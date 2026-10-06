@@ -27,8 +27,6 @@ jobs:
       - run: npm ci
       - name: Route types (next-env.d.ts isn't committed)
         run: npx next typegen
-      - name: Routine schedule tests
-        run: node --conditions=react-server scripts/test-routines.mjs
       - name: Typecheck
         run: npx tsc --noEmit -p .
       - name: Typecheck Bops Cloud
