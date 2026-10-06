@@ -576,6 +576,8 @@ export type UsageEvent = {
   kind: UsageKind;
   at: number;
   botId?: string;
+  /** The Bops task this model call belongs to, when known. */
+  sessionId?: string;
   qty?: number;
   /**
    * For model.tokens: which model, and what it was for: chat, a task (on a bot's computer or the
