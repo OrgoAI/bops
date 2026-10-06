@@ -5,7 +5,7 @@ Thanks for helping. A few things keep this smooth.
 ## Before you start
 
 - For anything bigger than a small fix, open an issue first so we can agree on the approach.
-- Security problems: [report them privately](https://github.com/OrgoAI/bops-oss/security/advisories/new), not in issues (see [SECURITY.md](SECURITY.md)).
+- Security problems: [report them privately](https://github.com/nickvasilescu/bops/security/advisories/new), not in issues (see [SECURITY.md](SECURITY.md)).
 - Be kind: we follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Contributor License Agreement

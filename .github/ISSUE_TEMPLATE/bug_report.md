@@ -14,4 +14,4 @@ labels: bug
 
 **Setup:** macOS version, Bops version or commit, which providers you use (Orgo, AgentMail, AgentPhone…)
 
-Don't paste keys, phone numbers or private messages. Security problems: report them privately at https://github.com/OrgoAI/bops-oss/security/advisories/new.
+Don't paste keys, phone numbers or private messages. Security problems: report them privately at https://github.com/nickvasilescu/bops/security/advisories/new.

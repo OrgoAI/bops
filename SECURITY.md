@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please don't open a public issue. Report it privately on GitHub: [**Report a vulnerability**](https://github.com/OrgoAI/bops-oss/security/advisories/new) (the Security tab of this repo). Tell us what you found, how to reproduce it, and what it lets someone do. We'll reply within 3 business days and keep you posted until it's fixed. Please give us a reasonable time to fix it before you share it.
+Please don't open a public issue. Report it privately on GitHub: [**Report a vulnerability**](https://github.com/nickvasilescu/bops/security/advisories/new) (the Security tab of this repo). Tell us what you found, how to reproduce it, and what it lets someone do. We'll reply within 3 business days and keep you posted until it's fixed. Please give us a reasonable time to fix it before you share it.
 
 ## What's in scope
 
