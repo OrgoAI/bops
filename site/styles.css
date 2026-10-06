@@ -1,0 +1,325 @@
+/* Bops landing page. Highlighter on paper: white, ink, and one lime. */
+:root {
+  --ink: #0a0a0a;
+  --lime: #e9ff3b;
+  --graphite: #5e5e5b;
+  --muted: #6b6b6b;
+  --hair: #f0f0ee;
+  --ring: #e6e6e3;
+  --paper-2: #f7f7f5;
+  --card-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 34px 70px -30px rgba(0, 0, 0, 0.3);
+  --gutter: 62px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { font-family: Geist, system-ui, sans-serif; color: var(--ink); background: #fff; }
+a { color: inherit; text-decoration: none; }
+ul { list-style: none; }
+
+.wrap { width: 100%; max-width: 1440px; margin: 0 auto; }
+
+/* Type */
+.mono-label, .mono-muted, .mono-small, .tag { font-family: "Geist Mono", ui-monospace, monospace; letter-spacing: 0.08em; }
+.mono-label { font-weight: 500; font-size: 12px; line-height: 16px; letter-spacing: 0.06em; color: var(--graphite); }
+.mono-label.ink { color: var(--ink); font-weight: 600; font-size: 11px; letter-spacing: 0.08em; }
+.mono-label.lime { color: var(--lime); font-weight: 600; }
+.mono-muted { font-weight: 600; font-size: 13px; line-height: 16px; color: var(--graphite); }
+.mono-small { font-weight: 500; font-size: 12px; line-height: 16px; letter-spacing: 0.06em; color: var(--muted); }
+.tag { display: inline-flex; font-weight: 600; font-size: 13px; line-height: 16px; color: var(--ink); background: var(--lime); padding: 5px 9px; border-radius: 6px; }
+.tag-sm { font-size: 11px; line-height: 14px; padding: 3px 7px; vertical-align: 2px; }
+.t13 { font-size: 13px; line-height: 17px; }
+.t15 { font-size: 15px; line-height: 20px; }
+.t16 { font-size: 16px; line-height: 22px; }
+.t17 { font-size: 17px; line-height: 22px; letter-spacing: -0.01em; }
+.medium { font-weight: 500; }
+.bold { font-weight: 700; }
+.muted { color: var(--muted); }
+.ink { color: var(--ink); }
+.white { color: #fff; }
+.body { color: #3a3a38; line-height: 21px; }
+.lede { font-size: 21px; line-height: 30px; color: var(--graphite); }
+
+/* Buttons */
+.pill { display: inline-flex; align-items: center; gap: 10px; background: var(--ink); color: #fff; border-radius: 999px; padding: 18px 28px; font-weight: 600; font-size: 17px; line-height: 22px; transition: transform 0.15s ease, opacity 0.15s ease; }
+.pill:hover { transform: translateY(-1px); opacity: 0.92; }
+.pill-sm { gap: 8px; padding: 10px 18px; font-size: 14px; line-height: 18px; }
+.lime-pill { background: var(--lime); color: var(--ink); font-weight: 700; padding: 18px 30px; }
+.play { display: inline-flex; align-items: center; gap: 10px; font-weight: 500; font-size: 16px; line-height: 22px; }
+.play-ring { display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 999px; box-shadow: inset 0 0 0 1.5px var(--ink); transition: background 0.15s ease; }
+.play:hover .play-ring { background: var(--lime); }
+.ctas { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
+
+/* Nav */
+.nav { display: flex; align-items: center; justify-content: space-between; padding: 28px 56px 28px 60px; }
+.logo { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 26px; line-height: 30px; letter-spacing: -0.04em; }
+.nav-actions { display: flex; align-items: center; gap: 28px; }
+.nav-link { font-weight: 500; font-size: 15px; line-height: 20px; }
+.nav-link:hover, .final-link:hover, .footer a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+/* Stages: the illustrated scenes keep their designed size and scale down to fit (main.js). */
+.fit { position: relative; flex-shrink: 0; }
+.split > .fit { flex: 1 1 0; min-width: 0; }
+.stage { position: absolute; left: 0; top: 0; transform-origin: top left; }
+.stage > * { position: absolute; }
+.spot { border-radius: 999px; background: var(--lime); }
+.card { background: #fff; border-radius: 22px; box-shadow: var(--card-shadow); }
+
+/* 1. Hero */
+.hero { display: flex; align-items: center; min-height: 790px; }
+.hero-copy { display: flex; flex-direction: column; gap: 32px; width: 640px; flex-shrink: 0; padding: 0 0 40px 56px; }
+.kicker { display: flex; align-items: center; gap: 10px; padding-left: 8px; margin-bottom: -14px; }
+.hero-title { font-weight: 900; font-size: clamp(96px, 10.8vw, 156px); line-height: 0.86; letter-spacing: -0.065em; }
+.hero-copy .lede, .hero-copy .ctas { margin-left: 6px; }
+.hero-copy .lede { max-width: 470px; }
+.hero .fit { flex: 1; }
+.boppy-float { animation: bob 3.2s ease-in-out infinite; }
+@keyframes bob { 0%, 100% { transform: translateY(0) rotate(0deg); } 50% { transform: translateY(-10px) rotate(-2deg); } }
+/* notes.js: music notes drifting out of the hero Boppy's headphones; click it for a burst. */
+.boppy-float.is-playing { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.boppy-float.is-playing:focus { outline: none; }
+.boppy-float.is-playing:focus-visible { outline: 2px solid var(--ink); outline-offset: 6px; border-radius: 50%; }
+.music-note { position: absolute; pointer-events: none; will-change: transform, opacity; opacity: 0; }
+
+.needs { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-radius: 18px; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 24px 50px -24px rgba(0, 0, 0, 0.28); }
+.needs-head { display: flex; align-items: center; gap: 8px; }
+.dot-amber { width: 8px; height: 8px; border-radius: 999px; background: #e59a0b; }
+.needs-actions { display: flex; gap: 8px; }
+.btn-ink, .btn-soft { font-size: 13px; line-height: 16px; border-radius: 999px; padding: 7px 14px; }
+.btn-ink { background: var(--ink); color: #fff; font-weight: 600; }
+.btn-soft { background: #f2f2f0; font-weight: 500; }
+
+.done { display: flex; flex-direction: column; padding: 18px 22px 10px; }
+.done-head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; }
+.done-row { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid var(--hair); }
+.av { width: 30px; flex-shrink: 0; }
+.done-text { display: flex; flex-direction: column; gap: 1px; flex: 1; }
+.time { width: 70px; flex-shrink: 0; text-align: right; font-family: "Geist Mono", monospace; font-weight: 500; font-size: 12px; line-height: 16px; color: var(--muted); }
+
+/* Section bands */
+.band { width: 100%; }
+.band.gray { background: var(--paper-2); }
+.band.ink { background: var(--ink); }
+.split { display: flex; align-items: center; justify-content: space-between; gap: 64px; }
+.split-copy { display: flex; flex-direction: column; gap: 28px; flex-shrink: 0; }
+.h2 { font-weight: 900; font-size: clamp(52px, 5.6vw, 80px); line-height: 0.95; letter-spacing: -0.055em; }
+
+/* 2. Hire a bot */
+.band.gray > .split { padding: 0 96px 0 var(--gutter); align-items: stretch; }
+.s2-copy { width: 600px; padding: 130px 0; justify-content: center; }
+.features { display: flex; flex-direction: column; gap: 22px; padding-top: 8px; }
+.features li { display: flex; gap: 16px; align-items: flex-start; }
+.ficon { display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 12px; background: #fff; box-shadow: 0 0 0 1px var(--ring); flex-shrink: 0; }
+.features b { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; line-height: 24px; }
+.features p { font-size: 16px; line-height: 23px; color: var(--graphite); margin-top: 2px; }
+
+.badge { display: flex; flex-direction: column; background: #fff; border-radius: 28px; box-shadow: 0 0 0 2px var(--ink), 0 40px 80px -30px rgba(0, 0, 0, 0.35); transform: rotate(-3deg); }
+.badge-top { display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 18px 28px 22px; border-bottom: 1px solid #ececea; }
+.slot { width: 56px; height: 10px; border-radius: 999px; background: #ececea; box-shadow: inset 0 0 0 1.5px #d9d9d6; }
+.badge-id { display: flex; align-items: center; gap: 18px; width: 100%; }
+.photo { display: flex; align-items: center; justify-content: center; width: 96px; height: 96px; border-radius: 20px; background: var(--lime); flex-shrink: 0; }
+.badge-name { display: flex; flex-direction: column; gap: 4px; }
+.badge-name .mono-label { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; }
+.name { font-weight: 800; font-size: 34px; line-height: 36px; letter-spacing: -0.03em; }
+.issued { display: flex; flex-direction: column; padding: 8px 28px 6px; }
+.issued > div { display: flex; align-items: center; height: 44px; border-bottom: 1px solid var(--hair); }
+.issued > div:last-child { border-bottom: 0; }
+.issued dt { width: 104px; flex-shrink: 0; font-family: "Geist Mono", monospace; font-weight: 500; font-size: 11px; letter-spacing: 0.08em; color: var(--muted); }
+.issued dd { font-weight: 500; font-size: 15px; line-height: 20px; }
+.badge-foot { display: flex; align-items: center; justify-content: space-between; padding: 14px 28px 20px; background: var(--ink); border-radius: 0 0 26px 26px; }
+
+/* The badge on its lanyard (lanyard.js). None of this applies until the script adds a class, and at
+   rest it takes them off again, so the badge above is exactly what you see. */
+.lanyard.is-waiting .badge, .lanyard.is-waiting .straps, .lanyard.is-moving .straps { visibility: hidden; }
+.lanyard-rig { display: none; left: 0; top: 0; pointer-events: none; overflow: visible; } /* the wind can trail past the stage's box */
+.lanyard.is-moving .lanyard-rig { display: block; }
+.lanyard.is-moving .badge { will-change: transform; -webkit-backface-visibility: hidden; backface-visibility: hidden; }
+/* While it moves, nothing shows above the top edge the straps hang from, and nothing scrolls sideways. */
+.lanyard.is-moving { overflow-x: visible; overflow-y: clip; }
+.lanyard-band { overflow-x: clip; }
+.lanyard.is-live .badge { cursor: grab; touch-action: pan-y pinch-zoom; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+html.lanyard-grabbing, html.lanyard-grabbing * { cursor: grabbing !important; }
+
+/* 3. Memory */
+.s3 { padding: 130px var(--gutter) 130px 40px; }
+.s3-copy { width: 520px; gap: 26px; }
+.s3-lede { font-size: 20px; line-height: 29px; }
+.thread { display: flex; flex-direction: column; gap: 16px; }
+.tcard { display: flex; flex-direction: column; gap: 12px; padding: 16px 18px 18px; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 30px 60px -30px rgba(0, 0, 0, 0.3); }
+.tcard .mono-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; color: var(--muted); }
+.bubble-row { display: flex; align-items: flex-end; gap: 8px; }
+.bubble-row.me { justify-content: flex-end; }
+.bubble { font-size: 15px; line-height: 20px; border-radius: 18px; padding: 8px 14px; }
+.bubble.blue { background: #0b84fe; color: #fff; }
+.bubble.gray { background: #e9e9eb; max-width: 340px; }
+.tcard.email { gap: 8px; margin-left: 40px; }
+.tcard.call { background: var(--ink); box-shadow: 0 30px 60px -30px rgba(0, 0, 0, 0.45); }
+.call-head { display: flex; align-items: center; justify-content: space-between; }
+.call-head .mono-label:first-child { color: #9a9a98; }
+.call-body { display: flex; align-items: center; gap: 12px; }
+.call-icon { display: flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 999px; background: var(--lime); flex-shrink: 0; }
+
+/* 4. Ops, not brunch */
+.center { display: flex; flex-direction: column; align-items: center; text-align: center; }
+.s4 { gap: 28px; padding: 130px var(--gutter) 140px; }
+.h2-xl { font-weight: 900; font-size: clamp(56px, 7.2vw, 104px); line-height: 0.96; letter-spacing: -0.06em; }
+.center-lede { max-width: 600px; }
+.compare { display: flex; width: 760px; max-width: 100%; margin-top: 20px; background: #fff; border-radius: 24px; text-align: left; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 40px 80px -34px rgba(0, 0, 0, 0.32); }
+.col { width: 50%; padding: 22px 24px 14px; }
+.col.other { border-right: 1px solid var(--hair); }
+.col-head { display: flex; align-items: center; gap: 10px; padding-bottom: 10px; font-weight: 700; font-size: 16px; line-height: 20px; }
+.col.other .col-head { color: #8a8a87; }
+.col li { display: flex; align-items: center; gap: 10px; height: 46px; border-top: 1px solid var(--hair); font-size: 15px; line-height: 20px; }
+.col.other li { color: #8a8a87; }
+.col.bops li { font-weight: 500; }
+.col svg { flex-shrink: 0; }
+
+/* 5. Close */
+.s5 { gap: 30px; padding: 120px var(--gutter) 130px; }
+.final-disc { display: flex; align-items: center; justify-content: center; width: 132px; height: 132px; border-radius: 999px; background: var(--lime); }
+.h2-final { font-weight: 900; font-size: clamp(52px, 6.7vw, 96px); line-height: 0.96; letter-spacing: -0.06em; color: #fff; }
+.final-lede { color: #a3a3a0; }
+.s5 .ctas { justify-content: center; padding-top: 8px; }
+.final-link { color: #fff; font-weight: 500; font-size: 16px; line-height: 22px; }
+
+/* Footer */
+.footer { display: flex; align-items: center; justify-content: space-between; padding: 28px 56px 28px var(--gutter); font-size: 14px; line-height: 18px; color: var(--graphite); }
+.footer nav { display: flex; gap: 24px; }
+.footer a { color: var(--ink); font-weight: 500; }
+
+/* Narrower screens: stack each section, scenes scale down. */
+@media (max-width: 1180px) {
+  :root { --gutter: 28px; }
+  .nav { padding: 22px var(--gutter); }
+  .hero { flex-direction: column; align-items: stretch; min-height: 0; padding: 24px 0 40px; }
+  .hero-copy { width: 100%; padding: 0 var(--gutter) 24px; }
+  .hero .fit { margin: 0 var(--gutter); }
+  .split, .band.gray > .split { flex-direction: column; align-items: stretch; gap: 40px; padding: 88px var(--gutter); }
+  .s2-copy, .s3-copy { width: 100%; padding: 0; }
+  .s3 { flex-direction: column-reverse; }
+  /* Stacked: the scenes take their own height (set by main.js), not a share of the column. */
+  .hero .fit, .split > .fit { flex: none; }
+  .split .fit { width: 100%; max-width: 680px; align-self: center; }
+  .s4, .s5 { padding: 88px var(--gutter); }
+  .footer { padding: 24px var(--gutter); }
+}
+/* Tablets and phones, below 1180 px. The desktop design above stays exactly as it is, and at 1180 itself
+   the block above still shows as it always has; these rules refine it below that. */
+@media (max-width: 1179.98px) {
+  /* index.html asks for viewport-fit=cover, so the bands run edge to edge: gutters clear the notch in
+     landscape. --edge is the scenes' margin, a little narrower than the text's on phones. */
+  :root { --gutter: max(32px, env(safe-area-inset-left), env(safe-area-inset-right)); --edge: var(--gutter); --section: 88px; }
+  /* A scene's stage can reach past the screen's edge (main.js crops to what it draws): no sideways scroll. */
+  main { overflow-x: hidden; overflow-x: clip; }
+  .nav { padding: 16px var(--gutter); }
+  .logo { min-height: 44px; }
+  .nav-link { padding: 12px 0; }
+  .pill-sm { padding: 13px 18px; }
+  .play { min-height: 44px; }
+  .hero { padding: 16px 0 64px; }
+  .hero-copy { padding: 0 var(--gutter) 40px; }
+  .hero .fit { margin: 0 var(--edge); }
+  .split, .band.gray > .split { gap: 48px; padding: var(--section) var(--gutter); }
+  .split .fit { width: auto; max-width: none; align-self: stretch; margin: 0 calc(var(--edge) - var(--gutter)); }
+  .s2-copy, .s3-copy { max-width: 640px; }
+  .s4, .s5 { padding: var(--section) var(--gutter); }
+  .final-link { padding: 11px 0; }
+  .footer { padding: 16px var(--gutter) max(16px, env(safe-area-inset-bottom)); }
+  .footer nav { gap: 16px; }
+  .footer a { padding: 13px 4px; }
+}
+
+/* Landscape tablets and small laptop windows: copy and scene side by side again, as on the desktop,
+   in flexible columns. (Phones in landscape are too short for it and stay stacked.) */
+@media (min-width: 960px) and (max-width: 1179.98px) and (min-height: 600px) {
+  .hero { flex-direction: row; align-items: center; padding: 16px 0 72px; }
+  .hero-copy { width: 48%; flex-shrink: 0; padding: 0 0 24px var(--gutter); }
+  .hero .fit { flex: 1 1 0; min-width: 0; margin: 0 var(--gutter) 0 16px; }
+  .split, .band.gray > .split { flex-direction: row; align-items: center; gap: 48px; }
+  .band.gray > .split { align-items: stretch; padding-top: 0; padding-bottom: 0; }
+  .s2-copy { width: 50%; max-width: none; flex-shrink: 0; padding: var(--section) 0; justify-content: center; }
+  .s3 { flex-direction: row; }
+  .s3-copy { width: 44%; max-width: none; flex-shrink: 0; }
+  .split .fit { flex: 1 1 0; min-width: 0; margin: 0; align-self: auto; }
+}
+
+/* Phones. */
+@media (max-width: 640px) {
+  :root { --gutter: max(20px, env(safe-area-inset-left), env(safe-area-inset-right)); --edge: max(14px, env(safe-area-inset-left), env(safe-area-inset-right)); --section: 72px; }
+  .nav { padding-top: 10px; padding-bottom: 10px; }
+  .nav-link { display: none; }
+  .hero { padding: 8px 0 56px; }
+  .hero-copy { gap: 28px; padding-bottom: 36px; }
+  .kicker { flex-wrap: wrap; row-gap: 8px; }
+  .lede { font-size: 18px; line-height: 27px; }
+  .split, .band.gray > .split { gap: 40px; }
+  .compare { flex-direction: column; }
+  .col { width: 100%; }
+  .col.other { border-right: 0; border-bottom: 1px solid var(--hair); }
+  .footer { flex-direction: column; gap: 0; }
+
+  /* The hero and the thread, recomposed for a narrow column: the same parts, closer together, so main.js
+     can draw them larger. (Their inline styles hold the desktop composition.) */
+  .hero .spot { left: 200px !important; top: 30px !important; width: 400px !important; height: 400px !important; }
+  .hero .boppy-float { left: 262px !important; top: 52px !important; width: 196px; height: 196px; }
+  .hero .needs { left: 376px !important; top: 0 !important; width: 234px !important; }
+  .hero .music-note { z-index: 1; } /* the card sits right above the right ear here: notes go over it, not behind */
+  .hero .done { left: 190px !important; top: 254px !important; width: 420px !important; }
+  .done-row .time { width: 64px; }
+  .done-text .t15 { text-wrap: balance; }
+  .s3 .spot { left: 130px !important; top: 0 !important; width: 420px !important; height: 420px !important; }
+  .s3 .thread { left: 140px !important; top: 60px !important; width: 400px !important; }
+  /* Behind the badge, a slightly smaller lime spot, so the badge itself can be drawn larger. */
+  .band.gray .spot { left: 60px !important; top: 320px !important; width: 440px !important; height: 440px !important; }
+}
+/* The smallest phones: a little more room for the nav's logo and Download pill. */
+@media (max-width: 360px) {
+  :root { --gutter: max(16px, env(safe-area-inset-left), env(safe-area-inset-right)); --edge: max(12px, env(safe-area-inset-left), env(safe-area-inset-right)); }
+  .pill-sm { padding-left: 14px; padding-right: 14px; }
+}
+
+/* Touch screens: no hover state left stuck on after a tap. */
+@media (hover: none) {
+  .pill:hover { transform: none; opacity: 1; }
+  .play:hover .play-ring { background: none; }
+  .nav-link:hover, .final-link:hover, .footer a:hover { text-decoration: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boppy-float { animation: none; }
+  .pill { transition: none; }
+}
+
+/* "Bop it." (as in Bop It): the first command gets the highlighter. */
+.bop-it { background: var(--lime); padding: 0 .12em; margin-left: -.12em; border-radius: .08em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+
+/* The note the download buttons open on anything but a Mac (download.js): a small card in the page's
+   own style, with Boppy. */
+button.pill { border: 0; font-family: inherit; cursor: pointer; }
+.pill-line { background: #fff; color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--ink); }
+.mac-note { width: min(400px, calc(100% - 32px)); max-height: calc(100% - 32px); margin: auto; padding: 34px 28px 26px; border: 0; border-radius: 28px; background: #fff; color: var(--ink); text-align: center; box-shadow: 0 0 0 2px var(--ink), 0 40px 80px -30px rgba(0, 0, 0, 0.5); overscroll-behavior: contain; }
+.mac-note[open] { display: flex; flex-direction: column; align-items: center; animation: mac-note-in 0.26s cubic-bezier(0.2, 0.9, 0.3, 1.15); }
+.mac-note:focus { outline: none; }
+.mac-note::backdrop { background: rgba(10, 10, 10, 0.55); }
+.mac-note [hidden] { display: none !important; }
+.mac-note-disc { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 84px; height: 84px; margin-bottom: 18px; border-radius: 999px; background: var(--lime); }
+.mac-note h2 { font-weight: 800; font-size: 28px; line-height: 32px; letter-spacing: -0.035em; }
+.mac-note p { max-width: 320px; margin-top: 10px; font-size: 16px; line-height: 23px; color: var(--graphite); }
+.mac-note-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; width: 100%; margin-top: 24px; }
+.mac-note .pill { flex: 1 1 auto; justify-content: center; gap: 8px; min-height: 50px; padding: 14px 20px; font-size: 16px; line-height: 22px; }
+.mac-note .pill.is-done { background: var(--lime); color: var(--ink); box-shadow: none; }
+.mac-note-anyway { margin-top: 8px; padding: 12px 8px; font-weight: 500; font-size: 14px; line-height: 20px; color: var(--graphite); text-decoration: underline; text-underline-offset: 3px; }
+.mac-note-close { position: absolute; top: 10px; right: 10px; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border: 0; border-radius: 999px; background: none; color: var(--ink); cursor: pointer; }
+.mac-note-close:hover { background: #f2f2f0; }
+.mac-note button:focus-visible, .mac-note a:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.mac-note-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.mac-note-copy { position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; font-size: 16px; }
+@keyframes mac-note-in { from { opacity: 0; transform: translateY(14px) scale(0.96); } }
+@media (max-height: 500px) {
+  .mac-note { padding-top: 22px; }
+  .mac-note-disc { width: 64px; height: 64px; margin-bottom: 12px; }
+  .mac-note-disc svg { width: 46px; height: 46px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mac-note[open] { animation: none; }
+}

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Keep each screen's page across a Chrome restart that Bops didn't start itself. Switching how a
+# computer's browsing goes out (lib/server/relay.ts) makes Orgo restart Chrome: it closes every
+# screen's browser and opens one plain window on the boot screen, without the DevTools port the bots
+# drive it by. `save` notes the page each screen shows; `restore` closes what's open and starts each
+# screen's own Chrome (bops-chrome) on that page again. Logins stay (each screen has its own profile).
+# `restore --if-down` does that only when a screen that had its DevTools port before lost it (Orgo
+# turned the change down, so Chrome may not have restarted at all); otherwise it leaves Chrome be.
+#
+# Usage: bops-keep-screens save|restore [--if-down]
+set -uo pipefail
+FILE=/opt/bops/keep-screens
+case "${1:-}" in
+  save)
+    mkdir -p /opt/bops
+    : > "$FILE"
+    for N in 100 101 102 99; do
+      # Only the screens whose Chrome is up now: a screen without one has nothing to keep.
+      J=$(curl -s --max-time 2 "http://127.0.0.1:$((9200 + N))/json/list") || continue
+      [ -n "$J" ] || continue
+      U=$(printf '%s' "$J" | python3 -c '
+import json, sys
+try:
+    pages = [t["url"] for t in json.load(sys.stdin) if t.get("type") == "page" and t.get("url", "").startswith(("http://", "https://"))]
+    print(pages[0] if pages else "")
+except Exception:
+    print("")
+' 2>/dev/null)
+      echo "$N $U" >> "$FILE"
+    done
+    echo "saved"
+    ;;
+  restore)
+    if [ "${2:-}" = "--if-down" ]; then
+      DOWN=0
+      if [ -s "$FILE" ]; then
+        while read -r N U; do
+          [ -n "$N" ] || continue
+          curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$((9200 + N))/json/version" || DOWN=1
+        done < "$FILE"
+      fi
+      if [ "$DOWN" = 0 ]; then
+        rm -f "$FILE"
+        echo "untouched"
+        exit 0
+      fi
+    fi
+    pkill -x chrome 2>/dev/null || true
+    sleep 1
+    [ -s "$FILE" ] || printf '100\n101\n102\n99\n' > "$FILE"
+    while read -r N U; do
+      [ -n "$N" ] || continue
+      if [ -n "$U" ]; then bops-chrome "$N" "$U" >/dev/null; else bops-chrome "$N" >/dev/null; fi
+    done < "$FILE"
+    rm -f "$FILE"
+    echo "restored"
+    ;;
+  *)
+    echo "usage: bops-keep-screens save|restore [--if-down]" >&2
+    exit 2
+    ;;
+esac

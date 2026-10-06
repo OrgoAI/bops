@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Who's driving which screen on this computer: a tiny claims ledger with a file lock.
+
+Bops claims a thread's own screen when the thread starts; a running thread's helpers claim free
+screens through the screen tools. Everything that drives a screen checks here first, so two
+agents never share a mouse.
+
+Screens are numbered 1-4 for agents and the user (displays :100, :101, :102, :99).
+
+  bops-screens claim <owner> [screen]   claim that screen, or the first free one; prints its number
+  bops-screens release <owner> [screen] release one screen, or everything the owner holds
+  bops-screens sync <owner>...          drop claims whose thread isn't among these live owners
+  bops-screens owner <screen>           print who holds a screen
+  bops-screens list                     print the ledger as JSON
+
+Owners look like "thread:<session id>" or "helper:<session id>"; a thread's helpers go with it.
+"watch:<watch id>" holds a screen Bops keeps on one site and watches for the user.
+"""
+import fcntl, json, os, sys
+
+LEDGER = "/root/.bops/screens.json"
+LOCK = "/root/.bops/screens.lock"
+SCREENS = ["1", "2", "3", "4"]
+
+
+def session_of(owner):
+    return owner.split(":", 1)[-1]
+
+
+def main(args):
+    os.makedirs("/root/.bops", exist_ok=True)
+    with open(LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            claims = json.load(open(LEDGER))
+        except Exception:
+            claims = {}
+        cmd = args[0] if args else "list"
+        out = ""
+        if cmd == "claim":
+            owner = args[1]
+            want = args[2] if len(args) > 2 else None
+            if want:
+                if claims.get(want) not in (None, owner):
+                    print(f"screen {want} is taken by {claims[want]}", file=sys.stderr)
+                    return 1
+                claims[want] = owner
+                out = want
+            else:
+                free = [s for s in SCREENS if s not in claims]
+                if not free:
+                    print("no free screens", file=sys.stderr)
+                    return 1
+                claims[free[0]] = owner
+                out = free[0]
+        elif cmd == "release":
+            owner = args[1]
+            screen = args[2] if len(args) > 2 else None
+            sid = session_of(owner)
+            for s in list(claims):
+                held_by = claims[s]
+                if screen and s != screen:
+                    continue
+                # Releasing a thread releases its helpers too.
+                if held_by == owner or (owner.startswith("thread:") and session_of(held_by) == sid):
+                    del claims[s]
+        elif cmd == "sync":
+            # Watched screens aren't threads; they stay claimed until Bops stops watching them.
+            live = {session_of(o) for o in args[1:]}
+            claims = {s: o for s, o in claims.items() if o.startswith("watch:") or session_of(o) in live}
+        elif cmd == "owner":
+            out = claims.get(args[1], "")
+        else:
+            out = json.dumps(claims)
+        with open(LEDGER, "w") as f:
+            json.dump(claims, f)
+        if out:
+            print(out)
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

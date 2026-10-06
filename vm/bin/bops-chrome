@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Launch Chrome on one Bops screen with its own profile and DevTools port.
+# Usage: bops-chrome <display-number> [url]     e.g. bops-chrome 100 https://mail.google.com
+# Display 99 is the boot screen; 100-102 are extra screens. DevTools port = 9200 + display.
+set -euo pipefail
+N="${1:?display number, e.g. 100}"; URL="${2:-}"  # no URL: the bot's home screen (its new tab page)
+PROFILE="/root/profiles/s$N"
+mkdir -p "$PROFILE"
+rm -f "$PROFILE"/Singleton{Lock,Socket,Cookie}
+# Clones copy a profile mid-run; mark it as cleanly exited so Chrome skips "Restore pages?".
+PREF="$PROFILE/Default/Preferences"
+if [ -f "$PREF" ]; then
+  sed -i 's/"exit_type":"[A-Za-z]*"/"exit_type":"Normal"/; s/"exited_cleanly":false/"exited_cleanly":true/' "$PREF"
+  # Chrome's own theme (the bot's color, set by policy), not the system's GTK one.
+  sed -i 's/"system_theme":[0-9]/"system_theme":0/' "$PREF"
+fi
+# The home screen extension (bops-desktop packs it). A profile's installed copy can be out of date
+# (a computer cloned from another bot's, Chrome only updating extensions every few hours) or broken.
+# Then, while this profile's Chrome is closed, it's taken out (files and Chrome's record of it), and
+# Chrome installs the current one from policy at start, like on a new screen (FRESH, below).
+E=/opt/bops/desktop/ext
+EXT_ID=""; FRESH=0
+if [ -z "$URL" ] && [ -s "$E/key.pem" ] && [ -s "$E/src/home.html" ] && ! pgrep -f "[u]ser-data-dir=$PROFILE( |$)" >/dev/null; then
+  EXT_ID=$(openssl rsa -in "$E/key.pem" -pubout -outform DER 2>/dev/null | sha256sum | cut -c1-32 | tr '0-9a-f' 'a-p')
+  CURRENT=0
+  for V in "$PROFILE/Default/Extensions/$EXT_ID"/*/; do cmp -s "$V/home.html" "$E/src/home.html" && CURRENT=1; done
+  BROKEN=$(python3 -c "import json,sys;s=json.load(open(sys.argv[1])).get('extensions',{}).get('settings',{}).get(sys.argv[2],{});print(1 if s.get('disable_reasons') else 0)" "$PREF" "$EXT_ID" 2>/dev/null || echo 0)
+  if [ "$CURRENT" = 0 ] || [ "$BROKEN" = 1 ]; then
+    rm -rf "$PROFILE/Default/Extensions/$EXT_ID"
+    # Chrome on Linux doesn't enforce its preference checksums, so dropping the record (and its
+    # checksum) is safe; nothing else in the profile changes.
+    for F in "$PREF" "$PROFILE/Default/Secure Preferences"; do
+      [ -f "$F" ] && python3 - "$F" "$EXT_ID" <<'PY'
+import json, sys
+path, ext = sys.argv[1], sys.argv[2]
+p = json.load(open(path))
+p.get("extensions", {}).get("settings", {}).pop(ext, None)
+p.get("protection", {}).get("macs", {}).get("extensions", {}).get("settings", {}).pop(ext, None)
+json.dump(p, open(path, "w"), separators=(",", ":"))
+PY
+    done
+    FRESH=1
+  fi
+fi
+# The window sits on the desktop above the dock, sized to this screen (screens can be any resolution).
+read -r W H < <(DISPLAY=":$N" xdotool getdisplaygeometry 2>/dev/null || echo "1280 720")
+# Light GTK theme: Chrome takes dark or light from it, and the base image is dark.
+DISPLAY=":$N" GTK_THEME=Arc-Lighter setsid nohup /usr/bin/google-chrome-stable \
+  --no-sandbox --disable-gpu --no-first-run --no-default-browser-check --hide-crash-restore-bubble \
+  --remote-debugging-port="$((9200 + N))" --user-data-dir="$PROFILE" --class=BopsBrowser \
+  --window-position=80,60 --window-size="$((W - 160)),$((H - 150))" ${URL:+"$URL"} \
+  < /dev/null > "/var/log/bops/chrome-$N.log" 2>&1 &
+# Installing the extension, Chrome opens its first tab before it lands: wait for it, then start
+# again so the window opens on the home screen.
+if [ "$FRESH" = 1 ]; then
+  for _ in $(seq 1 30); do ls "$PROFILE/Default/Extensions/$EXT_ID"/*/home.html >/dev/null 2>&1 && break; sleep 0.5; done
+  sleep 1
+  pkill -f "[u]ser-data-dir=$PROFILE( |$)" 2>/dev/null; sleep 1
+  sed -i 's/"exit_type":"[A-Za-z]*"/"exit_type":"Normal"/; s/"exited_cleanly":false/"exited_cleanly":true/' "$PREF" 2>/dev/null
+  DISPLAY=":$N" GTK_THEME=Arc-Lighter setsid nohup /usr/bin/google-chrome-stable \
+    --no-sandbox --disable-gpu --no-first-run --no-default-browser-check --hide-crash-restore-bubble \
+    --remote-debugging-port="$((9200 + N))" --user-data-dir="$PROFILE" --class=BopsBrowser \
+    --window-position=80,60 --window-size="$((W - 160)),$((H - 150))" \
+    < /dev/null >> "/var/log/bops/chrome-$N.log" 2>&1 &
+fi
+echo "chrome on :$N (profile $PROFILE, devtools $((9200 + N)))"

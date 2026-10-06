@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Copy the logged-in boot-screen Chrome profile into every screen's profile, so each
+# screen starts with the logins Sam was given. Run after logging in on Sam's computer,
+# and on each clone before launching screens. Chrome must not be running on those screens.
+set -euo pipefail
+SRC="${1:-/root/.config/google-chrome-orgo}"
+[ -d "$SRC" ] || { echo "no source profile at $SRC" >&2; exit 1; }
+for N in 99 100 101 102; do
+  DST="/root/profiles/s$N"
+  mkdir -p "$DST"
+  rsync -a --delete --exclude 'Singleton*' --exclude '*/Cache/*' --exclude '*/Code Cache/*' "$SRC/" "$DST/"
+done
+echo "seeded profiles s99-s102 from $SRC"

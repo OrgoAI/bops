@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Dress this computer as its bot's: wallpaper, Chrome theme and home screen, and a dock on every
+# screen. Bops writes /opt/bops/desktop/{bot.json,wall.html,home.html} first, then runs this.
+# Safe to re-run (e.g. when a bot is renamed or recolored).
+#
+# Usage: bops-desktop [--restart-chrome]
+set -uo pipefail
+D=/opt/bops/desktop
+THEME=$(python3 -c "import json;print(json.load(open('$D/bot.json'))['theme'])")
+NAME=$(python3 -c "import json;print(json.load(open('$D/bot.json'))['name'])")
+TZONE=$(python3 -c "import json;print(json.load(open('$D/bot.json')).get('timezone',''))")
+DOCK=$(python3 -c "import json;print(json.load(open('$D/bot.json')).get('dock','255;;255;;255'))")
+
+# 0. The user's timezone, so the clock and every page the bot reads match their day.
+if [ -n "$TZONE" ] && [ -f "/usr/share/zoneinfo/$TZONE" ]; then
+  ln -sf "/usr/share/zoneinfo/$TZONE" /etc/localtime && echo "$TZONE" > /etc/timezone
+fi
+mkdir -p /var/log/bops
+
+read -r W H < <(DISPLAY=:100 xdotool getdisplaygeometry 2>/dev/null || echo "1280 720")
+
+# 1. Wallpaper: render Bops' wallpaper page to an image with headless Chrome, then paint every screen.
+# Straight to the Chrome binary, with a hard timeout: on Orgo's image a headless Chrome can pick up
+# extra flags and stay running after its screenshot, which would stall everything below.
+CHROME_BIN=/opt/google/chrome/chrome
+timeout -k 2 25 "$CHROME_BIN" --headless=new --no-sandbox --disable-gpu --hide-scrollbars --user-data-dir=/tmp/bops-render \
+  --window-size="$W,$H" --screenshot="$D/wall.png" "file://$D/wall.html" </dev/null >/dev/null 2>&1
+pkill -f "[u]ser-data-dir=/tmp/bops-render" 2>/dev/null
+for N in 99 100 101 102; do
+  DISPLAY=":$N" hsetroot -fill "$D/wall.png" >/dev/null 2>&1 || true
+done
+# The boot screen runs xfdesktop, which draws its own backdrop.
+for P in $(DISPLAY=:99 xfconf-query -c xfce4-desktop -l 2>/dev/null | grep last-image); do
+  DISPLAY=:99 xfconf-query -c xfce4-desktop -p "$P" -s "$D/wall.png" 2>/dev/null
+done
+
+# 2. Chrome: the bot's color, and its home screen on every new tab. The home screen comes from a
+# tiny extension that overrides the new tab page (so the address bar stays empty, like a real new
+# tab); it's packed here with a key kept on this computer and force-installed by policy from the
+# home server.
+pgrep -f "[p]ython3 /opt/bops/bops-home.py" >/dev/null || setsid nohup python3 /opt/bops/bops-home.py 7600 </dev/null >/var/log/bops/home.log 2>&1 &
+E="$D/ext"
+mkdir -p "$E/src"
+[ -s "$E/key.pem" ] || openssl genrsa -out "$E/key.pem" 2048 2>/dev/null
+NOW=$(date +%s); VERSION="1.$((NOW / 86400)).$(((NOW % 86400) / 60))"
+# Nothing about the bot is baked into the extension: the tab takes its title (the bot's name) from
+# the home page, so a renamed bot, or a computer cloned from another bot's, shows the right name.
+# bops-chrome reinstalls the extension in any profile whose copy differs from this one.
+printf '{ "manifest_version": 3, "name": "Bops home", "version": "%s", "chrome_url_overrides": { "newtab": "home.html" } }\n' "$VERSION" > "$E/src/manifest.json.new"
+printf '<!doctype html><meta charset="utf-8"><title>Home</title><link rel="icon" href="http://127.0.0.1:7600/favicon.svg">\n<script src="title.js"></script>\n<style>html,body{margin:0;height:100%%;overflow:hidden}iframe{border:0;width:100%%;height:100%%;display:block}</style>\n<iframe src="http://127.0.0.1:7600/home"></iframe>\n' > "$E/src/home.html.new"
+printf 'addEventListener("message", (e) => { if (e.origin === "http://127.0.0.1:7600" && e.data && e.data.bopsTitle) document.title = e.data.bopsTitle; });\n' > "$E/src/title.js.new"
+# Packed again only when the page changed (a new version each time would have Chrome update for nothing).
+if ! cmp -s "$E/src/home.html" "$E/src/home.html.new" || ! cmp -s "$E/src/title.js" "$E/src/title.js.new" || [ ! -s "$E/home.crx" ]; then
+  mv -f "$E/src/manifest.json.new" "$E/src/manifest.json"; mv -f "$E/src/home.html.new" "$E/src/home.html"; mv -f "$E/src/title.js.new" "$E/src/title.js"
+  rm -f "$E/src.crx"
+  timeout -k 2 30 "$CHROME_BIN" --no-sandbox --headless=new --user-data-dir=/tmp/bops-pack --pack-extension="$E/src" --pack-extension-key="$E/key.pem" </dev/null >/dev/null 2>&1
+  pkill -f "[u]ser-data-dir=/tmp/bops-pack" 2>/dev/null
+  mv -f "$E/src.crx" "$E/home.crx" 2>/dev/null
+else
+  rm -f "$E/src/"*.new
+  VERSION=$(python3 -c "import json;print(json.load(open('$E/src/manifest.json'))['version'])")
+fi
+EXT_ID=$(openssl rsa -in "$E/key.pem" -pubout -outform DER 2>/dev/null | sha256sum | cut -c1-32 | tr '0-9a-f' 'a-p')
+printf "<?xml version='1.0' encoding='UTF-8'?>\n<gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'><app appid='%s'><updatecheck codebase='http://127.0.0.1:7600/ext/home.crx' version='%s' /></app></gupdate>\n" "$EXT_ID" "$VERSION" > "$E/updates.xml"
+mkdir -p /etc/opt/chrome/policies/managed
+printf '{ "BrowserThemeColor": "%s", "ExtensionInstallForcelist": ["%s;http://127.0.0.1:7600/ext/updates.xml"], "HomepageIsNewTabPage": true, "RestoreOnStartup": 5, "BookmarkBarEnabled": false, "PromotionsEnabled": false, "DefaultBrowserSettingEnabled": false, "BrowserSignin": 0, "SyncDisabled": true, "NTPCustomBackgroundEnabled": false, "NTPFooterExtensionAttributionEnabled": false, "NTPFooterManagementNoticeEnabled": false }\n' "$THEME" "$EXT_ID" > /etc/opt/chrome/policies/managed/bops.json
+
+# 3. Dock: Browser, Terminal, Files, Text editor, launched on the screen they're clicked on.
+cat > /usr/share/applications/bops-browser.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Browser
+Icon=google-chrome
+Exec=sh -c 'google-chrome-stable --no-sandbox --user-data-dir=/root/profiles/s${DISPLAY#:} --class=BopsBrowser --new-window'
+StartupWMClass=BopsBrowser
+NoDisplay=true
+EOF
+T=/root/.local/share/plank/themes/Bops
+mkdir -p "$T"
+# Frosted glass in a tint of the bot's color.
+cat > "$T/dock.theme" <<EOF
+[PlankTheme]
+TopRoundness=14
+BottomRoundness=14
+LineWidth=1
+OuterStrokeColor=255;;255;;255;;140
+FillStartColor=${DOCK};;190
+FillEndColor=${DOCK};;150
+InnerStrokeColor=255;;255;;255;;70
+[PlankDockTheme]
+HorizPadding=6
+TopPadding=4
+BottomPadding=6
+ItemPadding=8
+IndicatorSize=4
+IconShadowSize=1
+UrgentBounceHeight=1.6
+LaunchBounceHeight=0.6
+FadeOpacity=1
+ClickTime=300
+UrgentBounceTime=600
+LaunchBounceTime=600
+ActiveTime=300
+SlideTime=300
+FadeTime=250
+HideTime=150
+GlowSize=30
+GlowTime=10000
+GlowPulseTime=2000
+UrgentHueShift=150
+ItemMoveTime=450
+CascadeHide=true
+EOF
+export $(dbus-launch 2>/dev/null | xargs) >/dev/null 2>&1 || true
+# One dock per screen (plank keeps settings and launchers per dock name).
+for N in 99 100 101 102; do
+  L="/root/.config/plank/dock$N/launchers"
+  mkdir -p "$L" && rm -f "$L"/*.dockitem
+  for APP in bops-browser xfce4-terminal thunar sublime_text; do
+    [ -f "/usr/share/applications/$APP.desktop" ] && printf '[PlankDockItemPreferences]\nLauncher=file:///usr/share/applications/%s.desktop\n' "$APP" > "$L/$APP.dockitem"
+  done
+  S="net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock$N/"
+  gsettings set "$S" theme 'Bops' 2>/dev/null
+  gsettings set "$S" icon-size 40 2>/dev/null
+  gsettings set "$S" hide-mode 'none' 2>/dev/null
+  # No hover zoom: the live view misses some of its repaints and leaves ghost icons behind.
+  gsettings set "$S" zoom-enabled false 2>/dev/null
+  gsettings set "$S" show-dock-item false 2>/dev/null
+  gsettings set "$S" pinned-only true 2>/dev/null
+  pkill -f "[p]lank -n dock$N" 2>/dev/null
+  DISPLAY=":$N" setsid nohup plank -n "dock$N" </dev/null >/var/log/bops/plank-$N.log 2>&1 &
+done
+
+# A light system theme, like a fresh laptop (Orgo's base image is dark, and Chrome follows it).
+for N in 99; do
+  DISPLAY=":$N" xfconf-query -c xsettings -p /Net/ThemeName -s Arc-Lighter 2>/dev/null
+  DISPLAY=":$N" xfconf-query -c xsettings -p /Net/IconThemeName -s Papirus 2>/dev/null
+  DISPLAY=":$N" xfconf-query -c xfwm4 -p /general/theme -s Arc-Lighter 2>/dev/null
+done
+mkdir -p /root/.config/gtk-3.0
+if [ -f /root/.config/gtk-3.0/settings.ini ]; then
+  sed -i 's/^gtk-theme-name=.*/gtk-theme-name=Arc-Lighter/; s/^gtk-icon-theme-name=.*/gtk-icon-theme-name=Papirus/; s/^gtk-application-prefer-dark-theme=.*/gtk-application-prefer-dark-theme=0/' /root/.config/gtk-3.0/settings.ini
+else
+  printf '[Settings]\ngtk-theme-name=Arc-Lighter\ngtk-icon-theme-name=Papirus\ngtk-application-prefer-dark-theme=0\n' > /root/.config/gtk-3.0/settings.ini
+fi
+
+# Screen 4 is Orgo's own desktop: its taskbar (a clock bar on top, launchers under Bops' dock)
+# stays out of sight, and window buttons sit on the right like on the other screens. Hidden, not
+# quit: Orgo's watchdog restarts the taskbar whenever it exits.
+for P in $(DISPLAY=:99 xfconf-query -c xfce4-panel -p /panels 2>/dev/null | grep -E '^[0-9]+$'); do
+  DISPLAY=:99 xfconf-query -c xfce4-panel -p "/panels/panel-$P/autohide-behavior" -n -t uint -s 2 2>/dev/null
+done
+DISPLAY=:99 xfconf-query -c xfwm4 -p /general/button_layout -s "O|HMC" 2>/dev/null
+DISPLAY=:99 xfconf-query -c xsettings -p /Gtk/DecorationLayout -n -t string -s "menu:minimize,maximize,close" 2>/dev/null
+
+# Windows stay solid when they lose focus (xfwm4 fades them by default, which reads as glitchy here).
+for K in inactive_opacity move_opacity resize_opacity popup_opacity frame_opacity; do
+  DISPLAY=:99 xfconf-query -c xfwm4 -p "/general/$K" -s 100 2>/dev/null
+done
+
+# 4. Windows sit on the desktop, above the dock, instead of covering it edge to edge.
+place() {
+  for WIN in $(DISPLAY=":$1" xdotool search --onlyvisible --class BopsBrowser 2>/dev/null); do
+    DISPLAY=":$1" xdotool windowsize "$WIN" $((W - 160)) $((H - 150)) windowmove "$WIN" 80 60 2>/dev/null
+  done
+}
+if [ "${1:-}" = "--restart-chrome" ]; then
+  for N in 99 100 101 102; do
+    pkill -f "[u]ser-data-dir=/root/profiles/s$N" 2>/dev/null; sleep 1
+    bops-chrome "$N" >/dev/null
+  done
+  sleep 3
+fi
+for N in 99 100 101 102; do place "$N"; done
+echo "dressed as $NAME"

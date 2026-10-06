@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Put screens back the way a new computer starts: one Chrome window on the bot's home screen and
+# nothing else open. Logins stay (each screen keeps its own Chrome profile, /root/profiles/sNNN).
+# Bops only resets screens nothing is using (see resetScreens in lib/server/sessions.ts).
+#
+# Usage: bops-reset-screen <display>...     e.g. bops-reset-screen 100 101
+set -uo pipefail
+# The desktop itself (window manager, backdrop, Orgo's taskbar, the dock) stays; Chrome restarts below.
+KEEP='^(xfwm4|xfdesktop|xfce4-panel|panel-.*|wrapper.*|plank|chrome)$'
+apps() {
+  DISPLAY=":$1" wmctrl -lp 2>/dev/null | while read -r W _ P _; do
+    C=$(ps -o comm= -p "$P" 2>/dev/null)
+    [ -n "$C" ] && ! [[ "$C" =~ $KEEP ]] && echo "$W"
+  done
+}
+# Ask every other app window to close, then close what's left by force.
+for N in "$@"; do for W in $(apps "$N"); do DISPLAY=":$N" wmctrl -i -c "$W"; done; done
+sleep 1.5
+for N in "$@"; do
+  for W in $(apps "$N"); do DISPLAY=":$N" xdotool windowkill "$W" 2>/dev/null; done
+  pkill -f "[u]ser-data-dir=/root/profiles/s$N" 2>/dev/null
+done
+sleep 1
+# Chrome comes back with one tab, the home screen (policy: RestoreOnStartup = the new tab page).
+for N in "$@"; do bops-chrome "$N" >/dev/null; done
+sleep 3
+echo "reset $*"

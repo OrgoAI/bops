@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Join this computer to the user's tailnet so Bops can reach its screens' Chrome directly (mirror, input).
+# Orgo computers have no TUN device, so tailscaled runs in userspace networking mode: connections to
+# this node's tailnet IP are delivered to services on localhost (Chrome DevTools on 9299-9302).
+#
+# Usage: bops-tailnet <hostname> [--fresh]
+#   Reads a one-time auth key from /root/.bops/ts-authkey and deletes it after use.
+#   State is kept in memory only, so a forked computer never shares its parent's identity;
+#   --fresh restarts tailscaled (a fork arrives with its parent's tailscaled still running).
+# Prints this node's tailnet IPv4.
+set -euo pipefail
+NAME="${1:?hostname, e.g. bops-otto}"; FRESH="${2:-}"
+DIR=/opt/bops/tailscale
+SOCK=/run/tailscale/tailscaled.sock
+KEY=/root/.bops/ts-authkey
+ts() { "$DIR/tailscale" --socket="$SOCK" "$@"; }
+
+if [ ! -x "$DIR/tailscaled" ]; then
+  mkdir -p "$DIR"
+  curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_latest_amd64.tgz" | tar -xz -C "$DIR" --strip-components=1
+fi
+mkdir -p /run/tailscale /var/log/bops
+
+if [ "$FRESH" = "--fresh" ]; then pkill -x tailscaled || true; sleep 1; fi
+if ! ts status >/dev/null 2>&1 && ! pgrep -x tailscaled >/dev/null; then
+  setsid nohup "$DIR/tailscaled" --tun=userspace-networking --state=mem: --socket="$SOCK" \
+    < /dev/null > /var/log/bops/tailscaled.log 2>&1 &
+  for _ in $(seq 1 40); do [ -S "$SOCK" ] && break; sleep 0.25; done
+fi
+
+if [ "$(ts status --json 2>/dev/null | grep -o '"BackendState": *"[A-Za-z]*"' | grep -o '[A-Za-z]*"$' | tr -d '"')" != "Running" ]; then
+  [ -s "$KEY" ] || { echo "no auth key at $KEY" >&2; exit 2; }
+  ts up --auth-key="file:$KEY" --hostname="$NAME" --accept-dns=false --timeout=60s >/dev/null
+fi
+rm -f "$KEY"
+ts ip -4

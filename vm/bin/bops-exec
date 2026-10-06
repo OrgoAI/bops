@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Start the OpenAI Agents API executor for one Bops session, pinned to one screen.
+# The backend writes the environment key to /root/.bops/executor-key-<display> (0600) first;
+# this script reads it into the process environment and deletes the file.
+# Usage: bops-exec <display-number> <environment-id> <remote-url>
+set -euo pipefail
+N="${1:?display}"; ENV_ID="${2:?environment id}"; REMOTE="${3:?remote url}"
+KEYFILE="/root/.bops/executor-key-$N"
+[ -f "$KEYFILE" ] || { echo "missing $KEYFILE" >&2; exit 1; }
+KEY="$(cat "$KEYFILE")"; rm -f "$KEYFILE"
+pkill -f "codex exec-server.*$ENV_ID" 2>/dev/null || true
+DISPLAY=":$N" CODEX_API_KEY="$KEY" setsid nohup /usr/local/bin/codex exec-server \
+  --remote "$REMOTE" --environment-id "$ENV_ID" \
+  < /dev/null > "/var/log/bops/exec-$N.log" 2>&1 &
+sleep 2
+if grep -qi error "/var/log/bops/exec-$N.log"; then cat "/var/log/bops/exec-$N.log" >&2; exit 1; fi
+echo "executor on :$N for $ENV_ID"

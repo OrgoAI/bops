@@ -1,0 +1,53 @@
+{
+  "display_information": {
+    "name": "Bops",
+    "description": "Your Bops bots, in Slack.",
+    "background_color": "#0a0a0a",
+    "long_description": "Bops gives your business a team of AI bots, each with its own computer, email and phone number. Add them to Slack like teammates: mention one in a channel, or send it a direct message, and it answers right here, with the work it does on its computer and in your apps. Each bot posts under its own name and picture. A bot takes requests only from the person who set it up, and asks them before it sends, posts or pays for anything."
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "Bops",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://api.bops.bot/oauth/callback"
+    ],
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:join",
+        "channels:read",
+        "chat:write",
+        "chat:write.customize",
+        "chat:write.public",
+        "files:read",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "mpim:history",
+        "mpim:read",
+        "reactions:read",
+        "reactions:write",
+        "team:read",
+        "users:read",
+        "users:read.email"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
