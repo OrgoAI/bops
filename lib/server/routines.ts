@@ -1,5 +1,6 @@
 import "server-only";
 import { trackServerEvent } from "./analytics";
+import { isDeepStrictEqual } from "node:util";
 import { botChatId, type Routine, type Schedule } from "@/lib/types";
 import { startSession } from "./sessions";
 import { addMessage, bot, getState, id, ownerName, patchSession, stateReady, update } from "./store";
@@ -53,9 +54,20 @@ export function createRoutine(
   title: string,
   goal: string,
   schedule: Schedule,
-  opts: { where?: Routine["where"]; reminder?: string; textTo?: Routine["textTo"] } = {},
+  opts: { where?: Routine["where"]; reminder?: string; textTo?: Routine["textTo"]; deduplicate?: boolean } = {},
 ): Routine {
-  const r: Routine = { id: id("rtn"), botId, title, goal, schedule, enabled: true, nextRunAt: nextRun(schedule), where: opts.where, reminder: opts.reminder?.trim() || undefined, textTo: opts.textTo };
+  const reminder = opts.reminder?.trim() || undefined;
+  // A repeated bot request reuses the routine without changing its title or next run.
+  if (opts.deduplicate) {
+    const existing = getState().routines.find((r) =>
+      r.enabled && r.botId === botId && r.goal === goal &&
+      isDeepStrictEqual(r.schedule, schedule) &&
+      (r.where ?? "auto") === (opts.where ?? "auto") &&
+      r.reminder === reminder && isDeepStrictEqual(r.textTo, opts.textTo),
+    );
+    if (existing) return existing;
+  }
+  const r: Routine = { id: id("rtn"), botId, title, goal, schedule, enabled: true, nextRunAt: nextRun(schedule), where: opts.where, reminder, textTo: opts.textTo };
   update((s) => s.routines.push(r));
   trackServerEvent("bops_routine_created", {});
   return r;

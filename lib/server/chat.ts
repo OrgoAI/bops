@@ -981,7 +981,7 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
         const to = lastAsk?.via === "sms" && lastAsk.phone?.from && isOwner(lastAsk.phone.from) ? lastAsk.phone.from : byText ? ownerPhone() : undefined;
         const textTo = sender && to && (byText || lastAsk?.via === "sms") ? { botId: sender.from.id, to } : undefined;
         // Set up on a turn someone else started: its tasks run in the cloud (the user can move it to their Mac).
-        const r = createRoutine(botId, args.title, args.goal, toSchedule(args.schedule), { where: opts.outside ? "cloud" : a.where, reminder: a.reminder ?? undefined, textTo });
+        const r = createRoutine(botId, args.title, args.goal, toSchedule(args.schedule), { where: opts.outside ? "cloud" : a.where, reminder: a.reminder ?? undefined, textTo, deduplicate: true });
         notes.push(`Scheduled "${r.title}" · ${describeSchedule(r.schedule)}${r.reminder ? " · a reminder" : r.where && r.where !== "auto" ? ` · ${r.where === "mac" ? "on your Mac" : "in the cloud"}` : ""}`);
       }
       if (item.name === "manage_routine") {
