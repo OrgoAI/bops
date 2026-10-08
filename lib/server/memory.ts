@@ -1,6 +1,7 @@
 import "server-only";
 import { Honcho, type Peer, type Session as HonchoSession } from "@honcho-ai/sdk";
 import { openaiClient } from "./openai-client";
+import { aiModel, strictPrivacyEnabled } from "./ai-config";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MAIN_WORKSPACE, workspaceOf, type MemoryGroup } from "@/lib/types";
@@ -27,8 +28,8 @@ import { recordTokens, usageTags } from "./usage";
  * there carries the user's own prefix (bankFor).
  */
 
-const on = () => (cloudOn() ? !!cloudSessionNow()?.honcho : !!process.env.HONCHO_API_KEY);
-const MODEL = process.env.BOPS_CHAT_MODEL ?? process.env.BOPS_SAM_MODEL ?? "gpt-6.1-sol";
+const on = () => (strictPrivacyEnabled() ? !!process.env.HONCHO_API_KEY : cloudOn() ? !!cloudSessionNow()?.honcho : !!process.env.HONCHO_API_KEY);
+const MODEL = () => aiModel("chat");
 
 /** Which Honcho workspace (bank) a Bops workspace's memory lives in, and the user's peer in it. */
 export type Binding = { bank: string; peer: string };
@@ -352,7 +353,7 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
     saveToMemory(ws, "chat", chatId, [{ who: "owner", text: said }], metadata);
     if (said.trim().length < 8 || (yes(a?.worth) ?? 0) < 0.6) return;
     const res = await openai.responses.create({
-      model: MODEL,
+      model: MODEL(),
       reasoning: { effort: "low" },
       instructions: `${owner} told their assistant something about themselves. Write each lasting fact in it as one plain sentence in the third person, starting with "${owner}" ("${owner} is vegetarian.", "${owner}'s sister is Ana."). One per line, at most three. Only what they said, nothing guessed. If there's no lasting fact, write NONE.`,
       input: said.slice(0, 2000),
