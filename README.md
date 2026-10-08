@@ -16,6 +16,8 @@
   &nbsp;·&nbsp;
   <a href="#plans">Plans</a>
   &nbsp;·&nbsp;
+  <a href="#roadmap">Roadmap</a>
+  &nbsp;·&nbsp;
   <a href="#run-it-yourself">Self-host</a>
 </p>
 
@@ -128,6 +130,13 @@ Running Bops yourself on your own keys? Bops plans don't apply: you pay each pro
 4. Say hi to Boppy. It takes it from there.
 
 Every release is signed with Developer ID and notarized by Apple. When a newer version is out, Bops tells you, along with what's new in it.
+
+## Roadmap
+
+What's coming next. Ideas are welcome: [open an issue](../../issues).
+
+- **Multi-harness support.** Today your bots run on OpenAI (its Agents API with Codex, and its computer tool). Soon you'll choose the agent harness they run on.
+- **Zero data retention.** An option where the AI providers your bots use don't store your requests or their replies.
 
 ## Credits
 
