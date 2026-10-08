@@ -24,7 +24,8 @@ mkdir -p "$dest"
 git archive --format=tar HEAD | tar -x -C "$dest"
 # Internal: build notes, launch research, carrier registration, and dev scripts tied to one install.
 rm -rf "$dest/docs/internal" "$dest/scripts/internal"
-# Orgo's encrypted secrets (sops) and the helper that decrypts them belong to the hosted Bops, not the public copy.
+# Orgo's secrets helper belongs to the hosted Bops, not the public copy. (Its encrypted secrets moved to
+# OrgoAI/bops-secrets; envs/ and .sops.yaml stay listed for a tree from before that.)
 rm -rf "$dest/envs" "$dest/.sops.yaml" "$dest/scripts/secrets.sh"
 
 failed=0

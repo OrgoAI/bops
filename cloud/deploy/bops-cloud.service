@@ -7,8 +7,8 @@ Wants=network-online.target
 User=bops
 Group=bops
 WorkingDirectory=/opt/bops
-# Provider keys, the database URL and BOPS_CLOUD_SECRET (from envs/prod/bops-secrets.env), plus the
-# public settings (envs/prod/bops-public.env). scripts/cloud-deploy.sh writes it, mode 0640 root:bops.
+# Provider keys, the database URL and BOPS_CLOUD_SECRET (from Orgo's prod/bops-secrets.env), plus the
+# public settings (prod/bops-public.env). scripts/cloud-deploy.sh writes it, mode 0640 root:bops.
 EnvironmentFile=/etc/bops-cloud/env
 ExecStart=/usr/local/bin/node /opt/bops/cloud/server.ts
 Restart=always

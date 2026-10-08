@@ -59,6 +59,13 @@
   "build": {
     "appId": "ai.orgo.bops",
     "productName": "Bops",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "OrgoAI",
+        "repo": "bops"
+      }
+    ],
     "directories": {
       "output": "dist-desktop"
     },

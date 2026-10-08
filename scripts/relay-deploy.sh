@@ -6,27 +6,32 @@
 # RELAY_HOST, restarts it, and checks it answers at https://RELAY_HOST:8443. The box is set up once
 # with cloud/deploy/install.sh; scripts/cloud-deploy.sh runs this too. Run from the repo:
 #   scripts/relay-deploy.sh
-# Needs: sops (decrypts envs/prod/bops-secrets.env), gh (orgo-relay's releases are private), and SSH
-# to the box as root (default key: z-legacy-fleet's id_ed25519; BOPS_CLOUD_SSH_KEY picks another).
+# Needs: Orgo's private OrgoAI/bops-secrets next to this repo (BOPS_SECRETS points elsewhere) and sops,
+# which decrypts its prod/bops-secrets.env; gh (orgo-relay's releases are private); and SSH to the box
+# as root (default key: z-legacy-fleet's id_ed25519; BOPS_CLOUD_SSH_KEY picks another).
 #
 # ORGO_RELAY_SECRET has to be the same value as in orgo-web's envs/prod/web-secrets.env: orgo-web
 # makes every device's and computer's credential from it, and the rendezvous checks them with it.
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
+# Orgo's prod settings and secrets sit next to the main checkout (this may be a worktree elsewhere).
+main="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)"
+prod="${BOPS_SECRETS:-$main/../bops-secrets}/prod"
+[ -f "$prod/bops-public.env" ] || { echo "No $prod/bops-public.env: clone OrgoAI/bops-secrets next to $main, or set BOPS_SECRETS." >&2; exit 1; }
 set -a
-. envs/prod/bops-public.env
+. "$prod/bops-public.env"
 set +a
-: "${BOPS_CLOUD_BOX:?set BOPS_CLOUD_BOX (root@<address>) in envs/prod/bops-public.env}"
-: "${ORGO_RELAY_VERSION:?set ORGO_RELAY_VERSION (an orgo-relay release, like v0.0.3) in envs/prod/bops-public.env}"
-: "${RELAY_HOST:?set RELAY_HOST (the name Caddy has a certificate for) in envs/prod/bops-public.env}"
+: "${BOPS_CLOUD_BOX:?set BOPS_CLOUD_BOX (root@<address>) in bops-secrets prod/bops-public.env}"
+: "${ORGO_RELAY_VERSION:?set ORGO_RELAY_VERSION (an orgo-relay release, like v0.0.3) in bops-secrets prod/bops-public.env}"
+: "${RELAY_HOST:?set RELAY_HOST (the name Caddy has a certificate for) in bops-secrets prod/bops-public.env}"
 
 ssh_opts=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
 key="${BOPS_CLOUD_SSH_KEY:-$root/../z-legacy-fleet/.ssh/id_ed25519}"
 [ -f "$key" ] && ssh_opts+=(-i "$key" -o IdentitiesOnly=yes)
 box() { ssh "${ssh_opts[@]}" "$BOPS_CLOUD_BOX" "$@"; }
 
-secret="$(sops -d envs/prod/bops-secrets.env | sed -n 's/^ORGO_RELAY_SECRET=//p')"
+secret="$(sops -d "$prod/bops-secrets.env" | sed -n 's/^ORGO_RELAY_SECRET=//p')"
 if [ -z "$secret" ]; then
   echo "   no ORGO_RELAY_SECRET in bops-secrets.env yet: rendezvous left as it is"
   exit 0

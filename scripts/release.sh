@@ -20,9 +20,10 @@ cd "$root"
 # runs its own bundled server instead.
 rm -f desktop/repo.json
 
-# 1. The orgo-relay agent, bundled as Contents/Resources/bin/orgo-relay.
+# 1. The orgo-relay agent, bundled as Contents/Resources/bin/orgo-relay. BOPS_RELAY_READY=1: it's in
+# vendor/orgo-relay already (a release build that fetched it in a step of its own).
 relay="vendor/orgo-relay/orgo-relay"
-if [ -x scripts/fetch-relay.sh ]; then
+if [ -x scripts/fetch-relay.sh ] && [ -z "${BOPS_RELAY_READY:-}" ]; then
   scripts/fetch-relay.sh
 fi
 [ -x "$relay" ] || { echo "Missing $relay (scripts/fetch-relay.sh puts it there)." >&2; exit 1; }

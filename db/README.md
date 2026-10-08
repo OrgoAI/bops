@@ -54,8 +54,8 @@ can't read `profiles` or anything else of orgo-web's. Bops Cloud uses them only 
 BOPS_DATABASE_URL=postgres://bops_app:<password>@<host>:5432/orgo?sslmode=no-verify
 ```
 
-(`no-verify`: encrypted, without checking the server's self-signed certificate.) It lives in the
-encrypted secrets (`envs/prod/bops-secrets.env`, sops), and Bops Cloud gets it from there at deploy
+(`no-verify`: encrypted, without checking the server's self-signed certificate.) It lives in Orgo's
+encrypted secrets (`prod/bops-secrets.env`, sops), and Bops Cloud gets it from there at deploy
 time. Never put it in `.env.example`, a commit or a log.
 
 The older single-user hosted server (`lib/server/persist-pg.ts`) reads the same `bops.app_state`.
