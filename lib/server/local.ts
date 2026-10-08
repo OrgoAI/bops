@@ -112,7 +112,7 @@ export async function quitBotChromes({ switching = true } = {}) {
   if (switching) gq.bopsChromeQuits = quits() + 1;
   // The screens' mirrors keep the last page they saw: they go too.
   closeMirrors();
-  const pattern = `--user-data-dir=${chromeRoot()}/`.replace(/[.*+?^${}()|[\]\\]/g, "\\  const pattern = `--user-data-dir=${chromeRoot()}/`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");");
+  const pattern = `--user-data-dir=${chromeRoot()}/`;
   if (WINDOWS) {
     // Stop only browser processes with profiles under Bops' managed root.
     const script = "$root=[Console]::In.ReadToEnd().Trim();Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'chrome.exe' -or $_.Name -eq 'msedge.exe') -and $_.CommandLine -like ('*--user-data-dir='+$root+'*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
