@@ -6,6 +6,7 @@ import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { appsNote, placesNote } from "./skills";
 import { DATA_TOOL_NAMES, DATA_TOOLS, dataNote, runDataTool } from "./treg";
 import { openaiClient } from "./openai-client";
+import { aiModel } from "./ai-config";
 import { contactLine, createBot } from "./bots";
 import { creditsOut, noteOutOfCredit, OUT_OF_CREDIT } from "./cloud";
 import { noOwnComputer } from "./plan";
@@ -35,7 +36,7 @@ import { recordTokens, usageTags } from "./usage";
  */
 
 const client = openaiClient();
-const CHAT_MODEL = process.env.BOPS_CHAT_MODEL ?? process.env.BOPS_SAM_MODEL ?? "gpt-6.1-sol";
+const CHAT_MODEL = () => aiModel("chat");
 /** Texting should feel instant: chat turns mostly reply and route, so they think lightly. Threads think harder. */
 const CHAT_REASONING = { effort: (process.env.BOPS_CHAT_EFFORT ?? "low") as "low" | "medium" | "high" };
 
@@ -355,7 +356,7 @@ async function acknowledge(b: Bot | undefined, request: string, task: string, pa
     const res = await Promise.race([
       client.responses
         .create({
-          model: CHAT_MODEL,
+          model: CHAT_MODEL(),
           reasoning: { effort: "low" },
           instructions: `You are ${b?.name ?? "a bot"}, texting ${ownerName()} back. They just added something to a task you're already doing${passTo ? ` (${passTo} is doing it; say you'll pass it on)` : ""}. Reply with one short, natural line about what you'll do now, in words that fit what they said, like a friend would text. The task isn't done yet: never give an answer or a result, and never say it's done. No "On it.", no quotes, no emoji, under 12 words.`,
           input: JSON.stringify({ task, owner_said: request }),
@@ -527,7 +528,7 @@ async function askTeammate(asker: Bot, toId: string, question: string, chatId: s
     ].join("\n");
     stillOurs(ours);
     const res = await client.responses.create({
-      model: CHAT_MODEL,
+      model: CHAT_MODEL(),
       reasoning: CHAT_REASONING,
       instructions,
       input: history(pair, t.id).slice(-16),
@@ -773,7 +774,7 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     ].filter(Boolean);
     const input = [...history(chatId, botId), { role: "developer" as const, content: `As of now (from Bops, not ${owner}):\n${now.join("\n")}` }];
     stillOurs(ours);
-    let response = await client.responses.create({ model: CHAT_MODEL, reasoning: CHAT_REASONING, instructions, input, tools }, usageTags("chat", botId));
+    let response = await client.responses.create({ model: CHAT_MODEL(), reasoning: CHAT_REASONING, instructions, input, tools }, usageTags("chat", botId));
     stillOurs(ours);
     recordTokens("chat", response.model, response.usage, botId);
     // App lookups come back to the model before it answers (a few rounds at most). Other tools
@@ -866,7 +867,7 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
       earlier.push(...(rest as never[]));
       stillOurs(ours);
       response = await client.responses.create({
-        model: CHAT_MODEL,
+        model: CHAT_MODEL(),
         reasoning: CHAT_REASONING,
         instructions,
         previous_response_id: response.id,
