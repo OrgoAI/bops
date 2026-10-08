@@ -2,7 +2,12 @@
 
 ## Reporting a vulnerability
 
-Please don't open a public issue. Email **security@orgo.ai** with what you found, how to reproduce it, and what it lets someone do. We'll reply within 3 business days and keep you posted until it's fixed. Please give us a reasonable time to fix it before you share it.
+Please don't open a public issue. Report it privately, either way:
+
+- On GitHub: the repository's **Security** tab, then **Report a vulnerability**.
+- By email: **security@orgo.ai**.
+
+Tell us what you found, how to reproduce it, and what it lets someone do. We'll reply within 3 business days and keep you posted until it's fixed. Please give us a reasonable time to fix it before you share it.
 
 ## What's in scope
 

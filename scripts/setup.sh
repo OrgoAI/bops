@@ -91,6 +91,7 @@ install_hook
 main="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)"
 secrets="${BOPS_SECRETS:-$main/../bops-secrets}"
 if [ -x "$secrets/scripts/dev-env.sh" ]; then
+  secrets="$(cd "$secrets" && pwd)"
   echo "  - Orgo's bops-secrets is next to this repo: $secrets/scripts/dev-env.sh puts Orgo's development keys in .env.local."
 fi
 
