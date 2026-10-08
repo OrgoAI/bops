@@ -10,7 +10,7 @@ Thanks for helping. A few things keep this smooth.
 
 ## Contributor License Agreement
 
-Bops is released under FSL-1.1-ALv2, and Organic Intelligence, Inc. also runs a hosted version. To accept your contribution we need you to sign our CLA; the CLA Assistant bot asks on your first pull request. You keep the copyright to your work.
+Bops is released under FSL-1.1-ALv2, and Organic Intelligence, Inc. also runs a hosted version, so to accept your contribution we need you to sign our Contributor License Agreement (CLA). We'll ask you to before we merge your first pull request. You keep the copyright to your work.
 
 ## Development
 
@@ -19,7 +19,7 @@ npm run setup                # dependencies, .env.local from .env.example, and a
 npm run app                  # or: npx next dev --port 3210
 ```
 
-Fill in `.env.local` as the README's "Run it yourself" says, or set `BOPS_SELF_HOSTED=0` and sign in with Orgo. Work on a branch of your fork (or, on Orgo's team, a branch here) and open a pull request against `main`: `main` takes changes only through pull requests, and CI (typecheck, lint and a secret scan) has to pass.
+Fill in `.env.local` as the README's "Run it yourself" says, or set `BOPS_SELF_HOSTED=0` and sign in with Orgo. Work on a branch of your fork (or, on Orgo's team, a `dev/<name>` branch here) and open a pull request against `main`: `main` takes changes only through pull requests, and CI (typecheck, lint and a secret scan) has to pass.
 
 Before you open a pull request:
 
