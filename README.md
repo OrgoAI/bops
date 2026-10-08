@@ -271,10 +271,21 @@ Signed in with Orgo, Bops sends Orgo usage events through PostHog, the analytics
 
 ## License
 
-Bops is under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2), a [Fair Source](https://fsl.software) license. In plain words (the [LICENSE](LICENSE) has the exact terms):
+Bops is [fair source](https://fair.io): the code is public, and you can read it, run it, change it and share it. It's under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2, [about FSL](https://fsl.software)). Here it is in plain words; the [LICENSE](LICENSE) has the exact terms, and they're what count.
 
-- **Use it for anything but competing with it.** You may use, copy, change and share Bops at work or at home: inside your company, for teaching and research, and in services you provide to people who use Bops under these terms.
+- **Use it for anything but competing with it.** At home or at work: inside your company, for teaching and research, and in services you provide to people who use Bops under these terms.
 - **Don't offer it as a competing product.** You may not make Bops available to others in a commercial product or service that replaces Bops (or one of our products built with it), or that does substantially the same thing, such as a hosted Bops.
+- **Keep the license with it.** The same terms cover your copies, changes and forks. When you share them, include the license (or a link to it) and keep the copyright notices.
 - **Each version becomes Apache 2.0.** Two years after we release a version, that version is also yours under the Apache License 2.0, with no limit on competing.
+
+The license also gives you our patents for these uses (until you sue someone claiming Bops infringes a patent), and Bops comes as is, with no warranty.
+
+| Can I… | |
+|---|---|
+| Run Bops for myself, or across my company? | Yes. |
+| Change it and share my version? | Yes, under the same license, with a different name and logo ([TRADEMARK.md](TRADEMARK.md)). |
+| Build my own product with it? | Yes, as long as that product doesn't compete with Bops (above). |
+| Offer a hosted Bops, or sell an app that does what Bops does? | Not under FSL. Each version allows it two years after its release, under Apache 2.0. |
+| Contribute? | Yes, see [CONTRIBUTING.md](CONTRIBUTING.md). |
 
 "Bops", the Bops logo and the bot mascots are trademarks of Organic Intelligence, Inc. The license covers the code, not the name or logo. See [TRADEMARK.md](TRADEMARK.md).
