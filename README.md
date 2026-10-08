@@ -30,6 +30,16 @@
   Developed with <a href="https://orgo.ai">Orgo</a>
 </p>
 
+<p align="center">
+  <a href="https://www.star-history.com/#orgoai/bops&amp;Date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=orgoai/bops&amp;type=Date&amp;theme=dark">
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=orgoai/bops&amp;type=Date">
+      <img alt="Star history of OrgoAI/bops" src="https://api.star-history.com/svg?repos=orgoai/bops&amp;type=Date" width="600">
+    </picture>
+  </a>
+</p>
+
 <br>
 
 Bops is a Mac app that gives you a team of AI bots for your business ops: inbox, pipeline, invoices, reports. They work on cloud computers you can watch live and take over at any time. Reach them in the app and in Slack, Telegram and Discord, and on Pro and Max by text, call or email. They remember who you are and what they did yesterday.
