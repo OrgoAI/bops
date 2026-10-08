@@ -1,6 +1,6 @@
 /**
- * Bops Cloud's settings, all from the environment (the deploy decrypts envs/prod/bops-secrets.env
- * into it). Read when used, not at import, so tests can set them per case.
+ * Bops Cloud's settings, all from the environment (the deploy decrypts Orgo's prod secrets into
+ * it). Read when used, not at import, so tests can set them per case.
  */
 
 import { POSTHOG_HOST } from "./analytics-rules.ts";

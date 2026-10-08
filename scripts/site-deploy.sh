@@ -4,19 +4,22 @@
 # serves this index.html. The VM is set up once with site/deploy/install.sh. The backend API
 # (bops.orgo.ai/api) is separate: scripts/cloud-deploy.sh. Run from the repo:
 #   scripts/site-deploy.sh
-# Needs SSH to the VM as root (default key: z-legacy-fleet's ci-staging.key; BOPS_SITE_SSH_KEY picks
-# another).
+# Needs Orgo's private OrgoAI/bops-secrets next to this repo (its prod/bops-public.env names the VM;
+# BOPS_SECRETS points elsewhere) and SSH to the VM as root (default key: z-legacy-fleet's
+# ci-staging.key; BOPS_SITE_SSH_KEY picks another).
 set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
+# Orgo's prod settings and the legacy key sit next to the main checkout (this may be a worktree elsewhere).
+main="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)"
+prod="${BOPS_SECRETS:-$main/../bops-secrets}/prod"
+[ -f "$prod/bops-public.env" ] || { echo "No $prod/bops-public.env: clone OrgoAI/bops-secrets next to $main, or set BOPS_SECRETS." >&2; exit 1; }
 set -a
-. envs/prod/bops-public.env
+. "$prod/bops-public.env"
 set +a
-: "${BOPS_SITE_BOX:?set BOPS_SITE_BOX (root@<address>) in envs/prod/bops-public.env}"
+: "${BOPS_SITE_BOX:?set BOPS_SITE_BOX (root@<address>) in bops-secrets prod/bops-public.env}"
 
 ssh_opts=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
-# The legacy key sits next to the main checkout (this may be a worktree elsewhere).
-main="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)"
 key="${BOPS_SITE_SSH_KEY:-$main/../z-legacy-fleet/.ssh/ci-staging.key}"
 [ -f "$key" ] && ssh_opts+=(-i "$key" -o IdentitiesOnly=yes)
 box() { ssh "${ssh_opts[@]}" "$BOPS_SITE_BOX" "$@"; }

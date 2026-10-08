@@ -221,7 +221,7 @@ A release needs:
 
 To try your changes in the app, run `npm run app:build`. It makes an unsigned development app that runs `next dev` from this folder. `npm run app:install` builds the same app, then deletes `/Applications/Bops.app` and puts this one in its place.
 
-On GitHub, pushing a tag `v<version>` that matches `package.json` runs the Release workflow. It builds, signs and notarizes on a GitHub Mac, checks that Gatekeeper accepts the app, and attaches the DMG and zip to the release with that version's notes from `docs/releases/`. It needs the signing, notarization and relay secrets set on the repository.
+Orgo's releases are built from a version tag of this repository by a workflow in Orgo's private repository, which holds the signing and notarization secrets. It builds, signs and notarizes on a GitHub Mac, checks that Gatekeeper accepts the app, and attaches the DMG and zip to the release here with that version's notes from `docs/releases/`. This repository holds no secrets.
 
 The app runs with the hardened runtime and three entitlements (`build/entitlements.mac.plist`): JIT for Electron, the microphone for calls, and Apple Events so Full access can use your apps. Bops asks macOS for Screen Recording, the microphone and notifications, and Full access also needs Full Disk Access and Automation. Bops isn't on the Mac App Store because its sandbox would stop Bops from running its own server, starting Codex and Chrome for the bots, and driving other apps.
 
@@ -270,6 +270,10 @@ Signed in with Orgo, Bops sends Orgo usage events through PostHog, the analytics
 
 ## License
 
-[FSL-1.1-ALv2](LICENSE), the Functional Source License. You may use, copy, modify and share Bops for any purpose except offering it to others in a commercial product or service that competes with Bops. See [LICENSE](LICENSE) for the exact terms. Each version also becomes available under the Apache License 2.0 two years after we release it.
+Bops is under the [Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2), a [Fair Source](https://fsl.software) license. In plain words (the [LICENSE](LICENSE) has the exact terms):
+
+- **Use it for anything but competing with it.** You may use, copy, change and share Bops at work or at home: inside your company, for teaching and research, and in services you provide to people who use Bops under these terms.
+- **Don't offer it as a competing product.** You may not make Bops available to others in a commercial product or service that replaces Bops (or one of our products built with it), or that does substantially the same thing, such as a hosted Bops.
+- **Each version becomes Apache 2.0.** Two years after we release a version, that version is also yours under the Apache License 2.0, with no limit on competing.
 
 "Bops", the Bops logo and the bot mascots are trademarks of Organic Intelligence, Inc. The license covers the code, not the name or logo. See [TRADEMARK.md](TRADEMARK.md).
