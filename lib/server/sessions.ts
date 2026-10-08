@@ -92,6 +92,7 @@ type StartOptions = {
   title?: string;
   chatId?: string;
   sentVia?: Session["sentVia"];
+  routineId?: string;
   onWatch?: string;
   /** Where to run it: the user's Mac, the cloud, or (auto) let Bops decide. */
   where?: "mac" | "cloud" | "auto";
@@ -118,6 +119,9 @@ type StartOptions = {
 };
 
 const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const sameOrigin = (a: Session, routineId: string | undefined, sentVia: Session["sentVia"]) => a.routineId || routineId
+  ? !!a.routineId && a.routineId === routineId
+  : a.sentVia !== "routine" && sentVia !== "routine";
 
 /** Waiting on the user, as the server sees it (the app's needsYou, minus what only the app knows). */
 const waiting = (s: Session) => !s.dismissed && !s.replacedBy && (!!s.blocker || !!s.waitingOnYou || (s.status === "failed" && !!s.error && !/stopped|dismissed|moved|paused/i.test(s.error)));
@@ -126,16 +130,16 @@ const waiting = (s: Session) => !s.dismissed && !s.replacedBy && (!!s.blocker ||
 const doing = (s: Session) => live(s) && !stopped.has(s.id);
 
 /** The bot's thread already doing this job (same title): running, or waiting on the user. */
-function sameJob(botId: string, title: string, except?: string) {
+function sameJob(botId: string, title: string, except?: string, routineId?: string) {
   return getState()
-    .sessions.filter((s) => s.botId === botId && s.id !== except && !s.dismissed && !s.replacedBy && (doing(s) || waiting(s)) && norm(s.title) === norm(title))
+    .sessions.filter((s) => s.botId === botId && s.id !== except && sameOrigin(s, routineId, routineId ? "routine" : "you") && !s.dismissed && !s.replacedBy && (doing(s) || waiting(s)) && norm(s.title) === norm(title))
     .at(-1);
 }
 
 /** Older copies of a job that are waiting on the user go quiet once a newer thread has it. */
 function retireCopies(keep: Session) {
   for (const s of getState().sessions)
-    if (s.id !== keep.id && s.botId === keep.botId && !live(s) && waiting(s) && norm(s.title) === norm(keep.title)) patchSession(s.id, { replacedBy: keep.id, blocker: undefined, waitingOnYou: false });
+    if (s.id !== keep.id && s.botId === keep.botId && sameOrigin(s, keep.routineId, keep.sentVia) && !live(s) && waiting(s) && norm(s.title) === norm(keep.title)) patchSession(s.id, { replacedBy: keep.id, blocker: undefined, waitingOnYou: false });
 }
 
 /** Point the chat at the thread now doing the job: chips that showed `from` show `to`. */
@@ -147,7 +151,7 @@ function repoint(from: string, to: string) {
 
 /** A thread the bot is already running (or that waits on the user) for the same job as `s`, by Jev. */
 async function sameJobByMeaning(s: Session) {
-  const open = getState().sessions.filter((x) => x.id !== s.id && x.botId === s.botId && !x.dismissed && !x.replacedBy && (doing(x) || waiting(x)) && x.createdAt < s.createdAt).slice(-5);
+  const open = getState().sessions.filter((x) => x.id !== s.id && x.botId === s.botId && sameOrigin(x, s.routineId, s.sentVia) && !x.dismissed && !x.replacedBy && (doing(x) || waiting(x)) && x.createdAt < s.createdAt).slice(-5);
   if (!open.length) return undefined;
   const brief = (g: string) => (g.length > 240 ? `${g.slice(0, 240)}…` : g);
   const a = await decide(
@@ -183,17 +187,18 @@ function foldInto(s: Session, goal: string, where: "mac" | "cloud" | "auto", opt
   return s;
 }
 
-export function startSession({ botId, goal, title, chatId, sentVia = "you", onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom }: StartOptions): Session {
+export function startSession({ botId, goal, title, chatId, sentVia = "you", routineId, onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom }: StartOptions): Session {
   // Someone else's words (an email or a text from outside) never put work on the user's Mac (StartOptions.outside).
   const where = outside && asked === "mac" ? "auto" : asked;
   // One job, one thread: asking for a job that's already running (or waiting on the user) adds to it.
-  const same = !fresh && !onWatch ? sameJob(botId, title?.trim() || goal.slice(0, 48)) : undefined;
+  const same = !fresh && !onWatch ? sameJob(botId, title?.trim() || goal.slice(0, 48), undefined, routineId) : undefined;
   if (same) return foldInto(same, goal, where, { outside, ownerAsked });
   const s: Session = {
     id: id("ses"),
     botId,
     chatId: chatId ?? botChatId(botId),
     sentVia,
+    routineId,
     title: title?.trim() || goal.slice(0, 48),
     goal,
     host: getState().host,
@@ -330,7 +335,7 @@ export function moveToMac(sessionId: string, also?: string, depth = 0): Session 
   // A run under way is only told to stop (one that hadn't started stops at once).
   const ending = (running && live(session(sessionId)!)) || runs.has(sessionId);
   // Already being done on the Mac: this copy steps aside for that one, which gets what came with the move.
-  const there = getState().sessions.find((x) => x.id !== s.id && x.botId === s.botId && x.runsOn === "mac" && doing(x) && norm(x.title) === norm(s.title));
+  const there = getState().sessions.find((x) => x.id !== s.id && x.botId === s.botId && sameOrigin(x, s.routineId, s.sentVia) && x.runsOn === "mac" && doing(x) && norm(x.title) === norm(s.title));
   if (there && extra) replyToSession(there.id, extra);
   const why = s.blocker
     ? `In the cloud it got stuck: ${BLOCKER_LABEL[s.blocker]}.`
@@ -342,7 +347,7 @@ export function moveToMac(sessionId: string, also?: string, depth = 0): Session 
   const last = s.thenOnMac ? `When that's done, the last step: ${s.thenOnMac}` : "";
   const next =
     there ??
-    startSession({ botId: s.botId, goal: [s.goal, last, why, extra, "Do it on the Mac this time."].filter(Boolean).join("\n\n"), title: s.title, chatId: s.chatId, sentVia: s.sentVia, where: "mac", fresh: true, movedFrom: s.id });
+    startSession({ botId: s.botId, goal: [s.goal, last, why, extra, "Do it on the Mac this time."].filter(Boolean).join("\n\n"), title: s.title, chatId: s.chatId, sentVia: s.sentVia, routineId: s.routineId, where: "mac", fresh: true, movedFrom: s.id });
   if (!there) movePages.set(next.id, page);
   patchSession(sessionId, { replacedBy: next.id, blocker: undefined, waitingOnYou: false, offerMac: undefined });
   repoint(sessionId, next.id);
@@ -1706,7 +1711,7 @@ async function run(sessionId: string) {
     channelResult(done, done.answer ?? "Done.");
     // The part only the user's Mac can do comes next, with what the cloud found.
     if (done.thenOnMac)
-      startSession({ botId: b.id, goal: `${done.thenOnMac}\n\nWhat the first part found (in the cloud):\n${done.answer ?? ""}`, title: `${done.title} · on your Mac`, chatId: done.chatId, sentVia: done.sentVia, where: "mac" });
+      startSession({ botId: b.id, goal: `${done.thenOnMac}\n\nWhat the first part found (in the cloud):\n${done.answer ?? ""}`, title: `${done.title} · on your Mac`, chatId: done.chatId, sentVia: done.sentVia, routineId: done.routineId, where: "mac" });
   } catch (e) {
     if (e instanceof ScreenTaken && !stopped.has(sessionId)) {
       patchSession(sessionId, { status: "queued", lastDisplay: undefined });

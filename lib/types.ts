@@ -303,6 +303,8 @@ export type Session = {
   chatId: string;
   /** Who kicked it off: the user directly, another bot handing it over, or a routine. */
   sentVia: BotId | "you" | "routine";
+  /** Which routine started it, so distinct scheduled jobs stay on distinct threads. */
+  routineId?: string;
   /** Short label for chips and lists. */
   title: string;
   /** The kickoff message the bot works from, pinned at the top of the thread. */

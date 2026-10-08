@@ -101,7 +101,7 @@ function tick() {
           .then(({ isOwner, sendText }) => (isOwner(r.textTo!.to) ? sendText(r.textTo!.botId, r.textTo!.to, r.reminder!, { tag: m.id }) : undefined))
           .catch((e: Error) => console.warn(`[routines] text: ${e.message}`));
     } else {
-      const s = startSession({ botId: b.id, goal: r.goal, title: r.title, chatId, sentVia: "routine", where: r.where ?? "auto" });
+      const s = startSession({ botId: b.id, goal: r.goal, title: r.title, chatId, sentVia: "routine", routineId: r.id, where: r.where ?? "auto" });
       if (r.textTo) patchSession(s.id, { textBack: r.textTo });
       addMessage({ chatId, role: "system", text: `Routine · ${describeSchedule(r.schedule)}`, sessionIds: [s.id] });
     }
