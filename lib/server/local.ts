@@ -25,7 +25,17 @@ import { bopsHome, chromeRoot } from "./user-paths";
  * before another's bot uses its port.
  */
 
-export const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const WINDOWS = process.platform === "win32";
+export const CHROME = process.env.BOPS_CHROME_PATH || (
+  WINDOWS
+    ? [
+        process.env.PROGRAMFILES && join(process.env.PROGRAMFILES, "Google", "Chrome", "Application", "chrome.exe"),
+        process.env["PROGRAMFILES(X86)"] && join(process.env["PROGRAMFILES(X86)"], "Google", "Chrome", "Application", "chrome.exe"),
+        process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe"),
+        process.env.PROGRAMFILES && join(process.env.PROGRAMFILES, "Microsoft", "Edge", "Application", "msedge.exe"),
+      ].find((p) => p && existsSync(p)) || ""
+    : "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+);
 /**
  * Where the signed-in user's Mac tasks keep their folders: ~/.bops/users/<id>/tasks, beside their
  * Chrome profiles' own folder (~/.bops/tasks on a self-hosted install running on its own key). Signed
@@ -52,16 +62,12 @@ export const taskSockets = (dir: string) => join(/*turbopackIgnore: true*/ bopsH
 /** A Mac task's workspace: the agent session's workspace_directory, and where its browser tools run. */
 export const taskWorkspace = (sessionId: string) => join(taskDir(sessionId), "workspace");
 const CHROME_VERSION = (() => {
-  try {
-    return execFileSync("defaults", ["read", "/Applications/Google Chrome.app/Contents/Info", "CFBundleShortVersionString"])
-      .toString()
-      .trim();
-  } catch {
-    return "154.0.0.0";
-  }
+  if (WINDOWS) return "154.0.0.0";
+  try { return execFileSync("defaults", ["read", "/Applications/Google Chrome.app/Contents/Info", "CFBundleShortVersionString"]).toString().trim(); }
+  catch { return "154.0.0.0"; }
 })();
 /** Headless Chrome announces itself as "HeadlessChrome"; present as the normal Mac browser. */
-const USER_AGENT = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION.split(".")[0]}.0.0.0 Safari/537.36`;
+const USER_AGENT = `Mozilla/5.0 (${WINDOWS ? "Windows NT 10.0; Win64; x64" : "Macintosh; Intel Mac OS X 10_15_7"}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${CHROME_VERSION.split(".")[0]}.0.0.0 Safari/537.36`;
 const real = (p: string) => (existsSync(p) ? realpathSync(p) : p);
 /** The browser tools' package folder, at its real path: in the app, the server's node_modules links into the app bundle. */
 const nodeModules = () => real(join(process.cwd(), "node_modules"));
@@ -106,7 +112,18 @@ export async function quitBotChromes({ switching = true } = {}) {
   if (switching) gq.bopsChromeQuits = quits() + 1;
   // The screens' mirrors keep the last page they saw: they go too.
   closeMirrors();
-  const pattern = `--user-data-dir=${chromeRoot()}/`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = `--user-data-dir=${chromeRoot()}/`;
+  if (WINDOWS) {
+    // Stop only browser processes with profiles under Bops' managed root.
+    const script = "$root=[Console]::In.ReadToEnd().Trim();Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'chrome.exe' -or $_.Name -eq 'msedge.exe') -and $_.CommandLine -like ('*--user-data-dir='+$root+'*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
+    await new Promise<void>((resolve) => {
+      const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
+      child.once("close", () => resolve());
+      child.once("error", () => resolve());
+      child.stdin.end(chromeRoot());
+    });
+    return;
+  }
   const running = () => new Promise<boolean>((r) => execFile("pgrep", ["-f", "--", pattern], (e) => r(!e)));
   if (!(await running())) return;
   await new Promise((r) => execFile("pkill", ["-f", "--", pattern], () => r(null)));
@@ -129,6 +146,7 @@ export async function ensureChrome(botId: string, port: number) {
   writeFileSync(RUNNING_FOR(), dir);
   const profile = join(dir, `${botId}-${port}`);
   mkdirSync(profile, { recursive: true });
+  if (!CHROME) throw new Error("Chrome/Edge was not found. Set BOPS_CHROME_PATH in the local environment.");
   spawn(
     CHROME,
     [
@@ -141,7 +159,7 @@ export async function ensureChrome(botId: string, port: number) {
       ...(process.env.BOPS_CHROME_WINDOWS ? [] : ["--headless=new", `--user-agent=${USER_AGENT}`]),
       "about:blank",
     ],
-    { detached: true, stdio: "ignore" },
+    { detached: !WINDOWS, stdio: "ignore", windowsHide: true },
   )
     // No Chrome here: the wait below says so, rather than the server going down with it.
     .on("error", () => {})
@@ -200,6 +218,7 @@ export const browserMcp = (port: number, dir: string) => {
   const self = process.env.PORT ?? "3210";
   const blocked = `PLAYWRIGHT_MCP_BLOCKED_ORIGINS=http://localhost:${self};http://127.0.0.1:${self};http://[::1]:${self}`;
   const env = [`PWTEST_SOCKETS_DIR=${taskSockets(dir)}`, blocked, ...(asNode ? ["ELECTRON_RUN_AS_NODE=1"] : [])];
+  if (WINDOWS) return { type: "stdio", command: process.execPath, args, cwd: join(dir, "workspace"), env: Object.fromEntries(env.map((entry) => [entry.slice(0, entry.indexOf("=")), entry.slice(entry.indexOf("=") + 1)])) };
   return { type: "stdio", command: "/usr/bin/env", args: [...env, process.execPath, ...args], cwd: join(dir, "workspace") };
 };
 
@@ -321,6 +340,7 @@ export function prepareTaskDir(sessionId: string, dir = taskDir(sessionId)) {
  * so Codex never uses the user's ChatGPT sign-in or their Codex settings for it.
  */
 export async function startExecutor(sessionId: string, envId: string, remoteUrl: string, port: number, dir = taskDir(sessionId), fullAccess = false): Promise<ChildProcess> {
+  if (WINDOWS) throw new Error("Local Codex executor sandbox is not available on Windows v0.0.24 yet; use an Orgo cloud computer. Bops will not start an unrestricted shell on your PC.");
   if (!fullAccess && !existsSync(SANDBOX_EXEC)) throw new Error("this Mac has no sandbox for bots (/usr/bin/sandbox-exec)");
   const codex = findCodex();
   if (!codex) throw new Error("the Codex CLI isn't on this Mac yet");

@@ -1,0 +1,178 @@
+name: Windows 11 build
+
+on:
+  push:
+    branches: [windows-orgo-v0.0.24, main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-11-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+      - run: npm run win:doctor
+
+      - name: Verify Windows runtime APIs
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -AssemblyName UIAutomationClient
+          $secure = ConvertTo-SecureString "bops-dpapi-smoke" -AsPlainText -Force
+          $sealed = ConvertFrom-SecureString $secure
+          $openedSecure = ConvertTo-SecureString $sealed
+          $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($openedSecure)
+          try { $opened = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+          if ($opened -ne "bops-dpapi-smoke") { throw "DPAPI-backed SecureString round-trip failed" }
+
+      - run: npm run build
+
+      - name: Build Windows installer and portable EXE
+        run: npx electron-builder --win nsis portable --x64 --publish never
+
+      - name: Smoke-test packaged Windows app
+        shell: powershell
+        run: |
+          $portable = Get-ChildItem "dist-desktop\Bops *.exe" | Where-Object { $_.Name -notlike "*Setup*" } | Select-Object -First 1
+          if (-not $portable) { throw "Portable EXE was not produced" }
+          $process = Start-Process -FilePath $portable.FullName -PassThru
+          try {
+            $healthy = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Seconds 1
+              try {
+                $r = Invoke-WebRequest "http://127.0.0.1:3210/api/health" -UseBasicParsing -TimeoutSec 2
+                if ($r.StatusCode -eq 200) { $healthy = $true; break }
+              } catch {}
+            }
+            if (-not $healthy) { throw "Packaged Bops did not become healthy on port 3210" }
+            $tokenPath = Join-Path $env:APPDATA "Bops\\window-token"
+            if (-not (Test-Path $tokenPath)) { throw "Packaged Bops UI token was not written" }
+            $token = (Get-Content $tokenPath -Raw).Trim()
+            if ($token.Length -ne 64) { throw "Invalid packaged Bops UI token" }
+            $apiHeaders = @{ "x-bops-window" = $token }
+            $windows = $null
+            for ($try = 0; $try -lt 3; $try++) {
+              $raw = & curl.exe --silent --show-error --fail --max-time 20 --header "x-bops-window: $token" "http://127.0.0.1:3210/api/mac/windows?all=1" 2>$null
+              if ($LASTEXITCODE -eq 0 -and $raw) {
+                try {
+                  $candidate = $raw | ConvertFrom-Json
+                  if ($null -ne $candidate.windows) { $windows = $candidate; break }
+                } catch {}
+              }
+              Start-Sleep -Seconds 2
+            }
+            if ($null -eq $windows -or $null -eq $windows.windows) { throw "Packaged Win32 window enumeration API did not return a windows collection" }
+
+            # Exercise the packaged BYOK privacy path without contacting an external provider.
+            $body = @{
+              enabled = $true
+              blockBopsCloud = $true
+              apiKey = "bops-ci-dummy-key"
+              baseUrl = "https://api.openai.com/v1"
+              chatModel = "gpt-test-chat"
+              sessionModel = "gpt-test-session"
+              hardModel = "gpt-test-hard"
+            } | ConvertTo-Json
+            $saved = Invoke-RestMethod "http://127.0.0.1:3210/api/ai" -Headers $apiHeaders -Method POST -ContentType "application/json" -Body $body -TimeoutSec 15
+            if (-not $saved.hasKey) { throw "Packaged BYOK API did not report a protected saved key" }
+            if ($saved.PSObject.Properties.Name -contains "apiKey") { throw "Packaged BYOK API leaked the API key back to the client" }
+            $read = Invoke-RestMethod "http://127.0.0.1:3210/api/ai" -Headers $apiHeaders -TimeoutSec 15
+            if (-not $read.enabled -or -not $read.hasKey -or $read.chatModel -ne "gpt-test-chat" -or -not $read.blockBopsCloud) { throw "Packaged BYOK strict-privacy settings did not round-trip" }
+            $clear = @{ enabled = $false; clearKey = $true } | ConvertTo-Json
+            $cleared = Invoke-RestMethod "http://127.0.0.1:3210/api/ai" -Headers $apiHeaders -Method POST -ContentType "application/json" -Body $clear -TimeoutSec 15
+            if ($cleared.hasKey) { throw "Packaged BYOK key was not deleted" }
+          } finally {
+            Get-Process Bops -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+          }
+
+      - name: Create SHA256 checksums
+        shell: powershell
+        run: |
+          Get-ChildItem "dist-desktop\*.exe" |
+            Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
+            Set-Content "dist-desktop\SHA256SUMS.txt"
+
+      - name: Upload Windows EXE files
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bops-Windows-11-x64
+          path: |
+            dist-desktop/*.exe
+            dist-desktop/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Prepare direct Windows EXE names
+        if: github.ref == 'refs/heads/main'
+        shell: powershell
+        run: |
+          $setup = Get-ChildItem "dist-desktop\Bops Setup *.exe" | Select-Object -First 1
+          $portable = Get-ChildItem "dist-desktop\Bops *.exe" | Where-Object { $_.Name -notlike "*Setup*" } | Select-Object -First 1
+          if (-not $setup) { throw "Windows setup EXE was not produced" }
+          if (-not $portable) { throw "Windows portable EXE was not produced" }
+          Copy-Item $setup.FullName "dist-desktop\Bops-Windows-11-Setup-x64.exe" -Force
+          Copy-Item $portable.FullName "dist-desktop\Bops-Windows-11-Portable-x64.exe" -Force
+
+      - name: Publish direct Windows EXE downloads
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-v0.0.24
+          name: Unofficial Bops Windows 11 v0.0.24
+          target_commitish: ${{ github.sha }}
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: |
+            dist-desktop/Bops-Windows-11-Setup-x64.exe
+            dist-desktop/Bops-Windows-11-Portable-x64.exe
+            dist-desktop/SHA256SUMS.txt
+
+      - name: Prepare direct-download EXEs
+        if: github.ref == 'refs/heads/main'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force "release-assets" | Out-Null
+          $installer = Get-ChildItem "dist-desktop\*Setup*.exe" | Select-Object -First 1
+          $portable = Get-ChildItem "dist-desktop\Bops *.exe" | Where-Object { $_.Name -notlike "*Setup*" } | Select-Object -First 1
+          if (-not $installer) { throw "Installer EXE was not produced" }
+          if (-not $portable) { throw "Portable EXE was not produced" }
+          Copy-Item $installer.FullName "release-assets\Bops-Windows-11-Setup-x64.exe"
+          Copy-Item $portable.FullName "release-assets\Bops-Windows-11-Portable-x64.exe"
+          Get-ChildItem "release-assets\*.exe" |
+            Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
+            Set-Content "release-assets\SHA256SUMS.txt"
+
+      - name: Publish direct Windows EXE release
+        if: github.ref == 'refs/heads/main'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "windows-v0.0.24"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Bops Windows 11 v0.0.24" --notes "Windows 11 x64 installer and portable build. Validated by the Windows CI smoke test."
+          }
+          gh release upload $tag "release-assets\Bops-Windows-11-Setup-x64.exe" "release-assets\Bops-Windows-11-Portable-x64.exe" "release-assets\SHA256SUMS.txt" --clobber --repo $env:GITHUB_REPOSITORY

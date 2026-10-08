@@ -21,12 +21,14 @@ import { getState, stateReady, update } from "./store";
  */
 
 /** Apps and words that, named in a task, mean it belongs on the user's Mac (they can change the list). */
-export const DEFAULT_MAC_RULES = ["Messages", "iMessage", "Notes", "Apple Mail", "Photos", "Finder", "Keynote", "Pages", "Numbers", "Xcode", "Reminders", "my desktop", "my Downloads", "my laptop", "my Mac"];
+export const DEFAULT_MAC_RULES = process.platform === "win32"
+  ? ["Notepad", "File Explorer", "Outlook", "Excel", "Word", "PowerPoint", "my desktop", "my Downloads", "my laptop", "my PC"]
+  : ["Messages", "iMessage", "Notes", "Apple Mail", "Photos", "Finder", "Keynote", "Pages", "Numbers", "Xcode", "Reminders", "my desktop", "my Downloads", "my laptop", "my Mac"];
 
 export const emptyMac = (): MacState => ({ ready: false, rules: [...DEFAULT_MAC_RULES] });
 
 /** This server runs on the user's Mac (not a hosted one), where bots can work. */
-const onTheMac = () => process.platform === "darwin" && !onPostgres();
+const onTheMac = () => ["darwin", "win32"].includes(process.platform) && !onPostgres();
 
 /**
  * Is the user's Mac ready for bots, and if not, the one thing it waits on: the Codex CLI that runs the
@@ -42,7 +44,10 @@ export async function checkMac() {
   let next: MacState["next"];
   if (!onTheMac()) {
     next = "elsewhere";
-    reason = "Bots work on your Mac in the Bops app on your Mac.";
+    reason = "Local-computer tasks require the Bops desktop app.";
+  } else if (process.platform === "win32") {
+    next = "elsewhere";
+    reason = "Local-PC agent tasks are disabled until a restricted Windows executor is available; Orgo cloud computers are supported.";
   } else if (!findCodex()) {
     if (!installStatus()) installCodex(() => void checkMac().catch(() => {}));
     const failed = installStatus()?.state === "failed" ? installStatus()?.error : undefined;

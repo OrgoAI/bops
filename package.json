@@ -13,7 +13,10 @@
     "app:build": "node -e \"require('fs').writeFileSync('desktop/repo.json', JSON.stringify({ path: process.cwd() }))\" && electron-builder --mac --dir -c.mac.identity=null",
     "app:install": "npm run app:build && rm -rf /Applications/Bops.app && ditto dist-desktop/mac-arm64/Bops.app /Applications/Bops.app",
     "fast": "next build && next start --port 3210",
-    "app:release": "scripts/release.sh"
+    "app:release": "scripts/release.sh",
+    "app:build:win": "next build && electron-builder --win nsis portable --x64 --publish never",
+    "app:release:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release-windows.ps1",
+    "win:doctor": "node scripts/windows-doctor.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
@@ -87,10 +90,6 @@
       {
         "from": "public",
         "to": "server/public"
-      },
-      {
-        "from": "vendor/orgo-relay/orgo-relay",
-        "to": "bin/orgo-relay"
       }
     ],
     "npmRebuild": false,
@@ -127,6 +126,30 @@
     },
     "dmg": {
       "sign": false
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "desktop/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     }
   }
 }

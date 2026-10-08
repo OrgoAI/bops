@@ -2,6 +2,7 @@ import OpenAI, { type ClientOptions } from "openai";
 import { APP_VERSION_HEADER, TELEMETRY_HEADER } from "@/cloud/protocol";
 import { appVersion, telemetryHere } from "./app-version";
 import { cloudProxy } from "./cloud";
+import { directAiConfig, directAiEnabled, directAiKey } from "./ai-config";
 
 /**
  * An OpenAI client that finds its key when it makes a call, not when its module loads. Signed in
@@ -25,6 +26,11 @@ export function openaiClient(opts: Omit<ClientOptions, "apiKey" | "defaultHeader
       },
     },
     apiKey: async () => {
+      if (directAiEnabled()) {
+        const key = await directAiKey();
+        if (!key) throw new OpenAI.OpenAIError("Direct AI is enabled but no API key is saved. Open Settings → AI API.");
+        return key;
+      }
       const via = cloudProxy("openai");
       if (via) return via.key;
       const key = process.env.OPENAI_API_KEY;
@@ -35,6 +41,7 @@ export function openaiClient(opts: Omit<ClientOptions, "apiKey" | "defaultHeader
   let direct = client.baseURL;
   Object.defineProperty(client, "baseURL", {
     get: () => {
+      if (directAiEnabled()) return directAiConfig().baseUrl;
       const via = cloudProxy("openai");
       return via ? `${via.url}/v1` : direct;
     },

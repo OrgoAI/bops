@@ -2,6 +2,7 @@ import "server-only";
 import { trackServerEvent } from "./analytics";
 import type { BopsEventProps } from "@/cloud/analytics-rules";
 import { openaiClient } from "./openai-client";
+import { aiModel } from "./ai-config";
 import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -53,9 +54,9 @@ import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours
  */
 
 const client = openaiClient();
-const SESSION_MODEL = process.env.BOPS_SESSION_MODEL ?? "gpt-6.1-sol";
+const SESSION_MODEL = () => aiModel("session");
 /** For tasks Jev rates hard: GPT-6 Astra, what OpenAI's dots run on (slower and about 5× the price). */
-const HARD_MODEL = process.env.BOPS_HARD_MODEL ?? "gpt-6-astra";
+const HARD_MODEL = () => aiModel("hard");
 /** Helpers a thread can run at once, each on its own screen (a bot has 4). */
 const MAX_HELPERS = 3;
 /**
@@ -1281,7 +1282,7 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         computerId: at.computerId,
         display: at.display,
         // Hard tasks get the model Dots runs on; the rest the faster, cheaper one.
-        model: effort === "high" ? HARD_MODEL : SESSION_MODEL,
+        model: effort === "high" ? HARD_MODEL() : SESSION_MODEL(),
         effort,
         instructions: text,
         apps,
@@ -1589,7 +1590,7 @@ async function run(sessionId: string) {
         const created = (await client.beta.agents.sessions.create({
           agent: {
             // Hard tasks get the model Dots runs on; the rest the faster, cheaper one.
-            model: session(sessionId)!.effort === "high" ? HARD_MODEL : SESSION_MODEL,
+            model: session(sessionId)!.effort === "high" ? HARD_MODEL() : SESSION_MODEL(),
             // Reasoning summaries become the thread's live caption ("checking the pricing page…").
             reasoning: { effort: session(sessionId)!.effort ?? "medium", summary: "auto" },
             instructions: [
@@ -1895,7 +1896,7 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
   let mainTurn: string | undefined;
   // Each turn's tokens (the thread's and its helpers'), counted once when it ends; `seen` keeps it once.
   const s = session(sessionId);
-  const model = s?.effort === "high" ? HARD_MODEL : SESSION_MODEL;
+  const model = s?.effort === "high" ? HARD_MODEL() : SESSION_MODEL();
   // Whose state this turn belongs to: tokens counted after a hosted server swapped users are dropped (stateEpoch).
   const epoch = stateEpoch();
   const countTurn = (turnId: string, usage: TokenCount) => {
