@@ -15,10 +15,11 @@ Bops is released under FSL-1.1-ALv2, and Organic Intelligence, Inc. also runs a 
 ## Development
 
 ```bash
-npm install
-cp .env.example .env.local   # at least OPENAI_API_KEY and ORGO_API_KEY
+npm run setup                # dependencies, .env.local from .env.example, and a git hook
 npm run app                  # or: npx next dev --port 3210
 ```
+
+Fill in `.env.local` as the README's "Run it yourself" says, or set `BOPS_SELF_HOSTED=0` and sign in with Orgo. Work on a branch of your fork (or, on Orgo's team, a branch here) and open a pull request against `main`: `main` takes changes only through pull requests, and CI (typecheck, lint and a secret scan) has to pass.
 
 Before you open a pull request:
 

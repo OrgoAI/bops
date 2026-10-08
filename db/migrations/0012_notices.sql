@@ -1,5 +1,5 @@
 -- What Orgo tells Bops users, and which Bops apps the cloud serves (cloud/notices.ts, cloud/app-version.ts),
--- both written with scripts/internal/notices.sh. Run as bops_app after 0011 (cloud/db.ts migrate() does it
+-- both written with Orgo's scripts/notices.sh (OrgoAI/bops-secrets). Run as bops_app after 0011 (cloud/db.ts migrate() does it
 -- at start). Safe to run again.
 
 BEGIN;

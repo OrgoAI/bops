@@ -66,7 +66,7 @@ the answer for 5 minutes by the key's SHA-256 (`cloud/auth.ts`). It never stores
 Every request from the app (0.0.18 on) also says its version, `x-bops-version: 0.0.18`
 (`lib/server/app-version.ts`; apps before it say nothing). The cloud keeps the latest with the user's
 account, `bops.cloud_accounts.app_version` (NULL: an app that didn't say) and `app_seen_at`
-(`cloud/app-version.ts`). With `bops.app_policy.block_below` set (`scripts/internal/notices.sh block
+(`cloud/app-version.ts`). With `bops.app_policy.block_below` set (`Orgo's scripts/notices.sh (OrgoAI/bops-secrets) block
 0.0.18`; read every minute, no deploy), an app older than that, or one that doesn't say, is answered
 426 (`app_update_required`, with a line telling the user to update) on every call and socket but its
 state's (`/v1/state`, `/v1/messages`), which still go through so nothing it holds is lost.
@@ -77,7 +77,7 @@ What Orgo tells users (`cloud/notices.ts`): rows in `bops.notices` (a title, a f
 any, from when until when, and optionally only for apps older than a version). The app (0.0.19 on)
 asks `GET /v1/notices` at launch and every 15 minutes and shows each one once as a pop-up, until the
 user puts it away (`POST /v1/notices/dismiss { id }`, kept in `bops.notice_dismissals`, so it stays away
-on all their Macs). Posted, listed and ended with `scripts/internal/notices.sh`.
+on all their Macs). Posted, listed and ended with `Orgo's scripts/notices.sh (OrgoAI/bops-secrets)`.
 
 Webhooks are public and proven by the provider's signature instead.
 

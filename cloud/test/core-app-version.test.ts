@@ -41,7 +41,7 @@ before(async () => {
   cloud = await startCloud();
 });
 
-/** Set the oldest app served, as scripts/internal/notices.sh does, and read it now. */
+/** Set the oldest app served, as Orgo's scripts/notices.sh (OrgoAI/bops-secrets) does, and read it now. */
 const block = async (version: string | null) => {
   await query("UPDATE bops.app_policy SET block_below = $1, updated_at = now() WHERE id", [version]);
   await refreshAppPolicy();
