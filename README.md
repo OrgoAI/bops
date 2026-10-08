@@ -155,10 +155,11 @@ The app itself is Electron and Next.js.
 ### Start it
 
 ```bash
-npm install
-cp .env.example .env.local   # fill in at least OPENAI_API_KEY and OPENAI_EXECUTOR_API_KEY, and ORGO_API_KEY to skip signing in
+npm run setup                # dependencies, .env.local from .env.example, and a git hook (scripts/setup.sh)
 npm run app                  # opens the app, which starts the server on port 3210
 ```
+
+In `.env.local`, fill in at least `OPENAI_API_KEY` and `OPENAI_EXECUTOR_API_KEY`, and `ORGO_API_KEY` to skip signing in. Or set `BOPS_SELF_HOSTED=0` and sign in with Orgo: Bops Cloud then calls the providers, and you need no keys of your own. Run `npm run setup` again any time; it only adds what's missing.
 
 Or run the server alone with `npx next dev --port 3210 -H 127.0.0.1` and open http://127.0.0.1:3210. Leave out `-H 127.0.0.1` only when `edge/` or the bots' computers must reach it over your tailnet.
 
