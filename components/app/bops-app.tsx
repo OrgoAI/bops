@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { botChatId, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
 import { Account } from "./account";
+import { AiApiSettings } from "./ai-api-settings";
 import { BotPanel, type Section } from "./bot-panel";
 import { CallBar } from "./call-bar";
 import { ChatView, ThreadSheet, ToPicker } from "./chat-view";
@@ -1035,6 +1036,7 @@ function Settings({ state, onClose }: { state: AppState; onClose: () => void }) 
         {!selfHosted && <UsageData />}
         <ReachSettings />
         {!selfHosted && <EmailAddresses state={state} />}
+        <AiApiSettings />
         <ThisMacSettings state={state} />
 
         <div className="flex flex-col gap-2 px-[22px] pt-4">
