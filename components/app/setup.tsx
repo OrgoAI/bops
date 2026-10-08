@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppState } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { useMacApp } from "./mac-screens";
+import { RestartConfirm, useCanRestart } from "./restart";
 import { post } from "./ui";
 
 /*
@@ -14,31 +15,37 @@ import { post } from "./ui";
  *
  * - Screen recording, the microphone and notifications are this app's own macOS permissions, asked
  *   through the Mac app (desktop/main.cjs, window.bopsMac.permissions). In a browser they can't be.
- * - Computer use on your Mac runs through Codex, one step at a time (state.mac, lib/server/codex.ts):
- *   Bops installs the Codex CLI by itself, then the user signs in to Codex and turns on its Computer Use.
  * - Routing through this Mac: bots' computers reach the internet through this Mac (app/api/relay).
  *   It's on by default wherever Orgo offers it, so the card shows it on; turning it off sticks.
+ *
+ * When something's off, the setup screen also offers Restart Bops (restart.tsx), under its buttons.
+ *
+ * - Full access (Settings → This Mac only, never Setup): bots' tasks on this Mac run outside Bops'
+ *   sandbox, with a shell, the user's files and apps (MacState.fullAccess). Off until the user turns it on.
  *
  * The user's mobile isn't asked for here: it becomes theirs when they call or text their bot's number
  * (the bot's profile and Settings say how), or with a texted code in Settings (owner-phone.tsx).
  */
 
-export type PermId = "screen" | "microphone" | "notifications" | "accessibility";
+export type PermId = "screen" | "microphone" | "notifications" | "accessibility" | "fullDisk" | "automation";
 export type PermStatus = "granted" | "denied" | "not-determined" | "restricted" | "unknown";
 
+type ScriptedApp = { id: string; name: string; status: PermStatus };
 type Permissions = {
   status(): Promise<Record<PermId, PermStatus>>;
   request(id: PermId): Promise<PermStatus>;
   openSettings(id: PermId): Promise<void>;
+  /** Full access's apps, each with its Automation answer (null until Bops can read them). Older Mac apps don't have it. */
+  automationApps?(): Promise<ScriptedApp[] | null>;
 };
-type Bridge = { permissions?: Permissions; screenNeedsRestart?: () => Promise<boolean>; relaunch?: () => Promise<void> };
+type Bridge = { permissions?: Permissions; screenNeedsRestart?: () => Promise<boolean> };
 const bridge = () => (window as unknown as { bopsMac?: Bridge }).bopsMac;
 
 export type RelayInfo = { available: boolean; on: boolean; reason?: string; device?: { id: string; name: string }; running: boolean; online?: boolean; routedComputers: string[] };
 
 /** The items on the setup screen, which it can record as skipped (app/api/setup keeps the same list). */
-type Item = "screen" | "microphone" | "notifications" | "computer-use" | "relay";
-const ITEMS: Item[] = ["screen", "microphone", "notifications", "computer-use", "relay"];
+type Item = "screen" | "microphone" | "notifications" | "relay";
+const ITEMS: Item[] = ["screen", "microphone", "notifications", "relay"];
 
 /** The OS permissions setup asks for. Accessibility isn't one: Bops itself never drives other apps. */
 const ASKED: PermId[] = ["microphone", "notifications", "screen"];
@@ -143,12 +150,9 @@ function useSetupItems(state: AppState, slow = false) {
     setSent((s) => new Set(s).add(id));
     await bridge()?.permissions?.openSettings(id);
   };
-  const done = (item: Item) =>
-    item === "computer-use" ? !!state.mac?.ready : item === "relay" ? !!relay.info?.on || !!state.relay?.on : perms.status?.[item] === "granted";
-  // What the user can do something about here: a permission in the Mac app (once read), computer use on
-  // their Mac (not while Codex installs itself), routing where Orgo offers it.
-  const offered = (item: Item) =>
-    item === "relay" ? !!relay.info?.available : item === "computer-use" ? !!state.mac && state.mac.next !== "elsewhere" && !state.mac.installing : perms.inApp && !!perms.status?.[item];
+  const done = (item: Item) => (item === "relay" ? !!relay.info?.on || !!state.relay?.on : perms.status?.[item] === "granted");
+  // What the user can do something about here: a permission in the Mac app (once read), routing where Orgo offers it.
+  const offered = (item: Item) => (item === "relay" ? !!relay.info?.available : perms.inApp && !!perms.status?.[item]);
   /** What still needs the user: what the setup screen's Continue records as skipped, and what the badge counts. */
   const waiting = ITEMS.filter((i) => !done(i) && offered(i));
   return { state, perms, relay, ask, asking, openSettings, sentToSettings, done, waiting };
@@ -225,10 +229,10 @@ const ICONS = {
       <path d="M6.6 14.2a1.5 1.5 0 002.8 0" strokeLinecap="round" />
     </svg>
   ),
-  computerUse: (
-    <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round">
-      <rect x="1.5" y="2.5" width="13" height="9" rx="1.5" />
-      <path d="M6.5 5.5l3.5 2.3-1.6.4.9 1.8-.8.4-.9-1.8-1.1 1z" fill="currentColor" strokeWidth="0.6" />
+  fullAccess: (
+    <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2.5" y="7" width="11" height="7" rx="1.5" />
+      <path d="M5 7V5a3 3 0 015.8-1.1" />
     </svg>
   ),
   relay: (
@@ -247,6 +251,7 @@ const COPY: Record<"screen" | "microphone" | "notifications", { title: string; l
 
 function PermissionCard({ id, items }: { id: "screen" | "microphone" | "notifications"; items: Items }) {
   const { perms, ask, asking, openSettings, sentToSettings } = items;
+  const [restarting, setRestarting] = useState(false);
   const s = perms.status?.[id];
   const copy = COPY[id];
   if (!perms.inApp)
@@ -274,10 +279,11 @@ function PermissionCard({ id, items }: { id: "screen" | "microphone" | "notifica
   return (
     <Card icon={ICONS[id]} title={copy.title} line={copy.line} tone={tone} status={status}>
       {restart && (
-        <button onClick={() => void bridge()?.relaunch?.()} className={s === "granted" ? dark : light}>
+        <button onClick={() => setRestarting(true)} className={s === "granted" ? dark : light}>
           Restart Bops
         </button>
       )}
+      {restarting && <RestartConfirm onClose={() => setRestarting(false)} />}
       {s === "not-determined" || (id === "notifications" && s === "unknown") ? (
         <button disabled={!!asking} onClick={() => void ask(id)} className={dark}>
           {asking === id ? <Spinner size={11} color="#FFFFFF" /> : "Allow"}
@@ -287,78 +293,6 @@ function PermissionCard({ id, items }: { id: "screen" | "microphone" | "notifica
           Open System Settings
         </button>
       ) : null}
-    </Card>
-  );
-}
-
-/** "plus" → "Plus": the plan Codex reports for the account (plus, pro, team…). */
-const planName = (plan: string) => plan.charAt(0).toUpperCase() + plan.slice(1);
-
-/** The button for each step: Retry an install that failed, sign in to Codex, open the Codex app. */
-const STEP = {
-  codex: { label: "Retry", action: "install" },
-  "sign-in": { label: "Sign in", action: "sign-in" },
-  "computer-use": { label: "Open Codex", action: "open" },
-} as const;
-
-/**
- * Computer use, one step at a time (state.mac.next): Bops installs the Codex CLI by itself, then the
- * user signs in to Codex with their ChatGPT account and turns on Computer Use in the Codex app. While a
- * step waits on them it looks again every few seconds, while the window has focus and for a few
- * minutes after a button; a sign-in's end shows by itself too (lib/server/codex.ts).
- */
-function ComputerUseCard({ items }: { items: Items }) {
-  const m = items.state.mac;
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [opened, setOpened] = useState(false);
-  const until = useRef(0);
-  const checking = useRef(false);
-  const check = useCallback(async () => {
-    if (checking.current) return;
-    checking.current = true;
-    await fetch("/api/mac", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ check: true }) }).catch(() => undefined);
-    checking.current = false;
-  }, []);
-  // A fresh look when the card shows (it starts the install if Codex is missing), then while a step waits on the user.
-  useEffect(() => void check(), [check]);
-  useWhileOpen(() => {
-    const waiting = !!m && !m.ready && (m.next === "sign-in" || m.next === "computer-use");
-    if (waiting && (document.hasFocus() || Date.now() < until.current)) void check();
-  }, 3000);
-  const act = async (action: "install" | "sign-in" | "open") => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await post("/api/mac/codex", { action });
-      const j = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) throw new Error(j.error || "Couldn't reach Codex on this Mac.");
-      if (action === "open") setOpened(true);
-      until.current = Date.now() + 3 * 60_000;
-    } catch (e) {
-      setError((e as Error).message);
-    }
-    setBusy(false);
-  };
-  const card = { icon: ICONS.computerUse, title: "Computer use on your Mac", line: "Bots use apps on this Mac through Codex. You approve each app the first time." };
-  if (!m) return <Card {...card} tone="none" status="Checking" />;
-  if (m.ready) return <Card {...card} tone="ok" status={m.plan && m.plan !== "unknown" ? `Ready on your ${planName(m.plan)} plan` : "Ready"} />;
-  if (!m.next || m.next === "elsewhere") return <Card {...card} tone="none" status={m.reason ?? "Checking"} />;
-  if (m.installing)
-    return (
-      <Card {...card} tone="none" status="Installing Codex">
-        <Spinner size={13} color="#9A9A98" />
-      </Card>
-    );
-  const step = STEP[m.next];
-  // Once the user is on it (a sign-in open in the browser, Codex opened), the button only starts it over.
-  const again = (m.next === "sign-in" && !!m.signingIn) || (m.next === "computer-use" && opened);
-  const status = error ?? (m.next === "computer-use" && opened ? "In Codex, turn on Computer Use in Settings" : (m.reason ?? ""));
-  return (
-    <Card {...card} tone="todo" status={status}>
-      <button disabled={busy} onClick={() => void act(step.action)} className={again ? light : dark}>
-        {busy ? <Spinner size={11} color={again ? "#0A0A0A" : "#FFFFFF"} /> : step.label}
-      </button>
     </Card>
   );
 }
@@ -391,7 +325,6 @@ function Cards({ items }: { items: Items }) {
       <PermissionCard id="screen" items={items} />
       <PermissionCard id="microphone" items={items} />
       <PermissionCard id="notifications" items={items} />
-      <ComputerUseCard items={items} />
       <RelayCard items={items} />
     </div>
   );
@@ -416,6 +349,8 @@ export function Setup({ state, onClose }: { state: AppState; onClose: () => void
   const items = useSetupItems(state);
   const [busy, setBusy] = useState(false);
   const [allowing, setAllowing] = useState(false);
+  const canRestart = useCanRestart();
+  const [restart, setRestart] = useState(false);
   const askable = items.perms.inApp && ASKED.some((id) => items.perms.status?.[id] === "not-determined" || (id === "notifications" && items.perms.status?.[id] === "unknown"));
   const finish = async () => {
     setBusy(true);
@@ -468,7 +403,16 @@ export function Setup({ state, onClose }: { state: AppState; onClose: () => void
             {items.waiting.length ? "Continue" : "Done"}
           </button>
           {!!items.waiting.length && <span className="text-center text-[12px] leading-4 text-pencil">Anything you skip stays in Settings.</span>}
+          {canRestart && (
+            <span className="text-center text-[12px] leading-4 text-pencil">
+              Something not working?{" "}
+              <button onClick={() => setRestart(true)} className="underline underline-offset-2 hover:text-ink">
+                Restart Bops
+              </button>
+            </span>
+          )}
         </div>
+        {restart && <RestartConfirm onClose={() => setRestart(false)} />}
       </div>
     </div>
   );
@@ -500,6 +444,90 @@ export function ThisMacSettings({ state }: { state: AppState }) {
         )}
       </div>
       <Cards items={items} />
+      <FullAccessCard items={items} />
     </div>
+  );
+}
+
+/**
+ * What Full access needs from macOS, asked for here up front rather than mid-task: Full Disk Access
+ * (files in protected places, and Messages' history), which only System Settings can give, then
+ * Automation for each app bots script, which Bops asks for all at once (desktop/main.cjs askAutomation:
+ * apps it opens for that stay hidden).
+ */
+function FullAccessSetup({ items }: { items: Items }) {
+  const [apps, setApps] = useState<ScriptedApp[] | null>(null);
+  useWhileOpen(() => void bridge()?.permissions?.automationApps?.().then(setApps).catch(() => {}), 5000);
+  const disk = items.perms.status?.fullDisk === "granted";
+  const auto = items.perms.status?.automation;
+  const asking = items.asking === "automation";
+  const off = (apps ?? []).filter((a) => a.status === "denied").map((a) => a.name);
+  const names = (list: string[]) => (list.length > 1 ? `${list.slice(0, -1).join(", ")} and ${list.at(-1)}` : (list[0] ?? ""));
+  const row = (done: boolean, title: string, text: string, button?: React.ReactNode) => (
+    <div className="flex items-center gap-2.5">
+      <span className={`size-[7px] shrink-0 rounded-full ${done ? DOT.ok : DOT.todo}`} />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="text-[12.5px] font-medium leading-4">{title}</span>
+        <span className="text-[12px] leading-4 text-pencil">{text}</span>
+      </div>
+      {button}
+    </div>
+  );
+  return (
+    <div className="flex flex-col gap-2.5">
+      {row(
+        disk,
+        "Your files",
+        disk ? "Bops has Full Disk Access." : "Give Bops Full Disk Access in System Settings, then come back.",
+        !disk && (
+          <button onClick={() => void items.openSettings("fullDisk")} className={dark}>
+            Open Settings
+          </button>
+        ),
+      )}
+      {row(
+        auto === "granted",
+        "Your apps",
+        auto === "granted"
+          ? `Bots can use ${names((apps ?? []).map((a) => a.name)) || "your apps"}.`
+          : asking
+            ? "macOS asks once for each app: allow each one. Apps open hidden and close after."
+            : off.length
+              ? `Turned off for ${names(off)}. Turn them on under Automation in System Settings.`
+              : "Allow the apps bots use (Messages, Notes, Mail and the rest) now, so macOS doesn't ask mid-task.",
+        auto !== "granted" &&
+          (off.length && !asking ? (
+            <button onClick={() => void items.openSettings("automation")} className={light}>
+              Open Settings
+            </button>
+          ) : (
+            <button onClick={() => void items.ask("automation")} disabled={asking || !disk} title={disk ? undefined : "Full Disk Access first"} className={dark}>
+              {asking ? "Asking…" : "Allow apps"}
+            </button>
+          )),
+      )}
+    </div>
+  );
+}
+
+/** Full access for bots on this Mac (MacState.fullAccess): off by default, and only here, with what it means. */
+function FullAccessCard({ items }: { items: Items }) {
+  const on = !!items.state.mac?.fullAccess;
+  const set = items.perms.status?.fullDisk === "granted" && items.perms.status?.automation === "granted";
+  if (!items.state.mac?.ready && !on) return null;
+  return (
+    <Card
+      icon={ICONS.fullAccess}
+      title="Full access for bots"
+      chip={on ? "On" : undefined}
+      line="Bots' tasks on this Mac get a shell, your files and your apps, outside Bops' sandbox. Anything you could do here, they can."
+      tone={on ? (set || !items.perms.inApp ? "ok" : "todo") : "off"}
+      status={on ? (set || !items.perms.inApp ? "Bots can use your files and apps" : "Two steps left, so macOS never stops a bot mid-task") : "Off: bots on this Mac only browse, in a Chrome of their own"}
+      below={on && items.perms.inApp ? <FullAccessSetup items={items} /> : undefined}
+    >
+      <button onClick={() => void post("/api/mac", { fullAccess: !on }, "PATCH")} className={on ? light : dark}>
+        {on ? "Turn off" : "Turn on"}
+      </button>
+    </Card>
   );
 }

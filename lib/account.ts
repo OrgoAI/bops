@@ -6,8 +6,9 @@ import type { BopsTier } from "@/cloud/protocol";
 
 /**
  * The user's Bops plan and AI credit (orgo-web's GET /api/bops/plan, read with their Orgo key): Free
- * has $5 of AI credit once, Pro $20 and Max $200 each month, with nothing carried over. Money in
- * micro-dollars (1 cent = 10,000), times in Unix ms.
+ * has $5 of AI credit once, Pro $20 and Max $200 each month, with nothing carried over; on any plan,
+ * credit can be added once (lib/credit-topup.ts), and that never expires. Money in micro-dollars
+ * (1 cent = 10,000), times in Unix ms.
  */
 export type BopsPlan = {
   tier: BopsTier;
@@ -25,9 +26,13 @@ export type BopsPlan = {
     /** What's left of this month's plan credit, and when it resets (Pro and Max). */
     planLeftMicros: number;
     resetsAt?: number;
-    /** What's left of the one-time $5. */
+    /** The credit that never expires: what's left of the one-time $5, and of credit added once (top-ups). */
     freeLeftMicros: number;
+    /** Credit was added once (lib/credit-topup.ts), so freeLeftMicros isn't only the one-time $5. */
+    topUps?: true;
   };
+  /** On Free, the free Bops computer's month (orgo-web lib/bops-free-hours.ts): how long it ran, of how long, and when it starts over. */
+  computerTime?: { usedSeconds: number; limitSeconds: number; resetsAt: number };
 };
 
 /** Plan and billing, read from Orgo with the signed-in key. Each part is missing when Orgo didn't answer it. */
@@ -66,21 +71,40 @@ export type OrgoBilling = {
   compute?: { runningHours: number; vcpuHours: number; computers: number };
 };
 
-/** One month of Bops' own usage ledger. */
+/**
+ * One month of Bops' usage. Through Bops Cloud, model use, calls and AI credit spent are the cloud's
+ * own count (GET /v1/usage: the rows it charges), and the rest (computers, numbers and inboxes made)
+ * this Mac's ledger; otherwise all of it is this Mac's ledger. Every way it's
+ * cut adds up to the same: tokens by kind of work, by day and by bot each sum to `tokens`, and the
+ * parts of `spend` to its total.
+ */
 export type UsageTotals = {
   computersCreated: number;
   computersRemoved: number;
   phoneNumbers: number;
   inboxes: number;
   callMinutes: number;
+  /** Model tokens Bops used (its OpenAI models and Jev, tasks on the user's Mac too): what AI credit pays for. */
   tokens: number;
   tokensBySource: Partial<Record<TokenSource, number>>;
   /** Tokens per day of the month, index 0 is the 1st. */
   tokensByDay: number[];
-  byBot: { botId: string; name: string; color?: string; tokens: number; callMinutes: number; computers: number }[];
+  /** Per bot. `botId` "" is what wasn't for one bot (memory, quick checks about everything). */
+  byBot: { botId: string; name: string; color?: string; tokens: number; callMinutes: number; computers: number; costMicros?: number }[];
+  /**
+   * What it cost, by kind (Bops Cloud's count, in micro-dollars at cost): what AI credit paid for when
+   * the cloud takes it (`charged`). Missing without the cloud's answer.
+   */
+  spend?: { costMicros: number; charged: boolean; parts: SpendPart[] };
+  /** Where model use and calls come from: Bops Cloud's count, or this Mac's ledger (self-hosted, or the cloud didn't answer). */
+  from: "cloud" | "mac";
 };
 
 export type TokenSource = "chat" | "session" | "memory" | "call" | "decide" | "other";
+
+/** A kind of thing AI credit paid for, with how much of it: tokens, searches, call minutes, texts, numbers, codes, app runs, checks. */
+export type SpendPart = { id: SpendKind; costMicros: number; amount: number };
+export type SpendKind = "chat" | "session" | "search" | "call" | "memory" | "decide" | "text" | "number" | "code" | "app" | "data" | "other";
 
 export type AccountInfo = {
   user: { id: string; email?: string; name?: string } | null;

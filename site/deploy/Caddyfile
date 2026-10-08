@@ -1,0 +1,43 @@
+# bops.bot: the landing page (site/), as plain files, on the Bops VM. scripts/site-deploy.sh installs
+# this as /etc/caddy/Caddyfile; Caddy gets and renews the certificates itself. HTML is always fresh,
+# everything else is cached a day (as nginx.conf did on Fly). The backend API is not here: it's
+# bops.orgo.ai/api (cloud/, scripts/cloud-deploy.sh).
+bops.bot {
+	root * /opt/bops/site
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options DENY
+		-Server
+	}
+	@assets path *.css *.js *.svg *.png
+	header @assets Cache-Control "public, max-age=86400"
+	@pages not path *.css *.js *.svg *.png
+	header @pages Cache-Control "no-cache"
+
+	handle /health {
+		respond "ok" 200
+	}
+	# The Mac app for the page's download buttons: /download/Bops.dmg is always the newest release,
+	# /download/Bops-<version>-arm64.dmg a given one (scripts/download-publish.sh puts them there).
+	# /download/latest.json is what the Mac app reads to say a newer version is out: no-cache like the
+	# pages (@pages above), so a release shows at once; fetch() doesn't mind the attachment header.
+	handle /download/* {
+		root * /opt/bops
+		header Content-Disposition attachment
+		file_server
+	}
+	# The old review address goes to the page itself.
+	redir /preview* / 308
+	# The Open source links: the public repo, set on the VM (BOPS_GITHUB_URL in caddy's environment).
+	redir /github {$BOPS_GITHUB_URL:https://github.com} 302
+	handle {
+		file_server
+	}
+}
+
+www.bops.bot {
+	redir https://bops.bot{uri} permanent
+}

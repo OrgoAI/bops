@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { live, type AppState, type Bot, type Session, type Watch } from "@/lib/types";
-import { ApprovalCard, MacIcon, MacSettings } from "./mac-tab";
+import { MacIcon, MacSettings } from "./mac-tab";
 import { MacStream, useAppWindows, useMacApp, useMacScreens } from "./mac-screens";
+import { LiveScreen, type ScreenInput } from "./live-screen";
 import { WatchBadge, WatchEye, WatchOverlay, type Spot } from "./watch-overlay";
 import { Mascot } from "./mascot";
 import { botBezel, post } from "./ui";
@@ -13,8 +14,8 @@ import { botBezel, post } from "./ui";
  * everything there is to see under it, and a status pill. The "screens" are the windows bots are
  * working in (live as video, by window) and each display. It follows the work the same way: it cuts
  * to the window a bot is acting in, holds each cut a few seconds, and never cuts away while you're
- * pointing at it; two or more bots at work show as a grid; an approval a bot is waiting on jumps to
- * the front, on the screen itself. Pick a tile to stay on it; Follow goes back.
+ * pointing at it; two or more bots at work show as a grid; news in a watched window jumps to the
+ * front. Pick a tile to stay on it; Follow goes back.
  */
 
 /** An action this recent makes a window "where the action is". Mac steps arrive slower than screen events. */
@@ -30,7 +31,8 @@ const MAC_WASH = "linear-gradient(160deg, #F4F4F2 0%, #ECECE9 55%, #E2E2DE 100%)
 type Item = {
   key: string;
   sourceId: string;
-  kind: "window" | "display";
+  /** A window or a display, live from macOS; or the Chrome a bot's task has of its own on this Mac (`macScreen`). */
+  kind: "window" | "display" | "browser";
   /** "Notes", or "Display 1". */
   label: string;
   /** "Built-in Retina Display", or the window's title. */
@@ -44,6 +46,7 @@ type Item = {
   watch?: Watch;
   app?: string;
   windowId?: number;
+  macScreen?: number;
 };
 
 export function MacComputer({
@@ -52,10 +55,13 @@ export function MacComputer({
   onFocus,
   onBack,
   onOpenThread,
+  showThread,
   hidden = false,
 }: {
   state: AppState;
   mode: "panel" | "focus";
+  /** The thread open in the chat: its Chrome (or window) is shown, once it has one, until you pick another. */
+  showThread?: string;
   onFocus?: () => void;
   onBack?: () => void;
   onOpenThread: (s: Session) => void;
@@ -83,6 +89,22 @@ export function MacComputer({
 
   const sources = new Set(screens?.sources.map((s) => s.id) ?? []);
   const items: Item[] = [];
+  // Tasks on the Mac browse in a Chrome of their own there, which isn't a window on the screen: Bops
+  // shows a picture of it, while it works, for two minutes after, and while it waits on you (a sign-in:
+  // you take control of it here). One tile per Chrome, for its newest task; and the one you're driving.
+  const browsing = state.sessions.filter((s) => s.runsOn === "mac" && s.macScreen !== undefined && !s.macApps?.length && (live(s) || s.waitingOnYou || (s.endedAt && now - s.endedAt < 120_000)));
+  const driving = state.takeover?.macScreen !== undefined ? state.takeover : undefined;
+  const chromeKey = (botId: string, macScreen: number) => `browser:${botId}:${macScreen}`;
+  for (const s of [...browsing].sort((a, b) => lastAct(b) - lastAct(a))) {
+    const key = chromeKey(s.botId, s.macScreen!);
+    if (!items.some((i) => i.key === key)) items.push({ key, sourceId: key, kind: "browser", label: "Chrome", sub: "Chrome", session: s, bot: state.bots.find((b) => b.id === s.botId), macScreen: s.macScreen });
+  }
+  if (driving && !items.some((i) => i.key === chromeKey(driving.botId, driving.macScreen!))) {
+    const key = chromeKey(driving.botId, driving.macScreen!);
+    items.unshift({ key, sourceId: key, kind: "browser", label: "Chrome", sub: "Chrome", bot: state.bots.find((b) => b.id === driving.botId), macScreen: driving.macScreen });
+  }
+  // The Chrome you're driving stays on the big screen until you hand it back.
+  const drivenKey = driving ? chromeKey(driving.botId, driving.macScreen!) : null;
   // Newest work first, so the busiest window sits leftmost. Each task gets the window it's about
   // (an app can have several: one Messages window per conversation), else the app's frontmost.
   const ordered = [...threads].sort((a, b) => lastAct(b) - lastAct(a));
@@ -129,31 +151,55 @@ export function MacComputer({
     const m = w.marker ?? { x: 16, y: 16, w: 66, h: 20 };
     return { left: m.x / w.size.w, top: m.y / w.size.h, width: m.w / w.size.w, height: m.h / w.size.h };
   };
-  const approvals = state.mac?.approvals ?? [];
-  // Needs you: an approval a bot waits on, or something new in a watched window.
-  const waitingOn = (i: Item) => (!!i.session && approvals.some((a) => a.sessionId === i.session!.id)) || !!i.watch?.alert;
+  // Needs you: something new in a watched window.
+  const waitingOn = (i: Item) => !!i.watch?.alert;
   const working = items.filter((i) => i.session && live(i.session));
   const acting = (i: Item) => !!i.session && live(i.session) && now - lastAct(i.session) < FRESH_MS;
 
   // The newest Mac task ever started (finishing one doesn't bring an old pin back).
   const newestTask = Math.max(0, ...state.sessions.filter((s) => s.runsOn === "mac").map((s) => s.createdAt));
+  // The open thread's tile, when it has one: its own, else its Chrome's (a newer task of its bot may show there).
+  const [shownThread, setShownThread] = useState<string | undefined>();
+  const opened = showThread ? state.sessions.find((s) => s.id === showThread) : undefined;
+  const threadItem = opened ? (items.find((i) => i.session?.id === opened.id) ?? items.find((i) => i.kind === "browser" && i.bot?.id === opened.botId && i.macScreen === opened.macScreen)) : undefined;
+  if (showThread !== shownThread && (threadItem || !showThread)) {
+    setShownThread(showThread);
+    if (threadItem) setPin({ key: threadItem.key, at: newestTask });
+  }
   const pinned = pin && newestTask === pin.at ? pin.key : null;
   const following = !pinned;
-  const grid = following && working.length >= 2 && !items.some(waitingOn) ? working.slice(0, 4) : [];
+  const grid = following && !drivenKey && working.length >= 2 && !items.some(waitingOn) ? working.slice(0, 4) : [];
   // With nothing running: the window a bot just finished in, else a display (not the one Bops is on, if there's another).
-  const fallbackKey = (working[0] ?? items.find((i) => i.kind === "window") ?? items.find((i) => i.kind === "display" && !i.bops) ?? items.find((i) => i.kind === "display"))?.key ?? null;
-  const current = items.find((i) => i.key === (pinned ?? shown)) ?? items.find((i) => i.key === fallbackKey);
+  const fallbackKey = (working[0] ?? items.find((i) => i.kind === "browser" && i.session?.waitingOnYou) ?? items.find((i) => i.kind === "window") ?? items.find((i) => i.kind === "display" && !i.bops) ?? items.find((i) => i.kind === "display"))?.key ?? null;
+  const current = items.find((i) => i.key === (drivenKey ?? pinned ?? shown)) ?? items.find((i) => i.key === fallbackKey);
+  const yours = !!drivenKey && current?.key === drivenKey;
+  const takeControl = (i: Item) => i.bot && i.macScreen !== undefined && void post("/api/takeover", { botId: i.bot.id, macScreen: i.macScreen });
+  const handBack = () => void post("/api/takeover", {}, "DELETE");
+  const sendInput = (action: ScreenInput) => driving && void post("/api/input", { botId: driving.botId, macScreen: driving.macScreen, ...action });
+  // Esc hands control back (not while typing in Bops itself), as on a bot's computer.
+  useEffect(() => {
+    if (!yours) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      handBack();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [yours]);
 
   /** Where to cut to: a window waiting on you at once; else, calmly, where a bot just acted. */
   const pickCut = (t: number) => {
-    if (!following) return null;
-    // A bot waiting on an approval holds the view. A heads-up from a watched window gets one cut;
-    // after that the view follows the bots' work again (the window keeps its yellow ring).
-    const urgent = items.find((i) => (!!i.session && approvals.some((a) => a.sessionId === i.session!.id)) || (!!i.watch?.alert && !shownAlerts.has(i.watch.alert.at)));
+    if (!following || drivenKey) return null;
+    // A heads-up from a watched window gets one cut; after that the view follows the bots' work again
+    // (the window keeps its yellow ring).
+    const urgent = items.find((i) => !!i.watch?.alert && !shownAlerts.has(i.watch.alert.at));
     if (urgent && urgent.key !== current?.key) return urgent;
     // Already showing it: that counts as shown.
     if (urgent?.watch?.alert) shownAlerts.add(urgent.watch.alert.at);
-    if (urgent && !urgent.watch?.alert) return null;
     if (hovering || t - cut.at < DWELL_MS) return null;
     const [top] = [...working].sort((a, b) => lastAct(b.session!) - lastAct(a.session!));
     if (!top || top.key === current?.key) return current ? null : (items.find((i) => i.key === fallbackKey) ?? null);
@@ -191,7 +237,6 @@ export function MacComputer({
   const fullscreen = () => void frame.current?.requestFullscreen().catch(() => {});
   const ratio = (current && (aspects[current.key] ?? current.aspect)) || 16 / 10;
   const learn = (key: string) => (w: number, h: number) => setAspects((x) => (x[key] === w / h ? x : { ...x, [key]: w / h }));
-  const approval = current?.session ? approvals.find((a) => a.sessionId === current.session!.id) : undefined;
   const lastStep = current?.session?.steps.filter((x) => x.tool !== "setup").at(-1);
   const followRow = working.length > 1 || !following;
 
@@ -226,10 +271,10 @@ export function MacComputer({
       </div>
     ) : null;
 
-  // The bar under the screen shows only when something's going on: a task, an approval, news.
-  const showBar = !!grid.length || !!approval || !!current?.watch?.alert || !!current?.session || working.length > 0;
+  // The bar under the screen shows only when something's going on: a task, news, or you driving.
+  const showBar = yours || !!grid.length || !!current?.watch?.alert || !!current?.session || working.length > 0;
   // Before there's anything to stream: not in the app, no permission yet, or still looking.
-  const blocked = !inApp ? "app" : !screens ? "loading" : !granted ? "permission" : !current ? "nothing" : null;
+  const blocked = current?.kind === "browser" ? null : !inApp ? "app" : !screens ? "loading" : !granted ? "permission" : !current ? "nothing" : null;
 
   return (
     <div className={`relative flex min-h-0 flex-1 flex-col gap-3 ${mode === "focus" ? "px-5 pb-4 pt-3.5" : ""}`} style={mode === "panel" ? { containerType: "size", justifyContent: "center" } : undefined}>
@@ -246,10 +291,12 @@ export function MacComputer({
           ref={frame}
           onMouseEnter={() => setHovering(true)}
           onMouseLeave={() => setHovering(false)}
-          onClick={() => !blocked && !grid.length && !approval && (mode === "panel" ? onFocus?.() : fullscreen())}
-          className={`group/screen relative flex flex-none flex-col overflow-hidden rounded-[22px] bg-[#111111] ${!blocked && !grid.length && !approval ? "cursor-pointer" : ""}`}
+          onClick={() => !blocked && !grid.length && !yours && (mode === "panel" ? onFocus?.() : fullscreen())}
+          className={`group/screen relative flex flex-none flex-col overflow-hidden rounded-[22px] bg-[#111111] ${!blocked && !grid.length && !yours ? "cursor-pointer" : ""}`}
           style={{
             backgroundImage: blocked ? MAC_WASH : undefined,
+            // Yours while you drive: the bot's color around it, like a bot's computer.
+            boxShadow: yours && current?.bot ? `0 0 0 4px ${botBezel(current.bot)}` : undefined,
             width: `min(100cqw, calc(100cqh * ${grid.length === 2 ? ratio * 2 : ratio}))`,
             aspectRatio: `${grid.length === 2 ? ratio * 2 : ratio}`,
           }}
@@ -260,53 +307,63 @@ export function MacComputer({
             <div className={`grid h-full w-full gap-[3px] ${grid.length > 2 ? "grid-cols-2 grid-rows-2" : "grid-cols-2"}`}>
               {grid.map((i) => (
                 <button key={i.key} onClick={() => pick(i)} title="Watch this up close" className="group/tile relative min-h-0 overflow-hidden">
-                  <MacStream sourceId={i.sourceId} fps={15} maxWidth={1280} className="h-full w-full" onSize={learn(i.key)} />
+                  <Live item={i} fps={15} maxWidth={1280} className="h-full w-full" onSize={learn(i.key)} />
                   <div className="pointer-events-none absolute inset-0 transition-shadow duration-300" style={{ boxShadow: acting(i) && i.bot ? `inset 0 0 0 3px ${botBezel(i.bot)}` : undefined }} />
                   <div className="pointer-events-none absolute inset-0 opacity-0 transition-opacity duration-200 group-hover/tile:opacity-100" style={{ boxShadow: "inset 0 0 0 2px #FFFFFF" }} />
                   <WhoPill item={i} />
                 </button>
               ))}
             </div>
+          ) : yours && current ? (
+            // You're driving it: clicks, scrolling and typing go to the bot's Chrome.
+            <LiveScreen key={`${current.sourceId}-yours`} botId={current.bot?.id ?? ""} display={0} mac={current.macScreen} bot={current.bot} interactive onInput={sendInput} intervalMs={700} className="h-full w-full" />
           ) : (
             current && (
               <>
-                <MacStream key={current.sourceId} sourceId={current.sourceId} className="h-full w-full animate-[screen-in_300ms_ease-out]" onSize={learn(current.key)} />
-                {current.watch && !approval && <WatchOverlay watch={current.watch} anchor={markerOf(current)} />}
+                <Live key={current.sourceId} item={current} className="h-full w-full animate-[screen-in_300ms_ease-out]" onSize={learn(current.key)} />
+                {current.watch && <WatchOverlay watch={current.watch} anchor={markerOf(current)} />}
                 {/* Hovering: a soft ring and a pill, like a bot's computer. */}
-                {!approval && (
-                  <div className="pointer-events-none absolute inset-0 z-30 opacity-0 transition-opacity duration-200 group-hover/screen:opacity-100">
-                    <div className="absolute inset-0 rounded-[22px] shadow-[inset_0_0_0_2.5px_#0A0A0A]" />
-
-                  </div>
-                )}
+                <div className="pointer-events-none absolute inset-0 z-30 opacity-0 transition-opacity duration-200 group-hover/screen:opacity-100">
+                  <div className="absolute inset-0 rounded-[22px] shadow-[inset_0_0_0_2.5px_#0A0A0A]" />
+                </div>
                 {/* Pointing at the screen brings up its controls, like a bot's computer: watch it, see it bigger, settings. */}
-                {!approval && (
-                  <div
-                    onClick={(e) => e.stopPropagation()}
-                    className="absolute bottom-3 left-1/2 z-40 flex -translate-x-1/2 translate-y-1 items-center gap-1 rounded-full bg-white/95 p-1 opacity-0 shadow-[0_0_0_1px_#0000000F,0_10px_24px_-10px_#00000066] backdrop-blur transition duration-200 group-hover/screen:translate-y-0 group-hover/screen:opacity-100"
-                  >
-                    {!current.watch?.alert && (
-                      <button
-                        onClick={() => setWatchSheet(current.kind === "window" ? { app: current.app, title: current.label, windowId: current.windowId, watch: current.watch } : null)}
-                        title={current.watch ? `Change what ${current.label} is watched for` : "Keep an eye on a window and tell me when something needs me"}
-                        className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium leading-4 text-ink hover:bg-[#F2F2F0]"
-                      >
-                        <WatchEye size={13} />
-                        {current.watch ? "Edit" : "Watch"}
-                      </button>
-                    )}
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  className="absolute bottom-3 left-1/2 z-40 flex -translate-x-1/2 translate-y-1 items-center gap-1 rounded-full bg-white/95 p-1 opacity-0 shadow-[0_0_0_1px_#0000000F,0_10px_24px_-10px_#00000066] backdrop-blur transition duration-200 group-hover/screen:translate-y-0 group-hover/screen:opacity-100"
+                >
+                  {current.kind === "browser" && current.bot && (
                     <button
-                      onClick={() => (mode === "panel" ? onFocus?.() : fullscreen())}
-                      className="flex items-center gap-1.5 rounded-full bg-ink py-1.5 pl-2.5 pr-3.5 text-[13px] font-semibold leading-4 text-white"
+                      onClick={() => takeControl(current)}
+                      title={`Pause ${current.bot.name} here and use this Chrome yourself, say to sign in to a site`}
+                      className="flex items-center gap-1.5 rounded-full bg-ink py-1.5 pl-2 pr-3.5 text-[13px] font-semibold leading-4 text-white"
                     >
-                      <svg width="11" height="11" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                        <path d="M1.5 5V1.5H5M9 1.5h3.5V5M12.5 9v3.5H9M5 12.5H1.5V9" />
+                      <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
+                        <path d="M4 2.5l8.5 5-3.6.9-1.8 3.6z" fill="currentColor" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
                       </svg>
-                      {mode === "panel" ? "See it bigger" : "Full screen"}
+                      Take control
                     </button>
-                    {mode === "panel" && <SettingsButton onClick={() => setSettings(true)} />}
-                  </div>
-                )}
+                  )}
+                  {!current.watch?.alert && current.kind !== "browser" && (
+                    <button
+                      onClick={() => setWatchSheet(current.kind === "window" ? { app: current.app, title: current.label, windowId: current.windowId, watch: current.watch } : null)}
+                      title={current.watch ? `Change what ${current.label} is watched for` : "Keep an eye on a window and tell me when something needs me"}
+                      className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium leading-4 text-ink hover:bg-[#F2F2F0]"
+                    >
+                      <WatchEye size={13} />
+                      {current.watch ? "Edit" : "Watch"}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => (mode === "panel" ? onFocus?.() : fullscreen())}
+                    className={`flex items-center gap-1.5 rounded-full py-1.5 pl-2.5 pr-3.5 text-[13px] font-semibold leading-4 ${current.kind === "browser" ? "text-ink hover:bg-[#F2F2F0]" : "bg-ink text-white"}`}
+                  >
+                    <svg width="11" height="11" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <path d="M1.5 5V1.5H5M9 1.5h3.5V5M12.5 9v3.5H9M5 12.5H1.5V9" />
+                    </svg>
+                    {mode === "panel" ? "See it bigger" : "Full screen"}
+                  </button>
+                  {mode === "panel" && <SettingsButton onClick={() => setSettings(true)} />}
+                </div>
                 {/* Why the view just cut here. */}
                 {cutNote && (
                   <span
@@ -315,12 +372,6 @@ export function MacComputer({
                   >
                     {cutNote}
                   </span>
-                )}
-                {/* What the bot is waiting on, on the screen it's about. */}
-                {approval && (
-                  <div onClick={(e) => e.stopPropagation()} className="absolute inset-x-3 bottom-3 z-40">
-                    <ApprovalCard state={state} approval={approval} compact />
-                  </div>
                 )}
               </>
             )
@@ -366,7 +417,7 @@ export function MacComputer({
                 className={`relative flex min-w-0 flex-col gap-1.5 rounded-xl p-1.5 text-left transition-shadow duration-300 ${items.length >= 4 ? "flex-1 basis-0" : "w-[calc((100%-30px)/4)] flex-none"} ${inView ? "bg-white shadow-[0_0_0_2px_#0A0A0A]" : i.session ? "bg-[#F7F7F6]" : "shadow-[inset_0_0_0_1.5px_#E2E2DF]"}`}
               >
                 <div className="relative h-[52px] shrink-0 overflow-hidden rounded-[7px] bg-[#111111]">
-                  <MacStream key={`${i.sourceId}-t`} sourceId={i.sourceId} fps={2} maxWidth={400} fit="cover" className="h-full w-full" />
+                  <Live key={`${i.sourceId}-t`} item={i} fps={2} maxWidth={400} fit="cover" className="h-full w-full" />
                   {i.watch && <WatchBadge watch={i.watch} />}
                   {i.session && live(i.session) && <span className={`absolute right-1 top-1 size-[9px] rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A] ${acting(i) ? "animate-pulse" : ""}`} />}
                 </div>
@@ -389,16 +440,16 @@ export function MacComputer({
         </div>
       )}
 
-      {/* Under the screen, only when something's going on: a task, an approval, news. Its controls are on the screen. */}
+      {/* Under the screen, only when something's going on: a task, or news. Its controls are on the screen. */}
       {!blocked && showBar && (
         <div className={`flex max-w-full items-center gap-3 self-center rounded-full bg-white py-1.5 pl-3.5 pr-1.5 shadow-[0_0_0_1px_#ECECEA,0_6px_18px_-10px_#00000040]`}>
-          <span className={`size-2 shrink-0 rounded-full ${approval || items.some(waitingOn) ? "bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" : working.length ? "bg-[#2BB673]" : "bg-[#C9C9C6]"}`} />
+          <span className={`size-2 shrink-0 rounded-full ${yours || items.some(waitingOn) ? "bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" : working.length ? "bg-[#2BB673]" : "bg-[#C9C9C6]"}`} />
           <span className="min-w-0 truncate text-[13px] leading-4">
-            {grid.length
+            {yours
+              ? `You have control of ${current?.bot?.name ?? "the bot"}'s Chrome · click and type on it, then hand it back`
+              : grid.length
               ? `${grid.length} bots are working on your Mac · pick one to watch it up close`
-              : approval
-                ? `${current?.bot?.name ?? "A bot"} needs you: ${approval.app ? `allow ${approval.app}` : approval.message}`
-                : current?.watch?.alert
+              : current?.watch?.alert
                   ? `New in ${current.label}: ${current.watch.alert.text}`
                   : current?.watch && !(current.session && live(current.session))
                     ? current.watch.away
@@ -406,11 +457,23 @@ export function MacComputer({
                       : `Watching ${current.watch.mac?.title ?? current.label} · ${current.watch.lookFor}`
                 : current?.session && live(current.session)
                   ? `${current.bot?.name ?? "A bot"} · ${lastStep?.detail ?? current.session.activity ?? current.session.title}`
+                  : current?.kind === "browser" && current.session?.waitingOnYou
+                    ? `${current.bot?.name ?? "A bot"} is waiting on you · take control of its Chrome to sign in for it`
                   : working.length
                     ? `${working.length} working on your Mac`
                     : `Nothing running · ${current?.label ?? "your screen"}${current?.kind === "display" ? ` (${current.sub})` : ""}`}
           </span>
-          {current?.session && !grid.length && (
+          {current?.kind === "browser" && current.bot && !yours && !grid.length && !(current.session && live(current.session)) && (
+            <button onClick={() => takeControl(current)} className="shrink-0 rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white">
+              Take control
+            </button>
+          )}
+          {yours && (
+            <button onClick={handBack} title="Esc" className="shrink-0 rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white">
+              Hand back
+            </button>
+          )}
+          {current?.session && !grid.length && !yours && (
             <button
               onClick={() => onOpenThread(current.session!)}
               className="shrink-0 rounded-full px-3 py-1.5 text-[13px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]"
@@ -425,15 +488,6 @@ export function MacComputer({
               className="shrink-0 rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white"
             >
               Stop
-            </button>
-          )}
-          {!grid.length && current?.watch?.alert && (
-            <button
-              onClick={() => void post("/api/watches", { id: current.watch!.id, action: "draft" }, "PATCH")}
-              title={`${state.bots.find((b) => b.id === current.watch!.botId)?.name ?? "A bot"} writes a reply in the window for you to read and send`}
-              className="shrink-0 rounded-full bg-highlighter px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-ink shadow-[0_0_0_1px_#0000001F]"
-            >
-              Draft a reply
             </button>
           )}
 
@@ -461,6 +515,32 @@ function windowFor(s: Session, open: { windowId: number; title: string }[]) {
     if (score > 0 && (!best || score > best.score)) best = { w, score };
   }
   return best?.w;
+}
+
+/**
+ * What a tile or the screen shows: a window or a display live from macOS, or a bot's own Chrome on this
+ * Mac as a picture Bops takes of it (/api/screen?mac=), about once a second at a tile's 2 fps and up.
+ */
+function Live({ item, fps = 30, maxWidth = 4096, fit = "contain", className = "", onSize }: { item: Item; fps?: number; maxWidth?: number; fit?: "contain" | "cover"; className?: string; onSize?: (w: number, h: number) => void }) {
+  if (item.kind !== "browser") return <MacStream sourceId={item.sourceId} fps={fps} maxWidth={maxWidth} fit={fit} className={className} onSize={onSize} />;
+  return <BrowserPicture botId={item.bot?.id ?? item.session?.botId ?? ""} macScreen={item.macScreen ?? 0} small={maxWidth <= 400} fit={fit} className={className} onSize={onSize} />;
+}
+
+function BrowserPicture({ botId, macScreen, small, fit, className, onSize }: { botId: string; macScreen: number; small: boolean; fit: "contain" | "cover"; className: string; onSize?: (w: number, h: number) => void }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), small ? 2000 : 1000);
+    return () => clearInterval(t);
+  }, [small]);
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={`/api/screen?bot=${encodeURIComponent(botId)}&mac=${macScreen}&scale=${small ? 0.4 : 0.75}&t=${tick}`}
+      alt="Chrome on your Mac"
+      onLoad={(e) => onSize?.(e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)}
+      className={`${className} bg-white ${fit === "cover" ? "object-cover object-top" : "object-contain"}`}
+    />
+  );
 }
 
 /** When a step last happened in a thread (its start, before any). */
@@ -510,7 +590,7 @@ function SettingsButton({ onClick, label }: { onClick: () => void; label?: boole
   return (
     <button
       onClick={onClick}
-      title="Your Mac settings: apps bots may use, words that mean your Mac"
+      title="Your Mac settings: the words that mean your Mac"
       aria-label="Your Mac settings"
       className={`flex shrink-0 items-center justify-center gap-1.5 rounded-full text-[12.5px] font-medium text-[#3A3A38] hover:bg-[#F2F2F0] ${label ? "px-3 py-1.5 shadow-[0_0_0_1px_#E2E2DF]" : "size-8"}`}
     >

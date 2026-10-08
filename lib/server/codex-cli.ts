@@ -10,12 +10,13 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
 /**
- * The Codex CLI that Bops drives on the user's Mac (lib/server/codex.ts). Bops uses the user's own
+ * The Codex CLI that runs bots' tools on the user's Mac: `codex exec-server`, the Agents API's executor,
+ * on Bops' own key (lib/server/local.ts startExecutor; lib/server/mac.ts). Bops uses the user's own
  * when they have one (on PATH, or where Codex's installers put it). Without one it installs it by
  * itself, in the background, the way routing through this Mac just turns on: OpenAI's latest release
  * from GitHub (openai/codex), built for this Mac's chip, checked against the SHA-256 digest GitHub
- * lists for the file, into Bops' own folder (~/Library/Application Support/Bops/bin). Signing in and
- * Codex's Computer Use stay the user's to do (the setup card, components/app/setup.tsx).
+ * lists for the file, into Bops' own folder (~/Library/Application Support/Bops/bin). Nothing signs
+ * in to it: it never runs on the user's ChatGPT account.
  */
 
 const RELEASE = "https://api.github.com/repos/openai/codex/releases/latest";

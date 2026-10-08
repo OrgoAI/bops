@@ -13,6 +13,8 @@ import { makeServer } from "../server.ts";
  */
 
 export const TEST_DATABASE_URL = process.env.BOPS_TEST_DATABASE_URL || "postgres://bops_app:bops-local@127.0.0.1:55432/orgo_core";
+/** An advisory lock a test file holds shared while it uses orgo-web's credit ledger, and core-credit's access test exclusively while it takes access away. */
+export const LEDGER_IN_USE = "bops-tests-ai-credit-ledger";
 process.env.BOPS_DATABASE_URL = TEST_DATABASE_URL;
 process.env.BOPS_CLOUD_SECRET = randomBytes(32).toString("base64");
 process.env.BOPS_CLOUD_PUBLIC_URL = "https://bops-api.test";

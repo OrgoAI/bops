@@ -41,6 +41,11 @@ const START = `
 })();`;
 const INJECT = `${RECORDER}\n;${START}`;
 const STOP = "window.__bopsMirror && (window.__bopsMirror(), window.__bopsMirror = undefined)";
+/** What every tab says when someone clicks or types in it (the bot's tools, or the user taking control): that's where the work is. */
+const ACTED = '{"type":"bops-acted"}';
+const WATCH_INPUT = `(() => { if (window.__bopsActed) return; window.__bopsActed = true; let last = 0;
+  const said = () => { const now = Date.now(); if (now - last < 1000) return; last = now; try { __bopsEmit('${ACTED}'); } catch {} };
+  for (const e of ["pointerdown", "keydown", "input"]) addEventListener(e, said, true); })()`;
 /** Past this many changes, ask the page for a fresh snapshot so late joiners don't replay a backlog. */
 const CHECKOUT_AFTER = 4000;
 const IDLE_CLOSE_MS = 30_000;
@@ -61,6 +66,8 @@ class Mirror {
   private tabs = new Map<string, TargetInfo & { sessionId?: string }>();
   /** Tabs in the order they opened, so the window bar doesn't reshuffle as the bot moves around. */
   private opened: string[] = [];
+  /** When each tab last went to a new address, opened, or was clicked or typed in: the bot's browser tools open pages in windows of their own, all visible at once. */
+  private movedAt = new Map<string, number>();
   /** The tab being recorded, and its recorder script (removed when we switch away). */
   private active?: { targetId: string; scriptId?: string };
   private tabsJson = "";
@@ -163,6 +170,10 @@ class Mirror {
         if (!isTab(t)) return;
         const known = this.tabs.get(t.targetId);
         this.tabs.set(t.targetId, { ...t, sessionId: known?.sessionId });
+        if (!known || known.url !== t.url) {
+          this.movedAt.set(t.targetId, Date.now());
+          if (known) void this.follow();
+        }
         if (!known) {
           this.opened.push(t.targetId);
           // A session on every tab, so we can tell which one is on screen.
@@ -174,6 +185,7 @@ class Mirror {
       case "Target.targetDestroyed": {
         const id = msg.params!.targetId!;
         this.tabs.delete(id);
+        this.movedAt.delete(id);
         this.opened = this.opened.filter((x) => x !== id);
         if (this.active?.targetId === id) this.active = undefined;
         this.publishTabs();
@@ -190,10 +202,19 @@ class Mirror {
         t.sessionId = sessionId;
         this.send("Runtime.enable", {}, sessionId);
         this.send("Runtime.addBinding", { name: "__bopsEmit" }, sessionId);
+        // Every tab says when it's clicked or typed in, now and on each page it goes to.
+        this.send("Page.addScriptToEvaluateOnNewDocument", { source: WATCH_INPUT }, sessionId);
+        this.send("Runtime.evaluate", { expression: WATCH_INPUT }, sessionId);
         void this.follow();
         return;
       }
       case "Runtime.bindingCalled": {
+        if (msg.params?.name === "__bopsEmit" && msg.params.payload === ACTED) {
+          const tab = [...this.tabs.values()].find((t) => t.sessionId === msg.sessionId);
+          if (tab) this.movedAt.set(tab.targetId, Date.now());
+          if (tab && tab.targetId !== this.active?.targetId) void this.follow();
+          return;
+        }
         const session = this.active && this.tabs.get(this.active.targetId)?.sessionId;
         if (!session || msg.sessionId !== session || msg.params?.name !== "__bopsEmit" || !msg.params.payload) return;
         const json = msg.params.payload;
@@ -227,9 +248,15 @@ class Mirror {
       );
       const visible = tabs.filter((_, i) => states[i]?.result?.value === "visible");
       const current = this.active && tabs.find((t) => t.targetId === this.active!.targetId);
-      if (current && visible.includes(current)) return;
-      // The visible tab (the newest if a headless browser reports several), else the newest tab.
-      const next = visible.at(-1) ?? (current ? undefined : tabs.at(-1));
+      // The visible tab; when several are (each page the bot's browser tools open is a window of its
+      // own), the one that went somewhere or was clicked or typed in last, which is where the bot is: staying on the first would
+      // leave the viewer, and the screen watch that signs the bot in, on a page it left behind.
+      const at = (t: { targetId: string }) => this.movedAt.get(t.targetId) ?? 0;
+      const seed = current && visible.includes(current) ? current : visible.at(-1);
+      const latest = seed && visible.reduce((a, t) => (at(t) > at(a) ? t : a), seed);
+      if (current && latest === current) return;
+      // Else the newest tab.
+      const next = latest ?? (current ? undefined : tabs.at(-1));
       if (next && next.targetId !== this.active?.targetId) await this.record(next);
     } finally {
       this.following = false;
@@ -278,6 +305,14 @@ export function mirror(endpoint: string) {
   let m = mirrors().get(endpoint);
   if (!m) mirrors().set(endpoint, (m = new Mirror(endpoint)));
   return m;
+}
+
+/**
+ * Close every mirror (a sign-out, or another account signing in): each keeps the last page it saw,
+ * and the next account's bot on the same port would be shown it before its own.
+ */
+export function closeMirrors() {
+  for (const m of [...mirrors().values()]) m.close();
 }
 
 /** The tab a screen's mirror is showing, if it's running. */

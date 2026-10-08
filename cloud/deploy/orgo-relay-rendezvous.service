@@ -1,0 +1,28 @@
+[Unit]
+Description=orgo-relay rendezvous (Orgo personal-device egress: "Route through this Mac")
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=orgo-relay
+Group=orgo-relay
+# ORGO_RELAY_SECRET, the same value as orgo-web's (it mints every device credential).
+EnvironmentFile=/etc/orgo-relay/env
+# It terminates its own TLS: VMs send CONNECT and Macs open a WebSocket on this one port, and Caddy
+# can't pass CONNECT through. The certificate is Caddy's for the relay name, copied here by
+# orgo-relay-cert.service whenever Caddy renews it.
+ExecStart=/usr/local/bin/orgo-relay rendezvous --addr :8443 --tls-cert /etc/orgo-relay/tls/cert.pem --tls-key /etc/orgo-relay/tls/key.pem
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+CapabilityBoundingSet=
+ReadOnlyPaths=/etc/orgo-relay
+
+[Install]
+WantedBy=multi-user.target

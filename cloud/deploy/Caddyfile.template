@@ -1,0 +1,14 @@
+
+# Bops Cloud (the bops repo's cloud/, bops-cloud.service on this box), added by its
+# cloud/deploy/install.sh as a site of its own, so nothing in www.orgo.ai's block changes.
+# 127.0.0.1, never "localhost:<port>": orgo-web's deploy rewrites those to its own replicas.
+BOPS_SITE {
+	handle_path BOPS_CLOUD_PATH/* {
+		reverse_proxy 127.0.0.1:8790 {
+			flush_interval -1
+		}
+	}
+	handle {
+		respond "Not found" 404
+	}
+}

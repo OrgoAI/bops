@@ -1,8 +1,9 @@
+import { trackCloudEvent } from "./analytics.ts";
 import type pg from "pg";
 import { config } from "./config.ts";
 import { query } from "./db.ts";
 import { HttpError } from "./http.ts";
-import { AI_CREDIT_EMPTY } from "./protocol.ts";
+import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "./protocol.ts";
 
 /**
  * AI credit: what a user's bots may spend on OpenAI, AgentPhone, Typesafe and texted codes, at what
@@ -16,8 +17,9 @@ import { AI_CREDIT_EMPTY } from "./protocol.ts";
  * - bops_ai_credit_balance(user): what's left. The first time it's asked about a user it gives them
  *   Free's one-time $5, once ever (POST /v1/session asks, and so does the gate, whichever is first).
  * - bops_ai_credit_spend(user, micros): takes a use, from this month's plan credit first (it runs out
- *   at the month's end), then the rest. The rest may go below 0: a turn already under way when the
- *   credit ran out isn't cut off, and the next grant covers what it overran.
+ *   at the month's end), then the rest. The rest may go below 0 by what a use cost past what was
+ *   left: a model's answer already asked for, or an agent turn's last few seconds before the cloud
+ *   stopped it (turn-guard.ts holds running turns to the credit). The next grant covers it.
  *
  * Off unless BOPS_AI_CREDITS=1: then nothing is taken and nothing is refused (a self-hosted or local
  * cloud). On, the cloud won't start without access to the two tables (checkCreditAccess).
@@ -25,7 +27,8 @@ import { AI_CREDIT_EMPTY } from "./protocol.ts";
 
 export const creditsOn = () => config.aiCredits();
 
-const MESSAGE = "You're out of AI credit, so your bots have stopped. Upgrade in Settings to keep them going.";
+/** What the app is told when the credit is used up (a 402, or a task the cloud stopped: turn-guard.ts). */
+export const OUT_OF_CREDIT = "You're out of AI credit, so your bots have stopped. Upgrade in Settings to keep them going.";
 
 /** What the user has left, in micro-dollars (Free's $5 given first, if they never had it). */
 export async function creditLeft(userId: string): Promise<number> {
@@ -33,14 +36,32 @@ export async function creditLeft(userId: string): Promise<number> {
   return Number(r.rows[0]?.left ?? 0);
 }
 
-/** Take `micros` from the user's credit, inside the caller's transaction (with the usage row it pays for). What's left after. */
-export async function spend(c: pg.PoolClient, userId: string, micros: number): Promise<number> {
+/**
+ * Take `micros` from the user's credit, inside the caller's transaction (with the usage row it pays
+ * for). What's left after, and whether this use is the one that ran the credit out (only at the
+ * crossing, never after): the caller reports that once its transaction has committed (creditRanOut).
+ */
+export async function spend(c: pg.PoolClient, userId: string, micros: number): Promise<{ left: number; ranOut: boolean }> {
   const r = await c.query<{ left: string | null }>("SELECT public.bops_ai_credit_spend($1::uuid, $2::bigint) AS left", [userId, Math.ceil(micros)]);
-  return Number(r.rows[0]?.left ?? 0);
+  const left = Number(r.rows[0]?.left ?? 0);
+  return { left, ranOut: left <= 0 && left + Math.ceil(micros) > 0 };
 }
 
+/** The credit ran out (usage events), after the spend that did it committed. */
+export const creditRanOut = (userId: string) => trackCloudEvent(userId, "bops_ai_credit_ran_out", {});
+
 /** The 402 a call that would spend gets when the credit's used up: the app shows it with Upgrade. */
-export const outOfCredit = () => new HttpError(402, MESSAGE, { code: AI_CREDIT_EMPTY, upgrade: true });
+export const outOfCredit = () => new HttpError(402, OUT_OF_CREDIT, { code: AI_CREDIT_EMPTY, upgrade: true });
+
+/**
+ * A task that can't start on what's left, though some is (turn-guard.ts admitTurn): 403, not 402, so
+ * no app takes the credit for used up (every app before 0.0.16 pauses all its bots on any 402). The
+ * body is shaped like OpenAI's errors too, so the OpenAI SDK in the app keeps the code.
+ */
+export function shortOfCredit(): HttpError {
+  const message = "There isn't enough AI credit left to start this task. Upgrade in Settings to keep your bots going.";
+  return new HttpError(403, message, { error: { message, code: AI_CREDIT_LOW }, code: AI_CREDIT_LOW, upgrade: true });
+}
 
 /**
  * Refuse (402) a call that would spend when the user has nothing left, or less than it costs at the

@@ -8,7 +8,7 @@ import { getSecret, setSecret } from "./keychain";
 import { loadOrgoKey, orgoKey, signedInUser } from "./orgo-auth";
 import { egress, orgo, orgoUnavailable } from "./orgo";
 import { onPostgres } from "./persist";
-import { getState, update } from "./store";
+import { getState, stateEpoch, stateReady, update } from "./store";
 
 /**
  * Route the bots' computers through this Mac. Orgo's personal-device egress: this Mac is paired with
@@ -22,10 +22,12 @@ import { getState, update } from "./store";
  * - The agent is a child of this server, restarted with backoff if it dies, stopped when routing is
  *   turned off (once every computer is switched back) and on sign-out.
  * - Switching a computer: POST egress/upstream {mode: "device"}. Orgo applies it right away. When the
- *   computer's proxy was off that restarts its Chrome (every screen), so a computer switches only while
- *   no task runs on it and the user isn't driving it, and Bops puts each screen's page back afterwards
- *   (vm/bin/bops-keep-screens). When the proxy was already on, only the route underneath changes.
- *   How it was before is kept in state.relayRoutes, and put back when routing stops.
+ *   computer's proxy was off that restarts its Chrome (every screen); when it was already on, only the
+ *   route underneath changes, and Bops restarts Chrome itself, so pages already open and the
+ *   connections Chrome keeps go out the new way too. Either way a computer switches only while no task
+ *   runs on it and the user isn't driving it, and Bops puts each screen's page back afterwards
+ *   (vm/bin/bops-keep-screens). How it was before is kept in state.relayRoutes, and put back when
+ *   routing stops (Chrome restarts then too).
  * - On by default: once Orgo offers routing to the signed-in user (and this copy of Bops has the
  *   relay), it turns on by itself after sign-in and every bot computer, new ones too, goes through
  *   this Mac, unless the user turned it off. Their "off" stays (state.relay.turnedOff), across
@@ -70,6 +72,11 @@ type Supervisor = {
   avail?: { until: number; ok: boolean; reason?: string; online?: boolean | null; rendezvous?: string | null };
   /** When turning routing on by default last failed: pairing makes a device on Orgo, so it isn't tried on every tick. */
   defaultFailedAt?: number;
+  /**
+   * The user just flipped the switch: the computers switch now, even one in use (its Chrome restarts,
+   * with its pages kept), rather than waiting for it to come free. Until this time.
+   */
+  nowUntil?: number;
 };
 const g = globalThis as unknown as { bopsRelay?: Supervisor };
 const sup: Supervisor = (g.bopsRelay ??= { want: false, failures: 0 });
@@ -123,15 +130,22 @@ async function savedPairing(userId: string): Promise<{ deviceId: string; code: s
 async function ensurePaired(): Promise<{ deviceId: string; name: string; code: string; rendezvous?: string | null }> {
   const user = signedInUser();
   if (!user) throw new Error("Sign in to Orgo first.");
+  // Signed out, or another account in, while Orgo answered: this Mac's device is the last user's, not theirs.
+  const epoch = stateEpoch();
+  const stillTheirs = () => {
+    if (epoch !== stateEpoch()) throw new Error("Signed out meanwhile.");
+  };
   const { devices = [], rendezvous } = await egress.devices();
   const saved = await savedPairing(user.id);
   const known = saved && devices.find((d) => d.id === saved.deviceId);
+  stillTheirs();
   if (saved && known) {
     update((s) => (s.relay = { ...s.relay, on: s.relay?.on ?? false, deviceId: known.id, deviceName: known.name }));
     return { deviceId: known.id, name: known.name, code: saved.code, rendezvous };
   }
   const paired = await egress.pair(`${await macName()} (Bops)`);
   await setSecret(codeAccount(user.id), JSON.stringify({ deviceId: paired.id, code: paired.pairing_code }));
+  stillTheirs();
   update((s) => (s.relay = { ...s.relay, on: s.relay?.on ?? false, deviceId: paired.id, deviceName: paired.name }));
   sup.avail = undefined;
   return { deviceId: paired.id, name: paired.name, code: paired.pairing_code, rendezvous: paired.rendezvous ?? rendezvous };
@@ -169,7 +183,7 @@ async function spawnAgent() {
     const v = process.env[k];
     if (v) env[k] = v;
   }
-  const child = spawn(bin, ["agent", "--name", name, "--control-addr", CONTROL, ...(rendezvous ? ["--rendezvous", rendezvous] : [])], {
+  const child = spawn(/*turbopackIgnore: true*/ bin, ["agent", "--name", name, "--control-addr", CONTROL, ...(rendezvous ? ["--rendezvous", rendezvous] : [])], {
     env: env as NodeJS.ProcessEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -277,12 +291,14 @@ const computers = () => [...new Set(getState().bots.flatMap((b) => (b.computerId
 
 /** Whether something is using a computer right now: a task on it, or the user driving one of its screens. */
 function inUse(computerId: string) {
+  // Right after the user flips the switch, nothing waits: they asked for it now.
+  if (sup.nowUntil && Date.now() < sup.nowUntil) return false;
   const st = getState();
   const on = (botId: string) => {
     const b = st.bots.find((x) => x.id === botId);
     return !!b && workBot(b, st.bots).computerId === computerId;
   };
-  return st.sessions.some((s) => live(s) && s.runsOn !== "mac" && on(s.botId)) || (!!st.takeover && on(st.takeover.botId));
+  return st.sessions.some((s) => live(s) && s.runsOn !== "mac" && on(s.botId)) || (st.takeover?.display !== undefined && on(st.takeover.botId));
 }
 
 const keepScreens = () => Buffer.from(readFileSync(join(process.cwd(), "vm/bin/bops-keep-screens"))).toString("base64");
@@ -302,16 +318,21 @@ async function restoreScreens(computerId: string, ifDown = false) {
 }
 
 /**
- * A change that may restart the computer's Chrome, with its screens kept around it. Never throws:
- * says what went wrong with the change, and whether the screens are up again.
+ * A change to how a computer's browsing goes out, with its Chrome restarted around it and each
+ * screen's page kept: Orgo restarts Chrome itself when the proxy goes on or off, and when only the
+ * route underneath changes, the restart here makes open pages go out the new way. Never throws: says
+ * what went wrong with the change, and whether the screens are up again. `saved`: the screens are down
+ * from an earlier change, so the pages noted then are the ones to put back (noting them again now
+ * would find no browser on those screens and forget them).
  */
-async function withScreensKept(computerId: string, change: () => Promise<unknown>): Promise<{ error?: unknown; back: boolean }> {
-  try {
-    await saveScreens(computerId);
-  } catch (error) {
-    // Nothing was changed yet.
-    return { error, back: true };
-  }
+async function withScreensKept(computerId: string, change: () => Promise<unknown>, saved = false): Promise<{ error?: unknown; back: boolean }> {
+  if (!saved)
+    try {
+      await saveScreens(computerId);
+    } catch (error) {
+      // Nothing was changed yet.
+      return { error, back: true };
+    }
   let error: unknown;
   try {
     await change();
@@ -331,6 +352,13 @@ const setRoute = (computerId: string, route: RelayRoute | undefined) =>
     if (route) s.relayRoutes[computerId] = route;
     else delete s.relayRoutes[computerId];
   });
+
+/**
+ * Orgo answered about a computer as if it's gone (deleted on its site since): the bot on it moves on to
+ * another (healIfGone, which asks Orgo first). Imported only then, as sessions.ts imports this file.
+ */
+const maybeGone = (computerId: string, e: unknown) =>
+  void import("./sessions").then((m) => m.healIfGone(computerId, e)).catch((err: Error) => console.warn(`[relay] ${computerId}: ${err.message}`));
 
 /** The HTTP status in an Orgo error (0: not an answer from Orgo). */
 const statusOf = (e: unknown) => Number(/ → (\d{3}):/.exec((e as Error)?.message ?? "")?.[1] ?? 0);
@@ -368,13 +396,14 @@ async function routeOne(computerId: string, deviceId: string) {
     setRoute(computerId, route);
   }
   const before = route.before;
-  // With the proxy on, only the route underneath changes (Chrome isn't restarted).
-  const r = before.proxyOn
-    ? await egress.setUpstream(computerId, "device", deviceId).then(() => ({ back: true }), (error: unknown) => ({ error, back: true }))
-    : await withScreensKept(computerId, () => egress.setUpstream(computerId, "device", deviceId));
+  // Chrome restarts either way: by Orgo when the proxy was off, else by Bops (see withScreensKept).
+  const r = await withScreensKept(computerId, () => egress.setUpstream(computerId, "device", deviceId), !!route.screensDown);
   const down = r.back ? {} : { screensDown: true };
   if (!("error" in r)) setRoute(computerId, { before, applied: true, ...down, ...(r.back ? {} : { error: SCREENS_DOWN }) });
-  else setRoute(computerId, failed({ ...route, applied: false, ...down }, r.error, true));
+  else {
+    setRoute(computerId, failed({ ...route, applied: false, ...down }, r.error, true));
+    maybeGone(computerId, r.error);
+  }
 }
 
 /** Start the screens' browsers of a computer whose route changed but whose screens didn't come back. */
@@ -404,31 +433,37 @@ async function unrouteOne(computerId: string) {
     }
     const { before } = route;
     const off = async () => {
-      const r = await withScreensKept(computerId, async () => {
-        await egress.proxyOff(computerId);
-        // With the proxy off this only records the choice (nothing restarts again).
-        await egress.setUpstream(computerId, "residential");
-      });
+      const r = await withScreensKept(
+        computerId,
+        async () => {
+          await egress.proxyOff(computerId);
+          // With the proxy off this only records the choice (nothing restarts again).
+          await egress.setUpstream(computerId, "residential");
+        },
+        down,
+      );
       down = !r.back;
       if ("error" in r) throw r.error;
     };
     if (before.proxyOn) {
-      // Only the route underneath changes. If the device it went through before is gone (removed on
-      // Orgo since), there's nothing to go back to: turn the proxy off. Anything else is tried again later.
-      try {
-        await egress.setUpstream(computerId, before.mode, before.deviceId);
-        // Chrome wasn't restarted now, but screens left down by the switch to this Mac still are.
-        if (down) down = await restoreScreens(computerId).then(() => false, () => true);
-      } catch (e) {
-        if (!/ → 404: Device not found/.test((e as Error).message)) throw e;
+      // Only the route underneath changes, and Chrome restarts so open pages go out the old way again.
+      // If the device it went through before is gone (removed on Orgo since), there's nothing to go back
+      // to: turn the proxy off. Anything else is tried again later.
+      const r = await withScreensKept(computerId, () => egress.setUpstream(computerId, before.mode, before.deviceId), down);
+      down = !r.back;
+      if ("error" in r) {
+        if (!/ → 404: Device not found/.test((r.error as Error)?.message ?? "")) throw r.error;
         await off();
       }
     } else await off();
     // Its route is back; screens that didn't come back are started again on a later try.
     setRoute(computerId, down ? { before, applied: false, screensDown: true, error: SCREENS_DOWN, failures: 1, retryAt: Date.now() + TICK_MS } : undefined);
   } catch (e) {
-    // A computer that's gone has nothing to put back.
-    if (statusOf(e) === 404) return setRoute(computerId, undefined);
+    // A computer that's gone has nothing to put back (and a bot still on it moves on).
+    if (statusOf(e) === 404) {
+      maybeGone(computerId, e);
+      return setRoute(computerId, undefined);
+    }
     setRoute(computerId, failed({ ...route, ...(down ? { screensDown: true } : {}) }, e, false));
   }
 }
@@ -438,11 +473,12 @@ const due = (r?: RelayRoute) => !r?.retryAt || Date.now() >= r.retryAt;
 
 /**
  * Bring the computers in line with the switch: while it's on and the agent is connected, route every
- * computer not in use; while it's off, put each one back as it comes free, then stop the agent. The
+ * computer not in use; while it's off, put each one back as it comes free, then stop the agent. Right
+ * after the user flips it, in use doesn't count (inUse): each computer switches now. The
  * switch is read again before each computer, and a run that finds it flipped runs once more after.
  */
 export function reconcile(): Promise<void> {
-  if (sup.stopping) return Promise.resolve();
+  if (sup.stopping || !stateReady()) return Promise.resolve();
   if (sup.reconciling) return sup.reconciling;
   const wasOn = !!getState().relay?.on;
   const stillOn = () => !!getState().relay?.on && !sup.stopping;
@@ -461,7 +497,11 @@ export function reconcile(): Promise<void> {
         const r = getState().relayRoutes?.[id];
         if (r?.stuck || !due(r) || inUse(id)) continue;
         if (r?.screensDown && r.applied) setRoute(id, await bringScreensBack(id, r, true));
-        else if (!r?.applied) await routeOne(id, relay.deviceId).catch((e: Error) => console.warn(`[relay] ${id}: ${e.message}`));
+        else if (!r?.applied)
+          await routeOne(id, relay.deviceId).catch((e: Error) => {
+            console.warn(`[relay] ${id}: ${e.message}`);
+            maybeGone(id, e);
+          });
       }
       // Computers that were deleted since.
       for (const id of Object.keys(getState().relayRoutes ?? {})) if (!getState().bots.some((b) => b.computerId === id)) setRoute(id, undefined);
@@ -546,6 +586,7 @@ export async function setRelay(on: boolean): Promise<RelayStatus> {
     await switchOn();
   } else update((s) => (s.relay = { ...s.relay, on: false, turnedOff: true }));
   sup.avail = undefined;
+  sup.nowUntil = Date.now() + 2 * 60_000;
   void reconcile();
   return relayStatus();
 }

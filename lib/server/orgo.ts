@@ -2,7 +2,9 @@ import "server-only";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
+import { RTC_SHRUNK_MS } from "@/lib/rtc";
 import { recordUsage } from "./usage";
+import { stateEpoch } from "./store";
 
 /** Thin Orgo REST client (the published SDKs predate screens and clone). */
 
@@ -76,7 +78,8 @@ function inLane<T>(key: string, fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export type OrgoScreen = { id: string; display: string; width: number; height: number; default: boolean };
+/** A screen as Orgo lists it. `vnc_port`/`ws_port`: null in a list orgo-web answered from its record (a computer asleep). */
+export type OrgoScreen = { id: string; display: string; width: number; height: number; default: boolean; vnc_port?: number | null; ws_port?: number | null };
 
 export type OrgoComputer = { id: string; name: string; status: string; cpu: number; ram: number; os: string };
 
@@ -155,6 +158,33 @@ export const BOPS_SCREEN = { width: 1280, height: 960 };
 
 const grown = new Set<string>();
 
+/**
+ * Whether Bops streams the boot screen over Orgo's WebRTC (UDP): on unless BOPS_WEBRTC=0. Only at the
+ * screen's real size, though: Orgo's WebRTC gateway fits a screen inside its host's limit by shrinking
+ * the screen itself (1280x720 unless the host sets ORGO_RTC_WIDTH/HEIGHT, so a 1280x960 Bops screen
+ * comes out 960x720), and never sizes it back. The app sees that in the size Orgo says it streams at,
+ * stops, and streams over VNC, and Bops puts the screen back (orgo.screenShrunk). Off, Bops doesn't
+ * turn WebRTC on for computers and the app streams over VNC (through Orgo).
+ */
+export const webrtcWanted = () => process.env.BOPS_WEBRTC !== "0";
+
+/**
+ * Whether the bots' other screens (100-102) stream live through Orgo's noVNC proxy too, by ?screen=, when
+ * the computer isn't on the tailnet: on unless BOPS_SCREEN_STREAM=0. Orgo serves ?screen= from
+ * orgo-web's per-screen streams (on orgo.ai since 2026-10-06); an Orgo without them ignores ?screen= and
+ * streams the boot screen, so point BOPS_ORGO_ORIGIN at an older Orgo only with BOPS_SCREEN_STREAM=0.
+ * Off, those screens show as screenshots, as before.
+ */
+export const screenStreamWanted = () => process.env.BOPS_SCREEN_STREAM !== "0";
+
+/** Computers Orgo wouldn't turn WebRTC on for, until when: they aren't asked again on every view. */
+const rtcRefused = new Map<string, number>();
+const RTC_REFUSED_MS = 10 * 60_000;
+
+/** Computers whose boot screen Orgo's WebRTC shrank, until when: they stream over VNC till then. */
+const rtcShrank = new Map<string, number>();
+export const rtcShrunk = (computerId: string) => (rtcShrank.get(computerId) ?? 0) > Date.now();
+
 export const orgo = {
   /**
    * A new computer in the Bops workspace, from the Bops template, with `ram` GB of memory: the plan's
@@ -169,6 +199,7 @@ export const orgo = {
    * in their own "bops" workspace, from Orgo's Bops template; otherwise this is an ordinary create.
    */
   create: async (name: string, opts: { ram?: number; free?: boolean } = {}) => {
+    const epoch = stateEpoch();
     const c = await call<{ id: string; name: string; status: string }>("POST", "/computers", {
       workspace_id: await bopsWorkspace(),
       name,
@@ -176,7 +207,7 @@ export const orgo = {
       ...(opts.free ? { bops_free: true } : opts.ram ? { ram: opts.ram } : {}),
     });
     changed();
-    recordUsage("computer.create");
+    recordUsage("computer.create", {}, epoch);
     return c;
   },
 
@@ -193,10 +224,54 @@ export const orgo = {
   },
 
   /**
-   * The computer's VNC password, for the live desktop view. Server-side only: hand it out only to
-   * the user's own app on this Mac (see /api/vnc), never to anything remote.
+   * What the live desktop view needs (see /api/vnc): the computer's VNC password, which also opens
+   * Orgo's stream sockets (?token=), and whether Orgo's WebRTC is on for it (instance_details.webrtc:
+   * true, false when someone turned it off on Orgo, null when nobody chose, which means off on
+   * production), and whether it's running. Server-side only: hand the password only to the user's own
+   * app on this Mac, never to anything remote. It changes when the computer restarts, so it's read
+   * fresh each time.
    */
-  vncPassword: async (computerId: string) => (await call<{ vnc_password: string }>("GET", `/computers/${computerId}`)).vnc_password,
+  streamInfo: async (computerId: string) => {
+    const c = await call<{ vnc_password: string; status?: string; instance_details?: { webrtc?: unknown } | null }>("GET", `/computers/${computerId}`);
+    const webrtc = c.instance_details?.webrtc;
+    return { password: c.vnc_password, webrtc: typeof webrtc === "boolean" ? webrtc : null, running: c.status === "running" && !!c.instance_details };
+  },
+
+  /**
+   * Turn on Orgo's WebRTC (UDP) video for a computer, so its screen streams over UDP rather than VNC.
+   * It's one setting on Orgo's side (POST /computers/{id}/webrtc): nothing restarts. Orgo forgets it
+   * when a computer stops, so Bops turns it on when it sets a computer up and again whenever the view
+   * finds nobody chose (see /api/vnc). Only then: a choice someone made on Orgo (off too) stands. And
+   * only while the computer runs: a stopped one has no record on Orgo (instance_details is null), and
+   * saving the choice would make one, which Orgo then takes for a running computer. Orgo turns it down
+   * where it can't stream (409: fewer than 4 vCPUs, or UDP streaming off on Orgo's side); that
+   * computer isn't asked again for 10 minutes. `known`: what streamInfo just said, so it isn't read
+   * again. Says whether it's on.
+   */
+  webrtc: async (computerId: string, known?: { webrtc: boolean | null; running: boolean }) => {
+    if (!webrtcWanted() || (rtcRefused.get(computerId) ?? 0) > Date.now()) return false;
+    const now = known ?? (await orgo.streamInfo(computerId));
+    if (now.webrtc !== null) return now.webrtc;
+    if (!now.running) return false;
+    try {
+      const r = await call<{ webrtc?: boolean | null }>("POST", `/computers/${computerId}/webrtc`, { enabled: true });
+      rtcRefused.delete(computerId);
+      return r.webrtc === true;
+    } catch (e) {
+      if (e instanceof OrgoError && e.status < 500) rtcRefused.set(computerId, Date.now() + RTC_REFUSED_MS);
+      throw e;
+    }
+  },
+
+  /**
+   * Orgo's WebRTC gateway shrank the computer's boot screen to fit its limit (the app saw it in the
+   * stream's size): it streams over VNC for a day (rtcShrunk, RTC_SHRUNK_MS), and the screen goes back to
+   * BOPS_SCREEN. Orgo resizes a screen in place (xrandr on the computer), so its windows stay open.
+   */
+  screenShrunk: async (computerId: string) => {
+    rtcShrank.set(computerId, Date.now() + RTC_SHRUNK_MS);
+    await call("PATCH", `/computers/${computerId}/screens/${screenId(99)}`, BOPS_SCREEN);
+  },
 
   /** Every computer in the Bops workspace (and only that workspace). */
   bopsComputers: async () =>
@@ -207,13 +282,14 @@ export const orgo = {
    * computers made there before sign-in are Bops' too, when the account that signed in can reach them).
    */
   remove: async (computerId: string) => {
+    const epoch = stateEpoch();
     const c = await call<{ project_id?: string; workspace_id?: string }>("GET", `/computers/${computerId}`);
     const where = c.workspace_id ?? c.project_id;
     if (where !== (await bopsWorkspace()) && (!where || where !== process.env.BOPS_ORGO_WORKSPACE))
       throw new Error(`refusing to delete ${computerId}: not a Bops computer`);
     await call("DELETE", `/computers/${computerId}`);
     changed();
-    recordUsage("computer.remove");
+    recordUsage("computer.remove", {}, epoch);
   },
 
   /** Public facts about a computer. Never pass the raw response on: it carries the VNC password. */
@@ -230,18 +306,20 @@ export const orgo = {
    * that much free memory there.
    */
   fork: async (computerId: string) => {
+    const epoch = stateEpoch();
     const c = await call<{ instance_details?: { id?: string } }>("GET", `/computers/${computerId}`);
     if (!c.instance_details?.id) throw new Error("this computer can't be forked (no instance id)");
     const forked = await call<{ id: string; name: string; status: string }>("POST", `/computers/${c.instance_details.id}/fork`);
     changed();
-    recordUsage("computer.create");
+    recordUsage("computer.create", {}, epoch);
     return forked;
   },
 
   clone: async (computerId: string, name: string) => {
+    const epoch = stateEpoch();
     const cloned = await call<{ id: string; name: string; status: string }>("POST", `/computers/${computerId}/clone`, { name });
     changed();
-    recordUsage("computer.create");
+    recordUsage("computer.create", {}, epoch);
     return cloned;
   },
 
@@ -270,19 +348,39 @@ export const orgo = {
   /**
    * Raw screenshot bytes for one screen. Orgo fails overlapping screenshots of one computer,
    * and the app watches several screens at once, so they queue per computer and retry once.
+   * JPEG for the app's views; PNG at full size for the computer tool (computer-task.ts).
    */
-  screenshot: (computerId: string, screen: string, scale = 0.75) =>
+  screenshot: (computerId: string, screen: string, scale = 0.75, format: "jpeg" | "png" = "jpeg") =>
     inLane(computerId, async () => {
       for (let attempt = 0; ; attempt++) {
         const res = await fetch(
-          `${base()}/computers/${computerId}/screenshot?screen=${screen}&response_format=binary&format=jpeg&scale=${scale}`,
+          `${base()}/computers/${computerId}/screenshot?screen=${screen}&response_format=binary&format=${format}&scale=${scale}`,
           { headers: { Authorization: `Bearer ${await apiKey()}` }, cache: "no-store" },
         );
         if (res.ok) return new Uint8Array(await res.arrayBuffer());
-        if (attempt === 1 || res.status < 500) throw new Error(`screenshot ${res.status}`);
+        // With its status (and Orgo's code when it sent one), so a computer that's gone is told apart from
+        // one that's asleep (see healIfGone in sessions.ts, and computerAsleepError).
+        if (attempt === 1 || res.status < 500) {
+          const said = await res.json().catch(() => null);
+          throw new OrgoError(`screenshot ${res.status}`, res.status, typeof said?.code === "string" ? said.code : undefined, typeof said?.error === "string" ? said.error : undefined);
+        }
       }
     }),
+
+  /**
+   * Wake a computer that's asleep (suspended), for the user who just took over one of its screens:
+   * orgo-web's explicit resume, which says so when it can't (402 bops_free_hours once Free's 10 hours
+   * this month are used). A running one is left as it is.
+   */
+  resume: (computerId: string) => call("POST", `/computers/${computerId}/resume`),
 };
+
+/**
+ * Orgo didn't wake a computer that's asleep for a read of it (409 computer_asleep: orgo-web leaves
+ * Free's computer asleep after 15 minutes nobody used it, and answers a screenshot with this). The
+ * computer is still there: asleep, never gone.
+ */
+export const computerAsleepError = (e: unknown) => e instanceof OrgoError && e.status === 409 && e.code === "computer_asleep";
 
 /** A device paired to route computers' browsing through it (Orgo's personal-device egress). */
 export type OrgoEgressDevice = { id: string; name: string; online: boolean | null; computers?: unknown };

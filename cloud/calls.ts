@@ -6,7 +6,7 @@ import { callerVerdict } from "./lines.ts";
 import type { CloudCallPayload } from "./protocol.ts";
 import { loadState } from "./state.ts";
 import { queueForMac } from "./tunnel.ts";
-import { recordUsage } from "./usage.ts";
+import { liveSecondsOf, recordTokens, recordUsageFor } from "./usage.ts";
 
 /**
  * Answering the owner's GPT-Live call (a number routed to a SIP trunk to OpenAI) in the cloud when
@@ -351,9 +351,15 @@ export async function answerInCloud(userId: string, event: unknown): Promise<voi
 }
 
 type Turn = { who: "Caller" | "Bot"; text: string };
-type CallRecord = { acceptedAt: number; startedAt: number; endedAt: number; turns: Turn[]; message?: CallMessage };
+/** A call as it went: its turns, any message, and its audio seconds as OpenAI counted them (0: it never said). */
+type CallRecord = { acceptedAt: number; startedAt: number; endedAt: number; turns: Turn[]; message?: CallMessage; seconds: number };
 type ToolCall = { type?: string; call_id?: string; name?: string; arguments?: string };
-type LiveEvent = { type?: string; delta?: string; error?: { message?: string }; event?: { type?: string; item?: ToolCall } };
+type LiveEvent = {
+  type?: string;
+  delta?: string;
+  error?: { message?: string };
+  event?: { type?: string; item?: ToolCall; response?: { id?: unknown; object?: unknown; model?: unknown; usage?: unknown } };
+};
 
 /**
  * The call over the sideband: the greeting once the session starts, the transcript as it comes,
@@ -361,7 +367,7 @@ type LiveEvent = { type?: string; delta?: string; error?: { message?: string }; 
  */
 function converse(c: Call): Promise<CallRecord> {
   return new Promise((resolve) => {
-    const record: CallRecord = { acceptedAt: Date.now(), startedAt: 0, endedAt: 0, turns: [] };
+    const record: CallRecord = { acceptedAt: Date.now(), startedAt: 0, endedAt: 0, turns: [], seconds: 0 };
     const answered = new Set<string>();
     let closed = false;
     let hungUp = false;
@@ -416,11 +422,17 @@ function converse(c: Call): Promise<CallRecord> {
 
     ws.on("message", (data: RawData) => {
       let e: LiveEvent;
+      const text = String(data);
       try {
-        e = JSON.parse(String(data)) as LiveEvent;
+        e = JSON.parse(text) as LiveEvent;
       } catch {
         return;
       }
+      record.seconds = Math.max(record.seconds, liveSecondsOf(text));
+      // The backend's answers (the two tools run on a Responses model): each one's tokens, once, for the bot.
+      const r = e.type === "response.event" && /^response\.(completed|incomplete|failed)$/.test(e.event?.type ?? "") ? e.event?.response : undefined;
+      if (r?.object === "response" && typeof r.id === "string")
+        void recordTokens(c.userId, r.id, r.usage, { model: r.model, source: "phone", botId: c.bot.id }).catch((err: Error) => console.warn(`[calls] ${c.sessionId}: usage: ${err.message}`));
       if (e.type === "session.started" && !record.startedAt) {
         record.startedAt = Date.now();
         send({ type: "session.commentary.append", delegation_id: null, content: greeting(c) });
@@ -456,7 +468,11 @@ function messageFrom(args: string | undefined, before?: CallMessage): CallMessag
 
 /* ---------------- After the call ---------------- */
 
-/** The call goes to the Mac (kept until it's back), and its minutes are counted. */
+/**
+ * The call goes to the Mac (kept until it's back), and its audio seconds are counted as OpenAI said
+ * them (by the wall clock when it never did), as a GPT-Live call over SIP: the backend's tokens were
+ * counted as they came.
+ */
 async function report(c: Call, r: CallRecord) {
   const startedAt = r.startedAt || r.acceptedAt;
   const transcript = r.turns
@@ -475,6 +491,7 @@ async function report(c: Call, r: CallRecord) {
   };
   const warn = (what: string) => (e: Error) => console.warn(`[calls] ${c.sessionId}: ${what}: ${e.message}`);
   await queueForMac(c.userId, "call", payload, `call:${c.sessionId}`).catch(warn("couldn't keep the call for the Mac"));
-  const minutes = Math.round(((r.endedAt - startedAt) / 60_000) * 100) / 100;
-  await recordUsage(c.userId, "call.minutes", minutes, { botId: c.bot.id, sessionId: c.sessionId, answeredBy: "cloud" }).catch(warn("couldn't count the minutes"));
+  const seconds = r.seconds || Math.max(0, Math.round((r.endedAt - startedAt) / 1000));
+  if (seconds > 0)
+    await recordUsageFor(c.userId, "openai.live_seconds", c.sessionId, seconds, { transport: "sip", botId: c.bot.id, answeredBy: "cloud" }).catch(warn("couldn't count the seconds"));
 }

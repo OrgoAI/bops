@@ -5,20 +5,27 @@ import { BLOCKER_ASK, live, pairChatId, TAPBACK_EMOJI, TAPBACKS, type AppApprova
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
 import { OpenLink } from "./panel-tabs";
-import { ApprovalCard, MacIcon } from "./mac-tab";
+import { MacIcon } from "./mac-tab";
 import { AttachmentTray, MessageImages, useAttachments } from "./attachments";
 import { ComposerInput } from "./composer-input";
+import { MicButton } from "./mic-button";
 import { ChatAvatar, chatName, clockTime, needsYou, post, StatusIcon, teamOf, useNow } from "./ui";
 
 /** Light markdown for bot text: **bold** and [links](url). */
 /** How many messages a chat draws at first, and how many more each "Show earlier messages" adds. */
 const PAGE = 60;
 
-export function Rich({ text }: { text: string }) {
+/** The bot whose text this is, so a file it links opens from its computer (see Inline). */
+const LinkedBy = createContext<string | undefined>(undefined);
+
+/** A link to a file a bot made, not a web page: a path on its computer (/workspace/…) or on this Mac (~/…, /Users/…). */
+const isFileLink = (href: string) => /^(\/workspace\/|~\/|\/Users\/|file:\/\/\/)/.test(href);
+
+export function Rich({ text, botId }: { text: string; botId?: string }) {
   // Code blocks (ASCII diagrams, commands) keep their monospace layout; the rest is inline text.
   const blocks = text.split(/```[a-z0-9-]*\n?([\s\S]*?)```/g);
   return (
-    <>
+    <LinkedBy.Provider value={botId}>
       {blocks.map((b, i) =>
         i % 2 ? (
           <pre key={i} className="my-1.5 overflow-x-auto whitespace-pre rounded-xl bg-black/[0.045] px-3 py-2 font-mono text-[12px] leading-[17px] [overflow-wrap:normal]">
@@ -28,7 +35,7 @@ export function Rich({ text }: { text: string }) {
           <Prose key={i} text={b} />
         ),
       )}
-    </>
+    </LinkedBy.Provider>
   );
 }
 
@@ -109,7 +116,17 @@ function Prose({ text }: { text: string }) {
 /** Light inline markdown: **bold** and [links](url). */
 function Inline({ text }: { text: string }) {
   // Links open as a tab on the right; ⌘-click still opens your browser. A page a bot made opens there too.
+  // So does a file it linked: Bops fetches it from the bot's computer (or this Mac) first, as the link itself goes nowhere.
   const openLink = useContext(OpenLink);
+  const botId = useContext(LinkedBy);
+  const openFile = async (href: string, label: string, browser: boolean) => {
+    const res = await fetch("/api/files", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ botId, href }) });
+    const r = (await res.json().catch(() => ({}))) as { url?: string; error?: string };
+    if (!r.url) return window.alert(r.error ?? "Couldn't open that file.");
+    const url = new URL(r.url, window.location.href).href;
+    if (browser || !openLink) window.open(url, "_blank");
+    else openLink(url, label);
+  };
   const parts = text.split(/(\*\*[^*]+\*\*|\[[^\]]+\]\([^)\s]+\)|`[^`\n]+`)/g);
   return (
     <>
@@ -129,6 +146,11 @@ function Inline({ text }: { text: string }) {
               target="_blank"
               rel="noreferrer"
               onClick={(e) => {
+                if (botId && isFileLink(link[2])) {
+                  e.preventDefault();
+                  void openFile(link[2], link[1], e.metaKey || e.ctrlKey || e.shiftKey);
+                  return;
+                }
                 if (!openLink || e.metaKey || e.ctrlKey || e.shiftKey || !(page || /^https?:/.test(link[2]))) return;
                 e.preventDefault();
                 openLink(page ? new URL(link[2], window.location.href).href : link[2], page ? link[1] : undefined);
@@ -253,6 +275,13 @@ export function ChatView({
   const attach = useAttachments();
   const filePicker = useRef<HTMLInputElement>(null);
   const [dropping, setDropping] = useState(false);
+  // What went wrong with the mic, shown under the composer for a few seconds.
+  const [micError, setMicError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!micError) return;
+    const t = setTimeout(() => setMicError(null), 6000);
+    return () => clearTimeout(t);
+  }, [micError]);
   const attaching = attach.items.filter((a) => a.status !== "failed");
   const send = async () => {
     const text = draft.trim();
@@ -437,18 +466,6 @@ export function ChatView({
               ))}
             </div>
           )}
-          {!!state.mac?.approvals.length && (
-            <div className="mb-2.5 flex flex-col gap-2">
-              {state.mac.approvals.slice(0, 2).map((a) => (
-                <ApprovalCard key={a.id} state={state} approval={a} compact />
-              ))}
-              {state.mac.approvals.length > 2 && (
-                <button onClick={onShowMac} className="self-center text-[12.5px] font-medium text-ink hover:underline">
-                  {state.mac.approvals.length - 2} more waiting on your Mac ›
-                </button>
-              )}
-            </div>
-          )}
           {replying && (
             <div className="mx-2 -mb-px flex items-center gap-2 rounded-t-[16px] bg-[#F7F7F6] px-3.5 py-2 shadow-[0_0_0_1px_#ECECEA]">
               <ReplyArrow />
@@ -510,11 +527,21 @@ export function ChatView({
               placeholder={replying ? "Reply" : solo ? `Text ${solo.name}` : "Message the group · @ to mention"}
               className="min-w-0 flex-1 bg-transparent py-[6px] text-[14px] leading-[18px] outline-none placeholder:text-[#9A9A98]"
             />
+            <MicButton
+              botId={solo?.id}
+              onError={setMicError}
+              onText={(said) => {
+                setMicError(null);
+                setDraft((d) => (d.trim() ? `${d.trimEnd()} ${said}` : said));
+                document.getElementById("composer")?.focus();
+              }}
+            />
             <button type="submit" aria-label="Send" disabled={!draft.trim() && !attaching.length} className="flex size-[30px] shrink-0 items-center justify-center rounded-full bg-ink disabled:opacity-30">
               <SendIcon />
             </button>
             </div>
           </form>
+          {micError && <div className="px-3 pt-1.5 text-[12px] leading-4 text-[#B42318]">{micError}</div>}
         </div>
       </div>
 
@@ -878,12 +905,15 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
       >
         Show me
       </button>
-      <button
-        onClick={() => void post("/api/watches", { id: watch.id, action: "draft" }, "PATCH")}
-        className="rounded-full bg-highlighter px-3 py-1 text-[12.5px] font-semibold leading-4 shadow-[0_0_0_1px_#0000001F]"
-      >
-        Draft a reply
-      </button>
+      {/* Bots can't write in the apps on the user's Mac for now (lib/server/mac.ts), so a Mac window gets no draft. */}
+      {!watch.mac && (
+        <button
+          onClick={() => void post("/api/watches", { id: watch.id, action: "draft" }, "PATCH")}
+          className="rounded-full bg-highlighter px-3 py-1 text-[12.5px] font-semibold leading-4 shadow-[0_0_0_1px_#0000001F]"
+        >
+          Draft a reply
+        </button>
+      )}
     </div>
   );
   // Several running at once: one quiet way to stop them all, right under them.
@@ -923,6 +953,20 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             <button onClick={() => void post(`/api/sessions/${s.id}/where`, { to: "cloud" })} className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
               <CloudIcon />
               In the cloud
+            </button>
+          </div>
+        ))}
+      {/* The bot (or someone's words) suggested the Mac, but the user didn't ask: nothing moves until they say so (sessions.ts offerMove). Only while it runs (once it's over, a move would do it all again), and not while its card above offers Try on your Mac. */}
+      {chips
+        .filter((s) => s.offerMac && live(s) && s.runsOn !== "mac" && state.mac?.ready && !(needsYou(s) && (s.blocker || s.status === "failed")))
+        .map((s) => (
+          <div key={`${s.id}-move`} className="flex gap-1.5 pl-1">
+            <button onClick={() => void post(`/api/sessions/${s.id}/where`, { move: true })} className="flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white">
+              <MacIcon size={13} />
+              Move to your Mac?
+            </button>
+            <button onClick={() => void post(`/api/sessions/${s.id}/where`, { move: false })} className="rounded-full bg-white px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
+              Not now
             </button>
           </div>
         ))}
@@ -995,8 +1039,8 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
 
   if (m.role === "system")
     return (
-      <div className="flex flex-col items-center gap-1.5 self-center py-0.5">
-        <div className="flex items-center gap-1.5 rounded-full bg-[#F7F7F6] px-3 py-1 text-[12px] leading-4 text-[#6B6B6B]">{m.text}</div>
+      <div className="flex w-full flex-col items-center gap-1.5 self-center py-0.5">
+        <SystemNote text={m.text} />
         {chipList}
       </div>
     );
@@ -1014,8 +1058,14 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             {picker}
             {actionMenu}
             {balloons}
-            <div className="whitespace-pre-wrap rounded-[18px] bg-[#F2F2F0] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere]">
-              <Rich text={withoutBriefing(m.text)} />
+            <div className="flex flex-col items-start gap-1">
+              {/* Pictures the bot made (make_image). */}
+              {!!m.images?.length && <MessageImages images={m.images} align="start" />}
+              {(m.text || !m.images?.length) && (
+                <div className="whitespace-pre-wrap rounded-[18px] bg-[#F2F2F0] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere]">
+                  <Rich text={withoutBriefing(m.text)} botId={m.botId} />
+                </div>
+              )}
             </div>
           </div>
           {actions}
@@ -1113,7 +1163,8 @@ function PairSheet({ state, pairId, focusId, onClose }: { state: AppState; pairI
   }, [onClose]);
   const label = (b: Bot) => `${b.name} · ${b.isMain ? "Chief of Staff" : b.role}`;
   return (
-    <div className="absolute inset-0 z-40 flex animate-[screen-in_200ms_ease-out] flex-col bg-white">
+    // A dialog: Esc closes it before the Vault or a profile on the right (see bops-app.tsx).
+    <div role="dialog" aria-label="Chat between your bots" className="absolute inset-0 z-40 flex animate-[screen-in_200ms_ease-out] flex-col bg-white">
       <div className="flex shrink-0 justify-center px-5 pb-2 pt-4">
         <div className="flex max-w-full items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-4 shadow-[0_0_0_1px_#ECECEA]">
           {bots.map((b, i) => (
@@ -1153,7 +1204,7 @@ function PairSheet({ state, pairId, focusId, onClose }: { state: AppState; pairI
                     </span>
                   )}
                   <div className={`whitespace-pre-wrap rounded-[18px] bg-[#F2F2F0] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${m.id === focusId ? "shadow-[0_0_0_2px_#0A0A0A1F]" : ""}`}>
-                    <Rich text={m.text} />
+                    <Rich text={m.text} botId={m.botId} />
                   </div>
                 </div>
               </div>
@@ -1281,6 +1332,24 @@ function EmailCard({ m, state }: { m: Message; state: AppState }) {
   );
 }
 
+// A short note is a pill; a long one (a message sent on to a task) a card, three lines until clicked.
+function SystemNote({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  if (text.length <= 80) return <div className="flex items-center gap-1.5 rounded-full bg-[#F7F7F6] px-3 py-1 text-[12px] leading-4 text-[#6B6B6B]">{text}</div>;
+  const quoted = text.match(/^([^:“\n]{1,80}):\s*(“[\s\S]*)$/);
+  return (
+    <button
+      type="button"
+      onClick={() => setOpen((o) => !o)}
+      title={open ? undefined : "Show all"}
+      className="w-full max-w-[400px] rounded-[14px] bg-[#F7F7F6] px-3 py-2 text-left text-[12px] leading-4 text-[#6B6B6B] [overflow-wrap:anywhere] hover:bg-[#F2F2F0]"
+    >
+      {quoted && <span className="block font-medium">{quoted[1]}</span>}
+      <span className={`whitespace-pre-wrap ${quoted ? "text-[#3A3A3A]" : ""} ${open ? "block" : "line-clamp-3"}`}>{quoted ? quoted[2] : text}</span>
+    </button>
+  );
+}
+
 function MemoryNote({ m }: { m: Message }) {
   const mem = m.memory!;
   const [busy, setBusy] = useState(false);
@@ -1380,7 +1449,9 @@ function timeline(s: Session): Line[] {
       else lines.push({ kind: "steps", at: st.at, steps: [st] });
     }
   }
-  for (const r of s.replies) lines.push(r.note ? { kind: "event", at: r.at, text: r.note } : { kind: "reply", at: r.at, role: r.role, text: r.text });
+  // Passed on from outside Bops (someone's email): shown as that, not as the user's words.
+  for (const r of s.replies)
+    lines.push(r.note ? { kind: "event", at: r.at, text: r.note } : r.from ? { kind: "event", at: r.at, text: `Passed on from ${r.from}: ${r.text}` } : { kind: "reply", at: r.at, role: r.role, text: r.text });
   if (!s.replies.length && s.answer) lines.push({ kind: "reply", at: s.endedAt ?? Date.now(), role: "bot", text: s.answer });
   return lines.sort((a, b) => a.at - b.at);
 }
@@ -1422,14 +1493,14 @@ export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { st
               {s.askWhere && live(s) ? "waiting for you" : live(s) ? "working" : s.status === "done" ? "finished" : "stopped"} · {toolCount} steps
             </button>
           </div>
-          {s.runsOn !== "mac" && state.mac?.ready && (s.blocker || s.status === "failed") && (
+          {s.runsOn !== "mac" && state.mac?.ready && (s.blocker || s.status === "failed" || (s.offerMac && live(s))) && (
             <button
               onClick={() => void post(`/api/sessions/${s.id}/where`, { move: true })}
-              title="Do this on your Mac instead, where your apps and sign-ins are"
+              title="Do this on your Mac instead, on your home internet"
               className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]"
             >
               <MacIcon size={13} />
-              Try on your Mac
+              {s.offerMac && live(s) && !s.blocker ? "Move to your Mac" : "Try on your Mac"}
             </button>
           )}
           {live(s) ? (
@@ -1544,7 +1615,7 @@ export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { st
               </div>
             ) : (
               <div key={i} className="whitespace-pre-wrap text-[14px] leading-[22px] [overflow-wrap:anywhere]">
-                <Rich text={l.role === "bot" ? withoutBriefing(l.text) : l.text} />
+                <Rich text={l.role === "bot" ? withoutBriefing(l.text) : l.text} botId={l.role === "bot" ? s.botId : undefined} />
               </div>
             ),
           )}
@@ -1572,7 +1643,7 @@ export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { st
               id="thread-reply"
               value={draft}
               onChange={setDraft}
-              placeholder={live(s) ? "Reply in thread · goes in after this step" : "Reply in thread · picks it back up"}
+              placeholder={live(s) ? "Reply in thread · it sees this as it works" : "Reply in thread · picks it back up"}
               className="min-w-0 flex-1 bg-transparent py-[6px] text-[14px] leading-[18px] outline-none placeholder:text-[#9A9A98]"
             />
             <button type="submit" aria-label="Send" disabled={!draft.trim()} className="flex size-[30px] items-center justify-center rounded-full bg-ink disabled:opacity-30">

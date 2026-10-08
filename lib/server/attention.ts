@@ -1,7 +1,7 @@
 import "server-only";
 import { botChatId, MAIN_WORKSPACE, workspaceOf } from "@/lib/types";
 import { chose, decide } from "./decide";
-import { addMessage, getState, ownerName, update } from "./store";
+import { addMessage, getState, ownerName, stateReady, update } from "./store";
 
 /**
  * The user's attention, spent carefully. Each piece of news (something new on a watched screen, a
@@ -97,7 +97,7 @@ function flush() {
 }
 
 if (g.bopsDigestTimer) clearInterval(g.bopsDigestTimer);
-g.bopsDigestTimer = setInterval(flush, 60_000);
+g.bopsDigestTimer = setInterval(() => stateReady() && flush(), 60_000);
 
 /** A finished task's result: if Jev says it's worth interrupting the user for, it chimes (and notifies, if Bops is behind). */
 export function pingIfWorthIt(messageId: string, title: string, answer: string) {

@@ -1,9 +1,12 @@
-import type { CloudUser } from "./auth.ts";
+import { trackCloudEvent } from "./analytics.ts";
+import { bearer, type CloudUser } from "./auth.ts";
 import { config } from "./config.ts";
 import { welcome } from "./credit.ts";
 import { open, seal } from "./crypto.ts";
 import { ensureUserRow, query, tx } from "./db.ts";
+import { handlesOf, MAIN_WORKSPACE } from "./handles.ts";
 import { HttpError, sendJson, type Route } from "./http.ts";
+import { atSession, tierOf } from "./plans.ts";
 import type { CloudSession } from "./protocol.ts";
 import { verifyChannels } from "./verify.ts";
 
@@ -12,7 +15,8 @@ import { verifyChannels } from "./verify.ts";
  * sub-account) and answer a CloudSession (protocol.ts). Safe to call at every app
  * start: what was made is kept in bops.cloud_accounts and handed back, and the account row is locked
  * while it's being made, so two calls at once never make two of anything. A new user's first session
- * gives them Free's one-time AI credit (credit.ts), if the gate hasn't already.
+ * gives them Free's one-time AI credit (credit.ts), if the gate hasn't already. Each session also asks
+ * orgo-web for the user's plan and sets up what it brings, after answering (plans.ts atSession).
  */
 
 export type CloudAccount = {
@@ -59,7 +63,7 @@ type AccountRow = {
 };
 
 /** A provider call during setup that didn't work: which provider and how it answered (0: unreachable). */
-class ProviderError extends Error {
+export class ProviderError extends Error {
   status: number;
   constructor(provider: string, status: number, what: string) {
     super(`${provider} ${status ? `answered ${status}` : "couldn't be reached"} for ${what}`);
@@ -68,7 +72,7 @@ class ProviderError extends Error {
 }
 
 /** One JSON call to a provider with the cloud's own key. Keys and bodies are never logged, only the method, path and status. */
-async function callProvider<T>(provider: string, url: string, headers: Record<string, string>, method = "GET", body?: unknown): Promise<T> {
+export async function callProvider<T>(provider: string, url: string, headers: Record<string, string>, method = "GET", body?: unknown): Promise<T> {
   const what = `${method} ${new URL(url).pathname}`;
   let res: Response;
   try {
@@ -92,7 +96,8 @@ async function callProvider<T>(provider: string, url: string, headers: Record<st
 
 /* ---------------- AgentMail: a pod per user, and one key that reaches only that pod ---------------- */
 
-const agentmail = <T>(path: string, method?: string, body?: unknown) =>
+/** AgentMail with the cloud's own key (it reaches every pod: provision.ts makes a plan's inbox in the user's). */
+export const agentmail = <T>(path: string, method?: string, body?: unknown) =>
   callProvider<T>("AgentMail", `${config.upstream.agentmail()}${path}`, { authorization: `Bearer ${config.agentmailKey()}` }, method, body);
 
 type Pod = { pod_id?: string; client_id?: string | null };
@@ -142,7 +147,7 @@ let mailDomainSeen: { at: number; ready: boolean } | undefined;
  * can't be asked, the last answer stands (or the domain, never asked yet), so a blip doesn't put a
  * new bot on agentmail.to for good.
  */
-async function mailDomain(): Promise<string | null> {
+export async function mailDomain(): Promise<string | null> {
   const domain = config.mailDomain();
   if (!mailDomainSeen || Date.now() - mailDomainSeen.at > 5 * 60_000) {
     try {
@@ -178,7 +183,8 @@ function keptKey(sealed: string | null, userId: string) {
 
 /* ---------------- AgentPhone: a sub-account per user (and, when trunks are on, a SIP trunk to OpenAI in it) ---------------- */
 
-const agentphone = <T>(path: string, method?: string, body?: unknown, subAccount?: string) =>
+/** AgentPhone with the cloud's own key, in `subAccount` when it's given (provision.ts buys a plan's number in the user's). */
+export const agentphone = <T>(path: string, method?: string, body?: unknown, subAccount?: string) =>
   callProvider<T>(
     "AgentPhone",
     `${config.upstream.agentphone()}${path}`,
@@ -189,7 +195,7 @@ const agentphone = <T>(path: string, method?: string, body?: unknown, subAccount
 
 type SubAccount = { id?: string; name?: string };
 /** AgentPhone doesn't document its list shape: a bare array, or the array under a key. */
-const listOf = <T>(r: unknown): T[] => {
+export const listOf = <T>(r: unknown): T[] => {
   if (Array.isArray(r)) return r as T[];
   const o = (r ?? {}) as Record<string, unknown>;
   const found = [o.data, o.subAccounts, o.sub_accounts, o.items].find(Array.isArray);
@@ -261,8 +267,10 @@ async function setUp(user: CloudUser): Promise<CloudSession> {
   await ensureUserRow(user.id);
   await welcome(user.id);
   const failed: string[] = [];
-  const { row, mailKey } = await tx(async (c) => {
-    await c.query("INSERT INTO bops.cloud_accounts (user_id, email) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING", [user.id, user.email ?? null]);
+  const { row, mailKey, created } = await tx(async (c) => {
+    // A row made here is a new Bops user (usage events: bops_signup_completed).
+    const made = await c.query("INSERT INTO bops.cloud_accounts (user_id, email) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING RETURNING user_id", [user.id, user.email ?? null]);
+    const created = made.rowCount === 1;
     const row = (
       await c.query<AccountRow>(
         "SELECT user_id, email, agentmail_pod_id, agentmail_key_sealed, agentphone_sub_account FROM bops.cloud_accounts WHERE user_id = $1 FOR UPDATE",
@@ -300,22 +308,29 @@ async function setUp(user: CloudUser): Promise<CloudSession> {
        WHERE user_id = $1`,
       [user.id, user.email ?? null, row.agentmail_pod_id, row.agentmail_key_sealed, row.agentphone_sub_account],
     );
-    return { row, mailKey };
+    return { row, mailKey, created };
   });
+  if (created) trackCloudEvent(user.id, "bops_signup_completed", {}, { once: user.id, setOnce: { bops_plan: "free_bops" } });
   if (failed.length) throw new HttpError(502, `Couldn't set up your ${failed.join(" and ")} right now. Try again in a minute.`);
   const publicUrl = config.publicUrl();
+  const handles = row.agentmail_pod_id && mailKey ? await handlesOf(user.id) : {};
   return {
     userId: user.id,
     ...(user.email ? { email: user.email } : {}),
     publicUrl,
-    agentmail: row.agentmail_pod_id && mailKey ? { podId: row.agentmail_pod_id, apiKey: mailKey, domain: await mailDomain() } : null,
+    agentmail:
+      row.agentmail_pod_id && mailKey
+        ? { podId: row.agentmail_pod_id, apiKey: mailKey, domain: await mailDomain(), handle: handles[MAIN_WORKSPACE]?.handle ?? null, handles }
+        : null,
     agentphone: config.agentphoneKey() && row.agentphone_sub_account ? { subAccountId: row.agentphone_sub_account, hookUrl: publicUrl ? `${publicUrl}/hooks/agentphone` : "" } : null,
     honcho: config.honchoKey() ? { workspacePrefix: honchoPrefix(user.id) } : null,
     composio: config.composioKey() ? { userId: composioUserId(user.id) } : null,
     openai: config.openaiKey() ? { executorKey: executorKey() } : null,
     typesafe: !!config.typesafeKey(),
+    treg: !!config.tregToken(),
     verify: verifyChannels(),
     slack: slackApp(),
+    plan: { tier: await tierOf(user.id), limits: config.planLimits() },
   };
 }
 
@@ -330,6 +345,10 @@ export const routes: Route[] = [
     method: "POST",
     path: "/v1/session",
     auth: "user",
-    handle: async (_req, res, { user }) => sendJson(res, 200, await setUp(user!)),
+    handle: async (req, res, { user }) => {
+      sendJson(res, 200, await setUp(user!));
+      // The plan, asked of orgo-web with the user's own key, and what it brings set up: after the answer, never holding it up.
+      void atSession(user!.id, bearer(req)).catch((e: Error) => console.warn(`[session] ${user!.id}'s plan: ${e.message}`));
+    },
   },
 ];

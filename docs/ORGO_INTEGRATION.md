@@ -18,9 +18,10 @@ Orgo's own positioning is "provides the computer, not the agent". Bops is the ag
 | Session acts on its screen | `screenshot`, `click`, `drag`, `type`, `key`, `scroll` with `?screen=<id>` | Only these 6 honor `?screen`. `bash`, `exec` and `wait` always use `DISPLAY=:99`. |
 | Open apps on a screen | `POST /bash` with `DISPLAY=:100 nohup google-chrome --user-data-dir=/root/profiles/s100 … &` | Each screen needs its own Chrome profile (profile lock), seeded from Sam's logged-in profile. |
 | Screens survive restarts? | No. Screens are held in memory. | Run `ensureScreens()` after every start, restart and clone. |
-| Live view | `wss://www.orgo.ai/desktops/{instance_id}/ws/websockify?token={vnc_password}` (noVNC) | Default screen only. Screens 2–4 have a `ws_port` (6081+) but no public route yet; poll `GET /screenshot?screen=…&response_format=binary` until Orgo adds one. |
+| Live view | `wss://www.orgo.ai/desktops/{instance_id}/ws/websockify?token={vnc_password}` (noVNC) | Default screen. Screens 2–4 (`ws_port` 6081+): add `&screen=screen-100` (orgo-web's per-screen streams, on staging only so far; closes `4012` for a screen it can't stream, `4502`/`4503` when it can't reach the computer just then). WebRTC (`/ws/rtc`) streams the default screen only and closes `4010` on `?screen=`. Bops tries it by default alongside noVNC (`BOPS_WEBRTC=0` turns it off) and keeps it only at the screen's real size: the gateway shrinks a screen bigger than its host's `ORGO_RTC_WIDTH`x`ORGO_RTC_HEIGHT` (1280x720 unless set) before `ready`, so 1280x960 needs `ORGO_RTC_HEIGHT=960` on the host. A smaller stream ends, Bops puts the screen back (`PATCH /computers/{id}/screens/default`), and that computer stays on noVNC for a day. Bops uses `?screen=` with `BOPS_SCREEN_STREAM=1`; otherwise it polls `GET /screenshot?screen=…&response_format=binary` for those screens. |
 | Take over | Same noVNC embed with `viewOnly=false` | `vnc_password` = root on the computer (also opens the terminal and bash proxy). Fetch it server-side per session; never send it to the client bundle. It rotates on restart. `4008` close = 30-minute idle, so reconnect on user action. |
 | Activity / idle | Events WebSocket `wss://…/ws/events` | Subscribe to `window_focus`, `window_open`, `process_start`/`process_stop`, `file_change`, `clipboard`, `idle`/`active`. Server-side clients can use `Authorization: Bearer`. |
+| Free computer asleep | `status: "suspended"` (`GET /computers/{id}`), `POST /computers/{id}/resume` | Free's computer sleeps after 15 minutes without `POST /api/bops/computer/active`. Bops then reads only its status: a read of its screens can wake it, and a screenshot can come back `409 computer_asleep` (asleep, never gone). A task says it's in use as it starts; taking over resumes it. |
 | Runtime secrets | Secrets vault → `/root/.env` (`POST /computers/{id}/secrets/sync`) | Use for API keys. Template `secrets` declare names only, never values. Use the `on_resume` hook to re-read after a restore. |
 | VM-local automations | Template `triggers` (cron, file, http, process, metric, log, desktop) → actions (webhook, command, service, notify) | Good for watchdogs and "file landed" events that call back to Bops. Bot routines stay in our own scheduler because they change at runtime and templates are immutable. |
 | Size | `ram`/`cpu` on create; cap is 4 vCPU / 64 GB / 300 GB | For 4 screens, each running Chrome, use **16–32 GB / 4 vCPU**. |
@@ -37,6 +38,8 @@ Not used in Bops core:
 
 ### A. Responses API `computer` tool: always bring-your-own
 OpenAI returns `computer_call.actions[]`; we execute them against the Orgo screen and send back a screenshot (`detail: "original"`, unresized, so coordinates match). This is the **GUI path** and works today. Orgo's own guide covers it (it still names `gpt-5.6`; use `gpt-6.1-sol`).
+
+Built: `lib/server/computer-task.ts`, the default for new cloud tasks (`BOPS_COMPUTER_TOOL=0` turns it off) (with web search, a shell through Orgo's bash, and the user's apps; no browser tools or helpers). Actions run with xdotool on the screen's display, as the screen MCP's do. Benchmarked against Option B's screen MCP on the same model and tasks (2026-10-06): same success rate on 7 everyday tasks (21/21 each), about 30% faster and 45% cheaper per task.
 
 Action mapping:
 
@@ -96,7 +99,7 @@ Orgo
 
 ## 4. Orgo-side work (we own it)
 
-1. **Per-screen websockify route.** Needed for live view and Take over on screens 2–4.
+1. **Per-screen websockify route.** Needed for live view and Take over on screens 2–4. Built (`?screen=`), on staging; once orgo.ai has it, Bops' `BOPS_SCREEN_STREAM` goes on by default.
 2. **`?screen` on `bash` and `exec`.** Or set `DISPLAY` from it.
 3. **Mouse move / hover endpoint.** Plus a `drag` that accepts coordinate 0.
 4. **Screens surviving restart, or a template field to declare screens.** Removes `ensureScreens()`.

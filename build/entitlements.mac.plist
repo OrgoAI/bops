@@ -5,6 +5,8 @@
   notarization and users trust us with.
   - allow-jit: V8 (the window, and the bundled server run as node) needs JIT on Apple silicon.
   - device.audio-input: the microphone, for calls with bots (NSMicrophoneUsageDescription).
+  - automation.apple-events: with Full access on (Settings → This Mac), bots' tasks script the
+    user's apps through osascript, as Bops (NSAppleEventsUsageDescription); macOS asks per app.
   Not here on purpose: screen recording and Accessibility have no entitlement (the user grants
   them in System Settings); disable-library-validation is not needed because every binary in
   the app, the bundled orgo-relay included, is signed with the same team ID.
@@ -14,6 +16,8 @@
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
     <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.automation.apple-events</key>
     <true/>
   </dict>
 </plist>

@@ -3,6 +3,7 @@ import { CLOUD_CALLER_HEADER, type CallerVerdict } from "@/cloud/protocol";
 import { fromCloudTunnel } from "@/lib/server/cloud-tunnel";
 import { agentPhoneEvent, hookSecrets, verdictOf } from "@/lib/server/phone";
 import { phoneCallEnded, voiceResponse, voiceTurn } from "@/lib/server/phone-voice";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,8 @@ export const dynamic = "force-dynamic";
  * NDJSON with the filler first when the answer is slow.
  */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const body = await request.text();
   const tunnel = fromCloudTunnel(request);
   if (!tunnel) {

@@ -1,10 +1,13 @@
 import "server-only";
 import { createHmac } from "node:crypto";
-import type { ScreenRead, VaultLogin } from "@/lib/types";
-import { deleteSecret, getSecret, setSecret } from "./keychain";
+import { DISPLAYS, live, type ScreenRead, type VaultLogin } from "@/lib/types";
+import { deleteUserSecret, getUserSecret, setUserSecret } from "./keychain";
+import { onTab, openPages } from "./local";
+import { readScreen } from "./screen-watch";
+import { screenEndpoint } from "./screens";
 import { submitSignIn, type SignInValues } from "./sign-in";
 import { addStep } from "./sessions";
-import { bot, getState, id, update } from "./store";
+import { bot, getState, id, ownerName, session, stateUser, update } from "./store";
 
 /**
  * The vault: logins bots can sign in with. Bops keeps the site, the username and who may use it;
@@ -59,8 +62,8 @@ export async function saveLogin(input: LoginInput) {
   // Same site and username: update it rather than keeping two.
   const same = logins().find((l) => l.site === site && l.username === input.username.trim());
   const loginId = same?.id ?? id("login");
-  if (input.password) await setSecret(PASSWORD(loginId), input.password);
-  if (totp) await setSecret(TOTP(loginId), totp);
+  if (input.password) await setUserSecret(PASSWORD(loginId), input.password);
+  if (totp) await setUserSecret(TOTP(loginId), totp);
   const fields = {
     site,
     username: input.username.trim(),
@@ -77,11 +80,11 @@ export async function saveLogin(input: LoginInput) {
 export async function editLogin(loginId: string, input: Partial<LoginInput>) {
   const l = logins().find((x) => x.id === loginId);
   if (!l) throw new Error("no such login");
-  if (input.password) await setSecret(PASSWORD(loginId), input.password);
+  if (input.password) await setUserSecret(PASSWORD(loginId), input.password);
   const totp = input.totp?.replace(/\s+/g, "").toUpperCase();
   if (totp) {
     if (!/^[A-Z2-7]+=*$/.test(totp)) throw new Error("that 2FA key doesn't look right");
-    await setSecret(TOTP(loginId), totp);
+    await setUserSecret(TOTP(loginId), totp);
   }
   patchLogin(loginId, {
     ...(input.site ? { site: siteOfUrl(input.site) } : {}),
@@ -94,8 +97,8 @@ export async function editLogin(loginId: string, input: Partial<LoginInput>) {
 }
 
 export async function deleteLogin(loginId: string) {
-  await deleteSecret(PASSWORD(loginId));
-  await deleteSecret(TOTP(loginId));
+  await deleteUserSecret(PASSWORD(loginId));
+  await deleteUserSecret(TOTP(loginId));
   update((state) => (state.vault = state.vault?.filter((l) => l.id !== loginId)));
 }
 
@@ -138,9 +141,9 @@ async function walkSignIn(botId: string, display: number, loginId: string) {
   for (let step = 0; step < 3 && read?.form && read.blocker; step++) {
     const values: SignInValues = {};
     if (read.form.identifier) values.identifier = l.username;
-    if (read.form.password) values.password = (await getSecret(PASSWORD(loginId))) ?? undefined;
+    if (read.form.password) values.password = (await getUserSecret(PASSWORD(loginId))) ?? undefined;
     if (read.form.code && l.hasTotp) {
-      const key = await getSecret(TOTP(loginId));
+      const key = await getUserSecret(TOTP(loginId));
       if (key) values.code = totpCode(key);
     }
     if (!values.identifier && !values.password && !values.code) break;
@@ -165,14 +168,64 @@ export async function autoSignIn(botId: string, display: number, read: ScreenRea
   const login = loginsFor(botId, read.url).find((l) => l.auto);
   if (!login) return false;
   const key = `${botId}:${display}:${read.url}`;
-  const last = tried.get(key);
-  const n = last && Date.now() - last.at < 10 * 60_000 ? last.n : 0;
-  if (n >= 2) return false;
-  tried.set(key, { n: n + 1, at: Date.now() });
+  if (!takeTry(key)) return false;
   const { signedIn } = await signInWith(botId, display, login.id);
   // Worked: a later sign-out and sign-in on this page gets a fresh go.
   if (signedIn) tried.delete(key);
   return signedIn;
+}
+
+/** One more try at a sign-in page, unless it's had two in the last 10 minutes (a wrong password never loops). */
+function takeTry(key: string) {
+  const last = tried.get(key);
+  const n = last && Date.now() - last.at < 10 * 60_000 ? last.n : 0;
+  if (n >= 2) return false;
+  tried.set(key, { n: n + 1, at: Date.now() });
+  return true;
+}
+
+/**
+ * The bot's sign_in_from_vault (screen_mcp.py, through /api/apps/call): on one of its computer's
+ * screens, a tab whose site has a login it may use is read for its sign-in fields and signed in from
+ * the Keychain, whichever tab Bops is showing. The bot never sees the secret, only how it went.
+ */
+export async function vaultSignIn(botId: string, display: number, sessionId: string) {
+  const b = bot(botId);
+  const owner = ownerName();
+  if (!b || !(DISPLAYS as readonly number[]).includes(display)) return "There's no such screen.";
+  const s = session(sessionId);
+  if (!s || !live(s)) return "This task isn't running anymore.";
+  const ep = screenEndpoint(b, display);
+  if (!ep) return "Bops can't reach that screen right now.";
+  const pages = await openPages(ep).catch(() => []);
+  // Only logins set to sign in by themselves ("Sign in automatically"): the rest ask first, with the card,
+  // whoever asks for them, the bot included.
+  const usable = (url: string) => loginsFor(botId, url).filter((l) => l.auto);
+  // The newest tabs first (Chrome lists the last used first): that's where the bot just was.
+  const fits = pages.filter((p) => usable(p.url).length);
+  if (!fits.length) {
+    const asks = pages.filter((p) => loginsFor(botId, p.url).length).map((p) => siteOfUrl(p.url));
+    if (asks.length)
+      return `${owner}'s saved ${[...new Set(asks)].join(", ")} login is set to ask first. Stop and say in one sentence that you need to sign in: a card lets ${owner} sign you in with one tap.`;
+    return `No login in ${owner}'s vault fits a page open on that screen (${[...new Set(pages.map((p) => siteOfUrl(p.url)))].join(", ") || "none"}). Stop and say so in one sentence: ${owner} can add one in the Vault, or sign you in with the card.`;
+  }
+  const task = s.goal ?? "";
+  for (const p of fits) {
+    const done = await onTab(ep, p.id, async () => {
+      const read = await readScreen(botId, display, ep, task, sessionId, { signIn: true });
+      const login = read?.form ? usable(read.url)[0] : undefined;
+      if (!read || !login) return null;
+      // Two tries a page at most, shared with the screen watch's (autoSignIn): a wrong password never loops, or locks the account.
+      if (!takeTry(`${botId}:${display}:${read.url}`)) return { site: login.site, signedIn: false, read, busy: false };
+      return { site: login.site, ...(await signInWith(botId, display, login.id)) };
+    });
+    if (!done) continue;
+    if ("busy" in done && done.busy) return "Bops is already signing you in on that screen. Wait a few seconds, then look at it again.";
+    return done.signedIn
+      ? `Signed in to ${done.site} with ${owner}'s saved login. Look at the screen and carry on.`
+      : `Tried ${owner}'s saved ${done.site} login, but the page still needs them (a wrong password, a code Bops can't make, or a check). Stop and say in one sentence what's needed: a card lets ${owner} finish.`;
+  }
+  return `The pages on that screen with a saved login (${fits.map((p) => siteOfUrl(p.url)).join(", ")}) have no fields Bops can fill. If it's a sign-in, stop and say so: a card lets ${owner} finish.`;
 }
 
 /** Screens a sign-in is being typed into right now: one at a time, or two would type over each other. */
@@ -183,7 +236,8 @@ const pending = new Map<string, { site: string; username?: string; at: number }>
 
 /** Save what the user typed into a sign-in card, if they asked to. The values come from them, not from the page. */
 export async function rememberTyped(botId: string, display: number, url: string, values: SignInValues) {
-  const key = `${botId}:${display}`;
+  // Whose sign-in it is too: a username typed for another account on this Mac never joins this one's password.
+  const key = `${stateUser() ?? ""}:${botId}:${display}`;
   const site = siteOfUrl(url);
   const before = pending.get(key);
   const username = values.identifier?.trim() || (before && before.site === site && Date.now() - before.at < 5 * 60_000 ? before.username : undefined);

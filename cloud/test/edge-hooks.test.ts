@@ -293,6 +293,42 @@ test("a call answered in the cloud goes to the Mac when AgentPhone says it ended
   openai.state.respond = () => ({ text: "Hi there." });
 });
 
+/** A user's call seconds rows (agentphone.voice_seconds), by callId. */
+const callSeconds = async (userId: string) =>
+  (await query<{ units: number; cost: number; detail: Record<string, unknown> }>("SELECT units::float8 AS units, cost_micros::float8 AS cost, detail FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'agentphone.voice_seconds' ORDER BY id", [userId])).rows;
+
+test("every call's seconds are counted once, at AgentPhone's 13 cents a minute: the Mac's, the cloud's, and a paused number's", async () => {
+  const { userId, agentId, secret, line, mobile } = await setUp();
+  // The Mac answers this one's turns: the cloud still counts its seconds, from AgentPhone's own length when it ends.
+  const mac = await connectMac(cloud.url, userId, { answer: () => ({ status: 200, headers: { "content-type": "application/json" }, body: b64(JSON.stringify({ text: "Hi, it's Sam." })) }) });
+  const callId = `call_${randomUUID()}`;
+  const turn = voice(agentId, line.phone, mobile, callId);
+  assert.equal((await post("/hooks/agentphone", turn, agentPhoneHeaders(secret, turn))).status, 200);
+  await sleep(1_100);
+  assert.equal((await post("/hooks/agentphone", turn, agentPhoneHeaders(secret, turn))).status, 200);
+  // While it runs: the seconds since its first turn.
+  const running = await until(async () => (await callSeconds(userId)).find((r) => r.detail.ref === callId && r.units >= 1));
+  assert.equal(running.detail.botId, "sam");
+  const ended = JSON.stringify({ event: "agent.call_ended", channel: "voice", agentId, data: { callId, from: mobile, to: line.phone, durationSeconds: 75, startedAt: "2026-10-06T10:00:00Z", endedAt: "2026-10-06T10:01:15Z" } });
+  for (let i = 0; i < 2; i++) assert.equal((await post("/hooks/agentphone", ended, agentPhoneHeaders(secret, ended))).status, 200);
+  const done = await until(async () => (await callSeconds(userId)).find((r) => r.detail.ref === callId && r.units === 75));
+  assert.equal(done.cost, Math.ceil((75 * 130_000) / 60));
+  assert.equal((await callSeconds(userId)).filter((r) => r.detail.ref === callId).length, 1, "one row for the call, however often it's delivered");
+  mac.ws.close();
+
+  // A call to a paused plan number: nobody answers it but AgentPhone, which still bills it.
+  await query("UPDATE bops.phone_lines SET status = 'paused' WHERE user_id = $1", [userId]);
+  const pausedId = `call_${randomUUID()}`;
+  const pausedTurn = voice(agentId, line.phone, newNumber(), pausedId);
+  assert.deepEqual(await (await post("/hooks/agentphone", pausedTurn, agentPhoneHeaders(secret, pausedTurn))).json(), { text: "This number is paused right now. Goodbye.", hangup: true });
+  const pausedEnd = JSON.stringify({ event: "agent.call_ended", channel: "voice", agentId, data: { callId: pausedId, to: line.phone, startedAt: "2026-10-06T10:00:00Z", endedAt: "2026-10-06T10:00:06Z" } });
+  assert.equal((await post("/hooks/agentphone", pausedEnd, agentPhoneHeaders(secret, pausedEnd))).status, 200);
+  const paused = await until(async () => (await callSeconds(userId)).find((r) => r.detail.ref === pausedId));
+  assert.deepEqual([paused.units, paused.cost], [6, 13_000]);
+  // No estimated minutes on top of the seconds, for any call.
+  assert.equal((await query("SELECT 1 FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'call.minutes'", [userId])).rowCount, 0);
+});
+
 /* ---------------- OpenAI ---------------- */
 
 test("an OpenAI webhook must carry a good Standard Webhooks signature", async () => {

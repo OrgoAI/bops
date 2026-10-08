@@ -1,11 +1,17 @@
 import "server-only";
 import { execFile, execFileSync } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { chmodSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
 import { Composio } from "@composio/core";
+import { USAGE_APP_HEADER, USAGE_BOT_HEADER } from "@/cloud/protocol";
 import { live as running, type AppAccount, type AppApproval, type AppConnecting, type AppLevel, type Bot } from "@/lib/types";
+import { trackServerEvent } from "./analytics";
+import { appHeaders } from "./app-version";
 import { cloudOn, cloudProxy, cloudSession, cloudSessionNow, cloudUrl } from "./cloud";
-import { lowRisk } from "./judgment";
+import { lowRisk, movesMoney } from "./judgment";
 import { addMessage, bot, getState, id, installId, ownerName, session as threadOf, update } from "./store";
+import { DATA_TOOL_NAMES, dataOn, foundByBots, runDataTool } from "./treg";
 
 /**
  * The user's apps (Gmail, Notion, HubSpot… any of Composio's catalog) through Composio. Composio keeps
@@ -38,7 +44,8 @@ export const composioOn = () => (cloudOn() ? !!cloudSessionNow()?.composio : !!p
  */
 export const publicUrl = () => (cloudOn() ? (cloudSessionNow()?.publicUrl ?? cloudUrl()) : process.env.BOPS_PUBLIC_URL || "https://api.bops.bot").replace(/\/+$/, "");
 
-type ToolInfo = { tags: string[]; name: string; app?: string };
+/** An action: its tags (readOnlyHint…), name, app and input schema (withConsts). */
+type ToolInfo = { tags: string[]; name: string; app?: string; input?: Schema };
 /** How Composio is reached: through Bops Cloud (signed in with Orgo) or directly (self-hosted). The catalog differs. */
 type Via = "cloud" | "direct";
 type Live = {
@@ -46,6 +53,8 @@ type Live = {
   /** The key the client was made with: another sign-in makes a new one (and new bot sessions). */
   clientKey?: string;
   sessions: Map<string, { access: string; session: Awaited<ReturnType<Composio["sessions"]["use"]>> }>;
+  /** Clients that tell Bops Cloud which bot and app a run is for (cxFor), by key, bot and app. */
+  tagged?: Map<string, Composio>;
   tools: Map<string, ToolInfo>;
   waiting: Map<string, (yes: boolean) => void>;
   catalog?: { at: number; v: number; via: Via; apps: CatalogApp[] };
@@ -64,11 +73,32 @@ function cx() {
   const key = via ? via.key : (process.env.COMPOSIO_API_KEY ?? "");
   if (live.client && live.clientKey === key) return live.client;
   live.sessions.clear();
+  live.tagged?.clear();
   live.client = via
-    ? new Composio({ apiKey: via.key, baseURL: via.url, defaultHeaders: { Authorization: `Bearer ${via.key}` }, allowTracking: false })
+    ? new Composio({ apiKey: via.key, baseURL: via.url, defaultHeaders: { Authorization: `Bearer ${via.key}`, ...appHeaders() }, allowTracking: false })
     : new Composio({ apiKey: process.env.COMPOSIO_API_KEY });
   live.clientKey = key;
   return live.client;
+}
+
+/**
+ * Composio for one bot and one app (either may be unknown). Through Bops Cloud, the client says which
+ * bot and app it's for (x-bops-bot, x-bops-app) so the cloud counts each run for them, and a session
+ * it makes is that bot's; directly, the shared client.
+ */
+function cxFor(botId?: string, app?: string) {
+  const via = cloudProxy("composio");
+  if (!via || (!botId && !app)) return cx();
+  const k = `${via.key}\n${botId ?? ""}\n${app ?? ""}`;
+  live.tagged ??= new Map();
+  let c = live.tagged.get(k);
+  if (!c) {
+    if (live.tagged.size > 200) live.tagged.clear();
+    const tags = { ...(botId ? { [USAGE_BOT_HEADER]: botId } : {}), ...(app ? { [USAGE_APP_HEADER]: app } : {}) };
+    c = new Composio({ apiKey: via.key, baseURL: via.url, defaultHeaders: { Authorization: `Bearer ${via.key}`, ...tags, ...appHeaders() }, allowTracking: false });
+    live.tagged.set(k, c);
+  }
+  return c;
 }
 
 /* ---------------- The catalog ---------------- */
@@ -85,15 +115,32 @@ const short = (s?: string) => {
   return !first || first.length <= 110 ? first : `${first.slice(0, 108).replace(/[\s,;:]+\S*$/, "")}…`;
 };
 
-/** Bump when a catalog entry's shape changes, so a running server fetches it again. */
-const CATALOG_V = 3;
+/** Bump when a catalog entry's shape or what the catalog holds changes, so a running server fetches it again. */
+const CATALOG_V = 4;
 
 /**
  * An auth scheme where each person signs in with their own key or password, never through an OAuth
  * app: the only kind of sign-in setup Bops Cloud makes for an app Composio doesn't sign people in to
- * itself (OWN_KEY_SCHEME in cloud/proxy.ts).
+ * itself (OWN_KEY_SCHEME in cloud/proxy.ts). Not SAML: its setup needs the company's own keys first.
  */
-const ownKeyScheme = (scheme: string) => scheme !== "NO_AUTH" && /^(?!.*OAUTH)[A-Z][A-Z0-9_]{1,40}$/.test(scheme);
+const ownKeyScheme = (scheme: string) => scheme !== "NO_AUTH" && scheme !== "SAML" && /^(?!.*OAUTH)[A-Z][A-Z0-9_]{1,40}$/.test(scheme);
+
+/**
+ * Every toolkit Composio has, most used first. A page holds at most 1000 and Composio has more, so
+ * it's read page by page (the SDK's toolkits.get stops at the first page and drops its cursor).
+ */
+async function everyToolkit() {
+  const page = (cursor?: string) => cx().getClient().toolkits.list({ sort_by: "usage", limit: 1000, ...(cursor ? { cursor } : {}) });
+  const all: Awaited<ReturnType<typeof page>>["items"] = [];
+  let cursor: string | undefined;
+  for (let n = 0; n < 10; n++) {
+    const r = await page(cursor);
+    all.push(...r.items);
+    cursor = r.next_cursor ?? undefined;
+    if (!cursor || !r.items.length) break;
+  }
+  return all;
+}
 
 /**
  * The apps with a sign-in setup this Mac may use through Bops Cloud: its GET auth_configs lists only
@@ -125,17 +172,21 @@ export async function catalog(): Promise<CatalogApp[]> {
   if (have && Date.now() - have.at < 12 * 3600_000) return have.apps;
   if (live.loadingCatalog?.via !== via) {
     const apps = (async () => {
-      const [all, setups] = await Promise.all([cx().toolkits.get({ sortBy: "usage", limit: 1000 }), via === "cloud" ? cloudSetups() : null]);
+      const [all, setups] = await Promise.all([everyToolkit(), via === "cloud" ? cloudSetups() : null]);
       const out: CatalogApp[] = [];
+      // Usage can reorder the list between pages: an app seen on an earlier page is listed once.
+      const seen = new Set<string>();
       for (const t of all) {
-        if (t.isLocalToolkit || NOT_APPS.has(t.slug)) continue;
-        let auth: CatalogApp["auth"] = t.noAuth ? "open" : (t.authSchemes ?? []).some((a) => /OAUTH/.test(a)) ? "oauth" : "key";
+        if (t.is_local_toolkit || NOT_APPS.has(t.slug) || seen.has(t.slug)) continue;
+        seen.add(t.slug);
+        const schemes = t.auth_schemes ?? [];
+        let auth: CatalogApp["auth"] = t.no_auth ? "open" : schemes.some((a) => /OAUTH/.test(a)) ? "oauth" : "key";
         // Through the cloud, an app nobody signs people in to (Composio, or Orgo's own setup) connects only with each person's own key.
-        if (setups && auth !== "open" && !t.composioManagedAuthSchemes?.length && !setups.has(t.slug)) {
-          if (!(t.authSchemes ?? []).some(ownKeyScheme)) continue;
+        if (setups && auth !== "open" && !t.composio_managed_auth_schemes?.length && !setups.has(t.slug)) {
+          if (!schemes.some(ownKeyScheme)) continue;
           auth = "key";
         }
-        out.push({ app: t.slug, name: t.name, about: short(t.meta.description), tags: (t.meta.categories ?? []).slice(0, 2).map((c) => c.name), auth, tools: t.meta.toolsCount });
+        out.push({ app: t.slug, name: t.name, about: short(t.meta.description), tags: (t.meta.categories ?? []).slice(0, 2).map((c) => c.name), auth, tools: t.meta.tools_count });
       }
       if (cloudOn() === (via === "cloud")) live.catalog = { at: Date.now(), v: CATALOG_V, via, apps: out };
       return out;
@@ -182,12 +233,15 @@ export async function connectApp(app: string, label?: string, replaces?: string,
   if (!composioOn()) throw new Error(cloudOn() ? "Connected apps aren't available right now." : "Add COMPOSIO_API_KEY to .env.local first");
   const info = (await catalog()).find((a) => a.app === app);
   const appName = info?.name ?? (await appNameOf(app));
+  const who = getState().account?.user.id;
   if (info?.auth === "open") {
     const accountId = `open:${app}`;
+    const isNew = !getState().accounts?.some((a) => a.id === accountId);
     update((s) => {
       if (!s.accounts?.some((a) => a.id === accountId)) (s.accounts ??= []).push({ id: accountId, app, appName, status: "active", at: Date.now() });
       give(s, accountId, grant);
     });
+    if (isNew) trackServerEvent("bops_app_connected", { toolkit: app, reconnect: false });
     return { accountId };
   }
   // Afterwards the browser lands on Bops' own "connected" page, not Composio's (Bops Cloud's, signed in with Orgo).
@@ -205,6 +259,7 @@ export async function connectApp(app: string, label?: string, replaces?: string,
     .then(async (ca: { id: string }) => {
       const name = await accountName(ca.id).catch(() => undefined);
       const old = replaces ? getState().accounts?.find((a) => a.id === replaces) : undefined;
+      const isNew = !getState().accounts?.some((a) => a.id === ca.id);
       update((s) => {
         const c = s.connecting?.find((x) => x.id === waitId);
         s.connecting = (s.connecting ?? []).filter((x) => x.id !== waitId);
@@ -219,6 +274,7 @@ export async function connectApp(app: string, label?: string, replaces?: string,
           dropAccount(s, old.id);
         }
       });
+      if (isNew) trackServerEvent("bops_app_connected", { toolkit: app, reconnect: !!old }, { userId: who });
       if (old) await cx().connectedAccounts.delete(old.id).catch(() => null);
     })
     .catch((e: Error) =>
@@ -404,9 +460,9 @@ async function sessionFor(b: Bot) {
   const cached = live.sessions.get(b.id);
   if (cached?.access === key) return cached.session;
   let session;
-  if (b.composio?.access === key) session = await cx().sessions.use(b.composio.sessionId).catch(() => null);
+  if (b.composio?.access === key) session = await cxFor(b.id).sessions.use(b.composio.sessionId).catch(() => null);
   if (!session) {
-    session = await cx().sessions.create(userId(), {
+    session = await cxFor(b.id).sessions.create(userId(), {
       toolkits: { enable: [...apps.keys()] },
       tools: Object.fromEntries([...apps].map(([app, e]) => [app, e.level === "read" ? { tags: ["readOnlyHint" as const] } : { tags: { disable: ["destructiveHint" as const] } }])),
       connectedAccounts: accounts,
@@ -428,10 +484,57 @@ async function sessionFor(b: Bot) {
 async function toolInfo(slug: string) {
   const hit = live.tools.get(slug);
   if (hit) return hit;
-  const t = (await cx().tools.getRawComposioToolBySlug(slug)) as unknown as { tags?: string[]; name?: string; toolkit?: { slug?: string } };
-  const info = { tags: t.tags ?? [], name: t.name ?? slug, app: t.toolkit?.slug };
+  const t = (await cx().tools.getRawComposioToolBySlug(slug)) as unknown as { tags?: string[]; name?: string; toolkit?: { slug?: string }; inputParameters?: Schema };
+  const info = { tags: t.tags ?? [], name: t.name ?? slug, app: t.toolkit?.slug, input: t.inputParameters };
   live.tools.set(slug, info);
   return info;
+}
+
+type Schema = {
+  type?: string | string[];
+  const?: unknown;
+  required?: string[];
+  properties?: Record<string, Schema>;
+  items?: Schema;
+  oneOf?: Schema[];
+  anyOf?: Schema[];
+  $ref?: string;
+  $defs?: Record<string, Schema>;
+  definitions?: Record<string, Schema>;
+};
+
+/**
+ * An action's inputs with every field its schema pins to one value (a `const`) filled in where the bot
+ * left it out. Some actions list such a field as optional with a default, yet Composio picks which kind
+ * of input it is by it and refuses the call without it: NOTION_APPEND_TEXT_BLOCKS takes each block's
+ * `type` ("paragraph") as optional, then fails with "Unable to extract tag using discriminator 'type'".
+ * Where the schema allows one of several kinds (oneOf), the kind is the only one whose required fields
+ * the input has.
+ */
+export function withConsts(schema: Schema | undefined, value: unknown, root: Schema | undefined = schema): unknown {
+  if (!schema || value === null || typeof value !== "object") return value;
+  if (schema.$ref) {
+    const name = schema.$ref.split("/").pop() ?? "";
+    return withConsts(root?.$defs?.[name] ?? root?.definitions?.[name], value, root);
+  }
+  if (Array.isArray(value)) return schema.items ? value.map((v) => withConsts(schema.items, v, root)) : value;
+  const obj = value as Record<string, unknown>;
+  const options = (schema.oneOf ?? schema.anyOf ?? []).map((o) => (o.$ref ? (root?.$defs?.[o.$ref.split("/").pop() ?? ""] ?? root?.definitions?.[o.$ref.split("/").pop() ?? ""] ?? o) : o));
+  if (options.length) {
+    const kinds = options.filter((o) => o.properties);
+    // The one kind it names (a const it set), else the only one whose own required fields it has.
+    const named = kinds.filter((o) => Object.entries(o.properties!).some(([k, p]) => p.const !== undefined && obj[k] === p.const));
+    const fits = kinds.filter((o) => (o.required ?? []).every((k) => k in obj || o.properties![k]?.const !== undefined));
+    const kind = named.length === 1 ? named[0] : fits.length === 1 ? fits[0] : undefined;
+    return kind ? withConsts(kind, obj, root) : obj;
+  }
+  if (!schema.properties) return obj;
+  const out: Record<string, unknown> = { ...obj };
+  for (const [k, p] of Object.entries(schema.properties)) {
+    if (k in out) out[k] = withConsts(p, out[k], root);
+    else if (p.const !== undefined) out[k] = p.const;
+  }
+  return out;
 }
 
 /* ---------------- The two tools bots get ---------------- */
@@ -456,7 +559,7 @@ export const APP_TOOLS = (b: Bot) => {
     {
       type: "function" as const,
       name: "use_app",
-      description: `Run one action in ${owner}'s apps (${list}): an exact name from find_app_actions, with its inputs. Reading runs at once. Anything that sends, creates, changes or pays asks ${owner} first; Bops shows them the details.`,
+      description: `Run one action in ${owner}'s apps (${list}): an exact name from find_app_actions, with its inputs. Reading runs at once. ${b.autoApprove ? `Everything else runs at once too (${owner} set you to "Just do it"), except anything that could move money: that still asks them first.` : `Anything that sends, creates, changes or pays asks ${owner} first; Bops shows them the details.`}`,
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -530,10 +633,10 @@ export async function runAppAction(
   const where_ = account.id.startsWith("open:") ? account.appName : `${account.appName} (${accountTitle(account)})`;
   if (level === "read" && !reads) return `You can only read ${where_}. Ask ${ownerName()} for more access in the Vault if you need it.`;
   const run = async () => {
-    const res = (await cx().tools.execute(action, {
+    const res = (await cxFor(b.id, app).tools.execute(action, {
       userId: userId(),
       ...(account.id.startsWith("open:") ? {} : { connectedAccountId: account.id }),
-      arguments: args,
+      arguments: withConsts(info.input, args),
       dangerouslySkipVersionCheck: true,
     } as never)) as unknown as { data?: unknown; error?: string | null; successful?: boolean };
     return res.error || res.successful === false ? `Failed: ${res.error ?? "the app said no"}` : clip(JSON.stringify(res.data ?? {}));
@@ -543,10 +646,14 @@ export async function runAppAction(
   // Low-stakes and easy to undo, only touching the user's own things (marking read, a label, an event
   // only they attend): done without asking, and said so in the chat. Never anything that reaches
   // someone else, deletes, or costs money (Jev, strict; if it can't tell, the user is asked).
-  if (!destructive && (await lowRisk(`${info.name} in ${where_}`, describe(args)))) {
+  // A bot set to "Just do it" (Bot.autoApprove) asks only before what could move money (as its setting
+  // says), or reaches someone it found through business data (treg.ts); said in the chat the same way.
+  const what = `${info.name} in ${where_}`;
+  const autoOk = b.autoApprove && !foundByBots(JSON.stringify(args)) && !(await movesMoney(what, describe(args)));
+  if (b.autoApprove ? autoOk : !destructive && (await lowRisk(what, describe(args)))) {
     const out = await run();
     const chatId = where.chatId ?? (where.sessionId ? getState().sessions.find((x) => x.id === where.sessionId)?.chatId : undefined);
-    if (chatId && !out.startsWith("Failed")) addMessage({ chatId, role: "system", text: `${b.name}: ${info.name} in ${where_} · low risk, so didn't ask` });
+    if (chatId && !out.startsWith("Failed")) addMessage({ chatId, role: "system", text: `${b.name}: ${info.name} in ${where_} · ${b.autoApprove ? "Just do it is on, so didn't ask" : "low risk, so didn't ask"}` });
     return out;
   }
 
@@ -572,10 +679,11 @@ function describe(args: Record<string, unknown>) {
 
 /**
  * Run an action for Bops itself (not a bot's request), in one of the user's accounts: posting a bot's
- * Slack reply, listing Slack channels. Callers decide what's allowed.
+ * Slack reply, listing Slack channels. Callers decide what's allowed. Counted by Bops Cloud for the
+ * action's app (its slug's first word, "SLACKBOT_…" is slackbot) and the bot it's for, when it's for one.
  */
-export async function runAs(accountId: string, action: string, args: Record<string, unknown>) {
-  const res = (await cx().tools.execute(action, { userId: userId(), connectedAccountId: accountId, arguments: args, dangerouslySkipVersionCheck: true } as never)) as unknown as {
+export async function runAs(accountId: string, action: string, args: Record<string, unknown>, botId?: string) {
+  const res = (await cxFor(botId, action.split("_")[0].toLowerCase() || undefined).tools.execute(action, { userId: userId(), connectedAccountId: accountId, arguments: args, dangerouslySkipVersionCheck: true } as never)) as unknown as {
     data?: unknown;
     error?: string | null;
     successful?: boolean;
@@ -584,8 +692,8 @@ export async function runAs(accountId: string, action: string, args: Record<stri
   return res.data as Record<string, unknown>;
 }
 
-/** Composio's client, for the other parts of Bops that listen to apps (Slack messages for channels.ts). */
-export const composio = cx;
+/** Composio's client, for the other parts of Bops that listen to apps (Slack messages for channels.ts): for a bot and an app when they're known, so Bops Cloud counts its calls for them. */
+export const composio = (botId?: string, app?: string) => cxFor(botId, app);
 export const composioUser = userId;
 
 /* ---------------- Asking the user ---------------- */
@@ -631,22 +739,62 @@ export function bopsAddress() {
   const cli = ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "tailscale"];
   for (const c of cli) {
     try {
-      const ip = execFileSync(c, ["ip", "-4"], { timeout: 4000 }).toString().trim().split("\n")[0];
+      const ip = execFileSync(/*turbopackIgnore: true*/ c, ["ip", "-4"], { timeout: 4000 }).toString().trim().split("\n")[0];
       if (ip) return `${ip}:${process.env.PORT ?? 3210}`;
     } catch {}
   }
   return null;
 }
 
-/** A thread's app call (from screen_mcp.py on a bot computer, or apps-mcp on the Mac). It waits for the user when asked. */
+/** A thread's app call (from screen_mcp.py on a bot computer). It waits for the user when asked. */
 export async function appCall(sessionId: string, key: string, tool: string, args: Record<string, unknown>) {
   const s = threadOf(sessionId);
   const b = s && bot(s.botId);
   const want = b?.appsKey ? Buffer.from(b.appsKey) : null;
   // Only a thread that's running calls its apps: a finished one's id (seen in a process list) opens nothing.
   if (!s || !running(s) || !b || !want || want.length !== Buffer.byteLength(key) || !timingSafeEqual(want, Buffer.from(key))) return { status: 403, text: "not allowed" };
-  if (tool === "find_app_actions") return { status: 200, text: await findAppActions(b.id, String(args.query ?? "")) };
+  // Signing in on one of its computer's screens from the vault (the screen tools' sign_in_from_vault).
+  if (tool === "vault_sign_in") return { status: 200, text: await (await import("./vault")).vaultSignIn(b.id, Number(args.display), sessionId) };
+  return threadApps(b.id, sessionId, tool, args);
+}
+
+async function threadApps(botId: string, sessionId: string, tool: string, args: Record<string, unknown>) {
+  // Business data (treg.ts), when the bot has it.
+  if (DATA_TOOL_NAMES.has(tool)) {
+    const b = bot(botId);
+    return b && dataOn(b) ? { status: 200, text: await runDataTool(botId, tool, args, { sessionId }) } : { status: 403, text: "You don't have business data." };
+  }
+  if (tool === "find_app_actions") return { status: 200, text: await findAppActions(botId, String(args.query ?? "")) };
   if (tool === "use_app")
-    return { status: 200, text: await runAppAction(b.id, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId }, undefined, (args.account as string | null) ?? null) };
+    return { status: 200, text: await runAppAction(botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId }, undefined, (args.account as string | null) ?? null) };
   return { status: 404, text: `unknown tool ${tool}` };
+}
+
+/**
+ * A Mac thread's apps: a socket at `path`, in the task's own sockets folder (local.ts taskSockets),
+ * that vm/apps-mcp.mjs calls from inside the executor's sandbox, which reaches nothing else on this
+ * Mac. It answers only this thread, while it runs, so no secret goes into the task. Returns how to close it.
+ */
+export function serveApps(sessionId: string, path: string) {
+  rmSync(path, { force: true });
+  const server = createServer({ allowHalfOpen: true }, (c) => {
+    let body = "";
+    c.setEncoding("utf8");
+    c.on("data", (d) => (body += d));
+    c.on("error", () => {});
+    c.on("end", async () => {
+      let r: { status: number; text: string };
+      try {
+        const { tool, args } = JSON.parse(body) as { tool?: string; args?: Record<string, unknown> };
+        const s = threadOf(sessionId);
+        r = s && running(s) && bot(s.botId) ? await threadApps(s.botId, sessionId, tool ?? "", args ?? {}) : { status: 403, text: "not allowed" };
+      } catch (e) {
+        r = { status: 200, text: `Failed: ${(e as Error).message}` };
+      }
+      c.end(JSON.stringify({ text: r.text, ok: r.status < 400 }));
+    });
+  });
+  server.on("error", (e) => console.warn(`[apps] ${sessionId}: ${e.message}`));
+  server.listen(path, () => chmodSync(path, 0o600));
+  return () => server.close();
 }

@@ -258,7 +258,7 @@ function AccountBlock({ state, account: a, many, onSignIn }: { state: AppState; 
             value={label}
             onChange={(e) => setLabel(e.target.value)}
             onBlur={save}
-            onKeyDown={(e) => (e.key === "Enter" ? save() : e.key === "Escape" && (setLabel(a.label ?? ""), setNaming(false)))}
+            onKeyDown={(e) => (e.key === "Enter" ? save() : e.key === "Escape" && (e.preventDefault(), setLabel(a.label ?? ""), setNaming(false)))}
             placeholder="Work, Personal…"
             className="h-7 w-[150px] rounded-lg bg-white px-2 text-[12.5px] outline-none shadow-[0_0_0_1.5px_#0A0A0A]"
           />
@@ -360,8 +360,13 @@ function AppPicker({ state, start, replaces, onClose }: { state: AppState; start
   const featured = useMemo(() => (apps ? FEATURED_APPS.map((a) => apps.find((x) => x.app === a)).filter((x): x is CatalogApp => !!x) : []), [apps]);
   const list = q.trim() ? results : featured;
   const connected = new Set((state.accounts ?? []).map((a) => a.app));
+  // Esc closes the picker, and only the picker: the Vault behind it stays (it sees the dialog, and preventDefault).
   useEffect(() => {
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      onClose();
+    };
     window.addEventListener("keydown", esc);
     return () => window.removeEventListener("keydown", esc);
   }, [onClose]);
@@ -369,7 +374,13 @@ function AppPicker({ state, start, replaces, onClose }: { state: AppState; start
 
   return (
     <div onClick={onClose} className="fixed inset-0 z-50 flex items-start justify-center bg-black/10 p-6 pt-[9vh] backdrop-blur-[2px]">
-      <div onClick={(e) => e.stopPropagation()} className="flex max-h-[76vh] w-full max-w-[600px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add an app"
+        onClick={(e) => e.stopPropagation()}
+        className="flex max-h-[76vh] w-full max-w-[600px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]"
+      >
         {info ? (
           <ConnectStep state={state} app={info} replaces={replaces} onBack={start ? onClose : () => setChosen(undefined)} onDone={onClose} hasOne={connected.has(info.app)} />
         ) : (

@@ -92,6 +92,11 @@ export async function recordLine(userId: string, n: { id?: string | null; phoneN
          claimed_at = CASE WHEN phone_lines.user_id = EXCLUDED.user_id THEN phone_lines.claimed_at END,
          claimed_via = CASE WHEN phone_lines.user_id = EXCLUDED.user_id THEN phone_lines.claimed_via END,
          claim_until = CASE WHEN phone_lines.user_id = EXCLUDED.user_id THEN phone_lines.claim_until END,
+         -- A number given back (a plan's, 30 days after it ended) or now someone else's starts over as an ordinary line.
+         status = CASE WHEN phone_lines.user_id = EXCLUDED.user_id AND phone_lines.status <> 'released' THEN phone_lines.status ELSE 'ready' END,
+         plan = phone_lines.user_id = EXCLUDED.user_id AND phone_lines.status <> 'released' AND phone_lines.plan,
+         agent_id = CASE WHEN phone_lines.user_id = EXCLUDED.user_id AND phone_lines.status <> 'released' THEN phone_lines.agent_id END,
+         paused_at = CASE WHEN phone_lines.user_id = EXCLUDED.user_id AND phone_lines.status <> 'released' THEN phone_lines.paused_at END,
          updated_at = now()`,
       [digits, userId, n.id ?? null, `+1${digits}`, opts.botId ?? null, opts.workspaceId ?? null, !!opts.open, CLAIM_MINUTES],
     );

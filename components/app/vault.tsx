@@ -5,7 +5,7 @@ import type { AppState, BotId, VaultLogin } from "@/lib/types";
 import { AppsSection } from "./apps";
 import { Mascot } from "./mascot";
 import { KeyIcon } from "./screen-cards";
-import { ago, post, teamOf } from "./ui";
+import { ago, CloseButton, post, teamOf } from "./ui";
 
 /*
  * The vault: everything your bots can get into, in one place. Apps (any of Composio's catalog, several
@@ -14,7 +14,8 @@ import { ago, post, teamOf } from "./ui";
  * are filled straight into the sign-in page, so no AI ever sees them.
  */
 
-export function VaultTab({ state }: { state: AppState }) {
+/** The Vault, as a tab on the right. Its X (or Esc, see bops-app.tsx) closes it, back to where you were. */
+export function VaultTab({ state, onClose }: { state: AppState; onClose: () => void }) {
   const logins = [...(state.vault ?? [])].sort((a, b) => a.site.localeCompare(b.site));
   const [editing, setEditing] = useState<string | "new" | null>(null);
 
@@ -29,6 +30,7 @@ export function VaultTab({ state }: { state: AppState }) {
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">Vault</span>
             <span className="text-[13px] leading-[19px] text-[#6B6B6B]">Your apps and logins, and which bots can use them.</span>
           </div>
+          <CloseButton onClick={onClose} className="mt-1.5" />
         </div>
 
         <AppsSection state={state} />
@@ -164,6 +166,12 @@ function LoginForm({ state, login, onDone }: { state: AppState; login?: VaultLog
       onSubmit={(e) => {
         e.preventDefault();
         void save();
+      }}
+      // Esc cancels the form first; the next one closes the Vault (preventDefault tells it this one's taken).
+      onKeyDown={(e) => {
+        if (e.key !== "Escape") return;
+        e.preventDefault();
+        onDone();
       }}
       className="flex flex-col gap-3 rounded-2xl bg-white p-4 shadow-[0_0_0_1px_#ECECEA,0_10px_30px_-18px_#00000040]"
     >

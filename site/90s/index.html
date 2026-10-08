@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Bops! The bot team that does stuff</title>
+  <meta name="description" content="A team of AI bots that runs your business ops: inbox, pipeline, invoices, reports. Each one has its own computer, email and phone number, and remembers everything." />
+  <meta name="robots" content="noindex" />
+  <link rel="icon" href="../boppy.svg" type="image/svg+xml" />
+  <meta name="theme-color" content="#5B1FA8" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Luckiest+Guy&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css?v=6" />
+</head>
+<body>
+  <!-- The cast, drawn once: each bot is a part of the toy, wearing its headphones. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <path id="scallop" d="M200.0 176.0 L199.1 178.0 L196.6 179.9 L193.1 181.7 L189.5 183.3 L186.5 184.9 L184.7 186.5 L184.3 188.3 L185.0 190.3 L186.2 192.6 L187.1 195.0 L187.0 197.2 L185.4 199.1 L182.3 200.6 L178.0 201.6 L173.0 202.2 L168.1 202.6 L163.7 203.2 L160.4 204.1 L157.9 205.5 L156.1 207.4 L154.5 209.7 L152.5 211.9 L149.8 213.7 L146.2 214.9 L141.9 215.4 L137.1 215.1 L132.2 214.4 L127.6 213.5 L123.3 212.9 L119.4 212.8 L115.7 213.4 L111.9 214.6 L108.0 216.0 L103.8 217.4 L99.3 218.2 L94.9 218.4 L90.7 217.7 L87.0 216.2 L83.8 214.4 L80.9 212.5 L78.0 210.9 L74.8 209.8 L71.0 209.4 L66.5 209.4 L61.5 209.7 L56.4 209.7 L51.6 209.3 L47.7 208.3 L45.1 206.7 L43.6 204.6 L43.0 202.2 L42.8 199.9 L42.2 197.8 L40.7 196.1 L38.0 194.8 L34.2 193.7 L29.8 192.6 L25.4 191.4 L21.8 189.9 L19.7 188.1 L19.4 186.0 L20.6 183.8 L22.9 181.7 L25.4 179.7 L27.3 177.8 L28.0 176.0 L27.3 174.2 L25.4 172.3 L22.9 170.3 L20.6 168.2 L19.4 166.0 L19.7 163.9 L21.8 162.1 L25.4 160.6 L29.8 159.4 L34.2 158.3 L38.0 157.2 L40.7 155.9 L42.2 154.2 L42.8 152.1 L43.0 149.8 L43.6 147.4 L45.1 145.3 L47.7 143.7 L51.6 142.7 L56.4 142.3 L61.5 142.3 L66.5 142.6 L71.0 142.6 L74.8 142.2 L78.0 141.1 L80.9 139.5 L83.8 137.6 L87.0 135.8 L90.7 134.3 L94.9 133.6 L99.3 133.8 L103.8 134.6 L108.0 136.0 L111.9 137.4 L115.7 138.6 L119.4 139.2 L123.3 139.1 L127.6 138.5 L132.2 137.6 L137.1 136.9 L141.9 136.6 L146.2 137.1 L149.8 138.3 L152.5 140.1 L154.5 142.3 L156.1 144.6 L157.9 146.5 L160.4 147.9 L163.7 148.8 L168.1 149.4 L173.0 149.8 L178.0 150.4 L182.3 151.4 L185.4 152.9 L187.0 154.8 L187.1 157.0 L186.2 159.4 L185.0 161.7 L184.3 163.7 L184.7 165.5 L186.5 167.1 L189.5 168.7 L193.1 170.3 L196.6 172.1 L199.1 174.0 L200.0 176.0 Z" />
+
+      <symbol id="boppy" viewBox="-20 -40 340 378">
+        <path d="M26 150 C26 -50 274 -50 274 150" stroke="#000" stroke-width="28" stroke-linecap="round" fill="none"/>
+        <path d="M26 150 C26 -50 274 -50 274 150" stroke="#D4F53C" stroke-width="14" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="116" width="284" height="68" rx="34" fill="#C5C9D3" stroke="#000" stroke-width="8"/>
+        <circle cx="150" cy="150" r="122" fill="#C5C9D3" stroke="#000" stroke-width="8"/>
+        <circle cx="150" cy="150" r="92" fill="#0C0C10" stroke="#000" stroke-width="8"/>
+        <path d="M88 104 A78 78 0 0 1 150 72" stroke="#fff" stroke-opacity=".25" stroke-width="10" stroke-linecap="round" fill="none"/>
+        <path class="eye" d="M104 130 q15 15 30 0" stroke="#2E6BFF" stroke-width="10" stroke-linecap="round" fill="none"/>
+        <path class="eye" d="M166 130 q15 15 30 0" stroke="#2E6BFF" stroke-width="10" stroke-linecap="round" fill="none"/>
+        <path d="M130 158 q20 16 40 0" stroke="#FFE600" stroke-width="8" stroke-linecap="round" fill="none"/>
+        <path fill="#FF7A00" d="M118 200 c-6-8 6-14 10-6 c4-8 16-2 10 6 l-10 10 z"/>
+        <path fill="#FF7A00" d="M144 200 c-6-8 6-14 10-6 c4-8 16-2 10 6 l-10 10 z"/>
+        <path fill="none" stroke="#FF7A00" stroke-width="3" d="M170 200 c-6-8 6-14 10-6 c4-8 16-2 10 6 l-10 10 z"/>
+        <rect x="-8" y="92" width="50" height="116" rx="22" fill="#D4F53C" stroke="#000" stroke-width="8"/>
+        <rect x="258" y="92" width="50" height="116" rx="22" fill="#D4F53C" stroke="#000" stroke-width="8"/>
+        <rect x="4" y="112" width="12" height="76" rx="6" fill="#fff" opacity=".5"/>
+      </symbol>
+
+      <symbol id="clicky" viewBox="-14 -36 252 280">
+        <path d="M41 118 C41 -40 175 -40 175 118" stroke="#000" stroke-width="22" stroke-linecap="round" fill="none"/>
+        <path d="M41 118 C41 -40 175 -40 175 118" stroke="#D4F53C" stroke-width="11" stroke-linecap="round" fill="none"/>
+        <use href="#scallop" transform="translate(0 14)" fill="#7A3CC8" stroke="#000" stroke-width="6" stroke-linejoin="round"/>
+        <path d="M50 52 L50 186 A58 22 0 0 0 166 186 L166 52 Z" fill="#7CD82B" stroke="#000" stroke-width="6" stroke-linejoin="round"/>
+        <path d="M64 64 L64 180" stroke="#fff" stroke-opacity=".45" stroke-width="10" stroke-linecap="round"/>
+        <ellipse cx="108" cy="52" rx="58" ry="22" fill="#B8F070" stroke="#000" stroke-width="6"/>
+        <circle cx="88" cy="118" r="8"/><circle cx="128" cy="118" r="8"/>
+        <circle cx="91" cy="115" r="2.5" fill="#fff"/><circle cx="131" cy="115" r="2.5" fill="#fff"/>
+        <path d="M90 138 q18 18 36 0 z" stroke="#000" stroke-width="5" stroke-linejoin="round"/>
+        <rect x="26" y="88" width="30" height="62" rx="13" fill="#D4F53C" stroke="#000" stroke-width="6"/>
+        <rect x="160" y="88" width="30" height="62" rx="13" fill="#D4F53C" stroke="#000" stroke-width="6"/>
+      </symbol>
+
+      <symbol id="ringo" viewBox="-14 -36 252 280">
+        <path d="M39 166 C39 -60 177 -60 177 166" stroke="#000" stroke-width="22" stroke-linecap="round" fill="none"/>
+        <path d="M39 166 C39 -60 177 -60 177 166" stroke="#D4F53C" stroke-width="11" stroke-linecap="round" fill="none"/>
+        <rect x="88" y="4" width="40" height="38" rx="12" fill="#C5C9D3" stroke="#000" stroke-width="6"/>
+        <path d="M108 36 C132 76 178 128 178 170 A70 66 0 0 1 38 170 C38 128 84 76 108 36 Z" fill="#FF7A00" stroke="#000" stroke-width="6" stroke-linejoin="round"/>
+        <path d="M70 140 C74 116 86 96 98 78" stroke="#fff" stroke-opacity=".5" stroke-width="10" stroke-linecap="round" fill="none"/>
+        <g fill="#FFD27A"><circle cx="134" cy="104" r="3.5"/><circle cx="150" cy="146" r="3"/><circle cx="64" cy="204" r="3.5"/><circle cx="150" cy="206" r="3.5"/><circle cx="104" cy="226" r="3"/></g>
+        <path d="M80 160 l16 8 l-16 8 M136 160 l-16 8 l16 8" stroke="#000" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <ellipse cx="108" cy="198" rx="13" ry="11"/>
+        <ellipse cx="108" cy="202" rx="7" ry="5" fill="#FF5FA2"/>
+        <rect x="22" y="138" width="30" height="62" rx="13" fill="#D4F53C" stroke="#000" stroke-width="6"/>
+        <rect x="164" y="138" width="30" height="62" rx="13" fill="#D4F53C" stroke="#000" stroke-width="6"/>
+      </symbol>
+
+      <symbol id="mailey" viewBox="-14 -36 252 280">
+        <path d="M37 84 C37 -50 179 -50 179 84" stroke="#000" stroke-width="22" stroke-linecap="round" fill="none"/>
+        <path d="M37 84 C37 -50 179 -50 179 84" stroke="#5B1FA8" stroke-width="11" stroke-linecap="round" fill="none"/>
+        <rect x="30" y="198" width="156" height="38" rx="14" fill="#C5C9D3" stroke="#000" stroke-width="6"/>
+        <path d="M36 34 L180 34 L162 202 L54 202 Z" fill="#E4FF3A" stroke="#000" stroke-width="6" stroke-linejoin="round"/>
+        <path d="M60 50 L72 190" stroke="#fff" stroke-opacity=".6" stroke-width="10" stroke-linecap="round"/>
+        <path d="M52 150 L63.2 132 L74.4 150 L85.6 132 L96.8 150 L108 132 L119.2 150 L130.4 132 L141.6 150 L152.8 132 L164 150" stroke="#000" stroke-width="7" stroke-linejoin="round" stroke-linecap="round" fill="none"/>
+        <path d="M56 178 L66.4 160 L76.8 178 L87.2 160 L97.6 178 L108 160 L118.4 178 L128.8 160 L139.2 178 L149.6 160 L160 178" stroke="#5B1FA8" stroke-width="7" stroke-linejoin="round" stroke-linecap="round" fill="none"/>
+        <ellipse cx="108" cy="34" rx="72" ry="16" fill="#F4FF9A" stroke="#000" stroke-width="6"/>
+        <ellipse cx="108" cy="34" rx="54" ry="8" fill="#B9DB22"/>
+        <circle cx="86" cy="84" r="8"/><circle cx="89" cy="81" r="2.5" fill="#fff"/>
+        <path d="M120 86 q10 -11 20 0" stroke="#000" stroke-width="7" stroke-linecap="round" fill="none"/>
+        <path d="M90 104 q18 14 36 -2" stroke="#000" stroke-width="7" stroke-linecap="round" fill="none"/>
+        <rect x="22" y="56" width="30" height="62" rx="13" fill="#FF5FA2" stroke="#000" stroke-width="6"/>
+        <rect x="164" y="56" width="30" height="62" rx="13" fill="#FF5FA2" stroke="#000" stroke-width="6"/>
+      </symbol>
+
+      <symbol id="texty" viewBox="-14 -36 252 280">
+        <path d="M36 190 L86 208 L79 130 L136 151 L129 74 L170 90" stroke="#000" stroke-width="40" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <path d="M36 190 L86 208 L79 130 L136 151 L129 74 L170 90" stroke="#7CD82B" stroke-width="27" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <path d="M50 186 L80 197" stroke="#fff" stroke-opacity=".55" stroke-width="7" stroke-linecap="round"/>
+        <path d="M32 214 L40 192" stroke="#000" stroke-width="48" stroke-linecap="round"/>
+        <path d="M32 214 L40 192" stroke="#C5C9D3" stroke-width="36" stroke-linecap="round"/>
+        <path d="M143 72 C143 -6 209 -6 209 72" stroke="#000" stroke-width="18" stroke-linecap="round" fill="none"/>
+        <path d="M143 72 C143 -6 209 -6 209 72" stroke="#D4F53C" stroke-width="9" stroke-linecap="round" fill="none"/>
+        <circle cx="176" cy="70" r="32" fill="#7CD82B" stroke="#000" stroke-width="6"/>
+        <circle cx="165" cy="64" r="6.5"/><circle cx="188" cy="64" r="6.5"/>
+        <circle cx="167" cy="62" r="2" fill="#fff"/><circle cx="190" cy="62" r="2" fill="#fff"/>
+        <path d="M166 80 q11 12 22 0 z" stroke="#000" stroke-width="4" stroke-linejoin="round"/>
+        <rect x="130" y="50" width="24" height="44" rx="10" fill="#D4F53C" stroke="#000" stroke-width="5"/>
+        <rect x="198" y="50" width="24" height="44" rx="10" fill="#D4F53C" stroke="#000" stroke-width="5"/>
+      </symbol>
+
+      <symbol id="other-bot" viewBox="0 0 40 40">
+        <path d="M20 4c7.5 0 13.5 4.5 15.5 11 2.8 2.4 3.8 6 2.8 9.6C36.6 32.5 29.6 37 20 37S3.4 32.5 1.7 24.6C.7 21 1.7 17.4 4.5 15 6.5 8.5 12.5 4 20 4z" fill="#D9D9D6" stroke="#000" stroke-width="2"/>
+        <ellipse cx="15" cy="21" rx="2.2" ry="3" fill="#9A9A98"/><ellipse cx="25" cy="21" rx="2.2" ry="3" fill="#9A9A98"/>
+      </symbol>
+      <symbol id="apple" viewBox="0 0 24 24">
+        <path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/>
+      </symbol>
+      <symbol id="burst" viewBox="0 0 200 200">
+        <path d="M100 10 L112.9 35.3 L134.4 16.9 L136.7 45.1 L163.6 36.4 L154.9 63.3 L183.1 65.6 L164.7 87.1 L190 100 L164.7 112.9 L183.1 134.4 L154.9 136.7 L163.6 163.6 L136.7 154.9 L134.4 183.1 L112.9 164.7 L100 190 L87.1 164.7 L65.6 183.1 L63.3 154.9 L36.4 163.6 L45.1 136.7 L16.9 134.4 L35.3 112.9 L10 100 L35.3 87.1 L16.9 65.6 L45.1 63.3 L36.4 36.4 L63.3 45.1 L65.6 16.9 L87.1 35.3 Z" stroke="#000" stroke-width="6" stroke-linejoin="round"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <header class="nav wrap">
+    <a class="logo" href="#" aria-label="Bops home">
+      <svg width="46" height="51"><use href="#boppy" /></svg>
+      <span>Bops!</span>
+    </a>
+    <nav class="nav-actions">
+      <a class="nav-link" href="#pricing">Pricing</a>
+      <a class="nav-link" href="https://github.com/OrgoAI/bops" target="_blank" rel="noopener">Open source</a>
+      <a class="btn btn-sm" href="/download/Bops.dmg"><svg width="14" height="14" fill="currentColor"><use href="#apple" /></svg>Download for Mac</a>
+    </nav>
+  </header>
+
+  <main>
+    <!-- 1. Hero -->
+    <section class="hero wrap">
+      <div class="hero-copy">
+        <span class="sticker sticker-lime">Bops = business ops · run by bots</span>
+        <h1 class="mega">Bops<br />dot<br />bot!</h1>
+        <p class="lede">A team of AI bots that runs your business ops: inbox, pipeline, invoices, reports. Each one has its own computer, email and phone number, and remembers everything.</p>
+        <div class="ctas">
+          <a class="btn" href="/download/Bops.dmg"><svg width="18" height="18" fill="currentColor"><use href="#apple" /></svg>Download for Mac</a>
+          <a class="btn btn-ghost" href="#" data-todo="launch video URL"><span class="play">▶</span>Watch the launch</a>
+        </div>
+      </div>
+
+      <div class="hero-stage">
+        <svg class="confetti" viewBox="0 0 600 600" aria-hidden="true">
+          <path d="M40 90 q20 -24 40 0 t40 0 t40 0" stroke="#00B3B8" stroke-width="9" stroke-linecap="round" fill="none"/>
+          <path d="M470 520 l36 -28 l36 28 l36 -28" stroke="#FFE600" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M540 60 l30 52 l-60 0 z" fill="#FF7A00" stroke="#000" stroke-width="5" stroke-linejoin="round"/>
+          <circle cx="70" cy="470" r="13" fill="#7CD82B" stroke="#000" stroke-width="4"/>
+          <rect x="20" y="300" width="24" height="24" fill="#FF5FA2" stroke="#000" stroke-width="4" transform="rotate(20 32 312)"/>
+        </svg>
+        <svg class="hero-boppy" role="img" aria-label="Boppy"><use href="#boppy" /></svg>
+
+        <div class="burst"><svg viewBox="0 0 200 200" aria-hidden="true"><use href="#burst" fill="#FF7A00" /></svg><span><b>NEW!</b>5 bots<br />inside</span></div>
+
+        <div class="panel needs">
+          <span class="label"><i class="dot"></i>Needs you</span>
+          <b>Pay Acme's invoice: $4,800</b>
+          <div class="row-btns"><span class="mini mini-ink">Approve</span><span class="mini">Not now</span></div>
+        </div>
+
+        <div class="panel done">
+          <div class="done-head"><b>Done today!</b><span class="label">38 tasks · 5 bots</span></div>
+          <div class="done-row"><span class="av av-yellow"><svg><use href="#boppy" /></svg></span><div><b>Sent the weekly ops report</b><small>Boppy · Bop it!</small></div><time>9:02</time></div>
+          <div class="done-row"><span class="av av-teal"><svg><use href="#clicky" /></svg></span><div><b>Reconciled 42 Stripe payouts</b><small>Clicky · Click it!</small></div><time>10:14</time></div>
+          <div class="done-row"><span class="av av-green"><svg><use href="#ringo" /></svg></span><div><b>Called 6 leads, booked 2 demos</b><small>Ringo · Call it!</small></div><time>11:30</time></div>
+          <div class="done-row"><span class="av av-orange"><svg><use href="#mailey" /></svg></span><div><b>Triaged 214 emails, drafted 12</b><small>Mailey · Mail it!</small></div><time>12:05</time></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. Meet the team -->
+    <section class="band band-yellow">
+      <div class="wrap">
+        <div class="section-head">
+          <span class="sticker">Collect all 5!</span>
+          <h2 class="h2">Meet the Bops.</h2>
+          <p class="sub">Every bot is a move. Boppy runs the team, and the rest jump in when you call theirs.</p>
+        </div>
+        <div class="cast">
+          <article class="card c-yellow tilt-l">
+            <svg aria-hidden="true"><use href="#boppy" /></svg>
+            <h3>Boppy</h3><span class="move">Bop it!</span><p>The boss. Hands out jobs, keeps score.</p>
+          </article>
+          <article class="card c-teal tilt-r drop">
+            <svg aria-hidden="true"><use href="#clicky" /></svg>
+            <h3>Clicky</h3><span class="move">Click it!</span><p>Drives its own computer. Clicks, types, fills forms.</p>
+          </article>
+          <article class="card c-green tilt-l">
+            <svg aria-hidden="true"><use href="#ringo" /></svg>
+            <h3>Ringo</h3><span class="move">Call it!</span><p>Dials out, picks up, talks it through live.</p>
+          </article>
+          <article class="card c-orange tilt-r drop">
+            <svg aria-hidden="true"><use href="#mailey" /></svg>
+            <h3>Mailey</h3><span class="move">Mail it!</span><p>Reads the inbox. Drafts, replies, follows up.</p>
+          </article>
+          <article class="card c-pink tilt-l">
+            <svg aria-hidden="true"><use href="#texty" /></svg>
+            <h3>Texty</h3><span class="move">Text it!</span><p>Fires off texts. Reminders, nudges, check-ins.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. Every Bop comes with -->
+    <section class="band band-purple">
+      <div class="split wrap">
+        <div>
+          <span class="sticker sticker-lime">Every Bop comes with</span>
+          <h2 class="h2 h2-light">Hire a bot,<br />not a chatbot.</h2>
+          <ul class="features">
+            <li><span class="fi fi-teal"><svg viewBox="0 0 20 20"><rect x="2" y="3" width="16" height="11" rx="2" fill="#fff" stroke="#000" stroke-width="2"/><path d="M7 17.5h6M10 14v3.5" stroke="#000" stroke-width="2" stroke-linecap="round"/></svg></span><div><b>Its own computer</b><p>A cloud computer with 4 screens. Watch it work, or take over.</p></div></li>
+            <li><span class="fi fi-orange"><svg viewBox="0 0 20 20"><rect x="2" y="4" width="16" height="12" rx="2" fill="#fff" stroke="#000" stroke-width="2"/><path d="M3 5.5l7 5.5 7-5.5" fill="none" stroke="#000" stroke-width="2" stroke-linejoin="round"/></svg></span><div><b>Its own email</b><p>Email it a task. It emails back when it's done.</p></div></li>
+            <li><span class="fi fi-green"><svg viewBox="0 0 14 14"><path d="M3 2.2h2.6l1 2.6-1.6 1a7 7 0 003 3l1-1.6 2.6 1V11a.9.9 0 01-.9.9A9.6 9.6 0 012.1 3.1.9.9 0 013 2.2z" fill="#fff" stroke="#000" stroke-width="1.3" stroke-linejoin="round"/></svg></span><div><b>Its own phone number</b><p>Text it, iMessage it, or call and talk to it live.</p></div></li>
+            <li><span class="fi fi-pink"><svg viewBox="0 0 20 20"><path d="M5 3h10v14l-5-3.5L5 17z" fill="#fff" stroke="#000" stroke-width="2" stroke-linejoin="round"/></svg></span><div><b>A memory that sticks</b><p>It knows you, your team and your deals, on every channel.</p></div></li>
+            <li><span class="fi fi-yellow"><svg viewBox="0 0 20 20"><rect x="5.5" y="2" width="9" height="16" rx="2" fill="#fff" stroke="#000" stroke-width="2"/><path d="M9 15h2" stroke="#000" stroke-width="2" stroke-linecap="round"/></svg></span><div><b>Its own phone <span class="soon">Coming soon</span></b><p>A real phone it drives like its computer: apps, 2FA codes, everything.</p></div></li>
+          </ul>
+        </div>
+
+        <div class="id-wrap">
+          <div class="id-card">
+            <div class="id-top">
+              <span class="id-photo"><svg aria-hidden="true"><use href="#boppy" /></svg></span>
+              <div><span class="label">Bops · Staff ID 0001</span><b class="id-name">Boppy</b><span class="id-role">Chief of Staff · Acme Inc</span></div>
+            </div>
+            <dl>
+              <div><dt>Computer</dt><dd>Its own, in the cloud · 4 screens</dd></div>
+              <div><dt>Email</dt><dd>boppy@acme.bops.bot</dd></div>
+              <div><dt>Phone</dt><dd>+1 (415) 555-0142 · text or call</dd></div>
+              <div><dt>Memory</dt><dd>Knows you, your team, your deals</dd></div>
+            </dl>
+            <div class="id-foot">On the clock 24/7!</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. Bop it. Text it. Call it. -->
+    <section class="band band-teal">
+      <div class="split wrap split-rev">
+        <div class="thread">
+          <div class="panel tcard">
+            <span class="label">Text · 8:41 AM</span>
+            <div class="bubble-row me"><span class="bubble blue">did Acme pay yet?</span></div>
+            <div class="bubble-row"><span class="av av-pink"><svg><use href="#texty" /></svg></span><span class="bubble gray">Not yet. I nudged them yesterday, sending a second reminder now.</span></div>
+          </div>
+          <div class="panel tcard tilt-r">
+            <span class="label">Email · 10:12 AM</span>
+            <small>From Mailey &lt;mailey@acme.bops.bot&gt;</small>
+            <b class="t-big">Acme paid: $4,800</b>
+            <p>Cleared this morning. I logged it in Stripe and the CRM and closed the reminder thread.</p>
+          </div>
+          <div class="panel tcard call tilt-l">
+            <div class="call-head"><span class="label">Call · 4:30 PM</span><span class="label lime">3:12</span></div>
+            <div class="call-body"><span class="av av-green"><svg><use href="#ringo" /></svg></span><p>“Acme wants the Q4 renewal. I drafted it from what you told me last week.”</p></div>
+          </div>
+        </div>
+        <div>
+          <span class="sticker">It remembers you</span>
+          <h2 class="h2 shout">Bop it!<br />Text it!<br />Call it!</h2>
+          <p class="sub sub-dark">Reach your Bops however you work: the app, a text, a call or an email. Wherever you are, they know who you are, what you're working on and what they did yesterday.</p>
+          <span class="fine">Also in Slack · Telegram · Discord · WhatsApp soon</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. Ops, not brunch. -->
+    <section class="band band-pink">
+      <div class="wrap center">
+        <span class="sticker">Bops = business ops</span>
+        <h2 class="h2 h2-xl">Ops, not brunch.</h2>
+        <p class="sub center-sub">Other AI bots plan your weekend. Bops run your business. Less trip planning, more money made.</p>
+        <div class="compare">
+          <div class="col col-other">
+            <div class="col-head"><svg width="34" height="34"><use href="#other-bot" /></svg>Other bots</div>
+            <ul>
+              <li><s>Plan a weekend in Tulum</s></li>
+              <li><s>Find a brunch spot</s></li>
+              <li><s>Write a birthday poem</s></li>
+              <li><s>Summarize a podcast</s></li>
+              <li><s>Pick a playlist</s></li>
+            </ul>
+          </div>
+          <div class="col col-bops">
+            <div class="col-head"><svg width="40" height="44"><use href="#boppy" /></svg>Bops!</div>
+            <ul>
+              <li>Chase 14 overdue invoices</li>
+              <li>Update 32 deals in the CRM</li>
+              <li>Send the weekly ops report</li>
+              <li>Reconcile Stripe payouts</li>
+              <li>Book 6 sales calls</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6. Pricing: the same three plans, in the same words, as the app (lib/plan-includes.ts PLAN_CARDS) and the live page. -->
+    <section class="band band-orange" id="pricing" aria-labelledby="pricing-title">
+      <div class="wrap center">
+        <span class="sticker">Pricing</span>
+        <h2 class="h2 h2-xl" id="pricing-title">Pick a plan.</h2>
+        <p class="sub center-sub">Every plan comes with your own Bops computer. AI credit pays for what your bots do, at what it costs us.</p>
+        <div class="plans">
+          <div class="plan plan-free" data-tier="free_bops">
+            <div class="plan-head"><span class="plan-name">Free</span><span class="plan-price">$0</span></div>
+            <ul>
+              <li>$5 of AI credit, once</li>
+              <li>Your Bops computer: 10 hours a month, 4 cores, 16 GB RAM, multi-screen</li>
+              <li>As many bots as you like, sharing it</li>
+              <li class="no">No phone number or email</li>
+            </ul>
+          </div>
+          <div class="plan plan-pro" data-tier="pro_bops">
+            <div class="plan-head"><span class="plan-name">Pro</span><span class="plan-price">$20<span class="plan-per">/month</span></span></div>
+            <ul>
+              <li>$20 of AI credit every month</li>
+              <li>Your Bops computer: always on, 4 cores, 16 GB RAM, templates, multi-screen</li>
+              <li>As many bots as you like, sharing it</li>
+              <li>1 phone number and 1 email</li>
+              <li class="no">No extra computers</li>
+            </ul>
+          </div>
+          <div class="plan plan-max" data-tier="max_bops">
+            <div class="plan-head"><span class="plan-name">Max</span><span class="plan-price">$200<span class="plan-per">/month</span></span></div>
+            <ul>
+              <li>$200 of AI credit every month</li>
+              <li>Up to 3 Bops computers: always on, 4 cores, 16 GB RAM each</li>
+              <li>As many bots as you like, on any of them</li>
+              <li>Up to 5 phone numbers and 5 emails</li>
+            </ul>
+          </div>
+        </div>
+        <span class="fine plans-note">Pick or change a plan in the app, under Settings.</span>
+      </div>
+    </section>
+
+    <!-- 7. Close -->
+    <section class="band band-ink">
+      <div class="wrap center final">
+        <div class="final-cast" aria-hidden="true">
+          <svg><use href="#clicky" /></svg>
+          <svg><use href="#ringo" /></svg>
+          <svg class="final-boppy"><use href="#boppy" /></svg>
+          <svg><use href="#mailey" /></svg>
+          <svg><use href="#texty" /></svg>
+        </div>
+        <h2 class="mega mega-final">Hire your first Bop!</h2>
+        <p class="sub final-sub">Download for Mac and say hi to Boppy. It takes it from there.</p>
+        <div class="ctas ctas-center">
+          <a class="btn" href="/download/Bops.dmg"><svg width="18" height="18" fill="currentColor"><use href="#apple" /></svg>Download for Mac</a>
+          <a class="btn btn-ghost btn-ghost-dark" href="https://github.com/OrgoAI/bops" target="_blank" rel="noopener">Open source on GitHub</a>
+        </div>
+        <div class="fineprint"><span>Ages: everyone</span><span>Batteries not included. Wi-Fi is.</span><span>Each bot gets its own computer!</span></div>
+      </div>
+      <div class="checker" aria-hidden="true"></div>
+    </section>
+  </main>
+
+  <footer class="footer wrap">
+    <span>Bops by Orgo</span>
+    <nav><a href="https://www.orgo.ai/privacy">Privacy</a><a href="https://www.orgo.ai/terms">Terms</a></nav>
+  </footer>
+
+  <script src="../download.js?v=7" defer></script>
+</body>
+</html>

@@ -55,6 +55,12 @@ export function closeAll(): void {
   }
 }
 
+/** Tell the user's connected Mac something (a "state" frame: their state changed in the cloud). Best effort: false when it isn't connected. */
+export function notifyMac(userId: string, frame: CloudToMac): boolean {
+  const mac = macs.get(userId);
+  return mac ? send(mac, frame) : false;
+}
+
 /** Send a request to the user's Mac and wait for its answer; null when the Mac isn't connected or doesn't answer in time. */
 export async function requestMac(userId: string, req: MacRequest, timeoutMs: number): Promise<MacResponse | null> {
   const mac = macs.get(userId);

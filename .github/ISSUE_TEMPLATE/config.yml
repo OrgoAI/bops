@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security problem
-    url: https://github.com/nickvasilescu/bops/security/advisories/new
+    url: mailto:security@orgo.ai
     about: Please don't open a public issue for vulnerabilities.

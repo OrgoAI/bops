@@ -4,7 +4,7 @@ import { hasCredit } from "./credit.ts";
 import type { CallerVerdict, CloudCallPayload } from "./protocol.ts";
 import { loadState } from "./state.ts";
 import { queueForMac } from "./tunnel.ts";
-import { recordTokens, recordUsage } from "./usage.ts";
+import { recordTokens } from "./usage.ts";
 
 /**
  * A call's turns, answered in the cloud while the Mac is away (asleep, off, offline, or not answering
@@ -20,10 +20,11 @@ import { recordTokens, recordUsage } from "./usage.ts";
  * - Anyone else gets a friendly bot that only chats and takes a message for the person it works for:
  *   it's told nothing about them, so it can't share anything.
  * - Each turn is one OpenAI Responses call (a fast model, low reasoning, two tools: take_message and
- *   end_call, each with the words to say), its tokens counted (recordTokens, source "phone").
+ *   end_call, each with the words to say), its tokens counted for the bot (recordTokens, source "phone").
  * - A call is grouped by AgentPhone's callId and ends on a hangup, on AgentPhone's call_ended event,
  *   after 2 minutes without a turn, or at 10 minutes. Then the Mac gets it as a "call" event (kept
- *   until it's back): the transcript, any message, whether it was the owner. Its minutes are counted.
+ *   until it's back): the transcript, any message, whether it was the owner. Its seconds are counted
+ *   by /hooks/agentphone for every call, whoever answers it (hooks.ts countCallSeconds).
  *   Calls live in this process's memory: a restart mid-call loses that call's record.
  */
 
@@ -145,7 +146,7 @@ async function respond(c: VoiceCall, instructions: string): Promise<{ text: stri
   });
   if (!res.ok) throw new Error(`OpenAI answered ${res.status}`);
   const r = (await res.json()) as { id?: unknown; model?: unknown; usage?: unknown; output?: Output[] };
-  if (typeof r.id === "string") void recordTokens(c.userId, r.id, r.usage, { model: r.model, source: "phone" }).catch((e: Error) => console.warn(`[voice] usage: ${e.message}`));
+  if (typeof r.id === "string") void recordTokens(c.userId, r.id, r.usage, { model: r.model, source: "phone", botId: c.bot.id }).catch((e: Error) => console.warn(`[voice] usage: ${e.message}`));
   const out = Array.isArray(r.output) ? r.output : [];
   const text = out
     .filter((o) => o.type === "message")
@@ -253,7 +254,7 @@ export const callOpen = (userId: string, callId: string) => calls.has(keyOf(user
 
 /* ---------------- After the call ---------------- */
 
-/** The call goes to the Mac (kept until it's back), and its minutes are counted. */
+/** The call goes to the Mac (kept until it's back). Its seconds are counted by hooks.ts, for every call. */
 async function finish(c: VoiceCall) {
   if (c.ended) return;
   c.ended = true;
@@ -276,6 +277,4 @@ async function finish(c: VoiceCall) {
   };
   const warn = (what: string) => (e: Error) => console.warn(`[voice] ${c.userId} call ${c.callId}: ${what}: ${e.message}`);
   await queueForMac(c.userId, "call", payload, `call:${c.callId}`).catch(warn("couldn't keep the call for the Mac"));
-  const minutes = Math.round(((endedAt - c.startedAt) / 60_000) * 100) / 100;
-  await recordUsage(c.userId, "call.minutes", minutes, { botId: c.bot.id, callId: c.callId, answeredBy: "cloud", owner: c.owner }).catch(warn("couldn't count the minutes"));
 }

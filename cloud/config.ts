@@ -3,6 +3,8 @@
  * into it). Read when used, not at import, so tests can set them per case.
  */
 
+import { POSTHOG_HOST } from "./analytics-rules.ts";
+
 const env = (name: string) => process.env[name]?.trim() || "";
 
 export const config = {
@@ -47,6 +49,12 @@ export const config = {
   slackAppId: () => env("BOPS_SLACK_APP_ID"),
   slackSigningSecret: () => env("BOPS_SLACK_SIGNING_SECRET"),
   typesafeKey: () => env("TYPESAFE_API_KEY"),
+  /**
+   * treg (treg.to): business data for bots (companies, people, work emails, signals, places, and the
+   * rest of its catalog) through /proxy/treg. An org-scoped token of Orgo's treg team; every call is
+   * tagged with the user it's for (X-Treg-Meta) and paid from their AI credit at what treg charged.
+   */
+  tregToken: () => env("TREG_TOKEN"),
   twilio: () => ({
     accountSid: env("TWILIO_ACCOUNT_SID"),
     serviceSid: env("TWILIO_VERIFY_SERVICE_SID"),
@@ -61,6 +69,25 @@ export const config = {
    * BOPS_AI_CREDITS=1 (Orgo's cloud): a self-hosted or local cloud meters but never charges.
    */
   aiCredits: () => env("BOPS_AI_CREDITS") === "1",
+  /**
+   * Usage events to Orgo's PostHog (analytics.ts, README "Usage events"): off unless BOPS_TELEMETRY=1
+   * (Orgo's cloud), so a self-hosted or local cloud sends nothing.
+   */
+  telemetry: () => env("BOPS_TELEMETRY") === "1",
+  /**
+   * The secret orgo-web signs its plan notices with (POST /v1/internal/plan-changed, plans.ts): the
+   * same BOPS_CLOUD_PLAN_SECRET on both sides, 32+ random bytes. Unset: the route answers 404.
+   */
+  planSecret: () => env("BOPS_CLOUD_PLAN_SECRET"),
+  /**
+   * What a plan includes (BOPS_PLAN_LIMITS=1): phone numbers and emails as BOPS_TIERS says (Free
+   * none, Pro 1, Max up to 5), so a purchase past the plan's is refused (proxy.ts) and the app makes
+   * no inbox past it. Off (the default): anyone may, as before plans. Paid plans get their main bot's
+   * number and inbox either way.
+   */
+  planLimits: () => env("BOPS_PLAN_LIMITS") === "1",
+  /** The area code a plan's number is bought in (AgentPhone picks a nearby one when there's none), as the app's BOPS_PHONE_AREA. */
+  phoneArea: () => env("BOPS_PHONE_AREA") || "415",
 
   /** Upstreams, overridable for tests (a fake server on localhost). */
   upstream: {
@@ -70,6 +97,9 @@ export const config = {
     honcho: () => env("BOPS_UPSTREAM_HONCHO") || "https://api.honcho.dev",
     composio: () => env("BOPS_UPSTREAM_COMPOSIO") || "https://backend.composio.dev",
     typesafe: () => env("BOPS_UPSTREAM_TYPESAFE") || "https://api.typesafe.ai",
+    treg: () => env("BOPS_UPSTREAM_TREG") || "https://treg.to",
     twilioVerify: () => env("BOPS_UPSTREAM_TWILIO_VERIFY") || "https://verify.twilio.com",
+    /** Where usage events go (analytics.ts): Orgo's PostHog, or a fake one in tests. */
+    posthog: () => env("BOPS_UPSTREAM_POSTHOG") || POSTHOG_HOST,
   },
 };

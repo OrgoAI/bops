@@ -29,15 +29,29 @@ export type Bot = {
    */
   freeComputer?: boolean;
   computerStatus: "none" | "cloning" | "ready" | "error";
+  /** Its computer, asleep, couldn't be woken when the user last took control, and why (cleared when a takeover wakes it). */
+  wakeFailed?: { why: string; at: number };
   /** How to reach the bot, shown on its Details card. Empty until its phone and inbox exist. */
   phone?: string;
   email?: string;
-  /** Its AgentPhone line (lib/server/phone.ts): the number, and the AgentPhone agent it's attached to. */
-  phoneLine?: { numberId: string; agentId: string };
+  /**
+   * Its AgentPhone line (lib/server/phone.ts): the number, and the AgentPhone agent it's attached to.
+   * `plan`: it came with the user's Pro or Max plan (Bops Cloud set it up, lib/server/cloud-plan.ts);
+   * `paused`: that plan ended, so calls and texts to it go unanswered until the user upgrades again.
+   */
+  phoneLine?: { numberId: string; agentId: string; plan?: boolean; paused?: boolean };
   /** The voice it speaks in on calls (voiceFor in lib/server/call.ts), kept so Bops Cloud answers its calls in the same one while the Mac is away. */
   voice?: string;
-  /** Its AgentMail inbox (lib/server/mail.ts): the current one, and older ones (mail to them still arrives). */
-  mail?: { inboxId: string; podId: string; past?: string[]; seenAt?: number };
+  /**
+   * Its AgentMail inbox (lib/server/mail.ts): the current one, and older ones (mail to them still
+   * arrives). `plan` and `paused` as for phoneLine: a paused inbox's mail isn't read or answered.
+   */
+  mail?: { inboxId: string; podId: string; past?: string[]; seenAt?: number; plan?: boolean; paused?: boolean };
+  /**
+   * The user asked for this bot's email (Get an email, on Max): with Bops Cloud's plan limits on, a bot
+   * besides the plan's main bot gets an inbox only then, while the plan has room (lib/server/mail.ts).
+   */
+  mailWanted?: boolean;
   /** Your app accounts this bot may use (by AppAccount id), and how much it may do in each. */
   access?: Record<string, AppLevel>;
   /** This bot's Composio session (its allowed apps and actions), and the access it was made for. */
@@ -50,6 +64,16 @@ export type Bot = {
   effort?: Effort;
   /** Where this bot's tasks run: decided per task (auto), always its cloud computer, or always the user's Mac. */
   runsOn?: "auto" | "cloud" | "mac";
+  /**
+   * "Just do it": it sends, posts, changes and deletes in the user's apps and email without waiting for
+   * their OK (said in its chat after), and its tasks don't stop to confirm. Paying on a website still asks. Off by default.
+   */
+  autoApprove?: boolean;
+  /**
+   * Business data (lib/server/treg.ts: companies, people, work emails, signals, places) is off for this
+   * bot. On for every bot unless the user turns it off, whenever treg is set up.
+   */
+  dataOff?: boolean;
   /** The workspace (team) it belongs to. Unset means the first one. */
   workspaceId?: string;
 };
@@ -61,8 +85,23 @@ export type Workspace = {
   createdAt: number;
   /** Where its memory lives (lib/server/memory.ts): unset is its own bank; set when it shares another workspace's. */
   memory?: { bank: string; peer: string };
-  /** Its part of every bot's email address (sam@<slug>.bops.bot), unique across every Bops install. */
+  /**
+   * Its part of every bot's email address (sam@<slug>.bops.bot), unique across every Bops install.
+   * On Bops Cloud it's the handle the workspace claimed there (`mailClaimed`; cloud/handles.ts):
+   * one from before handles is kept for the bots that have it, and new bots get the claimed one.
+   */
   mailSlug?: string;
+  /** `mailSlug` is this workspace's handle in Bops Cloud (bops.mail_handles), claimed once across every user. */
+  mailClaimed?: boolean;
+  /**
+   * The "Pick your Bops address" step (components/app/mail-address.tsx): waiting for the user to pick
+   * the workspace's handle before its first inbox (`offer` unset), or offering to change one Bops
+   * picked for them (`offer`: they chose later, or a plan set it up while the Mac was closed).
+   * Unset once they've picked, kept it, or chosen later.
+   */
+  mailPick?: { at: number; offer?: boolean };
+  /** The handle just changed: the workspace's bots move to it (their old addresses still get mail). */
+  mailMove?: boolean;
   /**
    * The workspace's phone number (lib/server/phone.ts): people text its main bot there, and the main
    * bot hands work to the others. `previous` is the AgentPhone agent the number came from, for rollback.
@@ -162,6 +201,8 @@ export type Message = {
   phone?: { apId?: string; conversationId?: string; from?: string };
   /** A text someone else sent the bot's number (in), or the bot sent (out). */
   sms?: { dir: "in" | "out"; from: string; to: string; id?: string };
+  /** Set on the note an app action leaves when the user answered its approval: what the app answered, so the bot sees whether it worked. */
+  appResult?: { action: string; ok: boolean; output: string };
   /** Set on a heads-up from a watched screen: which watch, so the message can offer to show it or reply. */
   watch?: { id: string };
   /** An inline reply (like iMessage's): the message it starts from. Replies to a reply join the same one. */
@@ -178,6 +219,8 @@ export type Message = {
   emailed?: string;
   /** Images attached to it (shown from /api/uploads/<id>; bots see them too). */
   images?: { id: string; type: string; w?: number; h?: number }[];
+  /** A picture the bot made (make_image): what it was asked to show, so it knows what it sent. */
+  picture?: { prompt: string };
   /**
    * Teammates the bot asked before replying (Max asked Sam): "Asked ● Sam" over the reply opens
    * their conversation (`pairChatId`) at that exchange (`questionId`).
@@ -224,6 +267,12 @@ export type ThreadReply = {
   delivered?: boolean;
   /** Set on messages the app sends the bot for the user (like handing a screen back): shown as this quiet line, not as their words. */
   note?: string;
+  /**
+   * Passed on by the bot from outside Bops, on a turn someone else started ("an email from
+   * desk@hotel.example"): the task gets it as information from them, not as the user's words, and the
+   * thread shows who it came from.
+   */
+  from?: string;
 };
 
 /** A session is a long-running task on one screen of a bot's computer, shown as a thread. */
@@ -240,6 +289,14 @@ export type Session = {
   dismissed?: boolean;
   /** A newer thread took over this job (moved to the Mac, or asked for again); this one stays quiet. */
   replacedBy?: string;
+  /** On the Mac: the cloud thread it carries on from (sessions.ts moveToMac). It starts once that one's run has ended, with its record. */
+  movedFrom?: string;
+  /**
+   * A cloud thread that could carry on on the user's Mac, by the bot's say or someone's words, though the
+   * user didn't ask: the app offers "Move to your Mac?" while it runs, and nothing moves until they tap it.
+   * Cleared when its run ends (a tap then would do the whole task again on the Mac).
+   */
+  offerMac?: boolean;
   id: string;
   botId: BotId;
   /** The chat it was started from; its chip lives there. */
@@ -257,8 +314,20 @@ export type Session = {
   /** The screen it last held, so a finished session can still show where it left off. */
   lastDisplay?: number;
   agentSessionId?: string;
-  /** The Agents API environment its executor connects to, kept so a finished thread can pick up again. */
-  env?: { id: string; remoteUrl: string };
+  /** "computer": it runs on the Responses API's computer tool (lib/server/computer-task.ts), not an Agents API session. */
+  runner?: "computer";
+  /** On the computer runner: the last response, which the next turn follows on from. */
+  responseId?: string;
+  /**
+   * On the computer runner: calls in that response not answered yet (a turn stopped mid-step, or a step OpenAI
+   * flagged), answered when it picks up: a tool call with what it answered when it ran, a flagged step's call with its safety checks.
+   */
+  owed?: { id: string; type: "computer" | "function"; output?: string; checks?: { id: string; code?: string | null; message?: string | null }[] }[];
+  /**
+   * The Agents API environment its executor connects to, and the workspace (and Full access on this Mac, MacState.fullAccess, its browser tools' sockets folder, and whether it had the user's apps there; on a computer, the screen its browser tools drive) it was made with, kept so a finished thread can pick up again.
+   * `ui`: it had the Mac tools (Cua Driver), through Bops' own MCP server ("bops"; true was Cua's own, which a thread doesn't pick up again).
+   */
+  env?: { id: string; remoteUrl: string; workspace?: string; fullAccess?: boolean; sockets?: string; apps?: boolean; data?: boolean; ui?: boolean | "bops"; display?: number };
   steps: SessionStep[];
   replies: ThreadReply[];
   answer?: string;
@@ -276,7 +345,7 @@ export type Session = {
   helperOrder?: number[];
   /** Set on a thread started from a watched screen: it runs on that screen, on that site. */
   onWatch?: string;
-  /** Where it runs: the bot's cloud computer (also when unset, as older threads are), or the user's own Mac (through Codex). */
+  /** Where it runs: the bot's cloud computer (also when unset, as older threads are), or a Chrome of its own on the user's Mac. */
   runsOn?: "cloud" | "mac";
   /** Bops is still deciding where it runs. */
   routing?: boolean;
@@ -286,9 +355,8 @@ export type Session = {
   thenOnMac?: string;
   /** On the Mac: the apps it has used, most recent last (for the live window previews). */
   macApps?: string[];
-  /** On the Mac: the Codex thread it runs in, and its current turn (to stop it). */
-  codexThread?: string;
-  codexTurn?: string;
+  /** On the Mac: which of its bot's Chromes there it uses, or last used (0 to 2; lib/server/local.ts macTaskPort). */
+  macScreen?: number;
   /** What the bot is doing right now, in a word or two ("searching", "filling a form"), for its cursor caption. */
   activity?: string;
   /** Jev's read of the last answer: is the bot waiting on the user to answer, decide or act? */
@@ -325,8 +393,11 @@ export type Routine = {
   textTo?: { botId: string; to: string };
 };
 
-/** You've taken control of a bot's screen; the bot is paused there until you hand it back. */
-export type Takeover = { botId: BotId; display: number; sessionId?: string; since: number };
+/**
+ * You've taken control of a bot's screen (`display`), or of the Chrome a task of the bot's has of its
+ * own on your Mac (`macScreen`, Session.macScreen); the bot is paused there until you hand it back.
+ */
+export type Takeover = { botId: BotId; sessionId?: string; since: number } & ({ display: number; macScreen?: undefined } | { macScreen: number; display?: undefined });
 
 export type Blocker = "sign_in" | "two_factor" | "captcha" | "payment" | "error";
 export const BLOCKER_LABEL: Record<Blocker, string> = {
@@ -368,6 +439,8 @@ export type ScreenRead = {
   email?: { to?: FormField; subject?: FormField; body?: FormField; send?: { id: string; text: string } };
   /** The thread that hit this screen, so getting past it can pick that thread back up. */
   sessionId?: string;
+  /** The tab it was read from (lib/server/local.ts pageText): a sign-in fills that tab, never whichever is on screen by then. */
+  targetId?: string;
 };
 
 /** The person this install of Bops works for: what the bots call them, and what they should know about them (Settings → You). */
@@ -389,7 +462,7 @@ export type AppState = {
   watches?: Watch[];
   /** Logins bots can sign in with. Only what's safe to show is here; secrets live in the Keychain. */
   vault?: VaultLogin[];
-  /** The user's own Mac, where bots can work through Codex's computer use. */
+  /** The user's own Mac, where bots can work in a Chrome of their own. */
   mac?: MacState;
   /** The user's real app accounts, connected through Composio (lib/server/composio.ts). Several per app is fine. */
   accounts?: AppAccount[];
@@ -436,6 +509,11 @@ export type AppState = {
   /** The Orgo account signed in to this Bops (a Bops user is an Orgo user). The key is in the Keychain. */
   account?: { user: { id: string; email?: string; name?: string }; signedInAt: number };
   /**
+   * Settings → You → Share usage data turned off: no usage events from this account, from any Mac or
+   * from Bops Cloud (which reads it here). Unset: on (README, Privacy).
+   */
+  analyticsOff?: boolean;
+  /**
    * The user's AI credit ran out: Bops Cloud refused a call that would spend it (402 ai_credit_empty).
    * The bots stop asking the cloud for AI work and the chat shows it with Upgrade, until a read of
    * the plan (GET /api/plan, /api/account) shows credit again. Unset otherwise.
@@ -445,7 +523,9 @@ export type AppState = {
   usage?: UsageEvent[];
   /** The Orgo user whose account the bots' computers are in (lib/server/orgo-sign-in.ts adoptComputers). */
   computersOf?: string;
-  /** When the user finished (or skipped parts of) the setup screen; skipped holds its items ("screen", "relay"…). */
+  /**
+   * When the user finished (or skipped parts of) the setup screen; skipped holds its items ("screen", "relay"…).
+   */
   setup?: { doneAt?: number; skipped?: string[] };
   /**
    * Routing the bots' computers through this Mac (lib/server/relay.ts). The pairing code is in the
@@ -455,8 +535,20 @@ export type AppState = {
   relay?: { deviceId?: string; deviceName?: string; on: boolean; turnedOff?: boolean };
   /** Per computer routed through this Mac: how its route was before, to put back when routing stops. */
   relayRoutes?: Record<string, RelayRoute>;
-  /** The Orgo user this state is backed up for on Bops Cloud, once this Mac has checked the cloud for them (lib/server/cloud-state.ts). */
-  cloudUser?: string;
+  /**
+   * What's each of the user's other Macs' own (routing through it, whether bots can work on it, its setup), by device
+   * id, as Bops Cloud keeps the state (lib/server/state-merge.ts). This Mac's own is at the top level
+   * (relay, relayRoutes, mac, setup) and goes up under its id.
+   */
+  macs?: Record<string, { relay?: AppState["relay"]; relayRoutes?: AppState["relayRoutes"]; mac?: MacState; setup?: AppState["setup"] }>;
+  /**
+   * Whether the computers' other screens stream live through Orgo too, not only over the tailnet
+   * (BOPS_SCREEN_STREAM=1, screenStreamWanted in lib/server/orgo.ts). Filled in by /api/state for the
+   * app; never stored.
+   */
+  screenStream?: boolean;
+  /** Whether business data (treg) is there for the bots: lib/server/treg.ts tregOn. Filled in by /api/state for the app; never stored. */
+  businessData?: boolean;
 };
 
 /**
@@ -485,7 +577,10 @@ export type UsageEvent = {
   at: number;
   botId?: string;
   qty?: number;
-  /** For model.tokens: which model, and whether it was chat, an agent run, memory or a call. */
+  /**
+   * For model.tokens: which model, and what it was for: chat, a task (on a bot's computer or the
+   * user's Mac), memory, a call, or a quick check (Jev).
+   */
   model?: string;
   source?: "chat" | "session" | "memory" | "call" | "decide";
   /** For model.tokens: input and output split, when known. */
@@ -493,29 +588,27 @@ export type UsageEvent = {
   outputTokens?: number;
 };
 
-/** The user's Mac as a place bots can work: whether Codex is ready, what's waiting on their OK, and their rules. */
+/** The user's Mac as a place bots can work: whether it's ready, and the words that send a task there. */
 export type MacState = {
-  /** Codex is installed, signed in with ChatGPT, and has computer use. */
+  /** Bots can work here: the Codex CLI that runs their tools is installed, and Chrome is. */
   ready: boolean;
   /** Why not, in plain words, when it isn't. */
   reason?: string;
   /**
-   * The one thing it waits on when it isn't ready (lib/server/codex.ts checkMac): the Codex CLI
-   * (Bops installs it by itself; `installing` while it does), signing in to Codex, or Codex's
-   * Computer Use. "elsewhere": this server isn't on the user's Mac, so there's nothing to do here.
+   * The one thing it waits on when it isn't ready (lib/server/mac.ts checkMac): the Codex CLI (Bops
+   * installs it by itself; `installing` while it does), or Chrome. "elsewhere": this server isn't on
+   * the user's Mac, so there's nothing to do here.
    */
-  next?: "codex" | "sign-in" | "computer-use" | "elsewhere";
+  next?: "codex" | "chrome" | "elsewhere";
   installing?: boolean;
-  /** A Codex sign-in is open in the browser, waiting for the user. */
-  signingIn?: boolean;
-  plan?: string;
   checkedAt?: number;
-  /** Requests waiting for the user ("Sam wants to use Calculator on your Mac"). */
-  approvals: MacApproval[];
-  /** Apps the user said bots may always use on their Mac. */
-  alwaysApps: string[];
   /** Words that mean a task belongs on the Mac (apps like Messages or Notes, "my desktop"…). */
   rules: string[];
+  /**
+   * Full access: bots' tasks here run outside Bops' sandbox (lib/server/executor-sandbox.ts), as the
+   * user, with a shell, their files and their apps, and every browser tool. Off by default.
+   */
+  fullAccess?: boolean;
 };
 
 /**
@@ -612,18 +705,6 @@ export type ChannelPlace = { linkId: string; chat: string; messageId?: string; t
 /** A bot asks before an app action that changes something: the user sees what it is and says yes or no. */
 export type AppApproval = { id: string; botId: string; chatId?: string; sessionId?: string; app: string; action: string; title: string; detail: string; at: number };
 
-export type MacApproval = {
-  id: string;
-  sessionId?: string;
-  botId?: string;
-  /** The app it's about, when it's computer use. */
-  app?: string;
-  /** What's being asked, as Codex put it. */
-  message: string;
-  kind: "app" | "command" | "other";
-  at: number;
-};
-
 /**
  * A saved login. The password and 2FA setup key are in the Mac's Keychain (lib/server/keychain.ts);
  * Bops fills them straight into the sign-in page, so no model ever sees them.
@@ -681,6 +762,55 @@ export type Watch = {
 export const MAX_SCREENS = 4;
 /** Created screens first; the boot screen (with Orgo's own desktop) last. */
 export const DISPLAYS = [100, 101, 102, 99];
+
+/**
+ * The screen Orgo streams by default: its WebRTC video reaches the boot screen only, and so does its
+ * VNC proxy unless asked for another screen by ?screen= (app/api/vnc), which Bops does only with
+ * BOPS_SCREEN_STREAM=1 for now. Otherwise the other screens stream live only over the tailnet
+ * (TAILSCALE_AUTH_KEY, a developer's setup), and the app shows them as screenshots.
+ */
+export const ORGO_STREAM_DISPLAY = 99;
+
+/**
+ * Whether a screen of an Orgo computer can be shown live: Orgo's own screen, any over the tailnet, and
+ * any through Orgo when it streams the other screens too (`screenStream`, see AppState).
+ */
+export const streamsLive = (c: { tailnet?: unknown }, display: number, screenStream = false) => display === ORGO_STREAM_DISPLAY || !!c.tailnet || screenStream;
+
+/**
+ * Whether an Orgo computer's screens are read (their list, a screenshot): only while it's running, or
+ * before Orgo has said otherwise. A read of a suspended computer's screens can wake it (orgo-web woke it
+ * for every one), so a view that kept looking kept Free's computer from ever sleeping.
+ */
+export const computerUp = (status: string | undefined) => status === undefined || status === "running";
+
+/**
+ * An Orgo computer that's asleep (orgo-web's status "suspended"): Free's computer after 15 minutes nobody
+ * used it (orgo-web lib/bops-free-hours.ts), or once its 10 hours this month are used. The app shows it
+ * asleep and leaves it be; a task wakes it, and so does the user taking over.
+ */
+export const computerAsleep = (status: string | undefined) => status === "suspended";
+
+/**
+ * Something is using a computer in the cloud right now: a task working there (starting or running, not
+ * one on the user's Mac), or the user driving one of its screens. `onIt`: whether a bot works on it.
+ */
+export const computerInUse = (state: Pick<AppState, "sessions" | "takeover">, onIt: (botId: BotId) => boolean) =>
+  state.sessions.some((s) => onIt(s.botId) && s.runsOn !== "mac" && (s.status === "starting" || s.status === "running")) ||
+  (state.takeover?.display !== undefined && onIt(state.takeover.botId));
+
+/**
+ * How long the app waits to read a computer's status again (its computer view), or null for not while
+ * the window is hidden: every 8 seconds, as before, unless it's asleep; then every 2 while a task or the
+ * user is waking it, and every minute with nothing using it (a read of its status never wakes it, and
+ * it can wake without the app: a reset, a Resume on orgo.ai). The view reads it once more when the
+ * window shows again, and as soon as something starts using it.
+ */
+export function computerCheckMs(status: string | undefined, { visible, inUse }: { visible: boolean; inUse: boolean }): number | null {
+  if (!visible) return null;
+  if (!computerAsleep(status)) return 8000;
+  return inUse ? 2000 : 60_000;
+}
 
 /** The chat id for talking to one bot directly. */
 export const botChatId = (botId: BotId) => `bot:${botId}`;

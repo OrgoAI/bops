@@ -1,5 +1,6 @@
 import { onPostgres } from "@/lib/server/persist";
 import { checkOwnerPhone, phoneStatus } from "@/lib/server/phone";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +17,8 @@ const allowed = (request: Request) => !onPostgres() && ["localhost", "127.0.0.1"
  * new code), plus the phone settings.
  */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   if (!allowed(request)) return Response.json({ ok: false, error: "Adding a number only works in the app on your Mac for now." }, { status: 403 });
   const { number, code } = (await request.json().catch(() => ({}))) as { number?: unknown; code?: unknown };
   if (typeof number !== "string" || typeof code !== "string") return Response.json({ ok: false, error: "Enter the code from the text." }, { status: 400 });

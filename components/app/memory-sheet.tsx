@@ -46,10 +46,26 @@ export function MemorySheet({ state, onClose }: { state: AppState; onClose: () =
     };
   }, [ws, tick]);
   const reload = useCallback(() => setTick((t) => t + 1), []);
+  // Esc closes the sheet, and only the sheet: the profile behind it stays (it sees the dialog, and preventDefault).
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
 
   return (
     <div onClick={onClose} className="fixed inset-0 z-50 flex items-start justify-center bg-black/10 p-6 backdrop-blur-[2px]">
-      <div onClick={(e) => e.stopPropagation()} className="relative flex max-h-full w-full max-w-[560px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Memory"
+        onClick={(e) => e.stopPropagation()}
+        className="relative flex max-h-full w-full max-w-[560px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]"
+      >
         <button onClick={onClose} aria-label="Close" className="absolute right-3 top-3 z-10 flex size-8 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0]">
           <svg width="11" height="11" viewBox="0 0 12 12">
             <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />

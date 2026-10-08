@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 import * as calls from "../calls.ts";
-import { closeDb } from "../db.ts";
-import { dropUsers, fakeAgentPhone, fakeOpenAi, incomingCallEvent, newNumber, newUserId, pending, prepareDb, seedUser, type FakeSideband } from "./edge-fakes.ts";
+import { closeDb, query } from "../db.ts";
+import { dropUsers, fakeAgentPhone, fakeOpenAi, incomingCallEvent, newNumber, newUserId, pending, prepareDb, seedUser, until, type FakeSideband } from "./edge-fakes.ts";
 
 /** Answering a call in the cloud (cloud/calls.ts) against a fake OpenAI (REST + sideband) and a fake AgentPhone. */
 
@@ -56,6 +56,8 @@ async function leavesANote(sb: FakeSideband) {
   said(sb, "Caller", "Remind me to send Jane the invoice.");
   sb.send({ type: "session.delegation.created", delegation: { id: "del_1", target: "responses", type: "delegation", response_id: "resp_1" }, offset_ms: 4000 });
   toolCall(sb, "call_1", "take_message", { name: "Jane", text: "Send Jane the invoice", callback: "+1 415 555 0199" });
+  // The backend's answer that called it, with its tokens.
+  sb.send({ type: "response.event", delegation_id: "del_1", event: { type: "response.completed", response: { id: `resp_${sb.sessionId}`, object: "response", model: "gpt-6.1-sol", usage: { input_tokens: 900, output_tokens: 40 } } } });
   await answerTo(sb, "call_1");
   said(sb, "Bot", "Got it, I'll do that when the computer's back. Bye!");
   toolCall(sb, "call_2", "end_call", {});
@@ -141,6 +143,13 @@ test("the owner calls while the Mac is away: the bot answers, takes the note, ha
   );
   assert.ok(Date.parse(String(payload.startedAt)) <= Date.parse(String(payload.endedAt)));
   assert.equal(ap.sent.length, 0, "the owner was on the call: no text");
+  // The call's audio, as OpenAI counted it at the end (session.closed), at GPT-Live's price and the SIP leg's; no estimate per minute.
+  const seconds = await until(async () => (await query("SELECT units::float8 AS units, cost_micros::float8 AS cost, detail FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'openai.live_seconds'", [userId])).rows[0], "the call's seconds");
+  assert.deepEqual([seconds.units, seconds.cost, seconds.detail.transport, seconds.detail.botId, seconds.detail.ref], [12, Math.ceil(12 * (50_000 / 60 + 61.7)), "sip", "sam", sessionId]);
+  assert.equal((await query("SELECT 1 FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'call.minutes'", [userId])).rowCount, 0);
+  // And the backend's tokens, once, for the bot.
+  const tokens = await until(async () => (await query("SELECT units::float8 AS units, cost_micros::float8 AS cost, detail FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'openai.tokens'", [userId])).rows[0], "the backend's tokens");
+  assert.deepEqual([tokens.units, tokens.cost, tokens.detail.source, tokens.detail.botId], [940, 900 * 2 + 40 * 10, "phone", "sam"]);
 
   // A withheld From: the carrier's P-Asserted-Identity says who it is (as the app reads it).
   const withheld = incomingCallEvent(`live_${randomUUID()}`, "", line.phone, [{ name: "P-Asserted-Identity", value: `<sip:${mobile}@carrier.example>` }]);

@@ -1,4 +1,5 @@
 import { fromThisMac, ownerEmailStatus, removeOwnerEmail, setSignInEmailCounted } from "@/lib/server/owner-email";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,8 @@ export async function GET(request: Request) {
  * /api/owner-email/verify/start, then /check. The answer is { ok, error?, email } (email: the status above).
  */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   if (!fromThisMac(request)) return Response.json({ ok: false, error: HOSTED }, { status: 403 });
   const { action, address, on } = (await request.json().catch(() => ({}))) as { action?: unknown; address?: unknown; on?: unknown };
   if (action === "remove" && typeof address === "string" && address.trim()) {

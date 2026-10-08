@@ -2,10 +2,14 @@ import "server-only";
 import { randomBytes } from "node:crypto";
 import { AgentMailClient, type AgentMail } from "agentmail";
 import { botChatId, MAIN_WORKSPACE, workspaceOf, type Bot, type EmailInfo, type Message } from "@/lib/types";
-import { cloudOn, cloudSessionNow } from "./cloud";
+import { BOPS_TIERS, type MailHandleCheck, type MailHandleResult } from "@/cloud/protocol";
+import { emailShort } from "@/lib/plan-includes";
+import { emailsHeld, isPlanBot, planRoom } from "./plan-room";
+import { cloudJson, cloudOn, cloudSessionNow } from "./cloud";
 import { askOwner } from "./composio";
+import { foundByBots } from "./treg";
 import { saveUpload } from "./uploads";
-import { addMessage, bot, getState, installId, ofThisUser, ownerName, update } from "./store";
+import { addMessage, bot, getState, installId, ofThisUser, ownerName, sameState, stateEpoch, stateReady, update } from "./store";
 import { recordUsage } from "./usage";
 
 /**
@@ -139,7 +143,8 @@ const workspaceName = (ws: string) => getState().workspaces?.find((w) => w.id ==
 
 /**
  * A bot's inbox, made if it has none (or isn't on bops.bot yet and bops.bot is ready). Returns its
- * address, or null when mail is off. A workspace's main bot claims its part of the address first.
+ * address, or null when mail is off (or, on Bops Cloud, while the workspace's address is being
+ * picked, or the plan doesn't include one). A workspace's main bot claims its part of the address first.
  */
 export function ensureInbox(botId: string): Promise<string | null> {
   const going = live.making.get(botId);
@@ -149,17 +154,193 @@ export function ensureInbox(botId: string): Promise<string | null> {
   return p;
 }
 
+/* ---------------- The workspace's part of the address, on Bops Cloud ---------------- */
+
+/**
+ * On Bops Cloud each workspace's part of its bots' addresses (tiger in boppy@tiger.bops.bot) is a
+ * handle claimed once across every Bops user (cloud/handles.ts). Before handles, every user's first
+ * workspace was "Main" and every first bot Boppy, so all of them wanted boppy@main.bops.bot.
+ *
+ * The first time a workspace gets email, the user picks it ("Pick your Bops address",
+ * components/app/mail-address.tsx): prefilled with the suggestion (their Orgo name, or the
+ * workspace's), checked as they type, with "Choose later" claiming the suggestion so nothing waits
+ * on them. A day unpicked, Bops claims it itself. Inboxes made before handles keep their addresses;
+ * a workspace's slug from before is kept as its handle when nobody has it and it isn't reserved
+ * (main is). Changed later (Settings, Email, at most 3 times), the bots move to the new one and mail
+ * to the old addresses still arrives. Self-hosting keeps the old way (the workspace's name, counted up).
+ */
+
+/** How long the step waits for the user before Bops claims the suggestion, so mail is never held up for good. */
+const PICK_WAITS_MS = 24 * 3600_000;
+
+/**
+ * Whether a new inbox may be made for this bot. With plan limits on (Bops Cloud's
+ * BOPS_PLAN_LIMITS, CloudSession.plan), each plan's emails (lib/plan-includes.ts): Free none; Pro
+ * one, the main bot's (which Bops Cloud sets up itself when the plan starts; this makes it when the
+ * cloud couldn't); Max the main bot's and, only when the user asks (requestInbox), others up to 5 in
+ * all. A bot that has an inbox already keeps having one (a rename or a new handle moves it to a new
+ * address, which isn't one more).
+ */
+function inboxAllowed(b: Bot) {
+  const plan = cloudOn() ? cloudSessionNow()?.plan : undefined;
+  if (!plan?.limits) return true;
+  if (plan.tier === "free_bops") return false;
+  if (b.mail || isPlanBot(b)) return true;
+  if (plan.tier !== "max_bops" || !b.mailWanted) return false;
+  return emailsHeld(true) < BOPS_TIERS.max_bops.emails;
+}
+
+/**
+ * The user asked for this bot's email (Get an email): made now when the plan has room for it, else
+ * why not, in the plan's words (lib/plan-includes.ts emailShort).
+ */
+export async function requestInbox(botId: string): Promise<{ email: string } | { error: string; upgrade: "plan" | "max" | null }> {
+  const b = bot(botId);
+  if (!b) return { error: "no such bot", upgrade: null };
+  if (b.email) return { email: b.email };
+  const room = planRoom();
+  const short = room ? emailShort(room.tier, room.emails, { isPlanBot: isPlanBot(b) }) : null;
+  if (short) return { error: short.text, upgrade: short.upgrade };
+  update(() => {
+    const x = bot(botId);
+    if (x) x.mailWanted = true;
+  });
+  const email = await ensureInbox(botId);
+  return email ? { email } : { error: `${b.name}'s inbox is being set up. It shows up here in a moment.`, upgrade: null };
+}
+
+/**
+ * Take a handle Bops Cloud says is the workspace's. `moved`: it replaced another, so the workspace's
+ * bots move to it. `offer`: Bops picked it, so the app offers to change it.
+ */
+export function adoptHandle(ws: string, handle: string, opts: { moved?: boolean; offer?: boolean } = {}) {
+  update((s) => {
+    if (!s.workspaces?.some((w) => w.id === ws) && ws === MAIN_WORKSPACE) s.workspaces = [{ id: MAIN_WORKSPACE, name: "Main", createdAt: 0 }, ...(s.workspaces ?? [])];
+    const w = s.workspaces?.find((x) => x.id === ws);
+    if (!w) return;
+    const same = w.mailClaimed && w.mailSlug === handle;
+    if (opts.moved && w.mailSlug && w.mailSlug !== handle) w.mailMove = true;
+    w.mailSlug = handle;
+    w.mailClaimed = true;
+    // An offer to change it stands until the user answers it, however often the same handle is said again.
+    if (opts.offer) w.mailPick = { at: Date.now(), offer: true };
+    else if (!(same && w.mailPick?.offer)) w.mailPick = undefined;
+  });
+}
+
+/** Claim (or change) the workspace's handle in Bops Cloud: `handle`, or, without it, the suggestion. */
+export async function claimMailHandle(ws: string, handle?: string): Promise<MailHandleResult> {
+  return cloudJson<MailHandleResult>("/v1/mail/handle", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId: ws, ...(handle ? { handle } : {}), workspaceName: workspaceName(ws) }),
+  });
+}
+
+/** Whether a handle can be the workspace's, as the user types (Bops Cloud's GET /v1/mail/handle), with the address the main bot would get. */
+export async function checkMailHandle(ws: string, tried: string): Promise<MailHandleCheck & { address: string; bot: string }> {
+  const q = new URLSearchParams({ workspace: ws, try: tried, name: workspaceName(ws) });
+  const check = await cloudJson<MailHandleCheck>(`/v1/mail/handle?${q}`);
+  const main = getState().bots.find((x) => x.isMain && workspaceOf(x) === ws);
+  const handle = check.status === "available" || check.status === "yours" ? check.handle : check.suggestion;
+  return { ...check, bot: main?.name ?? "Boppy", address: `${slugify(main?.name ?? "Boppy")}@${handle || "…"}.${MAIL_DOMAIN}` };
+}
+
+/**
+ * The user picked (or, `handle` left out, chose later): the handle is claimed in Bops Cloud and the
+ * workspace's inboxes are made on it now. Changing one moves the workspace's bots to it.
+ */
+export async function pickMailHandle(ws: string, handle?: string) {
+  const r = await claimMailHandle(ws, handle);
+  adoptHandle(ws, r.handle, { moved: !!r.previous });
+  void ensureAll().catch(fail("inboxes"));
+  return r;
+}
+
+/** The user keeps the handle Bops picked: the offer to change it goes. */
+export function keepMailHandle(ws: string) {
+  update((s) => {
+    const w = s.workspaces?.find((x) => x.id === ws);
+    if (w) w.mailPick = undefined;
+  });
+}
+
+/**
+ * The workspace's handle for a new inbox: kept in its state, else the session's, else one from before
+ * handles claimed as it is, else the user picks (null meanwhile: the step shows, and its inboxes
+ * wait). A day unpicked, the suggestion is claimed.
+ */
+async function cloudHandle(ws: string): Promise<string | null> {
+  const w = getState().workspaces?.find((x) => x.id === ws);
+  if (w?.mailClaimed && w.mailSlug) return w.mailSlug;
+  const given = cloudSessionNow()?.agentmail?.handles?.[ws];
+  if (given) {
+    adoptHandle(ws, given.handle, { offer: given.auto && !w?.mailPick });
+    return given.handle;
+  }
+  if (w?.mailPick) {
+    if (Date.now() - w.mailPick.at < PICK_WAITS_MS) return null;
+    const picked = await claimMailHandle(ws);
+    adoptHandle(ws, picked.handle, { offer: true });
+    return picked.handle;
+  }
+  // A slug from before handles (acme, main-2) stays the workspace's when it can.
+  if (w?.mailSlug) {
+    const kept = await claimMailHandle(ws, w.mailSlug).catch(() => null);
+    if (kept) {
+      adoptHandle(ws, kept.handle);
+      return kept.handle;
+    }
+  }
+  update((s) => {
+    if (!s.workspaces?.some((x) => x.id === ws) && ws === MAIN_WORKSPACE) s.workspaces = [{ id: MAIN_WORKSPACE, name: "Main", createdAt: 0 }, ...(s.workspaces ?? [])];
+    const x = s.workspaces?.find((y) => y.id === ws);
+    if (x && !x.mailPick) x.mailPick = { at: Date.now() };
+  });
+  return null;
+}
+
+/** A bot's inbox, made at `where`, kept as its address (the one before stays in `past`, still getting mail). */
+async function newInbox(b: Bot, pod: string, ws: string, where: { username: string; domain?: string }, clientId: string, slug: string | null) {
+  const epoch = stateEpoch();
+  const inbox = await am().pods.inboxes.create(pod, {
+    ...where,
+    displayName: b.name,
+    clientId,
+    metadata: { bops_install: installId(), bops_workspace: ws, bops_bot: b.id },
+  });
+  recordUsage("mail.inbox", { botId: b.id }, epoch);
+  const before = bot(b.id)?.email;
+  update((s) => {
+    const w = s.workspaces?.find((x) => x.id === ws);
+    if (w && slug) w.mailSlug ??= slug;
+    const x = s.bots.find((y) => y.id === b.id);
+    if (!x) return;
+    const past = [...(x.mail?.past ?? []), ...(x.mail && x.mail.inboxId !== inbox.inboxId ? [x.mail.inboxId] : [])].filter((p) => p !== inbox.inboxId);
+    x.mail = { inboxId: inbox.inboxId, podId: pod, past: past.length ? past : undefined, seenAt: x.mail?.seenAt ?? Date.now() };
+    x.email = inbox.email;
+  });
+  if (before && before !== inbox.email) addMessage({ chatId: botChatId(b.id), role: "system", text: `${b.name}'s email is now ${inbox.email} (mail to ${before} still arrives)` });
+  return inbox.email;
+}
+
 async function makeInbox(botId: string): Promise<string | null> {
   const b = bot(botId);
   if (!b || !mailOn()) return null;
   const custom = await domainReady();
   const onRightDomain = (email: string) => (custom ? email.endsWith(`.${MAIL_DOMAIN}`) : true);
-  // The address is the bot's name: renamed, it gets a new one (and the old one keeps arriving).
+  // The address is the bot's name: renamed, it gets a new one (and the old one keeps arriving). A
+  // number after it (sam2) is the same name: the plain one was taken before handles.
   const user = slugify(b.name);
-  const named = (email: string) => email.split("@")[0].split(".")[0] === user;
-  if (b.mail && b.email && onRightDomain(b.email) && named(b.email)) return b.email;
+  const named = (email: string) => new RegExp(`^${user}\\d*$`).test(email.split("@")[0].split(".")[0]);
+  const ws = workspaceOf(b);
+  const w = getState().workspaces?.find((x) => x.id === ws);
+  // Moving to the workspace's new handle (it was changed): an address on any other isn't the bot's main one any more.
+  const moving = cloudOn() && custom && w?.mailMove && w.mailClaimed && w.mailSlug ? w.mailSlug : null;
+  const onHandle = (email: string) => !moving || email.endsWith(`@${moving}.${MAIL_DOMAIN}`);
+  if (b.mail && b.email && onRightDomain(b.email) && named(b.email) && onHandle(b.email)) return b.email;
   // Renamed back to a name it had: that address becomes its main one again.
-  const again = b.mail?.past?.find((p) => named(p) && onRightDomain(p));
+  const again = b.mail?.past?.find((p) => named(p) && onRightDomain(p) && onHandle(p));
   if (again && b.mail && b.email) {
     const before = b.email;
     update(() => {
@@ -171,39 +352,37 @@ async function makeInbox(botId: string): Promise<string | null> {
     addMessage({ chatId: botChatId(botId), role: "system", text: `${b.name}'s email is now ${again} (mail to ${before} still arrives)` });
     return again;
   }
-  const ws = workspaceOf(b);
+  if (!inboxAllowed(b)) return null;
   const main = getState().bots.find((x) => x.isMain && workspaceOf(x) === ws);
   // The main bot's inbox decides the workspace's part of the address (so another install's bots
   // can't end up sharing it), so it's made first.
   if (main && main.id !== botId) await ensureInbox(main.id);
   const pod = await podId();
-  const kept = getState().workspaces?.find((w) => w.id === ws)?.mailSlug;
+  // Unique per install, bot and name (AgentMail hands back the same inbox for the same id, so a renamed bot needs its own).
+  const clientId = `bops-${installId()}-${b.id}-${custom ? "own" : "am"}${user === slugify(b.id.replace(/-\d+$/, "")) ? "" : `-${user}`}`;
+  if (cloudOn() && custom) {
+    const handle = await cloudHandle(ws);
+    if (!handle) return null;
+    // The handle is the workspace's alone; within it, names are the user's own bots'. One taken anyway
+    // (someone had this subdomain before handles) gets a number: sam2, sam3… Bops Cloud makes a plan's
+    // inbox with the same client id (cloud/provision.ts), so the two never make two.
+    for (let n = 1; n <= 5; n++) {
+      try {
+        return await newInbox(b, pod, ws, { username: n === 1 ? user : `${user}${n}`, domain: `${handle}.${MAIL_DOMAIN}` }, `${clientId}-${handle}${n === 1 ? "" : `-${n}`}`, null);
+      } catch (e) {
+        if (!taken(e)) throw e;
+      }
+    }
+    throw new Error("couldn't find a free address");
+  }
+  const kept = w?.mailSlug;
   const base = kept ?? slugify(workspaceName(ws));
   // A slug already claimed is used as it is; a new one counts up until it's free (acme-2).
   for (let n = 1; n <= (kept ? 1 : 25); n++) {
     const slug = n === 1 ? base : `${base}-${n}`;
     const where = custom ? { username: user, domain: `${slug}.${MAIL_DOMAIN}` } : { username: `${user}.${slug}` };
     try {
-      const inbox = await am().pods.inboxes.create(pod, {
-        ...where,
-        displayName: b.name,
-        // Unique per install, bot and name (AgentMail hands back the same inbox for the same id, so a renamed bot needs its own).
-        clientId: `bops-${installId()}-${b.id}-${custom ? "own" : "am"}${user === slugify(b.id.replace(/-\d+$/, "")) ? "" : `-${user}`}`,
-        metadata: { bops_install: installId(), bops_workspace: ws, bops_bot: b.id },
-      });
-      recordUsage("mail.inbox", { botId });
-      const before = bot(botId)?.email;
-      update((s) => {
-        const w = s.workspaces?.find((x) => x.id === ws);
-        if (w) w.mailSlug ??= slug;
-        const x = s.bots.find((y) => y.id === botId);
-        if (!x) return;
-        const past = [...(x.mail?.past ?? []), ...(x.mail && x.mail.inboxId !== inbox.inboxId ? [x.mail.inboxId] : [])];
-        x.mail = { inboxId: inbox.inboxId, podId: pod, past: past.length ? past : undefined, seenAt: x.mail?.seenAt ?? Date.now() };
-        x.email = inbox.email;
-      });
-      if (before && before !== inbox.email) addMessage({ chatId: botChatId(botId), role: "system", text: `${b.name}'s email is now ${inbox.email} (mail to ${before} still arrives)` });
-      return inbox.email;
+      return await newInbox(b, pod, ws, where, clientId, slug);
     } catch (e) {
       if (taken(e) && !kept) continue;
       throw e;
@@ -212,10 +391,19 @@ async function makeInbox(botId: string): Promise<string | null> {
   throw new Error("couldn't find a free address");
 }
 
-/** Every bot's inbox, main bots first. Run at start and every 10 minutes (that's also how bots move to bops.bot once it's verified). */
+/**
+ * Every bot's inbox, main bots first. Run at start and every 10 minutes (that's also how bots move to
+ * bops.bot once it's verified, and to a workspace's new handle once it's changed).
+ */
 async function ensureAll() {
   const bots = [...getState().bots].sort((a, b) => Number(b.isMain) - Number(a.isMain));
   for (const b of bots) await ensureInbox(b.id).catch((e: Error) => console.warn(`[mail] inbox for ${b.id}: ${e.message}`));
+  // A workspace whose bots have all moved to its new handle is done moving.
+  const moved = (getState().workspaces ?? []).filter((w) => w.mailMove && getState().bots.every((b) => workspaceOf(b) !== w.id || !b.email || b.email.endsWith(`@${w.mailSlug}.${MAIL_DOMAIN}`)));
+  if (moved.length)
+    update((s) => {
+      for (const w of s.workspaces ?? []) if (moved.some((m) => m.id === w.id)) w.mailMove = undefined;
+    });
 }
 
 /** Delete a bot's inboxes (when the bot is deleted). Failures are logged, not fatal. */
@@ -231,6 +419,10 @@ export async function deleteInboxes(b: Bot) {
 /* ---------------- Mail coming in ---------------- */
 
 const ownerOf = (inboxId: string) => getState().bots.find((b) => b.mail && (b.mail.inboxId === inboxId || b.mail.past?.includes(inboxId)));
+
+/** An inbox that came with a plan that ended (Bot.mail.paused): its mail isn't read or answered until the user upgrades again. */
+const pausedInbox = (b: Bot, inboxId: string) => !!b.mail?.paused && b.mail.inboxId === inboxId;
+const PAUSED = "Your email is paused while the account is on Free. Nothing was sent.";
 
 /** Newsletters, notifications and auto-replies: shown as a card, but the bot doesn't speak up. */
 function isBulk(m: AgentMail.Message) {
@@ -316,7 +508,7 @@ export const onBotsMailDomain = (address: string) => !!MAIL_DOMAIN && domainOf(a
 
 /**
  * The user's own addresses with where each comes from, lowercased, one entry per address: the email
- * they signed in to Orgo with, the Gmail they connected, BOPS_OWNER_EMAILS (comma-separated), and
+ * they signed in to Orgo with, the Gmail they connected, BOPS_OWNER_EMAILS (comma-separated; self-hosted only), and
  * the ones they proved with an emailed code (state.ownerEmails, lib/server/owner-email.ts; only the
  * signed-in user's). A bot's own address is never one.
  *
@@ -335,7 +527,8 @@ export function ownerEmailSources() {
   const codes = (s.ownerEmails ?? []).filter((e) => e.verifiedAt && ofThisUser(e));
   add(s.account?.user.email, "sign-in");
   for (const a of s.accounts ?? []) if (a.app === "gmail" || a.app === "outlook") add(a.name, a.app);
-  for (const x of (process.env.BOPS_OWNER_EMAILS ?? "").split(",")) add(x, "env");
+  // A setting of this Mac's (.env.local), whoever signs in: only a self-hosted install's, where it's the one person's.
+  if (!cloudOn()) for (const x of (process.env.BOPS_OWNER_EMAILS ?? "").split(",")) add(x, "env");
   for (const e of codes) add(e.address, "code");
   return [...found].map(([address, sources]) => ({
     address,
@@ -407,15 +600,18 @@ export function isFromOwner(m: AgentMail.Message) {
 
 async function receive(m: AgentMail.Message) {
   const owner = ownerOf(m.inboxId);
-  if (!owner || m.labels?.includes("sent")) return;
+  if (!owner || m.labels?.includes("sent") || pausedInbox(owner, m.inboxId)) return;
   // An email's id is the same in the sender's copy and each recipient's, so it's per inbox.
   const key = `${m.inboxId} ${m.messageId}`;
   if (live.handled.has(key) || had(m.inboxId, m.messageId)) return;
   live.handled.add(key);
+  const ours = sameState();
   const { images, files } = await picsOf(m).catch((e) => {
     live.handled.delete(key);
     throw e;
   });
+  // Another account's Bops came in while the attachments downloaded: the email isn't theirs (it's picked up at its own account's next catch-up).
+  if (!ours()) return void live.handled.delete(key);
   const fromOwner = isFromOwner(m);
   const bulk = !fromOwner && isBulk(m);
   const msg = addMessage({
@@ -444,6 +640,7 @@ async function catchUp() {
   for (const b of getState().bots) {
     if (!b.mail) continue;
     for (const inboxId of [b.mail.inboxId, ...(b.mail.past ?? [])]) {
+      if (pausedInbox(b, inboxId)) continue;
       const after = new Date((bot(b.id)?.mail?.seenAt ?? Date.now()) - 1000);
       const list = await am().inboxes.messages.list(inboxId, { after, ascending: true, limit: 50 }).catch(() => null);
       for (const item of list?.messages ?? []) {
@@ -460,6 +657,7 @@ live.catchUp = catchUp;
 // Every 10 minutes: inboxes for new bots (and the move to bops.bot once it's verified), and any
 // email an event was missed for.
 live.tick = async () => {
+  if (!stateReady()) return;
   await ensureAll();
   await catchUp().catch(fail("catch-up"));
 };
@@ -477,7 +675,8 @@ export function startMail() {
     live.socket.close();
     live.socket = undefined;
   }
-  if (!key || live.socket || live.starting) return;
+  // (Signed out on the Mac app there's no state for mail to land in.)
+  if (!key || live.socket || live.starting || !stateReady()) return;
   live.starting = true;
   void (async () => {
     try {
@@ -582,8 +781,11 @@ type Where = { chatId?: string; sessionId?: string };
 /**
  * The user's OK first; then it goes. `onAsk` lets a chat turn finish while they decide. An email only to
  * the user's own addresses goes at once: it reaches no one but them (anyone else on it, and they're asked).
+ * A bot set to "Just do it" (Bot.autoApprove) sends at once; the sent card in its chat shows what went.
  */
 async function withOk(b: Bot, recipients: string[], title: string, detail: string, where: Where, go: () => Promise<string>, onAsk?: (ask: Promise<string>) => void) {
+  // "Just do it" sends at once, except to someone the bot found through business data (treg.ts): finding them isn't their OK to be written to.
+  if (b.autoApprove && !recipients.some((x) => foundByBots(x))) return go();
   const mine = ownerAddresses();
   if (recipients.length && recipients.every((x) => mine.includes(bare(x)))) return go();
   const owner = ownerName();
@@ -609,6 +811,7 @@ function noteSent(b: Bot, m: { inboxId: string; messageId: string; threadId: str
 export async function sendEmail(botId: string, a: { to: string[]; cc?: string[] | null; subject: string; text: string }, where: Where, onAsk?: (ask: Promise<string>) => void) {
   const b = bot(botId);
   if (!b?.mail) return "You don't have an email inbox yet.";
+  if (pausedInbox(b, b.mail.inboxId)) return PAUSED;
   const to = addresses(a.to);
   const cc = addresses(a.cc);
   const bad = [...to, ...cc].filter((x) => !valid(x));
@@ -636,6 +839,7 @@ export async function sendEmail(botId: string, a: { to: string[]; cc?: string[] 
 export async function replyEmail(botId: string, a: { message_id: string; text: string; reply_all?: boolean | null }, where: Where, onAsk?: (ask: Promise<string>) => void) {
   const b = bot(botId);
   if (!b?.mail) return "You don't have an email inbox yet.";
+  if (pausedInbox(b, b.mail.inboxId)) return PAUSED;
   if (!a.text.trim()) return "The reply is empty. Nothing was sent.";
   let original: AgentMail.Message | null = null;
   let inboxId = "";
@@ -673,6 +877,8 @@ function asEmail(text: string, b: Bot) {
   const body = text
     .replace(/\n*Open: \[[^\]]*\]\(\/api\/pages\/[^)]*\)/g, "\n\n(There's a page for this in Bops.)")
     .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, "$1 ($2)")
+    // A file on the bot's computer or the Mac: no address an email could open, so it's named, and opens in Bops.
+    .replace(/\[([^\]]+)\]\((?:\/|~\/|file:)[^)]*\)/g, "$1 (in Bops)")
     .replace(/\*\*([^*]+)\*\*/g, "$1")
     .trim();
   return `${body}\n\n${b.name}`;

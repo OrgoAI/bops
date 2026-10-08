@@ -1,6 +1,7 @@
 import { DISPLAYS, workspaceOf } from "@/lib/types";
 import { resetScreens } from "@/lib/server/sessions";
 import { bot, getState } from "@/lib/server/store";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,8 @@ export const dynamic = "force-dynamic";
  * `force` stops the task on them first.
  */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const { botId, screen, team, force } = (await request.json().catch(() => ({}))) as { botId?: string; screen?: number; team?: boolean; force?: boolean };
   const b = botId ? bot(botId) : undefined;
   if (!b) return Response.json({ error: "no such bot" }, { status: 404 });

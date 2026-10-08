@@ -107,6 +107,8 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
           }}
           onKeyDown={(e) => {
             if (e.key !== "Escape") return;
+            // Esc empties the search first; once it's empty, Esc leaves the profile.
+            if (q || answer || results) e.preventDefault();
             setQ("");
             setAnswer(null);
             setResults(null);
@@ -425,7 +427,7 @@ function Editable({ ws, item, onChange, pinnable, children }: { ws: string; item
           autoFocus
           value={editing}
           onChange={(e) => setEditing(e.target.value)}
-          onKeyDown={(e) => e.key === "Escape" && setEditing(null)}
+          onKeyDown={(e) => e.key === "Escape" && (e.preventDefault(), setEditing(null))}
           onBlur={() => setEditing(null)}
           className="h-7 min-w-0 flex-1 rounded-[8px] px-2 text-[13.5px] shadow-[inset_0_0_0_1.5px_#0A0A0A] outline-none"
         />

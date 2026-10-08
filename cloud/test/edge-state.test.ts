@@ -6,7 +6,7 @@ import { closeDb, ensureUserRow } from "../db.ts";
 import { loadState } from "../state.ts";
 import { dropUsers, fakeOrgo, keyOf, newUserId, prepareDb, startCloud, type Listening } from "./edge-fakes.ts";
 
-/** The state backup (cloud/state.ts): GET/PUT /v1/state and loadState. */
+/** Builds from before the state lived in the cloud (cloud/state.ts): their GET/PUT /v1/state backup, and loadState. The newer protocol is in edge-state-sync.test.ts. */
 
 let orgo: Listening;
 let cloud: Listening;
@@ -65,9 +65,10 @@ test("an upload comes back as it went, and the next one replaces it", async () =
   const back = await get(id);
   assert.equal(back.status, 200);
   assert.deepEqual(await back.json(), { version: 41, state: { ...state, note: "ab" } }, "the same state; a NUL (which JSONB can't keep) is dropped");
-  assert.deepEqual(await loadState(id), { version: 41, state: { ...state, note: "ab" } });
+  // What the cloud reads to answer calls never has the messages: they're rows of their own.
+  assert.deepEqual(await loadState(id), { version: 41, state: { owner: state.owner, bots: state.bots, note: "ab" } });
 
-  // The Mac is the source of truth: a newer upload with a lower number (the app restarted) still replaces it.
+  // An old build's upload is the whole state: a newer one with a lower number (the app restarted) still replaces it.
   assert.equal((await put(id, JSON.stringify({ version: 3, state: { bots: [] } }))).status, 200);
   assert.deepEqual(await loadState(id), { version: 3, state: { bots: [] } });
   assert.equal((await get(users[0])).status, 404, "each user sees only their own");

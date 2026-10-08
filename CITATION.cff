@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use Bops in your work, please cite it as below."
+title: "Bops"
+abstract: "A team of AI bots that run your business ops, working on their own cloud computers. A Mac app."
+type: software
+authors:
+  - given-names: "Nick"
+    family-names: "Vasilescu"
+    alias: "nickvasilescu"
+    website: "https://github.com/nickvasilescu"
+  - name: "Organic Intelligence, Inc."
+    website: "https://orgo.ai"
+repository-code: "https://github.com/OrgoAI/bops"
+url: "https://bops.bot"
+license-url: "https://fsl.software/FSL-1.1-ALv2.template.md"
+keywords:
+  - ai-agents
+  - computer-use
+  - macos
+  - automation

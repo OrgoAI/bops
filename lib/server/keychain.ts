@@ -1,5 +1,6 @@
 import "server-only";
 import { execFile, spawn } from "node:child_process";
+import { stateUser } from "./store";
 
 /**
  * Secrets in the Mac's Keychain, under "Bops Vault". Values go to `security` on stdin, hex-encoded,
@@ -26,4 +27,35 @@ export function getSecret(account: string) {
 
 export function deleteSecret(account: string) {
   return new Promise<void>((resolve) => execFile("security", ["delete-generic-password", "-s", SERVICE, "-a", account], () => resolve()));
+}
+
+/*
+ * A user's own secrets (a vault login's password and 2FA key, a channel's token): named for the
+ * signed-in Orgo user, so another account signed in on this Mac never reaches them. Their state
+ * lists them (the vault, the channels), and each user's state is their own. A secret saved before
+ * names had a user is still read for the user whose state names it, and moved to their name.
+ */
+const forUser = (name: string) => {
+  const user = stateUser();
+  return user ? `${user}:${name}` : name;
+};
+
+export async function getUserSecret(name: string) {
+  const named = forUser(name);
+  const value = await getSecret(named);
+  if (value !== null || named === name) return value;
+  const old = await getSecret(name);
+  if (old !== null)
+    await setSecret(named, old)
+      .then(() => deleteSecret(name))
+      .catch(() => {});
+  return old;
+}
+
+export const setUserSecret = (name: string, value: string) => setSecret(forUser(name), value);
+
+export async function deleteUserSecret(name: string) {
+  const named = forUser(name);
+  await deleteSecret(named);
+  if (named !== name) await deleteSecret(name);
 }

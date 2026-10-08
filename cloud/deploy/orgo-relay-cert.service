@@ -1,0 +1,7 @@
+[Unit]
+Description=Copy Caddy's certificate for the relay name to orgo-relay, then restart it if it changed
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/orgo-relay/env
+ExecStart=/usr/local/sbin/orgo-relay-cert-sync

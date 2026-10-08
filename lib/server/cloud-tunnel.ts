@@ -2,10 +2,11 @@ import "server-only";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import WebSocket from "ws";
 import { CLOUD_TUNNEL_HEADER, type CloudToMac, type MacToCloud } from "@/cloud/protocol";
+import { appHeaders } from "./app-version";
 import { cloudOn, cloudSession, cloudUrl, forgetCloudSession } from "./cloud";
-import { checkBackup, flushBackup } from "./cloud-state";
 import { orgoKey } from "./orgo-auth";
 import { onExit } from "./persist";
+import { pullState, stateReady, stateUser } from "./store";
 
 /**
  * The tunnel to Bops Cloud (cloud/README.md, "The tunnel"): while the app works through the cloud
@@ -43,6 +44,8 @@ type Tunnel = {
   events: Promise<void>;
   /** The latest code for a frame (an open socket outlives a code reload in development). */
   onFrame?: (socket: WebSocket, frame: CloudToMac) => void;
+  /** Whose state was in memory when it opened: what comes down it is that user's, and only theirs takes it. */
+  user?: string | null;
 };
 const g = globalThis as unknown as { bopsCloudTunnel?: Tunnel };
 const tunnel: Tunnel = (g.bopsCloudTunnel ??= { token: randomBytes(32).toString("base64url"), want: false, failures: 0, events: Promise.resolve() });
@@ -116,8 +119,17 @@ async function replay(req: Req): Promise<MacToCloud> {
   }
 }
 
+/**
+ * Whether what came down `socket` is for the state in memory: it's the open tunnel, opened for the user
+ * whose state is loaded. A sign-out or another account's sign-in closes it, but frames it already had
+ * (and events queued behind a slow one) would otherwise land in whoever's state came in next.
+ */
+const current = (socket: WebSocket) => tunnel.socket === socket && stateReady() && stateUser() === tunnel.user;
+
 /** Something that waited for this Mac, handed to /api/cloud/event; acknowledged only once handled, so one that wasn't comes again on the next connect. */
 async function deliver(socket: WebSocket, event: Event) {
+  // Not this tunnel's user any more: not handled, nor acknowledged, so it comes again on their next connect.
+  if (!current(socket)) return;
   const res = await fetch(`${self()}/api/cloud/event`, {
     method: "POST",
     headers: { "Content-Type": "application/json", [CLOUD_TUNNEL_HEADER]: tunnel.token },
@@ -132,8 +144,14 @@ async function deliver(socket: WebSocket, event: Event) {
 
 tunnel.onFrame = (socket, frame) => {
   if (frame.t === "ping") send(socket, { t: "pong" });
-  else if (frame.t === "req") void replay(frame).then((res) => send(socket, res));
+  else if (frame.t === "req") {
+    // A webhook for the user whose tunnel this was, come after they signed out or another account came in: refused, so the cloud keeps it.
+    if (!current(socket)) send(socket, { t: "res", id: frame.id, status: 503, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ error: "signed out" })).toString("base64") });
+    else void replay(frame).then((res) => send(socket, res));
+  }
   else if (frame.t === "event") tunnel.events = tunnel.events.then(() => deliver(socket, frame)).catch(() => {});
+  // Another Mac of the user's changed the state: read what changed.
+  else if (frame.t === "state" && current(socket)) void pullState();
 };
 
 /** Try again after 1 second, then 2, 4… up to a minute; a connection that held a while starts that over. */
@@ -153,7 +171,7 @@ function connect() {
   }
   let socket: WebSocket;
   try {
-    socket = new WebSocket(`${cloudUrl().replace(/^http/, "ws")}/v1/connect`, { headers: { Authorization: `Bearer ${key}` }, handshakeTimeout: 15_000 });
+    socket = new WebSocket(`${cloudUrl().replace(/^http/, "ws")}/v1/connect`, { headers: { Authorization: `Bearer ${key}`, ...appHeaders() }, handshakeTimeout: 15_000 });
   } catch (e) {
     console.warn(`[cloud] tunnel: ${(e as Error).message}`);
     return retryLater();
@@ -162,8 +180,8 @@ function connect() {
   let replaced = false;
   socket.on("open", () => {
     tunnel.openedAt = Date.now();
-    // The cloud can be reached: the backup's check, if it's still to do.
-    void checkBackup().catch((e: Error) => console.warn(`[cloud] ${e.message}`));
+    // Back after being away: what the user's other Macs changed meanwhile.
+    void pullState();
   });
   socket.on("message", (data) => {
     let frame: CloudToMac;
@@ -205,6 +223,7 @@ function closeSocket() {
 /** Open the tunnel on the signed-in key, closing one open on another. */
 function openTunnel() {
   closeSocket();
+  tunnel.user = stateUser();
   tunnel.want = true;
   tunnel.failures = 0;
   connect();
@@ -217,18 +236,18 @@ function closeTunnel() {
 }
 
 /**
- * What the app runs on Bops Cloud while it works through it: the session, the tunnel, and the state
- * backup's check (lib/server/cloud-state.ts). Called when the server starts (instrumentation.ts) and
- * after a sign-in (`signedIn`: the session is asked afresh and the tunnel starts over on the new
- * key). Nothing happens signed out or self-hosting.
+ * What the app runs on Bops Cloud while it works through it: the session and the tunnel. Called once
+ * the signed-in user's state has loaded (a sign-in, or the server starting with the key in the
+ * Keychain: orgo-sign-in.ts) with `signedIn` after a sign-in (the session is asked afresh and the
+ * tunnel starts over on the new key). Nothing happens signed out, self-hosting, or before the state
+ * has loaded: what comes down the tunnel lands in the user's state.
  */
 export async function startCloud({ signedIn = false } = {}) {
-  if (!cloudOn()) return;
+  if (!cloudOn() || !stateReady()) return;
   if (signedIn) tunnel.replaced = false;
   if (signedIn || (!tunnel.want && !tunnel.replaced)) openTunnel();
   try {
     await cloudSession(signedIn);
-    await checkBackup();
   } catch (e) {
     console.warn(`[cloud] ${(e as Error).message}`);
   }
@@ -236,20 +255,14 @@ export async function startCloud({ signedIn = false } = {}) {
 
 /** Bops Cloud running whenever it should be, even with a key the Keychain only gave later. The state route calls it on every poll, so it's cheap when it already is. */
 export function ensureCloud() {
-  if (cloudOn() && !tunnel.want && !tunnel.replaced) void startCloud();
+  if (cloudOn() && stateReady() && !tunnel.want && !tunnel.replaced) void startCloud();
 }
 
-const within = (p: Promise<unknown>, ms: number) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);
-
-/** Before a sign-out, while the key is still here: the latest state goes up (for at most 10 seconds), the tunnel closes, and the session is forgotten. */
+/** At a sign-out, while the key is still here: the tunnel closes, and the session is forgotten. (The state was saved first: app/api/auth/signout.) */
 export async function stopCloud() {
-  if (cloudOn()) await within(flushBackup().catch((e: Error) => console.warn(`[cloud] state backup: ${e.message}`)), 10_000);
   closeTunnel();
   forgetCloudSession();
 }
 
-// On the way out: the latest state goes up, and the cloud hears the tunnel close.
-onExit("cloud", async () => {
-  if (cloudOn()) await flushBackup().catch(() => {});
-  closeTunnel();
-});
+// On the way out, the cloud hears the tunnel close.
+onExit("cloud", async () => closeTunnel());

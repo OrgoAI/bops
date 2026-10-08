@@ -26,9 +26,6 @@ git archive --format=tar HEAD | tar -x -C "$dest"
 rm -rf "$dest/docs/internal" "$dest/scripts/internal"
 # Orgo's encrypted secrets (sops) and the helper that decrypts them belong to the hosted Bops, not the public copy.
 rm -rf "$dest/envs" "$dest/.sops.yaml" "$dest/scripts/secrets.sh"
-# Orgo's own deploys: Bops Cloud on orgo-web's box, the site and download VM (site/deploy), the relay. They name private
-# hosts and keys and don't run outside Orgo; self-hosters use edge/ and their own server.
-rm -rf "$dest/cloud/deploy" "$dest/site/deploy" "$dest/scripts/cloud-deploy.sh" "$dest/scripts/site-deploy.sh" "$dest/scripts/download-publish.sh" "$dest/scripts/relay-deploy.sh"
 
 failed=0
 if command -v gitleaks >/dev/null; then
@@ -38,8 +35,11 @@ else
   failed=1
 fi
 patterns="$root/docs/internal/private-patterns.txt"
+# Text that may stay in the copy although a pattern matches it (one fixed string per line): the
+# public repo's own address, which the landing page links to.
+allowed="$root/docs/internal/public-allowed.txt"
 if [ -f "$patterns" ]; then
-  if grep -rnE -f <(grep -v '^#' "$patterns" | grep -v '^$') "$dest"; then
+  if grep -rnE -f <(grep -v '^#' "$patterns" | grep -v '^$') "$dest" | grep -vF -f <(grep -v '^#' "$allowed" 2>/dev/null | grep -v '^$' || echo $'\x01'); then
     echo "Private details found above: fix them in the private repo, commit, and export again." >&2
     failed=1
   fi

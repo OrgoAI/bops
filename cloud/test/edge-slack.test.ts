@@ -301,6 +301,9 @@ test("the workspace and the app's bot user come from Slack itself, through the u
   assert.equal(asked.length, 1);
   assert.equal(asked[0].headers["x-api-key"], "composio-test-not-a-real-key");
   assert.deepEqual(asked[0].body, { endpoint: "/auth.test", method: "POST", connected_account_id: account, parameters: [] });
+  // That ask is the user's Composio call, counted like the Mac's (at $0 for now).
+  const counted = await until(async () => (await query("SELECT units::int AS units, cost_micros::int AS cost, detail FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'composio.calls'", [userId])).rows[0]);
+  assert.deepEqual(counted, { units: 1, cost: 0, detail: { tool: "proxy", app: "slackbot" } });
   const row = (await query("SELECT team_id, bot_user_id, channels, dm, owners, pairing FROM bops.slack_links WHERE user_id = $1", [userId])).rows[0];
   assert.deepEqual(row, { team_id: team, bot_user_id: "UBOPS", channels: ["C0AAA1", "C0AAA2"], dm: "D0AAA1", owners: [], pairing: true });
 

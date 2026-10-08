@@ -29,10 +29,10 @@ Object.assign(process.env, {
 const OWNER = "+14155550100";
 const LINE = "+14155550199";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-// Modules that would start processes when loaded (Codex, the relay's agent) or that Node can't load
+// Modules that would start processes when loaded (the Mac check, the relay's agent) or that Node can't load
 // (the desktop look draws the mascot's JSX, mirror.ts has parameter properties) are stand-ins: each of
 // their exports does nothing (as scripts/test-plan.mjs).
-const STAND_INS = new Set(["codex", "relay", "desktop", "mirror"]);
+const STAND_INS = new Set(["mac", "relay", "desktop", "mirror"]);
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith("@/")) specifier = pathToFileURL(`${root}/${specifier.slice(2)}`).href;
@@ -92,10 +92,19 @@ const fake = createServer(async (req, res) => {
 });
 await new Promise((r) => fake.listen(0, "127.0.0.1", r));
 process.env.OPENAI_BASE_URL = `http://127.0.0.1:${fake.address().port}/v1`;
-// Nothing leaves this machine.
+// Nothing leaves this machine. AgentPhone is a fake in this process (`agentPhone`, set where it's used).
 const realFetch = globalThis.fetch;
-globalThis.fetch = (input, init) => {
+/** Every AgentPhone request: method, path, query and body. */
+const apGot = [];
+let agentPhone = null;
+globalThis.fetch = async (input, init) => {
   const url = new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url);
+  if (url.hostname === "api.agentphone.ai" && agentPhone) {
+    const got = { method: init?.method ?? "GET", path: url.pathname, query: url.searchParams, json: init?.body ? JSON.parse(init.body) : undefined };
+    apGot.push(got);
+    const [status, json] = agentPhone(got);
+    return Response.json(json, { status });
+  }
   if (url.hostname !== "127.0.0.1") throw new Error(`not a fake: ${url}`);
   return realFetch(input, init);
 };
@@ -307,6 +316,90 @@ const until = async (check, what, ms = 5000) => {
   assert.equal(P.verdictOf("yes"), undefined);
   assert.equal(P.verdictOf({ owner: "true" }), undefined);
   assert.equal(P.verdictOf(null), undefined);
+}
+
+/* ---------------- Picking where a bot's number is from ---------------- */
+
+{
+  const place = (areaCode, city, state = "CA") => ({ phoneNumber: `+1${areaCode}555${String(apGot.length).padStart(4, "0")}`, city, state, rateCenter: "X", areaCode });
+  const forSale = {
+    // 415 has none left: AgentPhone answers with numbers nearby.
+    415: [place("628", "San Francisco"), place("628", "San Francisco"), place("628", "San Francisco"), place("650", "San Mateo"), place("628", "San Francisco")],
+    510: [place("510", "Berkeley"), place("510", "Oakland"), place("510", "Oakland"), place("628", "San Francisco")],
+    503: [place("503", "Portland", "OR")],
+    // Nothing in 907 or nearby: numbers anywhere in the US.
+    907: [],
+    any: [place("212", "New York", "NY"), place("212", "New York", "NY")],
+  };
+  const bought = [];
+  agentPhone = (g) => {
+    if (g.method === "GET" && g.path === "/v1/numbers/available") return [200, { data: forSale[g.query.get("areaCode") ?? "any"] ?? [] }];
+    if (g.method === "GET" && g.path === "/v1/numbers") return [200, { data: [] }];
+    if (g.method === "POST" && g.path === "/v1/agents") return [200, { id: `agt_${apGot.length}` }];
+    if (g.method === "POST" && g.path === "/v1/numbers") {
+      if (g.json.areaCode === "212") return [400, { detail: "No numbers available in area code 212" }];
+      bought.push(g.json);
+      return [200, { id: "num_new", phoneNumber: `+1${g.json.areaCode}2252685`, agentId: g.json.agentId, externalId: g.json.externalId }];
+    }
+    if (g.method === "PATCH") return [200, {}];
+    return [404, { detail: "not in the fake" }];
+  };
+
+  // Grouped by area code and city, the most numbers first; nearby ones when the code asked has none.
+  const sf = await P.searchNumbers("415");
+  assert.deepEqual(sf, {
+    areaCode: "415",
+    anywhere: false,
+    options: [
+      { areaCode: "628", city: "San Francisco", state: "CA", count: 4 },
+      { areaCode: "650", city: "San Mateo", state: "CA", count: 1 },
+    ],
+  });
+  const search = apGot.at(-1);
+  assert.equal(search.query.get("country"), "US");
+  assert.equal(search.query.get("areaCode"), "415");
+  // The code asked comes first, even with fewer numbers than another place.
+  assert.deepEqual(
+    (await P.searchNumbers(" 510 ")).options.map((o) => `${o.areaCode} ${o.city}`),
+    ["510 Oakland", "510 Berkeley", "628 San Francisco"],
+  );
+  // None there or nearby: anywhere in the US, said so.
+  const before = apGot.length;
+  const far = await P.searchNumbers("907");
+  assert.deepEqual(far, { areaCode: "907", anywhere: true, options: [{ areaCode: "212", city: "New York", state: "NY", count: 2 }] });
+  assert.equal(apGot[before + 1].query.get("areaCode"), null, "the second search is the whole country");
+  // No area code: the user's own mobile's.
+  const home = P.homeArea();
+  assert.ok(home === "503" || home === "415", `the user's mobile's area code (${home})`);
+  assert.equal((await P.searchNumbers()).areaCode, home);
+  assert.equal(apGot.at(-1).query.get("areaCode"), home);
+  await assert.rejects(P.searchNumbers("12"), /3 digits/);
+  await assert.rejects(P.searchNumbers("4155"), /3 digits/);
+
+  // The route the picker asks: this Mac only.
+  const numbers = await import(`${root}/app/api/phone/numbers/route.ts`);
+  const r = await numbers.GET(new Request("http://127.0.0.1:3210/api/phone/numbers?areaCode=415"));
+  assert.equal(r.status, 200);
+  assert.equal((await r.json()).options[0].areaCode, "628");
+  assert.equal((await numbers.GET(new Request("http://bops.example/api/phone/numbers?areaCode=415"))).status, 403);
+  assert.match((await (await numbers.GET(new Request("http://127.0.0.1:3210/api/phone/numbers?areaCode=4x"))).json()).error, /3 digits/);
+
+  // Bought in the area code picked; one with none left says so in plain words.
+  const other = S.getState().bots.find((x) => !x.isMain) ?? main;
+  await assert.rejects(P.ensurePhone(other.id, "212"), /No 212 numbers are left\. Search again and pick another area code\./);
+  await assert.rejects(P.ensurePhone(other.id, "1"), /3 digits/);
+  assert.equal(await P.ensurePhone(other.id, "628"), "+16282252685");
+  assert.equal(bought.at(-1).areaCode, "628");
+  assert.equal(bought.at(-1).country, "US");
+  assert.equal(S.getState().bots.find((x) => x.id === other.id).phone, "+16282252685");
+  // The API route passes the area code on (the fake lists no numbers, so it buys again).
+  const phoneRoute = await import(`${root}/app/api/phone/route.ts`);
+  const provision = (areaCode) => phoneRoute.POST(new Request("http://127.0.0.1:3210/api/phone", { method: "POST", body: JSON.stringify({ action: "provision", botId: other.id, areaCode }) }));
+  const res = await provision("510");
+  assert.deepEqual(await res.json(), { phone: "+15102252685" });
+  assert.equal(bought.at(-1).areaCode, "510");
+  assert.deepEqual(await (await provision("212")).json(), { error: "No 212 numbers are left. Search again and pick another area code." });
+  agentPhone = null;
 }
 
 console.log(`all phone voice tests passed (${asked.length} fake OpenAI calls, none to the network)`);

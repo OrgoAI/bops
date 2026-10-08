@@ -72,8 +72,13 @@ export function appsNote(b: Bot, mode: Mode, opts: { tools?: boolean } = {}) {
   return [
     yours,
     `They work through Bops' app gateway (Composio's tool router), which knows every action each app has. To use one: first call find_app_actions with the job in plain words ("add a row to the Q3 budget sheet", "my open Jira issues"); it searches only your apps and answers with the exact action names (like GOOGLESHEETS_BATCH_UPDATE), their inputs, how to use them and known pitfalls. Then call use_app with one exact name from that answer and its inputs. With more than one account in an app, set account to the one the job is about (its label or address, as listed above) and say which you used.`,
-    `Never make up an action name or guess its inputs: if nothing fits, search again with other words. Reading runs at once. Small changes only to ${owner}'s own things (a label, a draft for them) may go at once; anything that sends, posts, shares, deletes or pays waits for ${owner}'s OK: ${asking}.`,
+    b.autoApprove
+      ? `Never make up an action name or guess its inputs: if nothing fits, search again with other words. ${owner} set you to "Just do it": every action runs at once, without asking them, so do what the job needs and say what you did.`
+      : `Never make up an action name or guess its inputs: if nothing fits, search again with other words. Reading runs at once. Small changes only to ${owner}'s own things (a label, a draft for them) may go at once; anything that sends, posts, shares, deletes or pays waits for ${owner}'s OK: ${asking}.`,
     `Use your apps before doing the same thing on a screen: they act in ${owner}'s real accounts, faster and surer.`,
+    mode === "chat"
+      ? `Use them yourself, right here in the chat: never start or hand off a task just to use one of your apps (when ${owner} names an app, a connector, Composio or MCP, they mean these). A task is for work that needs a computer besides.`
+      : "",
     ask,
   ]
     .filter(Boolean)

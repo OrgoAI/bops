@@ -1,20 +1,22 @@
 import "server-only";
+import { planRoom } from "./plan-room";
 import { openaiClient } from "./openai-client";
 import { SidebandWS } from "openai/resources/live/sideband/ws";
 import type { LiveTransportIncomingWebhookEvent } from "openai/resources/webhooks";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { CallerVerdict, CloudCallPayload } from "@/cloud/protocol";
 import { botChatId, live, TAPBACKS, workspaceOf, type Bot, type Tapback, type WorkspaceLine } from "@/lib/types";
 import { callEnded, callStarted } from "./attention";
 import { delegate, endCall, rememberVoices, voiceFor, voicePrompt } from "./call";
+import { appHeaders } from "./app-version";
 import { CloudError, cloudOn, cloudProxy, cloudSession, cloudSessionNow, noteOutOfCredit } from "./cloud";
 import { installId } from "./mail";
 import { onPostgres } from "./persist";
 import { ownerPhoneTable } from "./persist-pg";
 import { forgetOwnerNumber, syncCloudLines, tellCloudLine } from "./phone-lines";
 import { saveUpload } from "./uploads";
-import { addMessage, bot, getState, ofThisUser, ownerName, patchSession, react, update } from "./store";
+import { addMessage, bot, getState, ofThisUser, ownerName, patchSession, react, sameState, stateEpoch, stateReady, stateUser, update, userDir } from "./store";
 import { recordCallMinutes, recordUsage } from "./usage";
 import { checkVerification, forgetVerification, pendingConsentAt, pendingVerifications, startVerification, toE164, verifyOn } from "./verify";
 
@@ -63,8 +65,14 @@ export const phoneOn = () => (cloudOn() ? !!cloudSessionNow()?.agentphone : !!pr
  * The webhook secrets that may sign a delivery: the Bops sub-account's webhook, and each agent
  * webhook Bops made for a workspace number (kept server-side in .data, never in app state).
  */
-const SECRETS = join(process.cwd(), ".data", "phone-secrets.json");
-const agentSecrets = (): Record<string, string> => (existsSync(SECRETS) ? JSON.parse(readFileSync(SECRETS, "utf8")) : {});
+const secretsFile = () => {
+  const dir = userDir();
+  return dir ? join(dir, "phone-secrets.json") : null;
+};
+const agentSecrets = (): Record<string, string> => {
+  const file = secretsFile();
+  return file && existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+};
 export const hookSecrets = () => [process.env.AGENTPHONE_WEBHOOK_SECRET, ...Object.values(agentSecrets())].filter((x): x is string => !!x);
 /** Where AgentPhone delivers: Bops Cloud's address for the user (their session), or BOPS_AGENTPHONE_HOOK_URL (api.bops.bot, the Fly relay in edge/). */
 const hookUrl = async () => (cloudOn() ? ((await cloudSession()).agentphone?.hookUrl ?? "") : (process.env.BOPS_AGENTPHONE_HOOK_URL ?? ""));
@@ -100,6 +108,7 @@ async function ap<T>(method: string, path: string, body?: unknown, scope: "sub" 
     headers: {
       Authorization: `Bearer ${via ? via.key : process.env.AGENTPHONE_API_KEY}`,
       "Content-Type": "application/json",
+      ...(via ? appHeaders() : {}),
       ...(!via && scope === "sub" && process.env.AGENTPHONE_SUB_ACCOUNT ? { "X-Sub-Account-Id": process.env.AGENTPHONE_SUB_ACCOUNT } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -253,23 +262,77 @@ export async function removeOwnerPhone(number: string) {
 
 type ApNumber = { id: string; phoneNumber: string; agentId?: string | null; externalId?: string | null; outboundSms?: string; voiceRouting?: { method: string } };
 
+/** A number AgentPhone has for sale (GET /numbers/available). */
+type ApAvailable = { phoneNumber?: string; city?: string; state?: string; areaCode?: string };
+/** Numbers for sale in one area code and city, as the app offers them ("628 · San Francisco, CA"). */
+export type NumberOption = { areaCode: string; city: string; state: string; count: number };
+
+const AREA_CODE = /^[2-9]\d{2}$/;
+/** The area code numbers are bought in when none is picked: BOPS_PHONE_AREA, else 415. */
+const defaultArea = () => (AREA_CODE.test(process.env.BOPS_PHONE_AREA ?? "") ? process.env.BOPS_PHONE_AREA! : "415");
+
+/** The area code of the user's own mobile (a US or Canadian one), to search near them first. */
+export function homeArea(): string | undefined {
+  const n = ownerPhone();
+  const d = n?.replace(/\D/g, "") ?? "";
+  const ten = d.length === 11 && d.startsWith("1") ? d.slice(1) : d.length === 10 ? d : "";
+  return AREA_CODE.test(ten.slice(0, 3)) ? ten.slice(0, 3) : undefined;
+}
+
 /**
- * A bot's own number: found again by its tag, or bought (about $3 a month) in the area code
- * BOPS_PHONE_AREA (415 unless set; AgentPhone picks a nearby one if there's none), with an
- * AgentPhone agent for it. Only when asked: numbers cost money.
+ * Numbers for sale near an area code (the user's own mobile's, else BOPS_PHONE_AREA or 415, when
+ * none is given), grouped by area code and city, the asked code first, then the most numbers: up to
+ * 8. AgentPhone answers an area code with none left with numbers nearby (415 gets 628s); one with
+ * none at all nearby gets numbers anywhere in the US (`anywhere`). Nothing is bought: a number is bought by area
+ * code (ensurePhone), AgentPhone has no buying one exact number.
  */
-export async function ensurePhone(botId: string) {
+export async function searchNumbers(areaCode?: string): Promise<{ areaCode: string; options: NumberOption[]; anywhere: boolean }> {
+  if (!phoneOn()) throw new Error("Phones aren't set up here yet.");
+  const asked = areaCode?.trim() || homeArea() || defaultArea();
+  if (!AREA_CODE.test(asked)) throw new Error("An area code is 3 digits, like 415.");
+  const find = async (code?: string) =>
+    (await ap<{ data?: ApAvailable[] }>("GET", `/numbers/available?${new URLSearchParams({ country: "US", ...(code ? { areaCode: code } : {}), limit: "30" })}`)).data ?? [];
+  let found = await find(asked);
+  const anywhere = !found.length;
+  if (anywhere) found = await find();
+  const groups = new Map<string, NumberOption>();
+  for (const n of found) {
+    const code = n.areaCode ?? digits(n.phoneNumber ?? "").slice(0, 3);
+    if (!AREA_CODE.test(code)) continue;
+    const city = n.city?.trim() ?? "";
+    const state = n.state?.trim() ?? "";
+    const key = `${code}|${city.toLowerCase()}|${state.toLowerCase()}`;
+    const g = groups.get(key);
+    if (g) g.count++;
+    else groups.set(key, { areaCode: code, city, state, count: 1 });
+  }
+  const options = [...groups.values()].sort((a, b) => Number(b.areaCode === asked) - Number(a.areaCode === asked) || b.count - a.count).slice(0, 8);
+  return { areaCode: asked, options, anywhere };
+}
+
+/**
+ * A bot's own number: found again by its tag, or bought (about $3 a month) in the area code picked
+ * (searchNumbers), else BOPS_PHONE_AREA (415 unless set), with an AgentPhone agent for it. Through
+ * Bops Cloud an area code with none left moves on to one nearby. Only when asked: numbers cost money.
+ */
+export async function ensurePhone(botId: string, areaCode?: string) {
   const b = bot(botId);
   if (!b || !phoneOn()) throw new Error("phone isn't set up");
+  const area = areaCode?.trim() || defaultArea();
+  if (!AREA_CODE.test(area)) throw new Error("An area code is 3 digits, like 415.");
   const tag = `bops-${installId()}-${b.id}`;
+  const epoch = stateEpoch();
   const numbers = await ap<{ data: ApNumber[] }>("GET", "/numbers?limit=100");
   let number = numbers.data.find((n) => n.externalId === tag);
   let agentId = number?.agentId ?? undefined;
   const madeAgent = !agentId;
   if (!agentId) agentId = (await ap<{ id: string }>("POST", "/agents", { name: `${b.name} (Bops)`, description: tag, voiceMode: "webhook", enableMessaging: true })).id;
   if (!number) {
-    number = await ap<ApNumber>("POST", "/numbers", { country: "US", areaCode: process.env.BOPS_PHONE_AREA ?? "415", type: "sms", externalId: tag, agentId });
-    recordUsage("phone.number", { botId });
+    number = await ap<ApNumber>("POST", "/numbers", { country: "US", areaCode: area, type: "sms", externalId: tag, agentId }).catch((e: Error) => {
+      if (/no numbers available/i.test(e.message)) e.message = `No ${area} numbers are left. Search again and pick another area code.`;
+      throw e;
+    });
+    recordUsage("phone.number", { botId }, epoch);
   } else if (!number.agentId) await ap("POST", `/agents/${agentId}/numbers`, { numberId: number.id });
   // On Bops Cloud a number's texts and calls come through its agent's own webhook, whose secret the
   // cloud keeps (it checks each delivery with it and knows whose it is); self-hosting has the sub-account's.
@@ -342,6 +405,7 @@ const plain = (t: string) =>
   t
     .replace(/\n*Open: \[[^\]]*\]\(\/api\/pages\/[^)]*\)/g, "")
     .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, "$1 $2")
+    .replace(/\[([^\]]+)\]\((?:\/|~\/|file:)[^)]*\)/g, "$1 (in Bops)")
     .replace(/\*\*([^*]+)\*\*/g, "$1")
     .trim();
 
@@ -385,6 +449,8 @@ export async function sendText(botId: string, to: string, body: string, opts: { 
   const b = bot(botId);
   const line = b && lineOf(b);
   if (!b || !line) throw new Error("no phone number");
+  // A plan's number that's paused (the plan ended): Bops Cloud refuses its texts too (cloud/proxy.ts).
+  if (b.phoneLine?.paused && b.phoneLine.numberId === line.numberId) throw new Error("the number is paused while the account is on Free, so no texts go out from it");
   if (optedOut(to) && !opts.evenIfStopped) throw new Error("they texted STOP, so no more texts to them");
   const text = plain(body).slice(0, 1500);
   if (dryRun()) {
@@ -675,13 +741,19 @@ export async function phoneCatchUp() {
   return found;
 }
 
-const gp = globalThis as unknown as { bopsPhoneCatchUp?: ReturnType<typeof setInterval>; bopsPhoneTick?: () => Promise<unknown> };
+const gp = globalThis as unknown as { bopsPhoneCatchUp?: ReturnType<typeof setInterval>; bopsPhoneTick?: () => Promise<unknown>; bopsPhoneUpkeepFor?: string };
 // The missed texts, and on Bops Cloud each bot's voice, which the cloud answers its calls in while the Mac is away.
-gp.bopsPhoneTick = () => Promise.all([phoneCatchUp(), cloudOn() ? rememberVoices() : null]);
-/** Started by the state route (like mail): one timer, one look right away, and the numbers' upkeep (lineUpkeep) once. */
+gp.bopsPhoneTick = () => (stateReady() ? Promise.all([phoneCatchUp(), cloudOn() ? rememberVoices() : null]) : Promise.resolve());
+/**
+ * Started by the state route (like mail): one timer, and for each user whose state comes in (a start,
+ * or another account signing in on this Mac) a look right away and their numbers' upkeep (lineUpkeep).
+ */
 export function startPhone() {
-  if (gp.bopsPhoneCatchUp || !phoneOn()) return;
-  gp.bopsPhoneCatchUp = setInterval(() => void gp.bopsPhoneTick?.().catch(() => {}), 2 * 60_000);
+  if (!phoneOn() || !stateReady()) return;
+  gp.bopsPhoneCatchUp ??= setInterval(() => void gp.bopsPhoneTick?.().catch(() => {}), 2 * 60_000);
+  const who = stateUser() ?? "";
+  if (gp.bopsPhoneUpkeepFor === who) return;
+  gp.bopsPhoneUpkeepFor = who;
   void gp.bopsPhoneTick?.().catch(() => {});
   void lineUpkeep().catch((e: Error) => console.warn(`[phone] numbers' upkeep: ${e.message}`));
 }
@@ -761,15 +833,20 @@ function calledBot(e: LiveTransportIncomingWebhookEvent): Bot | undefined {
 /** An OpenAI webhook event arrived (any type), for the call log. */
 export const logWebhook = (type: string, id?: string) => callLog({ event: "webhook", type, id });
 
-/** Each incoming call (its SIP headers or turns) and what Bops did, kept on this Mac (.data/phone-calls.jsonl) to debug calls. */
+/** Each incoming call (its SIP headers or turns) and what Bops did, kept on this Mac in the user's folder (.data/users/<id>/phone-calls.jsonl) to debug calls. */
 export function callLog(entry: Record<string, unknown>) {
+  const dir = userDir();
+  if (!dir) return;
   try {
-    appendFileSync(join(process.cwd(), ".data", "phone-calls.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(join(dir, "phone-calls.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
   } catch {}
 }
 
 /** The call, from Bops' side: the greeting, the transcript, what the user asks for done, and the note after. */
 function runCall(b: Bot, sessionId: string, from: string) {
+  // The account whose call this is: after a sign-out or another account's sign-in, nothing of it lands in the new one.
+  const ours = sameState();
   const sb = new SidebandWS(openai, { session_id: sessionId });
   const transcript: { who: string; text: string }[] = [];
   let heard = "";
@@ -808,6 +885,7 @@ function runCall(b: Bot, sessionId: string, from: string) {
       const id = event.delegation.id;
       const request = heard.trim();
       heard = "";
+      if (!ours()) return say("I can't do that right now.", id);
       void delegate(b.id, request)
         .then((r) => {
           say(r.result, id);
@@ -827,6 +905,13 @@ function runCall(b: Bot, sessionId: string, from: string) {
   function finish() {
     if (closed) return;
     closed = true;
+    if (!ours()) {
+      try {
+        sb.close();
+      } catch {}
+      callEnded();
+      return;
+    }
     const seconds = startedAt ? (Date.now() - startedAt) / 1000 : 0;
     // Every phone call's minutes, the user's and anyone else's (endCall counts only calls in the app).
     recordCallMinutes(b.id, seconds);
@@ -919,7 +1004,11 @@ export async function assignWorkspaceLine(workspaceId: string, phoneNumber: stri
   const hook = await ap<{ secret?: string; url?: string }>("POST", `/agents/${agent.id}/webhook`, { url, contextLimit: 10, timeout: 30 }, scope);
   await callsToAgent(number.id, agent.id, scope, !madeAgent);
   // Through Bops Cloud the secret stays there (its deliveries come over the tunnel): only a real one is kept here.
-  if (hook.secret && hook.secret !== KEPT_BY_CLOUD && !cloudOn()) writeFileSync(SECRETS, JSON.stringify({ ...agentSecrets(), [agent.id]: hook.secret }, null, 2), { mode: 0o600 });
+  const secrets = secretsFile();
+  if (hook.secret && hook.secret !== KEPT_BY_CLOUD && !cloudOn() && secrets) {
+    mkdirSync(dirname(secrets), { recursive: true });
+    writeFileSync(secrets, JSON.stringify({ ...agentSecrets(), [agent.id]: hook.secret }, null, 2), { mode: 0o600 });
+  }
   const line: WorkspaceLine = {
     phone: number.phoneNumber,
     numberId: number.id,
@@ -998,7 +1087,9 @@ function ownerList() {
 }
 
 export async function phoneStatus() {
-  if (!phoneOn()) return { on: false as const };
+  // What the Bops plan holds now, so the app says why a number or an email isn't on offer (lib/plan-includes.ts).
+  const room = planRoom();
+  if (!phoneOn()) return { on: false as const, room };
   const reg = await ap<{ campaign_status?: string; message?: string }>("GET", "/register/status").catch(() => null);
   return {
     on: true as const,
@@ -1021,5 +1112,15 @@ export async function phoneStatus() {
     lines: getState()
       .bots.filter((b) => b.phone)
       .map((b) => ({ bot: b.name, phone: prettyPhone(b.phone!) })),
+    // With Bops Cloud's plan limits on, Free gets no number (the cloud refuses the purchase): the app shows why instead of "Get a number".
+    planNeeded: planNeededForNumber(),
+    // Each plan's numbers and emails (Free none, Pro 1, Max 5) and how many the user has: the app says why when there's no room.
+    room,
   };
 }
+
+/** Whether a number needs Pro or Max here: Bops Cloud holds Free to its plan (CloudSession.plan) and the user is on Free. */
+export const planNeededForNumber = () => {
+  const plan = cloudOn() ? cloudSessionNow()?.plan : undefined;
+  return !!plan?.limits && plan.tier === "free_bops";
+};

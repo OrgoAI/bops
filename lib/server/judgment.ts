@@ -60,5 +60,19 @@ export async function lowRisk(what: string, details: string) {
   return (yes(a.reach) ?? 1) < 0.2 && (yes(a.harm) ?? 1) < 0.45 && (yes(a.safe) ?? 0) >= 0.8;
 }
 
-/** Apps on the user's Mac where using the app at all can mean talking to someone: always asked, never judged. */
-export const TALKING_APPS = /^(messages|mail|slack|whatsapp|telegram|signal|discord|superhuman|outlook|microsoft teams|teams|facetime|zoom|spark|messenger|wechat|line)$/i;
+/** Whether an app action could move money: a bot on "Just do it" still asks before those. Strict: when Jev can't tell, it could. */
+export async function movesMoney(what: string, details: string) {
+  const act = `${what}${details ? ` (${details.slice(0, 600)})` : ""}`;
+  const owner = ownerName();
+  const a = await decide(
+    { app: `Bops: AI assistants act in ${owner}'s apps` },
+    {
+      money: {
+        type: "noul",
+        instructions: `An AI assistant wants to do this for ${owner}: ${act}. Would it pay, charge, buy, subscribe, refund, transfer or pay out money, or commit ${owner} to a payment?`,
+        criteria: { true: "Moves money or commits to a payment", false: "No money moves" },
+      },
+    },
+  );
+  return !a || (yes(a.money) ?? 1) >= 0.2;
+}

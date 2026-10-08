@@ -1,6 +1,12 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { NextConfig } from "next";
 
+// This app's version, built in: the server tells Bops Cloud which app is calling (lib/server/app-version.ts).
+const { version } = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { version: string };
+
 const nextConfig: NextConfig = {
+  env: { BOPS_APP_VERSION: version },
   // The desktop app is the product; Next's floating dev badge sat on top of the sidebar footer.
   devIndicators: false,
   // Loaded by Node, not bundled: the AgentMail SDK lazily imports optional payment packages
@@ -11,6 +17,10 @@ const nextConfig: NextConfig = {
   // Images are served as they are: resizing them on a local server isn't worth shipping sharp and
   // libvips (about 18 MB) in the app. next/image still renders, with the original file.
   images: { unoptimized: true },
+  // The page cache stays in memory. The Mac app runs this server from inside its signed bundle, and
+  // with the default (true) Next writes rendered pages to .next/server/route-cache there: one added
+  // file breaks the app's seal, and macOS then calls Bops "damaged" and offers to move it to the Trash.
+  experimental: { isrFlushToDisk: false },
   // Files the server reads or runs by path at runtime, which the build's tracing can't see:
   // the scripts it copies onto bots' computers (vm/), the browser tools it hands Codex
   // (lib/server/local.ts, sessions.ts), the page recorder it injects (lib/server/mirror.ts) and

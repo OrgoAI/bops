@@ -1,6 +1,8 @@
 import "server-only";
 import { APIError } from "openai";
-import { AI_CREDIT_EMPTY, type CloudSession } from "@/cloud/protocol";
+import { AI_CREDIT_EMPTY, AI_CREDIT_LOW, type CloudSession } from "@/cloud/protocol";
+import { cloudUrl } from "./cloud-url";
+import { appHeaders } from "./app-version";
 import { loadOrgoKey, orgoKey } from "./orgo-auth";
 import { onPostgres } from "./persist";
 import { getState, update } from "./store";
@@ -10,14 +12,14 @@ import { getState, update } from "./store";
  * user's Mac. Signed in with Orgo, the app calls OpenAI, AgentPhone, Honcho, Composio, Typesafe and
  * texted codes through the cloud on the user's Orgo key (cloudProxy), and AgentMail directly with a
  * key that reaches only the user's own pod (the session). While it runs, it keeps a tunnel open for
- * webhooks (cloud-tunnel.ts) and backs its state up there (cloud-state.ts).
+ * webhooks (cloud-tunnel.ts). The app's state itself lives there too (persist-cloud.ts).
  *
  * Self-hosting (BOPS_SELF_HOSTED=1, keys in .env.local) and a hosted server (BOPS_DATABASE_URL,
  * which holds its own keys) call every service directly, as before. BOPS_CLOUD_URL points the app
  * at another cloud (staging, or one running on this Mac).
  */
 
-export const cloudUrl = () => (process.env.BOPS_CLOUD_URL || "https://bops.orgo.ai/api").replace(/\/+$/, "");
+export { cloudUrl };
 
 /** Whether services go through Bops Cloud: signed in with Orgo, in the app on a Mac, and not self-hosting. */
 export const cloudOn = () => !!orgoKey() && process.env.BOPS_SELF_HOSTED !== "1" && !onPostgres();
@@ -42,6 +44,7 @@ export async function cloudFetch(path: string, init: RequestInit = {}, fetchImpl
   if (!key) throw new CloudError("Sign in with Orgo first.");
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${key}`);
+  for (const [k, v] of Object.entries(appHeaders())) headers.set(k, v);
   try {
     return await fetchImpl(`${cloudUrl()}${path}`, { cache: "no-store", signal: AbortSignal.timeout(20_000), ...init, headers });
   } catch {
@@ -128,7 +131,7 @@ export function forgetCloudSession() {
 }
 
 /** Where a provider is reached through Bops Cloud and the key to reach it with (the user's Orgo key), or null when the app calls it directly. */
-export function cloudProxy(provider: "openai" | "agentphone" | "honcho" | "composio" | "typesafe") {
+export function cloudProxy(provider: "openai" | "agentphone" | "honcho" | "composio" | "typesafe" | "treg") {
   const key = cloudOn() ? orgoKey() : null;
   return key ? { url: `${cloudUrl()}/proxy/${provider}`, key } : null;
 }
@@ -154,6 +157,18 @@ export async function executorKey(): Promise<string> {
 export function outOfCredits(e: unknown): boolean {
   if (e instanceof CloudError) return e.status === 402 && (!e.code || e.code === AI_CREDIT_EMPTY);
   return e instanceof APIError && e.status === 402 && cloudOn();
+}
+
+/**
+ * Bops Cloud's words when a task can't start or go on for want of more AI credit, while some is left
+ * (AI_CREDIT_LOW: a 403 from /proxy/openai through the OpenAI SDK, or a turn the cloud stopped), or
+ * undefined for any other error. Unlike AI_CREDIT_EMPTY, the credit isn't counted as used up.
+ */
+export function shortOfCredit(e: unknown): string | undefined {
+  if (e instanceof CloudError) return e.code === AI_CREDIT_LOW ? e.message : undefined;
+  if (!(e instanceof APIError) || e.status !== 403 || e.code !== AI_CREDIT_LOW) return undefined;
+  const message = (e.error as { message?: unknown } | undefined)?.message;
+  return typeof message === "string" && message ? message : e.message;
 }
 
 /** What a bot says, once, in place of the error, when the credit ran out under it. */

@@ -1,9 +1,10 @@
 {
   "private": true,
   "type": "module",
-  "description": "Bops Cloud: run with `node cloud/server.ts` (Node 24+). On its box, `npm install --omit=dev` here installs pg and ws; in this repo they come from the root node_modules.",
+  "description": "Bops Cloud: run with `node cloud/server.ts` (Node 24+). On its box, `npm install --omit=dev` here installs pg, ws and posthog-node; in this repo they come from the root node_modules.",
   "dependencies": {
     "pg": "^8.23.1",
+    "posthog-node": "5.10.0",
     "ws": "^8.22.0"
   }
 }

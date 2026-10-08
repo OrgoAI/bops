@@ -1,4 +1,5 @@
 import "server-only";
+import { trackServerEvent } from "./analytics";
 import { botChatId, DISPLAYS, live, MAIN_WORKSPACE, workspaceOf, type Watch } from "@/lib/types";
 import { decide, chose, yes } from "./decide";
 import { holdForLater, urgency } from "./attention";
@@ -7,8 +8,8 @@ import { appWindows, findWindow, listWindows, mainWindow, windowText } from "./m
 import { orgo } from "./orgo";
 import { sameComputer, screenEndpoint, workComputer } from "./screens";
 import { ensureScreenTools, startSession, stopSession } from "./sessions";
-import { addMessage, bot, getState, id, ownerName, patchSession, session, update } from "./store";
-import { recordTokens } from "./usage";
+import { addMessage, bot, getState, id, ownerName, patchSession, session, stateEpoch, stateReady, stateUser, update } from "./store";
+import { recordTokens, usageTags } from "./usage";
 import { openaiClient } from "./openai-client";
 import { knownSite, siteOf } from "@/lib/watch-sites";
 
@@ -59,13 +60,16 @@ const suggested = new Map<string, { at: number; s: Suggestion }>();
  * at once; others get one quick, low-effort model read, remembered per address for a while.
  */
 export async function suggestWatch(botId: string, display: number): Promise<Suggestion> {
+  const epoch = stateEpoch();
   const b = bot(botId);
   const endpoint = b && screenEndpoint(b, display);
   const page = endpoint ? await pageLines(endpoint).catch(() => null) : null;
   if (!page?.url) return siteOf("");
   const usual = siteOf(page.url, page.title);
   if (knownSite(page.url)) return usual;
-  const hit = suggested.get(page.url);
+  // Remembered per user too: it's in their words, with their name.
+  const remembered = `${stateUser() ?? ""}\n${page.url}`;
+  const hit = suggested.get(remembered);
   if (hit && Date.now() - hit.at < 30 * 60_000) return hit.s;
   const owner = ownerName();
   try {
@@ -92,13 +96,13 @@ export async function suggestWatch(botId: string, display: number): Promise<Sugg
           },
         },
       },
-    });
+    }, usageTags("chat", botId));
     // A suggestion in the app, counted with chat (the ledger has no kind of its own for it).
-    recordTokens("chat", res.model, res.usage, botId);
+    recordTokens("chat", res.model, res.usage, botId, epoch);
     const s = JSON.parse(res.output_text) as Suggestion;
     const clean: Suggestion = { site: s.site.trim().slice(0, 40) || usual.site, lookFor: s.lookFor.trim().slice(0, 200) || usual.lookFor, picks: s.picks.map((p) => p.trim()).filter(Boolean).slice(0, 4) };
     if (!clean.picks.length) return usual;
-    suggested.set(page.url, { at: Date.now(), s: clean });
+    suggested.set(remembered, { at: Date.now(), s: clean });
     return clean;
   } catch (e) {
     console.warn(`[watch] suggest: ${(e as Error).message}`);
@@ -129,6 +133,7 @@ export async function startWatch(botId: string, display: number, lookFor?: strin
     if (claim.exit_code !== 0) throw new Error(`${b.name} is using that screen right now`);
   }
   update((state) => (state.watches ??= []).push(w));
+  trackServerEvent("bops_watch_created", { kind: "site" });
   void syncWatchFile(botId);
   void look(w.id);
   return w;
@@ -165,6 +170,7 @@ export async function startMacWatch(app: string, windowId: number, title: string
     target: `"${title}" in ${app}`,
   };
   update((state) => (state.watches ??= []).push(w));
+  trackServerEvent("bops_watch_created", { kind: "mac_window" });
   void look(w.id);
   return w;
 }
@@ -212,16 +218,10 @@ export function draftReply(watchId: string) {
   // One draft at a time per screen: a second tap shows the one already being written.
   const drafting = getState().sessions.find((s) => s.onWatch === watchId && live(s));
   if (drafting) return drafting;
+  // A window on the Mac: bots can't write in the Mac's apps for now (lib/server/mac.ts).
+  if (w.mac) throw new Error(`Bots can't write in ${w.mac.app} on your Mac for now.`);
   const what = w.alert?.text ?? [w.told ?? []].flat().at(-1) ?? "the newest thing waiting for me";
   patchWatch(watchId, { alert: undefined });
-  // A window on the Mac: the bot drafts it there, through Codex, and stops before sending.
-  if (w.mac)
-    return startSession({
-      botId: w.botId,
-      goal: `On my Mac in ${w.mac.app}, open the conversation "${w.mac.title}" and check that its name shows at the top before you type anything there. Find this: "${what}". Write a short, friendly reply in my voice in its message box, then stop. Don't send it: I'll read it and send it myself.`,
-      title: `Reply in ${w.mac.title}`,
-      where: "mac",
-    });
   return startSession({
     botId: w.botId,
     goal: `On your screen with ${w.site} open, find this: "${what}". Open it and write a short, friendly reply in my voice in the reply box, then stop. Don't send it: I'll read it and send it myself.`,
@@ -243,6 +243,7 @@ async function look(watchId: string) {
   if (!w || !b || looking.has(watchId) || (!w.mac && busy(w.botId, w.display))) return;
   const endpoint = w.mac ? null : screenEndpoint(b, w.display);
   if (!w.mac && !endpoint) return;
+  const epoch = stateEpoch();
   looking.add(watchId);
   try {
     const page = w.mac ? await macPage(w).catch(() => null) : await pageLines(endpoint!).catch(() => null);
@@ -297,6 +298,7 @@ async function look(watchId: string) {
             }
           : {}),
       },
+      { botId: w.botId },
     );
     if (!a) return;
     const now = watchById(watchId);
@@ -331,6 +333,8 @@ async function look(watchId: string) {
     const where = now.mac ? `in ${now.mac.title} on your Mac` : `on ${now.site}`;
     // How much of the user's attention it gets: interrupt now, just show it, or hold it for later.
     const level = await urgency({ kind: "watch", what: now.mac ? `"${now.mac.title}" in ${now.mac.app} on ${owner}'s Mac` : now.site, news: text, lookFor: now.lookFor });
+    // Signed out, or another account in, meanwhile: what this watch saw was the last account's.
+    if (epoch !== stateEpoch()) return;
     patchWatch(watchId, { alert: { text, at: Date.now(), level }, told: [...told, text].slice(-30) });
     if (level === "later") holdForLater({ botId: now.botId, text: `${now.mac?.title ?? now.site}: “${text}”`, watchId });
     else addMessage({ chatId: botChatId(now.botId), role: "bot", botId: now.botId, text: `Heads up, something new ${where}: “${text}”`, watch: { id: watchId } });
@@ -356,6 +360,7 @@ async function macPage(w: Watch) {
 const g = globalThis as typeof globalThis & { __bopsWatches?: ReturnType<typeof setInterval>; __bopsLook?: typeof look };
 g.__bopsLook = look;
 g.__bopsWatches ??= setInterval(() => {
+  if (!stateReady()) return;
   for (const w of getState().watches ?? []) void g.__bopsLook?.(w.id);
 }, LOOK_MS);
 
@@ -446,6 +451,7 @@ export function watchesNote(botIds: string[], withMac: boolean) {
  * watch for what they asked. Returns null when the message isn't that (then it goes to the thread as usual).
  */
 export async function watchInstead(sessionId: string, text: string): Promise<Watch | null> {
+  const epoch = stateEpoch();
   const s = session(sessionId);
   const display = s?.display ?? s?.lastDisplay;
   if (!s) return null;
@@ -459,10 +465,11 @@ export async function watchInstead(sessionId: string, text: string): Promise<Wat
       ongoing: {
         type: "noul",
         instructions:
-          `${owner} told an AI agent that's working on a screen what's in \`owner_said\`. Are they asking it to keep watching the screen over time and tell them when something happens or changes (a price crossing a number, a new message, a status changing), rather than to do something now?`,
-        criteria: { true: "Keep watching over time and tell them when it happens", false: "Do something now, or anything else" },
+          `${owner} told an AI agent that's working on a screen what's in \`owner_said\`. Are they asking it to keep watching the screen over time and tell them when something happens or changes (a price crossing a number, a new message, a status changing), rather than to do something now? Finding out when something already happened ("find when the credits ran out", "when did it last change?") is doing something now: looking it up, not waiting for it.`,
+        criteria: { true: "Keep watching over time and tell them when it happens in the future", false: "Do something now (including looking up when something already happened), or anything else" },
       },
     },
+    { botId: s.botId },
   );
   if ((yes(a?.ongoing) ?? 0) < 0.7) return null;
   // What to watch for, short and in their words ("Bitcoin goes above $86,000").
@@ -472,8 +479,11 @@ export async function watchInstead(sessionId: string, text: string): Promise<Wat
       reasoning: { effort: "low" },
       instructions: `${owner} asked for a screen to be watched. Write what to watch for as one short phrase in their words, like "Bitcoin goes above $86,000" or "a reply from Dana". Just the phrase.`,
       input: `Screen: ${s.title}. ${owner}: ${text.slice(0, 1500)}`,
-    })
+    }, usageTags("chat", s.botId))
     .catch(() => null);
+  if (res) recordTokens("chat", res.model, res.usage, s.botId, epoch);
+  // Signed out, or another account in, meanwhile: no watch is made for this thread in their state.
+  if (epoch !== stateEpoch()) return null;
   const lookFor = res?.output_text?.trim().replace(/^["“]|["”.]$/g, "").slice(0, 200) || text.slice(0, 200);
   if (live(s)) {
     stopSession(s.id, "Handed to a watch");

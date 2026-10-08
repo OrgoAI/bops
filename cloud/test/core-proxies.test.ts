@@ -87,6 +87,8 @@ before(async () => {
   for (const u of users) await seedUser(u, u === noPhone ? {} : { subAccount: sub(u) });
   orgo = await fakeOrgo();
   agentphone = await fakeProvider((g) => {
+    if (g.method === "GET" && g.path === "/v1/numbers/available")
+      return { json: { data: [{ phoneNumber: "+16282252685", city: "San Francisco", state: "CA", rateCenter: "Snfc Cntrl", areaCode: "628" }] } };
     if (g.method === "GET" && g.path === "/v1/numbers") return { json: { data: [{ id: `num_${tag}_1`, phoneNumber: numbers[0], type: "sms" }], hasMore: false, total: 1 } };
     if (g.method === "POST" && g.path === "/v1/numbers") return { json: { id: `num_${tag}_2`, phoneNumber: numbers[1], type: "sms", status: "active" } };
     if (g.method === "GET" && g.path === "/v1/agents") return { json: { data: [{ id: agent, name: "Sam", numbers: [{ id: `num_${tag}_3`, phoneNumber: numbers[2] }] }], total: 1 } };
@@ -181,7 +183,13 @@ before(async () => {
     if (g.method === "POST" && /^\/trigger_instances\/[^/]+\/upsert$/.test(p)) return { json: { trigger_id: `ti_${tag}` } };
     return { status: 418 };
   });
-  typesafe = await fakeProvider((g) => (g.method === "POST" && g.path === "/v1/systemone" ? { json: { answers: { memory: { type: "noul", noul: 0.9 } } } } : { status: 418 }));
+  // Jev's answer says its model and tokens, unless the question asks it not to (a fake's switch).
+  typesafe = await fakeProvider(async (g) => {
+    if (g.method !== "POST" || g.path !== "/v1/systemone") return { status: 418 };
+    if (g.json?.state?.slow) await new Promise((r) => setTimeout(r, 400));
+    const answers = { memory: { type: "noul", noul: 0.9 } };
+    return { json: g.json?.state?.unsaid ? { answers } : { model: "jev-1.13.0", answers, usage: { input_tokens: 1200, output_tokens: 1 } } };
+  });
   Object.assign(process.env, {
     AGENTPHONE_API_KEY: "ap-test-key",
     HONCHO_API_KEY: "honcho-test-key",
@@ -220,6 +228,25 @@ test("AgentPhone: naming a sub-account in the query or the body is refused", asy
   assert.equal((await as(alice, "GET", `/proxy/agentphone/v1/numbers?sub_account_id=${sub(bob)}`)).status, 400);
   assert.equal((await as(alice, "POST", "/proxy/agentphone/v1/messages", { body: "hi", subAccountId: sub(bob) })).status, 400);
   assert.equal((await as(alice, "POST", "/proxy/agentphone/v1/messages", { body: "hi", meta: { SUB_ACCOUNT_ID: sub(bob) } })).status, 400);
+});
+
+test("AgentPhone: numbers for sale can be searched, in the user's own sub-account, with no credit asked and nothing recorded", async () => {
+  const before = (await query("SELECT count(*)::int AS n FROM bops.cloud_usage WHERE user_id = $1", [alice])).rows[0].n;
+  const r = await as(alice, "GET", "/proxy/agentphone/v1/numbers/available?country=US&areaCode=415&limit=30", undefined, { "x-sub-account-id": sub(bob) });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.data[0].areaCode, "628");
+  const sent = agentphone.got.at(-1)!;
+  assert.equal(sent.method, "GET");
+  assert.equal(sent.path, "/v1/numbers/available");
+  assert.equal(sent.headers["x-sub-account-id"], sub(alice));
+  assert.equal(sent.headers.authorization, "Bearer ap-test-key");
+  assert.equal(sent.query.get("areaCode"), "415");
+  assert.equal(sent.query.get("country"), "US");
+  // A number for sale isn't anyone's: nothing is recorded as Alice's.
+  assert.equal((await query("SELECT count(*)::int AS n FROM bops.cloud_numbers WHERE digits = '6282252685'")).rows[0].n, 0);
+  assert.equal((await query("SELECT count(*)::int AS n FROM bops.cloud_usage WHERE user_id = $1", [alice])).rows[0].n, before);
+  // Naming another sub-account in the query is still refused.
+  assert.equal((await as(alice, "GET", `/proxy/agentphone/v1/numbers/available?areaCode=415&subAccountId=${sub(bob)}`)).status, 400);
 });
 
 test("AgentPhone: a webhook registration points at the cloud, and its secret stays here, sealed", async () => {
@@ -647,16 +674,94 @@ test("Composio: every call of the apps code (several accounts per app) works thr
 
 /* ---------------- Typesafe ---------------- */
 
-test("Typesafe: the one route the app uses goes on with the cloud's key, and is counted", async () => {
+/** Alice's rows of one kind, oldest first. */
+const rowsOf = async (kind: string) =>
+  (await query<{ units: number; cost: number; detail: Record<string, unknown> }>("SELECT units::float8 AS units, cost_micros::float8 AS cost, detail FROM bops.cloud_usage WHERE user_id = $1 AND kind = $2 ORDER BY id", [alice, kind])).rows;
+
+test("Typesafe: the one route the app uses goes on with the cloud's key, and each answer's tokens are counted at Jev's price, for the bot", async () => {
+  const before = (await rowsOf("typesafe.tokens")).length;
   const body = { model: "jev-latest", state: { app: "Bops" }, questions: { memory: { type: "noul", instructions: "x" } } };
-  const r = await as(alice, "POST", "/proxy/typesafe/v1/systemone", body);
+  const r = await call(cloud.url, "POST", "/proxy/typesafe/v1/systemone", { key: keyOf(alice), json: body, headers: { "x-bops-bot": "sam", "x-bops-source": "decide" } });
   assert.equal(r.status, 200, r.text);
-  assert.deepEqual(r.json, { answers: { memory: { type: "noul", noul: 0.9 } } });
+  assert.deepEqual(r.json.answers, { memory: { type: "noul", noul: 0.9 } });
   const sent = typesafe.got.at(-1)!;
   assert.equal(sent.headers.authorization, "Bearer typesafe-test-key");
   assert.deepEqual(sent.json, body);
+  assert.equal(sent.headers["x-bops-bot"], undefined, "who it's for stays in the cloud");
   assert.equal((await as(alice, "GET", "/proxy/typesafe/v1/systemone")).status, 403);
   assert.equal((await as(alice, "POST", "/proxy/typesafe/v1/keys", {})).status, 403);
-  const counted = await until(async () => (await query("SELECT count(*)::int AS n, sum(cost_micros)::int AS cost FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'typesafe.calls' HAVING count(*) > 0", [alice])).rows[0]);
-  assert.deepEqual(counted, { n: 1, cost: 200 });
+  const [said] = (await until(async () => (await rowsOf("typesafe.tokens")).length > before && (await rowsOf("typesafe.tokens")))).slice(before);
+  // $0.042 per 1M input tokens: 1,200 tokens is 50.4 micro-dollars, rounded up. Output is free.
+  assert.deepEqual([said.units, said.cost, said.detail.model, said.detail.input, said.detail.botId], [1200, 51, "jev-1.13.0", 1200, "sam"]);
+
+  // An answer that doesn't say its tokens: estimated from the question's size (about 4 bytes a token).
+  const unsaid = { model: "jev-latest", state: { unsaid: true, page: "x".repeat(4000) }, questions: { q: { type: "noul", instructions: "x" } } };
+  assert.equal((await as(alice, "POST", "/proxy/typesafe/v1/systemone", unsaid)).status, 200);
+  const guessed = await until(async () => (await rowsOf("typesafe.tokens")).find((x) => x.detail.estimated));
+  assert.equal(guessed.units, Math.ceil(Buffer.byteLength(JSON.stringify(unsaid)) / 4));
+  assert.equal(guessed.detail.model, "jev-latest");
+});
+
+test("Typesafe: an answer the Mac stopped waiting for is still read and counted (Typesafe bills it)", async () => {
+  const before = (await rowsOf("typesafe.tokens")).length;
+  const asked = typesafe.got.length;
+  const body = JSON.stringify({ model: "jev-latest", state: { slow: true }, questions: { q: { type: "noul", instructions: "x" } } });
+  await fetch(`${cloud.url}/proxy/typesafe/v1/systemone`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${keyOf(alice)}`, "content-type": "application/json" },
+    body,
+    signal: AbortSignal.timeout(150),
+  }).catch(() => null);
+  await until(() => typesafe.got.length > asked, "Typesafe to be asked");
+  const rows = await until(async () => (await rowsOf("typesafe.tokens")).length > before && (await rowsOf("typesafe.tokens")), "the answer to be counted", 3_000);
+  assert.equal(rows.at(-1)!.units, 1200);
+});
+
+test("Composio: every tool run is counted (by tool and app, for the bot), at Composio's price, $0 for now", async () => {
+  const before = (await rowsOf("composio.calls")).length;
+  const tagged = { key: keyOf(alice), headers: { "x-bops-bot": "sam", "x-bops-app": "gmail" } };
+  const direct = await call(cloud.url, "POST", "/proxy/composio/api/v3.1/tools/execute/GMAIL_FETCH_EMAILS", { ...tagged, json: { connected_account_id: `ca_${tag}_alice`, arguments: {} } });
+  assert.equal(direct.status, 200, direct.text);
+  const proxied = await call(cloud.url, "POST", "/proxy/composio/api/v3.1/tools/execute/proxy", { ...tagged, json: { endpoint: "/auth.test", method: "POST", connected_account_id: `ca_${tag}_alice` } });
+  assert.equal(proxied.status, 200, proxied.text);
+  // Refused calls never reach Composio, and aren't counted.
+  assert.equal((await as(alice, "POST", "/proxy/composio/api/v3.1/tools/execute/GMAIL_SEND_EMAIL", { connected_account_id: `ca_${tag}_bob`, arguments: {} })).status, 404);
+  const rows = (await until(async () => (await rowsOf("composio.calls")).length >= before + 2 && (await rowsOf("composio.calls")))).slice(before);
+  // Counted on the side, so in whatever order they land.
+  assert.deepEqual(
+    rows.map((x) => [x.units, x.cost, x.detail.tool, x.detail.app, x.detail.botId]).sort((a, b) => String(a[2]).localeCompare(String(b[2]))),
+    [
+      [1, 0, "GMAIL_FETCH_EMAILS", "gmail", "sam"],
+      [1, 0, "proxy", "gmail", "sam"],
+    ],
+  );
+  assert.equal(composio.got.at(-1)!.headers["x-bops-app"], undefined, "who and which app stay in the cloud");
+  // A bot's session runs a tool: counted for the bot the session was made for.
+  const made = await call(cloud.url, "POST", "/proxy/composio/api/v3.1/tool_router/session", { key: keyOf(alice), headers: { "x-bops-bot": "iris" }, json: { user_id: `bops-${alice}` } });
+  assert.equal(made.status, 201, made.text);
+  const ran = await as(alice, "POST", `/proxy/composio/api/v3.1/tool_router/session/${made.json.session_id}/execute`, { tool_slug: "NOTION_SEARCH", arguments: {} });
+  assert.equal(ran.status, 200, ran.text);
+  const viaSession = await until(async () => (await rowsOf("composio.calls")).find((x) => x.detail.tool === "NOTION_SEARCH"));
+  assert.deepEqual([viaSession.cost, viaSession.detail.botId], [0, "iris"]);
+});
+
+test("Honcho: a question about the user, a search and messages saved are counted, at $0 for now; reads and setup aren't", async () => {
+  const before = (await rowsOf("honcho.calls")).length;
+  for (const [method, path] of [
+    ["POST", `/v3/workspaces/${ws(alice)}/peers/user/chat`],
+    ["POST", `/v3/workspaces/${ws(alice)}/search`],
+    ["POST", `/v3/workspaces/${ws(alice)}/sessions/s1/messages`],
+    // Reading them back (a list, though it's a POST) does no work.
+    ["POST", `/v3/workspaces/${ws(alice)}/sessions/s1/messages/list`],
+    ["POST", `/v3/workspaces/${ws(alice)}/peers`],
+    ["GET", `/v3/workspaces/${ws(alice)}/peers/user`],
+  ] as const)
+    assert.equal((await as(alice, method, path, method === "POST" ? { id: "user", query: "x" } : undefined)).status, 200, path);
+  await until(async () => (await rowsOf("honcho.calls")).length >= before + 3);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual((await rowsOf("honcho.calls")).slice(before).map((x) => [x.detail.route, x.cost]).sort(), [
+    ["chat", 0],
+    ["messages", 0],
+    ["search", 0],
+  ]);
 });

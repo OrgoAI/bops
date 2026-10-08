@@ -1,6 +1,7 @@
 import { askMemory, copyMemory, deleteGroup, fixFact, forgetFact, memoryFor, memoryInfo, pinFact, previewCopy, reviewMemory, settleFlag, shareMemory, undoMemory } from "@/lib/server/memory";
 import { currentWorkspaceId } from "@/lib/server/workspaces";
 import type { MemoryGroup } from "@/lib/types";
+import { notReady } from "@/lib/server/ready";
 
 /** A workspace's memory, for the Memory sheet; with ?bot=, a bot's Memory tab (?q= searches, ?mine=1 is what it learned). */
 export async function GET(request: Request) {
@@ -28,6 +29,8 @@ type Body = {
 };
 
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const b = (await request.json().catch(() => ({}))) as Body;
   const ws = b.ws ?? currentWorkspaceId();
   try {

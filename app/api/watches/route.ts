@@ -1,4 +1,5 @@
 import { draftReply, editWatch, seenWatch, startMacWatch, startWatch, stopWatch, suggestWatch } from "@/lib/server/watches";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +14,8 @@ export async function GET(request: Request) {
 
 /** Keep a bot's screen on the site it's showing and watch it for the user. */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const { botId, display, lookFor, site, mac } = (await request.json()) as {
     botId?: string;
     display?: number;
@@ -37,6 +40,8 @@ export async function POST(request: Request) {
 
 /** The user looked at what a watched screen flagged, wants a reply drafted there, or changed what it's watched for. */
 export async function PATCH(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const { id, action, lookFor } = (await request.json()) as { id?: string; action?: "seen" | "draft" | "edit"; lookFor?: string };
   if (!id) return Response.json({ error: "which watch?" }, { status: 400 });
   try {
@@ -54,6 +59,8 @@ export async function PATCH(request: Request) {
 
 /** Stop watching a screen; it goes back to being one any work can use. */
 export async function DELETE(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const id = new URL(request.url).searchParams.get("id");
   if (!id) return Response.json({ error: "which watch?" }, { status: 400 });
   await stopWatch(id);

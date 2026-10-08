@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { slackDelivery } from "@/lib/server/channels";
 import { fromCloudTunnel } from "@/lib/server/cloud-tunnel";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +15,8 @@ export const dynamic = "force-dynamic";
  * seconds); the message is handled after.
  */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const body = await request.text();
   if (!fromCloudTunnel(request)) {
     const secret = process.env.BOPS_SLACK_SIGNING_SECRET;

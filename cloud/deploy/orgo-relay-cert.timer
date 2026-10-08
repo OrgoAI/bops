@@ -1,0 +1,10 @@
+[Unit]
+Description=Pick up Caddy's renewed certificate for the relay name, twice a day
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=12h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

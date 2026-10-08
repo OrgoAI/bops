@@ -59,16 +59,21 @@ export const signedInUser = (): OrgoUser | null => getState().account?.user ?? n
 
 export async function signIn(apiKey: string, user: OrgoUser) {
   const before = signedInUser();
-  // A hosted server first loads this user's own state (and refuses the sign-in if it can't).
-  await bindSignIn(user.id);
+  const was = keyNow();
+  // First this user's own state is loaded (from Bops Cloud, their file, or Postgres): the sign-in is refused if it can't be.
+  await bindSignIn(user.id, apiKey);
+  // Their key comes in with their state, at once, before the Keychain is written: background work (the
+  // 10-minute look at the bots' computers, routing through this Mac, a screen's view) never runs on the
+  // last user's key over this one's state. A computer of theirs that the last key can't see would look
+  // deleted, and be let go.
+  setKey(apiKey);
   try {
     await setSecret(KEY_ACCOUNT, apiKey);
   } catch (e) {
     // The key that's still in use is the one before; so must the state be, or one user's key would run over another's state.
-    await giveBack(before);
+    await giveBack(before, was);
     throw e;
   }
-  setKey(apiKey);
   update((s) => {
     s.account = { user, signedInAt: Date.now() };
     // Running out of AI credit was the last account's.
@@ -76,12 +81,20 @@ export async function signIn(apiKey: string, user: OrgoUser) {
   });
 }
 
-/** Undo a sign-in's swap of the state (hosted): back to whoever was signed in, or to nobody's. */
-async function giveBack(before: OrgoUser | null) {
+/** The key in memory as it stands (to put back as it was: giveBack). */
+const keyNow = () => ({ key: g.bopsOrgoKey, missAt: g.bopsOrgoKeyMissAt });
+
+/** Undo a sign-in's swap of the state: back to whoever was signed in, or to nobody's. */
+async function giveBack(before: OrgoUser | null, was: ReturnType<typeof keyNow>) {
+  const beforeKey = was.key ?? null;
   try {
     await releaseSignOut();
+    // Nobody's state is in memory now: the key before comes back with it, before theirs loads.
+    setKey(beforeKey);
+    g.bopsOrgoKey = was.key;
+    g.bopsOrgoKeyMissAt = was.missAt;
     if (before) {
-      await bindSignIn(before.id);
+      await bindSignIn(before.id, beforeKey ?? undefined);
       update((s) => (s.account = { user: before, signedInAt: s.account?.signedInAt ?? Date.now() }));
     }
   } catch (e) {

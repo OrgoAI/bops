@@ -164,6 +164,7 @@ html.lanyard-grabbing, html.lanyard-grabbing * { cursor: grabbing !important; }
 .s4 { gap: 28px; padding: 130px var(--gutter) 140px; }
 .h2-xl { font-weight: 900; font-size: clamp(56px, 7.2vw, 104px); line-height: 0.96; letter-spacing: -0.06em; }
 .center-lede { max-width: 600px; }
+#pricing .center-lede { max-width: 680px; text-wrap: balance; }
 .compare { display: flex; width: 760px; max-width: 100%; margin-top: 20px; background: #fff; border-radius: 24px; text-align: left; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 40px 80px -34px rgba(0, 0, 0, 0.32); }
 .col { width: 50%; padding: 22px 24px 14px; }
 .col.other { border-right: 1px solid var(--hair); }
@@ -174,7 +175,26 @@ html.lanyard-grabbing, html.lanyard-grabbing * { cursor: grabbing !important; }
 .col.bops li { font-weight: 500; }
 .col svg { flex-shrink: 0; }
 
-/* 5. Close */
+/* 5. Pricing: three cards, the compare card's look. */
+.plans { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; width: 1040px; max-width: 100%; margin-top: 20px; text-align: left; }
+.plan { display: flex; flex-direction: column; background: #fff; border-radius: 24px; padding: 22px 24px 14px; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 40px 80px -34px rgba(0, 0, 0, 0.32); }
+.plan-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 12px; }
+.plan-name { font-weight: 700; font-size: 16px; line-height: 20px; }
+.plan-price { font-weight: 800; font-size: 32px; line-height: 36px; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.plan-per { margin-left: 2px; font-weight: 500; font-size: 14px; line-height: 1; letter-spacing: 0; color: var(--muted); }
+/* How many computers a plan includes: the first thing on its card, in the highlighter. */
+.plan-computers { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 4px; padding: 14px 16px; border-radius: 16px; background: var(--lime); }
+.plan-computers svg { flex-shrink: 0; margin-top: 1px; }
+.plan-computers b { display: block; font-weight: 700; font-size: 17px; line-height: 22px; letter-spacing: -0.01em; }
+.plan-computers span { display: block; margin-top: 2px; font-weight: 500; font-size: 14px; line-height: 19px; color: #3a3a38; text-wrap: pretty; }
+.plan-computers + ul li:first-child { border-top: 0; }
+.plan li { display: flex; align-items: flex-start; gap: 10px; padding: 12px 0; border-top: 1px solid var(--hair); font-weight: 500; font-size: 15px; line-height: 20px; }
+.plan li svg { flex-shrink: 0; margin-top: 1px; }
+.plan li.no { color: #8a8a87; font-weight: 400; }
+.plan li.no svg { margin: 2px 1px 0; }
+.plans-note { margin-top: 4px; }
+
+/* 6. Close */
 .s5 { gap: 30px; padding: 120px var(--gutter) 130px; }
 .final-disc { display: flex; align-items: center; justify-content: center; width: 132px; height: 132px; border-radius: 999px; background: var(--lime); }
 .h2-final { font-weight: 900; font-size: clamp(52px, 6.7vw, 96px); line-height: 0.96; letter-spacing: -0.06em; color: #fff; }
@@ -223,6 +243,8 @@ html.lanyard-grabbing, html.lanyard-grabbing * { cursor: grabbing !important; }
   .split .fit { width: auto; max-width: none; align-self: stretch; margin: 0 calc(var(--edge) - var(--gutter)); }
   .s2-copy, .s3-copy { max-width: 640px; }
   .s4, .s5 { padding: var(--section) var(--gutter); }
+  /* Three plans side by side need the room: stacked below 900 px. */
+  .plans { gap: 12px; }
   .final-link { padding: 11px 0; }
   .footer { padding: 16px var(--gutter) max(16px, env(safe-area-inset-bottom)); }
   .footer nav { gap: 16px; }
@@ -243,6 +265,10 @@ html.lanyard-grabbing, html.lanyard-grabbing * { cursor: grabbing !important; }
   .split .fit { flex: 1 1 0; min-width: 0; margin: 0; align-self: auto; }
 }
 
+@media (max-width: 899.98px) {
+  .plans { grid-template-columns: minmax(0, 1fr); width: 520px; }
+}
+
 /* Phones. */
 @media (max-width: 640px) {
   :root { --gutter: max(20px, env(safe-area-inset-left), env(safe-area-inset-right)); --edge: max(14px, env(safe-area-inset-left), env(safe-area-inset-right)); --section: 72px; }
@@ -255,6 +281,7 @@ html.lanyard-grabbing, html.lanyard-grabbing * { cursor: grabbing !important; }
   .split, .band.gray > .split { gap: 40px; }
   .compare { flex-direction: column; }
   .col { width: 100%; }
+  .plans { grid-template-columns: minmax(0, 1fr); }
   .col.other { border-right: 0; border-bottom: 1px solid var(--hair); }
   .footer { flex-direction: column; gap: 0; }
 
@@ -315,11 +342,43 @@ button.pill { border: 0; font-family: inherit; cursor: pointer; }
 .mac-note-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .mac-note-copy { position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; font-size: 16px; }
 @keyframes mac-note-in { from { opacity: 0; transform: translateY(14px) scale(0.96); } }
+
+/* The same card on a Mac, before the download: Get First Access, an email field and Skip. The error line
+   keeps its height when empty, so a message never moves the card. */
+.access-ask, .access-done { display: flex; flex-direction: column; align-items: center; width: 100%; }
+.access-chip { margin-top: 12px; padding: 5px 12px; border-radius: 999px; background: var(--lime); font-weight: 600; font-size: 13px; line-height: 16px; }
+.mac-note #access-body { margin-top: 12px; }
+.access-form { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; margin-top: 22px; }
+.access-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.access-input { flex: 999 1 180px; min-width: 0; height: 50px; padding: 0 20px; border: 0; border-radius: 999px; background: #fff; color: var(--ink); font: 500 16px/22px Geist, system-ui, sans-serif; box-shadow: inset 0 0 0 1.5px var(--ring); outline: none; transition: box-shadow 0.15s ease; }
+.access-input::placeholder { color: #a3a3a0; }
+.access-input:hover { box-shadow: inset 0 0 0 1.5px #c9c9c6; }
+.access-input:focus { box-shadow: inset 0 0 0 2px var(--ink); }
+.access-input[aria-invalid="true"] { box-shadow: inset 0 0 0 2px #d33a2c; }
+.mac-note .access-form .pill { flex: 1 0 auto; }
+.mac-note .access-error { flex-basis: 100%; max-width: none; min-height: 18px; margin: 0; padding: 0 20px; font-weight: 500; font-size: 13px; line-height: 18px; color: #c0321f; text-align: left; }
+.mac-note .access-skip { margin-top: 2px; }
+.access-done { animation: access-done-in 0.22s ease-out; }
+.access-done h2 { font-size: 24px; line-height: 30px; }
+.access-done h2:focus { outline: none; }
+.access-again { margin-top: 12px; padding: 10px 8px; font-weight: 500; font-size: 15px; line-height: 20px; color: var(--graphite); text-decoration: underline; text-underline-offset: 3px; }
+.access-again:hover { color: var(--ink); }
+@keyframes access-done-in { from { opacity: 0; transform: translateY(6px); } }
+/* What's new in the newest release, at the card's foot (download.js, from /download/latest.json): a mono
+   label and a few short lines, under a hairline. Left out on short screens. */
+.access-new { width: 100%; margin-top: 10px; padding-top: 16px; border-top: 1px solid var(--hair); text-align: left; }
+.access-new h3 { font-family: "Geist Mono", ui-monospace, monospace; font-weight: 600; font-size: 11px; line-height: 14px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.access-new ul { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.access-new li { position: relative; padding-left: 14px; font-size: 14px; line-height: 20px; color: var(--graphite); }
+.access-new li::before { content: ""; position: absolute; left: 2px; top: 8px; width: 4px; height: 4px; border-radius: 999px; background: var(--ink); }
+
 @media (max-height: 500px) {
+  .access-new { display: none; }
   .mac-note { padding-top: 22px; }
   .mac-note-disc { width: 64px; height: 64px; margin-bottom: 12px; }
   .mac-note-disc svg { width: 46px; height: 46px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .mac-note[open] { animation: none; }
+  .mac-note[open], .access-done { animation: none; }
+  .access-input { transition: none; }
 }

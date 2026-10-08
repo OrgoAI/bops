@@ -1,7 +1,9 @@
-import type { CloudCallPayload, PendingKind } from "@/cloud/protocol";
+import type { CloudCallPayload, CloudPlanPayload, PendingKind } from "@/cloud/protocol";
 import { slackDelivery } from "@/lib/server/channels";
+import { adoptPlan } from "@/lib/server/cloud-plan";
 import { fromCloudTunnel } from "@/lib/server/cloud-tunnel";
 import { agentPhoneEvent, cloudCall, verdictOf } from "@/lib/server/phone";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -24,9 +26,13 @@ function parsed(payload: unknown) {
  * - "call": a call the cloud answered (the owner's, or anyone else's message), as a message in the bot's chat.
  * - "slack": an event from Bops' Slack app for this Mac's bots (Slack's whole envelope, at most a day
  *   old), handled as if the cloud had just replayed it to /api/channels/slack/events.
+ * - "plan": the user's plan changed, or what it brings the main bot did (a number and an inbox Bops
+ *   Cloud set up, paused or gave back): taken into the state (lib/server/cloud-plan.ts).
  * A kind this app doesn't know isn't acknowledged, so it waits for one that does.
  */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   if (!fromCloudTunnel(request)) return Response.json({ error: "not allowed" }, { status: 403 });
   const e = (await request.json().catch(() => null)) as { id?: unknown; kind?: PendingKind; payload?: unknown } | null;
   if (!e || typeof e.id !== "string" || !e.payload) return Response.json({ error: "id and payload" }, { status: 400 });
@@ -43,6 +49,7 @@ export async function POST(request: Request) {
     const delivery = parsed(e.payload);
     if (!delivery) console.warn(`[cloud] event ${e.id}: not a Slack delivery`);
     else slackDelivery(delivery);
-  } else return Response.json({ error: `unknown kind ${String(e.kind)}` }, { status: 422 });
+  } else if (e.kind === "plan") await adoptPlan(e.payload as CloudPlanPayload);
+  else return Response.json({ error: `unknown kind ${String(e.kind)}` }, { status: 422 });
   return Response.json({ ok: true });
 }

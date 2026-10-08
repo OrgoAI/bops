@@ -1,6 +1,7 @@
 import { submitSignIn } from "@/lib/server/sign-in";
 import { bot, getState } from "@/lib/server/store";
 import { rememberTyped } from "@/lib/server/vault";
+import { notReady } from "@/lib/server/ready";
 
 /**
  * The "Sign in for <bot>" card: fill the sign-in or code fields Jev matched on the bot's page,
@@ -8,6 +9,8 @@ import { rememberTyped } from "@/lib/server/vault";
  * or shown to a model, and kept only if the user ticks "Save to vault" (then in the Mac's Keychain).
  */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const body = (await request.json()) as { botId: string; display: number; values: { identifier?: string; password?: string; code?: string }; save?: boolean };
   const b = bot(body.botId);
   if (!b) return Response.json({ error: "no such bot" }, { status: 404 });

@@ -107,6 +107,7 @@ async function motifFor(b: Bot): Promise<Motif> {
   const a = await decide(
     { bot: b.name, job: b.role },
     { motif: { type: "choice", instructions: "Which theme fits this bot's job best?", criteria: Object.fromEntries(Object.entries(MOTIFS).map(([k, m]) => [k, m.about])) } },
+    { botId: b.id },
   );
   const pick = chose(a?.motif)?.choice;
   return pick && pick in MOTIFS ? (pick as Motif) : "nature";

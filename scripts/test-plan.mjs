@@ -4,7 +4,9 @@
 // custom deal's too), the first task's copy of the main bot's computer falling back to the main bot's
 // when the plan has no room, computers made one at a time, the plan read again after Bops makes or
 // deletes a computer, and setting a computer up (lib/server/sessions.ts): a broken one replaced, and
-// nothing done in another user's state. Orgo is a fake fetch on a made-up origin and the state a
+// nothing done in another user's state. A computer deleted on Orgo's site: whatever finds out (a screen's
+// stream or screenshot, the computer view, its set-up button, the check every 10 minutes), the bot moves
+// once onto the free Bops computer or a new one, and deleting one that's gone just forgets it. Orgo is a fake fetch on a made-up origin and the state a
 // throwaway file store in a temporary folder: nothing reaches Orgo, and no key is read from the Keychain.
 // Usage: node --conditions=react-server scripts/test-plan.mjs
 import assert from "node:assert/strict";
@@ -13,15 +15,18 @@ import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+// The state in a throwaway file store, as a self-hosted install keeps it (the Mac app keeps it in Bops Cloud, per user: test-profiles.mjs).
+process.env.BOPS_SELF_HOSTED = "1";
 // Orgo is the fake below, on its own origin; the state goes to a throwaway file store, with mail, OpenAI and the tailnet off.
-for (const k of ["ORGO_API_KEY", "BOPS_ORGO_WORKSPACE", "BOPS_ORGO_TEMPLATE", "BOPS_DATABASE_URL", "AGENTMAIL_API_KEY", "BOPS_MAIL_DOMAIN", "OPENAI_API_KEY", "TAILSCALE_AUTH_KEY"])
+// WebRTC is on by default (lib/server/orgo.ts webrtcWanted), so a new computer's is turned on.
+for (const k of ["ORGO_API_KEY", "BOPS_ORGO_WORKSPACE", "BOPS_ORGO_TEMPLATE", "BOPS_DATABASE_URL", "AGENTMAIL_API_KEY", "BOPS_MAIL_DOMAIN", "OPENAI_API_KEY", "TAILSCALE_AUTH_KEY", "BOPS_WEBRTC"])
   delete process.env[k];
 process.env.BOPS_ORGO_ORIGIN = "https://orgo.test";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-// Modules that would start processes when loaded (Codex, the relay's agent) or that Node can't load (the
+// Modules that would start processes when loaded (the Mac check, the relay's agent) or that Node can't load (the
 // desktop look draws the mascot's JSX, mirror.ts has parameter properties) are stand-ins here: each of
 // their exports does nothing. The computer setup tested below only calls them in passing.
-const STAND_INS = new Set(["codex", "relay", "desktop", "mirror"]);
+const STAND_INS = new Set(["mac", "relay", "desktop", "mirror"]);
 // The server modules import "@/lib/…" and "./store" (no extension), the way Next resolves them.
 registerHooks({
   resolve(specifier, context, next) {
@@ -661,7 +666,7 @@ replies = {
   route: (c) => {
     const [, id, what] = c.path.match(/^\/api\/computers\/([^/]+)(?:\/(\w+))?$/) ?? [];
     if (!upComputers.has(id)) return undefined;
-    if (c.method === "GET" && !what) return json(200, { id, status, ram: upComputers.get(id), workspace_id: "ws_bops" });
+    if (c.method === "GET" && !what) return json(200, { id, status, ram: upComputers.get(id), workspace_id: "ws_bops", instance_details: status === "running" ? { id: `inst-${id}` } : null });
     if (c.method === "DELETE" && !what) return upComputers.delete(id), json(200, { ok: true });
     if (c.method === "GET" && what === "screens")
       return screensUp ? json(200, { screens: [99, 100, 101, 102].map((d) => ({ id: `s${d}`, display: `:${d}`, width: 1280, height: 960, default: d === 99 })) }) : json(404, { error: "No screens yet" });
@@ -704,6 +709,11 @@ assert.deepEqual(
   calls.filter((c) => c.method === "PATCH" && c.path === "/api/computers/c-up-2/resize").map((c) => c.body),
   [{ disk_size_gb: 50 }],
   "its disk grows to the plan's most (under Bops' 120 GB)",
+);
+assert.deepEqual(
+  calls.filter((c) => c.method === "POST" && c.path === "/api/computers/c-up-2/webrtc").map((c) => c.body),
+  [{ enabled: true }],
+  "its screen set to stream over UDP (Orgo's WebRTC)",
 );
 // Orgo says a new one is stopped: deleted right away, without waiting out the three minutes for it to run.
 S.update(() => Object.assign(main(), { computerId: undefined, computerStatus: "none" }));
@@ -903,6 +913,404 @@ assert.equal(fo.inUse, 0, "nothing on the plan");
 await X.ensureComputer("kai");
 assert.equal(kai().computer, "shared");
 assert.equal(workBotOf(kai()).id, "boppy");
+
+/* ---------------- A computer deleted on Orgo's site: the bot moves on, once ---------------- */
+
+const V = await import(`${root}/app/api/vnc/route.ts`);
+const SR = await import(`${root}/app/api/screen/route.ts`);
+const C = await import(`${root}/app/api/computer/route.ts`);
+const view = (botId, display = 99) => V.GET(new Request(`http://localhost:3210/api/vnc?bot=${botId}&display=${display}`));
+const shot = (botId, display = 100) => SR.GET(new Request(`http://localhost:3210/api/screen?bot=${botId}&display=${display}`));
+const computerView = (botId) => C.GET(new Request(`http://localhost:3210/api/computer?bot=${botId}`));
+const healedSays = (botId) => S.getState().messages.filter((m) => m.chatId === `bot:${botId}` && /^My computer was deleted/.test(m.text)).map((m) => m.text);
+/** Wait for what runs in the background after a view (the fake Orgo answers at once). */
+const until = async (done) => {
+  for (let i = 0; i < 400 && !done(); i++) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(done(), "done in time");
+};
+const later = () => new Promise((r) => setTimeout(r, 30));
+/** Boppy's computer as the app last knew it: ready, on its own (not the free one), with what its screens showed. */
+const onComputer = (id, extra = {}) =>
+  S.update((s) => {
+    s.host = "orgo";
+    Object.assign(main(), { computerId: id, computerStatus: "ready", freeComputer: undefined, computerRam: 8, tailnet: undefined, ...extra });
+    Object.assign(kai(), { computer: undefined, computerId: undefined, computerStatus: "none" });
+    s.screens = { "boppy:100": { url: "https://example.com/", title: "Example", sensitive: false, at: 1 } };
+  });
+
+// The owner's case: Boppy is on a computer deleted on Orgo's site (Orgo answers 404), and the user's free
+// Bops computer is another one, live, that no bot has. The first look at a screen fails, and Boppy moves
+// onto the free one: nothing made, its old tailnet address and what its screens showed forgotten.
+fo = freeOrgo("free", 0, { free: "c-free-9" });
+onComputer("c-gone-1", { tailnet: { ip: "100.64.0.9", name: "bops-boppy" } });
+n = asked("POST", "/api/computers");
+let res = await view("boppy");
+assert.equal(res.status, 502);
+assert.match((await res.json()).error, /Orgo GET \/computers\/c-gone-1 → 404/);
+await until(() => healedSays("boppy").length === 1);
+assert.deepEqual(
+  { id: main().computerId, status: main().computerStatus, free: main().freeComputer, tailnet: main().tailnet, ram: main().computerRam },
+  { id: "c-free-9", status: "ready", free: true, tailnet: undefined, ram: 16 },
+);
+assert.equal(asked("POST", "/api/computers"), n, "nothing made: the free one taken up");
+assert.deepEqual(healedSays("boppy"), ["My computer was deleted, so I've moved to your Bops computer."]);
+noDashes(healedSays("boppy")[0]);
+assert.deepEqual(S.getState().screens, {}, "what its old screens showed is forgotten");
+// The next look streams the free one.
+res = await view("boppy");
+assert.equal(res.status, 200);
+assert.match((await res.json()).vnc, /^wss:\/\/orgo\.test\/desktops\/c-free-9\/ws\/websockify\?/);
+
+// No free Bops computer (the one deleted was it, and Orgo frees its place): Orgo makes it again, a new one.
+// A screenshot is what finds out this time.
+fo = freeOrgo("free", 0);
+onComputer("c-gone-2", { freeComputer: true });
+n = asked("POST", "/api/computers");
+res = await shot("boppy");
+assert.equal(res.status, 502);
+assert.equal(await res.text(), "screenshot 404");
+await until(() => healedSays("boppy").length === 2);
+assert.deepEqual({ id: main().computerId, status: main().computerStatus, free: main().freeComputer }, { id: "c-free-1", status: "ready", free: true });
+assert.equal(asked("POST", "/api/computers") - n, 1, "one made");
+assert.equal(calls.filter((c) => c.method === "POST" && c.path === "/api/computers").at(-1).body.bops_free, true);
+assert.equal(healedSays("boppy").at(-1), "My computer was deleted, so I've made a new one.");
+noDashes(healedSays("boppy").at(-1));
+
+// Many views at once (the boot screen twice, another screen, two screenshots, the computer view) all find
+// it gone: Orgo is asked about it once more, and Boppy moves once.
+fo = freeOrgo("free", 0, { free: "c-free-8" });
+onComputer("c-gone-3");
+n = asked("POST", "/api/computers");
+let before = healedSays("boppy").length;
+const limits = asked("GET", "/api/billing/compute-limits");
+const views = await Promise.all([view("boppy"), view("boppy", 100), view("boppy"), shot("boppy", 100), shot("boppy", 101), computerView("boppy")]);
+assert.deepEqual(views.map((r) => r.status), [502, 502, 502, 502, 502, 502]);
+await until(() => healedSays("boppy").length > before);
+await later();
+assert.equal(healedSays("boppy").length - before, 1, "said once");
+assert.equal(main().computerId, "c-free-8");
+assert.equal(asked("POST", "/api/computers"), n);
+assert.equal(asked("GET", "/api/computers/c-gone-3"), 5, "three streams and the computer view asked, then one check");
+assert.equal(asked("GET", "/api/billing/compute-limits") - limits, 1, "the plan read once, for one move");
+
+// A screen that's missing on a computer that's there isn't a computer that's gone: Orgo is asked once
+// whether it's there, then not again for a minute, and Boppy stays.
+n = asked("GET", "/api/computers/c-free-8");
+assert.equal((await shot("boppy", 101)).status, 502);
+await later();
+assert.equal((await shot("boppy", 102)).status, 502);
+await later();
+assert.equal(asked("GET", "/api/computers/c-free-8") - n, 1);
+assert.equal(main().computerId, "c-free-8");
+assert.equal(healedSays("boppy").length - before, 1);
+
+// Set up again (the computer view's button) while ready, but deleted since: Boppy moves on too.
+fo = freeOrgo("free", 0, { free: "c-free-5" });
+onComputer("c-gone-4");
+before = healedSays("boppy").length;
+res = await C.POST(new Request("http://localhost:3210/api/computer", { method: "POST", body: JSON.stringify({ botId: "boppy" }) }));
+assert.equal(res.status, 200);
+await until(() => healedSays("boppy").length > before);
+await later();
+assert.deepEqual({ id: main().computerId, status: main().computerStatus, free: main().freeComputer }, { id: "c-free-5", status: "ready", free: true });
+assert.equal(healedSays("boppy").length - before, 1);
+
+// When the app opens, and every 10 minutes: one read for each bot's computer. One that's gone is healed
+// without asking Orgo again; one that's there is left alone.
+fo = freeOrgo("free", 0, { free: "c-free-6" });
+onComputer("c-gone-5");
+fo.alive.add("c-kai");
+S.update(() => Object.assign(kai(), { computerId: "c-kai", computerStatus: "ready" }));
+const kaiReads = asked("GET", "/api/computers/c-kai");
+await X.checkComputers();
+assert.deepEqual({ id: main().computerId, status: main().computerStatus }, { id: "c-free-6", status: "ready" });
+assert.equal(asked("GET", "/api/computers/c-gone-5"), 1, "one read");
+assert.equal(asked("GET", "/api/computers/c-kai") - kaiReads, 1, "one read");
+assert.deepEqual({ id: kai().computerId, status: kai().computerStatus }, { id: "c-kai", status: "ready" });
+assert.equal(healedSays("boppy").at(-1), "My computer was deleted, so I've moved to your Bops computer.");
+assert.deepEqual(healedSays("kai"), []);
+
+// Deleting a computer Orgo no longer has (404), or that's out of this account's reach (403): nothing to
+// delete, so the state is cleared and the user told it worked, rather than an error and no change.
+onComputer("c-gone-6", { freeComputer: true });
+res = await C.DELETE(new Request("http://localhost:3210/api/computer?bot=boppy", { method: "DELETE" }));
+assert.equal(res.status, 200);
+assert.deepEqual(
+  { id: main().computerId, status: main().computerStatus, free: main().freeComputer, tailnet: main().tailnet },
+  { id: undefined, status: "none", free: undefined, tailnet: undefined },
+);
+assert.equal(asked("DELETE", "/api/computers/c-gone-6"), 0, "nothing deleted");
+const away = fo.replies.route;
+fo.replies.route = (c) => (c.path.startsWith("/api/computers/c-away") ? json(403, { error: "You don't have access to this computer" }) : away(c));
+onComputer("c-away");
+await X.resetComputer("boppy");
+assert.deepEqual({ id: main().computerId, status: main().computerStatus }, { id: undefined, status: "none" });
+// Anything else Orgo says still stops it, and the computer stays.
+fo.replies.route = (c) => (c.path === "/api/computers/c-busy" ? json(409, { error: "Computer is busy" }) : away(c));
+onComputer("c-busy");
+await assert.rejects(X.resetComputer("boppy"), /409: Computer is busy/);
+assert.deepEqual({ id: main().computerId, status: main().computerStatus }, { id: "c-busy", status: "ready" });
+fo.replies.route = away;
+
+/* ---------------- The free Bops computer, found again after a sign-in ---------------- */
+
+// The owner's case: signed in as A, then B, then A again. Their bots' computers were let go at the switch
+// (adoptComputers), so Boppy has none, while A's free Bops computer is still running on Orgo. After the
+// sign-in (and when a signed-in user's state loads) Boppy takes it up again: nothing is made.
+const signedInAs = (id) => S.update((s) => (s.account = { user: { id }, signedInAt: 1 }));
+const unlinked = () =>
+  S.update((s) => {
+    s.host = "orgo";
+    s.screens = {};
+    Object.assign(main(), { computerId: undefined, freeComputer: undefined, computerRam: undefined, computerStatus: "none", computer: undefined, tailnet: undefined });
+    Object.assign(kai(), { computerId: undefined, freeComputer: undefined, computerRam: undefined, computerStatus: "none", computer: undefined, tailnet: undefined });
+  });
+const setUpCalls = (id, since) => calls.slice(since).filter((c) => c.path.startsWith(`/api/computers/${id}/`)).length;
+signedInAs("user_a");
+
+// 1. Boppy has no computer, and the free one is on Orgo with no bot on it: Boppy has it again, set up
+// (its screens and the rest), and nothing is made. Kai, another workspace's main bot with none, is left alone.
+fo = freeOrgo("free", 0, { free: "c-free-r" });
+unlinked();
+n = calls.length;
+const creates = asked("POST", "/api/computers");
+await X.reattachFreeComputer("user_a");
+assert.deepEqual(
+  { id: main().computerId, free: main().freeComputer, status: main().computerStatus, ram: main().computerRam },
+  { id: "c-free-r", free: true, status: "ready", ram: 16 },
+);
+assert.equal(asked("POST", "/api/computers"), creates, "nothing made");
+assert.equal(fo.inUse, 0, "nothing on the plan");
+assert.ok(calls.slice(n).some((c) => c.method === "GET" && c.path === "/api/computers/c-free-r/screens"), "its screens set up again");
+assert.deepEqual({ id: kai().computerId, status: kai().computerStatus }, { id: undefined, status: "none" });
+// Two looks at once (the sign-in and the state loading) are one: one read of the plan.
+unlinked();
+n = asked("GET", "/api/billing/compute-limits");
+const looks = [X.reattachFreeComputer("user_a"), X.reattachFreeComputer("user_a")];
+assert.equal(looks[0], looks[1], "one look at a time per user");
+await Promise.all(looks);
+assert.equal(asked("GET", "/api/billing/compute-limits") - n, 1);
+assert.equal(main().computerId, "c-free-r");
+
+// 2. Another bot has the free one: nothing changes, and nothing is asked of Orgo beyond the plan.
+unlinked();
+S.update(() => Object.assign(kai(), { computerId: "c-free-r", freeComputer: true, computerStatus: "ready" }));
+let bots = JSON.stringify(S.getState().bots);
+n = calls.length;
+await X.reattachFreeComputer("user_a");
+assert.equal(JSON.stringify(S.getState().bots), bots, "nothing changed");
+assert.equal(posts(n), 0);
+assert.equal(setUpCalls("c-free-r", n), 0, "nothing set up");
+
+// 3. No free Bops computer: nothing made, though the plan has room for one (or Orgo says nothing about free ones).
+for (const orgoNow of [() => freeOrgo("free", 0), () => freeOrgo("hacker_v2", 1), () => onPlan("hacker_v2", 1, 0)]) {
+  orgoNow();
+  unlinked();
+  bots = JSON.stringify(S.getState().bots);
+  n = calls.length;
+  await X.reattachFreeComputer("user_a");
+  assert.equal(posts(n), 0, "nothing made");
+  assert.equal(JSON.stringify(S.getState().bots), bots, "nothing changed");
+}
+
+// 4. The account changes while Orgo is asked about the plan: nothing is written, into either state.
+// Another user's state swapped in (a hosted server; their bots have the same ids)...
+fo = freeOrgo("free", 0, { free: "c-free-r" });
+unlinked();
+const mine = S.getState();
+let other;
+const limitsNow = fo.replies["GET /api/billing/compute-limits"];
+fo.replies["GET /api/billing/compute-limits"] = (c) => {
+  if (S.getState() === mine) swap((other = JSON.parse(JSON.stringify(mine))));
+  return limitsNow(c);
+};
+n = calls.length;
+await X.reattachFreeComputer("user_a");
+assert.equal(S.getState(), other);
+assert.deepEqual([other, mine].map((st) => st.bots.find((b) => b.id === "boppy").computerId), [undefined, undefined]);
+assert.equal(setUpCalls("c-free-r", n), 0, "nothing set up");
+swap(mine);
+// ...or a sign-out, and someone else signed in, on this Mac.
+fo.replies["GET /api/billing/compute-limits"] = (c) => {
+  signedInAs("user_b");
+  return limitsNow(c);
+};
+bots = JSON.stringify(S.getState().bots);
+n = calls.length;
+await X.reattachFreeComputer("user_a");
+assert.equal(JSON.stringify(S.getState().bots), bots, "nothing written");
+assert.equal(setUpCalls("c-free-r", n), 0);
+// Nor is Orgo asked at all for a user who isn't the one signed in.
+n = calls.length;
+await X.reattachFreeComputer("user_a");
+assert.equal(calls.length, n);
+S.update((s) => (s.account = undefined));
+
+/* ---------------- Max's Bops computers ---------------- */
+
+/**
+ * Where Bops Cloud holds plans to what they include (CloudSession.plan.limits) and Orgo counts Bops
+ * computers (compute-limits' bops_computers_limit and bops_max_computer_ids), a bot's own computer is a
+ * Bops computer made fresh from the Bops template (bops_free), never a copy on the Orgo plan: Max has
+ * up to 5, the free one included; Free and Pro the free one only, and say so in the plan's words.
+ */
+const PI = await import(`${root}/lib/plan-includes.ts`);
+// The plan Bops Cloud says counts only where the app works through it (cloud.ts cloudOn): the Mac app,
+// not a self-hosted install. So it's the Mac app's here, with the state still in the test's file store.
+delete process.env.BOPS_SELF_HOSTED;
+const cloudBox = globalThis.bopsCloud;
+const onBopsPlan = (tier) => (cloudBox.session = { key: "sk_test_one", value: { userId: "u1", plan: { tier, limits: true } } });
+function bopsOrgo(limit, { extras = [], refuse = false } = {}) {
+  const o = { extras: [...extras], made: 0 };
+  o.replies = {
+    ...WORKSPACES,
+    "GET /api/user/subscription": () => json(200, { tier: "free", planLimits: null }),
+    "GET /api/billing/compute-limits": () =>
+      json(200, { max_computers: 0, computers_used: 0, account_ram_budget_gb: 4, account_ram_used_gb: 0, max_ram_gb: 4, bops_free_computer_id: "c-free-b", bops_max_computer_ids: o.extras, bops_computers_limit: limit }),
+    "POST /api/computers": (c) => {
+      if (!c.body.bops_free) return json(403, { error: "Creating a computer requires a paid plan.", code: "UPGRADE_REQUIRED" });
+      if (refuse || 1 + o.extras.length >= limit)
+        return json(403, { error: limit > 1 ? "Max includes up to 3 Bops computers, and you have 3." : "Pro includes 1 Bops computer. Max includes up to 3.", code: "BOPS_COMPUTER_LIMIT" });
+      const id = `c-max-${++o.made}`;
+      o.extras.push(id);
+      return json(201, { id, name: c.body.name, status: "creating" });
+    },
+  };
+  replies = o.replies;
+  L.forgetPlan();
+  return o;
+}
+const novaNote = () => S.getState().messages.filter((m) => m.chatId === "bot:nova").at(-1)?.text ?? "";
+S.update((st) => {
+  if (!st.bots.some((b) => b.id === "nova")) {
+    st.bots.push({ id: "nova", name: "Nova", role: "Research", color: "#2EC4B6", isMain: false, computerStatus: "none" });
+    st.chats.push({ id: "bot:nova", kind: "bot", botIds: ["nova"], createdAt: Date.now(), typing: [] });
+  }
+  Object.assign(st.bots.find((b) => b.id === "boppy"), { computerId: "c-free-b", freeComputer: true, computerStatus: "ready", workspaceId: undefined });
+  Object.assign(st.bots.find((b) => b.id === "nova"), { computerId: undefined, computer: "own", computerStatus: "cloning" });
+});
+const novaWs = T.workspaceOf(nova());
+
+// Max with room: Nova gets a Bops computer of its own, made from the template, not a copy.
+onBopsPlan("max_bops");
+bopsOrgo(5, { extras: ["c-max-a"] });
+let p = await L.orgoPlan({ fresh: true });
+assert.deepEqual(plain(p.bops), { tier: "max_bops", limit: 5, extras: ["c-max-a"] });
+assert.equal(P.ownComputerShort(p, S.getState().bots, novaWs), null);
+n = calls.length;
+const madeMax = await L.makeOwnComputer(nova(), main(), "nova-max");
+assert.equal(madeMax?.id, "c-max-1");
+const create = calls.slice(n).find((c) => c.method === "POST" && c.path === "/api/computers");
+assert.equal(create.body.bops_free, true, "made as a Bops computer");
+assert.equal(create.body.ram, undefined, "at the template's size");
+assert.equal(calls.slice(n).filter((c) => /\/(fork|clone)$/.test(c.path)).length, 0, "not a copy");
+
+// Max with all 5: it shares Boppy's, in Max's words, with nothing to buy and no Orgo link.
+bopsOrgo(5, { extras: ["a", "b", "c", "d"] });
+p = await L.orgoPlan({ fresh: true });
+assert.equal(P.ownComputerShort(p, S.getState().bots, novaWs)?.text, "Max includes up to 3 Bops computers, and you have 3.");
+ownAgain();
+n = calls.length;
+assert.equal(await L.makeOwnComputer(nova(), main(), "nova-max-6"), null);
+assert.equal(asked("POST", "/api/computers") - calls.slice(0, n).filter((c) => c.method === "POST" && c.path === "/api/computers").length, 0, "nothing made");
+assert.equal(nova().computer, "shared");
+assert.equal(novaNote(), "I'll work on Boppy's computer instead of one of my own. Max includes up to 3 Bops computers, and you have 3. Once your plan has room, you can switch me to Its own under Computer in my Details.");
+
+// Pro (and Free): one computer, the free one, shared by the bots. Why not, and the plan that has room.
+for (const [tier, name] of [["pro_bops", "Pro"], ["free_bops", "Free"]]) {
+  onBopsPlan(tier);
+  bopsOrgo(1);
+  p = await L.orgoPlan({ fresh: true });
+  const why = `${name} includes 1 Bops computer. Max includes up to 3.`;
+  assert.deepEqual(plain(P.ownComputerShort(p, S.getState().bots, novaWs)), { short: "bops", text: why, upgrade: "max" });
+  assert.equal(await L.noOwnComputer(novaWs), why);
+  ownAgain();
+  n = calls.length;
+  assert.equal(await L.makeOwnComputer(nova(), main(), `nova-${tier}`), null);
+  assert.equal(calls.slice(n).filter((c) => c.method === "POST").length, 0, `${tier}: nothing asked of Orgo`);
+  assert.equal(novaNote(), `I'll work on Boppy's computer instead of one of my own. ${why} Upgrade to Max in Settings. Once your plan has room, you can switch me to Its own under Computer in my Details.`);
+  noDashes(novaNote());
+}
+
+// Orgo's word is the last: a plan read with room, turned down at the create, shares in Orgo's words.
+onBopsPlan("max_bops");
+bopsOrgo(5, { refuse: true });
+ownAgain();
+assert.equal(await L.makeOwnComputer(nova(), main(), "nova-raced"), null);
+assert.equal(nova().computer, "shared");
+assert.ok(novaNote().includes("Max includes up to 3 Bops computers, and you have 3."), novaNote());
+
+// Without the cloud's limits (self-hosted, or before plans), the Orgo plan decides as before.
+cloudBox.session = { key: "sk_test_one", value: { userId: "u1", plan: { tier: "max_bops", limits: false } } };
+bopsOrgo(5);
+assert.equal((await L.orgoPlan({ fresh: true })).bops, undefined);
+cloudBox.session = undefined;
+
+// The words for numbers, emails and computers, and the cards: every plan, no dashes.
+assert.deepEqual(PI.numberShort("free_bops", 0, { isPlanBot: true }), { text: "Free doesn't include a phone number. Pro includes 1, and Max up to 5.", upgrade: "plan" });
+assert.equal(PI.numberShort("pro_bops", 0, { isPlanBot: true }), null, "Pro's one is the main bot's");
+assert.deepEqual(PI.numberShort("pro_bops", 1, { isPlanBot: false }), { text: "Pro includes 1 phone number. Max includes up to 5.", upgrade: "max" });
+assert.equal(PI.numberShort("max_bops", 4, { isPlanBot: false }), null);
+assert.deepEqual(PI.numberShort("max_bops", 5, { isPlanBot: false }), { text: "Max includes up to 5 phone numbers, and you have 5.", upgrade: null });
+assert.deepEqual(PI.emailShort("free_bops", 0, { isPlanBot: true }), { text: "Free doesn't include an email. Pro includes 1, and Max up to 5.", upgrade: "plan" });
+assert.equal(PI.emailShort("pro_bops", 1, { isPlanBot: true }), null);
+assert.deepEqual(PI.emailShort("pro_bops", 1, { isPlanBot: false }), { text: "Pro includes 1 email. Max includes up to 5.", upgrade: "max" });
+assert.equal(PI.emailShort("max_bops", 4, { isPlanBot: false }), null);
+assert.deepEqual(PI.emailShort("max_bops", 5, { isPlanBot: false }), { text: "Max includes up to 5 emails, and you have 5.", upgrade: null });
+assert.equal(PI.computerShort("max_bops", 1, 2), null, "Max: the free one, then a bot's own and its main bot's");
+assert.equal(PI.upgradeLabel("plan"), "Purchase a plan");
+assert.equal(PI.upgradeLabel("max"), "Upgrade to Max");
+assert.deepEqual(
+  PI.PLAN_CARDS.map((c) => [c.name, c.price, `${c.computers.title}: ${c.computers.detail}`, ...c.lines.map((l) => (l.no ? `- ${l.text}` : l.text))]),
+  [
+    ["Free", "$0", "1 computer included: 10 hours a month, 4 cores, 16 GB RAM, multi-screen", "$5 of AI credit, once", "As many bots as you like, sharing it", "- No phone number or email"],
+    ["Pro", "$20", "1 computer included: Always on, 4 cores, 16 GB RAM, templates, multi-screen", "$20 of AI credit every month", "As many bots as you like, sharing it", "1 phone number and 1 email", "- No extra computers"],
+    ["Max", "$200", "Up to 3 computers: Always on, 4 cores, 16 GB RAM each", "$200 of AI credit every month", "As many bots as you like, on any of them", "Up to 5 phone numbers and 5 emails"],
+  ],
+);
+for (const c of PI.PLAN_CARDS) for (const text of [c.computers.title, c.computers.detail, ...c.lines.map((l) => l.text)]) noDashes(text);
+
+// Emails: each plan's, held by the app (the Mac makes inboxes in its own pod). The plan's main bot's is
+// counted from the start on a paid plan; another bot's comes only when the user asks, on Max, up to 5.
+const M = await import(`${root}/lib/server/mail.ts`);
+const R = await import(`${root}/lib/server/plan-room.ts`);
+for (const [tier, error, upgrade] of [
+  ["free_bops", "Free doesn't include an email. Pro includes 1, and Max up to 5.", "plan"],
+  ["pro_bops", "Pro includes 1 email. Max includes up to 5.", "max"],
+]) {
+  onBopsPlan(tier);
+  assert.deepEqual(await M.requestInbox("nova"), { error, upgrade });
+  assert.equal(nova().mailWanted, undefined, `${tier}: nothing asked for`);
+}
+onBopsPlan("max_bops");
+S.update((st) => {
+  for (const [i, id] of ["x1", "x2", "x3", "x4"].entries())
+    st.bots.push({ id, name: `X${i}`, role: "Research", color: "#2EC4B6", isMain: false, computerStatus: "none", mail: { inboxId: `${id}@acme.bops.bot`, podId: "pod" } });
+});
+assert.deepEqual(R.planRoom(), { tier: "max_bops", numbers: R.numbersHeld(), emails: 5 }, "4 bots and the plan's main bot");
+assert.deepEqual(await M.requestInbox("nova"), { error: "Max includes up to 5 emails, and you have 5.", upgrade: null });
+S.update((st) => (st.bots = st.bots.filter((b) => !["x2", "x3", "x4"].includes(b.id))));
+// With room: asked for, and made when mail is on (it's off here, so it's on its way).
+assert.deepEqual(await M.requestInbox("nova"), { error: "Nova's inbox is being set up. It shows up here in a moment.", upgrade: null });
+assert.equal(nova().mailWanted, true);
+cloudBox.session = undefined;
+S.update((st) => (st.bots = st.bots.filter((b) => b.id !== "x1")));
+process.env.BOPS_SELF_HOSTED = "1";
+
+/* ---------------- A self-hosted install's file: saved now, in order ---------------- */
+
+// Saving now (Restart Bops, a sign-out) waits for a background save under way, and lands last: the
+// older state that save holds never lands after it (lib/server/persist.ts fileStore).
+const onDisk = () => JSON.parse(readFileSync(join(scratch, ".data/state.json"), "utf8"));
+const save = globalThis.__bopsSave;
+S.update((s) => (s.owner.about = "saved in the background"));
+for (const end = Date.now() + 2000; !save.writing && Date.now() < end; ) await new Promise((r) => setImmediate(r));
+assert.ok(save.writing, "a background save under way");
+S.update((s) => (s.owner.about = "saved now"));
+assert.equal(await S.flushState(), true);
+assert.equal(onDisk().owner.about, "saved now");
+await new Promise((r) => setTimeout(r, 600));
+assert.equal(onDisk().owner.about, "saved now", "nothing older lands after it");
 
 console.log(`all plan tests passed (${calls.length} fake Orgo calls, none to the network)`);
 // Gone before the store's next save could make the folder again.

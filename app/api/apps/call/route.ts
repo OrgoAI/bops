@@ -1,10 +1,13 @@
 import { appCall } from "@/lib/server/composio";
+import { notReady } from "@/lib/server/ready";
 
 /**
- * A thread uses one of the user's apps. Called by the bot's screen tools over the tailnet, or by Codex
- * on the Mac; the thread's bot secret (x-bops-key) proves which bot it is. Waits while the user approves.
+ * A thread uses one of the user's apps. Called by the bot's screen tools over the tailnet; the thread's
+ * bot secret (x-bops-key) proves which bot it is. Waits while the user approves.
  */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const { session, tool, args } = (await request.json().catch(() => ({}))) as { session?: string; tool?: string; args?: Record<string, unknown> };
   try {
     const r = await appCall(session ?? "", request.headers.get("x-bops-key") ?? "", tool ?? "", args ?? {});

@@ -1,9 +1,12 @@
 # Bops database (hosted Bops)
 
-The desktop app keeps its state in `.data/state.json` and needs none of this. Hosted Bops keeps its
-data in Postgres: Bops Cloud (`cloud/`, see cloud/README.md) for every user's cloud setup, webhooks,
-pending texts and calls, plus each user's state backup (`bops.app_state`, one row per Orgo user, the
-whole app state as JSONB).
+Hosted Bops keeps its data in Postgres: Bops Cloud (`cloud/`, see cloud/README.md) for every user's
+cloud setup, webhooks, pending texts and calls, and each user's app state: the Mac app keeps none of
+its own, it loads the signed-in user's from here and writes every change back. The state is
+`bops.app_state` (one row per Orgo user: the app state as JSONB, without its messages) and
+`bops.chat_messages` (one row per chat message; `db/migrations/0010_chat_messages.sql`). A
+self-hosted install (`BOPS_SELF_HOSTED=1`) needs none of this: it keeps a file per user,
+`.data/users/<id>/state.json`.
 
 At Orgo it lives in orgo-web's production database (`orgo`), in its own schema (`bops`), under its
 own login (`bops_app`). That login owns its schema and has no grants on orgo-web's, so it can't read
@@ -102,6 +105,13 @@ transaction mode.
 - `bops.cloud_usage.cost_micros` and `bops.cloud_objects.model` (0007, `0007_ai_credit.sql`, Bops
   Cloud's `cloud/usage.ts` and `cloud/credit.ts`): what each use cost Orgo, taken from the user's AI
   credit, and the model an agent session runs on, to price its turns.
+- `bops.cloud_objects.bot_id`, `used_at`, `checked_at`, `settled_at` (0009, `0009_usage.sql`, Bops
+  Cloud's `cloud/reconcile.ts`): the bot an agent session works for, and when its turns were last
+  read back from OpenAI; `cloud_usage_ref`, the index that finds a use by its ref.
+- `bops.chat_messages`, `bops.chat_seq`, `bops.app_state.protocol` and `writer` (0010,
+  `0010_chat_messages.sql`, Bops Cloud's `cloud/state.ts`): each chat message its own row, moved out
+  of the state blobs, with a seq bumped on every write; which build last wrote a user's state, and
+  from which Mac (cloud/README.md, "The app's state").
 
 ## Test against a throwaway database
 

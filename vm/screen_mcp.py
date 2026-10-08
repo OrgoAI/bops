@@ -236,8 +236,9 @@ def release_screen(screen: int) -> str:
     return f"Screen {screen} released."
 
 
-# The user's apps (Gmail, Calendar, Linear…), through Bops on their Mac. Bops holds the accounts and asks
-# the user before anything that sends or changes something; this computer only has the bot's own secret.
+# The user's apps (Gmail, Calendar, Linear…) and business data (companies, people, contacts: treg), through
+# Bops on their Mac. Bops holds the accounts and keys and asks the user before anything that sends, changes
+# or costs more than a little; this computer only has the bot's own secret.
 APPS = "/opt/bops/apps.json"
 if BOT and os.path.exists(f"/opt/bops/apps-{BOT}.json"):
     APPS = f"/opt/bops/apps-{BOT}.json"
@@ -277,7 +278,10 @@ def _apps(tool: str, args: dict) -> str:
         return f"Couldn't reach Bops for apps: {e}"
 
 
-if os.path.exists(APPS):
+# Which tools the key file says this bot has: its apps (a file from before business data says nothing: apps), business data.
+_HAS = _read(APPS) if os.path.exists(APPS) else {}
+
+if os.path.exists(APPS) and _HAS.get("apps", True):
 
     @server.tool()
     def find_app_actions(query: str) -> str:
@@ -288,6 +292,48 @@ if os.path.exists(APPS):
     def use_app(action: str, arguments: dict, account: str = "") -> str:
         """Run one action in the user's apps, e.g. GMAIL_FETCH_EMAILS. Reading runs at once. Anything that sends, creates, changes or pays waits for the user to approve it in Bops. When you have more than one account in that app, set account to its label or name (e.g. "Work")."""
         return _apps("use_app", {"action": action, "arguments": arguments, "account": account or None})
+
+
+if os.path.exists(APPS) and _HAS.get("data"):
+
+    @server.tool()
+    def business_search(
+        job: str,
+        query: str = "",
+        name: str = "",
+        domain: str = "",
+        industry: str = "",
+        technology: str = "",
+        title: str = "",
+        keywords: list[str] | None = None,
+        full_name: str = "",
+        email: str = "",
+        linkedin_url: str = "",
+        country: str = "",
+        location: str = "",
+        limit: int = 10,
+    ) -> str:
+        """Look up business data from 100+ data providers, through Bops. job is one of: companies (query, or industry, technology, name or domain; country, limit), similar_companies (domain), people (title and the company's domain, or query, full_name; keywords, location, country, limit), company (domain, or name, linkedin_url, email), person (email or linkedin_url, or full_name and domain), work_email (full_name and domain, or linkedin_url; checked before you get it), phone (linkedin_url, or email, or full_name and domain), check_email (email), news (domain), hiring (domain: open jobs), funding (domain), places (query: "dentists in Austin, TX"; country). Fill only what the job uses; a domain or LinkedIn URL beats a name. Most lookups cost under a cent and a miss is free."""
+        args = {k: v for k, v in dict(job=job, query=query, name=name, domain=domain, industry=industry, technology=technology, title=title, keywords=keywords, full_name=full_name, email=email, linkedin_url=linkedin_url, country=country, location=location, limit=limit).items() if v not in ("", None, [])}
+        return _apps("business_search", args)
+
+    @server.tool()
+    def find_data(query: str) -> str:
+        """Search the rest of the business data catalog (social profiles and posts, SEO and search results, ads libraries, reviews, app stores, web scraping) for a job business_search doesn't do. It answers with each endpoint's id, price per call, how often it works and its inputs. Then call get_data."""
+        return _apps("find_data", {"query": query})
+
+    @server.tool()
+    def get_data(endpoint_id: str, input: dict) -> str:
+        """Call one endpoint from find_data by its exact id, with its inputs (query, path and body inputs all in input, by name). Cheap ones run at once; a dearer one waits for the user's OK in Bops."""
+        return _apps("get_data", {"endpoint_id": endpoint_id, "input": input})
+
+
+if os.path.exists(APPS):
+
+    @server.tool()
+    def sign_in_from_vault(screen: int | None = None) -> str:
+        """Sign in on a sign-in or verification code page from the user's vault. Bops finds the page on your screen (or a helper's: pass its screen number), fills the saved username, password or 2FA code straight into it and submits; you never see them. Call it whenever a page asks you to sign in, and never type a password yourself. It says whether that worked."""
+        return _apps("vault_sign_in", {"display": int(_display(screen).lstrip(":"))})
 
 
 if __name__ == "__main__":

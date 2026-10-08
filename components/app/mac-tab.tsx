@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { live, type AppState, type MacApproval } from "@/lib/types";
+import { live, type AppState } from "@/lib/types";
 import { MacStream, useAppWindowSource } from "./mac-screens";
 import { Mascot } from "./mascot";
 import { post } from "./ui";
 
 /*
- * The user's Mac, as a place bots work: whether it's ready, what's waiting on their OK, what's running
- * there, which apps bots may always use, and the words that send a task there.
+ * The user's Mac, as a place bots work: whether it's ready, what's running there, and the words that
+ * send a task there.
  */
 
 export function MacIcon({ size = 14, color = "currentColor" }: { size?: number; color?: string }) {
@@ -20,71 +20,10 @@ export function MacIcon({ size = 14, color = "currentColor" }: { size?: number; 
   );
 }
 
-/** One of Codex's questions, as a card: "Sam wants to use Calculator on your Mac". */
-export function ApprovalCard({ state, approval: a, compact }: { state: AppState; approval: MacApproval; compact?: boolean }) {
-  const [busy, setBusy] = useState(false);
-  const b = state.bots.find((x) => x.id === a.botId);
-  const s = state.sessions.find((x) => x.id === a.sessionId);
-  const decide = async (decision: "once" | "session" | "always" | "deny") => {
-    setBusy(true);
-    await post("/api/mac", { id: a.id, decision });
-  };
-  const who = b?.name ?? "A bot";
-  const btn = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
-  return (
-    <div className={`flex flex-col gap-2.5 rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#0000000F,0_10px_30px_-16px_#00000059] ${compact ? "" : ""}`}>
-      <div className="flex items-start gap-2.5">
-        {b ? <Mascot botId={b.id} color={b.color} size={26} /> : <MacIcon size={20} />}
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="text-[13.5px] font-semibold leading-[18px]">
-            {a.kind === "app" ? (
-              <>
-                {who} wants to use <span className="rounded-[5px] bg-[#F2F2F0] px-1">{a.app}</span> on your Mac
-              </>
-            ) : a.kind === "command" ? (
-              `${who} wants to ${a.message.charAt(0).toLowerCase()}${a.message.slice(1)}`
-            ) : (
-              `${who} is asking on your Mac: ${a.message}`
-            )}
-          </span>
-          {s && <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">For &ldquo;{s.title}&rdquo;</span>}
-        </div>
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {a.kind === "app" ? (
-          <>
-            {/* "Once" is a single action, so a task asks again at its next step; for the task is the usual answer. */}
-            <button disabled={busy} onClick={() => void decide("session")} className={`${btn} bg-ink text-white`}>
-              Allow for this task
-            </button>
-            <button disabled={busy} onClick={() => void decide("always")} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-              Always
-            </button>
-            <button disabled={busy} onClick={() => void decide("once")} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-              Just this step
-            </button>
-          </>
-        ) : (
-          <>
-            <button disabled={busy} onClick={() => void decide("once")} className={`${btn} bg-ink text-white`}>
-              Allow
-            </button>
-            <button disabled={busy} onClick={() => void decide("session")} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-              For this task
-            </button>
-          </>
-        )}
-        <button disabled={busy} onClick={() => void decide("deny")} className={`${btn} text-[#B42318] hover:bg-[#FEF3F2]`}>
-          Don&apos;t allow
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/** Your Mac's settings, in a sheet over the Your Mac tab: whether bots can work here, apps they may always use, words that mean the Mac. */
+/** Your Mac's settings, in a sheet over the Your Mac tab: whether bots can work here, and the words that mean the Mac. */
 export function MacSettings({ state }: { state: AppState }) {
   const m = state.mac;
+  const retry = m?.next === "codex" && !m.installing;
   const [rule, setRule] = useState("");
   const section = "flex flex-col gap-2";
   const heading = "text-[15px] font-semibold leading-5";
@@ -101,35 +40,16 @@ export function MacSettings({ state }: { state: AppState }) {
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">Your Mac</span>
             <span className="flex items-center gap-1.5 text-[13px] leading-[19px] text-[#6B6B6B]">
               <span className={`size-2 rounded-full ${m?.ready ? "bg-[#2BB673]" : "bg-[#C9C9C6]"}`} />
-              {m?.ready
-                ? `Bots can work here using your ChatGPT plan${m.plan ? ` (${m.plan.replace(/_/g, " ")})` : ""}. You approve each app the first time.`
-                : (m?.reason ?? "Checking…")}
+              {m?.ready ? "Bots can browse here in a Chrome of their own, on your home internet, with Bops AI credit. They can't use your Mac's apps for now." : (m?.reason ?? "Checking…")}
             </span>
           </div>
-          <button onClick={() => void post("/api/mac", { check: true }, "PATCH")} className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
-            Check again
+          {/* An install of Codex that failed (it runs bots' tools here) starts again; anything else is looked at again. */}
+          <button
+            onClick={() => void (retry ? post("/api/mac/codex", { action: "install" }) : post("/api/mac", { check: true }, "PATCH"))}
+            className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]"
+          >
+            {retry ? "Try again" : "Check again"}
           </button>
-        </div>
-
-        <div className={section}>
-          <div className="flex flex-col gap-0.5">
-            <span className={heading}>Apps bots can always use</span>
-            <span className={sub}>From &ldquo;Always&rdquo; on an app request. Remove one and bots ask again.</span>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {m?.alwaysApps.length ? (
-              m.alwaysApps.map((app) => (
-                <span key={app} className="flex items-center gap-1.5 rounded-full bg-[#F2F2F0] py-1 pl-3 pr-1.5 text-[12.5px] leading-4">
-                  {app}
-                  <button onClick={() => void post("/api/mac", { removeApp: app }, "PATCH")} aria-label={`Stop always allowing ${app}`} className="flex size-4 items-center justify-center rounded-full text-[#9A9A98] hover:bg-black/10 hover:text-ink">
-                    ×
-                  </button>
-                </span>
-              ))
-            ) : (
-              <span className={sub}>None yet.</span>
-            )}
-          </div>
         </div>
 
         <div className={section}>

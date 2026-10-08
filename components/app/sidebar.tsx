@@ -5,7 +5,9 @@ import { DISPLAYS, live, workspaceOf, type AppState, type Chat, type Session, ty
 import { initialsOf, signOutOfOrgo } from "./account";
 import { KeyIcon } from "./screen-cards";
 import { Mascot } from "./mascot";
+import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
 import { useSetupNeedsYou } from "./setup";
+import { UpdateNotice } from "./update-notice";
 import { WATCH, WatchEye, watchName } from "./watch-overlay";
 import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, post, RoundButton, StatusIcon, teamOf, useNow } from "./ui";
 
@@ -125,6 +127,8 @@ export function Sidebar({
         )}
       </div>
 
+      {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
+      <UpdateNotice />
       <div className="flex items-center gap-2.5 p-1 pt-3">
         <YouMenu state={state} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />
         <button
@@ -160,18 +164,21 @@ function NeedsYouDot({ className = "" }: { className?: string }) {
 
 /**
  * You, at the bottom of the sidebar: your initials, and a menu with your Orgo account (plan and
- * usage), Settings, this Mac's permissions, and signing out. While something on this Mac still needs
- * you (and you haven't skipped it on the setup screen), a badge on your initials opens that screen
- * and the menu item carries the same mark.
+ * usage), Settings, this Mac's permissions, Restart Bops (in the Mac app; restart.tsx) and signing
+ * out. While something on this Mac still needs you (and you haven't skipped it on the setup screen),
+ * a badge on your initials opens that screen and the menu item carries the same mark.
  */
 function YouMenu({ state, onAccount, onSettings, onSetup }: { state: AppState; onAccount: () => void; onSettings: () => void; onSetup: () => void }) {
   const [open, setOpen] = useState(false);
+  const [restart, setRestart] = useState(false);
+  const canRestart = useCanRestart();
   const needsYou = useSetupNeedsYou(state);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
     const away = (e: MouseEvent) => !box.current?.contains(e.target as Node) && setOpen(false);
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    // Esc closes the menu, and only the menu (preventDefault keeps the Vault or a profile on the right open).
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && (e.preventDefault(), setOpen(false));
     document.addEventListener("mousedown", away);
     document.addEventListener("keydown", esc);
     return () => {
@@ -238,6 +245,12 @@ function YouMenu({ state, onAccount, onSettings, onSetup }: { state: AppState; o
             <span className="flex-1">Permissions on this Mac</span>
             {needsYou && <NeedsYouDot />}
           </button>
+          {canRestart && (
+            <button onClick={pick(() => setRestart(true))} className={item}>
+              <RestartIcon />
+              Restart Bops
+            </button>
+          )}
           {user && (
             <>
               <div className="mx-2 my-1 h-px bg-[#ECECEA]" />
@@ -249,6 +262,7 @@ function YouMenu({ state, onAccount, onSettings, onSetup }: { state: AppState; o
           )}
         </div>
       )}
+      {restart && <RestartConfirm onClose={() => setRestart(false)} />}
     </div>
   );
 }
@@ -263,7 +277,7 @@ function MainBot({ chat: c, state, selected, onClick, last }: { chat: Chat; stat
   const mine = new Set(teamOf(state).map((x) => x.id));
   const sessions = state.sessions.filter((s) => mine.has(s.botId));
   const working = new Set(sessions.filter((s) => live(s) && !s.askWhere).map((s) => s.botId)).size;
-  const waiting = sessions.filter((s) => needsYou(s)).length + (state.mac?.approvals.length ?? 0) + (state.watches?.filter((w) => w.alert && mine.has(w.botId)).length ?? 0);
+  const waiting = sessions.filter((s) => needsYou(s)).length + (state.watches?.filter((w) => w.alert && mine.has(w.botId)).length ?? 0);
   // One line: what needs you, else who's working, else just the role.
   const status = c.typing.length ? "typing…" : waiting ? `${waiting} need${waiting === 1 ? "s" : ""} you` : working ? `${working} working` : "Chief of Staff";
   return (

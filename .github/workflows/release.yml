@@ -80,7 +80,21 @@ jobs:
           [ ${#files[@]} -gt 0 ] || { echo "::error::No DMG or zip was built."; exit 1; }
           pre=""
           case "$TAG" in *-*) pre="--prerelease" ;; esac
-          gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" $pre --verify-tag --title "Bops $TAG" \
-                 --notes "Bops for Mac (Apple silicon), signed with Developer ID and notarized by Apple."
+          # The notes: what's new in this version (docs/releases/<tag>.md, a few "- " lines), then the line
+          # every release has. A tag from before those files gets the line alone, and an existing release
+          # of one keeps its notes.
+          whatsnew="docs/releases/$TAG.md"
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            if [ -f "$whatsnew" ]; then
+              tr -d '\r' < "$whatsnew" | grep -E '^- ' || true
+              echo
+            fi
+            echo "Bops for Mac (Apple silicon), signed with Developer ID and notarized by Apple."
+          } > "$notes"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" $pre --verify-tag --title "Bops $TAG" --notes-file "$notes"
+          elif [ -f "$whatsnew" ]; then
+            gh release edit "$TAG" --notes-file "$notes"
+          fi
           gh release upload "$TAG" "${files[@]}" --clobber

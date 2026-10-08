@@ -74,9 +74,13 @@ async function matchForm(page: Page): Promise<ScreenRead["form"]> {
     },
   );
   if (!a) return undefined;
+  // What each can be, whatever Jev says: a password only ever goes into a password field, and none of them into a
+  // text box or a rich editor (a message being written, a search), which a site would show or send on.
+  const fits = (k: "identifier" | "password" | "code", type: string) =>
+    k === "password" ? type === "password" : !["password", "richtext", "textarea", "search", "url", "date", "file"].includes(type);
   const pick = (k: "identifier" | "password" | "code"): FormField | undefined => {
     const c = chose(a[k]);
-    const f = c && c.choice !== "none" && c.confidence >= 0.5 ? page.fields.find((x) => x.id === c.choice) : undefined;
+    const f = c && c.choice !== "none" && c.confidence >= 0.5 ? page.fields.find((x) => x.id === c.choice && fits(k, x.type)) : undefined;
     const fallback = k === "identifier" ? "Email or phone" : k === "password" ? "Password" : "Code";
     return f ? { id: f.id, label: f.label || f.placeholder || fallback, secret: k !== "identifier" } : undefined;
   };
@@ -84,7 +88,7 @@ async function matchForm(page: Page): Promise<ScreenRead["form"]> {
   return form.identifier || form.password || form.code ? form : undefined;
 }
 
-type Page = { url: string; title: string; text: string; fields: PageField[]; buttons: PageButton[] };
+type Page = { url: string; title: string; text: string; fields: PageField[]; buttons: PageButton[]; targetId?: string };
 
 /** The checkout's total (picked from the amounts on the page) and the button that pays. */
 async function matchPayment(page: Page): Promise<ScreenRead["payment"]> {
@@ -141,22 +145,27 @@ async function matchEmail(page: Page): Promise<ScreenRead["email"]> {
 }
 
 /** Read one screen now and record what's on it. Returns null if the page couldn't be read. */
-export async function readScreen(botId: string, display: number, endpoint: string, task: string, sessionId?: string): Promise<ScreenRead | null> {
+export async function readScreen(botId: string, display: number, endpoint: string, task: string, sessionId?: string, opts: { signIn?: boolean } = {}): Promise<ScreenRead | null> {
   const page = await pageText(endpoint).catch(() => null);
   if (!page?.url || page.url === "about:blank") return null;
   const a = await decide({ task, page: { url: page.url, title: page.title, text: page.text, fields: page.fields } }, QUESTIONS);
   if (!a) return null;
   const pick = chose(a.blocker);
   // Only a page that stands between the bot and its task needs the user; one it just has to read doesn't.
-  const blocker =
+  let blocker =
     pick && pick.choice !== "normal" && pick.confidence >= SURE && (yes(a.stops_task) ?? 1) >= 0.5 ? (pick.choice as Blocker) : undefined;
   const k = chose(a.kind);
   const kind = (k && k.confidence >= 0.5 ? k.choice : "other") as PageKind;
   // Each card needs its own read of the page; only ask for the one this page calls for.
-  const form = blocker === "sign_in" || blocker === "two_factor" ? await matchForm(page) : undefined;
+  let form = blocker === "sign_in" || blocker === "two_factor" ? await matchForm(page) : undefined;
+  // The bot asked the vault to sign it in here (vault.ts vaultSignIn): its fields, whatever the page seemed.
+  if (!form && opts.signIn) {
+    form = await matchForm(page);
+    if (form && !blocker) blocker = form.identifier || form.password ? "sign_in" : "two_factor";
+  }
   const payment = blocker === "payment" ? await matchPayment(page) : undefined;
   const email = kind === "email_compose" ? await matchEmail(page) : undefined;
-  const read: ScreenRead = { url: page.url, title: page.title, blocker, sensitive: (yes(a.sensitive) ?? 0) >= 0.5, at: Date.now(), kind, form, payment, email, sessionId };
+  const read: ScreenRead = { url: page.url, title: page.title, blocker, sensitive: (yes(a.sensitive) ?? 0) >= 0.5, at: Date.now(), kind, form, payment, email, sessionId, targetId: page.targetId };
   update((state) => {
     state.screens ??= {};
     state.screens[`${botId}:${display}`] = read;

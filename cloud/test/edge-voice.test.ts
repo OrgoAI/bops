@@ -88,20 +88,21 @@ test("the owner's bot knows the computer is offline and what it can use, keeps t
       "Bot: Bye Alex!",
     ].join("\n"),
   );
-  // Each turn's tokens, metered as the phone's, and the call's minutes.
+  // Each turn's tokens, metered as the phone's, for the bot. The call's seconds are AgentPhone's, counted by /hooks/agentphone (edge-hooks).
   const usage = await until(async () => {
-    const r = await query<{ kind: string; detail: { source?: string; answeredBy?: string } }>("SELECT kind, detail FROM bops.cloud_usage WHERE user_id = $1 ORDER BY id", [userId]);
-    return r.rows.length === 4 ? r.rows : null;
+    const r = await query<{ kind: string; detail: { source?: string; botId?: string } }>("SELECT kind, detail FROM bops.cloud_usage WHERE user_id = $1 ORDER BY id", [userId]);
+    return r.rows.length === 3 ? r.rows : null;
   }, "the usage rows");
   assert.deepEqual(
-    usage.map((u) => [u.kind, u.detail.source ?? u.detail.answeredBy]),
+    usage.map((u) => [u.kind, u.detail.source, u.detail.botId]),
     [
-      ["openai.tokens", "phone"],
-      ["openai.tokens", "phone"],
-      ["openai.tokens", "phone"],
-      ["call.minutes", "cloud"],
+      ["openai.tokens", "phone", "sam"],
+      ["openai.tokens", "phone", "sam"],
+      ["openai.tokens", "phone", "sam"],
     ],
   );
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal((await query("SELECT 1 FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'call.minutes'", [userId])).rowCount, 0, "no estimated minutes on top");
 });
 
 test("anyone else gets a bot that knows nothing about the owner and takes a message, which reaches the Mac", async () => {

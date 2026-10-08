@@ -1,7 +1,8 @@
-import { checkMac, openCodexApp, retryCodex, signInToCodex } from "@/lib/server/codex";
+import { retryCodex } from "@/lib/server/mac";
 import { findCodex, installStatus } from "@/lib/server/codex-cli";
 import { fromThisMac } from "@/lib/server/owner-email";
 import { getState } from "@/lib/server/store";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -10,22 +11,23 @@ export async function GET() {
   return Response.json({ codex: findCodex() ?? null, install: installStatus() ?? null, mac: getState().mac ?? null });
 }
 
+/** What the sign-in actions answer now: Bops doesn't sign in to ChatGPT or Codex (lib/server/mac.ts). */
+const SIGN_IN_GONE = "Bops doesn't sign in to Codex anymore. Bots use Bops AI credit for all their work, on your Mac too.";
+
 /**
- * The setup card's one next step, from the app on this Mac only (each starts something on it):
- * { action: "install" } installs the CLI again if it's still missing (Retry), "sign-in" opens Codex's
- * sign-in in the browser, "open" opens the Codex app (or its installer) to turn on Computer Use.
- * Each looks at the Mac again; the card follows state.mac.
+ * { action: "install" } installs the Codex CLI again if it's still missing (Retry), from the app on
+ * this Mac only, then looks at the Mac again. Bops runs bots' tools with it, on its own key. Signing in
+ * to Codex ("sign-in", "reopen", "cancel") and opening the Codex app ("open") are gone: 410.
  */
 export async function POST(request: Request) {
-  if (!fromThisMac(request)) return Response.json({ ok: false, error: "This works in the Bops app on your Mac." }, { status: 403 });
   const { action } = (await request.json().catch(() => ({}))) as { action?: unknown };
+  if (action === "sign-in" || action === "reopen" || action === "cancel" || action === "open") return Response.json({ ok: false, error: SIGN_IN_GONE }, { status: 410 });
+  const unready = notReady();
+  if (unready) return unready;
+  if (!fromThisMac(request)) return Response.json({ ok: false, error: "This works in the Bops app on your Mac." }, { status: 403 });
+  if (action !== "install") return Response.json({ ok: false, error: "action: install" }, { status: 400 });
   try {
-    if (action === "install") await retryCodex();
-    else if (action === "sign-in") await signInToCodex();
-    else if (action === "open") {
-      openCodexApp();
-      await checkMac();
-    } else return Response.json({ ok: false, error: "action: install, sign-in or open" }, { status: 400 });
+    await retryCodex();
   } catch (e) {
     return Response.json({ ok: false, error: (e as Error).message }, { status: 502 });
   }

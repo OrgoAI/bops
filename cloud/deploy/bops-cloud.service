@@ -1,0 +1,36 @@
+[Unit]
+Description=Bops Cloud (keys, webhooks and calls for hosted Bops)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bops
+Group=bops
+WorkingDirectory=/opt/bops
+# Provider keys, the database URL and BOPS_CLOUD_SECRET (from envs/prod/bops-secrets.env), plus the
+# public settings (envs/prod/bops-public.env). scripts/cloud-deploy.sh writes it, mode 0640 root:bops.
+EnvironmentFile=/etc/bops-cloud/env
+ExecStart=/usr/local/bin/node /opt/bops/cloud/server.ts
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+LimitNOFILE=65536
+# It shares the box with orgo-web: never more than 2 of its cores and 4 GB.
+CPUQuota=200%
+MemoryMax=4G
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadOnlyPaths=/opt/bops
+
+[Install]
+WantedBy=multi-user.target

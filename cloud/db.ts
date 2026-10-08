@@ -78,20 +78,33 @@ export async function migrate(): Promise<string[]> {
 /**
  * Ownership of provider objects (an OpenAI response or live session, a Composio connection): the
  * cloud records who made or was handed each id, so one user can't reach another's through a proxy.
- * An Agents API session keeps its model too, so its turns are priced at it (usage.ts).
+ * An Agents API session keeps its model and its bot too, so its turns are priced at that model and
+ * counted for that bot (usage.ts), and when it last got work, so the cloud reads its turns back
+ * (reconcile.ts).
  */
-export async function ownObject(userId: string, provider: string, kind: string, objectId: string, model?: string) {
+export async function ownObject(userId: string, provider: string, kind: string, objectId: string, model?: string, botId?: string) {
   await query(
-    `INSERT INTO bops.cloud_objects (object_id, provider, kind, user_id, model) VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO bops.cloud_objects (object_id, provider, kind, user_id, model, bot_id, used_at)
+     VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $3 = 'agent_session' THEN now() END)
      ON CONFLICT (provider, object_id) DO NOTHING`,
-    [objectId, provider, kind, userId, model ?? null],
+    [objectId, provider, kind, userId, model ?? null, botId ?? null],
   );
 }
 
 /** The model an object was made with (an Agents API session's, to price its turns), or null when the cloud doesn't know it. */
 export async function objectModel(provider: string, objectId: string): Promise<string | null> {
-  const r = await query<{ model: string | null }>("SELECT model FROM bops.cloud_objects WHERE provider = $1 AND object_id = $2", [provider, objectId]);
-  return r.rows[0]?.model ?? null;
+  return (await objectInfo(provider, objectId)).model;
+}
+
+/** An object's model and bot, as kept when it was made (nulls when the cloud doesn't know). */
+export async function objectInfo(provider: string, objectId: string): Promise<{ model: string | null; botId: string | null }> {
+  const r = await query<{ model: string | null; bot_id: string | null }>("SELECT model, bot_id FROM bops.cloud_objects WHERE provider = $1 AND object_id = $2", [provider, objectId]);
+  return { model: r.rows[0]?.model ?? null, botId: r.rows[0]?.bot_id ?? null };
+}
+
+/** An Agents API session got work (a message): the cloud reads its turns back again once that's done (reconcile.ts). */
+export async function sessionUsed(sessionId: string) {
+  await query("UPDATE bops.cloud_objects SET used_at = now() WHERE provider = 'openai' AND kind = 'agent_session' AND object_id = $1", [sessionId]);
 }
 
 /** Who owns an object, or null when the cloud never saw it. */

@@ -1,11 +1,16 @@
 /**
  * Orgo's plans, as Bops shows them. A Bops user is an Orgo user. Every user has one free Bops computer
- * (the main bot's, made by Bops from the Bops template, off their Orgo plan, whatever the plan); any
- * more come out of their Orgo plan: Hacker includes 1 computer, Startup 4, Scale 16, and Free none.
- * Bops' own plans (Free, Pro, Max: BOPS_TIERS in cloud/protocol.ts) are only AI credit, and give
- * nothing on Orgo. Shared by the server (lib/server/plan.ts reads the user's plan from Orgo) and the
- * app, so both say the same thing in the same words.
+ * (the main bot's, made by Bops from the Bops template, off their Orgo plan, whatever the plan).
+ *
+ * Where the Bops plan decides (Bops Cloud holds plans to what they include, and Orgo counts Bops
+ * computers: OrgoPlan.bops), a bot's own computer is a Bops computer too: Max includes up to 3, the free
+ * one included, and Free and Pro the free one only (lib/plan-includes.ts). Elsewhere (self-hosted, or an
+ * older Orgo), any more come out of the Orgo plan: Hacker includes 1 computer, Startup 4, Scale 16, and
+ * Free none. Shared by the server (lib/server/plan.ts reads the user's plan from Orgo) and the app, so
+ * both say the same thing in the same words.
  */
+import { BOPS_TIERS, type BopsTier } from "@/cloud/protocol";
+import { computerShort } from "./plan-includes";
 import { workBot, workspaceOf, type Bot } from "./types";
 
 /** The user's plan, as Orgo answered it (lib/server/plan.ts). */
@@ -32,6 +37,13 @@ export type OrgoPlan = {
    * from before free Bops computers): then every computer is on the plan, as before.
    */
   freeComputerId?: string | null;
+  /**
+   * The Bops plan's computers, when the Bops plan decides them (Bops Cloud's plan limits are on, and
+   * Orgo counts them: compute-limits' bops_computers_limit): the plan, how many Bops computers it
+   * includes (the free one included), and Max's others besides the free one. Then a bot's own computer
+   * is one more of these, made fresh from the Bops template, never one on the Orgo plan.
+   */
+  bops?: { tier: BopsTier; limit: number; extras: string[] };
 };
 
 /** The free Bops computer's memory in GB: the Bops template's, which it's made at whatever the plan. */
@@ -76,7 +88,19 @@ export const planComputers = (tier: string): number | undefined => TIERS[tier.to
  * can't have that much disk ("disk"). Bops sees all but the last in the plan's numbers; that one only
  * when Orgo turns a computer down (planRefusal in lib/server/plan.ts).
  */
-export type PlanShort = "none" | "count" | "size" | "memory" | "disk";
+export type PlanShort = "none" | "count" | "size" | "memory" | "disk" | "bops";
+
+/**
+ * Why the Bops plan has no room for `more` Bops computers (lib/plan-includes.ts computerShort), with
+ * the plan that has room ("max", or null on Max); null when it has room. Undefined when the Bops plan
+ * doesn't decide (OrgoPlan.bops): then the Orgo plan does, as before.
+ */
+export function bopsComputerShort(plan: OrgoPlan | null | undefined, more = 1) {
+  if (!plan?.bops) return undefined;
+  const held = (plan.freeComputerId ? 1 : 0) + plan.bops.extras.length;
+  const s = computerShort(plan.bops.tier, held, more);
+  return s ? { short: "bops" as const, text: s.text, upgrade: s.upgrade === "max" ? ("max" as const) : null } : null;
+}
 
 /** Memory sizes Orgo makes computers in, in GB, largest first: from the Bops template's 16 down (orgo-web lib/computer-sizes.ts). */
 const RAM_SIZES = [16, 8, 4];
@@ -141,6 +165,8 @@ const upFor = (short: PlanShort, plan: OrgoPlan | null | undefined) => (short ==
  * computer, so a bot can't have its own until the main bot has one.
  */
 export function planShortText(short: PlanShort, plan: OrgoPlan | null | undefined, opts: { bops?: number; main?: string } = {}) {
+  // The Bops plan's own words, when it decides.
+  if (short === "bops") return bopsComputerShort(plan, 1)?.text ?? `Max includes up to ${BOPS_TIERS.max_bops.computers} Bops computers.`;
   // Always "Orgo" by name: an Orgo plan is never the user's Bops plan (Free, Pro or Max).
   const name = plan?.name ? `Orgo ${plan.name}` : "Orgo";
   const main = opts.main ?? "the main bot";
@@ -176,6 +202,8 @@ export function planShortText(short: PlanShort, plan: OrgoPlan | null | undefine
  * this one (or, on a custom deal, to see what it allows).
  */
 export function planFix(short: PlanShort, plan: OrgoPlan | null | undefined): { label: string; tab: "plan" | "usage" } {
+  // Bops' own plans are changed in the app (Settings), never on Orgo's pages: the app shows its own button.
+  if (short === "bops") return { label: "Upgrade to Max", tab: "plan" };
   const up = upFor(short, plan);
   if (up) return { label: `Upgrade to Orgo ${up.name}`, tab: "plan" };
   if (plan?.deal) return { label: "See your plan on Orgo", tab: "usage" };
@@ -199,6 +227,8 @@ export function mainComputerShort(plan: OrgoPlan | null | undefined, bots: Bot[]
  * one of its own on the plan now, in plain words, or null when it can (or Orgo didn't say).
  */
 export function mainOwnShort(plan: OrgoPlan | null | undefined, bots: Bot[], main: Pick<Bot, "name">) {
+  const bops = bopsComputerShort(plan, 1);
+  if (bops !== undefined) return bops;
   const short = planShort(plan, 1, computerRam(plan));
   return short ? { short, text: planShortText(short, plan, { bops: bopsComputers(bots), main: main.name }) } : null;
 }
@@ -212,6 +242,9 @@ export function mainOwnShort(plan: OrgoPlan | null | undefined, bots: Bot[], mai
 export function ownComputerShort(plan: OrgoPlan | null | undefined, bots: Bot[], workspaceId: string) {
   const ws = mainBot(bots, workspaceId);
   const main = ws && workBot(ws, bots);
+  // A Bops computer of its own, and the main bot's first when it has none.
+  const bops = bopsComputerShort(plan, main?.computerId ? 1 : 2);
+  if (bops !== undefined) return bops;
   const short = main?.computerId
     ? planShort(plan, 1, main.computerRam ?? (main.freeComputer ? FREE_COMPUTER_RAM : undefined))
     : freeComputerOpen(plan)

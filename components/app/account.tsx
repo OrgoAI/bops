@@ -1,16 +1,44 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import type { AccountInfo, BopsPlan, TokenSource, UsageTotals } from "@/lib/account";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import type { AccountInfo, BopsPlan, SpendKind, TokenSource, UsageTotals } from "@/lib/account";
 import type { BopsTier } from "@/cloud/protocol";
+import {
+  afterAnswer,
+  afterCancel,
+  beingSent,
+  cardRechecked,
+  confirmCopy,
+  creditLanded,
+  dollars,
+  mergeTopUp,
+  newPurchase,
+  pendingNote,
+  POLL_FOR_MS,
+  pollDelay,
+  resumePurchase,
+  tidyDollars,
+  TOPUP_PRESETS,
+  TOPUP_UNREACHABLE,
+  topUpFrom,
+  topUpNext,
+  typedCents,
+  type CardPurchase,
+  type PendingTopUp,
+  type TopUpInfo,
+  type TopUpNext,
+} from "@/lib/credit-topup";
+import { freeHoursWords, PLAN_CARDS } from "@/lib/plan-includes";
 import type { AppState } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
-import { post } from "./ui";
+import { signOutOfOrgo as signOutAsking } from "./sign-in";
+import { refreshState } from "./ui";
 
 /*
  * The account: who you are on Orgo, your Bops plan (Free, Pro or Max; an Orgo plan doesn't change it,
- * and everyone is on Free until they pay) and the AI credit left when Orgo says, what your bots used
- * this month and last, and the inboxes and numbers they have. A sheet
+ * and everyone is on Free until they pay) and the AI credit left when Orgo says, with a way to add some
+ * once, what your bots used this month and last, and the inboxes and numbers they have. A sheet
  * over the app, like Settings. Everything comes from GET /api/account, which reads Orgo with your key
  * on the server; paying for Pro or Max, and managing it, happen in the browser.
  */
@@ -23,8 +51,12 @@ export function initialsOf(state: AppState) {
   return ((parts[0]?.[0] ?? "") + (parts.length > 1 ? parts[parts.length - 1][0] : (parts[0]?.[1] ?? ""))).toUpperCase() || "?";
 }
 
-/** Sign out of Orgo on this Mac (the route clears the key from the Keychain). */
-export const signOutOfOrgo = () => post("/api/auth/signout");
+/** Sign out of Orgo on this Mac (the route clears the key from the Keychain), asking first when changes haven't reached Bops Cloud. */
+export const signOutOfOrgo = async () => {
+  const res = await signOutAsking();
+  await refreshState();
+  return res;
+};
 
 const compact = (n: number) => new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: n < 10_000 ? 0 : 1 }).format(n);
 const hours = (h: number) => (h < 10 ? h.toFixed(1).replace(/\.0$/, "") : Math.round(h).toLocaleString());
@@ -57,6 +89,8 @@ export function Account({ state, onClose, onThisMac }: { state: AppState; onClos
     setLoading(true);
     fetchInfo();
   };
+  // The Bops plan read again on its own (after adding credit): the balance shows it.
+  const setBops = useCallback((bops: BopsPlan) => setInfo((i) => (i ? { ...i, bops } : i)), []);
 
   // The header shows at once from the app's state; the rest fills in when the route answers.
   const user = info?.user ?? state.account?.user ?? null;
@@ -86,7 +120,7 @@ export function Account({ state, onClose, onThisMac }: { state: AppState; onClos
         </div>
 
         {/* Every signed-in user has a Bops plan: Free until Orgo says Pro or Max. */}
-        {user && (info || (failed && !loading) ? <YourPlan plan={info?.bops} known={!!info} /> : <Placeholder title="Your plan" />)}
+        {user && (info || (failed && !loading) ? <YourPlan plan={info?.bops} known={!!info} onPlan={setBops} userId={user.id} /> : <Placeholder title="Your plan" />)}
         {info ? (
           <Usage info={info} />
         ) : failed && !loading ? (
@@ -148,12 +182,8 @@ function Placeholder({ title }: { title: string }) {
 /** Micro-dollars as money, rounded down to the cent (none below 0). */
 const credit = (micros: number) => money(Math.max(0, Math.floor(micros / 10_000)));
 
-/** Bops' three plans, as the sheet lists them. An Orgo plan is never one of these. */
-const PLANS: { tier: BopsTier; name: string; price: string; per?: string; perks: string[] }[] = [
-  { tier: "free_bops", name: "Free", price: "$0", perks: ["$5 of AI credit, once", "Your Bops computer, always on"] },
-  { tier: "pro_bops", name: "Pro", price: "$20", per: "/month", perks: ["$20 of AI credit every month", "Your Bops computer", "1 phone number (texts and calls)", "1 email address"] },
-  { tier: "max_bops", name: "Max", price: "$200", per: "/month", perks: ["$200 of AI credit every month", "Your Bops computer", "1 phone number", "1 email address"] },
-];
+/** Bops' three plans, as the sheet lists them (lib/plan-includes.ts, the same words as bops.bot). */
+const PLANS = PLAN_CARDS;
 const RANK: Record<BopsTier, number> = { free_bops: 0, pro_bops: 1, max_bops: 2 };
 
 type Open = "pro_bops" | "max_bops" | "manage";
@@ -164,9 +194,10 @@ type Open = "pro_bops" | "max_bops" | "manage";
  * (Orgo has no Bops plans yet, or didn't answer) the user is on Free, and the balance isn't shown.
  * `known` is false when the account itself didn't load: no plan is marked then. Upgrading opens
  * Stripe's checkout, and Manage plan Stripe's billing page, in the browser; the sheet reads the plan
- * again when Bops comes back to the front.
+ * again when Bops comes back to the front. On every plan, AI credit can be added once under the
+ * balance (AddCredit); `onPlan` takes the plan read again after that.
  */
-function YourPlan({ plan, known }: { plan: BopsPlan | null | undefined; known: boolean }) {
+function YourPlan({ plan, known, onPlan, userId }: { plan: BopsPlan | null | undefined; known: boolean; onPlan: (plan: BopsPlan) => void; userId: string }) {
   const [busy, setBusy] = useState<Open | null>(null);
   // What the last button said, under it: "Upgrades open soon." is a note, anything else an error.
   const [said, setSaid] = useState<{ what: Open; text: string; soon: boolean } | null>(null);
@@ -202,7 +233,8 @@ function YourPlan({ plan, known }: { plan: BopsPlan | null | undefined; known: b
   };
   return (
     <Section title="Your plan">
-      {plan && <Balance plan={plan} />}
+      {plan && <Balance plan={plan} onPlan={onPlan} userId={userId} />}
+      {plan && <ComputerTime plan={plan} />}
       <div className="grid grid-cols-3 gap-2">
         {PLANS.map((p) => {
           const mine = current === p.tier;
@@ -219,13 +251,29 @@ function YourPlan({ plan, known }: { plan: BopsPlan | null | undefined; known: b
                   {p.per && <span className="text-[12.5px] text-[#6B6B6B]">{p.per}</span>}
                 </span>
               </div>
+              {/* How many computers the plan includes, before anything else it does (paper, not highlighter: yellow only marks what needs you). */}
+              <div className="flex items-start gap-2 rounded-[10px] bg-[#F7F7F6] px-2.5 py-2">
+                <svg width="16" height="16" viewBox="0 0 20 20" className="mt-px shrink-0" aria-hidden>
+                  <rect x="2" y="3" width="16" height="11" rx="2" fill="none" stroke="#0A0A0A" strokeWidth="1.6" />
+                  <path d="M7 17.5h6M10 14v3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
+                </svg>
+                <span className="flex min-w-0 flex-col gap-0.5">
+                  <span className="text-[13px] font-semibold leading-[18px] text-ink">{p.computers.title}</span>
+                  <span className="text-[12px] leading-4 text-[#3A3A38]">{p.computers.detail}</span>
+                </span>
+              </div>
               <ul className="flex flex-1 flex-col gap-1">
-                {p.perks.map((perk) => (
-                  <li key={perk} className="flex items-start gap-1.5 text-[12.5px] leading-[18px] text-[#3A3A38]">
+                {p.lines.map((line) => (
+                  <li key={line.text} className={`flex items-start gap-1.5 text-[12.5px] leading-[18px] ${line.no ? "text-[#8A8A88]" : "text-[#3A3A38]"}`}>
+                    {/* A check for what the plan includes, a dash for what it doesn't. */}
                     <svg width="12" height="12" viewBox="0 0 12 12" className="mt-[3px] shrink-0" aria-hidden>
-                      <path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="#9A9A98" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                      {line.no ? (
+                        <path d="M3 6h6" fill="none" stroke="#C9C9C6" strokeWidth="1.5" strokeLinecap="round" />
+                      ) : (
+                        <path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="#9A9A98" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                      )}
                     </svg>
-                    {perk}
+                    {line.text}
                   </li>
                 ))}
               </ul>
@@ -250,13 +298,36 @@ function YourPlan({ plan, known }: { plan: BopsPlan | null | undefined; known: b
 }
 
 /**
- * The AI credit left, from Orgo's own numbers, and what to know about the paid month. Only what Orgo
- * said: no numbers, no balance.
+ * On Free, the free Bops computer's month (orgo-web lib/bops-free-hours.ts): how long it ran of its 10 hours,
+ * and when it starts over, in lib/plan-includes.ts freeHoursWords' words (no period named, from an Orgo that
+ * still counts by the week). It sleeps when nothing uses it, so only the time it's used counts. Only when Orgo said.
  */
-function Balance({ plan }: { plan: BopsPlan }) {
+function ComputerTime({ plan }: { plan: BopsPlan }) {
+  if (!plan.computerTime) return null;
+  const w = freeHoursWords(plan.computerTime);
+  return (
+    <div className="flex items-center gap-4 rounded-[14px] p-4 shadow-[0_0_0_1px_#E6E6E3]">
+      <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#6B6B6B]">{w.note}</span>
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        <span className="text-[24px] font-semibold leading-7 tracking-[-0.02em] tabular-nums">{w.amount}</span>
+        <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{w.label}</span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The AI credit left, from Orgo's own numbers, and what to know about the paid month. Only what Orgo
+ * said: no numbers, no balance. Under it, a way to add credit once (AddCredit), when Orgo sells it.
+ */
+function Balance({ plan, onPlan, userId }: { plan: BopsPlan; onPlan: (plan: BopsPlan) => void; userId: string }) {
+  const topUp = useTopUp(onPlan);
+  const canAdd = !!topUp.info && !topUp.info.off;
   const c = plan.credit;
   const paid = plan.tier !== "free_bops";
   const monthly = plan.tier === "max_bops" ? 200_000_000 : 20_000_000;
+  // Credit added once is kept with what's left of the one-time $5: neither expires.
+  const added = !!c && (c.topUps === true || c.freeLeftMicros > 5_000_000);
   const line =
     paid && plan.status === "past_due"
       ? "Payment failed. Update your card in Manage plan."
@@ -265,15 +336,17 @@ function Balance({ plan }: { plan: BopsPlan }) {
           ? `Your plan ends ${day(plan.periodEnd)}.`
           : ""
         : !paid
-          ? `${credit(c.freeLeftMicros)} left of your one-time $5.`
+          ? added
+            ? "Includes credit you added, which doesn't expire."
+            : `${credit(c.freeLeftMicros)} left of your one-time $5.`
           : [
               `${credit(c.planLeftMicros)} of ${credit(monthly)} left${c.resetsAt ? `, resets ${day(c.resetsAt)}` : ""}.`,
-              c.freeLeftMicros > 0 ? `Plus ${credit(c.freeLeftMicros)} of your one-time $5.` : "",
+              c.freeLeftMicros > 0 ? (added ? `Plus ${credit(c.freeLeftMicros)} that doesn't expire.` : `Plus ${credit(c.freeLeftMicros)} of your one-time $5.`) : "",
               plan.cancelAtPeriodEnd && plan.periodEnd ? `Ends ${day(plan.periodEnd)}.` : "",
             ]
               .filter(Boolean)
               .join(" ");
-  if (!c && !line) return null;
+  if (!c && !line && !canAdd) return null;
   return (
     <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
       <div className="flex items-center gap-4 p-4">
@@ -287,10 +360,416 @@ function Balance({ plan }: { plan: BopsPlan }) {
       </div>
       {c && c.leftMicros <= 0 && (
         <span className="border-t border-[#F0F0EE] px-4 py-3 text-[12.5px] leading-[18px] text-[#3A3A38]">
-          You&apos;re out of AI credit, so your bots are paused.{paid ? " It comes back when your plan renews, or upgrade for more." : " Upgrade to keep them going."}
+          You&apos;re out of AI credit, so your bots are paused.
+          {canAdd ? " Add credit below to keep them going." : paid ? " It comes back when your plan renews, or upgrade for more." : " Upgrade to keep them going."}
         </span>
       )}
+      {canAdd && <AddCredit plan={plan} topUp={topUp} onPlan={onPlan} userId={userId} />}
     </div>
+  );
+}
+
+/* ---------------- Adding AI credit once ---------------- */
+
+/** The Bops plan, asked of Orgo again now (GET /api/plan?fresh=1): null when it didn't say. */
+async function freshPlan(): Promise<BopsPlan | null> {
+  try {
+    const res = await fetch("/api/plan?fresh=1", { cache: "no-store" });
+    if (!res.ok) return null;
+    return ((await res.json()) as { bops?: BopsPlan | null }).bops ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the sheet knows about adding AI credit (GET /api/account/credit): null until it answers, then
+ * whether it can be added here, the card on file and the payments whose credit is on its way. While
+ * one is, it's asked again now and then, and the balance is read again once the credit is in.
+ */
+function useTopUp(onPlan: (plan: BopsPlan) => void) {
+  const [info, setInfo] = useState<TopUpInfo | null>(null);
+  // Counts purchase answers: a read that started before one knows less than the sheet does, so it's dropped.
+  const answers = useRef(0);
+  const read = useCallback(async (): Promise<TopUpInfo | null> => {
+    const since = answers.current;
+    let next: TopUpInfo;
+    try {
+      const res = await fetch("/api/account/credit", { cache: "no-store" });
+      next = topUpFrom(res.status, await res.json().catch(() => null));
+    } catch {
+      next = topUpFrom(0, null);
+    }
+    if (since !== answers.current) return null;
+    setInfo((was) => mergeTopUp(was, next));
+    return next;
+  }, []);
+  const answered = useCallback(() => void (answers.current += 1), []);
+  useEffect(() => void read(), [read]);
+  const pending = !!info && !info.off && !!info.pending?.length;
+  useEffect(() => {
+    if (!pending) return;
+    const every = setInterval(() => void read(), 30_000);
+    return () => clearInterval(every);
+  }, [pending, read]);
+  // It's in: the balance shows it.
+  const hadPending = useRef(pending);
+  useEffect(() => {
+    if (hadPending.current && !pending) void freshPlan().then((p) => p && onPlan(p));
+    hadPending.current = pending;
+  }, [pending, onPlan]);
+  return { info, setInfo, read, answered };
+}
+
+type TopUp = ReturnType<typeof useTopUp>;
+
+/**
+ * A purchase on the card whose answer never came (it may have charged), kept while the window is open
+ * though the sheet closes: the next Add credit tries it again under its own key instead of a new one.
+ */
+let kept: { user: string; purchase: CardPurchase } | null = null;
+const keep = (user: string, purchase: CardPurchase | null) => void (kept = purchase?.unresolved ? { user, purchase } : null);
+
+/** The line under Add credit: what happened last. */
+type Note =
+  | { kind: "added"; cents: number }
+  | { kind: "pending"; cents: number; code: PendingTopUp["code"]; from?: number }
+  | { kind: "checkout"; cents: number; from?: number }
+  | { kind: "error"; text: string }
+  | { kind: "off" };
+
+/**
+ * Add AI credit once, under the balance: $20, $50, $100 or a whole-dollar amount from $5 to $1,000,
+ * the way Orgo's own Add credit works (lib/credit-topup.ts). With a card on file it asks first
+ * (ConfirmCredit) and charges that card; without one, or when the card can't be charged, Stripe Checkout
+ * opens in the browser. Then the plan is read again until the new credit shows, for 2 minutes at most
+ * (and the sheet reads it again when Bops comes back to the front). Never monthly, never an automatic
+ * reload.
+ */
+function AddCredit({ plan, topUp, onPlan, userId }: { plan: BopsPlan; topUp: TopUp; onPlan: (plan: BopsPlan) => void; userId: string }) {
+  const { info, setInfo, read, answered } = topUp;
+  const [choice, setChoice] = useState<number | "other" | null>(null);
+  const [other, setOther] = useState("");
+  /** The purchase on the card, from Add credit until a definite answer. An unresolved one outlives Cancel. */
+  const [purchase, setPurchase] = useState<CardPurchase | null>(() => {
+    const k = kept;
+    return k && k.user === userId ? k.purchase : null;
+  });
+  const [open, setOpen] = useState(false);
+  const [paying, setPaying] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const [note, setNote] = useState<Note | null>(null);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  /** Reading the plan again after a purchase: from the balance before it. */
+  const [poll, setPoll] = useState<{ from?: number } | null>(null);
+  const sending = useRef(false);
+  const left = plan.credit?.leftMicros;
+  const cents = choice === "other" ? typedCents(other) : choice;
+  const resumable = !!purchase && !open;
+  const busy = paying || opening;
+
+  // Until the new credit shows (or 2 minutes), the plan is read again: soon at first, then every 5 seconds.
+  useEffect(() => {
+    if (!poll) return;
+    let stop = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const until = Date.now() + POLL_FOR_MS;
+    const tick = async (reads: number) => {
+      const bops = await freshPlan();
+      if (stop) return;
+      if (bops) onPlan(bops);
+      if (creditLanded(poll.from, bops?.credit?.leftMicros) || Date.now() >= until) return;
+      timer = setTimeout(() => void tick(reads + 1), pollDelay(reads));
+    };
+    void tick(0);
+    return () => {
+      stop = true;
+      clearTimeout(timer);
+    };
+  }, [poll, onPlan]);
+
+  const pick = (c: number | "other") => {
+    setChoice(c);
+    if (c !== "other") setOther("");
+    setNote((n) => (n?.kind === "error" ? null : n));
+  };
+
+  /** Stripe Checkout for `amount`, in the browser: without a card on file, or when the card couldn't. */
+  const checkout = async (amount: number) => {
+    const fromConfirm = open;
+    setOpening(true);
+    setCheckoutError(null);
+    const from = left;
+    let said: { url?: unknown; error?: unknown; code?: unknown } = {};
+    try {
+      const res = await fetch("/api/account/credit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ amount_cents: amount }) });
+      said = await res.json().catch(() => ({}));
+    } catch {
+      said = {};
+    } finally {
+      setOpening(false);
+    }
+    if (typeof said.url === "string") {
+      window.open(said.url, "_blank");
+      keep(userId, null);
+      setPurchase(null);
+      setOpen(false);
+      setChoice(null);
+      setOther("");
+      setNote({ kind: "checkout", cents: amount, from });
+      setPoll({ from });
+      return;
+    }
+    if (said.code === "bops_credit_off") {
+      keep(userId, null);
+      setPurchase(null);
+      setOpen(false);
+      setNote({ kind: "off" });
+      return;
+    }
+    const text = typeof said.error === "string" && said.error ? said.error : "Couldn't open checkout. Try again in a minute.";
+    if (fromConfirm) setCheckoutError(text);
+    else setNote({ kind: "error", text });
+  };
+
+  // The confirm names the card it charges, so the card on file is read again as it opens: it may have changed elsewhere.
+  const recheck = () =>
+    void read().then((got) => {
+      if (got && !got.off && !got.unknown) setPurchase((p) => (p ? cardRechecked(p, got.card) : p));
+    });
+
+  // With a card on file, Add credit asks once and charges it; without one, Checkout. A purchase whose
+  // answer never came opens again instead: tried again under its own key it can't charge twice, and a
+  // new one could.
+  const buy = async () => {
+    if (purchase && !open) {
+      const step = resumePurchase(purchase);
+      if (step.kind === "stop") {
+        keep(userId, null);
+        setPurchase(null);
+        setNote({ kind: "error", text: step.message });
+        return;
+      }
+      setCheckoutError(null);
+      setOpen(true);
+      recheck();
+      return;
+    }
+    if (!cents || !info || info.off) return;
+    setNote((n) => (n?.kind === "error" ? null : n));
+    let card = info.card;
+    if (info.unknown) {
+      // The card couldn't be looked up when the sheet opened: look again before choosing how to pay.
+      setOpening(true);
+      const got = await read();
+      setOpening(false);
+      if (got?.off) return;
+      card = got && !got.off ? got.card : null;
+    }
+    if (!card) return void checkout(cents);
+    setCheckoutError(null);
+    setPurchase(newPurchase(cents, card));
+    setOpen(true);
+    if (!info.unknown) recheck();
+  };
+
+  const pay = async () => {
+    if (!purchase || sending.current) return;
+    if (purchase.fallback !== null) return void checkout(purchase.cents);
+    sending.current = true;
+    setPaying(true);
+    setCheckoutError(null);
+    const from = left;
+    // Until it's answered it may charge: kept as unconfirmed, so a sheet closed meanwhile tries it again rather than start another.
+    keep(userId, beingSent(purchase));
+    let next: TopUpNext;
+    try {
+      const res = await fetch("/api/account/credit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount_cents: purchase.cents, card_handle: purchase.card.handle, idempotency_key: purchase.key }),
+      });
+      next = topUpNext(res.status, await res.json().catch(() => null));
+    } catch {
+      next = TOPUP_UNREACHABLE;
+    } finally {
+      sending.current = false;
+      setPaying(false);
+    }
+    answered();
+    if (next.kind === "card_changed") {
+      const card = next.card;
+      setInfo((i) => (i && !i.off ? { ...i, card } : i));
+    }
+    const step = afterAnswer(purchase, next);
+    keep(userId, step.kind === "open" ? step.purchase : null);
+    if (step.kind === "open") return void setPurchase(step.purchase);
+    setPurchase(null);
+    setOpen(false);
+    if (step.kind === "stop") return void setNote({ kind: "error", text: step.message });
+    if (step.kind === "off") return void setNote({ kind: "off" });
+    setChoice(null);
+    setOther("");
+    setNote(step.kind === "pending" ? { kind: "pending", cents: purchase.cents, code: step.pending.code, from } : { kind: "added", cents: purchase.cents });
+    setPoll({ from });
+  };
+
+  const cancel = () => {
+    if (busy) return;
+    setOpen(false);
+    setCheckoutError(null);
+    setPurchase(afterCancel);
+  };
+
+  if (note?.kind === "off") return <span className="border-t border-[#F0F0EE] px-4 py-3 text-[12.5px] leading-[18px] text-[#6B6B6B]">Adding credit opens soon.</span>;
+
+  // Credit the balance shows is in, however it was paid.
+  const shown: Note | null = note && (note.kind === "pending" || note.kind === "checkout") && creditLanded(note.from, left) ? { kind: "added", cents: note.cents } : note;
+  const pendingText = !info || info.off || !info.pending ? null : pendingNote(info.pending);
+  const say: { text: string; tone: "muted" | "good" | "bad" } =
+    resumable && purchase
+      ? { text: `Your ${dollars(purchase.cents)} payment isn't confirmed yet.`, tone: "bad" }
+      : choice === "other" && other !== "" && !cents
+        ? { text: "Whole dollars, from $5 to $1,000.", tone: "muted" }
+        : shown?.kind === "added"
+          ? { text: `Added ${dollars(shown.cents)} of AI credit.`, tone: "good" }
+          : shown?.kind === "pending"
+            ? { text: pendingNote([{ cents: shown.cents, code: shown.code }]) ?? "", tone: "muted" }
+            : shown?.kind === "checkout"
+              ? { text: "Finish paying in your browser. Your credit shows up here.", tone: "muted" }
+              : shown?.kind === "error"
+                ? { text: shown.text, tone: "bad" }
+                : { text: pendingText ?? "Charged once, not monthly.", tone: "muted" };
+  const chip = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 tabular-nums disabled:opacity-50";
+  return (
+    <div className="flex flex-col gap-2 border-t border-[#F0F0EE] px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="mr-1 text-[12.5px] font-medium leading-4 text-[#3A3A38]">Add AI credit</span>
+        {TOPUP_PRESETS.map((p) => (
+          <button
+            key={p}
+            type="button"
+            aria-pressed={choice === p}
+            disabled={busy}
+            onClick={() => pick(p)}
+            className={`${chip} ${choice === p ? "bg-white shadow-[0_0_0_1.5px_#0A0A0A]" : "shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]"}`}
+          >
+            {dollars(p)}
+          </button>
+        ))}
+        <label
+          className={`flex h-7 w-[92px] cursor-text items-center gap-0.5 rounded-full px-3 text-[12.5px] font-medium leading-4 ${choice === "other" ? "bg-white shadow-[0_0_0_1.5px_#0A0A0A]" : "bg-[#F7F7F6] shadow-[0_0_0_1px_#E6E6E3]"}`}
+        >
+          <span className={choice === "other" && other ? "text-ink" : "text-[#9A9A98]"}>$</span>
+          <input
+            value={other}
+            disabled={busy}
+            onFocus={() => pick("other")}
+            onChange={(e) => {
+              setOther(tidyDollars(e.target.value));
+              pick("other");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && cents && !busy) void buy();
+            }}
+            placeholder="Other"
+            inputMode="numeric"
+            autoComplete="off"
+            aria-label="Other amount, in whole dollars"
+            className="w-full min-w-0 bg-transparent tabular-nums text-ink outline-none placeholder:font-normal placeholder:text-[#9A9A98]"
+          />
+        </label>
+        <span className="flex-1" />
+        <button
+          type="button"
+          disabled={(!cents && !resumable) || busy}
+          onClick={() => void buy()}
+          className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-40"
+        >
+          {opening && !open ? "Opening…" : resumable ? "Try again" : "Add credit"}
+        </button>
+      </div>
+      <span className={`flex items-center gap-1.5 text-[12px] leading-4 ${say.tone === "bad" ? "text-[#B42318]" : say.tone === "good" ? "text-[#1F7A4D]" : "text-[#9A9A98]"}`}>
+        {say.tone === "good" && <span className="size-[7px] shrink-0 rounded-full bg-[#2BB673]" />}
+        {say.text}
+      </span>
+      {open && purchase && (
+        <ConfirmCredit purchase={purchase} busy={busy} error={checkoutError} onPay={() => void pay()} onOtherWay={() => void checkout(purchase.cents)} onCancel={cancel} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * "Add $50 of AI credit? Charged once to Visa ending 4242.", over everything (the sheet too), like
+ * Restart Bops. Nothing is charged until Pay. A card the bank wants to confirm, or one it declines,
+ * charges nothing and turns this into the way to Checkout for the same amount. While an answer is
+ * missing there's no other way to pay, and Cancel keeps the purchase for Add credit.
+ */
+function ConfirmCredit({
+  purchase,
+  busy,
+  error,
+  onPay,
+  onOtherWay,
+  onCancel,
+}: {
+  purchase: CardPurchase;
+  busy: boolean;
+  error: string | null;
+  onPay: () => void;
+  onOtherWay: () => void;
+  onCancel: () => void;
+}) {
+  useEffect(() => {
+    // Escape cancels this alone, not the sheet under it (the app closes its sheets on Escape, on window).
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      if (!busy) onCancel();
+    };
+    document.addEventListener("keydown", esc);
+    return () => document.removeEventListener("keydown", esc);
+  }, [busy, onCancel]);
+  const copy = confirmCopy(purchase);
+  const warning = error ?? copy.error;
+  const pill = "rounded-full px-3.5 py-1.5 text-[13px] font-medium leading-4 disabled:opacity-50";
+  return createPortal(
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onCancel()}>
+      <div
+        role="alertdialog"
+        aria-labelledby="add-credit-title"
+        aria-describedby="add-credit-line"
+        onClick={(e) => e.stopPropagation()}
+        className="flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
+      >
+        <span id="add-credit-title" className="text-[15px] font-semibold leading-5">
+          {copy.title}
+        </span>
+        <span id="add-credit-line" className="pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
+          {copy.line}
+        </span>
+        {warning && (
+          <span role="alert" className="pt-2 text-[12.5px] leading-[18px] text-[#B42318]">
+            {warning}
+          </span>
+        )}
+        <div className="flex items-center justify-end gap-2 pt-5">
+          {copy.otherWay && (
+            <button disabled={busy} onClick={onOtherWay} className="mr-auto text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink disabled:opacity-50">
+              Pay another way
+            </button>
+          )}
+          <button disabled={busy} onClick={onCancel} className={`${pill} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+            Cancel
+          </button>
+          <button autoFocus disabled={busy} onClick={onPay} className={`${pill} flex min-w-[76px] items-center justify-center bg-ink text-white`}>
+            {busy ? <Spinner size={12} color="#FFFFFF" /> : copy.confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -328,13 +807,32 @@ const SOURCES: { id: TokenSource; label: string }[] = [
   { id: "other", label: "Other" },
 ];
 
-/** What Bops itself used, this month or last: totals, model use by day, by kind of work and by bot. */
+/** What AI credit paid for, by kind, and how much of each it was. */
+const SPEND: Record<SpendKind, { label: string; amount: (n: number) => string }> = {
+  chat: { label: "Chats", amount: (n) => `${compact(n)} tokens` },
+  session: { label: "Tasks", amount: (n) => `${compact(n)} tokens` },
+  search: { label: "Web searches", amount: (n) => `${compact(n)} ${n === 1 ? "search" : "searches"}` },
+  call: { label: "Calls", amount: (n) => `${hours(n)} min` },
+  memory: { label: "Memory", amount: (n) => `${compact(n)} tokens` },
+  decide: { label: "Quick checks", amount: (n) => `${compact(n)} ${n === 1 ? "check" : "checks"}` },
+  text: { label: "Texts", amount: (n) => `${compact(n)} ${n === 1 ? "text" : "texts"}` },
+  number: { label: "Numbers", amount: (n) => `${compact(n)} bought` },
+  code: { label: "Codes", amount: (n) => `${compact(n)} sent` },
+  app: { label: "Apps", amount: (n) => `${compact(n)} ${n === 1 ? "action" : "actions"}` },
+  data: { label: "Business data", amount: (n) => `${compact(n)} ${n === 1 ? "lookup" : "lookups"}` },
+  other: { label: "Other", amount: (n) => compact(n) },
+};
+
+/** Micro-dollars as money: to the cent, and a little under one cent as "<$0.01". */
+const spent = (micros: number) => (micros <= 0 ? "$0" : micros < 10_000 ? "<$0.01" : money(Math.round(micros / 10_000)));
+
+/** What Bops itself used, this month or last: totals, AI credit spent by kind, model use by day, by kind of work and by bot. */
 function Usage({ info }: { info: AccountInfo }) {
   const [last, setLast] = useState(false);
   const t = last ? info.usage.lastMonth : info.usage.thisMonth;
   const start = last ? info.usage.lastMonthStart : info.usage.monthStart;
   const month = (ts: number) => new Date(ts).toLocaleDateString(undefined, { month: "long" });
-  const empty = !t.tokens && !t.callMinutes && !t.computersCreated && !t.phoneNumbers && !t.inboxes;
+  const empty = !t.tokens && !t.callMinutes && !t.computersCreated && !t.phoneNumbers && !t.inboxes && !t.spend?.costMicros;
   const tabs = (
     <div className="flex rounded-full bg-[#F2F2F0] p-0.5">
       {[false, true].map((l) => (
@@ -372,6 +870,7 @@ function Usage({ info }: { info: AccountInfo }) {
         </div>
       ) : (
         <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
+          {t.spend && t.spend.parts.length > 0 && <Spend spend={t.spend} />}
           {t.tokens > 0 && <Days totals={t} start={start} current={!last} />}
           <div className={`grid grid-cols-2 ${t.tokens > 0 ? "border-t border-[#F0F0EE]" : ""}`}>
             <BySource totals={t} />
@@ -380,6 +879,30 @@ function Usage({ info }: { info: AccountInfo }) {
         </div>
       )}
     </Section>
+  );
+}
+
+/**
+ * What the month cost, by kind: the money, and how much of each it was (Bops Cloud's own count, at
+ * cost). It's what AI credit paid for once the cloud takes it; until then the sheet says so.
+ */
+function Spend({ spend }: { spend: NonNullable<UsageTotals["spend"]> }) {
+  const top = Math.max(...spend.parts.map((p) => p.costMicros), 1);
+  return (
+    <div className="flex flex-col gap-2.5 border-b border-[#F0F0EE] px-4 pb-3.5 pt-3.5">
+      <span className="flex items-baseline justify-between gap-3 text-[12px] leading-4 text-[#6B6B6B]">
+        <span>
+          {spend.charged ? "AI credit used" : "What it cost"}
+          {!spend.charged && <span className="text-[#9A9A98]"> · not taken from your AI credit yet</span>}
+        </span>
+        <span className="text-[13px] font-semibold tabular-nums text-ink">{spent(spend.costMicros)}</span>
+      </span>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-2.5">
+        {spend.parts.map((p) => (
+          <Share key={p.id} label={SPEND[p.id].label} value={`${SPEND[p.id].amount(p.amount)} · ${spent(p.costMicros)}`} share={p.costMicros / top} />
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -454,7 +977,10 @@ function ByBot({ totals: t }: { totals: UsageTotals }) {
             key={b.botId}
             label={b.name}
             lead={b.color ? <Mascot botId={b.botId} color={b.color} size={16} /> : <span className="size-4 rounded-full bg-[#E6E6E3]" />}
-            value={[b.tokens && `${compact(b.tokens)} tokens`, b.callMinutes && `${hours(b.callMinutes)} min`].filter(Boolean).join(", ") || `${b.computers} computer${b.computers === 1 ? "" : "s"}`}
+            value={
+              [b.tokens && `${compact(b.tokens)} tokens`, b.callMinutes && `${hours(b.callMinutes)} min`].filter(Boolean).join(", ") ||
+              `${b.computers} computer${b.computers === 1 ? "" : "s"}`
+            }
             share={b.tokens / top}
           />
         ))

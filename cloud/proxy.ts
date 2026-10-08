@@ -1,21 +1,25 @@
+import { trackCloudEvent } from "./analytics.ts";
 import { request as httpRequest, STATUS_CODES, type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { Transform, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
-import type { CloudUser } from "./auth.ts";
+import { bearer, type CloudUser } from "./auth.ts";
 import { config } from "./config.ts";
-import { requireCredit } from "./credit.ts";
+import { creditLeft, creditsOn, outOfCredit, requireCredit } from "./credit.ts";
 import { seal } from "./crypto.ts";
-import { objectModel, objectOwner, ownObject, query } from "./db.ts";
+import { objectInfo, objectOwner, ownObject, query, sessionUsed } from "./db.ts";
 import { HttpError, readBody, refuseUpgrade, type Route, type Upgrade } from "./http.ts";
 import { recordLine } from "./lines.ts";
-import { numberCost, smsSegments } from "./pricing.ts";
+import { refuseSecondPlanNumber, requireRoomForNumber, sendingStopped } from "./plans.ts";
+import { imageModelPriced, numberCost, smsSegments } from "./pricing.ts";
+import { PLAN_REQUIRED, USAGE_APP_HEADER, USAGE_BOT_HEADER, USAGE_SOURCE_HEADER } from "./protocol.ts";
 import { accountFor, composioUserId, honchoPrefix, ownsWorkspace } from "./session.ts";
-import { recordTokens, recordUsage, recordUsageFor } from "./usage.ts";
+import { admitTurn, follow, userStopped, verdict, watchSession, type Start } from "./turn-guard.ts";
+import { isWebSearch, liveSecondsOf, recordImages, recordJev, recordTokens, recordTranscription, recordTreg, recordUsage, recordUsageFor, recordWebSearch } from "./usage.ts";
 
 /**
- * /proxy/<provider>/*: the Mac's calls to OpenAI, AgentPhone, Honcho, Composio and Typesafe, sent on
+ * /proxy/<provider>/*: the Mac's calls to OpenAI, AgentPhone, Honcho, Composio, Typesafe and treg, sent on
  * with Orgo's key and kept inside the calling user's own things.
  *
  * - Deny by default: each provider has a list of the routes the app uses (the rules below); anything
@@ -28,18 +32,26 @@ import { recordTokens, recordUsage, recordUsageFor } from "./usage.ts";
  *   event at a time; an event or answer that makes an object is held only until its owner is
  *   recorded, so the Mac can never name an object before the cloud knows it's theirs.
  * - What keeps users apart, per provider, is at each provider's rules (see README.md).
- * - Routes that spend (a model's answer, a call, a number, a text, a Typesafe call) are refused with
- *   402 once the user's AI credit is used up (credit.ts), before anything is sent on. Reads, hanging
- *   up and turning a call away never are.
+ * - Routes that spend (a model's answer, a call, a number, a text, a Typesafe call, a message to a
+ *   task) are refused with 402 once the user's AI credit is used up (credit.ts), before anything is
+ *   sent on. Reads, hanging up, turning a call away and cancelling a task never are. A task's turns
+ *   are held to the credit while they run, and stopped when it's used up (turn-guard.ts); an in-app
+ *   call is hung up when it is.
+ * - What each call used is recorded once (usage.ts): tokens by response or turn, web searches by
+ *   item, Jev's tokens, Composio's and Honcho's calls. The Mac says which bot and what kind of work a
+ *   call is for (x-bops-bot, x-bops-source: read here, never sent on), and an agent session keeps the
+ *   bot it was made for.
  */
 
 const MAX_BODY = 25 * 1024 * 1024;
 
-type Provider = "openai" | "agentphone" | "honcho" | "composio" | "typesafe";
+type Provider = "openai" | "agentphone" | "honcho" | "composio" | "typesafe" | "treg";
 
 /** A call on its way through: who's asking and where to, and what the rules may check or change before it goes. */
 type Call = {
   user: CloudUser;
+  /** The caller's Orgo key, only to ask orgo-web about their plan (plans.ts); never sent on to a provider. */
+  orgoKey: string;
   method: string;
   /** The path after /proxy/<provider>, split on "/". */
   path: string[];
@@ -48,6 +60,8 @@ type Call = {
   query: URLSearchParams;
   /** The parsed JSON body, when the provider's bodies are read (undefined: none). */
   json?: unknown;
+  /** A file upload on a route that takes one (Rule.upload): read whole, sent on as it came, and its fields as parsed. */
+  upload?: { body: Buffer; fields: FormData };
   /** Added to the request sent on (AgentPhone's X-Sub-Account-Id). */
   headers: Record<string, string>;
   /** Objects already recorded as this user's during this call (a stream names the same turn many times). */
@@ -56,6 +70,20 @@ type Call = {
   session?: string;
   /** That session's model, once looked up (null: the cloud never saw it), to price its turns. */
   model?: string | null;
+  /** That session's bot, once looked up. */
+  sessionBot?: string | null;
+  /** A turn this call starts, let through by turn-guard.ts admitTurn: given back if the call fails. */
+  start?: Start;
+  /** Given back once the call is over and what it cost is recorded (a treg call's hold on the credit: tregCall). */
+  release?: () => void;
+  /** What the call's cost is being recorded by, waited for before `release`. */
+  recording?: Promise<unknown>;
+  /** The bot the Mac says this call is for (x-bops-bot), what kind of work (x-bops-source), and the app (x-bops-app, Composio), for counting it. */
+  bot?: string;
+  source?: string;
+  app?: string;
+  /** The Mac's own request headers, for a rule that reads one it doesn't send on (treg's x-treg-route-max-cost). */
+  asked: IncomingHttpHeaders;
 };
 
 type Hook<T> = (call: Call, value: T) => Promise<unknown> | unknown;
@@ -70,13 +98,30 @@ type Rule = {
   check?: (call: Call) => Promise<void> | void;
   /** A 2xx JSON answer: record what it makes, and return the body the Mac gets instead (undefined: as it came). */
   json?: Hook<unknown>;
-  /** Each event of a 2xx event stream, before it's passed on. */
+  /** Each event of a 2xx event stream, before it's passed on: return the event the Mac gets instead (undefined: as it came). */
   event?: Hook<unknown>;
   /** After any 2xx answer has been sent. */
   done?: (call: Call) => Promise<unknown> | unknown;
-  /** It spends AI credit: refused (402) when the user has none left, or less than `minCost` (micro-dollars). */
+  /** Right before it's sent on, past every check and the credit: what must happen even when the Mac goes away before the answer. */
+  before?: (call: Call) => Promise<unknown> | unknown;
+  /** A 2xx event stream the Mac follows: called as it starts; what it returns is called once the Mac stops following it. */
+  follow?: (call: Call) => () => void;
+  /** It spends AI credit: refused (402) when the user has none left, or less than `minCost` (micro-dollars). An agent turn is let through by turn-guard.ts admitTurn instead. */
   spends?: true;
-  minCost?: (call: Call) => number;
+  minCost?: (call: Call) => number | Promise<number>;
+  /** A refused answer (its status and body): change the request and return true to send it again (at most 12 times). */
+  retry?: (call: Call, status: number, body: string) => boolean;
+  /**
+   * The provider bills it whether the Mac waits or not (a model's answer, a Jev call): when the Mac
+   * goes away first, the answer is still read to the end and recorded, just not sent anywhere.
+   */
+  readToEnd?: true;
+  /** It takes a file upload (multipart): read whole (MAX_BODY at most), so its fields can be checked (Call.upload), and sent on as it came. */
+  upload?: true;
+  /** Any answer, 2xx or not, as it starts: what its headers say (treg's cost and call id). */
+  headers?: (call: Call, status: number, headers: IncomingHttpHeaders) => void;
+  /** A refusal (status 400 or more), read whole: what the Mac gets instead ({status, body}), or undefined to pass it on as it came. */
+  refused?: (call: Call, status: number, headers: IncomingHttpHeaders, body: Buffer) => { status: number; body: Record<string, unknown> } | undefined;
 };
 
 /** "GET v1/agents/sessions/:session/events", with what to do on it. "*" as the method is any; "*" at the end of the path is anything below. */
@@ -190,6 +235,16 @@ function idsIn(value: unknown): string[] {
 const hasBody = (req: IncomingMessage) => Number(req.headers["content-length"] ?? 0) > 0 || !!req.headers["transfer-encoding"];
 const isUpload = (req: IncomingMessage) => /^multipart\//i.test(String(req.headers["content-type"] ?? ""));
 
+/** A file upload, read whole, with its fields parsed (a body that isn't one is refused, 400). */
+async function readUpload(req: IncomingMessage): Promise<NonNullable<Call["upload"]>> {
+  const body = await readBody(req, MAX_BODY);
+  try {
+    return { body, fields: await new Response(body, { headers: { "content-type": String(req.headers["content-type"]) } }).formData() };
+  } catch {
+    throw new HttpError(400, "That file upload can't be read.");
+  }
+}
+
 /** Any body that isn't a file upload is read as JSON, whatever it says it is (a server may read one with no content type as JSON), and sent on as JSON. */
 function parseBody(raw: Buffer): unknown {
   if (!raw.length) return undefined;
@@ -218,15 +273,23 @@ async function mustOwn(provider: Provider, call: Call, id: string) {
   if ((await objectOwner(provider, id)) !== call.user.id) throw new HttpError(404, "Not found");
 }
 
-/** Record an object as this user's (once per call), with the model it runs on when that's known. */
-async function own(call: Call, provider: Provider, kind: string, id: string, model?: string) {
+/** Record an object as this user's (once per call), with the model it runs on and the bot it's for when those are known. */
+async function own(call: Call, provider: Provider, kind: string, id: string, model?: string, botId?: string) {
   if (call.owned.has(id)) return;
   call.owned.add(id);
-  await ownObject(call.user.id, provider, kind, id, model);
+  await ownObject(call.user.id, provider, kind, id, model, botId);
 }
 
 /** Usage is counted on the side: a failure to count never fails the call. */
 const counted = (p: Promise<unknown>) => void p.catch((e: Error) => console.warn(`[proxy] usage: ${e.message}`));
+
+/** A file upload's one text field `name` (undefined: not there). Sent twice, it's refused: the provider might read the other. */
+function formField(call: Call, name: string): string | undefined {
+  const all = call.upload?.fields.getAll(name) ?? [];
+  if (all.length > 1) throw new HttpError(400, `${name} is given more than once.`);
+  if (all[0] !== undefined && typeof all[0] !== "string") throw new HttpError(400, `${name} should be text.`);
+  return all[0];
+}
 
 /* ---------------- OpenAI ---------------- */
 
@@ -253,13 +316,41 @@ async function openaiRefs(call: Call) {
   }
 }
 
-type ResponseObject = { id?: unknown; object?: unknown; model?: unknown; usage?: unknown };
+/**
+ * The tools a Responses call may have: the app's own (its functions, the computer, web search, which the
+ * cloud counts: recordResponse). Hosted tools priced on their own (image generation, code interpreter, file
+ * search) or that reach elsewhere (remote MCP servers) aren't passed through: the cloud couldn't count them.
+ */
+const RESPONSES_TOOLS = new Set(["function", "computer", "web_search", "web_search_preview"]);
+function responsesTools(call: Call) {
+  const tools = isObject(call.json) && Array.isArray(call.json.tools) ? call.json.tools : [];
+  for (const t of tools) {
+    const type = isObject(t) ? t.type : undefined;
+    if (typeof type !== "string" || !RESPONSES_TOOLS.has(type)) throw new HttpError(403, `Bops Cloud doesn't pass ${typeof type === "string" ? `the ${type} tool` : "that tool"} through.`);
+  }
+}
 
-/** A response (JSON, or the `response` of a streamed event): its id is the user's, and its tokens are counted when it's done. */
+/** The sizes and qualities the app asks for (lib/server/images.ts), one picture at a time: an answer stays small enough to read whole, and count. */
+const IMAGE_SIZES = new Set(["1024x1024", "1024x1536", "1536x1024"]);
+const IMAGE_QUALITIES = new Set(["low", "medium", "high"]);
+function imageAsk(n: unknown, size: unknown, quality: unknown) {
+  if (n !== undefined && Number(n) !== 1) throw new HttpError(400, "Bops Cloud makes one image at a time.");
+  if (!IMAGE_SIZES.has(String(size))) throw new HttpError(400, "Bops Cloud makes images at 1024x1024, 1024x1536 or 1536x1024.");
+  if (!IMAGE_QUALITIES.has(String(quality))) throw new HttpError(400, "Bops Cloud makes images at low, medium or high quality.");
+}
+
+type ResponseObject = { id?: unknown; object?: unknown; model?: unknown; usage?: unknown; output?: unknown };
+
+/**
+ * A response (JSON, or the `response` of a streamed event): its id is the user's, and its tokens are
+ * counted when it's done, and so are its web searches (a task on the computer tool searches in Responses).
+ */
 async function recordResponse(call: Call, r: ResponseObject | undefined, done: boolean) {
   if (r?.object !== "response" || typeof r.id !== "string") return;
   await own(call, "openai", "response", r.id);
-  if (done) counted(recordTokens(call.user.id, r.id, r.usage, { model: r.model, source: "responses" }));
+  if (!done) return;
+  counted(recordTokens(call.user.id, r.id, r.usage, { model: r.model, source: call.source ?? "responses", botId: call.bot }));
+  for (const item of Array.isArray(r.output) ? r.output : []) if (isWebSearch(item)) counted(recordWebSearch(call.user.id, item, call.bot));
 }
 
 type AgentEvent = {
@@ -269,45 +360,84 @@ type AgentEvent = {
   turn_id?: unknown;
   turn?: { id?: unknown; subagent_id?: unknown; usage?: unknown };
   subagent?: { id?: unknown };
+  item?: unknown;
   usage?: unknown;
 };
 
-/** The model a new Agents API session is asked for (agent.model in the body that makes it). */
+/** The model a new Agents API session is asked for (agent.model in the body that makes it; any other call's body says nothing about it). */
 function modelAsked(call: Call): string | undefined {
+  if (call.method !== "POST" || call.path.join("/") !== "v1/agents/sessions") return undefined;
   const agent = isObject(call.json) ? call.json.agent : undefined;
   return isObject(agent) && typeof agent.model === "string" ? agent.model : undefined;
 }
 
-/** The model of the session a turn is in, as recorded when the session was made (null: never seen; priced at the dearest). */
-async function turnModel(call: Call, session: string | undefined): Promise<string | undefined> {
-  if (call.model === undefined) call.model = modelAsked(call) ?? (session ? await objectModel("openai", session) : null);
-  return call.model ?? undefined;
+/**
+ * The model and bot of the session a turn is in, as recorded when the session was made (a model never
+ * seen is priced at the dearest; a bot never said isn't anyone's).
+ */
+async function turnInfo(call: Call, session: string | undefined): Promise<{ model?: string; botId?: string }> {
+  if (call.model === undefined || call.sessionBot === undefined) {
+    const kept = session ? await objectInfo("openai", session) : { model: null, botId: null };
+    call.model = modelAsked(call) ?? kept.model;
+    call.sessionBot = kept.botId ?? (modelAsked(call) ? (call.bot ?? null) : null);
+  }
+  return { model: call.model ?? undefined, botId: call.sessionBot ?? undefined };
 }
 
-/** A finished agent turn's tokens, at its session's model. */
+/** A finished agent turn's tokens, at its session's model, for its session's bot. */
 const turnTokens = (call: Call, session: string | undefined, turn: string, usage: unknown) =>
-  counted(turnModel(call, session).then((model) => recordTokens(call.user.id, turn, usage, { model, source: "agent" })));
+  counted(turnInfo(call, session).then(({ model, botId }) => recordTokens(call.user.id, turn, usage, { model, source: "agent", botId })));
+
+/** A web search the agent ran (a web_search_call item, seen in a session's stream or a list of its items), for the session's bot (usage.ts recordWebSearch). */
+async function countWebSearch(call: Call, session: string | undefined, item: unknown) {
+  if (!isWebSearch(item)) return;
+  const { botId } = await turnInfo(call, session);
+  counted(recordWebSearch(call.user.id, item, botId));
+}
+
+/** Every web search in a list of a session's items (or a helper's). */
+async function webSearchesIn(call: Call, data: unknown) {
+  const list = isObject(data) && Array.isArray(data.data) ? data.data : [];
+  for (const item of list) await countWebSearch(call, call.params.session, item);
+}
 
 /**
  * An Agents API session event (its own stream, or a session made with stream: true): the session,
  * its turns and its helpers (subagents) become the user's as they're named, and a finished turn's
- * tokens are counted. Only events of the stream's own session count.
+ * tokens are counted. Only events of the stream's own session count. A turn the cloud stopped for
+ * want of AI credit (turn-guard.ts) reaches the Mac as failed, with why, so the app says so; one it
+ * stopped only to see what it had spent, and set going again, passes as it came.
  */
-async function agentEvent(call: Call, data: unknown) {
+async function agentEvent(call: Call, data: unknown): Promise<unknown> {
   const e = data as AgentEvent;
   if (e.type === "agent.session.created" && e.session?.object === "agent.session" && typeof e.session.id === "string") {
     call.session ??= e.session.id;
-    await own(call, "openai", "agent_session", e.session.id, modelAsked(call));
+    await own(call, "openai", "agent_session", e.session.id, modelAsked(call), call.bot);
+    watchSession(call.user.id, e.session.id, modelAsked(call), call.bot);
+    call.start?.session(e.session.id);
   }
   if (typeof e.session_id === "string" && e.session_id !== call.session) return;
   if (typeof e.turn_id === "string") await own(call, "openai", "agent_turn", e.turn_id);
   if (typeof e.turn?.id === "string") await own(call, "openai", "agent_turn", e.turn.id);
   if (typeof e.turn?.subagent_id === "string") await own(call, "openai", "agent_subagent", e.turn.subagent_id);
   if (e.type === "agent.session.subagent.created" && typeof e.subagent?.id === "string") await own(call, "openai", "agent_subagent", e.subagent.id);
-  if (/^agent\.session\.turn\.(completed|failed|cancelled)$/.test(e.type ?? "") && typeof e.turn_id === "string") turnTokens(call, call.session, e.turn_id, e.usage ?? e.turn?.usage);
+  // The turn's own count first: the event's `usage` is only the root agent's during the turn, which for a helper's turn isn't the helper's.
+  if (/^agent\.session\.turn\.(completed|failed|cancelled)$/.test(e.type ?? "") && typeof e.turn_id === "string") turnTokens(call, call.session, e.turn_id, e.turn?.usage ?? e.usage);
+  if (e.type === "agent.session.turn.item.done") await countWebSearch(call, call.session, e.item);
+  if (e.type === "agent.session.turn.cancelled" && typeof e.turn_id === "string" && call.session && !e.turn?.subagent_id) {
+    const why = await verdict(call.session, e.turn_id);
+    if (why) return { ...e, type: "agent.session.turn.failed", turn: { ...(e.turn ?? {}), status: "failed", error: why } };
+  }
+  return undefined;
 }
 
-/** Exactly the OpenAI endpoints the app uses (lib/server/chat, sessions, call, phone, memory, watches.ts). */
+/** The events posted to a task (POST …/events): anything but a cancel is work, which starts a turn. */
+const postsWork = (call: Call) => {
+  const list = isObject(call.json) && Array.isArray(call.json.events) ? call.json.events : [];
+  return !list.length || list.some((ev) => !isObject(ev) || ev.type !== "agent.session.input.cancel");
+};
+
+/** Exactly the OpenAI endpoints the app uses (lib/server/chat, sessions, call, phone, memory, watches, images, transcribe.ts). */
 const openai: Spec = {
   name: "OpenAI",
   key: config.openaiKey,
@@ -319,40 +449,104 @@ const openai: Spec = {
   rules: [
     rule("POST v1/responses", {
       spends: true,
+      readToEnd: true,
+      check: responsesTools,
       json: (call, data) => recordResponse(call, data as ResponseObject, true),
       event: (call, data) => {
         const e = data as { type?: string; response?: ResponseObject };
         return recordResponse(call, e.response, /^response\.(completed|incomplete|failed)$/.test(e.type ?? ""));
       },
     }),
+    // The chat's mic: a recording made text. Only gpt-transcribe (its price is known), answered as JSON (so its seconds are read), not streamed.
+    rule("POST v1/audio/transcriptions", {
+      upload: true,
+      spends: true,
+      readToEnd: true,
+      check: (call) => {
+        if (!call.upload) throw new HttpError(400, "Send the recording as a file upload.");
+        if (formField(call, "model") !== "gpt-transcribe") throw new HttpError(400, "Bops Cloud only transcribes with gpt-transcribe.");
+        if (!["json", undefined].includes(formField(call, "response_format"))) throw new HttpError(400, "Ask for a JSON answer.");
+        if (!["false", undefined].includes(formField(call, "stream"))) throw new HttpError(400, "Bops Cloud doesn't stream transcriptions.");
+      },
+      json: (call, data) => counted(recordTranscription(call.user.id, isObject(data) ? data : {}, { model: "gpt-transcribe", botId: call.bot })),
+    }),
+    // A bot's picture, made or edited (an edit sends the pictures it starts from as a file upload). Only image models whose price is known; never streamed.
+    rule("POST v1/images/generations", {
+      spends: true,
+      readToEnd: true,
+      check: (call) => {
+        const body = isObject(call.json) ? call.json : {};
+        if (!imageModelPriced(body.model)) throw new HttpError(400, "Bops Cloud only makes images with gpt-image-2.5-flare or gpt-image-2.5-sunburst.");
+        if (body.stream) throw new HttpError(400, "Bops Cloud doesn't stream images.");
+        imageAsk(body.n, body.size, body.quality);
+      },
+      json: (call, data) => counted(recordImages(call.user.id, isObject(data) ? data : {}, { model: isObject(call.json) ? call.json.model : undefined, botId: call.bot })),
+    }),
+    rule("POST v1/images/edits", {
+      upload: true,
+      spends: true,
+      readToEnd: true,
+      check: (call) => {
+        if (!call.upload) throw new HttpError(400, "Send the images as a file upload.");
+        if (!imageModelPriced(formField(call, "model"))) throw new HttpError(400, "Bops Cloud only edits images with gpt-image-2.5-flare or gpt-image-2.5-sunburst.");
+        if (!["false", undefined].includes(formField(call, "stream"))) throw new HttpError(400, "Bops Cloud doesn't stream images.");
+        imageAsk(formField(call, "n"), formField(call, "size"), formField(call, "quality"));
+      },
+      json: (call, data) => counted(recordImages(call.user.id, isObject(data) ? data : {}, { model: formField(call, "model"), botId: call.bot })),
+    }),
     // A call in the app: the live session it makes is the user's (a phone call's is recorded by /hooks/openai).
+    // Its audio goes from the browser to OpenAI, so the cloud listens on the session's sideband for its seconds (watchLive).
     rule("POST v1/live/sessions", {
       spends: true,
       json: async (call, data) => {
         const id = (data as { session?: { id?: unknown } }).session?.id;
-        if (typeof id === "string") await own(call, "openai", "live_session", id);
+        if (typeof id !== "string") return;
+        await own(call, "openai", "live_session", id);
+        const transport = isObject(call.json) && isObject(call.json.transport) ? call.json.transport.type : undefined;
+        if (transport === "webrtc") watchLive(call.user.id, id, call.bot);
       },
     }),
     rule("POST v1/live/sessions/:live/accept", { own: ["live"], spends: true }),
     rule("POST v1/live/sessions/:live/reject", { own: ["live"] }),
     rule("POST v1/live/sessions/:live/hangup", { own: ["live"] }),
-    // A task: the session's model is kept with it, for pricing its turns.
+    // A task: the session's model and bot are kept with it, for pricing its turns and counting them for the bot.
+    // Its turns are held to the user's credit while they run (turn-guard.ts): it needs room for the first few seconds of one
+    // (admitTurn: 402, 403 or 429), and it's read to the end, so a session made for a Mac that went away is still the user's, and watched.
     rule("POST v1/agents/sessions", {
-      spends: true,
+      readToEnd: true,
+      check: async (call) => void (call.start = await admitTurn(call.user.id, undefined, modelAsked(call))),
       json: async (call, data) => {
         const s = data as { id?: unknown; object?: unknown };
-        if (s.object === "agent.session" && typeof s.id === "string") await own(call, "openai", "agent_session", s.id, modelAsked(call));
+        if (s.object !== "agent.session" || typeof s.id !== "string") return;
+        await own(call, "openai", "agent_session", s.id, modelAsked(call), call.bot);
+        watchSession(call.user.id, s.id, modelAsked(call), call.bot);
+        call.start?.session(s.id);
       },
       event: agentEvent,
     }),
     rule("GET v1/agents/sessions/:session/events", {
       own: ["session"],
+      // The cloud sets a stopped task going again only while the Mac follows it (turn-guard.ts).
+      follow: (call) => follow(call.params.session),
       event: (call, data) => {
         call.session = call.params.session;
         return agentEvent(call, data);
       },
     }),
-    rule("POST v1/agents/sessions/:session/events", { own: ["session"], spends: true }),
+    // A message to a task: held to the user's credit while it runs (turn-guard.ts), and read back once it's done (reconcile.ts),
+    // both from before it's sent, so a Mac that hangs up can't skip them. Cancelling never needs credit, and is the user's Stop.
+    rule("POST v1/agents/sessions/:session/events", {
+      own: ["session"],
+      check: async (call) => {
+        if (postsWork(call)) call.start = await admitTurn(call.user.id, call.params.session, (await turnInfo(call, call.params.session)).model);
+      },
+      before: async (call) => {
+        counted(sessionUsed(call.params.session));
+        if (!postsWork(call)) return userStopped(call.params.session);
+        const { model, botId } = await turnInfo(call, call.params.session);
+        watchSession(call.user.id, call.params.session, model, botId);
+      },
+    }),
     rule("GET v1/agents/sessions/:session/turns/:turn", {
       own: ["session", "turn"],
       json: (call, data) => {
@@ -360,7 +554,9 @@ const openai: Spec = {
         if (t.object === "agent.session.turn" && ["completed", "failed", "cancelled"].includes(String(t.status))) turnTokens(call, call.params.session, call.params.turn, t.usage);
       },
     }),
-    rule("GET v1/agents/sessions/:session/items", { own: ["session"] }),
+    rule("GET v1/agents/sessions/:session/items", { own: ["session"], json: webSearchesIn }),
+    // Whether a turn is running (lib/server/sessions.ts steeredOn: a reply that came as a turn ended may have started another).
+    rule("GET v1/agents/sessions/:session", { own: ["session"] }),
     rule("GET v1/agents/sessions/:session/subagents", {
       own: ["session"],
       json: async (call, data) => {
@@ -370,7 +566,7 @@ const openai: Spec = {
             if (s?.object === "agent.session.subagent" && typeof s.id === "string") await own(call, "openai", "agent_subagent", s.id);
       },
     }),
-    rule("GET v1/agents/sessions/:session/subagents/:subagent/items", { own: ["session", "subagent"] }),
+    rule("GET v1/agents/sessions/:session/subagents/:subagent/items", { own: ["session", "subagent"], json: webSearchesIn }),
   ],
 };
 
@@ -422,8 +618,39 @@ async function recordNumbers(call: Call, data: unknown) {
  * bought one starts its 15 minutes for the first caller to claim it. The app says which bot it's for
  * after (PUT /v1/phone/lines); this is what holds if it never does.
  */
+/**
+ * A number is bought by area code (the app searches first, GET v1/numbers/available, but there's no
+ * buying one exact number), and an area code with none left is refused ("No numbers available in
+ * area code 415"). Then the next one nearby is asked for, and in the end any US number (no area code).
+ */
+const NEARBY_AREA_CODES = ["415", "628", "650", "510", "408", "669", "925", "707", "916", "213", "310", "323", "818", "206", "503", "720", "512", "646", "917"];
+const areaTried = new WeakMap<Call, string[]>();
+
+function anotherAreaCode(call: Call, status: number, body: string): boolean {
+  const ask = call.json as { areaCode?: unknown } | undefined;
+  if (status >= 500 || !ask || typeof ask !== "object" || !/no numbers available/i.test(body)) return false;
+  const tried = areaTried.get(call) ?? [];
+  if (typeof ask.areaCode !== "string" || !ask.areaCode) return false;
+  tried.push(ask.areaCode);
+  areaTried.set(call, tried);
+  const next = NEARBY_AREA_CODES.find((c) => !tried.includes(c));
+  if (next) ask.areaCode = next;
+  else delete ask.areaCode;
+  console.log(`[proxy] ${call.user.id}: no numbers left in ${tried.at(-1)}, asking for ${next ?? "any area code"}`);
+  return true;
+}
+
 async function recordBought(call: Call, data: unknown) {
-  for (const n of numbersIn(data)) await recordLine(call.user.id, n, { open: true }).catch(lineNotKept(call));
+  for (const n of numbersIn(data)) {
+    const kept = await recordLine(call.user.id, n, { open: true }).then(
+      () => true,
+      (e: unknown) => {
+        lineNotKept(call)(e as Error);
+        return false;
+      },
+    );
+    if (kept) trackCloudEvent(call.user.id, "bops_phone_number_added", { added_via: "app" }, { once: n.id });
+  }
 }
 
 async function recordAttached(call: Call) {
@@ -452,6 +679,14 @@ function countText(call: Call) {
   const mms = Object.entries(body).some(([k, v]) => MEDIA_KEYS.has(norm(k)) && (Array.isArray(v) ? v.length > 0 : !!v));
   const text = typeof body.body === "string" ? body.body : "";
   counted(recordUsage(call.user.id, "agentphone.sms", mms ? 1 : smsSegments(text), { direction: "out", ...(mms ? { mms: true } : {}) }));
+}
+
+/** A text out from a plan's number that's paused (the plan ended) or given back is refused, as calls and texts to it go unanswered (plans.ts). */
+async function notFromPausedNumber(call: Call) {
+  const body = isObject(call.json) ? call.json : {};
+  const id = (x: unknown) => (typeof x === "string" ? x : "");
+  if (await sendingStopped(call.user.id, id(body.number_id ?? body.numberId), id(body.agent_id ?? body.agentId)))
+    throw new HttpError(402, "This number is paused while you're on Free. Upgrade to text from it again.", { code: PLAN_REQUIRED, upgrade: true });
 }
 
 /** A webhook registration goes to the cloud's own address, whatever the Mac asked for. */
@@ -495,9 +730,19 @@ const agentphone: Spec = {
   timeoutMs: 2 * 60_000,
   rules: [
     rule("GET v1/numbers", { json: recordNumbers }),
-    // Buying a number needs credit for its month: an iMessage line's is far more than a number's.
+    // Numbers for sale (by area code, or anywhere in the country): read only, nothing bought, so no credit asked. Before "v1/numbers/:number", which it would otherwise be taken for.
+    rule("GET v1/numbers/available"),
+    // Buying a number needs credit for its month: an iMessage line's is far more than a number's. With
+    // plan limits on, a number is bought only while the plan has room for it (Free none, Pro 1, Max 5,
+    // the main bot's from the plan included; plans.ts), and the main bot's own purchase never makes a
+    // second next to the plan's.
     rule("POST v1/numbers", {
+      check: async (call) => {
+        await requireRoomForNumber(call.user.id, call.orgoKey);
+        await refuseSecondPlanNumber(call.user.id, isObject(call.json) ? (call.json.externalId ?? call.json.external_id) : undefined);
+      },
       spends: true,
+      retry: anotherAreaCode,
       minCost: (call) => numberCost(numberAsked(call)),
       json: async (call, data) => {
         await recordNumbers(call, data);
@@ -525,7 +770,7 @@ const agentphone: Spec = {
     rule("DELETE v1/agents/:agent/numbers/:number"),
     rule("GET v1/agents/:agent/webhook", { json: keepWebhookSecret }),
     rule("POST v1/agents/:agent/webhook", { check: webhookToCloud, json: keepWebhookSecret }),
-    rule("POST v1/messages", { spends: true, done: countText }),
+    rule("POST v1/messages", { check: notFromPausedNumber, spends: true, done: countText }),
     rule("POST v1/messages/:message/reactions"),
     rule("POST v1/conversations/:conversation/typing"),
     rule("GET v1/register/status"),
@@ -555,6 +800,18 @@ function ownWorkspacesOnly(call: Call, data: unknown) {
   return { items: mine, total: mine.length, page: 1, size: mine.length, pages: 1 };
 }
 
+/**
+ * Honcho calls that do work, counted by route at Honcho's price (pricing.ts, $0 until it's set): a
+ * question about the user (a peer's chat), a search, and messages saved. Reads and setup aren't.
+ */
+function countHoncho(call: Call) {
+  if (call.method !== "POST") return;
+  const last = call.path.at(-1);
+  // Messages saved, or a file uploaded as messages; a list of them (messages/list) is a read.
+  const route = last === "chat" ? "chat" : last === "search" ? "search" : last === "messages" || (last === "upload" && call.path.at(-2) === "messages") ? "messages" : undefined;
+  if (route) counted(recordUsage(call.user.id, "honcho.calls", 1, { route, ...(call.bot ? { botId: call.bot } : {}) }));
+}
+
 /** Honcho: the user's own workspaces, and anything inside them. */
 const honcho: Spec = {
   name: "Honcho",
@@ -574,7 +831,7 @@ const honcho: Spec = {
     }),
     rule("POST v3/workspaces/list", { json: ownWorkspacesOnly }),
     rule("* v3/workspaces/:workspace", { check: workspaceInPath }),
-    rule("* v3/workspaces/:workspace/*", { check: workspaceInPath }),
+    rule("* v3/workspaces/:workspace/*", { check: workspaceInPath, done: countHoncho }),
   ],
 };
 
@@ -763,6 +1020,26 @@ const recordAccount = (field: string) => async (call: Call, data: unknown) => {
   return masked(data);
 };
 
+/**
+ * A tool run through Composio (an action in an app, a session's tool, or a call to an app's own API),
+ * counted once it's answered, by tool, app and bot (the Mac's x-bops-app and x-bops-bot; a session's
+ * tool is for the bot the session was made for), at Composio's price (pricing.ts: $0 while it's negotiated).
+ */
+const countComposio = (tool: (call: Call) => string) => (call: Call) =>
+  counted(
+    (async () => {
+      const botId = call.bot ?? (call.params.session ? (await objectInfo("composio", call.params.session)).botId : null);
+      await recordUsage(call.user.id, "composio.calls", 1, { tool: tool(call), ...(call.app ? { app: call.app } : {}), ...(botId ? { botId } : {}) });
+    })(),
+  );
+
+/** The tool a session's execute names (tool_slug in its body). */
+const sessionTool = (call: Call) => {
+  const body = isObject(call.json) ? call.json : {};
+  const slug = body.tool_slug ?? body.toolSlug ?? body.slug;
+  return typeof slug === "string" ? slug.slice(0, 120) : "session";
+};
+
 /** These checks, one after the other. */
 const both =
   (...checks: ((call: Call) => Promise<void> | void)[]) =>
@@ -812,13 +1089,14 @@ const composio: Spec = {
       check: both(asUser([]), usableSignIns(false)),
       json: async (call, data) => {
         const id = isObject(data) ? data.session_id : undefined;
-        if (typeof id === "string") await own(call, "composio", "tool_router_session", id);
+        if (typeof id === "string") await own(call, "composio", "tool_router_session", id, undefined, call.bot);
       },
     }),
     rule("GET api/v3.1/tool_router/session/:session", { own: ["session"] }),
     rule("POST api/v3.1/tool_router/session/:session/search", { own: ["session"] }),
     rule("POST api/v3.1/tool_router/session/:session/execute", {
       own: ["session"],
+      done: countComposio(sessionTool),
       // Which of the session's accounts to use: only one of the user's.
       check: async (call) => {
         const account = isObject(call.json) ? call.json.account : undefined;
@@ -826,9 +1104,9 @@ const composio: Spec = {
       },
     }),
     // An app's own API through the user's account (Slack's chat.postMessage and auth.test, an app's "who am I").
-    rule("POST api/v3.1/tools/execute/proxy", { check: namesAccount }),
+    rule("POST api/v3.1/tools/execute/proxy", { check: namesAccount, done: countComposio(() => "proxy") }),
     // One action in one of the user's accounts, or in an app that needs no account.
-    rule("POST api/v3.1/tools/execute/:tool", { check: asUser([]) }),
+    rule("POST api/v3.1/tools/execute/:tool", { check: asUser([]), done: countComposio((call) => call.params.tool) }),
     // Triggers (Slack messages for channels.ts): only on the user's own accounts. Their live delivery
     // (triggers.subscribe, a Pusher channel for the whole project) isn't passed through at all.
     rule("GET api/v3.1/triggers_types/:trigger"),
@@ -851,17 +1129,202 @@ const composio: Spec = {
 
 /* ---------------- Typesafe ---------------- */
 
+/**
+ * Jev, Typesafe's decision model: each answer's input tokens at its model's price (Typesafe's answer
+ * says both; when it doesn't, the tokens are estimated from the question's size). Its answer is read
+ * to the end even when the Mac stopped waiting (decide() gives up at 8 s): Typesafe bills it anyway.
+ */
 const typesafe: Spec = {
   name: "Typesafe",
   key: config.typesafeKey,
   upstream: config.upstream.typesafe,
   auth: (key) => ({ authorization: `Bearer ${key}` }),
-  body: "pipe",
+  body: "json",
   timeoutMs: 60_000,
-  rules: [rule("POST v1/systemone", { spends: true, done: (call) => counted(recordUsage(call.user.id, "typesafe.calls", 1)) })],
+  rules: [
+    rule("POST v1/systemone", {
+      spends: true,
+      readToEnd: true,
+      json: (call, data) => {
+        const bytes = call.json === undefined ? 0 : Buffer.byteLength(JSON.stringify(call.json));
+        counted(recordJev(call.user.id, isObject(data) ? data : {}, bytes, { botId: call.bot }));
+      },
+    }),
+  ],
 };
 
-const SPECS: Record<Provider, Spec> = { openai, agentphone, honcho, composio, typesafe };
+/* ---------------- treg ---------------- */
+
+/** What one treg catalog endpoint is, as the cloud checks a call to it (GET /catalog/endpoints/{id}, open). */
+type TregEndpoint = { method: string; scope: string; kind: string; async: boolean; usd: number; eligible: boolean };
+
+/** treg's catalog entries, by endpoint id, for an hour (null: no such endpoint). */
+const tregCatalog = new Map<string, { at: number; entry: TregEndpoint | null }>();
+const TREG_CATALOG_TTL = 60 * 60_000;
+
+/** The kinds of catalog endpoint bots may call: a provider's data, treg's routed ones (several providers behind one), and free helpers. Never a team's own tools or another team's hub tools. */
+const TREG_KINDS = new Set(["data", "routed", "utility"]);
+
+async function tregEndpoint(id: string): Promise<TregEndpoint | null> {
+  const hit = tregCatalog.get(id);
+  if (hit && Date.now() - hit.at < TREG_CATALOG_TTL) return hit.entry;
+  const r = await fetch(`${config.upstream.treg().replace(/\/+$/, "")}/catalog/endpoints/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(15_000) }).catch(() => null);
+  if (!r || (!r.ok && r.status !== 404)) throw new HttpError(502, "Couldn't reach treg's catalog.");
+  const data = r.ok ? ((await r.json().catch(() => null)) as { endpoint?: Record<string, unknown>; usd_per_call?: unknown } | null) : null;
+  const e = data?.endpoint;
+  const entry: TregEndpoint | null =
+    e && e.id === id
+      ? {
+          method: String(e.method ?? "GET").toUpperCase(),
+          scope: String(e.scope ?? ""),
+          kind: String(e.kind ?? ""),
+          async: !!e.async,
+          usd: Math.max(0, Number(data?.usd_per_call ?? (e.cost as { usd?: unknown } | undefined)?.usd) || 0),
+          // On treg's platform keys (a team's own key answers at no cost to the user, on Orgo's provider bill), and not replaced.
+          eligible: e.platform_eligible !== false && !e.superseded_by,
+        }
+      : null;
+  if (tregCatalog.size > 5_000) tregCatalog.clear();
+  tregCatalog.set(id, { at: Date.now(), entry });
+  return entry;
+}
+
+/** The most one treg call may cost, in dollars, when the Mac doesn't say (x-treg-route-max-cost), and the most it may ever say. */
+const TREG_CALL_CAP = 0.1;
+const TREG_CALL_MOST = 5;
+/** treg calls a user may have on their way at once. */
+const TREG_AT_ONCE = 3;
+/**
+ * Each user's treg calls on their way: how many, and the most they may cost together (micro-dollars).
+ * Held against the user's credit until each is counted, so calls at once can't spend past it (each was
+ * capped at the whole of what's left), nor past Orgo's treg balance.
+ */
+const tregHeld = new Map<string, { n: number; micros: number }>();
+
+/** Each user's treg calls being capped, one at a time, so each sees the holds of the ones before it. */
+const tregTurns = new Map<string, Promise<unknown>>();
+
+/**
+ * A treg call's cap (dollars): what it asked, at most what's left of the user's credit once their other
+ * calls on their way are paid for, held until it's counted (Call.release, given back by handle). At most
+ * TREG_AT_ONCE at a time per user.
+ */
+function holdForTreg(call: Call, asked: number): Promise<number> {
+  const user = call.user.id;
+  const decide = async () => {
+    const held = tregHeld.get(user) ?? { n: 0, micros: 0 };
+    if (held.n >= TREG_AT_ONCE) throw new HttpError(429, "Too many business data lookups at once. Try again in a moment.");
+    const cap = creditsOn() ? Math.min(asked, Math.max(0, (await creditLeft(user)) - held.micros) / 1_000_000) : asked;
+    if (cap <= 0) throw held.n > 0 ? new HttpError(429, "Your other business data lookups are using what's left of your AI credit. Try again in a moment.") : outOfCredit();
+    const mine = Math.ceil(cap * 1_000_000);
+    held.n += 1;
+    held.micros += mine;
+    tregHeld.set(user, held);
+    let given = false;
+    call.release = () => {
+      if (given) return;
+      given = true;
+      held.n -= 1;
+      held.micros -= mine;
+      if (held.n <= 0 && tregHeld.get(user) === held) tregHeld.delete(user);
+    };
+    return cap;
+  };
+  const turn = (tregTurns.get(user) ?? Promise.resolve()).then(decide, decide);
+  const settled = turn.then(
+    () => undefined,
+    () => undefined,
+  );
+  tregTurns.set(user, settled);
+  void settled.then(() => tregTurns.get(user) === settled && tregTurns.delete(user));
+  return turn;
+}
+
+/** A value treg keeps as a tag (X-Treg-Meta): letters, digits, ". _ - :" only, at most 128, never like an email. */
+const tregTag = (v: string) => v.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 128);
+
+/**
+ * A call to one catalog endpoint: it must be in treg's catalog (data, routed or a free helper), on
+ * treg's own keys (never one that needs an account connected to treg: those would be Orgo's team's),
+ * and not a long-running job. It's tagged with the user and bot (X-Treg-Meta, set here, never by the
+ * Mac) and capped (X-Treg-Route-Max-Cost): what the Mac asked, at most TREG_CALL_MOST and what's left
+ * of the user's credit.
+ */
+async function tregCall(call: Call) {
+  const id = call.params.endpoint;
+  const e = await tregEndpoint(id);
+  if (!e || !TREG_KINDS.has(e.kind)) throw new HttpError(404, `${id} isn't in treg's catalog.`);
+  if (e.scope === "own_account") throw new HttpError(403, `${id} needs an account connected to treg, which Bops doesn't offer yet.`);
+  if (e.async) throw new HttpError(403, `${id} is a long-running job, which Bops doesn't run through treg yet.`);
+  if (!e.eligible) throw new HttpError(403, `${id} isn't available to Bops (it's replaced, or not on treg's own keys).`);
+  if (e.method !== call.method) throw new HttpError(405, `${id} takes ${e.method}.`);
+  const said = Number([call.asked["x-treg-route-max-cost"]].flat()[0]);
+  const cap = await holdForTreg(call, Math.min(Number.isFinite(said) && said > 0 ? said : TREG_CALL_CAP, TREG_CALL_MOST));
+  call.headers["x-treg-route-max-cost"] = cap.toFixed(6);
+  // One token for every user: their replay keys must never meet (treg keeps replays by team and key).
+  const replay = [call.asked["idempotency-key"]].flat()[0];
+  if (replay) call.headers["idempotency-key"] = `${tregTag(call.user.id)}:${String(replay).slice(0, 200)}`;
+  // Providers a routed endpoint should skip (treg.ts: ones whose answers don't fit a job).
+  const skip = [call.asked["x-treg-route-exclude"]].flat()[0];
+  if (skip && /^[a-z0-9_-]+(, ?[a-z0-9_-]+)*$/.test(skip)) call.headers["x-treg-route-exclude"] = skip;
+  call.headers["x-treg-meta"] = [`customer=${tregTag(call.user.id)}`, ...(call.bot ? [`bot=${tregTag(call.bot)}`] : [])].join(", ");
+}
+
+/** What treg's own refusals may say to a user: its estimate against the cap is fine; anything about Orgo's balance or limits isn't. */
+function tregRefused(call: Call, status: number, headers: IncomingHttpHeaders, body: Buffer) {
+  if (headers["x-treg-error"] !== "1") return undefined;
+  let error: unknown;
+  try {
+    // treg puts its code at the top or under `detail` ({"detail": {"error": "route_max_cost", …}}).
+    const said = JSON.parse(body.toString("utf8")) as { error?: unknown; detail?: { error?: unknown } };
+    error = said.error ?? said.detail?.error;
+  } catch {
+    /* not JSON: treated as Orgo's own trouble below */
+  }
+  if (status === 402 && error === "route_max_cost") return undefined;
+  if (status === 400 || status === 404 || status === 405 || status === 409 || status === 410 || status === 422) return undefined;
+  // Orgo's treg balance or daily cap (402/429), or treg itself out of room: never passed on (it names Orgo's balance and a top-up link).
+  console.warn(`[proxy] treg refused ${call.params.endpoint} for ${call.user.id}: ${status} ${String(error ?? body.toString("utf8").slice(0, 200))}`);
+  return { status: 503, body: { error: "Business data isn't available right now. Try again in a little while.", code: "treg_unavailable" } };
+}
+
+/** Count a treg call, once by its call id, at what treg said it cost. A call it refused before the provider (X-Treg-Error) has no id and costs nothing. */
+function countTreg(call: Call, _status: number, headers: IncomingHttpHeaders) {
+  const callId = [headers["x-treg-call-id"]].flat()[0];
+  if (!callId) return;
+  const cost = Number([headers["x-treg-cost-micro"]].flat()[0]) || 0;
+  const servedBy = [headers["x-treg-served-by"]].flat()[0];
+  call.recording = recordTreg(call.user.id, callId, cost, { botId: call.bot, endpoint: call.params.endpoint, ...(servedBy ? { servedBy } : {}) });
+  counted(call.recording);
+}
+
+const TREG_CALL: Omit<Rule, "method" | "pattern"> = {
+  check: tregCall,
+  spends: true,
+  // Billed whether the Mac waits or not, so its answer is read to the end and counted.
+  readToEnd: true,
+  minCost: async (call) => Math.min((await tregEndpoint(call.params.endpoint))?.usd ?? 0, TREG_CALL_CAP) * 1_000_000,
+  headers: countTreg,
+  refused: tregRefused,
+};
+
+/**
+ * treg (treg.to): the bots' business data (lib/server/treg.ts). Only calls to its catalog's endpoints
+ * by id (/call/<endpoint-id>): never a team's own tools (/call/<tool>/<path>, or a URL), a hub tool,
+ * or anything about Orgo's treg team (its balance, keys, members, budgets). The Mac reads the open
+ * catalog (search, an endpoint's details) from treg directly.
+ */
+const treg: Spec = {
+  name: "treg",
+  key: config.tregToken,
+  upstream: config.upstream.treg,
+  auth: (key) => ({ "x-treg-token": key }),
+  body: "json",
+  timeoutMs: 2 * 60_000,
+  rules: [rule("GET call/:endpoint", TREG_CALL), rule("POST call/:endpoint", TREG_CALL)],
+};
+
+const SPECS: Record<Provider, Spec> = { openai, agentphone, honcho, composio, typesafe, treg };
 
 /* ---------------- Sending on ---------------- */
 
@@ -897,20 +1360,21 @@ const limiter = (max: number) => {
   });
 };
 
-/** Send the call on and wait for the provider to start answering. The request is dropped if the Mac goes away first. */
-function send(spec: Spec, key: string, call: Call, req: IncomingMessage, res: ServerResponse, body: Buffer | IncomingMessage | null): Promise<IncomingMessage> {
+/** Send the call on and wait for the provider to start answering. The request is dropped if the Mac goes away first, unless the rule reads its answer to the end. */
+function send(spec: Spec, key: string, call: Call, req: IncomingMessage, res: ServerResponse, body: Buffer | IncomingMessage | null, readToEnd = false): Promise<IncomingMessage> {
   const url = new URL(`${spec.upstream().replace(/\/+$/, "")}/${call.path.join("/")}${qs(call.query)}`);
   // identity: answers must be readable here, to record what they make.
   const headers: OutgoingHttpHeaders = { ...requestHeaders(req.headers), ...spec.auth(key), ...call.headers, "accept-encoding": "identity" };
   if (Buffer.isBuffer(body)) {
-    headers["content-type"] = "application/json";
+    // A file upload goes as it came (its content type names its boundary); anything else read here is JSON.
+    if (!call.upload) headers["content-type"] = "application/json";
     headers["content-length"] = String(body.length);
   } else if (body && req.headers["content-length"]) headers["content-length"] = req.headers["content-length"];
   return new Promise((resolve, reject) => {
     const up = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, { method: call.method, headers });
     const timer = setTimeout(() => up.destroy(new HttpError(504, `${spec.name} took too long to answer.`)), spec.timeoutMs);
     res.on("close", () => {
-      if (!res.writableFinished) up.destroy();
+      if (!res.writableFinished && !readToEnd) up.destroy();
     });
     up.on("response", (answer) => {
       clearTimeout(timer);
@@ -1013,21 +1477,45 @@ function eventData(raw: Buffer): unknown {
   }
 }
 
-/** Stream events on as they come, each after the rule has seen it. */
+/** An event as sent, with other data (and its `event:` line, if it had one, naming the new type). Its other lines stay. */
+function withData(raw: Buffer, data: unknown): Buffer {
+  const lines = raw.toString("utf8").split(/\r\n|\r|\n/).filter((l) => l && !l.startsWith("data:"));
+  const type = isObject(data) && typeof data.type === "string" ? data.type : undefined;
+  const kept = lines.map((l) => (l.startsWith("event:") && type ? `event: ${type}` : l));
+  return Buffer.from(`${[...kept, `data: ${JSON.stringify(data)}`].join("\n")}\n\n`);
+}
+
+/** Stream events on as they come, each after the rule has seen it (and as it says, when it changes one). */
 async function streamEvents(rule: Rule, call: Call, up: IncomingMessage, res: ServerResponse, readable: boolean) {
   res.writeHead(up.statusCode ?? 200, responseHeaders(up.headers));
   res.flushHeaders();
+  // Followed until the Mac goes away (seen at once, even while an event is held) or the stream ends.
+  const unfollow = rule.follow?.(call);
+  if (unfollow) {
+    if (res.destroyed) unfollow();
+    else res.once("close", unfollow);
+  }
   const split = readable ? new EventSplitter() : null;
+  let gone = false;
   try {
     for await (const chunk of up as AsyncIterable<Buffer>) {
       for (const part of split ? split.push(chunk) : [{ raw: chunk, data: undefined }]) {
-        if (part.data !== undefined) await Promise.resolve(rule.event!(call, part.data)).catch((e: Error) => console.warn(`[proxy] event: ${e.message}`));
-        if (!(await write(res, part.raw))) return void up.destroy();
+        let raw = part.raw;
+        if (part.data !== undefined) {
+          const instead = await Promise.resolve(rule.event!(call, part.data)).catch((e: Error) => void console.warn(`[proxy] event: ${e.message}`));
+          if (instead !== undefined) raw = withData(part.raw, instead);
+        }
+        if (gone || (await write(res, raw))) continue;
+        // The Mac went away: a rule that reads to the end (a model's answer, billed either way) reads the rest unsent, to record it.
+        if (!rule.readToEnd) return void up.destroy();
+        gone = true;
       }
     }
-    const rest = split?.rest();
-    if (rest?.length) await write(res, rest);
-    res.end();
+    if (!gone) {
+      const rest = split?.rest();
+      if (rest?.length) await write(res, rest);
+      res.end();
+    }
     await rule.done?.(call);
   } catch {
     res.destroy();
@@ -1049,6 +1537,11 @@ async function answerJson(spec: Spec, rule: Rule, call: Call, up: IncomingMessag
     const changed = await rule.json!(call, data);
     if (changed !== undefined) out = Buffer.from(JSON.stringify(changed));
   }
+  // The Mac went away while it was read (a rule that reads to the end): recorded, with nobody to send it to.
+  if (res.destroyed) {
+    await rule.done?.(call);
+    return;
+  }
   res.writeHead(up.statusCode ?? 200, { ...responseHeaders(up.headers, ["content-length"]), "content-length": String(out.length) });
   res.end(out);
   await rule.done?.(call);
@@ -1057,6 +1550,21 @@ async function answerJson(spec: Spec, rule: Rule, call: Call, up: IncomingMessag
 async function answer(spec: Spec, rule: Rule, call: Call, up: IncomingMessage, res: ServerResponse) {
   const status = up.statusCode ?? 502;
   const ok = status >= 200 && status < 300;
+  rule.headers?.(call, status, up.headers);
+  // A hold on the credit (a treg call's) goes back once what the call cost is recorded, before the Mac
+  // hears back: its next call finds the room.
+  if (call.release) {
+    await call.recording?.catch(() => {});
+    call.release();
+  }
+  if (!ok && rule.refused) {
+    const raw = await readAll(up, MAX_BODY, spec.name);
+    const instead = rule.refused(call, status, up.headers, raw);
+    const out = instead ? Buffer.from(JSON.stringify(instead.body)) : raw;
+    const headers = instead ? { "content-type": "application/json" } : responseHeaders(up.headers, ["content-length"]);
+    res.writeHead(instead?.status ?? status, { ...headers, "content-length": String(out.length) });
+    return void res.end(out);
+  }
   const encoding = String(up.headers["content-encoding"] ?? "identity").toLowerCase();
   const readable = encoding === "identity";
   if (ok && rule.event && /^text\/event-stream/i.test(String(up.headers["content-type"] ?? ""))) return streamEvents(rule, call, up, res, readable);
@@ -1070,25 +1578,78 @@ async function answer(spec: Spec, rule: Rule, call: Call, up: IncomingMessage, r
   if (ok) await rule.done?.(call);
 }
 
+/** A bot id or a kind of work as the Mac names them: plain and short, else not kept. */
+const USAGE_TAG = /^[A-Za-z0-9_.:-]{1,80}$/;
+
+/** Which bot, kind of work and app the Mac says a call is for (x-bops-bot, x-bops-source, x-bops-app), for counting it. Never sent on (not in PASS_REQUEST). */
+function usageHeaders(req: IncomingMessage): Pick<Call, "bot" | "source" | "app"> {
+  const one = (name: string) => {
+    const v = req.headers[name];
+    const s = Array.isArray(v) ? v[0] : v;
+    return s && USAGE_TAG.test(s) ? s : undefined;
+  };
+  const bot = one(USAGE_BOT_HEADER);
+  const source = one(USAGE_SOURCE_HEADER);
+  const app = one(USAGE_APP_HEADER);
+  return { ...(bot ? { bot } : {}), ...(source && MAC_SOURCES.has(source) ? { source } : {}), ...(app ? { app } : {}) };
+}
+
+/**
+ * The kinds of work the Mac may name (lib/server/usage.ts usageTags). Never "agent", "phone" or
+ * "responses": those are the cloud's own, and "agent" is priced as a summed turn (never at
+ * long-context rates, pricing.ts), so a Mac that said it would pay less for one long answer.
+ */
+const MAC_SOURCES = new Set(["chat", "session", "memory", "call", "decide"]);
+
 async function handle(provider: Provider, prefix: string, req: IncomingMessage, res: ServerResponse, user: CloudUser) {
   const spec = SPECS[provider];
   const key = spec.key();
   if (!key) throw new HttpError(503, `${spec.name} isn't set up on this cloud.`);
   const { path, query: q } = target(req.url, prefix);
-  const call: Call = { user, method: req.method ?? "GET", path, params: {}, query: q, headers: {}, owned: new Set() };
+  const call: Call = { user, orgoKey: bearer(req), method: req.method ?? "GET", path, params: {}, query: q, headers: {}, owned: new Set(), asked: req.headers, ...usageHeaders(req) };
   const r = match(spec, call);
   if (Number(req.headers["content-length"] ?? 0) > MAX_BODY) throw new HttpError(413, "Request too large");
   let body: IncomingMessage | null = null;
   if (hasBody(req)) {
-    if (spec.body === "json" || (spec.body === "json-or-upload" && !isUpload(req))) call.json = parseBody(await readBody(req, MAX_BODY));
+    if (r.upload && isUpload(req)) call.upload = await readUpload(req);
+    else if (spec.body === "json" || (spec.body === "json-or-upload" && !isUpload(req))) call.json = parseBody(await readBody(req, MAX_BODY));
     else body = req;
   }
+  try {
+    await sendOn(provider, spec, key, r, call, req, res, user, body);
+  } finally {
+    // What the call held on the user's credit (a treg call) goes back once what it cost is recorded.
+    if (call.release) await call.recording?.catch(() => {});
+    call.release?.();
+  }
+}
+
+/** handle's work once the request is read: its checks, the credit, and sending it on and answering. */
+async function sendOn(provider: Provider, spec: Spec, key: string, r: Rule, call: Call, req: IncomingMessage, res: ServerResponse, user: CloudUser, body: IncomingMessage | null) {
   await spec.check?.(call);
   for (const name of r.own ?? []) await mustOwn(provider, call, call.params[name]);
   await r.check?.(call);
   // Last before it's sent: a call that isn't allowed is refused for that, not for the credit.
-  if (r.spends) await requireCredit(user.id, r.minCost?.(call));
-  const up = await send(spec, key, call, req, res, call.json === undefined ? body : Buffer.from(JSON.stringify(call.json)));
+  if (r.spends) await requireCredit(user.id, await r.minCost?.(call));
+  await r.before?.(call);
+  // A turn that doesn't start gives back what was set aside for it (turn-guard.ts admitTurn).
+  let up: IncomingMessage;
+  try {
+    up = await send(spec, key, call, req, res, call.upload?.body ?? (call.json === undefined ? body : Buffer.from(JSON.stringify(call.json))), r.readToEnd);
+  } catch (e) {
+    call.start?.release();
+    throw e;
+  }
+  // A rule may ask again with a changed request (another area code when one has no numbers left).
+  for (let tries = 0; r.retry && call.json !== undefined && (up.statusCode ?? 502) >= 400 && tries < 12; tries++) {
+    const raw = await readAll(up, MAX_BODY, spec.name);
+    if (!r.retry(call, up.statusCode ?? 502, raw.toString("utf8"))) {
+      res.writeHead(up.statusCode ?? 502, { ...responseHeaders(up.headers, ["content-length"]), "content-length": String(raw.length) });
+      return void res.end(raw);
+    }
+    up = await send(spec, key, call, req, res, Buffer.from(JSON.stringify(call.json)), r.readToEnd);
+  }
+  if ((up.statusCode ?? 502) >= 300) call.start?.release();
   await answer(spec, r, call, up, res);
 }
 
@@ -1106,16 +1667,8 @@ const sidebands = new WebSocketServer({ noServer: true, maxPayload: MAX_BODY });
 /** Close codes that may be sent on (ws refuses the reserved ones). */
 const sendable = (code: number) => ((code >= 1000 && code <= 1014 && ![1004, 1005, 1006].includes(code)) || (code >= 3000 && code <= 4999) ? code : 1000);
 
-/** How long OpenAI says the call has run, from a session.usage.updated event. */
-function liveSeconds(data: RawData): number {
-  const text = data.toString();
-  if (!text.includes("session.usage.updated")) return 0;
-  try {
-    return Number((JSON.parse(text) as { usage?: { seconds?: unknown } }).usage?.seconds) || 0;
-  } catch {
-    return 0;
-  }
-}
+/** How long OpenAI says the call has run, from a sideband message (usage.ts liveSecondsOf). */
+const liveSeconds = (data: RawData) => liveSecondsOf(data.toString());
 
 type Upstream = { ws: WebSocket; early: [RawData, boolean][]; keep: (data: RawData, binary: boolean) => void };
 
@@ -1157,10 +1710,74 @@ function bridge(client: WebSocket, { ws: upstream, early, keep }: Upstream, user
   client.on("close", closeOther(upstream));
   upstream.on("close", (code, reason) => {
     closeOther(client)(code, reason);
-    if (seconds) counted(recordUsageFor(userId, "openai.live_seconds", sessionId, seconds));
+    if (seconds) counted(recordUsageFor(userId, "openai.live_seconds", sessionId, seconds, { transport: "sip" }));
   });
   client.on("error", () => upstream.terminate());
   upstream.on("error", () => client.terminate());
+}
+
+/** The in-app calls the cloud is listening to (watchLive), so one is never counted twice. Tests shorten the timings. */
+const listening = new Set<string>();
+export const liveWatch = { maxMs: 2 * 60 * 60_000, recordEveryMs: 30_000, retryMs: 2_000, tries: 3 };
+
+/**
+ * A call in the app (GPT-Live over WebRTC): its audio goes from the browser straight to OpenAI, so
+ * nothing of it passes through the cloud. The cloud attaches to the session's sideband with its own
+ * key as a listener only (it never sends anything) and counts the seconds OpenAI reports
+ * (session.usage.updated, and session.closed's final count) as openai.live_seconds, by the session's
+ * id, every 30 seconds or so: once that leaves the user's AI credit used up, the cloud hangs the call
+ * up. A call the Mac attaches a sideband to itself (a phone call) is counted by the bridge instead.
+ */
+function watchLive(userId: string, sessionId: string, botId: string | undefined, attempt = 1) {
+  const key = config.openaiKey();
+  if (!key || (attempt === 1 && listening.has(sessionId))) return;
+  listening.add(sessionId);
+  let seconds = 0;
+  let recorded = 0;
+  let lastAt = 0;
+  let opened = false;
+  let ended = false;
+  const record = () => {
+    if (seconds <= recorded) return;
+    recorded = seconds;
+    lastAt = Date.now();
+    counted(recordUsageFor(userId, "openai.live_seconds", sessionId, seconds, { transport: "webrtc", ...(botId ? { botId } : {}) }).then(() => (ended ? undefined : hangUpWhenOut(userId, sessionId))));
+  };
+  const url = `${config.upstream.openai().replace(/\/+$/, "").replace(/^http/, "ws")}/v1/live/sessions/${encodeURIComponent(sessionId)}/attach`;
+  const ws = new WebSocket(url, { headers: { authorization: `Bearer ${key}` }, followRedirects: false, maxPayload: MAX_BODY, handshakeTimeout: 15_000 });
+  const limit = setTimeout(() => ws.close(), liveWatch.maxMs);
+  limit.unref?.();
+  ws.on("open", () => (opened = true));
+  ws.on("message", (data, binary) => {
+    if (binary) return;
+    seconds = Math.max(seconds, liveSeconds(data));
+    if (data.toString().includes("session.closed") || Date.now() - lastAt >= liveWatch.recordEveryMs) record();
+  });
+  ws.on("close", () => {
+    clearTimeout(limit);
+    ended = true;
+    record();
+    // It couldn't attach yet (the call is still connecting): a few more tries, then it's left uncounted, and logged.
+    if (!opened && attempt < liveWatch.tries) setTimeout(() => watchLive(userId, sessionId, botId, attempt + 1), liveWatch.retryMs).unref?.();
+    else {
+      listening.delete(sessionId);
+      if (!opened) console.warn(`[proxy] ${userId}'s call ${sessionId}: couldn't listen for its seconds`);
+    }
+  });
+  ws.on("error", () => {});
+}
+
+/** Hang up an in-app call whose seconds used up the user's AI credit (with the cloud's key: the call's audio never passes through it). */
+async function hangUpWhenOut(userId: string, sessionId: string) {
+  if (!creditsOn() || (await creditLeft(userId)) > 0) return;
+  const res = await fetch(`${config.upstream.openai().replace(/\/+$/, "")}/v1/live/sessions/${encodeURIComponent(sessionId)}/hangup`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${config.openaiKey()}`, "content-type": "application/json" },
+    body: "{}",
+    signal: AbortSignal.timeout(15_000),
+  });
+  await res.body?.cancel().catch(() => {});
+  console.log(`[proxy] ${userId}'s call ${sessionId}: out of AI credit, hung up (${res.status})`);
 }
 
 async function attach(req: IncomingMessage, socket: Duplex, head: Buffer, user: CloudUser) {
@@ -1170,7 +1787,7 @@ async function attach(req: IncomingMessage, socket: Duplex, head: Buffer, user: 
   const params = matchPath(["v1", "live", "sessions", ":live", "attach"], path);
   if (!params) throw new HttpError(404, "Not found");
   if ((await objectOwner("openai", params.live)) !== user.id) throw new HttpError(404, "Not found");
-  await openaiRefs({ user, method: "GET", path, params, query: q, headers: {}, owned: new Set() });
+  await openaiRefs({ user, orgoKey: "", method: "GET", path, params, query: q, headers: {}, owned: new Set(), asked: {} });
   const upstream = await connectUpstream(`${config.upstream.openai().replace(/\/+$/, "").replace(/^http/, "ws")}/${path.join("/")}${qs(q)}`, key, req);
   if (socket.destroyed) return upstream.ws.terminate();
   sidebands.handleUpgrade(req, socket, head, (client) => bridge(client, upstream, user.id, params.live));

@@ -1,9 +1,10 @@
-import { fieldValues, fillField, pressButton } from "@/lib/server/local";
+import { fieldValues, fillField, onTab, pressButton } from "@/lib/server/local";
 import { readScreen } from "@/lib/server/screen-watch";
 import { screenEndpoint } from "@/lib/server/screens";
 import { replyToSession } from "@/lib/server/sessions";
 import { bot, getState, ownerName, patchSession, session, update } from "@/lib/server/store";
 import { live } from "@/lib/types";
+import { notReady } from "@/lib/server/ready";
 
 /**
  * The user acting on a card drawn over a bot's page. Everything happens on the real page: approving a
@@ -11,6 +12,8 @@ import { live } from "@/lib/types";
  * presses Send. Then the thread that got there picks up, told what the user did.
  */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const body = (await request.json()) as {
     botId: string;
     display: number;
@@ -42,8 +45,14 @@ export async function POST(request: Request) {
     } else if (body.action === "send") {
       const e = read.email;
       if (!e?.send) return Response.json({ error: "couldn't find the Send button; take over to send it" }, { status: 409 });
-      for (const k of ["to", "subject", "body"] as const) if (e[k] && body.values?.[k] !== undefined) await fillField(endpoint, e[k]!.id, body.values[k]!);
-      await pressButton(endpoint, e.send.id);
+      // Into the tab the draft was read on, while it's still on that site (lib/server/sign-in.ts does the same).
+      if (!read.targetId) return Response.json({ error: "Bops needs to look at the draft again. Try in a few seconds." }, { status: 409 });
+      const host = new URL(read.url).hostname;
+      const send = e.send;
+      await onTab(endpoint, read.targetId, async () => {
+        for (const k of ["to", "subject", "body"] as const) if (e[k] && body.values?.[k] !== undefined) await fillField(endpoint, e[k]!.id, body.values[k]!, host);
+        await pressButton(endpoint, send.id);
+      });
       resume(`${owner} reviewed your draft and sent the email themselves. Confirm it went out, then carry on.`, "You sent the email");
     } else if (body.action === "discard") {
       update((state) => void delete state.screens![key]);

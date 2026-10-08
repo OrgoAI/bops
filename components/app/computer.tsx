@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { BLOCKER_LABEL, DISPLAYS, live, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
+import { BLOCKER_LABEL, computerAsleep, computerCheckMs, computerInUse, DISPLAYS, live, streamsLive, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
 import { freeComputerOpen, setupShort } from "@/lib/orgo-plans";
 import { BotCursor } from "./bot-cursor";
 import { LiveDesktop, Waking } from "./live-desktop";
@@ -14,8 +14,10 @@ import { WatchBadge, WatchOverlay } from "./watch-overlay";
 import { EmailCard, PaymentCard, SignInCard } from "./screen-cards";
 import { Mascot } from "./mascot";
 import { PlanNote, usePlan } from "./plan-note";
+import { freeHoursOutLine } from "@/lib/plan-includes";
 import { AppLogo, botApps } from "./apps";
 import { botBezel, botOnInk, botWash, MonitorIcon, post, screenNo } from "./ui";
+import { useWindowVisible } from "./window-visible";
 
 /* A bot's computer, shown as the work on it: it runs up to four things at once, one per screen. */
 
@@ -25,32 +27,65 @@ type ComputerInfo = {
   pages?: Record<string, { url: string; title: string }>;
 };
 
-function useComputer(botId: string, enabled: boolean) {
+/**
+ * The bot's computer as Orgo has it (its status and size, and the page each screen has open), read again
+ * every so often (computerCheckMs): not while the window is hidden, and only every minute while the
+ * computer is asleep with nothing using it. `computerId`: the computer the bot
+ * works on (none: nothing to read). `inUse`: a task or the user is on it (computerInUse), so it's read
+ * sooner while it wakes. Read again at once when the window comes to the front, and by `recheck` (one of
+ * its screens just failed: it may have fallen asleep).
+ */
+function useComputer(botId: string, computerId: string | undefined, inUse = false) {
+  const enabled = !!computerId;
   const [info, setInfo] = useState<ComputerInfo | null>(null);
+  const [again, setAgain] = useState(0);
+  const visible = useWindowVisible();
+  const every = enabled ? computerCheckMs(info?.computer?.status, { visible, inUse }) : null;
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !visible) return;
     let stop = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
       try {
-        const json = (await (await fetch(`/api/computer?bot=${botId}`, { cache: "no-store" })).json()) as ComputerInfo;
-        if (!stop) setInfo(json);
+        const res = await fetch(`/api/computer?bot=${botId}`, { cache: "no-store" });
+        // A read that failed (Orgo or the network not there yet, as the laptop wakes) keeps what was last
+        // known: an asleep computer shown as unknown would have its views connect, and screenshots wake it.
+        if (res.ok) {
+          const json = (await res.json()) as ComputerInfo;
+          if (!stop) setInfo(json);
+        }
       } catch {
         /* retry next tick */
       }
-      if (!stop) setTimeout(tick, 8000);
+      if (!stop && every !== null) timer = setTimeout(tick, every);
     };
+    // Now, then every so often.
     void tick();
     return () => {
       stop = true;
+      clearTimeout(timer);
     };
-  }, [botId, enabled]);
-  return enabled ? info : null;
+    // computerId: another computer (the bot moved on) is read at once, whatever the last one's status was.
+  }, [botId, computerId, enabled, visible, every, again]);
+  useEffect(() => {
+    if (!enabled) return;
+    const front = () => setAgain((n) => n + 1);
+    window.addEventListener("focus", front);
+    return () => window.removeEventListener("focus", front);
+  }, [enabled]);
+  return { info: enabled ? info : null, recheck: () => setAgain((n) => n + 1) };
 }
+
+/** The bots working on the computer `c` is (itself and the bots that share it): whose tasks and takeovers are on it. */
+const onComputerOf = (state: AppState, c: Bot) => (botId: string) => {
+  const x = state.bots.find((y) => y.id === botId);
+  return !!x && workBot(x, state.bots).id === c.id;
+};
 
 /** Which screen to show: the one you picked, else where the newest work is, else screen 1. */
 export function defaultDisplay(state: AppState, botId: string, picked?: number) {
   if (picked !== undefined) return picked;
-  if (state.takeover?.botId === botId) return state.takeover.display;
+  if (state.takeover?.botId === botId && state.takeover.display !== undefined) return state.takeover.display;
   const held = state.sessions.filter((s) => s.botId === botId && s.display !== undefined);
   return held[held.length - 1]?.display ?? DISPLAYS[0];
 }
@@ -94,7 +129,14 @@ export function ComputerView({
   const c = mac ? b : workBot(b, state.bots);
   const here = (botId: string) => botId === b.id || (!mac && workBot(state.bots.find((x) => x.id === botId) ?? b, state.bots).id === c.id);
   const hasComputer = mac || (!!c.computerId && c.computerStatus === "ready");
-  const info = useComputer(b.id, !mac && !!c.computerId);
+  // A task or the user on it wakes it, when it's asleep: nothing streams or reads its screens till then.
+  const inUse = !mac && computerInUse(state, here);
+  const { info, recheck } = useComputer(b.id, mac ? undefined : c.computerId, inUse);
+  const asleep = !mac && computerAsleep(info?.computer?.status);
+  // Free's computer with its hours used (10 a month): nothing wakes it till they start over.
+  const plan = usePlan(state);
+  const time = c.freeComputer ? plan?.bops?.computerTime : undefined;
+  const hoursOut = !!time && time.usedSeconds >= time.limitSeconds;
   const holding = new Map(state.sessions.filter((s) => here(s.botId) && s.display !== undefined).map((s) => [s.display!, s]));
   // Screens a thread's helpers are using belong to that thread too.
   for (const s of state.sessions.filter((x) => here(x.botId) && live(x)))
@@ -176,11 +218,13 @@ export function ComputerView({
     ro.observe(stage);
     return () => ro.disconnect();
   }, [stage]);
+  // Every screen streams live: over the tailnet, or through Orgo when it streams them all (AppState.screenStream).
+  const everyLive = DISPLAYS.every((d) => streamsLive(c, d, state.screenStream));
   // How many screens are busy sets the layout: one big screen, two side by side, or all four two by
   // two. A screen that needs you gets the whole frame (its card needs the room); a screen you
   // picked stays on its own until you say Follow.
   const auto = mode === "panel" && !!follow?.on && state.takeover?.botId !== b.id;
-  const tiles = auto && !mac && !!c.tailnet && !DISPLAYS.some(needsYouOn) ? (working.length >= 3 ? DISPLAYS : working.length === 2 ? working : []) : [];
+  const tiles = auto && !mac && !asleep && everyLive && !DISPLAYS.some(needsYouOn) ? (working.length >= 3 ? DISPLAYS : working.length === 2 ? working : []) : [];
   const grid = tiles.length > 1;
   const following = auto && !grid;
   const acting = (d: number) => working.includes(d) && now - lastAct(d) < FRESH_MS;
@@ -281,21 +325,35 @@ export function ComputerView({
   const watchedHere = !onScreen ? watchOn(display) : undefined;
 
   const sendInput = (action: ScreenInput) => void post("/api/input", { botId: b.id, display, ...action });
-  // How a screen is shown. Orgo computers on the tailnet show their real desktop live; the mirror
+  // How a screen is shown. Orgo computers show their real desktop live where it streams; the mirror
   // (just the bot's page, as live DOM) is the Mac's view and an option on Orgo; video is the fallback.
   // How a screen is shown is decided for you: the real desktop live on Orgo, the bot's page on this
   // Mac (no desktop there), screenshots only if a live view can't connect. Reader is the one choice,
   // offered while the bot is reading something long.
   const [fallback, setFallback] = useState<Record<string, View>>({});
+  // Nothing connects to a computer that's asleep, so a view that gave up then (before the app knew it was
+  // asleep) is tried again once it wakes.
+  const [wasAsleep, setWasAsleep] = useState(asleep);
+  if (wasAsleep !== asleep) {
+    setWasAsleep(asleep);
+    if (asleep) setFallback({});
+  }
   const [readerFor, setReaderFor] = useState<string | null>(null);
   const [tabs, setTabs] = useState<{ key: string; tabs: MirrorTab[] }>({ key: "", tabs: [] });
   const viewKey = `${b.id}-${display}`;
+  // Its screens' Chrome is reachable (the mirror, page reads, the address bar): on this Mac, or over the tailnet.
   const reachable = mac || !!c.tailnet;
-  const canDesktop = !mac && !!c.tailnet;
+  /**
+   * A screen whose real desktop streams live: Orgo's own screen always (WebRTC, else VNC), every screen
+   * over the tailnet, or through Orgo's VNC when it streams them all.
+   */
+  const canDesktop = (d: number) => !mac && streamsLive(c, d, state.screenStream) && !fallback[`${b.id}-${d}`];
+  /** A screen's live desktop didn't connect, or Orgo can't stream it: it's shown another way from now on. */
+  const showOtherwise = (d: number) => setFallback((x) => ({ ...x, [`${b.id}-${d}`]: reachable ? "page" : "video" }));
   /** An idle screen showing a site can become a watched one. */
-  const watchable = (d: number) => (canDesktop || mac) && !holding.has(d) && !yours(d) && !watchOn(d) && pageOn(d) !== "Home" && pageOn(d) !== "Blank page";
+  const watchable = (d: number) => reachable && !holding.has(d) && !yours(d) && !watchOn(d) && pageOn(d) !== "Home" && pageOn(d) !== "Blank page";
   const canWatchHere = watchable(display);
-  const live_: View = fallback[viewKey] ?? (canDesktop ? "desktop" : reachable ? "page" : "video");
+  const live_: View = fallback[viewKey] ?? (canDesktop(display) ? "desktop" : reachable ? "page" : "video");
   const readable = reachable && (read?.kind === "article" || readerFor === viewKey);
   const view: View = readerFor === viewKey && readable ? "reader" : live_;
   const fallBackTo = (v: View) => setFallback((x) => ({ ...x, [viewKey]: v }));
@@ -334,7 +392,8 @@ export function ComputerView({
 
   // Live desktops stay connected for every screen being worked on, stacked, so a cut is a crossfade
   // instead of a reconnect; the pair and the grid lay the same connections out side by side.
-  const warm = DISPLAYS.filter((d) => (grid ? tiles.includes(d) : d === display || (follow?.on && working.includes(d))));
+  // None while it's asleep: a stream that can't connect would give up on the screen for good.
+  const warm = asleep ? [] : DISPLAYS.filter((d) => canDesktop(d) && (grid ? tiles.includes(d) : d === display || (follow?.on && working.includes(d))));
   const desktops = (interactive: boolean) => (
     <div className={grid ? `grid h-full w-full gap-[3px] ${tiles.length > 2 ? "grid-cols-2 grid-rows-2" : stacked ? "grid-rows-2" : "grid-cols-2"}` : "relative h-full w-full"}>
       {warm.map((d) => {
@@ -355,11 +414,13 @@ export function ComputerView({
             className={grid ? `group/tile relative min-h-0 cursor-pointer overflow-hidden ${s ? "" : "opacity-75"}` : `absolute inset-0 transition-opacity duration-300 ${on ? "z-[1] opacity-100" : "pointer-events-none opacity-0"}`}
           >
             <LiveDesktop
+              // Its own per bot: a stream, and whether it was ever live, aren't carried over to another bot's screen.
+              key={`${b.id}-${d}`}
               botId={b.id}
               bot={b}
               display={d}
               interactive={interactive && on && !grid}
-              onFail={() => setFallback((x) => ({ ...x, [`${b.id}-${d}`]: "page" }))}
+              onFail={() => showOtherwise(d)}
               onSize={(w, h) => setAspect((x) => (x[b.id] === w / h ? x : { ...x, [b.id]: w / h }))}
               className="h-full w-full"
             />
@@ -409,11 +470,11 @@ export function ComputerView({
         className="h-full w-full"
       />
     ) : (
-      <LiveScreen key={`${viewKey}-v${interactive}`} bot={b} botId={b.id} display={display} interactive={interactive} onInput={sendInput} className="h-full w-full" />
+      <LiveScreen key={`${viewKey}-v${interactive}`} bot={b} botId={b.id} display={display} interactive={interactive} onInput={sendInput} onFail={recheck} className="h-full w-full" />
     );
   // A real desktop is the computer itself, so it always shows; elsewhere a free screen shows the bot's home screen.
   const showingReal = view === "desktop" || view === "reader" || !!takeover || busy || showReal || !!read?.blocker || card === "email";
-  const screen = takeover ? real(true) : showingReal ? real(false) : <HomeScreen state={state} bot={b} />;
+  const screen = asleep ? <AsleepScreen bot={b} host={c} waking={inUse} hoursOut={hoursOut && time ? freeHoursOutLine(time) : undefined} /> : takeover ? real(true) : showingReal ? real(false) : <HomeScreen state={state} bot={b} />;
 
   return (
     <div
@@ -519,11 +580,12 @@ export function ComputerView({
             onMouseEnter={() => setHovering(true)}
             onMouseLeave={() => setHovering(false)}
             // Clicking in takes control right here (the "You have control" notch drops down); full screen is its own button.
-            onClick={() => !takeover && !grid && clickable && post("/api/takeover", { botId: b.id, display })}
-            className={`group/screen relative flex min-h-0 flex-1 flex-col overflow-hidden ${desktop ? "" : "rounded-xl bg-white shadow-[0_18px_40px_-16px_#28320073,0_0_0_1px_#0000000F]"} ${clickable ? "cursor-pointer" : ""}`}
+            // Not while it's asleep: waking it costs Free's hours, so that's the Take control button's alone.
+            onClick={() => !takeover && !grid && clickable && !asleep && post("/api/takeover", { botId: b.id, display })}
+            className={`group/screen relative flex min-h-0 flex-1 flex-col overflow-hidden ${desktop ? "" : "rounded-xl bg-white shadow-[0_18px_40px_-16px_#28320073,0_0_0_1px_#0000000F]"} ${clickable && !asleep ? "cursor-pointer" : ""}`}
           >
             {/* Hovering a computer you can click into: a soft ring in the bot's color and a small pill, instead of a zoom cursor. */}
-            {clickable && !grid && sheet !== display && (
+            {clickable && !asleep && !grid && sheet !== display && (
               <div className="pointer-events-none absolute inset-0 z-30 opacity-0 transition-opacity duration-200 group-hover/screen:opacity-100">
                 <div className={`absolute inset-0 ${desktop ? "rounded-[22px]" : "rounded-xl"}`} style={{ boxShadow: `inset 0 0 0 2.5px ${botBezel(b)}` }} />
 
@@ -581,8 +643,9 @@ export function ComputerView({
                 </button>
                 <button
                   onClick={() => void post("/api/takeover", { botId: b.id, display })}
-                  title="Pause the bot here and drive the screen yourself"
-                  className="flex items-center gap-1.5 rounded-full bg-ink py-1.5 pl-2 pr-3.5 text-[13px] font-semibold leading-4 text-white"
+                  disabled={asleep && hoursOut}
+                  title={asleep && hoursOut ? "Your Bops computer has used its free hours" : asleep ? "Wake the computer and drive this screen yourself" : "Pause the bot here and drive the screen yourself"}
+                  className="flex items-center gap-1.5 rounded-full bg-ink py-1.5 pl-2 pr-3.5 text-[13px] font-semibold leading-4 text-white disabled:cursor-default disabled:bg-[#B0B0AD]"
                 >
                   <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
                     <path d="M4 2.5l8.5 5-3.6.9-1.8 3.6z" fill="currentColor" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
@@ -660,7 +723,7 @@ export function ComputerView({
                 {b.name}
               </span>
             )}
-            {!busy && view !== "desktop" && (
+            {!busy && !asleep && view !== "desktop" && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -778,11 +841,22 @@ export function ComputerView({
                 )}
                 <div className="relative h-[52px] shrink-0 overflow-hidden rounded-[7px]" style={{ backgroundImage: botWash(b) }}>
                   {w && !s && <WatchBadge watch={w} />}
-                  {s || canDesktop ? (
-                    canDesktop ? (
-                      <LiveDesktop key={`${b.id}-${d}-t`} botId={b.id} bot={b} display={d} interactive={false} thumbnail className={`h-full w-full ${blurred(d) ? "blur-[3px]" : ""}`} />
+                  {!asleep && (s || (!mac && everyLive)) ? (
+                    canDesktop(d) ? (
+                      <LiveDesktop
+                        key={`${b.id}-${d}-t`}
+                        botId={b.id}
+                        bot={b}
+                        display={d}
+                        interactive={false}
+                        thumbnail
+                        // Only Orgo saying the screen can't stream moves it to screenshots; a thumbnail that
+                        // just didn't connect leaves the big view to try for itself.
+                        onFail={(noStream) => noStream && showOtherwise(d)}
+                        className={`h-full w-full ${blurred(d) ? "blur-[3px]" : ""}`}
+                      />
                     ) : (
-                      <LiveScreen key={`${b.id}-${d}-t`} bot={b} botId={b.id} display={d} intervalMs={5000} scale={0.3} className={`absolute inset-x-2 bottom-0 top-2 rounded-t-sm ${blurred(d) ? "blur-[3px]" : ""}`} />
+                      <LiveScreen key={`${b.id}-${d}-t`} bot={b} botId={b.id} display={d} intervalMs={5000} scale={0.3} onFail={recheck} className={`absolute inset-x-2 bottom-0 top-2 rounded-t-sm ${blurred(d) ? "blur-[3px]" : ""}`} />
                     )
                   ) : (
                     <div className="absolute inset-x-2.5 bottom-0 top-2 flex items-center justify-center rounded-t-sm bg-white/90">
@@ -998,6 +1072,32 @@ function WindowBar({ bot: b, tabs, compact }: { bot: Bot; tabs: MirrorTab[]; com
   );
 }
 
+/**
+ * The computer asleep (computerAsleep): nothing streams or reads its screens, which would wake it. A task
+ * on it wakes it, and so does Take control; `waking` while one of those does. `hoursOut`: Free's hours this
+ * week are used (the line Settings shows), so neither can. Why the last Take control couldn't wake it
+ * (Bot.wakeFailed, cleared once a takeover or a task gets it up).
+ */
+function AsleepScreen({ bot: b, host, waking, hoursOut }: { bot: Bot; /** The bot whose computer it is. */ host: Bot; waking: boolean; hoursOut?: string }) {
+  const failed = host.wakeFailed?.why;
+  const line = hoursOut ?? (failed ? `It couldn't wake up just now. ${failed}` : "It wakes up when a task starts on it, or when you take control.");
+  return (
+    <div className="relative h-full w-full overflow-hidden" style={{ backgroundImage: botWash(b) }} data-asleep={waking ? "waking" : "asleep"}>
+      {waking ? (
+        <Waking thumbnail={false} bot={b} text={`Waking ${host.name}'s computer…`} />
+      ) : (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2.5 px-6 text-center">
+          <Mascot botId={b.id} color={b.color} size={40} />
+          <span className="rounded-full bg-white/85 px-3 py-1 text-[12.5px] font-medium leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#0000000D,0_6px_16px_-8px_#00000033]">
+            {`${host.name}'s computer is asleep`}
+          </span>
+          <span className="max-w-[300px] text-[12px] leading-4 text-[#6B6B6B]">{line}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** The bot's own home screen, shown on a free screen instead of a blank browser. */
 function HomeScreen({ state, bot: b }: { state: AppState; bot: Bot }) {
   const [now, setNow] = useState(() => new Date());
@@ -1055,7 +1155,9 @@ function NoComputer({ state, bot: b, host }: { state: AppState; bot: Bot; /** Th
           ? `${b.name} doesn't have a computer yet. ${free ? `Your free Bops computer starts the first time ${b.name} needs it` : `It starts the first time ${b.name} needs one`}, or set it up now. The bots you add work on it too, unless you give one its own.`
           : host.id !== b.id
             ? `${b.name} works on ${host.name}'s computer, which isn't set up yet. It starts the first time either of them needs it.`
-            : `${b.name} doesn't have a computer yet. It gets a copy of the main bot's computer: apps, logins and open screens.`}
+            : plan?.plan?.bops
+              ? `${b.name} doesn't have a computer yet. It gets a Bops computer of its own, fresh from the Bops template.`
+              : `${b.name} doesn't have a computer yet. It gets a copy of the main bot's computer: apps, logins and open screens.`}
       </span>
       {plan && noRoom ? (
         <PlanNote
@@ -1083,7 +1185,7 @@ function NoComputer({ state, bot: b, host }: { state: AppState; bot: Bot; /** Th
 export function ComputerSummary({ state, bot: b, className = "", onOpen }: { state: AppState; bot: Bot; className?: string; onOpen?: () => void }) {
   const mac = state.host === "mac";
   const c = mac ? b : workBot(b, state.bots);
-  const info = useComputer(b.id, !mac && !!c.computerId);
+  const { info } = useComputer(b.id, mac ? undefined : c.computerId, !mac && computerInUse(state, onComputerOf(state, c)));
   return (
     <button
       type="button"
@@ -1107,7 +1209,7 @@ export function ComputerSummary({ state, bot: b, className = "", onOpen }: { sta
                   : "Its own, set up on its first task"}
         </span>
       </div>
-      {info?.computer && <span className="shrink-0 font-mono text-[12px] leading-4 text-[#6B6B6B]">{`${info.computer.status} · ${info.computer.cpu} CPU`}</span>}
+      {info?.computer && <span className="shrink-0 font-mono text-[12px] leading-4 text-[#6B6B6B]">{`${info.computer.status === "suspended" ? "asleep" : info.computer.status} · ${info.computer.cpu} CPU`}</span>}
       {onOpen && (
         <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="shrink-0 text-[#9A9A98] transition-transform group-hover/pc:translate-x-0.5 group-hover/pc:text-ink">
           <path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />

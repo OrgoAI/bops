@@ -5,12 +5,12 @@ Thanks for helping. A few things keep this smooth.
 ## Before you start
 
 - For anything bigger than a small fix, open an issue first so we can agree on the approach.
-- Security problems: [report them privately](https://github.com/nickvasilescu/bops/security/advisories/new), not in issues (see [SECURITY.md](SECURITY.md)).
+- Security problems go to security@orgo.ai, not issues (see [SECURITY.md](SECURITY.md)).
 - Be kind: we follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Contributor License Agreement
 
-Bops is released under FSL-1.1-ALv2, and Organic Intelligence, Inc. also runs a hosted version. Before we merge your first pull request, we'll ask you to sign our CLA. You keep the copyright to your work.
+Bops is released under FSL-1.1-ALv2, and Organic Intelligence, Inc. also runs a hosted version. To accept your contribution we need you to sign our CLA; the CLA Assistant bot asks on your first pull request. You keep the copyright to your work.
 
 ## Development
 

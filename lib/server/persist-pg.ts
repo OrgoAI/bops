@@ -363,13 +363,28 @@ export function pgStore({ get, replace }: StateAccess): Persistence {
   return {
     // The row is read in hydrate(): module init can't wait on the database.
     initial: () => null,
+    // A hosted server serves whatever is in memory (a pinned server's user before their row is read).
+    ready: () => true,
+    user: () => box.user ?? null,
+    async flush(ms) {
+      if (box.timer) clearTimeout(box.timer);
+      box.timer = undefined;
+      const done = (async () => {
+        while (box.writing) await box.writing;
+        await save();
+        return true;
+      })().catch(() => false);
+      return Promise.race([done, new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
+    },
+    unsent: () => !!box.timer || !!box.writing || box.failures > 0,
+    pull: async () => {},
     changed: () => persist(box.failures ? retryDelay() : SAVE_MS),
     signIn: switchTo,
     signOut: leave,
-    backup() {
+    async backup() {
       if (!box.user) return;
       const user = box.user;
-      box.table.backup(user, get()).catch((e: Error) => console.error(`[store] backup for ${user} failed: ${e.message}`));
+      await box.table.backup(user, get()).catch((e: Error) => console.error(`[store] backup for ${user} failed: ${e.message}`));
     },
     async hydrate() {
       const who = pinned;

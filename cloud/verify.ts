@@ -1,3 +1,4 @@
+import { trackCloudEvent } from "./analytics.ts";
 import type pg from "pg";
 import type { CloudUser } from "./auth.ts";
 import { config } from "./config.ts";
@@ -284,6 +285,7 @@ async function check(user: CloudUser, body: Partial<VerifyCheckBody>): Promise<V
     if (channel === "sms" && !(await claimPhone(user.id, to, hold.created_at, r.sid))) throw new HttpError(409, TAKEN);
     if (channel === "sms") await linkVerifiedNumber(user.id, to).catch((e: Error) => console.warn(`[verify] couldn't link ${user.id}'s lines: ${e.message}`));
     if (channel === "email") await keepEmail(user.id, to, r.sid);
+    trackCloudEvent(user.id, "bops_owner_contact_verified", { channel });
   }
   return r;
 }

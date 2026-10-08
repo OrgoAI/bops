@@ -1,12 +1,15 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
 import { workspaceOf, MAIN_WORKSPACE, botChatId, type AppState, type Bot, type Chat, type Message, type Session, type Reaction, type Tapback } from "@/lib/types";
-import { fileStore, onPostgres, type Persistence, type StateAccess } from "./persist";
+import { fileStore, onPostgres, selfHosted, type Persistence, type StateAccess } from "./persist";
+import { cloudStore } from "./persist-cloud";
 import { pgStore } from "./persist-pg";
+import { userBopsHome, userChromeDir, userDataDir } from "./user-paths";
 
 /**
- * The app's state: one in-process object, saved behind to .data/state.json on the desktop, or to
- * Postgres per Orgo user on a hosted server (BOPS_DATABASE_URL; lib/server/persist.ts).
+ * The app's state: one in-process object, the signed-in Orgo user's. The Mac app keeps it in Bops
+ * Cloud (persist-cloud.ts), a self-hosted install in a file per user, a hosted server in Postgres per
+ * user (BOPS_DATABASE_URL); lib/server/persist.ts.
  */
 
 const seedBots: Bot[] = [
@@ -72,6 +75,8 @@ function migrate(raw: Record<string, unknown>): AppState {
   state.owner ??= { name: "" };
   state.takeover = undefined;
   delete state.samThinking;
+  // Whose backup this state was, from when the Mac kept its own copy: the state is always the signed-in user's now.
+  delete (state as { cloudUser?: string }).cloudUser;
   // App approvals wait on a bot that's gone after a restart; a connection mid-sign-in can't finish.
   state.appApprovals = [];
   state.connecting = [];
@@ -148,8 +153,11 @@ const access: StateAccess = {
     ownerMarks(box.state);
     box.version++;
   },
+  touch() {
+    box.version++;
+  },
 };
-const store: Persistence = onPostgres() ? pgStore(access) : fileStore(access);
+const store: Persistence = onPostgres() ? pgStore(access) : selfHosted() ? fileStore(access) : cloudStore(access);
 // The version starts somewhere random each boot, so a page that polled before a restart can't mistake a new state for its own.
 g.__bops2 ??= { state: migrate(store.initial() ?? {}), version: Math.floor(Math.random() * 1e9) };
 const box = g.__bops2;
@@ -158,10 +166,52 @@ ownerMarks(box.state);
 
 /** Load the saved state before the first request (a hosted server's Postgres row; instrumentation.ts). */
 export const hydrateState = () => store.hydrate();
-/** Called by signIn() before the key and account land: on a hosted server, swaps in this user's saved state. */
-export const bindSignIn = (userId: string) => store.signIn(userId);
-/** Called by signOut() first: on a hosted server, saves the user's state and clears it from memory. */
+/**
+ * Called by signIn() before the key and account land: swaps in this user's saved state (from Bops
+ * Cloud with their Orgo `key`, from their file, from Postgres). Throws StateLoadError when it can't,
+ * and the sign-in is refused: nobody works on (or saves into) another user's state.
+ */
+export const bindSignIn = (userId: string, key?: string) => store.signIn(userId, key);
+/** Called by signOut(): saves the user's state (what's unsent keeps going in the background) and clears it from memory. */
 export const releaseSignOut = () => store.signOut();
+/** Whether there's a state to work on: on the Mac app, once a signed-in user's has loaded. Background work waits until then. */
+export const stateReady = () => store.ready();
+/** Whose state is in memory (null: nobody's). */
+export const stateUser = () => store.user();
+/** Whether the store is the Mac app's, in Bops Cloud: no state without a signed-in user. */
+export const stateInCloud = () => !onPostgres() && !selfHosted();
+/** Save what's changed now, and wait up to `ms`: true when it's all saved (a sign-out asks before going on without). */
+export const flushState = (ms = 10_000) => store.flush(ms);
+/** Changes not saved yet. */
+export const unsentState = () => store.unsent();
+/** Read what another Mac of the user's changed, now (Bops Cloud said so). */
+export const pullState = () => store.pull();
+
+/**
+ * Whose files these are: the user whose state is in memory, "" for none (a self-hosted install on its
+ * own key, or a hosted server pinned to one user, keeps them where they always were), null when
+ * there's nobody to keep them for (the Mac app signed out).
+ */
+function filesOf(): string | null {
+  const user = store.user();
+  if (onPostgres() && process.env.BOPS_ORGO_USER_ID) return "";
+  return user || (stateInCloud() ? null : "");
+}
+/** Where the signed-in user's own files on this Mac go (uploads, pages, phone secrets…; user-paths.ts), or null signed out on the Mac app. */
+export function userDir(): string | null {
+  const user = filesOf();
+  return user === null ? null : userDataDir(user || null);
+}
+/** The user's ~/.bops (the bots' workspace on this Mac), or null signed out on the Mac app. */
+export function userHome(): string | null {
+  const user = filesOf();
+  return user === null ? null : userBopsHome(user || null);
+}
+/** Where the user's bots keep their Chrome profiles on this Mac, or null signed out on the Mac app. */
+export function userChrome(): string | null {
+  const user = filesOf();
+  return user === null ? null : userChromeDir(user || null);
+}
 
 export const getState = () => box.state;
 /**
@@ -170,8 +220,20 @@ export const getState = () => box.state;
  * if it changed, so they never land in someone else's state.
  */
 export const stateEpoch = () => box.swaps ?? 0;
+/**
+ * For work that waits on something (a bot's turn on the model, an email's attachments): whether the
+ * state in memory is still the one it started on. On the Mac app a sign-out lets the user's state go
+ * and the next sign-in brings in another account's; what the work had in hand then is dropped, never
+ * written into that account's chats.
+ */
+export function sameState() {
+  const epoch = stateEpoch();
+  return () => epoch === stateEpoch();
+}
 /** This install of Bops: made once, kept in state. Shared services carry it (AgentMail's pod and inboxes, Composio's user). */
 export function installId() {
+  // Signed out on the Mac app the state is nobody's: nothing outside (an inbox, a pod) is made for nobody.
+  if (!store.ready()) throw new Error("Sign in to Bops first.");
   if (!box.state.installId) update((s) => void (s.installId ??= randomBytes(4).toString("hex")));
   return box.state.installId!;
 }
@@ -183,8 +245,8 @@ export const ownerName = () => box.state.owner?.name.trim() || "the user";
 /**
  * Whether a number or address the user proved belongs to whoever is signed in now: saved with their
  * Orgo user id, or with none (saved before ids were kept, or with nobody signed in, as a self-hoster
- * on their own key). The desktop app's state stays put across sign-ins, so another Orgo account
- * signed in on this Mac doesn't inherit the last one's.
+ * on their own key). Each user's state is their own now; this still keeps out one that came from the
+ * one shared state file of before.
  */
 export const ofThisUser = (x: { userId?: string }) => !x.userId || x.userId === box.state.account?.user.id;
 
@@ -197,7 +259,7 @@ export function ownerLine() {
 export const getVersion = () => box.version;
 
 const watchers = (g.__bopsWatchers ??= new Map());
-/** Run `fn` after every change (the Bops Cloud backup, lib/server/cloud-state.ts), by name so a code reload replaces it. */
+/** Run `fn` after every change, by name so a code reload replaces it. */
 export const watchChanges = (name: string, fn: () => void) => void watchers.set(name, fn);
 
 /** A change: saved behind, and passed on to whatever watches for one. */
@@ -277,26 +339,14 @@ export function patchSession(sessionId: string, patch: Partial<Session> | ((s: S
 }
 
 /** Start over: back up the current state, then begin again with the main bot alone (keeps the host setting and who's signed in). */
-export function resetState() {
-  store.backup();
+export async function resetState() {
+  await store.backup();
   // Starting over isn't signing out: who's signed in stays (their key stays in the Keychain), and
   // the bots call them by their Orgo name again, as on a first sign-in. What Bops has cost so far
-  // stays too, and so do this Mac's routing switch and whose backup the state is (the fresh start
-  // replaces it, rather than the backup coming back).
-  const { host, account, usage, relay, cloudUser } = box.state;
+  // stays too, and so do this Mac's routing switch and the user's other Macs' own settings.
+  // The user's usage data switch stays as they set it.
+  const { host, account, usage, relay, macs, analyticsOff } = box.state;
   const name = account?.user.name?.slice(0, 80);
-  box.state = migrate({ host, account, usage, relay, cloudUser, owner: name ? { name } : undefined });
-  update(() => {});
-}
-
-/**
- * Swap in a state restored from Bops Cloud onto a fresh install (lib/server/cloud-state.ts). What
- * belongs to this Mac stays: who's signed in, routing through it, Codex on it and its setup, and
- * what Bops has cost here so far joins what it cost before.
- */
-export function restoreState(raw: Record<string, unknown>) {
-  const { account, relay, relayRoutes, mac, setup, usage } = box.state;
-  access.replace(raw);
-  Object.assign(box.state, { account, relay, relayRoutes, mac, setup, usage: [...(box.state.usage ?? []), ...(usage ?? [])] });
+  box.state = migrate({ host, account, usage, relay, macs, analyticsOff, owner: name ? { name } : undefined });
   update(() => {});
 }

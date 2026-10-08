@@ -1,4 +1,5 @@
 import { getState, update } from "@/lib/server/store";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -8,6 +9,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const { name, about } = (await request.json().catch(() => ({}))) as { name?: unknown; about?: unknown };
   if (typeof name !== "string" || (about !== undefined && typeof about !== "string")) return Response.json({ error: "name (and about) must be text" }, { status: 400 });
   update((s) => {

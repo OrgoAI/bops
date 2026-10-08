@@ -2,6 +2,7 @@ import "server-only";
 import { computerBriefing, teamBriefing } from "./briefing";
 import { ABOUT_BOPS, SPEAKING } from "./style";
 import { appsNote, placesNote } from "./skills";
+import { dataNote } from "./treg";
 import { openaiClient } from "./openai-client";
 import { botChatId, live, type Bot } from "@/lib/types";
 import { handleMessage } from "./chat";
@@ -10,7 +11,7 @@ import { noteOutOfCredit, OUT_OF_CREDIT } from "./cloud";
 import { chose, decide } from "./decide";
 import { memoryBlock, saveToMemory, wsOf } from "./memory";
 import { addMessage, bot, getState, ownerLine, ownerName, update } from "./store";
-import { recordCallMinutes } from "./usage";
+import { recordCallMinutes, usageTags } from "./usage";
 import { contactLine } from "./bots";
 
 /**
@@ -55,6 +56,7 @@ async function chooseVoice(b: Bot) {
           criteria: { female: "Usually a woman's name", male: "Usually a man's name", unclear: "Could be either, or not a person's name" },
         },
       },
+      { botId: b.id },
     );
     const c = chose(a?.gender);
     g = c?.choice === "female" && (c.probabilities.female ?? 0) >= 0.6 ? "female" : "male";
@@ -85,6 +87,7 @@ export async function voicePrompt(b: Bot, how: "live" | "turns" = "live") {
     contactLine(b, true),
     // What it can use (through its delegate) and where else the user reaches it.
     appsNote(b, "call"),
+    dataNote(b, "call"),
     placesNote(b, "call"),
     how === "live"
       ? `You can't act on your own during the call. Whenever ${owner} asks for something to be done, looked up, checked, scheduled, or handed to another bot, delegate it, then tell them briefly what's happening while it runs. When the result comes back, say it in your own words.`
@@ -119,7 +122,7 @@ export async function startCall(botId: string, sdp: string) {
         delegation: { type: "client" },
       },
       transport: { type: "webrtc", sdp },
-    } as never);
+    } as never, usageTags("call", botId));
     return result as unknown as { session: { id: string }; transport: { sdp: string } };
   } catch (e) {
     if (noteOutOfCredit(e)) throw new Error(OUT_OF_CREDIT);
@@ -134,7 +137,7 @@ export async function startCall(botId: string, sdp: string) {
 export async function delegate(botId: string, request: string) {
   const chatId = botChatId(botId);
   const since = Date.now();
-  await handleMessage(chatId, request);
+  await handleMessage(chatId, request, undefined, undefined, undefined, undefined, undefined, true);
   const replies = getState().messages.filter((m) => m.chatId === chatId && m.at >= since && m.role !== "user");
   const threads = getState().sessions.filter((s) => s.chatId === chatId && s.createdAt >= since);
   const said = replies.map((m) => m.text).join(" ").trim();

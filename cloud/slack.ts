@@ -5,6 +5,7 @@ import { ensureUserRow, query, tx } from "./db.ts";
 import { HttpError, readBody, readJson, sendJson, type Route } from "./http.ts";
 import type { SlackLinkIn, SlackLinksResult } from "./protocol.ts";
 import { queueForMac, requestMac } from "./tunnel.ts";
+import { recordUsage } from "./usage.ts";
 
 /**
  * Bops' own Slack app (slack/manifest.json; at Orgo, the "Bops" app): every workspace that installed
@@ -199,9 +200,10 @@ type Identity = { teamId: string; botUserId: string | null };
 
 /**
  * Which workspace one of the user's Slack accounts is in, and the app's bot user there: Slack's own
- * answer to auth.test, asked through that account (Composio's proxy, with the cloud's key).
+ * answer to auth.test, asked through that account (Composio's proxy, with the cloud's key). Counted
+ * as the user's Composio call, like the ones the Mac makes through /proxy/composio.
  */
-async function slackIdentity(accountId: string): Promise<Identity> {
+async function slackIdentity(userId: string, accountId: string): Promise<Identity> {
   const key = config.composioKey();
   if (!key) throw new HttpError(503, "Composio isn't set up on this cloud.");
   let res: Response;
@@ -215,6 +217,8 @@ async function slackIdentity(accountId: string): Promise<Identity> {
   } catch {
     throw new HttpError(502, "Couldn't reach Composio to check that Slack account.");
   }
+  if (res.ok)
+    void recordUsage(userId, "composio.calls", 1, { tool: "proxy", app: "slackbot" }).catch((e: Error) => console.warn(`[slack] ${userId}: usage: ${e.message}`));
   const answer = (await res.json().catch(() => null)) as { data?: { ok?: unknown; error?: unknown; team_id?: unknown; user_id?: unknown; bot_id?: unknown } } | null;
   if (!res.ok || !answer) throw new HttpError(502, `Composio answered ${res.status} when checking that Slack account.`);
   const d = answer.data ?? {};
@@ -248,7 +252,7 @@ const putLinks: Route = {
     const kept: (Link & Identity)[] = [];
     for (const l of links) {
       if (!(await ownsAccount(userId, l.accountId))) throw new HttpError(404, "That Slack account isn't one of yours.");
-      kept.push({ ...l, ...(known.get(l.accountId) ?? (await slackIdentity(l.accountId))) });
+      kept.push({ ...l, ...(known.get(l.accountId) ?? (await slackIdentity(userId, l.accountId))) });
     }
     await ensureUserRow(userId);
     await tx(async (c) => {

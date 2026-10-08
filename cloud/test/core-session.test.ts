@@ -114,14 +114,16 @@ test("the first session makes a pod, one pod key and a sub-account, and no SIP t
     userId: alice,
     email: `${alice}@example.com`,
     publicUrl: "https://bops-api.test",
-    agentmail: { podId: pod.pod_id, apiKey: r.json.agentmail.apiKey, domain: "bops.bot" },
+    agentmail: { podId: pod.pod_id, apiKey: r.json.agentmail.apiKey, domain: "bops.bot", handle: null, handles: {} },
     agentphone: { subAccountId: sub.id, hookUrl: "https://bops-api.test/hooks/agentphone" },
     honcho: { workspacePrefix: honchoPrefix(alice) },
     composio: { userId: `bops-${alice}` },
     openai: { executorKey: "sk-test-executor" },
     typesafe: true,
+    treg: false,
     verify: { sms: true, email: false },
     slack: { appId: "A0TESTAPP" },
+    plan: { tier: "free_bops", limits: false },
   });
   // The pod key reaches only mail in that pod: no keys, pods, domains, webhooks or apps.
   const [keyCall] = posts(agentmail, new RegExp(`^/v0/pods/${pod.pod_id}/api-keys$`));
@@ -235,6 +237,7 @@ test("a provider whose key the cloud lacks comes back null, and the executor key
     assert.equal(r.json.honcho, null);
     assert.equal(r.json.composio, null);
     assert.equal(r.json.typesafe, false);
+    assert.equal(r.json.treg, false);
     assert.deepEqual(r.json.openai, { executorKey: null });
     assert.deepEqual(r.json.verify, { sms: false, email: false });
     assert.equal(r.json.slack, null, "Slack's events need Composio to know where they go");

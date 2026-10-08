@@ -36,8 +36,23 @@ export function usePlan(state: AppState) {
   return info;
 }
 
-/** Why the plan has no room for a computer, in plain words, and where to change that on Orgo. */
-export function PlanNote({ info, short, text, className = "" }: { info: PlanInfo; short: PlanShort; text: string; className?: string }) {
+/**
+ * Why the plan has no room for a computer, in plain words, and where to change that: on Orgo, or, when
+ * the Bops plan decides (`short` "bops"), Upgrade to Max in the app (`onUpgrade` opens the plans; none
+ * on Max, which has nothing more).
+ */
+export function PlanNote({ info, short, text, className = "", onUpgrade }: { info: PlanInfo; short: PlanShort; text: string; className?: string; onUpgrade?: () => void }) {
+  if (short === "bops")
+    return (
+      <span className={`text-[12px] leading-4 text-[#6B6B6B] ${className}`}>
+        {text}{" "}
+        {onUpgrade && (
+          <button onClick={onUpgrade} className="font-medium text-ink underline underline-offset-2">
+            Upgrade to Max
+          </button>
+        )}
+      </span>
+    );
   const fix = planFix(short, info.plan);
   return (
     <span className={`text-[12px] leading-4 text-[#6B6B6B] ${className}`}>
@@ -48,3 +63,4 @@ export function PlanNote({ info, short, text, className = "" }: { info: PlanInfo
     </span>
   );
 }
+

@@ -1,9 +1,12 @@
 import { startSession, stopSession } from "@/lib/server/sessions";
 import { getState } from "@/lib/server/store";
 import { live } from "@/lib/types";
+import { notReady } from "@/lib/server/ready";
 
 /** Start a thread directly on a bot, bypassing chat (used for testing). */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const { botId, goal, title } = (await request.json()) as { botId?: string; goal?: string; title?: string };
   if (!botId || !goal?.trim()) return Response.json({ error: "botId and goal required" }, { status: 400 });
   return Response.json(startSession({ botId, goal: goal.trim(), title }));
@@ -11,6 +14,8 @@ export async function POST(request: Request) {
 
 /** Stop one thread, every live thread of a bot, or everything. */
 export async function DELETE(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const { sessionId, botId } = (await request.json().catch(() => ({}))) as { sessionId?: string; botId?: string };
   const ids = sessionId
     ? [sessionId]

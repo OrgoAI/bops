@@ -1,8 +1,9 @@
-// Tests for the app's side of Bops Cloud (lib/server/cloud.ts, cloud-state.ts, cloud-tunnel.ts and the
+// Tests for the app's side of Bops Cloud (lib/server/cloud.ts, persist-cloud.ts, cloud-tunnel.ts and the
 // modules that switch to it): the session, every provider through the cloud and directly (self-hosting),
 // codes through the cloud, the webhook routes' tunnel token, Slack through the cloud's app (its events,
-// pairing codes, where the bots are), app actions that ask first, the state backup and restore, routing
-// through this Mac on by default, and the tunnel against a fake cloud. Nothing reaches a real service or
+// pairing codes, where the bots are), app actions that ask first, the state in the cloud (what goes up and
+// how, merged with another Mac's), routing through this Mac on by default, the tunnel, and Restart Bops
+// saving to the cloud first, against a fake cloud. Whose state is whose across sign-ins, against the real cloud, is test-profiles.mjs. Nothing reaches a real service or
 // the real Keychain: the cloud and this Mac's server are fakes on 127.0.0.1, every other address answers
 // from a stub (or not at all), and `security`, `codex` and `orgo-relay` are stand-ins.
 // Usage: node --conditions=react-server scripts/test-cloud.mjs
@@ -41,6 +42,8 @@ const bin = join(scratch, "bin");
 mkdirSync(bin);
 mkdirSync(join(scratch, "keychain"));
 process.env.BOPS_TEST_KEYCHAIN = join(scratch, "keychain");
+// This app's version, as the build sets it (next.config.ts): every call to the cloud says it.
+process.env.BOPS_APP_VERSION = "9.9.9";
 // macOS's `security`, with a folder for a Keychain.
 writeFileSync(
   join(bin, "security"),
@@ -63,17 +66,8 @@ if (process.argv[2] === "-i") {
 `,
   { mode: 0o755 },
 );
-// Codex's app server, signed in to nothing.
-writeFileSync(
-  join(bin, "codex"),
-  `#!/usr/bin/env node
-require("readline").createInterface({ input: process.stdin }).on("line", (line) => {
-  const m = JSON.parse(line);
-  if (m.id !== undefined && m.method) process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: m.method === "account/read" ? { account: null } : {} }) + "\\n");
-});
-`,
-  { mode: 0o755 },
-);
+// Codex is there (so nothing installs it); nothing here runs it.
+writeFileSync(join(bin, "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 // The relay agent: says it's connected on its control address until it's stopped.
 writeFileSync(
   join(bin, "orgo-relay"),
@@ -107,11 +101,24 @@ globalThis.fetch = async (input, init) => {
   if (!out) throw new TypeError(`fetch failed (the test is offline: ${url.host})`);
   return out;
 };
-// Orgo: routing through this Mac isn't offered (403) until the routing tests say otherwise.
-const orgo = { offered: false, devices: [], calls: [] };
+// Orgo: routing through this Mac isn't offered (403) until the routing tests say otherwise. `computer`:
+// one computer's route and the commands run on it (bops-keep-screens), for the routing tests.
+const orgo = { offered: false, devices: [], calls: [], computer: null };
 const orgoAnswer = (c) => {
   if (c.host !== "www.orgo.ai") return null;
   orgo.calls.push(c);
+  const pc = orgo.computer;
+  if (pc && c.path === `/api/computers/${pc.id}/egress/upstream` && c.method === "GET") return Response.json({ mode: pc.mode, device_id: pc.deviceId, proxy_on: pc.proxyOn });
+  if (pc && c.path === `/api/computers/${pc.id}/egress/upstream`) {
+    const b = JSON.parse(c.body);
+    Object.assign(pc, { mode: b.mode, deviceId: b.device_id ?? null });
+    return Response.json({ proxy_on: pc.proxyOn });
+  }
+  if (pc && c.path === `/api/computers/${pc.id}/bash`) {
+    const { command } = JSON.parse(c.body);
+    pc.ran.push(/bops-keep-screens (save|restore)/.exec(command)?.[0] ?? command);
+    return Response.json({ output: command.includes("restore") ? "restored" : "saved", exit_code: 0 });
+  }
   if (c.path === "/api/egress-devices" && !orgo.offered) return Response.json({ error: "Not available" }, { status: 403 });
   if (c.path === "/api/egress-devices" && c.method === "GET") return Response.json({ devices: orgo.devices, rendezvous: null });
   if (c.path === "/api/egress-devices" && c.method === "POST") {
@@ -176,26 +183,63 @@ const SESSION = {
   verify: { sms: true, email: false },
 };
 const BARE = { ...SESSION, agentmail: null, agentphone: null, honcho: null, composio: null, openai: { executorKey: null }, typesafe: false, verify: { sms: false, email: false } };
-const cloud = { requests: [], upgrades: [], connections: [], session: SESSION, handle: null };
+// The state's calls (/v1/state…, /v1/messages) are kept apart in stateRequests, answered by `stateHandle` or the fake below.
+const cloud = { requests: [], stateRequests: [], upgrades: [], connections: [], session: SESSION, handle: null, stateHandle: null };
 const cloudDefault = (r) => {
   if (r.path === "/v1/session") return { json: cloud.session };
-  if (r.path === "/v1/state" && r.method === "GET") return { status: 404, json: { error: "No state yet" } };
   return { json: {} };
 };
+/** Each user's state in the fake cloud, as cloud/state.ts keeps it: the blob over its version, each message a row with a seq. By the user a call names. */
+const states = new Map();
+let seqs = 0;
+const stateOf = (user) => states.get(user) ?? states.set(user, { version: 0, blob: null, writer: null, rows: new Map() }).get(user);
+const lastSeq = (st) => Math.max(0, ...[...st.rows.values()].map((x) => x.seq));
+const sentJson = (r) => JSON.parse((r.headers["content-encoding"] === "gzip" ? gunzipSync(r.body) : r.body).toString("utf8") || "{}");
+function stateAnswer(r) {
+  const url = new URL(r.path, "http://cloud");
+  const user = r.headers["x-bops-user"];
+  if (!user) return { status: 400, json: { error: "Name the user" } };
+  const st = stateOf(user);
+  if (url.pathname === "/v1/state" && r.method === "GET")
+    return st.blob ? { json: { version: st.version, seq: lastSeq(st), protocol: 2, writer: st.writer, state: st.blob } } : { status: 404, json: { error: "No state saved yet", version: st.version, seq: lastSeq(st) } };
+  if (url.pathname === "/v1/state/head") return { json: { version: st.version, seq: lastSeq(st), writer: st.writer } };
+  if (url.pathname === "/v1/state" && r.method === "PUT") {
+    const b = sentJson(r);
+    if (b.base !== st.version) return { status: 409, json: { error: "changed elsewhere", code: "state_conflict", version: st.version, state: st.blob ?? {} } };
+    Object.assign(st, { version: st.version + 1, blob: b.state, writer: r.headers["x-bops-device"] });
+    return { json: { version: st.version } };
+  }
+  if (url.pathname === "/v1/messages" && r.method === "GET") {
+    const after = Number(url.searchParams.get("after"));
+    const limit = Number(url.searchParams.get("limit") ?? 2000);
+    const all = [...st.rows.values()].filter((x) => x.seq > after).sort((a, b) => a.seq - b.seq);
+    const page = all.slice(0, limit);
+    return { json: { messages: page.filter((x) => after > 0 || x.json), seq: page.at(-1)?.seq ?? after, more: all.length > limit } };
+  }
+  if (url.pathname === "/v1/messages" && r.method === "POST") {
+    const b = sentJson(r);
+    for (const m of b.upsert) st.rows.set(m.id, { id: m.id, seq: ++seqs, json: m });
+    for (const id of b.remove) if (st.rows.get(id)?.json) st.rows.set(id, { id, seq: ++seqs, json: null });
+    return { json: { seq: lastSeq(st) } };
+  }
+  if (url.pathname === "/v1/state/backups") return { json: { ok: true, id: 1 } };
+  return { status: 404, json: { error: "Not found" } };
+}
 const cloudHttp = createServer((req, res) => {
   const chunks = [];
   req.on("data", (c) => chunks.push(c));
   req.on("end", async () => {
     const r = { method: req.method, path: req.url, headers: req.headers, body: Buffer.concat(chunks) };
-    cloud.requests.push(r);
-    const out = (await (cloud.handle ?? cloudDefault)(r)) ?? cloudDefault(r);
+    const forState = /^\/v1\/(state|messages)\b/.test(r.path);
+    (forState ? cloud.stateRequests : cloud.requests).push(r);
+    const out = forState ? ((await cloud.stateHandle?.(r)) ?? stateAnswer(r)) : ((await (cloud.handle ?? cloudDefault)(r)) ?? cloudDefault(r));
     res.writeHead(out.status ?? 200, { "content-type": "application/json" });
     res.end(typeof out.body === "string" ? out.body : JSON.stringify(out.json ?? {}));
   });
 });
 const wss = new WebSocketServer({ noServer: true });
 cloudHttp.on("upgrade", (req, socket, head) => {
-  cloud.upgrades.push({ path: req.url, auth: req.headers.authorization });
+  cloud.upgrades.push({ path: req.url, auth: req.headers.authorization, version: req.headers["x-bops-version"] });
   if (req.url !== "/v1/connect") return socket.destroy();
   wss.handleUpgrade(req, socket, head, (ws) => {
     const c = { ws, auth: req.headers.authorization, frames: [], closed: null, at: Date.now() };
@@ -224,7 +268,6 @@ const Mem = await import(`${root}/lib/server/memory.ts`);
 const C = await import(`${root}/lib/server/composio.ts`);
 const D = await import(`${root}/lib/server/decide.ts`);
 const V = await import(`${root}/lib/server/verify.ts`);
-const B = await import(`${root}/lib/server/cloud-state.ts`);
 const T = await import(`${root}/lib/server/cloud-tunnel.ts`);
 const R = await import(`${root}/lib/server/relay.ts`);
 const AP = await import(`${root}/app/api/phone/agentphone/route.ts`);
@@ -233,16 +276,21 @@ const EV = await import(`${root}/app/api/cloud/event/route.ts`);
 const CH = await import(`${root}/lib/server/channels.ts`);
 const SE = await import(`${root}/app/api/channels/slack/events/route.ts`);
 const K = await import(`${root}/lib/server/skills.ts`);
-const { MAIN_WORKSPACE, PAIR_CODE_MS } = await import(`${root}/lib/types.ts`);
+const U = await import(`${root}/lib/server/usage.ts`);
+const ACCOUNT = await import(`${root}/app/api/account/route.ts`);
+const { MAIN_WORKSPACE, PAIR_CODE_MS, botChatId } = await import(`${root}/lib/types.ts`);
 const { buildURL: sidebandURL } = await import(`${root}/node_modules/openai/resources/live/sideband/internal-base.mjs`);
 
 const KEY = "orgo_test_key";
 const USER = { id: "u1", email: "me@example.com", name: "Test" };
-function signIn(key = KEY, user = USER) {
+/** Signed in as the app does it: the user's state loaded from the (fake) cloud first, then the key and the account. */
+async function signIn(key = KEY, user = USER) {
+  await S.bindSignIn(user.id, key);
   g.bopsOrgoKey = key;
   g.bopsOrgoKeyMissAt = undefined;
   S.update((s) => (s.account = { user, signedInAt: 1 }));
 }
+/** The key gone (as a sign-out has it), the state left loaded: what these tests look at is the key. */
 function signOut() {
   g.bopsOrgoKey = null;
   g.bopsOrgoKeyMissAt = Infinity;
@@ -272,7 +320,7 @@ await assert.rejects(Cl.cloudSession(), /Sign in with Orgo first\./);
 assert.equal(Cl.cloudSessionNow(), null);
 assert.equal(Cl.cloudProxy("openai"), null);
 assert.equal(cloud.requests.length, 0, "signed out: nothing is asked");
-signIn();
+await signIn();
 assert.equal(Cl.cloudOn(), true);
 await selfHosted({}, () => assert.equal(Cl.cloudOn(), false, "self-hosting"));
 process.env.BOPS_DATABASE_URL = "postgres://nowhere";
@@ -295,10 +343,10 @@ assert.deepEqual(Cl.cloudSessionNow(), SESSION);
 await Cl.cloudSession(true);
 assert.equal(since(n).length, 2, "a sign-in asks again");
 // Another key (someone else signed in): asked again on that key, and the old answer isn't theirs.
-signIn("orgo_other_key", { id: "u2" });
+await signIn("orgo_other_key", { id: "u2" });
 assert.equal(Cl.cloudSessionNow(), null, "not the other key's session");
 await until(() => since(n).some((r) => r.headers.authorization === "Bearer orgo_other_key"), "the session on the new key");
-signIn();
+await signIn();
 Cl.forgetCloudSession();
 assert.equal(Cl.cloudSessionNow(), null, "a sign-out forgets it (and the next look asks again)");
 await until(() => Cl.cloudSessionNow(), "the session again");
@@ -371,7 +419,7 @@ await selfHosted({ OPENAI_API_KEY: "sk-self" }, async () => {
 await selfHosted({}, () => assert.rejects(ai.responses.create({ model: "x", input: "x" }), /No OpenAI key is set: add OPENAI_API_KEY to \.env\.local\./));
 signOut();
 await assert.rejects(ai.responses.create({ model: "x", input: "x" }), /Sign in with Orgo first\./);
-signIn();
+await signIn();
 
 // AgentPhone: <cloud>/proxy/agentphone/v1 on the Orgo key, never naming a sub-account (the cloud acts in the user's own).
 process.env.AGENTPHONE_SUB_ACCOUNT = "sub_self";
@@ -478,7 +526,7 @@ await selfHosted({ AGENTMAIL_API_KEY: "am_self" }, async () => {
 });
 signOut();
 await assert.rejects(M.checkEmail("boppy", null), /Email isn't available right now\./);
-signIn();
+await signIn();
 S.update((s) => (s.bots = s.bots.filter((b) => b.id !== "iris")));
 
 // Honcho: <cloud>/proxy/honcho on the Orgo key, every workspace with the user's prefix.
@@ -543,24 +591,38 @@ const TOOLKITS = [
   toolkit("dcrapp", "DCR App", ["DCR_OAUTH"]),
   toolkit("hackernews", "Hacker News", [], [], { no_auth: true }),
   toolkit("composio", "Composio", [], [], { no_auth: true }),
+  // Its setup needs the company's own keys, which a setup made through the cloud never has.
+  toolkit("samlapp", "SAML App", ["SAML"]),
 ];
 const listPage = (items) => ({ items, next_cursor: null, total_pages: 1, current_page: 1, total_items: items.length });
+// Composio's list comes in pages (at most 1000 apps each): every page is read, and an app that turns
+// up on two pages (usage moved it between the two asks) is listed once.
+const toolkitPage = (url) =>
+  /[?&]cursor=p2(&|$)/.test(url)
+    ? { items: [TOOLKITS[0], ...TOOLKITS.slice(4)], next_cursor: null, total_pages: 2, current_page: 2, total_items: TOOLKITS.length }
+    : { items: TOOLKITS.slice(0, 4), next_cursor: "p2", total_pages: 2, current_page: 1, total_items: TOOLKITS.length };
 const orgoSlackSetup = { id: "ac_slack", uuid: "ac_slack", name: "Bops", toolkit: { slug: "slackbot", logo: "" }, no_of_connections: 1, status: "ENABLED", is_composio_managed: false, auth_scheme: "OAUTH2" };
 const picked = (apps) => apps.map((a) => `${a.app}:${a.auth}`);
 const CLOUD_PICKS = ["gmail:oauth", "slackbot:oauth", "acmecrm:key", "keyonly:key", "hackernews:open"];
 g.bopsComposio2.catalog = g.bopsComposio2.loadingCatalog = undefined;
 cloud.handle = (r) =>
-  r.path.startsWith("/proxy/composio/api/v3.1/toolkits?") ? { json: listPage(TOOLKITS) } : r.path.startsWith("/proxy/composio/api/v3.1/auth_configs") ? { json: listPage([orgoSlackSetup]) } : cloudDefault(r);
+  r.path.startsWith("/proxy/composio/api/v3.1/toolkits?") ? { json: toolkitPage(r.path) } : r.path.startsWith("/proxy/composio/api/v3.1/auth_configs") ? { json: listPage([orgoSlackSetup]) } : cloudDefault(r);
 n = cloud.requests.length;
 assert.deepEqual(picked(await C.catalog()), CLOUD_PICKS);
 assert.ok(since(n).some((r) => r.method === "GET" && r.path.startsWith("/proxy/composio/api/v3.1/auth_configs")), "the setups the cloud offers");
+assert.deepEqual(
+  since(n).filter((r) => r.path.startsWith("/proxy/composio/api/v3.1/toolkits?")).map((r) => new URL(r.path, "http://x").searchParams.get("cursor")),
+  [null, "p2"],
+  "every page of Composio's apps",
+);
 n = cloud.requests.length;
 assert.deepEqual(picked(await C.catalog()), CLOUD_PICKS);
 assert.equal(since(n).length, 0, "kept (asked again after half a day)");
 await selfHosted({ COMPOSIO_API_KEY: "cp_self" }, async () => {
-  web.answer = (c) => (c.host === "backend.composio.dev" && c.path.startsWith("/api/v3.1/toolkits") ? Response.json(listPage(TOOLKITS)) : providers(c));
+  web.answer = (c) => (c.host === "backend.composio.dev" && c.path.startsWith("/api/v3.1/toolkits") ? Response.json(toolkitPage(c.url)) : providers(c));
   w = web.calls.length;
-  assert.deepEqual(picked(await C.catalog()), ["gmail:oauth", "slackbot:oauth", "acmecrm:oauth", "keyonly:key", "salesforce:oauth", "dcrapp:oauth", "hackernews:open"]);
+  assert.deepEqual(picked(await C.catalog()), ["gmail:oauth", "slackbot:oauth", "acmecrm:oauth", "keyonly:key", "salesforce:oauth", "dcrapp:oauth", "hackernews:open", "samlapp:key"]);
+  assert.equal(web.calls.slice(w).filter((c) => c.path.startsWith("/api/v3.1/toolkits")).length, 2, "both pages, directly");
   assert.ok(!web.calls.slice(w).some((c) => c.path.includes("auth_configs")), "no sign-in setups asked for");
   web.answer = providers;
 });
@@ -608,6 +670,149 @@ await selfHosted({ TYPESAFE_API_KEY: "ts_self" }, async () => {
   web.answer = providers;
 });
 cloud.handle = null;
+
+// Each quick check is counted on this Mac (the account page's "Quick checks") at the tokens Typesafe
+// says it read, for the bot it's about, and the cloud is told the bot and the kind of work to count it the same way.
+const decides = () => (S.getState().usage ?? []).filter((u) => u.kind === "model.tokens" && u.source === "decide");
+let d0 = decides().length;
+cloud.handle = (r) => (r.path === "/proxy/typesafe/v1/systemone" ? { json: { model: "jev-1.13.0", answers: { ok: { type: "noul", noul: 0.9 } }, usage: { input_tokens: 812, output_tokens: 1 } } } : cloudDefault(r));
+n = cloud.requests.length;
+await D.decide({ x: 1 }, question, { botId: "sam" });
+assert.deepEqual([since(n)[0].headers["x-bops-source"], since(n)[0].headers["x-bops-bot"]], ["decide", "sam"]);
+assert.deepEqual(
+  decides().slice(d0).map((u) => [u.qty, u.inputTokens, u.outputTokens, u.model, u.botId]),
+  [[812, 812, 0, "jev-1.13.0", "sam"]],
+);
+// An answer that doesn't say: about 4 bytes of the question a token, as the cloud estimates it.
+cloud.handle = (r) => (r.path === "/proxy/typesafe/v1/systemone" ? { json: { answers: { ok: { type: "noul", noul: 0.9 } } } } : cloudDefault(r));
+d0 = decides().length;
+n = cloud.requests.length;
+await D.decide({ x: 1 }, question);
+assert.equal(since(n)[0].headers["x-bops-bot"], undefined, "no bot named when the check isn't about one");
+assert.equal(decides().at(-1).qty, Math.ceil(since(n)[0].body.length / 4));
+// A failed check costs nothing here.
+cloud.handle = (r) => (r.path === "/proxy/typesafe/v1/systemone" ? { status: 503, json: { error: "down" } } : cloudDefault(r));
+d0 = decides().length;
+assert.equal(await D.decide({ x: 1 }, question), null);
+assert.equal(decides().length, d0);
+cloud.handle = null;
+// OpenAI's calls say the same through the cloud (the SDK's per-call headers), and nothing when self-hosting.
+cloud.handle = (r) => (r.path.startsWith("/proxy/openai/") ? { json: { id: "resp_tag", object: "response", output: [], usage: null } } : cloudDefault(r));
+n = cloud.requests.length;
+await ai.responses.create({ model: "gpt-test", input: "hi" }, U.usageTags("chat", "sam"));
+assert.deepEqual([since(n)[0].headers["x-bops-source"], since(n)[0].headers["x-bops-bot"]], ["chat", "sam"]);
+assert.deepEqual(U.usageTags("memory"), { headers: { "x-bops-source": "memory" } });
+await selfHosted({}, () => assert.deepEqual(U.usageTags("chat", "sam"), {}, "nothing extra for OpenAI itself"));
+cloud.handle = null;
+console.log("usage: quick checks counted here at Typesafe's tokens, and every call tells the cloud its bot and kind of work");
+
+// The account page: model use, calls and AI credit spent are the cloud's own count (what AI credit
+// paid for), and each way of cutting it adds up; computers made are this Mac's. A row older builds kept
+// for Codex on the user's own account is never counted, and there's no line for it.
+{
+  const now = new Date();
+  const day = (d) => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  const at = (d) => new Date(now.getFullYear(), now.getMonth(), d, 12).getTime();
+  const was = structuredClone({ bots: S.getState().bots, usage: S.getState().usage });
+  S.update((s) => {
+    s.bots = [
+      { id: "sam", name: "Sam", role: "Chief of Staff", isMain: true, color: "#111111" },
+      { id: "iris", name: "Iris", role: "Research", isMain: false, color: "#222222" },
+    ];
+    s.usage = [
+      { kind: "computer.create", at: at(1), botId: "iris" },
+      // Kept by an older build for Codex on the user's own account: never counted.
+      { kind: "model.tokens", at: at(1), source: "codex", plan: "chatgpt", model: "gpt-6.1-sol", botId: "sam", qty: 40_000, inputTokens: 38_000, outputTokens: 2_000 },
+      // This Mac's own count of what the cloud counted too: the cloud's stands, never both.
+      { kind: "model.tokens", at: at(1), source: "chat", botId: "sam", qty: 999, inputTokens: 900, outputTokens: 99 },
+      { kind: "call.minutes", at: at(1), botId: "sam", qty: 7 },
+    ];
+  });
+  const usage = {
+    kinds: [
+      { kind: "agentphone.voice_seconds", units: 90, count: 1, costMicros: 195_000 },
+      { kind: "composio.calls", units: 3, count: 3, costMicros: 0 },
+      { kind: "honcho.calls", units: 4, count: 4, costMicros: 0 },
+      { kind: "openai.live_seconds", units: 30, count: 1, costMicros: 25_000 },
+      { kind: "openai.tokens", source: "agent", units: 606_000, count: 1, costMicros: 234_000 },
+      { kind: "openai.tokens", source: "chat", units: 1_100, count: 1, costMicros: 3_000 },
+      { kind: "openai.tokens", source: "phone", units: 940, count: 2, costMicros: 2_200 },
+      { kind: "openai.tokens", source: "responses", units: 50, count: 1, costMicros: 150 },
+      { kind: "openai.web_search", units: 2, count: 2, costMicros: 20_000 },
+      { kind: "typesafe.tokens", units: 1_200, count: 3, costMicros: 51 },
+    ],
+    days: [
+      { day: day(1), tokens: 1_100 + 50 + 1_200, costMicros: 3_000 + 150 + 51 + 25_000 },
+      { day: day(2), tokens: 606_000 + 940, costMicros: 234_000 + 2_200 + 195_000 + 20_000 },
+    ],
+    bots: [
+      { botId: "iris", tokens: 606_000, callSeconds: 0, costMicros: 254_000 },
+      { botId: "sam", tokens: 1_100 + 940, callSeconds: 120, costMicros: 3_000 + 2_200 + 195_000 + 25_000 },
+      { botId: null, tokens: 1_250, callSeconds: 0, costMicros: 201 },
+    ],
+  };
+  usage.costMicros = usage.kinds.reduce((s, k) => s + k.costMicros, 0);
+  usage.charged = true;
+  const asked = [];
+  cloud.handle = (r) => {
+    if (!r.path.startsWith("/v1/usage?")) return cloudDefault(r);
+    const q = new URL(r.path, CLOUD).searchParams;
+    asked.push({ from: Number(q.get("from")), to: Number(q.get("to")), tz: q.get("tz"), auth: r.headers.authorization });
+    return { json: Number(q.get("from")) === new Date(now.getFullYear(), now.getMonth(), 1).getTime() ? { ...usage, from: 0, to: 0 } : { from: 0, to: 0, charged: true, costMicros: 0, kinds: [], days: [], bots: [] } };
+  };
+  const info = await (await ACCOUNT.GET()).json();
+  cloud.handle = null;
+  assert.equal(asked.length, 2, "this month and last");
+  assert.ok(asked.every((a) => a.auth === `Bearer ${g.bopsOrgoKey}` && a.tz), "with the Orgo key, days on this Mac's clock");
+  const t = info.usage.thisMonth;
+  assert.equal(t.from, "cloud");
+  assert.equal(t.tokens, 1_100 + 50 + 606_000 + 940 + 1_200, "Bops' model tokens, from the cloud: Codex's and this Mac's own copy left out");
+  assert.deepEqual(t.tokensBySource, { chat: 1_100, other: 50, session: 606_000, call: 940, decide: 1_200 });
+  const sum = (xs) => xs.reduce((s, x) => s + x, 0);
+  assert.equal(sum(Object.values(t.tokensBySource)), t.tokens);
+  assert.equal(sum(t.tokensByDay), t.tokens);
+  assert.equal(sum(t.byBot.map((b) => b.tokens)), t.tokens);
+  assert.equal(t.callMinutes, 2, "the cloud's seconds: 90 on the phone, 30 in the app");
+  assert.ok(!("codexTokens" in t), "no line for Codex");
+  assert.equal(t.computersCreated, 1);
+  assert.deepEqual([t.spend.costMicros, t.spend.charged], [usage.costMicros, true]);
+  assert.equal(sum(t.spend.parts.map((p) => p.costMicros)), t.spend.costMicros);
+  assert.deepEqual(
+    Object.fromEntries(t.spend.parts.map((p) => [p.id, [p.amount, p.costMicros]])),
+    // Memory here was only Honcho's calls, at $0 and no tokens: nothing to show.
+    { session: [606_000, 234_000], call: [2, 195_000 + 25_000 + 2_200], search: [2, 20_000], chat: [1_100, 3_000], other: [50, 150], decide: [3, 51], app: [3, 0] },
+  );
+  const bot = Object.fromEntries(t.byBot.map((b) => [b.botId, b]));
+  assert.deepEqual([bot.sam.tokens, bot.sam.callMinutes, bot.sam.costMicros], [2_040, 2, 225_200]);
+  assert.deepEqual([bot.iris.tokens, bot.iris.computers, bot.iris.name], [606_000, 1, "Iris"]);
+  assert.deepEqual([bot[""].name, bot[""].tokens], ["Not tied to a bot", 1_250]);
+  assert.equal(info.usage.lastMonth.tokens, 0);
+  // The cloud not answering: this Mac's own ledger, the old Codex row still left out.
+  cloud.handle = (r) => (r.path.startsWith("/v1/usage?") ? { status: 503, json: { error: "down" } } : cloudDefault(r));
+  const mac = (await (await ACCOUNT.GET()).json()).usage.thisMonth;
+  cloud.handle = null;
+  assert.deepEqual([mac.from, mac.tokens, mac.callMinutes, mac.spend], ["mac", 999, 7, undefined]);
+  // Rows the cloud wrote before it counted seconds and Jev's tokens: a call's minutes are Calls, a Jev call a quick check.
+  const old = {
+    from: 0,
+    to: 0,
+    charged: false,
+    costMicros: 65_000 + 400,
+    kinds: [
+      { kind: "call.minutes", units: 1.5, count: 1, costMicros: 65_000 },
+      { kind: "typesafe.calls", units: 2, count: 2, costMicros: 400 },
+    ],
+    days: [{ day: day(1), tokens: 0, costMicros: 65_400 }],
+    bots: [{ botId: "sam", tokens: 0, callSeconds: 90, costMicros: 65_400 }],
+  };
+  cloud.handle = (r) => (r.path.startsWith("/v1/usage?") ? { json: old } : cloudDefault(r));
+  const before = (await (await ACCOUNT.GET()).json()).usage.thisMonth;
+  cloud.handle = null;
+  assert.deepEqual(Object.fromEntries(before.spend.parts.map((p) => [p.id, [p.amount, p.costMicros]])), { call: [1.5, 65_000], decide: [2, 400] });
+  assert.deepEqual([before.callMinutes, before.tokens], [1.5, 0]);
+  S.update((s) => Object.assign(s, was));
+}
+console.log("account page: the cloud's count of what AI credit paid for adds up every way");
 
 // The key copied onto bot computers: the cloud's restricted one, or OPENAI_EXECUTOR_API_KEY.
 assert.equal(await Cl.executorKey(), "sk-exec-restricted");
@@ -859,6 +1064,155 @@ res = await EV.POST(request("/api/cloud/event", { "x-bops-cloud": token }, JSON.
 assert.equal(res.status, 400);
 console.log("routes: the tunnel's token is taken as checked, everything else is checked as before");
 
+/* ---------------- Bops addresses: each workspace's handle, picked once; a plan's number and inbox ---------------- */
+
+{
+const HANDLE = await import(`${root}/app/api/mail/handle/route.ts`);
+const PHONE = await import(`${root}/app/api/phone/route.ts`);
+// The cloud's handles (cloud/handles.ts), as far as the app sees them: "taken-one" is someone else's.
+const handles = { claims: [], current: {} };
+cloud.handle = (r) => {
+  if (r.path.startsWith("/v1/mail/handle?")) {
+    const q = new URL(r.path, "http://cloud").searchParams;
+    const t = q.get("try") ?? "";
+    const current = handles.current[q.get("workspace")] ?? null;
+    if (!t) return { json: { handle: "", status: "invalid", problem: "Pick a name for your address.", suggestion: current?.handle ?? "test", current } };
+    if (t === "taken-one") return { json: { handle: t, status: "taken", problem: "Someone already has that one.", suggestion: "taken-one2", current } };
+    return { json: { handle: t, status: current?.handle === t ? "yours" : "available", suggestion: t, current } };
+  }
+  // A plan's number shown to the user opens its 15 minutes for the first caller (lib/server/cloud-plan.ts).
+  if (r.path === "/v1/phone/lines" && r.method === "PUT") {
+    const b = json(r);
+    return { json: { line: { numberId: b.numberId, number: "+14155550142", botId: b.botId ?? null, workspaceId: null, owner: null, claimUntil: b.open ? new Date(Date.now() + 15 * 60_000).toISOString() : null } } };
+  }
+  if (r.path === "/v1/mail/handle" && r.method === "POST") {
+    const b = json(r);
+    handles.claims.push(b);
+    if (b.handle === "taken-one") return { status: 409, json: { error: "Someone already has that one.", code: "handle_taken", suggestion: "taken-one2" } };
+    const before = handles.current[b.workspaceId];
+    const handle = b.handle ?? before?.handle ?? (b.workspaceId === MAIN_WORKSPACE ? "test" : b.workspaceId.replace(/^ws_/, ""));
+    handles.current[b.workspaceId] = { handle, auto: !b.handle && !before, changesLeft: before && before.handle !== handle ? before.changesLeft - 1 : (before?.changesLeft ?? 3) };
+    return { json: { workspaceId: b.workspaceId, ...handles.current[b.workspaceId], ...(before && before.handle !== handle ? { previous: before.handle } : {}) } };
+  }
+  return cloudDefault(r);
+};
+// AgentMail makes the inbox asked for, on its address; bops.bot is ready (the cloud says so).
+const inboxesMade = [];
+web.answer = (c) => {
+  if (c.host === "api.agentmail.to" && c.method === "POST" && /^\/v0\/pods\/[^/]+\/inboxes$/.test(c.path)) {
+    const b = JSON.parse(c.body);
+    inboxesMade.push(b);
+    const email = `${b.username}@${b.domain}`;
+    return Response.json({ pod_id: "pod_u1", inbox_id: email, email, display_name: b.display_name, client_id: b.client_id, created_at: "2026-10-06T00:00:00Z", updated_at: "2026-10-06T00:00:00Z" });
+  }
+  return providers(c);
+};
+await withSession({ ...SESSION, agentmail: { podId: "pod_u1", apiKey: "am_pod_key", domain: "bops.bot", handle: null, handles: {} } });
+S.update((s) => {
+  s.installId = "inst1";
+  s.bots = s.bots.filter((b) => b.isMain);
+  delete s.bots[0].mail;
+  delete s.bots[0].email;
+  delete s.bots[0].phone;
+  delete s.bots[0].phoneLine;
+  s.workspaces = [{ id: MAIN_WORKSPACE, name: "Main", createdAt: 0 }];
+});
+const main = () => S.getState().bots[0];
+const mainWs = () => S.getState().workspaces.find((x) => x.id === MAIN_WORKSPACE);
+// The first inbox waits for the user's pick: the step shows, nothing is claimed or made meanwhile.
+let made = inboxesMade.length;
+n = cloud.requests.length;
+assert.equal(await M.ensureInbox(main().id), null);
+assert.ok(mainWs().mailPick && !mainWs().mailPick.offer, "Pick your Bops address");
+assert.equal(inboxesMade.length, made);
+assert.equal(since(n).filter((r) => r.path === "/v1/mail/handle").length, 0);
+// As the user types: checked with the cloud, with the main bot's address on it.
+let r = await HANDLE.GET(new Request(`http://127.0.0.1:3210/api/mail/handle?workspace=${MAIN_WORKSPACE}&try=tiger`));
+assert.deepEqual(await r.json(), { handle: "tiger", status: "available", suggestion: "tiger", current: null, bot: main().name, address: `${main().name.toLowerCase()}@tiger.bops.bot` });
+r = await HANDLE.GET(new Request(`http://127.0.0.1:3210/api/mail/handle?workspace=${MAIN_WORKSPACE}&try=taken-one`));
+assert.deepEqual(await r.json().then((j) => [j.status, j.suggestion, j.address]), ["taken", "taken-one2", `${main().name.toLowerCase()}@taken-one2.bops.bot`]);
+// Taken a moment before the button: refused, with what's free instead.
+r = await HANDLE.POST(new Request("http://127.0.0.1:3210/api/mail/handle", { method: "POST", body: JSON.stringify({ workspaceId: MAIN_WORKSPACE, handle: "taken-one" }) }));
+assert.deepEqual([r.status, (await r.json()).suggestion], [409, "taken-one2"]);
+assert.ok(mainWs().mailPick, "still waiting");
+// "Use this address": claimed, and the inbox is made on it with the client id Bops Cloud uses for a plan's.
+r = await HANDLE.POST(new Request("http://127.0.0.1:3210/api/mail/handle", { method: "POST", body: JSON.stringify({ workspaceId: MAIN_WORKSPACE, handle: "tiger" }) }));
+assert.equal(r.status, 200);
+assert.deepEqual([mainWs().mailSlug, mainWs().mailClaimed, mainWs().mailPick], ["tiger", true, undefined]);
+await until(() => main().email === `${main().name.toLowerCase()}@tiger.bops.bot`, "the main bot's inbox on its handle");
+assert.equal(inboxesMade.at(-1).client_id, `bops-inst1-${main().id}-own-tiger`);
+assert.equal(inboxesMade.at(-1).domain, "tiger.bops.bot");
+// Changed in Settings: the bots move to it, and mail to the old address still arrives.
+r = await HANDLE.POST(new Request("http://127.0.0.1:3210/api/mail/handle", { method: "POST", body: JSON.stringify({ workspaceId: MAIN_WORKSPACE, handle: "tiger-two" }) }));
+assert.equal(r.status, 200);
+await until(() => main().email?.endsWith("@tiger-two.bops.bot") && !mainWs().mailMove, "moved to the new handle");
+assert.deepEqual(main().mail.past, [`${main().name.toLowerCase()}@tiger.bops.bot`]);
+// A workspace's slug from before handles is kept as its handle, quietly; "Choose later" claims the suggestion.
+S.update((s) => {
+  s.workspaces.push({ id: "ws_acme", name: "Acme", createdAt: 1, mailSlug: "acme" }, { id: "ws_two", name: "Two", createdAt: 2 });
+  s.bots.push({ id: "sam", name: "Sam", role: "Lead", color: "#0A0A0A", isMain: true, computerStatus: "none", workspaceId: "ws_acme" }, { id: "kai", name: "Kai", role: "Lead", color: "#0A0A0A", isMain: true, computerStatus: "none", workspaceId: "ws_two" });
+});
+assert.equal(await M.ensureInbox("sam"), "sam@acme.bops.bot");
+assert.equal(handles.claims.at(-1).handle, "acme");
+assert.equal(await M.ensureInbox("kai"), null);
+r = await HANDLE.POST(new Request("http://127.0.0.1:3210/api/mail/handle", { method: "POST", body: JSON.stringify({ workspaceId: "ws_two" }) }));
+assert.deepEqual(await r.json().then((j) => [j.handle, j.auto]), ["two", true]);
+await until(() => S.getState().bots.find((b) => b.id === "kai")?.email === "kai@two.bops.bot", "the inbox after choosing later");
+S.update((s) => {
+  s.bots = s.bots.filter((b) => !["sam", "kai"].includes(b.id));
+  s.workspaces = s.workspaces.filter((w) => w.id === MAIN_WORKSPACE);
+});
+
+// A plan Bops Cloud set up while the Mac was closed: the number and inbox come in as a "plan" event.
+S.update((s) => {
+  delete s.bots[0].mail;
+  delete s.bots[0].email;
+  s.workspaces = [{ id: MAIN_WORKSPACE, name: "Main", createdAt: 0 }];
+});
+const planEvent = (id, payload) => EV.POST(request("/api/cloud/event", { "x-bops-cloud": token }, JSON.stringify({ id, kind: "plan", payload, at: new Date().toISOString() })));
+const phone = { number: "+14155550142", numberId: "num_plan", agentId: "agent_plan", status: "ready" };
+const inbox = { email: "boppy@test.bops.bot", inboxId: "boppy@test.bops.bot", podId: "pod_u1", handle: "test", status: "ready" };
+const said = () => S.getState().messages.filter((m) => m.chatId === `bot:${main().id}` && m.role === "system").map((m) => m.text);
+let before = said().length;
+n = cloud.requests.length;
+for (const id of ["p1", "p1"]) assert.equal((await planEvent(id, { tier: "pro_bops", botId: main().id, workspaceId: MAIN_WORKSPACE, phone, email: inbox, handle: { handle: "test", auto: true, changesLeft: 3 } })).status, 200);
+assert.deepEqual([main().phone, main().phoneLine], ["+14155550142", { numberId: "num_plan", agentId: "agent_plan", plan: true }]);
+// The cloud never opened the number to a first caller (the Mac may have been closed): it opens now, as the user is told, once.
+assert.deepEqual(
+  since(n).filter((r) => r.path === "/v1/phone/lines").map((r) => [r.method, json(r)]),
+  [["PUT", { numberId: "num_plan", botId: main().id, open: true }]],
+);
+assert.ok(said().some((t) => t.includes("+1 (415) 555-0142") && t.includes("in the next 15 minutes")));
+assert.deepEqual([main().email, main().mail.inboxId, main().mail.plan], ["boppy@test.bops.bot", "boppy@test.bops.bot", true]);
+assert.deepEqual([mainWs().mailSlug, mainWs().mailClaimed, mainWs().mailPick?.offer], ["test", true, true], "the app offers to change the address Bops picked");
+assert.equal(said().length - before, 2, "said once, however often it's handed over");
+// "Keep test": the offer goes.
+r = await HANDLE.POST(new Request("http://127.0.0.1:3210/api/mail/handle", { method: "POST", body: JSON.stringify({ workspaceId: MAIN_WORKSPACE, keep: true }) }));
+assert.equal(mainWs().mailPick, undefined);
+// The plan ended: paused (unanswered, unread, nothing sent), then given back.
+assert.equal((await planEvent("p2", { tier: "free_bops", botId: main().id, workspaceId: MAIN_WORKSPACE, phone: { ...phone, status: "paused" }, email: { ...inbox, status: "paused" } })).status, 200);
+assert.deepEqual([main().phoneLine.paused, main().mail.paused], [true, true]);
+assert.match(await M.sendEmail(main().id, { to: ["ana@example.com"], subject: "Hi", text: "Hello" }, {}), /paused/);
+n = cloud.requests.length;
+await assert.rejects(P.sendText(main().id, "+12125550123", "Hello"), /paused/);
+assert.equal(since(n).filter((r) => r.path.startsWith("/proxy/agentphone/v1/messages")).length, 0, "no text out from a paused number");
+assert.equal((await planEvent("p3", { tier: "free_bops", botId: main().id, workspaceId: MAIN_WORKSPACE, phone: { ...phone, status: "released" }, email: { ...inbox, status: "released" } })).status, 200);
+assert.deepEqual([main().phone, main().phoneLine, main().email, main().mail], [undefined, undefined, undefined, undefined]);
+// With the cloud's plan limits on, Free gets no new inbox and no number to buy.
+await withSession({ ...SESSION, agentmail: { podId: "pod_u1", apiKey: "am_pod_key", domain: "bops.bot", handle: "test", handles: { [MAIN_WORKSPACE]: { handle: "test", auto: false, changesLeft: 3 } } }, plan: { tier: "free_bops", limits: true } });
+made = inboxesMade.length;
+assert.equal(await M.ensureInbox(main().id), null);
+assert.equal(inboxesMade.length, made);
+assert.equal((await (await PHONE.GET()).json()).planNeeded, true);
+await withSession({ ...SESSION, agentmail: { podId: "pod_u1", apiKey: "am_pod_key", domain: "bops.bot", handle: "test", handles: { [MAIN_WORKSPACE]: { handle: "test", auto: false, changesLeft: 3 } } }, plan: { tier: "pro_bops", limits: true } });
+assert.equal(await M.ensureInbox(main().id), `${main().name.toLowerCase()}@test.bops.bot`, "Pro: the main bot's inbox");
+assert.equal((await (await PHONE.GET()).json()).planNeeded, false);
+cloud.handle = null;
+web.answer = providers;
+await withSession(SESSION);
+console.log("addresses: picked once per workspace (checked as typed, chosen later, kept from before, changed with the bots moving), a plan's number and inbox taken in, paused and given back, limits on Free");
+}
+
 /* ---------------- Slack through the cloud, and pairing ---------------- */
 
 // Bops' own Slack app on the cloud (CloudSession.slack): the main bot is in #general of the Acme
@@ -927,6 +1281,11 @@ assert.equal(res.status, 200);
 await until(() => posted().length > before, "the pairing hint");
 assert.match(posted().at(-1).markdown_text, /To pair with me, send me the code shown in Bops/);
 assert.equal(posted().at(-1).icon_url, "https://cloud.example/mascot/main-0A0A0A.png", "the bot's picture, from the cloud");
+{
+  // The cloud counts the bot's Slack post for the bot and the app (its Composio calls, at $0 for now).
+  const sent = cloud.requests.filter((x) => x.path === "/proxy/composio/api/v3.1/tools/execute/proxy" && json(x).endpoint === "/chat.postMessage").at(-1);
+  assert.deepEqual([sent.headers["x-bops-bot"], sent.headers["x-bops-app"]], ["boppy", "slackbot"]);
+}
 assert.deepEqual([link().owner, link().pairTries, link().slack.dm], [undefined, 0, undefined], "not paired, no try, and a stranger's DM isn't recorded");
 // A wrong code counts.
 await viaTunnel(dm("111 111"));
@@ -1038,6 +1397,9 @@ assert.match(await decision, /^Not approved/);
 assert.ok(!executed().includes("GMAIL_SEND_DRAFT"), "and nothing sent after a no");
 assert.equal(await C.runAppAction("boppy", "GMAIL_FETCH_EMAILS", {}, { chatId: "bot:boppy" }), '{"messages":[]}');
 assert.ok(executed().includes("GMAIL_FETCH_EMAILS"), "reading runs at once");
+// The run tells the cloud whose and which app it is, for counting it (the cloud's Composio rows).
+const fetched = cloud.requests.filter((x) => x.path.endsWith("/tools/execute/GMAIL_FETCH_EMAILS")).at(-1);
+assert.deepEqual([fetched.headers["x-bops-bot"], fetched.headers["x-bops-app"], fetched.headers.authorization], ["boppy", "gmail", `Bearer ${g.bopsOrgoKey}`]);
 S.update((s) => {
   s.accounts = [];
   delete s.bots.find((b) => b.isMain).access;
@@ -1045,179 +1407,144 @@ S.update((s) => {
 cloud.handle = null;
 console.log("slack: through the cloud's app (events over the tunnel or waiting, links told), pairing codes exact, fresh, once; apps ask before a send; bots told their apps, the gateway and where they're reached");
 
-/* ---------------- The state backup, and restoring onto a fresh install ---------------- */
+/* ---------------- The state in Bops Cloud: what goes up, and how ---------------- */
 
 // (What the calls above set going in the background settles first: a bot's reply, a call's note.)
 await sleep(1000);
-B.setBackupDelayForTests(150);
-const backupBox = g.bopsCloudBackup;
-const puts = () => cloud.requests.filter((x) => x.method === "PUT" && x.path === "/v1/state");
-const gets = () => cloud.requests.filter((x) => x.method === "GET" && x.path === "/v1/state");
-/** This Mac as a fresh install: the main bot alone, nothing said or set up, not checked against the cloud yet. */
-const freshen = () =>
-  S.update((s) => {
-    s.bots = s.bots.filter((b) => b.isMain);
-    for (const b of s.bots) {
-      delete b.phone;
-      delete b.phoneLine;
-    }
-    s.messages = [];
-    s.sessions = [];
-    s.routines = [];
-    s.watches = [];
-    s.vault = [];
-    s.accounts = [];
-    s.channels = [];
-    s.ownerPhones = [];
-    s.ownerEmails = [];
-    s.workspaces = s.workspaces.slice(0, 1);
-    delete s.workspaces[0].line;
-    s.owner = { name: "Test" };
-    delete s.cloudUser;
-  });
-freshen();
-assert.equal(B.freshInstall(S.getState()), true);
-assert.equal(B.freshInstall({}), true, "raw JSON with nothing in it");
-for (const real of [{ messages: [{ role: "user" }] }, { bots: [{}, {}] }, { owner: { name: "A", about: "Bakes" } }, { ownerPhones: [{}] }, { routines: [{}] }, { accounts: [{}] }, { channels: [{}] }, { apps: { gmail: {} } }])
-  assert.equal(B.freshInstall(real), false, JSON.stringify(real));
-// The name from Orgo and a bot's first inbox come by themselves: still fresh.
-S.update((s) => (s.bots[0].mail = { inboxId: "boppy@main.bops.bot", podId: "pod_u1" }));
-assert.equal(B.freshInstall(S.getState()), true);
+assert.equal(await S.flushState(5000), true);
+const blobPuts = () => cloud.stateRequests.filter((x) => x.method === "PUT" && x.path === "/v1/state");
+const msgPosts = () => cloud.stateRequests.filter((x) => x.method === "POST" && x.path === "/v1/messages");
+// Every call is the signed-in user's, on their key, naming them, the protocol and this Mac.
+const lastCall = cloud.stateRequests.at(-1);
+assert.equal(lastCall.headers.authorization, `Bearer ${KEY}`);
+assert.equal(lastCall.headers["x-bops-user"], "u1");
+assert.equal(lastCall.headers["x-bops-protocol"], "2");
+assert.match(lastCall.headers["x-bops-device"], /^[0-9a-f]{16}$/);
+const device = lastCall.headers["x-bops-device"];
 
-// Fresh here, and the cloud has a real copy: restored, keeping what's this Mac's own.
-const backedUp = {
-  bots: [
-    { id: "boppy", name: "Sam", role: "Chief of Staff", color: "#0A0A0A", isMain: true, computerStatus: "none", connectors: {}, channels: {}, voice: "cedar" },
-    { id: "max", name: "Max", role: "Research", color: "#E9FF3B", isMain: false, computerStatus: "none", connectors: { calendar: "Read only" }, channels: {} },
-  ],
-  // From an app before several accounts per app: one account per app, each bot's access by app.
-  apps: { calendar: { accountId: "ca_cal", account: "ana@bakery.com", status: "active", at: 3 } },
-  messages: [{ id: "m1", chatId: "bot:boppy", role: "user", text: "hello", at: 1 }],
-  sessions: [],
-  routines: [],
-  owner: { name: "Ana", about: "Runs a bakery" },
-  account: { user: { id: "someone-else" }, signedInAt: 0 },
-  relay: { on: true, deviceId: "dev_other" },
-  installId: "cafe1234",
-  usage: [{ kind: "mail.inbox", at: 5 }],
-};
-S.update((s) => {
-  s.relay = { on: false, turnedOff: true };
-  s.usage = [{ kind: "mail.inbox", at: 9 }];
-});
-cloud.handle = (x) => (x.method === "GET" && x.path === "/v1/state" ? { json: { version: 7, state: backedUp } } : cloudDefault(x));
-let p0 = puts().length;
-await B.checkBackup();
-let st = S.getState();
-assert.deepEqual(st.bots.map((b) => b.name), ["Sam", "Max"]);
-assert.deepEqual(JSON.parse(JSON.stringify(st.accounts)), [{ id: "ca_cal", app: "googlecalendar", appName: "Google Calendar", name: "ana@bakery.com", status: "active", at: 3 }], "an old backup's apps become accounts");
-assert.deepEqual([st.bots[1].access, "connectors" in st.bots[1], "channels" in st.bots[1], "apps" in st], [{ ca_cal: "read" }, false, false, false], "and each bot's access is by account");
-assert.deepEqual([st.owner.name, st.installId, st.messages[0].text], ["Ana", "cafe1234", "hello"]);
-assert.equal(st.account.user.id, "u1", "who's signed in stays");
-assert.deepEqual(st.relay, { on: false, turnedOff: true }, "routing through this Mac stays this Mac's");
-assert.deepEqual(st.usage.map((u) => u.at), [5, 9], "what it cost here joins what it cost before");
-assert.equal(st.cloudUser, "u1");
-assert.equal(gets().at(-1).headers.authorization, `Bearer ${KEY}`);
-assert.deepEqual([backupBox.dirty, backupBox.timer, puts().length], [false, undefined, p0], "the restored copy isn't sent straight back");
-cloud.handle = null;
-
-// From now on a change goes up 30 seconds (here 150 ms) later, with whatever else changed: one upload, gzipped.
+// A burst of changes is one write (a second later, and no sooner than 5 seconds after the last one:
+// the blob holds the usage ledger); what never leaves this Mac stays here.
+let p0 = blobPuts().length;
 S.update((s) => (s.bots[0].appsKey = "the-apps-secret"));
 for (let i = 0; i < 5; i++) S.update((s) => (s.owner.about = `v${i}`));
-await until(() => puts().length > p0, "an upload");
-await sleep(350);
-assert.equal(puts().length, p0 + 1, "one upload for the burst");
-let put = puts().at(-1);
-assert.equal(put.headers["content-encoding"], "gzip");
-assert.equal(put.headers["content-type"], "application/json");
-assert.equal(put.headers.authorization, `Bearer ${KEY}`);
-let sent = JSON.parse(gunzipSync(put.body).toString("utf8"));
-assert.equal(typeof sent.version, "number");
-assert.equal(sent.state.owner.about, "v4");
-assert.equal(sent.state.bots[0].voice, "cedar", "the cloud reads the voice to answer calls in");
-assert.ok(!gunzipSync(put.body).toString("utf8").includes("the-apps-secret"), "bots' keys for app actions stay here");
+await until(() => blobPuts().length > p0, "a write", 8000);
+await sleep(1300);
+assert.equal(blobPuts().length, p0 + 1, "one write for the burst");
+const wroteAt = Date.now() - 1300;
+S.update((s) => (s.owner.about = "soon after"));
+await until(() => blobPuts().length > p0 + 1, "the next write", 8000);
+assert.ok(Date.now() - wroteAt >= 4500, `the next blob ${Date.now() - wroteAt} ms after the last`);
+S.update((s) => (s.owner.about = "v4"));
+assert.equal(await S.flushState(5000), true, "a save waited on goes at once");
+let put = sentJson(blobPuts().at(-1));
+assert.equal(typeof put.base, "number");
+assert.equal(put.state.owner.about, "v4");
+assert.equal(put.state.messages, undefined, "messages are rows of their own, never in the blob");
+assert.equal(put.state.account, undefined, "who's signed in stays on this Mac");
+assert.ok(!JSON.stringify(put).includes("the-apps-secret"), "bots' keys for app actions stay here");
+assert.equal(states.get("u1").blob.owner.about, "v4");
+// A message goes up on its own, not the chat again; a tapback is that message again; a deleted one is removed.
+let m0 = msgPosts().length;
+const said = S.addMessage({ chatId: botChatId("boppy"), role: "user", text: "just this one" });
+await until(() => msgPosts().length > m0, "the message");
+assert.deepEqual(sentJson(msgPosts().at(-1)), { upsert: [JSON.parse(JSON.stringify(said))], remove: [] });
+m0 = msgPosts().length;
+S.react(said.id, "boppy", { type: "love" });
+await until(() => msgPosts().length > m0, "the tapback");
+assert.deepEqual(sentJson(msgPosts().at(-1)).upsert.map((m) => [m.id, m.reactions?.[0].type]), [[said.id, "love"]]);
+m0 = msgPosts().length;
+S.update((s) => (s.messages = s.messages.filter((m) => m.id !== said.id)));
+await until(() => msgPosts().length > m0, "the removal");
+assert.deepEqual(sentJson(msgPosts().at(-1)), { upsert: [], remove: [said.id] });
+assert.equal(states.get("u1").rows.get(said.id).json, null);
+// A big write goes gzipped.
+S.update((s) => (s.owner.about = "a long story ".repeat(5000)));
+assert.equal(await S.flushState(5000), true);
+assert.equal(blobPuts().at(-1).headers["content-encoding"], "gzip");
 // One at a time: a change while one is going up goes next, never alongside.
 let inFlight = 0;
 let most = 0;
-cloud.handle = async (x) => {
+cloud.stateHandle = async (x) => {
   if (x.method === "PUT") {
     inFlight++;
     most = Math.max(most, inFlight);
     await sleep(300);
     inFlight--;
   }
-  return cloudDefault(x);
+  return null;
 };
-p0 = puts().length;
+p0 = blobPuts().length;
 S.update((s) => (s.owner.about = "w1"));
-await sleep(200);
+await sleep(1100);
 S.update((s) => (s.owner.about = "w2"));
-await sleep(50);
-const flushed = B.flushBackup();
-await until(() => puts().length >= p0 + 2, "both uploads");
-await flushed;
-await sleep(500);
+assert.equal(await S.flushState(5000), true);
 assert.equal(most, 1, "never two at once");
-assert.equal(JSON.parse(gunzipSync(puts().at(-1).body).toString("utf8")).state.owner.about, "w2", "the latest went last");
-cloud.handle = null;
-// Sending now (a sign-out, the server stopping): at once, not in 30 seconds.
-B.setBackupDelayForTests(60_000);
-p0 = puts().length;
-S.update((s) => (s.owner.about = "now"));
-await B.flushBackup();
-assert.equal(puts().length, p0 + 1);
-B.setBackupDelayForTests(150);
-// Never signed out, self-hosting, or for a state that's another account's.
-p0 = puts().length;
-signOut();
-S.update((s) => (s.owner.about = "signed out"));
-await sleep(300);
-assert.equal(puts().length, p0, "not signed out");
-signIn();
-await until(() => puts().length > p0, "the change, once signed in again");
-await sleep(300);
-p0 = puts().length;
-await selfHosted({}, async () => {
-  S.update((s) => (s.owner.about = "self-hosted"));
-  await sleep(300);
-});
-assert.equal(puts().length, p0, "not self-hosting");
-S.update((s) => (s.cloudUser = "u-other"));
-S.update((s) => (s.owner.about = "someone else's"));
-await sleep(300);
-assert.equal(puts().length, p0, "not for another account's state");
-// That state stays the other account's: not claimed, not replaced, not even looked up.
-let g0 = gets().length;
-await B.checkBackup();
-assert.equal(S.getState().cloudUser, "u-other");
-assert.equal(gets().length, g0);
-// A state with real content and no owner yet is claimed by the user it's checked for (no download needed).
-S.update((s) => delete s.cloudUser);
-await B.checkBackup();
-assert.equal(S.getState().cloudUser, "u1");
-assert.equal(gets().length, g0);
-// Fresh, and the cloud has nothing (404) or nothing real: nothing restored, and it goes up from now on.
-freshen();
-await B.checkBackup();
-assert.deepEqual([S.getState().cloudUser, S.getState().bots.length], ["u1", 1]);
-freshen();
-cloud.handle = (x) => (x.method === "GET" && x.path === "/v1/state" ? { json: { version: 1, state: { bots: [{ id: "boppy", name: "Boppy", isMain: true }], messages: [] } } } : cloudDefault(x));
-await B.checkBackup();
-assert.deepEqual([S.getState().cloudUser, S.getState().bots[0].name], ["u1", "Sam"], "not restored: nothing in it");
-cloud.handle = null;
-// Fresh and the cloud can't be reached: nothing goes up until it's been checked, so the backup isn't replaced.
-freshen();
+assert.equal(states.get("u1").blob.owner.about, "w2", "the latest went last");
+cloud.stateHandle = null;
+
+// Another Mac of the user's wrote first: 409, both merged, written again over theirs.
+const mineNow = states.get("u1");
+mineNow.blob = { ...mineNow.blob, bots: [...mineNow.blob.bots, { id: "zed", name: "Zed", role: "Ops", color: "#47C46B", isMain: false, computerStatus: "none" }] };
+mineNow.version++;
+S.update((s) => (s.owner.about = "after the other Mac"));
+assert.equal(await S.flushState(5000), true);
+assert.ok(S.getState().bots.some((b) => b.name === "Zed"), "the other Mac's bot came in");
+assert.equal(S.getState().owner.about, "after the other Mac", "and this Mac's change stands");
+assert.ok(mineNow.blob.bots.some((b) => b.name === "Zed") && mineNow.blob.owner.about === "after the other Mac");
+// It wrote a message, and the cloud said so down the tunnel (or the look every 30 seconds): read and merged in.
+mineNow.rows.set("msg_other", { id: "msg_other", seq: ++seqs, json: { id: "msg_other", chatId: botChatId("boppy"), role: "user", text: "from my other Mac", at: Date.now() } });
+await S.pullState();
+assert.ok(S.getState().messages.some((m) => m.text === "from my other Mac"));
+S.update((s) => (s.bots = s.bots.filter((b) => b.id !== "zed")));
+
+// Offline: the change waits, the app works from memory, and it goes up when the cloud is back.
 process.env.BOPS_CLOUD_URL = "http://127.0.0.1:9";
-await assert.rejects(B.checkBackup(), /Couldn't reach Bops Cloud/);
+S.update((s) => (s.owner.about = "written offline"));
+assert.equal(await S.flushState(1500), false);
+assert.equal(S.unsentState(), true);
 process.env.BOPS_CLOUD_URL = CLOUD;
-p0 = puts().length;
-S.update((s) => (s.owner.about = ""));
-await sleep(300);
-assert.equal(puts().length, p0, "not checked yet: nothing went up");
-await B.checkBackup();
-S.update((s) => (s.owner.name = "Test again"));
-await until(() => puts().length > p0, "an upload once checked");
-console.log("backup: debounced, one at a time, gzipped; restored only onto a fresh install");
+assert.equal(await S.flushState(5000), true);
+assert.equal(states.get("u1").blob.owner.about, "written offline");
+
+// A state an older build uploaded (one account per app, each bot's access by app, this Mac's settings at
+// the top) comes in in today's shape; another Mac's routing never becomes this Mac's.
+states.set("u3", {
+  version: 7,
+  writer: null,
+  blob: {
+    bots: [
+      { id: "boppy", name: "Sam", role: "Chief of Staff", color: "#0A0A0A", isMain: true, computerStatus: "none", connectors: {}, channels: {}, voice: "cedar" },
+      { id: "max", name: "Max", role: "Research", color: "#E9FF3B", isMain: false, computerStatus: "none", connectors: { calendar: "Read only" }, channels: {} },
+    ],
+    apps: { calendar: { accountId: "ca_cal", account: "ana@bakery.com", status: "active", at: 3 } },
+    sessions: [],
+    routines: [],
+    owner: { name: "Ana", about: "Runs a bakery" },
+    account: { user: { id: "someone-else" }, signedInAt: 0 },
+    cloudUser: "u3",
+    relay: { on: true, deviceId: "dev_other" },
+    installId: "cafe1234",
+  },
+  rows: new Map([["m1", { id: "m1", seq: ++seqs, json: { id: "m1", chatId: "bot:boppy", role: "user", text: "hello", at: 1 } }]]),
+});
+await signIn("orgo_key_3", { id: "u3", email: "ana@bakery.com" });
+let st = S.getState();
+assert.deepEqual(st.bots.map((b) => b.name), ["Sam", "Max"]);
+assert.deepEqual(JSON.parse(JSON.stringify(st.accounts)), [{ id: "ca_cal", app: "googlecalendar", appName: "Google Calendar", name: "ana@bakery.com", status: "active", at: 3 }], "an old state's apps become accounts");
+assert.deepEqual([st.bots[1].access, "connectors" in st.bots[1], "channels" in st.bots[1], "apps" in st], [{ ca_cal: "read" }, false, false, false], "and each bot's access is by account");
+assert.deepEqual([st.owner.name, st.installId, st.messages.map((m) => m.text)], ["Ana", "cafe1234", ["hello"]]);
+assert.equal(st.account.user.id, "u3");
+assert.equal(st.relay, undefined, "another Mac's routing isn't this Mac's");
+assert.equal("cloudUser" in st, false);
+assert.equal(await S.flushState(5000), true);
+const u3 = states.get("u3").blob;
+assert.deepEqual([u3.apps, u3.cloudUser, u3.account, u3.relay], [undefined, undefined, undefined, undefined], "written back in today's shape");
+assert.equal(u3.accounts[0].id, "ca_cal");
+// Back to u1: u1's own state, from the cloud.
+await signIn();
+assert.equal(S.getState().owner.about, "written offline");
+assert.equal(S.getState().bots.some((b) => b.name === "Max"), false);
+console.log("state: in the cloud per user, one write per burst and one at a time, each message on its own, merged with another Mac's");
 
 /* ---------------- Routing through this Mac: on by default, the user's "off" sticks ---------------- */
 
@@ -1233,14 +1560,14 @@ assert.deepEqual(JSON.parse(readFileSync(join(scratch, "keychain", encodeURIComp
 await until(async () => (await statusNow()).running, "the relay running", 15_000);
 let rs = await statusNow();
 assert.deepEqual([rs.available, rs.on], [true, true]);
-// The user turns it off: it stays off, also after a restart (it's in the state on disk) and a sign-in.
+// The user turns it off: it stays off, also after a restart (it's in the user's state in the cloud, as this Mac's) and a sign-in.
 rs = await R.setRelay(false);
 assert.equal(rs.on, false);
 assert.deepEqual([S.getState().relay.on, S.getState().relay.turnedOff], [false, true]);
 await R.reconcile();
 await R.reconcile();
 assert.equal(S.getState().relay.on, false);
-await until(() => JSON.parse(readFileSync(join(scratch, ".data/state.json"), "utf8")).relay?.turnedOff, "the off saved");
+await until(() => states.get("u1").blob?.macs?.[device]?.relay?.turnedOff, "the off saved, under this Mac");
 R.relayAfterSignIn();
 await R.reconcile();
 assert.equal(S.getState().relay.on, false);
@@ -1264,13 +1591,39 @@ rs = await statusNow();
 assert.deepEqual([rs.available, rs.on, S.getState().relay.on], [false, false, false]);
 assert.match(rs.reason, /isn't available on your Orgo account yet/);
 assert.equal(orgo.calls.length, asked, "asked again only after 10 minutes");
-// A Mac paired and turned off by an older build (no "off" on record yet) stays off; starting over keeps
-// that, and whose backup the state is.
+// A Mac paired and turned off by an older build (no "off" on record yet) stays off; starting over keeps that.
 S.update((s) => (s.relay = { on: false, deviceId: "dev_9" }));
-S.resetState();
-assert.deepEqual([S.getState().relay, S.getState().cloudUser], [{ on: false, deviceId: "dev_9", turnedOff: true }, "u1"]);
+await S.resetState();
+assert.deepEqual(S.getState().relay, { on: false, deviceId: "dev_9", turnedOff: true });
+assert.ok(cloud.stateRequests.some((x) => x.path === "/v1/state/backups"), "the cloud kept a copy first");
 S.update((s) => (s.relay = undefined));
 console.log("routing: on by default where Orgo offers it, off when the user says so");
+
+// A computer whose proxy is already on (residential): Orgo only changes the route underneath, so Bops
+// restarts its Chrome (each screen's page kept) when it goes through this Mac and when it comes back.
+orgo.offered = true;
+// The script Bops sends to the computer is read from vm/bin under the working folder (the scratch one here).
+mkdirSync(join(scratch, "vm/bin"), { recursive: true });
+symlinkSync(join(root, "vm/bin/bops-keep-screens"), join(scratch, "vm/bin/bops-keep-screens"));
+orgo.computer = { id: "c_route", mode: "residential", deviceId: null, proxyOn: true, ran: [] };
+S.update((s) => Object.assign(s.bots.find((b) => b.isMain), { computerId: "c_route", computerStatus: "ready" }));
+await R.setRelay(true);
+await until(() => S.getState().relayRoutes?.c_route?.applied, "the computer on this Mac's route", 15_000);
+assert.deepEqual([orgo.computer.mode, orgo.computer.deviceId], ["device", S.getState().relay.deviceId]);
+assert.deepEqual(orgo.computer.ran, ["bops-keep-screens save", "bops-keep-screens restore"], "Chrome restarted with its pages, after the switch");
+assert.deepEqual(S.getState().relayRoutes.c_route.before, { proxyOn: true, mode: "residential" });
+orgo.computer.ran = [];
+await R.setRelay(false);
+await until(() => !S.getState().relayRoutes?.c_route, "the computer's route put back", 15_000);
+assert.deepEqual([orgo.computer.mode, orgo.computer.deviceId], ["residential", null]);
+assert.deepEqual(orgo.computer.ran, ["bops-keep-screens save", "bops-keep-screens restore"], "Chrome restarted with its pages when it comes back too");
+await R.stopRelay(5000);
+orgo.computer = null;
+S.update((s) => {
+  Object.assign(s.bots.find((b) => b.isMain), { computerId: undefined, computerStatus: "none" });
+  s.relay = undefined;
+});
+console.log("routing: flipping the switch restarts the computer's Chrome (pages kept) also when its proxy was on already");
 
 /* ---------------- The tunnel, against the fake cloud ---------------- */
 
@@ -1295,7 +1648,6 @@ process.env.PORT = String(macHttp.address().port);
 const connection = (i) => until(() => cloud.connections[i], `connection ${i + 1}`, 8000);
 const frame = (c, test, what) => until(() => c.frames.find(test), what);
 S.update((s) => {
-  s.cloudUser = "u1";
   s.workspaces[0].line = { phone: "+14155550100", numberId: "num_1", agentId: "agt_ws", type: "sms", scope: "sub", at: 0 };
 });
 await withSession(SESSION);
@@ -1384,20 +1736,37 @@ T.ensureCloud();
 await sleep(300);
 assert.equal(cloud.connections.length, 3, "not reopened");
 // A sign-in starts it over on the new key, closing the one before.
-signIn("orgo_key_2");
+await signIn("orgo_key_2");
 await T.startCloud({ signedIn: true });
 const c4 = await connection(3);
 assert.equal(c4.auth, "Bearer orgo_key_2");
 T.ensureCloud();
 await sleep(200);
 assert.equal(cloud.connections.length, 4, "one at a time");
-// A sign-out: the last state goes up while the key is still here, and the tunnel closes for good.
-p0 = puts().length;
-B.setBackupDelayForTests(60_000);
+// The cloud says the state changed (another Mac wrote): this Mac reads what changed.
+const heads = cloud.stateRequests.filter((x) => x.path === "/v1/state/head").length;
+c4.ws.send(JSON.stringify({ t: "state", version: 99, seq: 99 }));
+await until(() => cloud.stateRequests.filter((x) => x.path === "/v1/state/head").length > heads, "a look at what changed");
+// Another account's state comes in while this tunnel is still open (a sign-in landing): what comes
+// down it now was for the user before, and never lands in the new one's state. An event isn't
+// handled nor acknowledged (it comes again on that user's next connect), a webhook is refused.
+assert.equal(await S.flushState(5000), true);
+await S.bindSignIn("user_other", "orgo_key_other");
+const reached = mac.requests.length;
+c4.ws.send(JSON.stringify({ t: "event", id: "45", kind: "call", payload: { ...ownersCall, message: { text: "For the user before only" } }, at: "2026-10-05T12:03:00Z" }));
+c4.ws.send(JSON.stringify({ t: "req", id: "r9", method: "POST", path: "/api/phone/agentphone", headers: { "content-type": "application/json", "x-webhook-id": "wh_10", "x-webhook-event": "agent.message" }, body: Buffer.from(voiceTurn).toString("base64") }));
+const refusedReq = await frame(c4, (f) => f.t === "res" && f.id === "r9", "the webhook turned down");
+assert.equal(refusedReq.status, 503);
+await sleep(400);
+assert.ok(!c4.frames.some((f) => f.t === "ack" && f.id === "45"), "the event isn't acknowledged");
+assert.equal(mac.requests.length, reached, "nothing reached this Mac's routes");
+assert.equal(S.getState().messages.some((m) => m.text?.includes("For the user before only") || m.sms?.id === "cloud-call:45"), false, "nothing in the new user's state");
+await signIn("orgo_key_2");
+// A sign-out: the state goes up on the key still here (app/api/auth/signout), and the tunnel closes for good.
 S.update((s) => (s.owner.about = "last words"));
+assert.equal(await S.flushState(5000), true);
+assert.equal(blobPuts().at(-1).headers.authorization, "Bearer orgo_key_2");
 await T.stopCloud();
-assert.equal(puts().length, p0 + 1);
-assert.equal(puts().at(-1).headers.authorization, "Bearer orgo_key_2");
 await until(() => c4.closed === 1000, "the tunnel closed");
 signOut();
 T.ensureCloud();
@@ -1405,10 +1774,126 @@ await sleep(1500);
 assert.equal(cloud.connections.length, 4, "stays closed signed out");
 console.log("tunnel: requests replayed with the token, events acked once handled, reconnects with backoff");
 
+/* ---------------- Restart Bops: saved to Bops Cloud, sessions dropped, still signed in ---------------- */
+
+const RESTART = await import(`${root}/app/api/restart/route.ts`);
+await signIn();
+await T.startCloud({ signedIn: true });
+const c5 = await connection(4);
+await until(() => g.bopsCloud.session, "the session");
+g.bopsOrgoPlan = { key: KEY, changes: 0, at: Date.now(), plan: Promise.resolve(null) };
+// A change and a new message, still waiting to go up (a second after a change) when the restart comes.
+await S.flushState(5000);
+p0 = blobPuts().length;
+const posts0 = msgPosts().length;
+S.update((s) => (s.owner.about = "just before the restart"));
+const lastWords = S.addMessage({ chatId: botChatId("boppy"), role: "user", text: "Restarting now" });
+assert.equal(S.unsentState(), true);
+// Only from this Mac.
+assert.equal((await RESTART.POST(new Request("http://192.168.1.20:3210/api/restart", { method: "POST" }))).status, 403);
+const restarted = await RESTART.POST(new Request("http://localhost:3210/api/restart", { method: "POST" }));
+assert.deepEqual(await restarted.json(), { ok: true, pid: process.pid });
+// Up in the user's Bops Cloud before the answer, where the new server loads it from: the message on its own, then the rest.
+assert.equal(S.unsentState(), false, "nothing left to send");
+assert.ok(msgPosts().slice(posts0).some((r) => sentJson(r).upsert.some((m) => m.id === lastWords.id && m.text === "Restarting now")), "the new message went up");
+assert.equal(blobPuts().length, p0 + 1, "and the rest, once");
+assert.equal(sentJson(blobPuts().at(-1)).state.owner.about, "just before the restart");
+assert.equal(blobPuts().at(-1).headers["x-bops-user"], USER.id, "the signed-in user's");
+assert.equal(stateOf(USER.id).blob.owner.about, "just before the restart");
+await until(() => c5.closed === 1000, "the tunnel closed");
+assert.equal(g.bopsCloud.session, undefined, "the Bops Cloud session (and its keys) dropped");
+assert.equal(g.bopsOrgoPlan, undefined, "the Orgo plan dropped");
+assert.equal(g.bopsOrgoKey, KEY, "still signed in");
+assert.equal(S.getState().account?.user.id, USER.id);
+assert.equal(S.stateUser(), USER.id, "with their state still loaded");
+// Bops Cloud not taking the state: the restart goes ahead all the same (it's what fixes a stuck
+// server) and says so; what's unsent goes up once the cloud is back (and once more on the way out).
+cloud.stateHandle = (r) => (r.method === "GET" ? undefined : { status: 503, json: { error: "down" } });
+S.update((s) => (s.owner.about = "while the cloud is down"));
+const offline = await (await RESTART.POST(new Request("http://localhost:3210/api/restart", { method: "POST" }))).json();
+assert.deepEqual([offline.ok, offline.pid], [false, process.pid]);
+assert.match(offline.error, /Some changes hadn't reached Bops Cloud yet/);
+assert.equal(S.unsentState(), true);
+// On the way out (the Mac app stops the server next), still not taken: kept in the user's folder on
+// this Mac, for the next start to send. Nothing is lost to a restart while offline.
+await globalThis.__bopsExitWork.get("state")();
+const keptOnMac = join(scratch, ".data", "users", USER.id, "unsent-state.json");
+assert.equal(existsSync(keptOnMac), true, "kept on this Mac on the way out");
+assert.equal(JSON.parse(readFileSync(keptOnMac, "utf8")).blob.owner.about, "while the cloud is down");
+cloud.stateHandle = null;
+assert.equal(await S.flushState(5000), true, "up once the cloud is back");
+assert.equal(stateOf(USER.id).blob.owner.about, "while the cloud is down");
+assert.equal(existsSync(keptOnMac), false, "and the copy on this Mac goes");
+// What starts again: a fresh session from the cloud.
+n = cloud.requests.length;
+await Cl.cloudSession();
+assert.equal(since(n).filter((r) => r.path === "/v1/session").length, 1, "the session asked again");
+await T.stopCloud();
+signOut();
+console.log("restart: the state saved to the user's Bops Cloud first, the cloud session and plan dropped, still signed in");
+
+// An action's inputs get the fields its schema pins to one value (a const) where the bot left them out:
+// NOTION_APPEND_TEXT_BLOCKS lists each block's `type` as optional, then refuses a block without it.
+const rich = { type: "object", properties: { type: { type: "string", const: "text" }, text: { type: "object", properties: { content: { type: "string" } } } } };
+const block = (kind) => ({ type: "object", required: [kind], properties: { type: { type: "string", const: kind }, object: { type: "string", const: "block" }, [kind]: { type: "object", properties: { rich_text: { type: "array", items: rich } } } } });
+const appendSchema = { type: "object", properties: { block_id: { type: "string" }, children: { type: "array", items: { oneOf: [block("paragraph"), block("heading_2")] } } } };
+const text = (t) => ({ rich_text: [{ text: { content: t } }] });
+assert.deepEqual(C.withConsts(appendSchema, { block_id: "b1", children: [{ paragraph: text("Ten years") }, { heading_2: text("Denver") }, { type: "paragraph", paragraph: text("kept") }] }), {
+  block_id: "b1",
+  children: [
+    { paragraph: { rich_text: [{ text: { content: "Ten years" }, type: "text" }] }, type: "paragraph", object: "block" },
+    { heading_2: { rich_text: [{ text: { content: "Denver" }, type: "text" }] }, type: "heading_2", object: "block" },
+    { type: "paragraph", paragraph: { rich_text: [{ text: { content: "kept" }, type: "text" }] }, object: "block" },
+  ],
+});
+// A kind it can't tell (none of their required fields, or two fit) is left as it is; so is anything without a schema.
+assert.deepEqual(C.withConsts(appendSchema, { children: [{ to_do: {} }] }), { children: [{ to_do: {} }] });
+assert.deepEqual(C.withConsts(undefined, { a: 1 }), { a: 1 });
+// Schemas that point to their parts ($ref to $defs) too.
+assert.deepEqual(C.withConsts({ $defs: { P: block("paragraph") }, type: "object", properties: { children: { type: "array", items: { oneOf: [{ $ref: "#/$defs/P" }] } } } }, { children: [{ paragraph: { rich_text: [] } }] }), {
+  children: [{ paragraph: { rich_text: [] }, type: "paragraph", object: "block" }],
+});
+console.log("apps: the fields an action's schema pins to one value filled in where the bot left them out");
+
+/* ---------------- Notices from Orgo: passed on as the cloud sends them, put away there ---------------- */
+
+const NOTICES = await import(`${root}/app/api/notices/route.ts`);
+await signIn();
+await withSession(SESSION);
+const handleBefore = cloud.handle;
+const NOTICE = { id: "7", title: "Maintenance tonight", body: "A few lines.", link: { url: "https://bops.bot/status", label: "Status" } };
+const putAway = [];
+cloud.handle = (r) => {
+  if (r.path === "/v1/notices") return { json: { notices: [NOTICE] } };
+  if (r.path === "/v1/notices/dismiss") {
+    putAway.push(JSON.parse(r.body.toString("utf8")));
+    return { json: { ok: true } };
+  }
+  return handleBefore?.(r);
+};
+assert.deepEqual(await (await NOTICES.GET()).json(), { notices: [NOTICE] });
+assert.equal((await NOTICES.POST(new Request("http://localhost:3210/api/notices", { method: "POST", body: JSON.stringify({ id: "7" }) }))).status, 200);
+assert.deepEqual(putAway, [{ id: "7" }], "put away in the cloud, for all the user's Macs");
+assert.equal((await NOTICES.POST(new Request("http://localhost:3210/api/notices", { method: "POST", body: JSON.stringify({ id: "x" }) }))).status, 400);
+// A cloud that can't be asked: no notices, no error.
+cloud.handle = (r) => (r.path === "/v1/notices" ? { status: 503, json: { error: "down" } } : handleBefore?.(r));
+assert.deepEqual(await (await NOTICES.GET()).json(), { notices: [] });
+cloud.handle = handleBefore;
+signOut();
+assert.deepEqual(await (await NOTICES.GET()).json(), { notices: [] }, "signed out: none");
+console.log("notices: passed on as the cloud sends them and put away there; none when it can't be asked, or signed out");
+
 // Outside this Mac only the stub was asked: the providers when self-hosting (AgentMail always), Composio's
 // own version check and usage reports (self-hosting), and Orgo for routing.
 const stubbed = new Set(["api.openai.com", "api.agentphone.ai", "api.agentmail.to", "api.honcho.dev", "backend.composio.dev", "api.typesafe.ai", "registry.npmjs.org", "telemetry.composio.dev", "www.orgo.ai"]);
 assert.deepEqual(web.calls.filter((c) => !stubbed.has(c.host)), []);
+// Every call to Bops Cloud said which app it came from, sockets too (cloud/app-version.ts keeps old apps
+// out by it); a provider called directly (self-hosting) or Orgo never hears it.
+const unsaid = [...cloud.requests, ...cloud.stateRequests].filter((r) => r.headers["x-bops-version"] !== "9.9.9").map((r) => `${r.method} ${r.path}`);
+assert.deepEqual(unsaid, [], "every call to the cloud says the app's version");
+assert.ok(cloud.upgrades.length > 0 && cloud.upgrades.every((u) => u.version === "9.9.9"), `every socket says it: ${JSON.stringify(cloud.upgrades.map((u) => [u.path, u.version]))}`);
+assert.ok(cloud.requests.some((r) => r.path.startsWith("/proxy/openai/")) && cloud.requests.some((r) => r.path.startsWith("/proxy/composio")), "through the providers' proxies too");
+assert.deepEqual(web.calls.filter((c) => c.headers["x-bops-version"]).map((c) => c.host), [], "never to anyone else");
 console.log(`all cloud tests passed (${cloud.requests.length} requests to the fake cloud, ${cloud.connections.length} tunnels, ${web.calls.length} stubbed calls, none to the network)`);
 // The link to the project's node_modules goes first, on its own, so nothing behind it is touched.
 unlinkSync(join(scratch, "node_modules"));

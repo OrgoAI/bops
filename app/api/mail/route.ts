@@ -1,4 +1,5 @@
 import { checkMailNow, mailStatus, setupDomain, verifyDomain } from "@/lib/server/mail";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,8 @@ export async function GET() {
 
 /** { action: "setup" } adds bops.bot to AgentMail (DNS records come back); { action: "verify" } checks the DNS again; { action: "check" } looks for new email now. */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const { action } = (await request.json().catch(() => ({}))) as { action?: string };
   try {
     if (action === "setup") return Response.json(await setupDomain());

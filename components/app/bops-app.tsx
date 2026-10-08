@@ -10,21 +10,25 @@ import { ComputerPeek, ComputerView, defaultDisplay } from "./computer";
 import { BusyBots, Mascot } from "./mascot";
 import { CHAT_TAB, hostOf, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
 
-/** The tabs open from the start besides the computer: your Mac, and the chat's bot's profile. */
+/** Your Mac's tab, and the chat's bot's profile (it follows the chat, like the computer tab); both open on demand. */
 const MAC_TAB = "tab_mac";
 const PROFILE_TAB = "tab_profile";
 import { Sidebar } from "./sidebar";
-import { SignIn, useAuthStatus } from "./sign-in";
+import { CloudUnreachable, SignIn, useAuthStatus } from "./sign-in";
 import { Setup, ThisMacSettings } from "./setup";
 import { TooltipLayer } from "./tooltip";
 import { VaultTab } from "./vault";
 import { MacPreviews } from "./mac-tab";
 import { OPEN_MAC_KEY } from "./mac-pip";
 import { MacComputer } from "./mac-computer";
-import { chatInWorkspace, post, teamOf, useAppState } from "./ui";
+import { NoticePopup } from "./notice-popup";
+import { chatInWorkspace, post, teamOf, useAppState, useSelfHosted } from "./ui";
+import { UsageData, useAnalytics } from "./usage-data";
+import { trackEvent } from "@/lib/analytics";
 import { OwnerEmail, useOwnerEmailInfo } from "./owner-email";
 import { OwnerPhone, useOwnerPhone, usePhoneInfo, type OwnerNumber, type PendingCode } from "./owner-phone";
 import { LineLink } from "./line-link";
+import { EmailAddresses, MailAddressStep } from "./mail-address";
 import { bannerNumber, ReachBanner } from "./reach-banner";
 
 /*
@@ -68,8 +72,11 @@ function chime() {
  */
 export function BopsApp() {
   const state = useAppState();
-  const [auth, recheck] = useAuthStatus(state?.account?.signedInAt);
+  const [auth, recheck, retry] = useAuthStatus(state?.account?.signedInAt);
+  useAnalytics(state);
   if (auth?.needsSignIn) return <SignIn onSignedIn={recheck} />;
+  // Signed in, but their Bops (it lives in Bops Cloud) couldn't be loaded: nothing to show until it can.
+  if (auth?.cloudProblem) return <CloudUnreachable onRetry={retry} />;
   return <Bops state={auth ? state : null} />;
 }
 
@@ -83,12 +90,8 @@ function Bops({ state }: { state: AppState | null }) {
   // Full width shows your Mac instead of a bot's computer.
   const [macFocus, setMacFocus] = useState(false);
   // The right side's tabs (the chat's own computer is always first; see panel-tabs.tsx).
-  // Open from the start: your Mac, the chat's bot's profile (it follows the chat, like the computer tab), and a new tab.
-  const [openTabs, setTabs] = useState<PanelTab[]>([
-    { id: MAC_TAB, kind: "mac" },
-    { id: PROFILE_TAB, kind: "bot", botId: "", section: "details" },
-    { id: "tab_new", kind: "new" },
-  ]);
+  // Only the computer is open from the start; the rest open as you need them.
+  const [openTabs, setTabs] = useState<PanelTab[]>([]);
   // The work the panel last followed ("thread:where"), so it switches between your Mac and the bot's
   // computer only when that changes, and a tab you picked stays until it does.
   const [followed, setFollowed] = useState("");
@@ -100,7 +103,14 @@ function Bops({ state }: { state: AppState | null }) {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
   const [active, setActive] = useState(CHAT_TAB);
+  // Where you were, so leaving a tab goes back there: the tabs you've had open (latest last), and how
+  // the side panel was when the tab on it now opened it (hidden, or a computer full width).
+  const [recent, setRecent] = useState<string[]>([CHAT_TAB]);
+  const [openedFrom, setOpenedFrom] = useState<{ id: string; panelOpen: boolean; focus: boolean } | null>(null);
+  const panelRef = useRef<HTMLElement>(null);
   const [displays, setDisplays] = useState<Record<string, number>>({});
+  // The open thread's screen the panel last went to ("thread:display"), so it follows the thread there once.
+  const [shownScreen, setShownScreen] = useState("");
   // Screens you picked yourself stay put; otherwise the panel follows the action (see ComputerView).
   const [pinned, setPinned] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState(false);
@@ -189,6 +199,8 @@ function Bops({ state }: { state: AppState | null }) {
     wasFocused.current = focus;
   }, [focus]);
 
+  // What Esc does to the tab on the right, set on every render (see escTab.current below).
+  const escTab = useRef<(e: KeyboardEvent) => void>(() => {});
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
@@ -201,6 +213,8 @@ function Bops({ state }: { state: AppState | null }) {
         setSettings(false);
         setAccount(false);
         setSetup(false);
+        // Last, so going back can bring a full-width computer back.
+        escTab.current(e);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -221,6 +235,11 @@ function Bops({ state }: { state: AppState | null }) {
     .map((t) => (t.id === PROFILE_TAB && t.kind === "bot" ? { ...t, botId: chatBotId } : t))
     .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId));
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
+  if (recent.at(-1) !== active) {
+    setRecent([...recent.filter((id) => id !== active), active].slice(-20));
+    // Gone on to another tab: leaving that one later shouldn't hide the panel this one opened.
+    if (openedFrom && openedFrom.id !== active) setOpenedFrom(null);
+  }
 
   // Where the chat's bot is working now: on your Mac or on its own computer. When that changes (a
   // task starts, or moves), the panel shows it, unless you're reading something (a page, the Vault).
@@ -231,8 +250,10 @@ function Bops({ state }: { state: AppState | null }) {
     const browsing = tab && (tab.kind === "web" || tab.kind === "vault" || (tab.kind === "computer" && tab.botId !== chatBotId) || (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
       if (lead.runsOn === "mac") {
-        if (!openTabs.some((t) => t.id === MAC_TAB)) setTabs([...openTabs, { id: MAC_TAB, kind: "mac" }]);
-        setActive(MAC_TAB);
+        // Your Mac's tab, however it was opened (from a new tab it keeps that tab's id): never a second one.
+        const mac = openTabs.find((t) => t.kind === "mac");
+        if (!mac) setTabs([...openTabs, { id: MAC_TAB, kind: "mac" }]);
+        setActive(mac?.id ?? MAC_TAB);
       } else setActive(CHAT_TAB);
     }
   }
@@ -269,14 +290,12 @@ function Bops({ state }: { state: AppState | null }) {
   /** Show a tab, opening it first if it isn't open yet. */
   const openTab = (match: (t: PanelTab) => boolean, make: () => PanelTab, update?: (t: PanelTab) => PanelTab) => {
     const open = tabs.find(match);
-    if (open) {
-      if (update) setTabs(tabs.map((t) => (t === open ? update(t) : t)));
-      setActive(open.id);
-    } else {
-      const t = make();
-      setTabs([...tabs, t]);
-      setActive(t.id);
-    }
+    const t = open ?? make();
+    if (!open) setTabs([...tabs, t]);
+    else if (update) setTabs(tabs.map((x) => (x === open ? update(x) : x)));
+    setActive(t.id);
+    // Opened over a hidden side panel, or a computer full width: leaving it puts that back.
+    if (!panelOpen || focus) setOpenedFrom({ id: t.id, panelOpen, focus });
     setPanelOpen(true);
     setFocus(false);
   };
@@ -291,19 +310,46 @@ function Bops({ state }: { state: AppState | null }) {
   const openProfile = (id: string, section: Section = "details") =>
     openTab(
       (t) => t.kind === "bot" && t.botId === id && (t.id === PROFILE_TAB) === (id === chatBotId),
-      () => ({ id: tabId(), kind: "bot", botId: id, section }),
+      () => ({ id: id === chatBotId ? PROFILE_TAB : tabId(), kind: "bot", botId: id, section }),
       (t) => ({ ...t, section }) as PanelTab,
     );
   const openVault = () => openTab((t) => t.kind === "vault", () => ({ id: tabId(), kind: "vault" }));
-  const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: tabId(), kind: "mac" }));
+  const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
   // eslint-disable-next-line react-hooks/refs -- kept current for the storage listener above
   openMacRef.current = openMac;
   const openWeb = (url: string, title?: string) => openTab((t) => t.kind === "web" && t.url === url, () => ({ id: tabId(), kind: "web", url, title }));
+  /**
+   * Leave the tab you're on for where you were: the tab you had open before it (else `fallback`), and the
+   * side panel the way it was if this tab opened it.
+   */
+  const leave = (id: string, open: PanelTab[], fallback = CHAT_TAB) => {
+    const before = [...recent].reverse().find((r) => r !== id && (r === CHAT_TAB || open.some((t) => t.id === r)));
+    setActive(before ?? fallback);
+    if (openedFrom?.id === id) {
+      setPanelOpen(openedFrom.panelOpen);
+      setFocus(openedFrom.focus);
+    }
+  };
   const closeTab = (id: string) => {
     const i = tabs.findIndex((t) => t.id === id);
     const rest = tabs.filter((t) => t.id !== id);
     setTabs(rest);
-    if (active === id) setActive(rest[i - 1]?.id ?? rest[i]?.id ?? CHAT_TAB);
+    setRecent(recent.filter((r) => r !== id));
+    if (active === id) leave(id, rest, rest[i - 1]?.id ?? rest[i]?.id ?? CHAT_TAB);
+  };
+  /** A page-like tab's own X (and Esc) closes it. */
+  const leaveTab = closeTab;
+  // Esc leaves a tab that reads as a page (the Vault, a bot's profile) for where you were, once nothing
+  // nearer wants it: a sheet, a thread or a dialog (the app picker, an image) closes first, something
+  // inside that used it (a form) says so with preventDefault, and Esc while typing elsewhere (the chat,
+  // a search) stays there.
+  // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
+  escTab.current = (e) => {
+    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot") ? tab : undefined;
+    if (!page || e.defaultPrevented || thread || composing || settings || account || setup || document.querySelector('[role="dialog"]')) return;
+    const el = e.target instanceof HTMLElement ? e.target : null;
+    if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && !panelRef.current?.contains(el)) return;
+    leaveTab(page.id);
   };
   const pickTab = (id: string) => {
     setActive(id);
@@ -356,16 +402,28 @@ function Bops({ state }: { state: AppState | null }) {
     setComposing(false);
     setFocus(false);
     setThreadId(s.id);
-    // A thread on your Mac shows your Mac; one in the cloud, the bot's computer.
+    // A thread on your Mac shows your Mac; one in the cloud, the bot's computer, on its screen.
     if (s.runsOn === "mac") {
-      if (!openTabs.some((t) => t.id === MAC_TAB)) setTabs([...openTabs, { id: MAC_TAB, kind: "mac" }]);
-      setActive(MAC_TAB);
+      const mac = openTabs.find((t) => t.kind === "mac");
+      if (!mac) setTabs([...openTabs, { id: MAC_TAB, kind: "mac" }]);
+      setActive(mac?.id ?? MAC_TAB);
     } else setActive(CHAT_TAB);
-    if (s.lastDisplay !== undefined) {
-      setDisplays({ ...displays, [s.botId]: s.lastDisplay });
+    const screen = s.display ?? s.lastDisplay;
+    if (screen !== undefined) {
+      setDisplays({ ...displays, [s.botId]: screen });
       setPinned((p) => ({ ...p, [s.botId]: true }));
     }
+    setShownScreen(`${s.id}:${screen}`);
+    // Its screen comes up with it, even with the side panel hidden.
+    if (screen !== undefined || s.macScreen !== undefined) setPanelOpen(true);
   };
+  // The open thread gets a screen (it was waiting for one) or moves to another: the panel goes there.
+  const threadScreen = thread && thread.runsOn !== "mac" ? thread.display : undefined;
+  if (thread && threadScreen !== undefined && shownScreen !== `${thread.id}:${threadScreen}`) {
+    setShownScreen(`${thread.id}:${threadScreen}`);
+    setDisplays({ ...displays, [thread.botId]: threadScreen });
+    setPinned((p) => ({ ...p, [thread.botId]: true }));
+  }
 
   const chatColumn = composing ? (
     <ToPicker state={state} onOpenChat={openChat} onCancel={() => setComposing(false)} />
@@ -383,7 +441,10 @@ function Bops({ state }: { state: AppState | null }) {
           setPinned((p) => ({ ...p, [id]: true }));
           openComputer(id);
         }}
-        onUpgrade={() => setAccount(true)}
+        onUpgrade={() => {
+          trackEvent("bops_upgrade_clicked", { surface: "chat" });
+          setAccount(true);
+        }}
         peek={!panelOpen && <ComputerPeek state={state} bot={bot} onOpen={() => setPanelOpen(true)} />}
         call={call}
         onCall={setCall}
@@ -417,13 +478,25 @@ function Bops({ state }: { state: AppState | null }) {
     <BusyBots.Provider value={busy}>
     <OpenLink.Provider value={openWeb}>
       <TooltipLayer />
+      <NoticePopup />
       <div className="flex h-screen flex-col bg-white font-sans text-ink antialiased">
-        <TitleBar columns={columns} wide={focus || !panelOpen} tabs={tabBar} panelOpen={panelOpen && !focus} onTogglePanel={() => (focus ? setFocus(false) : setPanelOpen(!panelOpen))} />
+        <TitleBar
+          columns={columns}
+          wide={focus || !panelOpen}
+          tabs={tabBar}
+          panelOpen={panelOpen && !focus}
+          onTogglePanel={() => {
+            // You set the panel yourself: leaving the tab on it keeps it as it is.
+            setOpenedFrom(null);
+            if (focus) setFocus(false);
+            else setPanelOpen(!panelOpen);
+          }}
+        />
         <div className={`grid min-h-0 flex-1 ${columns}`}>
           <Sidebar state={state} chatId={chat.id} onOpenChat={openChat} onOpenThread={openThread} onCompose={() => setComposing(true)} onSettings={() => setSettings(true)} onAccount={() => setAccount(true)} onSetup={() => setSetup(true)} onVault={openVault} onOpenWatch={showWatch} />
           {focus && macFocus ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
-              <MacComputer state={state} mode="focus" onBack={() => setFocus(false)} onOpenThread={openThread} />
+              <MacComputer state={state} mode="focus" showThread={thread?.runsOn === "mac" ? thread.id : undefined} onBack={() => setFocus(false)} onOpenThread={openThread} />
             </div>
           ) : focus ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
@@ -443,7 +516,7 @@ function Bops({ state }: { state: AppState | null }) {
             <>
               {chatColumn}
               {panelOpen && (
-                <section className="relative flex min-h-0 min-w-0 flex-col bg-white">
+                <section ref={panelRef} className="relative flex min-h-0 min-w-0 flex-col bg-white">
                   {cutBack && (
                     <div className="absolute left-1/2 top-3 z-40 flex -translate-x-1/2 animate-[screen-in_300ms_ease-out] items-center gap-2 rounded-full bg-ink py-1 pl-3 pr-1 text-[12.5px] leading-4 text-white shadow-[0_10px_24px_-10px_#00000080]">
                       <span className="max-w-[260px] truncate">New from {cutBack.name}</span>
@@ -465,6 +538,7 @@ function Bops({ state }: { state: AppState | null }) {
                         <WebTab
                           key={t.id}
                           url={t.url}
+                          user={state.account?.user.id}
                           hidden={t.id !== active}
                           onPage={(url, title) => setTabs((all) => all.map((x) => (x.id === t.id ? { ...x, title: title || hostOf(url) } : x)))}
                         />
@@ -480,6 +554,11 @@ function Bops({ state }: { state: AppState | null }) {
                       onOpenThread={openThread}
                       onOpenVault={openVault}
                       onOpenComputer={openComputer}
+                      onUpgrade={() => {
+                        trackEvent("bops_upgrade_clicked", { surface: "bot_panel" });
+                        setAccount(true);
+                      }}
+                      onClose={() => leaveTab(tab.id)}
                     />
                   ) : tab?.kind === "new" ? (
                     <NewTab
@@ -494,7 +573,7 @@ function Bops({ state }: { state: AppState | null }) {
                       onMac={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "mac" } : t)))}
                     />
                   ) : tab?.kind === "vault" ? (
-                    <VaultTab state={state} />
+                    <VaultTab state={state} onClose={() => leaveTab(tab.id)} />
                   ) : null}
                   {/* Your Mac stays capturing, hidden, for two minutes after you leave it (restarting capture is slow). */}
                   {(showingMac || macHeld) && (
@@ -502,6 +581,7 @@ function Bops({ state }: { state: AppState | null }) {
                       <MacComputer
                         state={state}
                         mode="panel"
+                        showThread={thread?.runsOn === "mac" ? thread.id : undefined}
                         onFocus={() => {
                           setMacFocus(true);
                           setFocus(true);
@@ -552,6 +632,8 @@ function Bops({ state }: { state: AppState | null }) {
           />
         )}
         {setup && <Setup state={state} onClose={() => setSetup(false)} />}
+        {/* The first time a workspace gets email: "Pick your Bops address" (or an offer to change one Bops picked). */}
+        {!settings && !account && !setup && <MailAddressStep state={state} />}
         {/* What bots are doing on the user's Mac, live, in the corner (hidden while the Your Mac tab is open). */}
         {!(tab?.kind === "mac" && panelOpen) && <MacPreviews state={state} onOpen={openMac} />}
       </div>
@@ -684,17 +766,6 @@ type PhoneInfo = {
   workspaces?: { id: string; name: string; main: string | null; line: { phone: string; type: string } | null; call: string | null }[];
   lines?: { bot: string; phone: string }[];
 };
-
-/** Settings, the way it's meant to be used: Bops runs every service for you, so it shows only what's yours to set. */
-function useSelfHosted() {
-  const [selfHosted, setSelfHosted] = useState(false);
-  useEffect(() => {
-    void fetch("/api/config")
-      .then((r) => r.json())
-      .then((c: { selfHosted?: boolean }) => setSelfHosted(!!c.selfHosted));
-  }, []);
-  return selfHosted;
-}
 
 /**
  * A row of How your bots reach you that has nothing to set yet: still loading, not on this server, or
@@ -961,7 +1032,9 @@ function Settings({ state, onClose }: { state: AppState; onClose: () => void }) 
         </div>
 
         <OwnerSettings owner={state.owner} />
+        {!selfHosted && <UsageData />}
         <ReachSettings />
+        {!selfHosted && <EmailAddresses state={state} />}
         <ThisMacSettings state={state} />
 
         <div className="flex flex-col gap-2 px-[22px] pt-4">

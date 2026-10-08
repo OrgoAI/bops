@@ -1,0 +1,10 @@
+# Bops was created by @nickvasilescu (see AUTHORS), who owns its core: he is asked to review
+# changes to these paths. Nothing here requires his approval to merge.
+/lib/        @nickvasilescu
+/app/        @nickvasilescu
+/components/ @nickvasilescu
+/cloud/      @nickvasilescu
+/desktop/    @nickvasilescu
+/vm/         @nickvasilescu
+/orgo/       @nickvasilescu
+/edge/       @nickvasilescu

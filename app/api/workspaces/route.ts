@@ -1,8 +1,11 @@
 import { deleteWorkspace } from "@/lib/server/remove";
 import { createWorkspace, ensureMain, renameWorkspace, switchWorkspace } from "@/lib/server/workspaces";
+import { notReady } from "@/lib/server/ready";
 
 /** A new workspace: its own team, starting with its own Sam. It becomes the current one. */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const { name } = (await request.json().catch(() => ({}))) as { name?: string };
   ensureMain();
   return Response.json(createWorkspace(name ?? ""));
@@ -10,6 +13,8 @@ export async function POST(request: Request) {
 
 /** Switch to a workspace, or rename one. */
 export async function PATCH(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const { id, name, current } = (await request.json().catch(() => ({}))) as { id?: string; name?: string; current?: string };
   ensureMain();
   try {
@@ -23,6 +28,8 @@ export async function PATCH(request: Request) {
 
 /** Delete a workspace with its team and their computers. */
 export async function DELETE(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const { id } = (await request.json().catch(() => ({}))) as { id?: string };
   ensureMain();
   try {

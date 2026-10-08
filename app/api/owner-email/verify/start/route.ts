@@ -1,4 +1,5 @@
 import { fromThisMac, ownerEmailStatus, startOwnerEmail } from "@/lib/server/owner-email";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,8 @@ export const dynamic = "force-dynamic";
  * set). Open this to hosted servers once a request proves which Orgo user sent it.
  */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   if (!fromThisMac(request)) return Response.json({ ok: false, error: "Adding an email only works in the app on your Mac for now." }, { status: 403 });
   const { address } = (await request.json().catch(() => ({}))) as { address?: unknown };
   if (typeof address !== "string" || !address.trim()) return Response.json({ ok: false, error: "That doesn't look like an email address." }, { status: 400 });

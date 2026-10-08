@@ -1,4 +1,5 @@
 import { relayStatus, setRelay } from "@/lib/server/relay";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,8 @@ export async function GET() {
 
 /** Turn it on (pairs this Mac the first time, starts the relay, switches the computers) or off. */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   const body = (await request.json().catch(() => ({}))) as { on?: unknown };
   if (typeof body.on !== "boolean") return Response.json({ error: "on: true or false" }, { status: 400 });
   try {

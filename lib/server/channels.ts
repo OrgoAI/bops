@@ -5,9 +5,9 @@ import type { SlackLinkIn, SlackLinksBody, SlackLinksResult } from "@/cloud/prot
 import { pictureName } from "@/lib/mascot";
 import { botChatId, pairCodeLive, PAIR_CODE_MS, type Bot, type ChannelKind, type ChannelLink, type ChannelPlace, type Message } from "@/lib/types";
 import { cloudJson, cloudOn, cloudSession, cloudSessionNow } from "./cloud";
-import { deleteSecret, getSecret, setSecret } from "./keychain";
+import { deleteUserSecret, getUserSecret, setUserSecret } from "./keychain";
 import { composio, composioUser, publicUrl, runAs } from "./composio";
-import { addMessage, bot, getState, id, ownerName, patchSession, update, watchChanges } from "./store";
+import { addMessage, bot, getState, id, ownerName, patchSession, stateReady, update, watchChanges } from "./store";
 import { saveUpload } from "./uploads";
 
 /**
@@ -79,7 +79,7 @@ export async function removeLink(linkId: string) {
     d.ws?.close();
     live.discord.delete(linkId);
   }
-  if (l.kind !== "slack") await deleteSecret(secretOf(linkId));
+  if (l.kind !== "slack") await deleteUserSecret(secretOf(linkId));
   update((s) => void (s.channels = (s.channels ?? []).filter((x) => x.id !== linkId)));
 }
 
@@ -97,8 +97,23 @@ export function repair(linkId: string) {
   });
 }
 
+/** Every channel's listener stops (a sign-out, or another account signing in: they listen on that user's tokens). */
+export function stopChannels() {
+  for (const [linkId, ctl] of live.telegram) {
+    ctl.abort();
+    live.telegram.delete(linkId);
+  }
+  for (const [linkId, d] of live.discord) {
+    d.stop = true;
+    if (d.beat) clearInterval(d.beat);
+    d.ws?.close();
+    live.discord.delete(linkId);
+  }
+}
+
 /** Start every channel's listener. Safe to call again: running ones are left alone. */
 export function startChannels() {
+  if (!stateReady()) return;
   for (const l of linksOf("telegram")) if (!live.telegram.has(l.id)) void pollTelegram(l.id);
   for (const l of linksOf("discord")) if (!live.discord.has(l.id)) void connectDiscord(l.id);
   // Signed in with Orgo, Slack's events come through Bops Cloud (which never passes Composio's live
@@ -293,7 +308,7 @@ export async function renameInChannels(botId: string) {
   const b = bot(botId);
   if (!b) return;
   for (const l of (getState().channels ?? []).filter((x) => x.botId === botId)) {
-    const token = l.kind === "slack" ? null : await getSecret(secretOf(l.id));
+    const token = l.kind === "slack" ? null : await getUserSecret(secretOf(l.id));
     if (!token) continue;
     if (l.kind === "telegram") await tg(token, "setMyName", { name: b.name }).catch(() => {});
     if (l.kind === "discord") {
@@ -315,7 +330,7 @@ async function slackPost(l: ChannelLink, channel: string, text: string, thread?:
   const b = bot(l.botId);
   const accountId = l.slack!.accountId;
   if (b && !plainSlack.has(accountId)) {
-    const r = (await composio()
+    const r = (await composio(l.botId, "slackbot")
       .tools.proxyExecute({
         endpoint: "/chat.postMessage",
         method: "POST",
@@ -328,7 +343,7 @@ async function slackPost(l: ChannelLink, channel: string, text: string, thread?:
     plainSlack.add(accountId);
   }
   const shared = linksOf("slack").filter((x) => x.slack?.accountId === accountId).length > 1;
-  await runAs(accountId, "SLACKBOT_SEND_MESSAGE", { channel, markdown_text: shared && b ? `*${b.name}:* ${text}` : text, ...(thread ? { thread_ts: thread } : {}) });
+  await runAs(accountId, "SLACKBOT_SEND_MESSAGE", { channel, markdown_text: shared && b ? `*${b.name}:* ${text}` : text, ...(thread ? { thread_ts: thread } : {}) }, l.botId);
 }
 
 /**
@@ -401,7 +416,7 @@ async function react(l: ChannelLink, p: ChannelPlace, emoji: string) {
     await dc(await tokenOf(l), "PUT", `/channels/${p.chat}/messages/${p.messageId}/reactions/${encodeURIComponent(emoji)}/@me`);
   } else {
     const name: Record<string, string> = { "❤️": "heart", "👍": "+1", "👎": "-1", "😂": "joy", "‼️": "bangbang", "❓": "question" };
-    await runAs(l.slack!.accountId, "SLACKBOT_ADD_REACTION_TO_AN_ITEM", { channel: p.chat, timestamp: p.messageId, name: name[emoji] ?? "+1" });
+    await runAs(l.slack!.accountId, "SLACKBOT_ADD_REACTION_TO_AN_ITEM", { channel: p.chat, timestamp: p.messageId, name: name[emoji] ?? "+1" }, l.botId);
   }
 }
 
@@ -420,7 +435,7 @@ function typing(l: ChannelLink, chat: string) {
 }
 
 async function tokenOf(l: ChannelLink) {
-  const t = await getSecret(secretOf(l.id));
+  const t = await getUserSecret(secretOf(l.id));
   if (!t) throw new Error(`${KIND_NAME[l.kind]} token is missing from the Keychain`);
   return t;
 }
@@ -460,7 +475,7 @@ export async function linkTelegram(botId: string, token: string) {
   await tg(t, "deleteWebhook", { drop_pending_updates: false }).catch(() => {});
   await dressTelegram(t, b);
   const made = addLink({ kind: "telegram", botId, handle: `@${me.username}`, telegram: { userId: me.id, username: me.username } });
-  await setSecret(secretOf(made.id), t);
+  await setUserSecret(secretOf(made.id), t);
   void pollTelegram(made.id);
   return made;
 }
@@ -578,7 +593,7 @@ export async function linkDiscord(botId: string, token: string) {
   for (const l of linksOf("discord").filter((x) => x.botId === botId)) await removeLink(l.id);
   await dressDiscord(t, b);
   const made = addLink({ kind: "discord", botId, handle: b.name, discord: { userId: me.id, appId: app.id, username: me.username } });
-  await setSecret(secretOf(made.id), t);
+  await setUserSecret(secretOf(made.id), t);
   void connectDiscord(made.id);
   return made;
 }
@@ -694,7 +709,7 @@ export async function slackChannels(accountId: string) {
  * Without the workspace no message could be matched to the bot, so no answer is a failure.
  */
 async function slackIdentity(accountId: string) {
-  const r = (await composio()
+  const r = (await composio(undefined, "slackbot")
     .tools.proxyExecute({ endpoint: "/auth.test", method: "POST", connectedAccountId: accountId })
     .catch((e: Error) => {
       throw new Error(`Couldn't ask Slack which workspace this is: ${e.message}`);

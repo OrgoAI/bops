@@ -1,4 +1,6 @@
 import OpenAI, { type ClientOptions } from "openai";
+import { APP_VERSION_HEADER, TELEMETRY_HEADER } from "@/cloud/protocol";
+import { appVersion, telemetryHere } from "./app-version";
 import { cloudProxy } from "./cloud";
 
 /**
@@ -9,9 +11,19 @@ import { cloudProxy } from "./cloud";
  * Self-hosting, it's OPENAI_API_KEY: the Mac app ships with no keys, and a client made with
  * `new OpenAI()` throws on import without one, which takes down every route that imports it.
  */
-export function openaiClient(opts: Omit<ClientOptions, "apiKey"> = {}) {
+export function openaiClient(opts: Omit<ClientOptions, "apiKey" | "defaultHeaders"> = {}) {
   const client = new OpenAI({
     ...opts,
+    // Which app is calling, said to Bops Cloud only: read at each call (and each sideband socket), and
+    // left out (null) when the app calls OpenAI directly.
+    defaultHeaders: {
+      get [APP_VERSION_HEADER]() {
+        return cloudProxy("openai") ? (appVersion() ?? null) : null;
+      },
+      get [TELEMETRY_HEADER]() {
+        return cloudProxy("openai") && !telemetryHere() ? "off" : null;
+      },
+    },
     apiKey: async () => {
       const via = cloudProxy("openai");
       if (via) return via.key;

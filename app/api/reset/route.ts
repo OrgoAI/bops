@@ -1,11 +1,13 @@
 import { rmSync } from "node:fs";
-import { join } from "node:path";
-import { checkMac } from "@/lib/server/codex";
+import { checkMac } from "@/lib/server/mac";
 import { orgo } from "@/lib/server/orgo";
 import { onPostgres } from "@/lib/server/persist";
 import { ownerPhoneTable } from "@/lib/server/persist-pg";
 import { stopAllSessions } from "@/lib/server/sessions";
+import { pagesDir } from "@/lib/server/pages";
+import { filesDir } from "@/lib/server/files";
 import { getState, resetState, update } from "@/lib/server/store";
+import { notReady } from "@/lib/server/ready";
 
 /**
  * Start Bops over from the beginning: stop all work, delete the bots' computers, and reset to Sam
@@ -15,6 +17,8 @@ import { getState, resetState, update } from "@/lib/server/store";
  * user's own on Orgo and may hold computers they put there themselves; those stay, listed in `kept`.
  */
 export async function POST() {
+  const unready = notReady();
+  if (unready) return unready;
   stopAllSessions("Stopped: Bops was reset");
   update((state) => (state.takeover = undefined));
   const ours = new Set(getState().bots.flatMap((b) => (b.computerId ? [b.computerId] : [])));
@@ -33,12 +37,12 @@ export async function POST() {
       failed.push(`${c.name}: ${(e as Error).message}`);
     }
   }
-  resetState();
+  await resetState();
   // Starting over forgets the user's verified mobiles, so on a hosted server their claim on them goes too.
   const user = getState().account?.user.id;
   if (onPostgres() && user) await ownerPhoneTable()?.releaseAll(user).catch((e: Error) => console.warn(`[reset] owner_phones: ${e.message}`));
-  // Pages bots made go too; the user's Mac is checked again right away, so it's ready for the first task.
-  rmSync(join(process.cwd(), ".data", "pages"), { recursive: true, force: true });
+  // Pages bots made go too, and the files of theirs the user opened; the user's Mac is checked again right away, so it's ready for the first task.
+  for (const dir of [pagesDir(), filesDir()]) if (dir) rmSync(dir, { recursive: true, force: true });
   await checkMac().catch(() => {});
   return Response.json({ deleted, failed, kept, bots: getState().bots.map((b) => b.name) });
 }

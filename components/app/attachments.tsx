@@ -148,7 +148,13 @@ function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
   return createPortal(
-    <div onClick={onClose} className="fixed inset-0 z-[900] flex animate-[screen-in_150ms_ease-out] cursor-zoom-out items-center justify-center bg-black/70 p-10 backdrop-blur-sm">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image"
+      onClick={onClose}
+      className="fixed inset-0 z-[900] flex animate-[screen-in_150ms_ease-out] cursor-zoom-out items-center justify-center bg-black/70 p-10 backdrop-blur-sm"
+    >
       {/* eslint-disable-next-line @next/next/no-img-element -- full-size view of an attached image */}
       <img src={src} alt="" className="max-h-full max-w-full rounded-[12px] shadow-[0_24px_60px_-20px_#000000]" />
     </div>,

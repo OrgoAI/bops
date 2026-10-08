@@ -1,6 +1,7 @@
 import { cloudLines, linesOn, localLines, openLine, unlinkLine } from "@/lib/server/phone-lines";
 import { prettyPhone } from "@/lib/server/phone";
 import { getState } from "@/lib/server/store";
+import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
 
@@ -52,6 +53,8 @@ export async function GET() {
  * the first caller to claim it; { action: "unlink", numberId } unlinks its owner (and opens a fresh 15).
  */
 export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
   if (!local(request)) return Response.json({ error: "local only" }, { status: 403 });
   const { action, numberId } = (await request.json().catch(() => ({}))) as { action?: string; numberId?: string };
   if (!numberId || (action !== "open" && action !== "unlink")) return Response.json({ error: "unknown action" }, { status: 400 });

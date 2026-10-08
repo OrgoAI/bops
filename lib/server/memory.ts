@@ -2,11 +2,13 @@ import "server-only";
 import { Honcho, type Peer, type Session as HonchoSession } from "@honcho-ai/sdk";
 import { openaiClient } from "./openai-client";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { MAIN_WORKSPACE, workspaceOf, type MemoryGroup } from "@/lib/types";
+import { appHeaders } from "./app-version";
 import { cloudOn, cloudProxy, cloudSessionNow } from "./cloud";
 import { chose, decide, yes, type Question } from "./decide";
-import { addMessage, bot, getState, ownerName, update } from "./store";
-import { recordTokens } from "./usage";
+import { addMessage, bot, getState, ownerName, sameState, stateEpoch, update, userDir } from "./store";
+import { recordTokens, usageTags } from "./usage";
 
 /**
  * Long-term memory, through Honcho (honcho.dev). Each workspace has a memory bank (a Honcho
@@ -88,7 +90,7 @@ function bankFor(b: Binding) {
   let x = live.banks.get(workspaceId);
   if (!x) {
     const client = via
-      ? new Honcho({ apiKey: via.key, baseURL: new URL(via.url).origin, workspaceId, timeout: 45_000, maxRetries: 0 })
+      ? new Honcho({ apiKey: via.key, baseURL: new URL(via.url).origin, workspaceId, timeout: 45_000, maxRetries: 0, defaultHeaders: appHeaders() })
       : new Honcho({ apiKey: process.env.HONCHO_API_KEY, workspaceId, timeout: 45_000, maxRetries: 0 });
     if (via) {
       const http = client.http as unknown as { buildURL(path: string, query?: unknown): string };
@@ -269,7 +271,9 @@ export function learn(ws: string, fact: string, chatId?: string): Promise<string
     return Promise.resolve(`Not saved: ${ownerName()} wants this kept from someone, and the memory is shared by the whole team. Keep it to yourself in this conversation.`);
   const b = bindingOf(ws);
   const x = bankFor(b);
+  const ours = sameState();
   const run = x.queue.then(async () => {
+    if (!ours()) return "Not saved: another account signed in.";
     const p = await peer(b);
     const [near, lines] = await Promise.all([p.conclusions.query(text, 6).catch(() => []), card(b).catch(() => [] as string[])]);
     x.recent = x.recent.filter((r) => Date.now() - r.at < 10 * 60_000);
@@ -282,12 +286,13 @@ export function learn(ws: string, fact: string, chatId?: string): Promise<string
     const prob = (i: number, k: string) => chose(a?.[`k${i}`])?.probabilities[k] ?? 0;
     const same = ids.findIndex((_, i) => prob(i, "same") >= 0.6);
     if (same >= 0) return `Already known: ${known.get(ids[same])}`;
+    if (!ours()) return "Not saved: another account signed in.";
     const [made] = await p.conclusions.create([{ content: text }]);
     x.recent.push({ id: made.id, text, at: Date.now() });
     let best = -1;
     ids.forEach((_, i) => prob(i, "replaces") >= 0.7 && (best < 0 || prob(i, "replaces") > prob(best, "replaces")) && (best = i));
     const old = best >= 0 ? { id: ids[best], text: known.get(ids[best])! } : undefined;
-    if (chatId) addMessage({ chatId, role: "system", text: `Remembered: ${text}`, memory: { ws, id: made.id, fact: text, old } });
+    if (chatId && ours()) addMessage({ chatId, role: "system", text: `Remembered: ${text}`, memory: { ws, id: made.id, fact: text, old } });
     return old ? `Saved. It may replace an older fact ("${old.text}"); ${ownerName()} was asked whether to forget that one.` : "Saved.";
   });
   x.queue = run.catch(() => {});
@@ -323,6 +328,9 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
     secrets.add(messageId);
     return;
   }
+  // The account whose message this is: a sign-out or another account's sign-in meanwhile, and nothing of it goes into the new one's memory.
+  const ours = sameState();
+  const epoch = stateEpoch();
   void (async () => {
     const owner = ownerName();
     const a = await decide(
@@ -340,6 +348,7 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
       secrets.add(messageId);
       return;
     }
+    if (!ours()) return;
     saveToMemory(ws, "chat", chatId, [{ who: "owner", text: said }], metadata);
     if (said.trim().length < 8 || (yes(a?.worth) ?? 0) < 0.6) return;
     const res = await openai.responses.create({
@@ -347,14 +356,15 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
       reasoning: { effort: "low" },
       instructions: `${owner} told their assistant something about themselves. Write each lasting fact in it as one plain sentence in the third person, starting with "${owner}" ("${owner} is vegetarian.", "${owner}'s sister is Ana."). One per line, at most three. Only what they said, nothing guessed. If there's no lasting fact, write NONE.`,
       input: said.slice(0, 2000),
-    });
-    recordTokens("memory", res.model, res.usage);
+    }, usageTags("memory"));
+    recordTokens("memory", res.model, res.usage, undefined, epoch);
+    if (!ours()) return;
     const facts = (res.output_text ?? "")
       .split("\n")
       .map((l) => l.replace(/^[-*•\d.)\s]+/, "").trim())
       .filter((l) => l && l !== "NONE" && l.length < 400)
       .slice(0, 3);
-    for (const f of facts) await learn(ws, f, chatId);
+    for (const f of facts) if (ours()) await learn(ws, f, chatId);
   })().catch((e: Error) => console.warn(`[memory] auto-remember: ${e.message}`));
 }
 
@@ -458,17 +468,26 @@ type Review = {
   /** Facts the user said to keep: not flagged again. */
   kept: string[];
 };
-const REVIEWS = `${process.cwd()}/.data/memory-reviews.json`;
-const gr = globalThis as unknown as { bopsReviews?: Record<string, Review> };
-const reviews = () => (gr.bopsReviews ??= existsSync(REVIEWS) ? (JSON.parse(readFileSync(REVIEWS, "utf8")) as Record<string, Review>) : {});
+/** The reviews, in the signed-in user's folder on this Mac (null signed out: nothing kept). */
+const reviewsFile = () => {
+  const dir = userDir();
+  return dir ? join(dir, "memory-reviews.json") : null;
+};
+const gr = globalThis as unknown as { bopsReviews?: { file: string | null; all: Record<string, Review> } };
+function reviews() {
+  const file = reviewsFile();
+  if (gr.bopsReviews?.file !== file) gr.bopsReviews = { file, all: file && existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, Review>) : {} };
+  return gr.bopsReviews.all;
+}
 function setReview(bank: string, patch: Partial<Review> | ((r: Review) => void), save = true) {
   const all = reviews();
   const r = (all[bank] ??= { at: 0, checked: 0, flagged: [], kept: [] });
   if (typeof patch === "function") patch(r);
   else Object.assign(r, patch);
-  if (save) {
-    mkdirSync(`${process.cwd()}/.data`, { recursive: true });
-    writeFileSync(REVIEWS, JSON.stringify(all));
+  const file = reviewsFile();
+  if (save && file) {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(all));
   }
 }
 

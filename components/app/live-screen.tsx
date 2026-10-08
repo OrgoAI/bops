@@ -2,11 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Waking } from "./live-desktop";
+import { useWindowVisible } from "./window-visible";
 
 /**
  * A live view of one screen on a bot's computer, refreshed by polling screenshots.
  * Each frame is preloaded before it replaces the last, so the image never flashes.
  * Give it a `key` of bot + display so switching screens starts from a blank frame.
+ * No screenshots while the window is hidden: the last frame stays, and they start again as it shows.
  *
  * When `interactive` (you've taken over), clicks are sent as fractions of the real screen
  * and typing goes to whatever is focused there.
@@ -19,7 +21,9 @@ export function LiveScreen({
   className,
   interactive,
   onInput,
+  onFail,
   bot,
+  mac,
 }: {
   /** Whose screen it is, for the loading state. */
   bot?: { id: string; name: string; color: string };
@@ -30,37 +34,53 @@ export function LiveScreen({
   className?: string;
   interactive?: boolean;
   onInput?: (action: ScreenInput) => void;
+  /** A screenshot didn't come (the computer may have fallen asleep since: the caller looks again). */
+  onFail?: () => void;
+  /** The Chrome a task of the bot's has of its own on the user's Mac (Session.macScreen), instead of a screen. */
+  mac?: number;
 }) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState(false);
-  const alive = useRef(true);
   const img = useRef<HTMLImageElement>(null);
+  const visible = useWindowVisible();
+  const failed = useRef(onFail);
+  useEffect(() => {
+    failed.current = onFail;
+  });
 
   useEffect(() => {
-    alive.current = true;
+    if (!visible) return;
+    // This run's own: a frame still loading when the window hid (or anything else re-ran this) must not
+    // start the old loop again next to the new one.
+    let on = true;
     let timer: ReturnType<typeof setTimeout>;
+    // Failing since the last frame that came: the caller hears once per run of failures, not each try.
+    let failing = false;
     const tick = () => {
-      const url = `/api/screen?bot=${botId}&display=${display}&scale=${scale}&t=${Date.now()}`;
+      const url = `/api/screen?bot=${botId}&${mac !== undefined ? `mac=${mac}` : `display=${display}`}&scale=${scale}&t=${Date.now()}`;
       const next = new Image();
       next.onload = () => {
-        if (!alive.current) return;
+        if (!on) return;
+        failing = false;
         setSrc(url);
         setError(false);
         timer = setTimeout(tick, interactive ? Math.min(intervalMs, 700) : intervalMs);
       };
       next.onerror = () => {
-        if (!alive.current) return;
+        if (!on) return;
         setError(true);
+        if (!failing) failed.current?.();
+        failing = true;
         timer = setTimeout(tick, intervalMs * 3);
       };
       next.src = url;
     };
     tick();
     return () => {
-      alive.current = false;
+      on = false;
       clearTimeout(timer);
     };
-  }, [botId, display, intervalMs, scale, interactive]);
+  }, [botId, display, mac, intervalMs, scale, interactive, visible]);
 
   /** Map a click on the letterboxed image to a point on the real screen. */
   const point = (e: React.MouseEvent) => {

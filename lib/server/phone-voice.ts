@@ -6,9 +6,9 @@ import { delegate, voicePrompt } from "./call";
 import { saveToMemory, wsOf } from "./memory";
 import { openaiClient } from "./openai-client";
 import { callLog, fromOwner, isOwner, linkClaimed, routeFor, type ApEvent } from "./phone";
-import { addMessage, bot, getState, ownerLine, ownerName, patchSession } from "./store";
+import { addMessage, bot, getState, ownerLine, ownerName, patchSession, stateEpoch } from "./store";
 import { SPEAKING } from "./style";
-import { recordCallMinutes, recordTokens } from "./usage";
+import { recordCallMinutes, recordTokens, usageTags } from "./usage";
 
 /**
  * Calls to a bot's number, answered on this Mac. Every Bops number's calls go to its AgentPhone
@@ -67,6 +67,8 @@ type PhoneCall = {
   message?: { name?: string; text: string; callback?: string };
   timer?: ReturnType<typeof setTimeout>;
   ended?: boolean;
+  /** The state it came in on (store.ts stateEpoch): after a sign-out or another account's sign-in, nothing of it lands in the new one. */
+  epoch: number;
 };
 
 const g = globalThis as unknown as { bopsPhoneCalls?: Map<string, PhoneCall> };
@@ -165,8 +167,8 @@ async function respond(b: Bot, c: PhoneCall, instructions: string, tools: Return
   const input = c.turns.length
     ? c.turns.map((t) => ({ role: t.who === "caller" ? ("user" as const) : ("assistant" as const), content: t.text }))
     : [{ role: "user" as const, content: "(The call just connected; the caller hasn't said anything yet. Say hello.)" }];
-  const r = await client.responses.create({ model: MODEL(), reasoning: { effort: "low" }, instructions, input, tools, parallel_tool_calls: false, max_output_tokens: 1200, store: false });
-  recordTokens("call", r.model, r.usage, b.id);
+  const r = await client.responses.create({ model: MODEL(), reasoning: { effort: "low" }, instructions, input, tools, parallel_tool_calls: false, max_output_tokens: 1200, store: false }, usageTags("call", b.id));
+  recordTokens("call", r.model, r.usage, b.id, c.epoch);
   const called = r.output.flatMap((o) => {
     if (o.type !== "function_call") return [];
     try {
@@ -257,7 +259,7 @@ export async function voiceTurn(e: ApEvent, verdict?: CallerVerdict): Promise<Vo
   if (verdict?.claimed) linkClaimed(from, verdict.claimed, b);
   let c = calls.get(id);
   if (!c) {
-    c = { id, botId: b.id, from, to, owner, startedAt: Date.now(), lastAt: Date.now(), turns: [], work: [] };
+    c = { id, botId: b.id, from, to, owner, startedAt: Date.now(), lastAt: Date.now(), turns: [], work: [], epoch: stateEpoch() };
     calls.set(id, c);
     if (owner) callStarted(b.id);
     callLog({ event: "call", call: id, bot: b.id, from, owner });
@@ -329,6 +331,11 @@ function finish(c: PhoneCall) {
   c.ended = true;
   clearTimeout(c.timer);
   calls.delete(c.id);
+  // Signed out, or another account in, since the call began: its minutes and transcript were the last account's, not this one's.
+  if (c.epoch !== stateEpoch()) {
+    if (c.owner) callEnded();
+    return;
+  }
   const b = bot(c.botId);
   const seconds = Math.max(0, Math.round((c.lastAt - c.startedAt) / 1000));
   recordCallMinutes(c.botId, seconds);

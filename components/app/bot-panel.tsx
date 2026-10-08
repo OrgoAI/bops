@@ -1,15 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { botChatId, live, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Routine, type Session } from "@/lib/types";
+import { useEffect, useRef, useState } from "react";
+import { botChatId, live, MAIN_WORKSPACE, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Routine, type Session } from "@/lib/types";
 import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
+import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
+import type { BopsTier } from "@/cloud/protocol";
 import { BotMemory } from "./bot-memory";
 import { ComputerSummary } from "./computer";
 import { Mascot } from "./mascot";
 import { PlanNote, usePlan } from "./plan-note";
 import { KeyIcon } from "./screen-cards";
 import { LineLink } from "./line-link";
-import { botWash, post } from "./ui";
+import { botWash, CloseButton, post } from "./ui";
 import { accountTitle, AppLogo, botApps } from "./apps";
 import { WhereToFind } from "./channels";
 import { BOOK_A_CALL } from "@/lib/links";
@@ -27,6 +29,8 @@ export function BotPanel({
   onOpenThread,
   onOpenVault,
   onOpenComputer,
+  onUpgrade,
+  onClose,
 }: {
   state: AppState;
   bot: Bot;
@@ -37,7 +41,13 @@ export function BotPanel({
   onOpenVault: () => void;
   /** Open this bot's computer tab. */
   onOpenComputer: (botId: string) => void;
+  /** Open the plans (Account), where Pro and Max are bought. */
+  onUpgrade: () => void;
+  /** Leave the profile, back to where you were (its X; Esc does it too, see bops-app.tsx). */
+  onClose: () => void;
 }) {
+  // The way out, top right, as on the Vault and the Account sheet.
+  const close = <CloseButton onClick={onClose} className="absolute right-4 top-4 bg-white/60" />;
   const tabs = (
     <div className="flex gap-1">
       {SECTIONS.map((t) => (
@@ -55,10 +65,11 @@ export function BotPanel({
     </div>
   );
 
-  if (tab === "details") return <Details state={state} bot={b} tabs={tabs} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenComputer={onOpenComputer} />;
+  if (tab === "details") return <Details state={state} bot={b} tabs={tabs} close={close} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenComputer={onOpenComputer} onUpgrade={onUpgrade} />;
 
   return (
-    <section className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto bg-white px-5 py-4">
+    <section className="relative flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto bg-white px-5 py-4">
+      {close}
       <div className="flex flex-col items-center gap-2">
         <Mascot botId={b.id} color={b.color} size={52} />
         <div className="flex flex-col items-center gap-px">
@@ -86,17 +97,28 @@ function Details({
   state,
   bot: b,
   tabs,
+  close,
   onOpenChat,
   onOpenVault,
   onOpenComputer,
+  onUpgrade,
 }: {
   state: AppState;
   bot: Bot;
   tabs: React.ReactNode;
+  close: React.ReactNode;
   onOpenChat: (chatId: string) => void;
   onOpenVault: () => void;
   onOpenComputer: (botId: string) => void;
+  onUpgrade: () => void;
 }) {
+  const plan = usePhonePlan();
+  // What the Bops plan includes for this bot (lib/plan-includes.ts), when Bops Cloud holds plans to it.
+  const planBot = !!b.isMain && workspaceOf(b) === MAIN_WORKSPACE;
+  const numberRoom = plan.room ? numberShort(plan.room.tier, plan.room.numbers, { isPlanBot: planBot }) : null;
+  const emailRoom = plan.room && !b.email ? emailShort(plan.room.tier, plan.room.emails, { isPlanBot: planBot }) : null;
+  // Max has room for this bot's email, which it gets when the user asks (Get an email).
+  const emailOnAsk = !!plan.room && plan.room.tier === "max_bops" && !planBot && !b.email && !emailRoom;
   const routines = state.routines.filter((r) => r.botId === b.id);
   const running = state.sessions.filter((s) => s.botId === b.id && live(s)).length;
   // The workspace's number belongs to its main bot; the other bots are reached through it.
@@ -113,7 +135,8 @@ function Details({
   };
 
   return (
-    <section className="flex min-h-0 min-w-0 flex-col items-center gap-3.5 overflow-y-auto px-6 pb-5 pt-6" style={{ backgroundImage: `linear-gradient(180deg, transparent 40%, #FFFFFF 100%), ${botWash(b)}`, backgroundSize: "100% 520px", backgroundRepeat: "no-repeat", backgroundColor: "#FFFFFF" }}>
+    <section className="relative flex min-h-0 min-w-0 flex-col items-center gap-3.5 overflow-y-auto px-6 pb-5 pt-6" style={{ backgroundImage: `linear-gradient(180deg, transparent 40%, #FFFFFF 100%), ${botWash(b)}`, backgroundSize: "100% 520px", backgroundRepeat: "no-repeat", backgroundColor: "#FFFFFF" }}>
+      {close}
       <div className={`flex size-[104px] items-center justify-center rounded-full ${glass} shadow-[inset_0_0_0_2px_#FFFFFF,0_14px_30px_-12px_#2832002E,0_0_0_1px_#0000000F]`}>
         <Mascot botId={b.id} color={b.color} size={70} />
       </div>
@@ -138,7 +161,7 @@ function Details({
           <rect x="1.2" y="3.5" width="8" height="7" rx="1.5" fill="#0A0A0A" />
           <path d="M9.6 6.2l3.2-2v5.6L9.6 7.8z" fill="#0A0A0A" />
         </ActionButton>
-        <ActionButton label={b.email ? `Email ${b.email}` : "Its inbox is coming"} disabled={!b.email} onClick={() => b.email && window.open(`mailto:${b.email}`)}>
+        <ActionButton label={b.email ? `Email ${b.email}` : emailRoom ? emailRoom.text : emailOnAsk ? `${b.name} has no email yet` : plan.planNeeded ? "An email comes with Pro and Max" : "Its inbox is coming"} disabled={!b.email} onClick={() => b.email && window.open(`mailto:${b.email}`)}>
           <rect x="1.5" y="3" width="11" height="8.5" rx="1.5" fill="none" stroke="#0A0A0A" strokeWidth="1.3" />
           <path d="M2 4l5 4 5-4" fill="none" stroke="#0A0A0A" strokeWidth="1.3" strokeLinejoin="round" />
         </ActionButton>
@@ -147,15 +170,20 @@ function Details({
 
       <div className={`flex w-full flex-col rounded-2xl ${glass}`}>
         <Field
-          label={line && b.isMain ? `mobile · ${line.type === "imessage" ? "iMessage" : "texts"} · the team's number` : "mobile · texts and calls"}
+          label={
+            line && b.isMain ? `mobile · ${line.type === "imessage" ? "iMessage" : "texts"} · the team's number` : b.phoneLine?.paused ? "mobile · paused until you upgrade again" : "mobile · texts and calls"
+          }
           value={reach ? prettyPhone(reach) : undefined}
           empty={line && main ? `Text ${main.name} at ${prettyPhone(line.phone)}: ${main.name} passes work to ${b.name}.` : "No number yet."}
         />
-        {!line && !b.phone && <GetNumber bot={b} />}
+        {!line && !b.phone && <GetNumber bot={b} plan={plan} room={numberRoom} onUpgrade={onUpgrade} />}
         {/* Whose phone the number is linked to: the first to call or text it, then calls and texts from it count as the user. */}
         {reach && <LineLink key={reach} phone={reach} className="px-4 pb-[11px]" />}
         <div className="h-px bg-black/[0.05]" />
-        <Field label="email" value={b.email} empty="No inbox yet." />
+        <Field label={b.mail?.paused ? "email · paused until you upgrade again" : "email"} value={b.email} empty="No inbox yet." />
+        {!b.email && emailRoom && <PlanRoom short={emailRoom} onUpgrade={onUpgrade} />}
+        {!b.email && !emailRoom && !plan.room && plan.planNeeded && <PlanNeeded what="An email address" bot={b} onUpgrade={onUpgrade} />}
+        {emailOnAsk && <GetEmail bot={b} />}
       </div>
 
       <ComputerSummary state={state} bot={b} className={`w-full ${glass}`} onOpen={() => onOpenComputer(b.id)} />
@@ -199,7 +227,49 @@ function Details({
         </div>
       </div>
 
-      {(!b.isMain || sharesComputer(b)) && state.host !== "mac" && <ComputerChoice state={state} bot={b} className={glass} />}
+      <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <span className="text-[13px] font-semibold leading-4">Approvals</span>
+          <span className="text-[12px] leading-4 text-[#6B6B6B]">
+            {b.autoApprove ? "Sends, posts and changes things without asking. Still asks before paying" : "Asks you before it sends, posts, deletes or pays"}
+          </span>
+        </div>
+        <div className="flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px]">
+          {([[false, "Ask first"], [true, "Just do it"]] as const).map(([v, label]) => (
+            <button
+              key={label}
+              onClick={() => void post("/api/bots", { botId: b.id, autoApprove: v }, "PATCH")}
+              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${!!b.autoApprove === v ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {state.businessData && (
+        <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <span className="text-[13px] font-semibold leading-4">Business data</span>
+            <span className="text-[12px] leading-4 text-[#6B6B6B]">
+              {b.dataOff ? "No lookups of companies, people or contacts" : "Looks up companies, people, work emails and company news. Cents a lookup, from AI credit"}
+            </span>
+          </div>
+          <div className="flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px]">
+            {([[false, "On"], [true, "Off"]] as const).map(([v, label]) => (
+              <button
+                key={label}
+                onClick={() => void post("/api/bots", { botId: b.id, dataOff: v }, "PATCH")}
+                className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${!!b.dataOff === v ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(!b.isMain || sharesComputer(b)) && state.host !== "mac" && <ComputerChoice state={state} bot={b} className={glass} onUpgrade={onUpgrade} />}
 
       <div className={`flex w-full flex-col rounded-2xl ${glass}`}>
         <div className="flex items-center justify-between px-4 pb-1 pt-[11px]">
@@ -243,7 +313,7 @@ function Details({
  * and says why. A main bot shows this only while it works on the free Bops computer another
  * workspace's main bot has: it can move to its own on the plan (with its team), never back.
  */
-function ComputerChoice({ state, bot: b, className }: { state: AppState; bot: Bot; className: string }) {
+function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppState; bot: Bot; className: string; onUpgrade: () => void }) {
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -273,7 +343,9 @@ function ComputerChoice({ state, bot: b, className }: { state: AppState; bot: Bo
               ? `Works on your free Bops computer, which ${main.name} has, with ${b.name}'s team`
               : shared
                 ? `Works on ${main.name}'s computer, on screens no one else is using`
-                : "Its own cloud computer, a copy of the main bot's"}
+                : plan?.plan?.bops
+                  ? "Its own Bops computer"
+                  : "Its own cloud computer, a copy of the main bot's"}
           </span>
         </div>
         <div className="flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px]">
@@ -304,7 +376,14 @@ function ComputerChoice({ state, bot: b, className }: { state: AppState; bot: Bo
           </div>
         </div>
       )}
-      {plan && noRoom && <PlanNote info={plan} short={noRoom.short} text={shared ? noRoom.text : `It will work on ${main.name}'s computer instead. ${noRoom.text}`} />}
+      {plan && noRoom && (
+        <PlanNote
+          info={plan}
+          short={noRoom.short}
+          text={shared ? noRoom.text : `It will work on ${main.name}'s computer instead. ${noRoom.text}`}
+          onUpgrade={"upgrade" in noRoom && noRoom.upgrade ? onUpgrade : undefined}
+        />
+      )}
       {error && error !== noRoom?.text && <span className="text-[12px] leading-4 text-[#B42318]">{error}</span>}
     </div>
   );
@@ -371,36 +450,279 @@ const prettyPhone = (n: string) => {
   return d.length === 11 && d.startsWith("1") ? `+1 (${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}` : n;
 };
 
-/** Give the bot its own phone number (AgentPhone, about $3 a month), when phones are set up. */
-function GetNumber({ bot: b }: { bot: Bot }) {
-  const [on, setOn] = useState<boolean | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+/** Numbers for sale in one area code and city (/api/phone/numbers). */
+type NumberOption = { areaCode: string; city: string; state: string; count: number };
+type Found = { areaCode: string; options: NumberOption[]; anywhere?: boolean };
+
+/** What the Bops plan holds now (lib/server/plan-room.ts): null where Bops Cloud doesn't hold plans to what they include. */
+type Room = { tier: BopsTier; numbers: number; emails: number } | null;
+type PhonePlan = { on: boolean | null; planNeeded: boolean; room: Room };
+
+/**
+ * Phones on here (AgentPhone through Bops Cloud), and whether a number or an inbox needs Pro or Max:
+ * Bops Cloud holds Free to its plan (BOPS_PLAN_LIMITS). Asked again with the plan read fresh when
+ * Bops comes back to the front while it still says Free: the user may have just paid in the browser.
+ */
+function usePhonePlan(): PhonePlan {
+  const [plan, setPlan] = useState<PhonePlan>({ on: null, planNeeded: false, room: null });
+  const needed = useRef(false);
   useEffect(() => {
-    void fetch("/api/phone")
-      .then((r) => r.json())
-      .then((j: { on?: boolean }) => setOn(!!j.on));
+    const ask = (fresh: boolean) =>
+      void fetch(`/api/phone${fresh ? "?fresh=1" : ""}`, { cache: "no-store" })
+        .then((r) => r.json())
+        .then((j: { on?: boolean; planNeeded?: boolean; room?: Room }) => {
+          // Asked again on focus while the plan has less than Max: the user may have just upgraded.
+          needed.current = !!j.planNeeded || (!!j.room && j.room.tier !== "max_bops");
+          setPlan({ on: !!j.on, planNeeded: !!j.planNeeded, room: j.room ?? null });
+        })
+        .catch(() => {});
+    ask(false);
+    const back = () => {
+      if (needed.current) ask(true);
+    };
+    window.addEventListener("focus", back);
+    return () => window.removeEventListener("focus", back);
   }, []);
-  if (!on) return null;
+  return plan;
+}
+
+/** On Free: a number or an email comes with a plan. "Purchase a plan" opens the plans (Account). */
+function PlanNeeded({ what, bot: b, onUpgrade, onCancel }: { what: string; bot: Bot; onUpgrade: () => void; onCancel?: () => void }) {
+  return (
+    <div className="flex flex-col gap-2 px-4 pb-[11px] text-[12px] leading-4">
+      <span className="text-[#3A3A38]">
+        {what} comes with a plan. Pro and Max include a phone number and an email for {b.name}.
+      </span>
+      <div className="flex items-center gap-3">
+        <button onClick={onUpgrade} className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white">
+          Purchase a plan
+        </button>
+        {onCancel && (
+          <button onClick={onCancel} className="text-[12px] font-medium text-[#6B6B6B] hover:text-ink">
+            Not now
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Why the plan has no room for one more number or email (lib/plan-includes.ts), with the upgrade that
+ * has room: "Purchase a plan" from Free, "Upgrade to Max" from Pro. Both open the plans (Account).
+ */
+function PlanRoom({ short, onUpgrade, onCancel }: { short: PlanRoomShort; onUpgrade: () => void; onCancel?: () => void }) {
+  return (
+    <div className="flex flex-col gap-2 px-4 pb-[11px] text-[12px] leading-4">
+      <span className="text-[#3A3A38]">{short.text}</span>
+      {(short.upgrade || onCancel) && (
+        <div className="flex items-center gap-3">
+          {short.upgrade && (
+            <button onClick={onUpgrade} className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white">
+              {upgradeLabel(short.upgrade)}
+            </button>
+          )}
+          {onCancel && (
+            <button onClick={onCancel} className="text-[12px] font-medium text-[#6B6B6B] hover:text-ink">
+              Not now
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** On Max, an email for a bot besides the main one comes when the user asks: up to 5 in all. */
+function GetEmail({ bot: b }: { bot: Bot }) {
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
   const get = async () => {
     setBusy(true);
-    setError(null);
-    const res = await post("/api/phone", { action: "provision", botId: b.id });
-    const j = (await res.json()) as { error?: string };
-    if (j.error) setError(j.error);
+    setSaid(null);
+    const res = await post("/api/bots", { botId: b.id, email: true }, "PATCH");
+    const j = (await res.json().catch(() => ({}))) as { email?: string; error?: string };
+    if (!j.email) setSaid(j.error ?? "Couldn't get an email. Try again.");
     setBusy(false);
   };
   return (
-    <div className="flex items-center gap-2 px-4 pb-[11px]">
-      <button
-        onClick={() => void get()}
-        disabled={busy}
-        data-tip="A real number anyone can text or call."
-        className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-50"
-      >
-        {busy ? "Getting a number…" : `Get ${b.name} a number`}
-      </button>
-      {error && <span className="text-[12px] leading-4 text-[#B42318]">{error}</span>}
+    <div className="flex flex-col gap-2 px-4 pb-[11px] text-[12px] leading-4">
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => void get()}
+          disabled={busy}
+          data-tip="An address anyone can email. Max includes up to 5."
+          className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-50"
+        >
+          {busy ? "Getting the email…" : `Get ${b.name} an email`}
+        </button>
+      </div>
+      {said && (
+        <span role="alert" className="text-[#6B6B6B]">
+          {said}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** "628 · San Francisco, CA". */
+const placeOf = (o: NumberOption) => [o.city, o.state].filter(Boolean).join(", ");
+const optionLabel = (o: NumberOption) => (placeOf(o) ? `${o.areaCode} · ${placeOf(o)}` : o.areaCode);
+
+/**
+ * Give the bot its own phone number (AgentPhone, about $3 a month), when phones are set up. It asks
+ * where first: an area code (the user's own mobile's, else 415), searched as it's typed, with the
+ * places that have numbers as pills (nearby ones when that code has none left). The number is bought
+ * in the area code picked; then the card shows it, and how to make it yours (LineLink).
+ */
+function GetNumber({ bot: b, plan, room, onUpgrade }: { bot: Bot; plan: PhonePlan; room: PlanRoomShort | null; onUpgrade: () => void }) {
+  const { on } = plan;
+  // No number on the plan for this bot (lib/plan-includes.ts), or, from a cloud that doesn't say what's held, none on Free.
+  const planNeeded = !!room || (!plan.room && plan.planNeeded);
+  const [picking, setPicking] = useState(false);
+  /** The area code typed; null until the first search says which one to start from. */
+  const [code, setCode] = useState<string | null>(null);
+  const [found, setFound] = useState<Found | null>(null);
+  const [picked, setPicked] = useState<NumberOption | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // A search once the picker opens (no area code: the server starts from the user's own), then each
+  // full area code typed, a moment after the last key. A newer one cancels the one before.
+  const answered = found?.areaCode;
+  useEffect(() => {
+    if (!picking || planNeeded || (code !== null && (code.length !== 3 || code === answered))) return;
+    const stop = new AbortController();
+    const t = setTimeout(
+      async () => {
+        setSearching(true);
+        const res = await fetch(`/api/phone/numbers${code ? `?areaCode=${code}` : ""}`, { cache: "no-store", signal: stop.signal }).catch(() => null);
+        const j = (await res?.json().catch(() => null)) as (Found & { error?: string }) | null;
+        if (stop.signal.aborted) return;
+        setSearching(false);
+        if (!res?.ok || !j || j.error || !Array.isArray(j.options)) {
+          setError(j?.error ?? "Couldn't look for numbers. Try again.");
+          if (code === null) setCode("");
+          return;
+        }
+        setError(null);
+        setFound(j);
+        setCode(j.areaCode);
+        setPicked(j.options[0] ?? null);
+      },
+      code === null ? 0 : 350,
+    );
+    return () => {
+      clearTimeout(t);
+      stop.abort();
+    };
+  }, [picking, planNeeded, code, answered]);
+  if (!on) return null;
+
+  const type = (v: string) => {
+    const next = v.replace(/\D/g, "").slice(0, 3);
+    setCode(next);
+    setError(null);
+    if (next === answered) return;
+    setFound(null);
+    setPicked(null);
+    setSearching(next.length === 3);
+  };
+  const get = async () => {
+    if (!picked) return;
+    setBusy(true);
+    setError(null);
+    const res = await post("/api/phone", { action: "provision", botId: b.id, areaCode: picked.areaCode });
+    const j = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok || j.error) setError(j.error ?? "Couldn't get a number. Try again.");
+    setBusy(false);
+  };
+
+  if (!picking)
+    return (
+      <div className="flex items-center gap-2 px-4 pb-[11px]">
+        <button
+          onClick={() => setPicking(true)}
+          data-tip="A real number anyone can text or call."
+          className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-50"
+        >
+          {`Get ${b.name} a number`}
+        </button>
+      </div>
+    );
+  // A number the plan doesn't include: "Get a number" says why, with the upgrade that has room, instead of opening the picker.
+  if (room) return <PlanRoom short={room} onUpgrade={onUpgrade} onCancel={() => setPicking(false)} />;
+  if (planNeeded) return <PlanNeeded what="A phone number" bot={b} onUpgrade={onUpgrade} onCancel={() => setPicking(false)} />;
+
+  const asked = found?.areaCode;
+  const nearby = found && !found.anywhere && found.options.length > 0 && !found.options.some((o) => o.areaCode === asked) ? found.options[0] : undefined;
+  return (
+    <div className="flex flex-col gap-2 px-4 pb-[11px] text-[12px] leading-4">
+      <label className="flex items-center gap-2">
+        <span className="text-[#6B6B6B]">Area code</span>
+        <input
+          value={code ?? ""}
+          onChange={(e) => type(e.target.value)}
+          disabled={busy || code === null}
+          autoFocus
+          placeholder="415"
+          aria-label="Area code"
+          inputMode="numeric"
+          maxLength={3}
+          className="h-7 w-[64px] rounded-full bg-[#F7F7F6] px-3 text-[13px] tabular-nums outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50"
+        />
+        {(searching || code === null) && <span className="text-[#9A9A98]">Looking for numbers…</span>}
+      </label>
+      {!searching && found && (
+        <>
+          {nearby && (
+            <span className="text-[#6B6B6B]">
+              No {asked} numbers left. Nearby: {nearby.areaCode} {nearby.city || placeOf(nearby)}
+            </span>
+          )}
+          {found.anywhere && found.options.length > 0 && <span className="text-[#6B6B6B]">No {asked} numbers left, or nearby. These are from elsewhere in the US.</span>}
+          {found.options.length === 0 ? (
+            <span className="text-[#6B6B6B]">No numbers for sale right now. Try another area code.</span>
+          ) : (
+            <div role="radiogroup" aria-label="Where the number is from" className="flex flex-wrap gap-1.5">
+              {found.options.map((o) => {
+                const chosen = picked?.areaCode === o.areaCode && picked.city === o.city && picked.state === o.state;
+                return (
+                  <button
+                    key={`${o.areaCode}|${o.city}|${o.state}`}
+                    role="radio"
+                    aria-checked={chosen}
+                    disabled={busy}
+                    onClick={() => setPicked(o)}
+                    className={`rounded-full px-2.5 py-1 text-[12.5px] font-medium leading-4 disabled:opacity-50 ${chosen ? "bg-ink text-white" : "text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-black/[0.04]"}`}
+                  >
+                    {optionLabel(o)}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+      {code !== null && code.length > 0 && code.length < 3 && <span className="text-[#9A9A98]">An area code is 3 digits.</span>}
+      <div className="flex items-center gap-3">
+        <button
+          onClick={() => void get()}
+          disabled={busy || searching || !picked}
+          className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-40"
+        >
+          {busy ? "Getting the number…" : "Get this number"}
+        </button>
+        <button disabled={busy} onClick={() => setPicking(false)} className="text-[12px] font-medium text-[#6B6B6B] hover:text-ink disabled:opacity-40">
+          Cancel
+        </button>
+      </div>
+      {error && (
+        <span role="alert" className="text-[#B42318]">
+          {error}
+        </span>
+      )}
     </div>
   );
 }

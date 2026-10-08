@@ -1,7 +1,8 @@
 import "server-only";
+import { trackServerEvent } from "./analytics";
 import { botChatId, type Routine, type Schedule } from "@/lib/types";
 import { startSession } from "./sessions";
-import { addMessage, bot, getState, id, ownerName, patchSession, update } from "./store";
+import { addMessage, bot, getState, id, ownerName, patchSession, stateReady, update } from "./store";
 
 /**
  * Routines and scheduled asks. Each one belongs to a bot; when it comes due it becomes a thread
@@ -56,6 +57,7 @@ export function createRoutine(
 ): Routine {
   const r: Routine = { id: id("rtn"), botId, title, goal, schedule, enabled: true, nextRunAt: nextRun(schedule), where: opts.where, reminder: opts.reminder?.trim() || undefined, textTo: opts.textTo };
   update((s) => s.routines.push(r));
+  trackServerEvent("bops_routine_created", {});
   return r;
 }
 
@@ -82,6 +84,8 @@ export function deleteRoutine(routineId: string) {
 
 /** Run everything that's due. Called on a timer. */
 function tick() {
+  // Signed out on the Mac app: nobody's routines to run.
+  if (!stateReady()) return;
   const now = Date.now();
   for (const r of getState().routines.filter((x) => x.enabled && x.nextRunAt && x.nextRunAt <= now)) {
     const b = bot(r.botId);

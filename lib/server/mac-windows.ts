@@ -13,7 +13,7 @@ const CUA = process.env.CUA_DRIVER_PATH ?? join(homedir(), ".local/bin/cua-drive
 
 function cua<T>(tool: string, args: object, timeout = 4000) {
   return new Promise<T>((resolve, reject) =>
-    execFile(CUA, ["call", tool, JSON.stringify(args)], { timeout, maxBuffer: 16 * 1024 * 1024 }, (err, out) => {
+    execFile(/*turbopackIgnore: true*/ CUA, ["call", tool, JSON.stringify(args)], { timeout, maxBuffer: 16 * 1024 * 1024 }, (err, out) => {
       if (err) return reject(err);
       try {
         resolve(JSON.parse(String(out)) as T);

@@ -82,9 +82,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
     (t.kind === "computer" && state.sessions.some((s) => s.botId === t.botId && live(s) && s.runsOn !== "mac")) ||
     (t.kind === "mac" && state.sessions.some((s) => s.runsOn === "mac" && live(s)));
   const needsYou =
-    (t.kind === "computer" &&
-      (state.watches?.some((w) => w.botId === t.botId && w.alert) || state.sessions.some((s) => s.botId === t.botId && live(s) && s.blocker))) ||
-    (t.kind === "mac" && !!state.mac?.approvals.length);
+    t.kind === "computer" && (state.watches?.some((w) => w.botId === t.botId && w.alert) || state.sessions.some((s) => s.botId === t.botId && live(s) && s.blocker));
   const label =
     t.kind === "computer" ? `${b?.name ?? "Bot"}'s computer` : t.kind === "bot" ? (b?.name ?? "Bot") : t.kind === "web" ? t.title || hostOf(t.url) : t.kind === "vault" ? "Vault" : t.kind === "mac" ? "Your Mac" : "New tab";
   return (
@@ -153,7 +151,13 @@ export const toAddress = (typed: string) => {
  * across launches); in a plain browser tab it's a frame, which some sites refuse, hence the
  * "Open in browser" button.
  */
-export function WebTab({ url, hidden, onPage }: { url: string; hidden: boolean; onPage: (url: string, title: string) => void }) {
+const webPartition = (user?: string) => (user ? `persist:bops-web-${user.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80)}` : "persist:bops-web");
+
+/**
+ * A web page in a tab. In the Mac app its cookies and storage are the signed-in Orgo user's own
+ * (`user`: a partition each), so another account signed in on this Mac never sees their sign-ins.
+ */
+export function WebTab({ url, hidden, user, onPage }: { url: string; hidden: boolean; user?: string; onPage: (url: string, title: string) => void }) {
   // The tab loads its first address once; navigating inside it doesn't reload it from here.
   const [src, setSrc] = useState(url);
   const [at, setAt] = useState(url);
@@ -238,7 +242,7 @@ export function WebTab({ url, hidden, onPage }: { url: string; hidden: boolean; 
         </button>
       </div>
       {native ? (
-        createElement("webview", { ref: setView, src, partition: "persist:bops-web", allowpopups: "true", className: "min-h-0 flex-1" })
+        createElement("webview", { ref: setView, src, partition: webPartition(user), allowpopups: "true", className: "min-h-0 flex-1" })
       ) : (
         <iframe src={src} className="min-h-0 w-full flex-1 border-0" title={hostOf(src)} />
       )}

@@ -1,11 +1,12 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders, ServerResponse } from "node:http";
-import { answerInCloud, calledNumbers, callerOf, numberForAgent, sipHeadersOf, userForCall } from "./calls.ts";
+import { answerInCloud, botForAgent, calledNumbers, callerOf, numberForAgent, sipHeadersOf, userForCall } from "./calls.ts";
 import { config } from "./config.ts";
 import { open } from "./crypto.ts";
 import { ownObject, query } from "./db.ts";
 import { readBody, sendJson, type Route } from "./http.ts";
 import { callerVerdict } from "./lines.ts";
+import { lineStopped } from "./plans.ts";
 import { smsSegments } from "./pricing.ts";
 import { CLOUD_CALLER_HEADER, type CallerVerdict } from "./protocol.ts";
 import { loadState } from "./state.ts";
@@ -37,6 +38,8 @@ export const voiceTiming = { macWaitMs: 15_000, fillerAfterMs: 1_500 };
 const FILLER = "Mm-hm, one sec.";
 /** AgentPhone events the Mac acts on (lib/server/phone.ts agentPhoneEvent), kept while it's away. Call summaries aren't. */
 const KEPT = new Set(["agent.message", "agent.reaction"]);
+/** What a caller hears on a plan's number that's paused (the plan ended), before the call ends. */
+const PAUSED = "This number is paused right now. Goodbye.";
 /** The carrier keywords a texted number gets an answer to (STOP, START, HELP and theirs, as lib/server/phone.ts): never a claim on a line. */
 const KEYWORDS = new Set(["stop", "stopall", "unsubscribe", "cancel", "end", "quit", "optout", "revoke", "start", "unstop", "help", "info"]);
 
@@ -106,6 +109,46 @@ function countTextIn(userId: string, event: ApEvent, deliveryId: string) {
   );
 }
 
+/** When the cloud first heard each call (its first turn) and the bot it's for, by user and callId, to count its seconds while it runs. */
+const callsHeard = new Map<string, { at: number; bot: Promise<string | undefined> }>();
+
+/**
+ * A call through AgentPhone's voice agent costs Orgo by the second, whoever answers its turns (the
+ * Mac or the cloud, voice.ts) and whether the number is paused or not (AgentPhone bills it either
+ * way): one row per call (its callId), as agentphone.voice_seconds. While it runs, each turn counts
+ * the seconds since its first; when AgentPhone says it ended, its own length (durationSeconds, else
+ * startedAt to endedAt) stands. recordUsageFor keeps the largest count, so a late or repeated
+ * delivery never counts a call twice. The words the bot says are its own model answers, counted as
+ * tokens where they're made.
+ */
+async function countCallSeconds(userId: string, event: ApEvent) {
+  const voiceTurn = event.event === "agent.message" && event.channel === "voice";
+  if (!voiceTurn && event.event !== "agent.call_ended") return;
+  const d = event.data ?? {};
+  const callId = text(d.callId) || text(d.call_id);
+  if (!callId) return;
+  const key = `${userId} ${callId}`;
+  const now = Date.now();
+  for (const [k, v] of callsHeard) if (now - v.at > 2 * 60 * 60_000) callsHeard.delete(k);
+  let heard = callsHeard.get(key);
+  if (!heard) {
+    const agentId = text(event.agentId);
+    const bot = agentId ? loadState(userId).then((saved) => botForAgent(saved?.state, agentId)?.id || undefined, () => undefined) : Promise.resolve(undefined);
+    heard = { at: now, bot };
+    callsHeard.set(key, heard);
+  }
+  let seconds = Math.round((now - heard.at) / 1000);
+  if (event.event === "agent.call_ended") {
+    callsHeard.delete(key);
+    const said = Number(d.durationSeconds);
+    const span = (Date.parse(text(d.endedAt)) - Date.parse(text(d.startedAt))) / 1000;
+    seconds = d.durationSeconds != null && Number.isFinite(said) && said >= 0 ? said : Number.isFinite(span) && span >= 0 ? Math.round(span) : seconds;
+  }
+  if (seconds <= 0) return;
+  const botId = await heard.bot;
+  await recordUsageFor(userId, "agentphone.voice_seconds", callId, seconds, { agentId: text(event.agentId), ...(botId ? { botId } : {}) });
+}
+
 /** The user an AgentPhone agent belongs to and its webhook secret (sealed in bops.cloud_agents when the Mac registered the webhook). */
 async function agentFor(agentId: string): Promise<{ userId: string; secret: string } | null> {
   const r = await query<{ user_id: string; secret_sealed: string | null }>("SELECT user_id, secret_sealed FROM bops.cloud_agents WHERE agent_id = $1", [agentId]);
@@ -158,6 +201,12 @@ const agentphone: Route = {
     if (!event || !agent || !agentPhoneSigned(agent.secret, one(req.headers["x-webhook-timestamp"]), body, one(req.headers["x-webhook-signature"])))
       return sendJson(res, 400, { error: "bad signature" });
     const deliveryId = one(req.headers["x-webhook-id"]) || createHash("sha256").update(body).digest("hex");
+    void countCallSeconds(agent.userId, event).catch((e: Error) => console.warn(`[hooks] ${agent.userId}: call seconds: ${e.message}`));
+    // A plan's number that's paused (the plan ended) or given back: nothing on it reaches the Mac or is answered, and no text on it is counted (a call's seconds are, above: AgentPhone bills them).
+    if (await lineStopped(agent.userId, agentId, text(event.data?.toNumber) || text(event.data?.to)).catch(() => false)) {
+      if (event.event === "agent.message" && event.channel === "voice") return sendJson(res, 200, { text: PAUSED, hangup: true } satisfies VoiceReply);
+      return sendJson(res, 200, {});
+    }
     countTextIn(agent.userId, event, deliveryId);
     const verdict = await verdictFor(agent.userId, event).catch((e: Error) => (console.warn(`[hooks] ${agent.userId}: couldn't tell who's calling: ${e.message}`), null));
     const headers = { ...forwarded(req.headers, /^x-webhook-/), ...(verdict ? { [CLOUD_CALLER_HEADER]: JSON.stringify(verdict) } : {}) };

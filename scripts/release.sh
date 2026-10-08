@@ -33,6 +33,21 @@ npx next build
 rm -f .next/standalone/.env*
 rm -rf .next/standalone/.data
 [ -f .next/standalone/server.js ] || { echo "No .next/standalone/server.js: is output \"standalone\" set in next.config.ts?" >&2; exit 1; }
+# Only the built server ships: the compiled .next, its node_modules, public, server.js and the files
+# it reads at run time (vm/, cloud/, slack/). A file read through process.cwd() with a name known only
+# at run time makes the build's tracer copy parts of the project too (it once took .git, envs/,
+# docs/internal and scripts/), and the source is compiled into .next anyway, so anything else at the
+# top of the standalone folder is removed here, by name, before the app is built from it.
+for f in .next/standalone/* .next/standalone/.[!.]*; do
+  [ -e "$f" ] || continue
+  case "$(basename "$f")" in
+    .next | cloud | LICENSE | node_modules | package.json | public | server.js | slack | vm) ;;
+    *) echo "Not shipping $(basename "$f") (traced from the project, not part of the server)."; rm -rf "$f" ;;
+  esac
+done
+for f in .git .github envs docs scripts .sops.yaml .data; do
+  [ ! -e ".next/standalone/$f" ] || { echo ".next/standalone/$f is still there. Not shipping." >&2; exit 1; }
+done
 # No secret from the .env files next build reads may end up in what ships (only the setting names
 # are printed). Settings named like secrets are checked (plain URLs and names would match the code's
 # own defaults), written as KEY=v, KEY="v", KEY='v' or with `export ` in front.

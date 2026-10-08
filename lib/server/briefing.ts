@@ -1,8 +1,7 @@
 import "server-only";
-import { execFile } from "node:child_process";
 import { BLOCKER_LABEL, DISPLAYS, live, workspaceOf, type Session } from "@/lib/types";
-import { currentPage } from "./local";
-import { sameComputer, screenEndpoint, workComputer } from "./screens";
+import { fullAccessOn } from "./full-access";
+import { sameComputer, screenPages, workComputer } from "./screens";
 import { bot, getState, ownerName } from "./store";
 
 /**
@@ -33,12 +32,7 @@ export async function computerBriefing(botId: string, opts: { thread?: string } 
     return at >= 0 ? s.helperNames?.[at] : undefined;
   };
   // What's open on each screen, read from its browser (quick, and only where Bops can reach it).
-  const pages = await Promise.all(
-    DISPLAYS.map(async (d) => {
-      const ep = screenEndpoint(b, d);
-      return ep ? await Promise.race([currentPage(ep).catch(() => null), new Promise<null>((r) => setTimeout(() => r(null), 1500))]) : null;
-    }),
-  );
+  const pages = await screenPages(b);
   const pageText = (i: number) => {
     const p = pages[i];
     if (!p || /^(chrome:\/\/newtab|chrome-extension:|http:\/\/127\.0\.0\.1:7600)/.test(p.url)) return "your home screen";
@@ -96,10 +90,7 @@ export async function computerBriefing(botId: string, opts: { thread?: string } 
   ].join("\n");
 }
 
-const run = (cmd: string, args: string[]) =>
-  new Promise<string>((resolve) => execFile(cmd, args, { timeout: 1500 }, (_e, out) => resolve(String(out ?? "").trim())));
-
-/** The user's own Mac, when bots can work there: ready or not, what they're in, what's allowed, what's running. */
+/** The user's own Mac, when bots can work there: ready or not, and what's running. */
 async function macBriefing(botId: string) {
   const state = getState();
   const m = state.mac;
@@ -114,19 +105,14 @@ async function macBriefing(botId: string) {
     : `No windows on ${owner}'s Mac are being watched.`;
   if (!m) return watching;
   if (!m.ready) return [`${owner}'s Mac: not available to bots (${m.reason ?? "not set up"}).`, watching].join("\n");
-  // What the user is doing right now, so work on their Mac stays out of their way.
-  const [front, locked] = await Promise.all([
-    run("/usr/bin/lsappinfo", ["info", "-only", "name", "front"]).then((o) => /"LSDisplayName"="([^"]+)"/.exec(o)?.[1] ?? /"name"="([^"]+)"/i.exec(o)?.[1] ?? ""),
-    run("/usr/sbin/ioreg", ["-n", "Root", "-d1"]).then((o) => /CGSSessionScreenIsLocked"=Yes/.test(o)),
-  ]);
   const onMac = state.sessions.filter((s) => s.runsOn === "mac" && live(s));
   const yours = onMac.filter((s) => s.botId === botId);
   return [
-    `${owner}'s Mac: available through computer use${locked ? " (screen locked)" : front ? `; ${owner} is in ${front} right now` : ""}.`,
-    `Apps bots may always use there: ${m.alwaysApps.length ? m.alwaysApps.join(", ") : `none yet (${owner} approves each app the first time)`}.`,
+    fullAccessOn()
+      ? `${owner}'s Mac: available with full access: a Chrome of the bot's own there (websites see ${owner}'s home internet), a shell, ${owner}'s files and their apps (Messages, Notes, Finder…).`
+      : `${owner}'s Mac: available, in a Chrome of the bot's own there (websites see ${owner}'s home internet). Not its apps (Messages, Notes, Finder…) or files: bots can't use those for now.`,
     ...(yours.length ? [`Your tasks on ${owner}'s Mac: ${yours.map((s) => `"${s.title}"${s.activity ? ` (${s.activity})` : ""}`).join("; ")}.`] : []),
     ...(onMac.length > yours.length ? [`Other bots are working on ${owner}'s Mac too (${onMac.length - yours.length}).`] : []),
-    ...(m.approvals.length ? [`Waiting on ${owner}'s OK: ${m.approvals.map((a) => a.message).join("; ")}.`] : []),
     watching,
   ].join("\n");
 }
