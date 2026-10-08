@@ -12,6 +12,7 @@ const path = require("node:path");
 
 const PORT = 3210;
 const URL = `http://localhost:${PORT}`;
+const IS_WINDOWS = process.platform === "win32";
 
 /**
  * The Bops window's token (lib/server/ui-token.ts): what only the window may do (turn on Full access,
@@ -51,6 +52,7 @@ let pipWin;
 
 /** Apps opened from Finder get a bare PATH; borrow the login shell's so node and codex resolve. */
 function loginPath() {
+  if (IS_WINDOWS) return process.env.PATH || "";
   try {
     return execFileSync(process.env.SHELL || "/bin/zsh", ["-ilc", 'printf %s "$PATH"'], { timeout: 5000 }).toString();
   } catch {
@@ -98,7 +100,15 @@ function packagedServer() {
     if (st && !st.isSymbolicLink()) continue;
     if (st && fs.readlinkSync(link) === path.join(dir, name)) continue;
     if (st) fs.unlinkSync(link);
-    fs.symlinkSync(path.join(dir, name), link);
+    if (IS_WINDOWS) {
+      const source = path.join(dir, name);
+      const isDir = fs.statSync(source).isDirectory();
+      try { fs.symlinkSync(source, link, isDir ? "junction" : "file"); }
+      catch {
+        if (isDir) fs.cpSync(source, link, { recursive: true, force: true });
+        else fs.copyFileSync(source, link);
+      }
+    } else fs.symlinkSync(path.join(dir, name), link);
   }
   // Settings for this Mac (self-hosting, testing) go in ~/Library/Application Support/Bops/.env.local;
   // the app itself ships with no keys.
@@ -106,7 +116,7 @@ function packagedServer() {
   try {
     env = require("node:util").parseEnv(fs.readFileSync(path.join(app.getPath("userData"), ".env.local"), "utf8"));
   } catch {}
-  const relay = path.join(process.resourcesPath, "bin", "orgo-relay");
+  const relay = path.join(process.resourcesPath, "bin", IS_WINDOWS ? "orgo-relay.exe" : "orgo-relay");
   // What the server prints, for support: ~/Library/Logs/Bops/server.log. Each start adds to it (an
   // earlier start's error is often the one that matters); it starts over once it passes 5 MB.
   fs.mkdirSync(app.getPath("logs"), { recursive: true });
@@ -160,13 +170,15 @@ async function startServer() {
           HOSTNAME: packaged.env.BOPS_LISTEN_ALL === "1" ? "0.0.0.0" : "127.0.0.1",
         },
         stdio: ["ignore", packaged.log, packaged.log],
-        detached: true,
+        detached: !IS_WINDOWS,
+        windowsHide: true,
       })
-    : spawn("npx", ["next", "dev", "--port", String(PORT)], {
+    : spawn(IS_WINDOWS ? "npx.cmd" : "npx", ["next", "dev", "--port", String(PORT)], {
         cwd: REPO,
         env: { ...process.env, PATH: loginPath(), BOPS_UI_TOKEN: windowToken() },
         stdio: "ignore",
-        detached: true,
+        detached: !IS_WINDOWS,
+        ...(IS_WINDOWS ? { shell: true, windowsHide: true } : {}),
       });
   for (let i = 0; i < 240 && !(await serverUp()); i++) await new Promise((r) => setTimeout(r, 500));
 }
@@ -180,8 +192,7 @@ async function createWindow() {
     minWidth: 1180,
     minHeight: 640,
     title: "Bops",
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 14, y: 14 },
+    ...(IS_WINDOWS ? {} : { titleBarStyle: "hiddenInset", trafficLightPosition: { x: 14, y: 14 } }),
     backgroundColor: "#FFFFFF",
     icon: ICON,
     // Web pages open as tabs inside Bops (see components/app/panel-tabs.tsx). The preload lets the
@@ -257,7 +268,7 @@ ipcMain.handle("mac-screens", async () => {
   const list = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 0, height: 0 } });
   return { access, displays, bopsOn, sources: list.map((s) => ({ id: s.id, name: s.name, displayId: s.display_id || undefined })) };
 });
-ipcMain.handle("mac-screen-settings", () => shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"));
+ipcMain.handle("mac-screen-settings", () => shell.openExternal(IS_WINDOWS ? "ms-settings:privacy-screenshots" : "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"));
 
 /*
  * What Bops asks macOS for, all in one place (components/app/setup.tsx, and Settings → This Mac):
@@ -462,7 +473,13 @@ ipcMain.handle("perm-request", async (_, id) => {
   }
   return permStatus(id);
 });
-ipcMain.handle("perm-settings", (_, id) => (PANES[id] ? shell.openExternal(PANES[id]) : undefined));
+ipcMain.handle("perm-settings", (_, id) => {
+  if (IS_WINDOWS) {
+    const paths = { screen: "ms-settings:privacy-screenshots", microphone: "ms-settings:privacy-microphone", accessibility: "ms-settings:easeofaccess", notifications: "ms-settings:notifications", fullDisk: "ms-settings:privacy", automation: "ms-settings:privacy" };
+    return paths[id] ? shell.openExternal(paths[id]) : undefined;
+  }
+  return PANES[id] ? shell.openExternal(PANES[id]) : undefined;
+});
 // Screen Recording was turned on after Bops started: it works once Bops restarts.
 ipcMain.handle("perm-screen-restart", () => mac && screenAtLaunch !== "granted" && systemPreferences.getMediaAccessStatus("screen") === "granted");
 
@@ -500,15 +517,18 @@ ipcMain.handle("relaunch", () => restart());
 function stopOtherServer(pid) {
   if (!app.isPackaged || fs.existsSync(path.join(__dirname, "repo.json")) || !Number.isInteger(pid) || pid <= 1) return false;
   try {
-    // The server runs as `<Helper> -e "…require(process.env.BOPS_SERVER_JS)"` (startServer above).
-    if (!execFileSync("ps", ["-p", String(pid), "-o", "command="]).toString().includes("BOPS_SERVER_JS")) return false;
-    process.kill(pid, "SIGTERM");
+    if (IS_WINDOWS) {
+      const cmdline = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`], { windowsHide: true }).toString();
+      if (!cmdline.includes("BOPS_SERVER_JS")) return false;
+      execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
+    } else {
+      if (!execFileSync("ps", ["-p", String(pid), "-o", "command="]).toString().includes("BOPS_SERVER_JS")) return false;
+      process.kill(pid, "SIGTERM");
+      execFileSync("pkill", ["-f", ".bops/chrome/"]);
+    }
   } catch {
     return false;
   }
-  try {
-    execFileSync("pkill", ["-f", ".bops/chrome/"]);
-  } catch {}
   return true;
 }
 
@@ -531,11 +551,11 @@ ipcMain.handle("mac-pip-open", () => {
     fullscreenable: false,
     skipTaskbar: true,
     backgroundColor: "#F2F2F0",
-    title: "Your Mac",
+    title: IS_WINDOWS ? "Your PC" : "Your Mac",
     webPreferences: { preload: path.join(__dirname, "preload.cjs") },
   });
   pipWin.setAlwaysOnTop(true, "floating");
-  pipWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  if (!IS_WINDOWS) pipWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   void pipWin.loadURL(`${URL}/pip`);
   pipWin.on("closed", () => (pipWin = undefined));
 });
@@ -637,7 +657,7 @@ app.setName("Bops");
 app.whenReady().then(() => {
   if (process.platform === "darwin" && fs.existsSync(ICON)) app.dock.setIcon(nativeImage.createFromPath(ICON));
   // Release builds only: not `npm run app`, nor a build that runs the source folder (desktop/repo.json).
-  if (app.isPackaged && !fs.existsSync(path.join(__dirname, "repo.json"))) {
+  if (!IS_WINDOWS && app.isPackaged && !fs.existsSync(path.join(__dirname, "repo.json"))) {
     void checkForUpdate();
     setInterval(() => void checkForUpdate(), 60 * 60_000);
   }
@@ -651,12 +671,13 @@ app.on("window-all-closed", () => app.quit());
 function stopServer() {
   if (!server) return false;
   try {
-    process.kill(-server.pid);
+    if (IS_WINDOWS) execFileSync("taskkill", ["/PID", String(server.pid), "/T", "/F"], { windowsHide: true });
+    else process.kill(-server.pid);
   } catch {}
   server = undefined;
-  try {
-    execFileSync("pkill", ["-f", ".bops/chrome/"]);
-  } catch {}
+  if (!IS_WINDOWS) {
+    try { execFileSync("pkill", ["-f", ".bops/chrome/"]); } catch {}
+  }
   return true;
 }
 
