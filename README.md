@@ -25,6 +25,12 @@
 </p>
 
 <p align="center">
+  <b>Open code, one limit.</b> Use, self-host, change and share Bops for free, at work or at home.<br>
+  The license (FSL) only rules out offering it as a competing product or hosted service,<br>
+  and each version becomes Apache 2.0, fully open source, two years after its release. <a href="#license">Details</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/nickvasilescu"><img src="https://avatars.githubusercontent.com/u/143043823?v=4" width="72" height="72" alt="Nick Vasilescu"></a><br>
   <b>Created by <a href="https://github.com/nickvasilescu">Nick Vasilescu</a></b> (<a href="https://github.com/nickvasilescu">@nickvasilescu</a>)<br>
   Developed with <a href="https://orgo.ai">Orgo</a>
