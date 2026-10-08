@@ -29,6 +29,8 @@ jobs:
         run: npx next typegen
       - name: Typecheck
         run: npx tsc --noEmit -p .
+      - name: Typecheck Bops Cloud
+        run: npx tsc -p cloud/tsconfig.json --noEmit
       - name: Lint
         run: npm run lint
       - name: Secret scan (whole history)

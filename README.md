@@ -288,4 +288,6 @@ The license also gives you our patents for these uses (until you sue someone cla
 | Offer a hosted Bops, or sell an app that does what Bops does? | Not under FSL. Each version allows it two years after its release, under Apache 2.0. |
 | Contribute? | Yes, see [CONTRIBUTING.md](CONTRIBUTING.md). |
 
+Some code comes from other projects, under their own licenses: `components/message-ui/` is adapted from [imessage-ui](https://github.com/theswerd/imessage-ui) (MIT). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 "Bops", the Bops logo and the bot mascots are trademarks of Organic Intelligence, Inc. The license covers the code, not the name or logo. See [TRADEMARK.md](TRADEMARK.md).

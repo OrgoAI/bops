@@ -15,6 +15,10 @@ Tell us what you found, how to reproduce it, and what it lets someone do. We'll 
 - The webhook relay (`edge/`) and the webhook routes (`app/api/phone/*`).
 - What runs on the bots' computers (`vm/`, `orgo/`).
 - The desktop app (`desktop/`).
+- Bops Cloud (`cloud/`, with its schema in `db/`), the server Orgo runs for hosted Bops at bops.orgo.ai/api: anything that lets one user read or act on another user's data, numbers, inboxes or memory, or spend Orgo's provider keys.
+- The website (`site/`, bops.bot).
+
+When you test the hosted service, use your own account, don't touch other people's data, and stop at a proof of concept.
 
 ## How Bops is meant to be run
 

@@ -24,7 +24,9 @@ Fill in `.env.local` as the README's "Run it yourself" says, or set `BOPS_SELF_H
 Before you open a pull request:
 
 ```bash
+npx next typegen                         # route types (next-env.d.ts isn't committed)
 npx tsc --noEmit -p .
+npx tsc -p cloud/tsconfig.json --noEmit  # Bops Cloud
 npm run lint
 ```
 

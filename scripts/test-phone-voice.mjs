@@ -339,7 +339,7 @@ const until = async (check, what, ms = 5000) => {
     if (g.method === "POST" && g.path === "/v1/numbers") {
       if (g.json.areaCode === "212") return [400, { detail: "No numbers available in area code 212" }];
       bought.push(g.json);
-      return [200, { id: "num_new", phoneNumber: `+1${g.json.areaCode}2252685`, agentId: g.json.agentId, externalId: g.json.externalId }];
+      return [200, { id: "num_new", phoneNumber: `+1${g.json.areaCode}5550123`, agentId: g.json.agentId, externalId: g.json.externalId }];
     }
     if (g.method === "PATCH") return [200, {}];
     return [404, { detail: "not in the fake" }];
@@ -388,15 +388,15 @@ const until = async (check, what, ms = 5000) => {
   const other = S.getState().bots.find((x) => !x.isMain) ?? main;
   await assert.rejects(P.ensurePhone(other.id, "212"), /No 212 numbers are left\. Search again and pick another area code\./);
   await assert.rejects(P.ensurePhone(other.id, "1"), /3 digits/);
-  assert.equal(await P.ensurePhone(other.id, "628"), "+16282252685");
+  assert.equal(await P.ensurePhone(other.id, "628"), "+16285550123");
   assert.equal(bought.at(-1).areaCode, "628");
   assert.equal(bought.at(-1).country, "US");
-  assert.equal(S.getState().bots.find((x) => x.id === other.id).phone, "+16282252685");
+  assert.equal(S.getState().bots.find((x) => x.id === other.id).phone, "+16285550123");
   // The API route passes the area code on (the fake lists no numbers, so it buys again).
   const phoneRoute = await import(`${root}/app/api/phone/route.ts`);
   const provision = (areaCode) => phoneRoute.POST(new Request("http://127.0.0.1:3210/api/phone", { method: "POST", body: JSON.stringify({ action: "provision", botId: other.id, areaCode }) }));
   const res = await provision("510");
-  assert.deepEqual(await res.json(), { phone: "+15102252685" });
+  assert.deepEqual(await res.json(), { phone: "+15105550123" });
   assert.equal(bought.at(-1).areaCode, "510");
   assert.deepEqual(await (await provision("212")).json(), { error: "No 212 numbers are left. Search again and pick another area code." });
   agentPhone = null;

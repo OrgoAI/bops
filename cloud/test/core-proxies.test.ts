@@ -88,7 +88,7 @@ before(async () => {
   orgo = await fakeOrgo();
   agentphone = await fakeProvider((g) => {
     if (g.method === "GET" && g.path === "/v1/numbers/available")
-      return { json: { data: [{ phoneNumber: "+16282252685", city: "San Francisco", state: "CA", rateCenter: "Snfc Cntrl", areaCode: "628" }] } };
+      return { json: { data: [{ phoneNumber: "+16285550123", city: "San Francisco", state: "CA", rateCenter: "Snfc Cntrl", areaCode: "628" }] } };
     if (g.method === "GET" && g.path === "/v1/numbers") return { json: { data: [{ id: `num_${tag}_1`, phoneNumber: numbers[0], type: "sms" }], hasMore: false, total: 1 } };
     if (g.method === "POST" && g.path === "/v1/numbers") return { json: { id: `num_${tag}_2`, phoneNumber: numbers[1], type: "sms", status: "active" } };
     if (g.method === "GET" && g.path === "/v1/agents") return { json: { data: [{ id: agent, name: "Sam", numbers: [{ id: `num_${tag}_3`, phoneNumber: numbers[2] }] }], total: 1 } };
@@ -243,7 +243,7 @@ test("AgentPhone: numbers for sale can be searched, in the user's own sub-accoun
   assert.equal(sent.query.get("areaCode"), "415");
   assert.equal(sent.query.get("country"), "US");
   // A number for sale isn't anyone's: nothing is recorded as Alice's.
-  assert.equal((await query("SELECT count(*)::int AS n FROM bops.cloud_numbers WHERE digits = '6282252685'")).rows[0].n, 0);
+  assert.equal((await query("SELECT count(*)::int AS n FROM bops.cloud_numbers WHERE digits = '6285550123'")).rows[0].n, 0);
   assert.equal((await query("SELECT count(*)::int AS n FROM bops.cloud_usage WHERE user_id = $1", [alice])).rows[0].n, before);
   // Naming another sub-account in the query is still refused.
   assert.equal((await as(alice, "GET", `/proxy/agentphone/v1/numbers/available?areaCode=415&subAccountId=${sub(bob)}`)).status, 400);
