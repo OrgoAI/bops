@@ -11,7 +11,7 @@ import { BLOCKER_LABEL, botChatId, DISPLAYS, live, MAIN_WORKSPACE, MAX_SCREENS, 
 import { CloudError, creditsOut, executorKey, noteOutOfCredit, OUT_OF_CREDIT, outOfCreditError, shortOfCredit } from "./cloud";
 import { appsMcp, appsSocket, browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
 import { relayNewComputer } from "./relay";
-import { computerAsleepError, orgo, OrgoError, screenId, type OrgoScreen } from "./orgo";
+import { computerAsleepError, computerWakingError, madeByThisServer, madeReady, orgo, OrgoError, screenId, wakeWaitMs, type OrgoScreen } from "./orgo";
 import { forgetPlan, holdFreeAgain, limitText, makeMainComputer, makeOwnComputer, orgoPlan, PlanLimit } from "./plan";
 import { signedInUser } from "./orgo-auth";
 import { fullAccessOn } from "./full-access";
@@ -659,9 +659,11 @@ function screensInUse(botId: string) {
  * room for it works on Sam's after all, and its chat says why; so does another workspace's main bot, on
  * the free computer, with its team (until it's switched to its own in its Details). A computer that
  * can't be made or set up ends the tasks waiting for it, saying why (see computerFailed); the next
- * task tries again, never a loop of tries. One made whose setup didn't finish gets one more try, then
- * it's deleted and the next task makes a new one, so a broken computer neither holds the plan's room
- * nor stops the bots for good.
+ * task tries again, never a loop of tries. One Bops made whose setup didn't finish gets one more try,
+ * then it's deleted and the next task makes a new one, so a broken computer neither holds the plan's
+ * room nor stops the bots for good. Only one Bops made and never had ready (computerNeverReady): a
+ * computer that may hold the user's work is never deleted for a failed setup. One asleep is woken and
+ * waited for, from storage too (a few minutes); waking is never a failed setup.
  */
 export async function ensureComputer(botId: string): Promise<void> {
   const b = bot(botId);
@@ -699,20 +701,29 @@ export async function ensureComputer(botId: string): Promise<void> {
         b.freeComputer = undefined;
       });
     }
-    const clone = b.computerId ? { id: b.computerId, free: b.freeComputer } : b.isMain ? await makeMainComputer(b, name, epoch) : await makeOwnComputer(b, sam, name, epoch);
+    const had = b.computerId;
+    const clone = had ? { id: had, free: b.freeComputer } : b.isMain ? await makeMainComputer(b, name, epoch) : await makeOwnComputer(b, sam, name, epoch);
     if (swapped()) return;
     // No room on the plan: it works on Sam's computer instead (or a main bot on the free one), and said why.
     if (!clone) return void pump();
+    // Made just now, not the free one taken up again (makeMainComputer can hand that back): nothing has run on it.
+    const madeNow = !had && madeByThisServer(clone.id);
     update(() => {
       if (b.computerId !== clone.id) b.computerRam = undefined;
       b.computerId = clone.id;
+      if (madeNow) b.computerNeverReady = clone.id;
+      else if (b.computerNeverReady !== clone.id) b.computerNeverReady = undefined;
       b.freeComputer = b.isMain && "free" in clone && clone.free ? true : undefined;
       b.tailnet = undefined;
       // Pinned, so a reset later doesn't quietly turn it into a bot that shares (see sharesComputer).
       if (!b.isMain) b.computer = "own";
     });
-    // Up when Orgo says it's running. A computer in error, stopped or frozen doesn't get there by itself.
-    for (let i = 0; i < 60; i++) {
+    // Up when Orgo says it's running. One asleep (suspended) is woken: from storage that takes a minute or
+    // a few, so the wait grows to wakeWaitMs and a wake that didn't work is asked for again. A computer in
+    // error, stopped or frozen doesn't get there by itself.
+    let until = Date.now() + UP_WAIT_MS;
+    let wokenAt = 0;
+    for (;;) {
       const c = await orgo.computer(clone.id).catch(() => null);
       if (swapped()) return;
       if (c?.status === "running") {
@@ -723,6 +734,16 @@ export async function ensureComputer(botId: string): Promise<void> {
         broken = c.status;
         throw new Error(`Orgo says it's ${c.status === "error" ? "broken" : c.status}`);
       }
+      if (c?.status === "suspended" && Date.now() - wokenAt >= WAKE_ASK_MS) {
+        wokenAt = Date.now();
+        until = Math.max(until, wokenAt + wakeWaitMs());
+        // Orgo's own words when it won't wake it (402: Free's hours this month used) end the setup.
+        await orgo.resume(clone.id).catch((e: unknown) => {
+          if (!computerWakingError(e) && !(e instanceof OrgoError && e.status === 409 && /not suspended/i.test(e.said ?? ""))) throw e;
+        });
+        if (swapped()) return;
+      }
+      if (Date.now() >= until) break;
       await new Promise((r) => setTimeout(r, 3000));
     }
     await orgo.growDisk(clone.id).catch((e: Error) => console.warn(`[disk] ${b.id}: ${e.message}`));
@@ -733,7 +754,11 @@ export async function ensureComputer(botId: string): Promise<void> {
       await orgo.bash(clone.id, "rm -f /opt/bops/apps-*.json", 15).catch((e: Error) => console.warn(`[apps] guest keys on ${b.id}'s computer: ${e.message}`));
     await ensureScreens(clone.id);
     if (swapped()) return;
-    update(() => (b.computerStatus = "ready"));
+    update(() => {
+      b.computerStatus = "ready";
+      b.computerNeverReady = undefined;
+    });
+    madeReady(clone.id);
     // A fork arrives with its parent's tailnet identity in memory; join fresh as itself.
     await ensureTailnet(b, true).catch(() => null);
     // A fork also arrives dressed as its parent; make it look like this bot's own computer.
@@ -743,27 +768,38 @@ export async function ensureComputer(botId: string): Promise<void> {
   } catch (e) {
     if (swapped()) return;
     // Its second failed setup, or Orgo says it's broken: deleted, so it stops using up the plan, and the
-    // next task makes a new one. Bops made it and never had it working, so nothing on it is lost.
+    // next task makes a new one. Only when Bops made it and never had it ready (computerNeverReady), so
+    // nothing on it is lost. Any other is kept whatever Orgo says (asleep, waking, a wake that failed,
+    // stopped, broken): it may hold the user's work, and the user decides.
     const id = b.computerId;
+    const neverReady = !!id && b.computerNeverReady === id;
+    const kept = !!id && !neverReady;
     const deleted =
-      !!id && (broken !== undefined || id === failedBefore) && (await orgo.remove(id).then(() => true, (err) => err instanceof OrgoError && (err.status === 403 || err.status === 404)));
+      neverReady &&
+      (broken !== undefined || id === failedBefore) &&
+      (await orgo.remove(id).then(() => true, (err) => err instanceof OrgoError && (err.status === 403 || err.status === 404)));
     if (swapped()) return;
     update(() => {
       b.computerStatus = "error";
       if (deleted) {
         b.computerId = undefined;
+        b.computerNeverReady = undefined;
         b.computerRam = undefined;
         b.freeComputer = undefined;
         b.tailnet = undefined;
       }
     });
-    computerFailed(b, e as Error, deleted);
+    computerFailed(b, e as Error, deleted, kept);
   }
   void pump();
 }
 
 /** Orgo statuses a computer doesn't come back from by itself (a computer that's been deleted isn't usually listed at all). */
 const BROKEN = new Set(["error", "stopped", "frozen", "deleted"]);
+/** How long a setup waits for a computer to run before going on (a computer waking waits up to wakeWaitMs). */
+const UP_WAIT_MS = 3 * 60_000;
+/** How often a setup asks Orgo again to wake a computer that's still asleep. */
+const WAKE_ASK_MS = 60_000;
 
 /** Orgo's answer for a computer that's gone: deleted (404), or out of this account's reach (403). */
 export const computerGone = (e: unknown) => e instanceof OrgoError && (e.status === 403 || e.status === 404);
@@ -952,16 +988,17 @@ async function reattach(userId: string) {
  * its chat (and by text or email when it was asked for that way), so none waits on it or sets off
  * another try. Waiting are the tasks on that computer and, for Sam's, those of bots that need Sam's
  * before their own. With none waiting, the bot's own chat says it. The next task tries again, on a new
- * computer when this one was `deleted`.
+ * computer when this one was `deleted`. `kept`: one that may hold the user's work, which Bops never
+ * deletes for a failed setup; the chat says it's kept.
  */
-function computerFailed(b: Bot, e: Error, deleted = false) {
+function computerFailed(b: Bot, e: Error, deleted = false, kept = false) {
   const why = e instanceof PlanLimit ? limitText(e) : undefined;
   const waits = (s: Session) => {
     const x = bot(s.botId);
     return !!x && (workComputer(x).id === b.id || (b.isMain && !x.computerId && workspaceOf(x) === workspaceOf(b)));
   };
   const waiting = getState().sessions.filter((s) => s.status === "queued" && !s.routing && !s.askWhere && s.runsOn !== "mac" && s.host === "orgo" && waits(s));
-  const next = deleted ? "Bops deleted it, and the next task makes a new one." : "The next task tries again.";
+  const next = deleted ? "Bops deleted it, and the next task makes a new one." : kept ? "Bops kept it, so nothing on it is lost. The next task tries again." : "The next task tries again.";
   for (const s of waiting) {
     patchSession(s.id, { status: "failed", error: e.message, endedAt: Date.now() });
     taskEnded(s, "computer_failed");
@@ -983,7 +1020,7 @@ function computerFailed(b: Bot, e: Error, deleted = false) {
       botId: b.id,
       text: why
         ? `I couldn't set up my computer. ${why}`
-        : `I couldn't set up my computer (${e.message}). ${deleted ? "I deleted it, and I'll make a new one on my next task." : "I'll try again on my next task."}`,
+        : `I couldn't set up my computer (${e.message}). ${deleted ? "I deleted it, and I'll make a new one on my next task." : kept ? "I kept it, so nothing on it is lost, and I'll try again on my next task." : "I'll try again on my next task."}`,
     });
 }
 
@@ -1075,9 +1112,10 @@ const fromRecord = (screens: OrgoScreen[]) => screens.length > 0 && screens.ever
 /** Screens live in the computer's memory, so recreate any that a restart or clone dropped. */
 async function ensureScreen(computerId: string, display: number) {
   if (display !== 99) {
-    // Asleep with nothing on Orgo's record to list (409 computer_asleep): an action wakes it, then it's listed.
+    // Asleep with nothing on Orgo's record to list (409 computer_asleep), or waking from storage: an action
+    // wakes it (and waits while it does), then it's listed.
     let screens = await orgo.screens(computerId).catch(async (e: unknown) => {
-      if (!computerAsleepError(e)) throw e;
+      if (!computerAsleepError(e) && !computerWakingError(e)) throw e;
       await orgo.bash(computerId, "true", 30);
       return orgo.screens(computerId);
     });

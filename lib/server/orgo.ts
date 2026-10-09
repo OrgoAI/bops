@@ -1,6 +1,7 @@
 import "server-only";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { orgoHeaders } from "./app-version";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
 import { RTC_SHRUNK_MS } from "@/lib/rtc";
 import { recordUsage } from "./usage";
@@ -41,33 +42,89 @@ export class OrgoError extends Error {
   }
 }
 
-async function call<T>(method: string, path: string, body?: unknown, attempt = 0): Promise<T> {
-  const res = await fetch(`${base()}${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${await apiKey()}`, "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    cache: "no-store",
-  });
-  const text = await res.text();
-  // Orgo has the odd momentary 5xx; reads are safe to try again.
-  if (res.status >= 500 && method === "GET" && attempt < 2) {
-    await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
-    return call<T>(method, path, body, attempt + 1);
+/**
+ * What Orgo answers while a computer is still there but can't take an action yet (orgo-web
+ * lib/computer-asleep.ts and lib/with-auto-resume.ts): it's waking from storage (409 computer_waking),
+ * its memory is being saved or coming back (409 suspend_in_progress, 409 resume_in_progress, 503
+ * resuming), or this wake didn't work and Orgo tries again (503 wake_failed, no_capacity,
+ * saved_state_unavailable). Orgo did nothing with the call, so an action is made again when Orgo says
+ * (Retry-After), for up to wakeWaitMs: a wake from storage in another city takes a few minutes. None of
+ * them means the computer is gone (only 403 and 404 do: healIfGone in sessions.ts), and nothing deletes
+ * a computer for one.
+ */
+export const WAKE_CODES: ReadonlySet<string> = new Set([
+  "computer_waking",
+  "suspend_in_progress",
+  "resume_in_progress",
+  "resuming",
+  "wake_failed",
+  "no_capacity",
+  "saved_state_unavailable",
+]);
+
+/** Whether Orgo said the computer is waking, or will be (WAKE_CODES): wait for it, never take it for gone. */
+export const computerWakingError = (e: unknown) => e instanceof OrgoError && !!e.code && WAKE_CODES.has(e.code);
+
+/** How long an action waits on a computer that's waking: 6 minutes, or BOPS_WAKE_WAIT_MS. */
+export const wakeWaitMs = () => {
+  const n = Number(process.env.BOPS_WAKE_WAIT_MS);
+  return Number.isFinite(n) && n >= 0 ? n : 6 * 60_000;
+};
+
+/** When Orgo says to ask again (its Retry-After, or retry_after in the answer), between 1 second and a minute; 15 seconds when it doesn't say. */
+function retryAfterMs(res: Response, json: { retry_after?: unknown }) {
+  const said = Number(res.headers.get("retry-after") ?? json.retry_after);
+  return Math.min(Math.max(Number.isFinite(said) && said > 0 ? said * 1000 : 15_000, 1000), 60_000);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * One call to Orgo's API, saying which Bops it is (orgoHeaders). `wait`: an action on a computer that's
+ * waking (WAKE_CODES) is made again once it can be, for up to wakeWaitMs; on by default for POST and
+ * PATCH, off for a read and a delete. A read of a computer that's asleep answers 409 computer_asleep at
+ * once, for the caller to wake it with an action (computerAsleepError); a delete is the user's, and
+ * answers at once with Orgo's words.
+ */
+async function call<T>(method: string, path: string, body?: unknown, { wait = method === "POST" || method === "PATCH" }: { wait?: boolean } = {}): Promise<T> {
+  const until = Date.now() + wakeWaitMs();
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${base()}${path}`, {
+      method,
+      headers: { ...orgoHeaders(), Authorization: `Bearer ${await apiKey()}`, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: "no-store",
+    });
+    const text = await res.text();
+    let json: { error?: string; code?: unknown; retry_after?: unknown } = {};
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      if (res.ok) throw new Error(`Orgo ${method} ${path} sent back something that isn't JSON`);
+    }
+    const code = typeof json.code === "string" ? json.code : undefined;
+    // Still there, not ready for it yet: the same action again when Orgo says, while there's time.
+    if (!res.ok && wait && code && WAKE_CODES.has(code)) {
+      const ms = retryAfterMs(res, json);
+      if (Date.now() + ms <= until) {
+        await sleep(ms);
+        continue;
+      }
+    }
+    // Orgo has the odd momentary 5xx; reads are safe to try again.
+    else if (res.status >= 500 && method === "GET" && attempt < 2) {
+      await sleep(700 * (attempt + 1));
+      continue;
+    }
+    if (!res.ok)
+      throw new OrgoError(
+        `Orgo ${method} ${path} → ${res.status}: ${json.error ?? text.slice(0, 200)}`,
+        res.status,
+        code,
+        typeof json.error === "string" ? json.error : undefined,
+      );
+    return json as T;
   }
-  let json: { error?: string; code?: unknown } = {};
-  try {
-    json = text ? JSON.parse(text) : {};
-  } catch {
-    if (res.ok) throw new Error(`Orgo ${method} ${path} sent back something that isn't JSON`);
-  }
-  if (!res.ok)
-    throw new OrgoError(
-      `Orgo ${method} ${path} → ${res.status}: ${json.error ?? text.slice(0, 200)}`,
-      res.status,
-      typeof json.code === "string" ? json.code : undefined,
-      typeof json.error === "string" ? json.error : undefined,
-    );
-  return json as T;
 }
 
 const lanes = new Map<string, Promise<unknown>>();
@@ -94,7 +151,7 @@ export type OrgoComputer = { id: string; name: string; status: string; cpu: numb
  */
 const WORKSPACE = "bops";
 type OrgoWorkspace = { id: string; name: string; role?: string };
-const g = globalThis as unknown as { bopsOrgoWorkspace?: Promise<string>; bopsComputerChanges?: number };
+const g = globalThis as unknown as { bopsOrgoWorkspace?: Promise<string>; bopsComputerChanges?: number; bopsMadeHere?: Set<string> };
 
 /**
  * How many computers Bops has made or deleted since the server started. What's known about the plan's
@@ -102,6 +159,19 @@ const g = globalThis as unknown as { bopsOrgoWorkspace?: Promise<string>; bopsCo
  */
 export const computerChanges = () => g.bopsComputerChanges ?? 0;
 const changed = () => void (g.bopsComputerChanges = computerChanges() + 1);
+
+/**
+ * The computers this server made (a create, a fork or a clone) and hasn't had ready yet, by id. Only
+ * such a computer may be deleted by a setup that fails (ensureComputer in sessions.ts, which keeps the
+ * mark on the bot as computerNeverReady): one Bops didn't make (the user's free computer taken up again,
+ * one from another Mac) or once had working is never deleted for a failed setup, whatever Orgo says.
+ */
+const madeHere = (g.bopsMadeHere ??= new Set());
+/** Whether this server made the computer and hasn't had it ready since (madeReady). */
+export const madeByThisServer = (computerId: string) => madeHere.has(computerId);
+/** The computer is ready: from now on it may hold the user's work, so it's no longer one Bops just made. */
+export const madeReady = (computerId: string) => void madeHere.delete(computerId);
+const made = <C extends { id: string }>(c: C) => (madeHere.add(c.id), c);
 
 /** The workspaces the user owns. GET /api/workspaces lists shared ones too (role "member" and up). */
 const ownedWorkspaces = async () => ((await call<{ workspaces?: OrgoWorkspace[] }>("GET", "/workspaces")).workspaces ?? []).filter((w) => (w.role ?? "owner") === "owner");
@@ -200,12 +270,20 @@ export const orgo = {
    */
   create: async (name: string, opts: { ram?: number; free?: boolean } = {}) => {
     const epoch = stateEpoch();
-    const c = await call<{ id: string; name: string; status: string }>("POST", "/computers", {
-      workspace_id: await bopsWorkspace(),
-      name,
-      template_ref: BOPS_TEMPLATE,
-      ...(opts.free ? { bops_free: true } : opts.ram ? { ram: opts.ram } : {}),
-    });
+    // Never made again for a waking code: a new computer isn't a computer waking.
+    const c = made(
+      await call<{ id: string; name: string; status: string }>(
+        "POST",
+        "/computers",
+        {
+          workspace_id: await bopsWorkspace(),
+          name,
+          template_ref: BOPS_TEMPLATE,
+          ...(opts.free ? { bops_free: true } : opts.ram ? { ram: opts.ram } : {}),
+        },
+        { wait: false },
+      ),
+    );
     changed();
     recordUsage("computer.create", {}, epoch);
     return c;
@@ -309,7 +387,7 @@ export const orgo = {
     const epoch = stateEpoch();
     const c = await call<{ instance_details?: { id?: string } }>("GET", `/computers/${computerId}`);
     if (!c.instance_details?.id) throw new Error("this computer can't be forked (no instance id)");
-    const forked = await call<{ id: string; name: string; status: string }>("POST", `/computers/${c.instance_details.id}/fork`);
+    const forked = made(await call<{ id: string; name: string; status: string }>("POST", `/computers/${c.instance_details.id}/fork`, undefined, { wait: false }));
     changed();
     recordUsage("computer.create", {}, epoch);
     return forked;
@@ -317,7 +395,7 @@ export const orgo = {
 
   clone: async (computerId: string, name: string) => {
     const epoch = stateEpoch();
-    const cloned = await call<{ id: string; name: string; status: string }>("POST", `/computers/${computerId}/clone`, { name });
+    const cloned = made(await call<{ id: string; name: string; status: string }>("POST", `/computers/${computerId}/clone`, { name }, { wait: false }));
     changed();
     recordUsage("computer.create", {}, epoch);
     return cloned;
@@ -355,7 +433,7 @@ export const orgo = {
       for (let attempt = 0; ; attempt++) {
         const res = await fetch(
           `${base()}/computers/${computerId}/screenshot?screen=${screen}&response_format=binary&format=${format}&scale=${scale}`,
-          { headers: { Authorization: `Bearer ${await apiKey()}` }, cache: "no-store" },
+          { headers: { ...orgoHeaders(), Authorization: `Bearer ${await apiKey()}` }, cache: "no-store" },
         );
         if (res.ok) return new Uint8Array(await res.arrayBuffer());
         // With its status (and Orgo's code when it sent one), so a computer that's gone is told apart from
@@ -370,9 +448,12 @@ export const orgo = {
   /**
    * Wake a computer that's asleep (suspended), for the user who just took over one of its screens:
    * orgo-web's explicit resume, which says so when it can't (402 bops_free_hours once Free's 10 hours
-   * this month are used). A running one is left as it is.
+   * this month are used). A running one is left as it is. One that sleeps in storage answers at once
+   * (202, `waking`) and runs a minute or a few later; the caller waits for it as it sees fit, so this
+   * never waits on a waking code itself.
    */
-  resume: (computerId: string) => call("POST", `/computers/${computerId}/resume`),
+  resume: (computerId: string) =>
+    call<{ waking?: boolean; pending?: boolean; expected_seconds?: number }>("POST", `/computers/${computerId}/resume`, undefined, { wait: false }),
 };
 
 /**

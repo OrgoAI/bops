@@ -4,6 +4,7 @@ import type { BopsPlan } from "@/lib/account";
 import { pendingFrom, savedCardFrom, type PendingTopUp, type SavedCard } from "@/lib/credit-topup";
 import { botChatId, freeComputerBot, type Bot } from "@/lib/types";
 import { bopsComputerShort, bopsComputers, computerRam, mainOwnShort, ownComputerShort, planComputers, planFix, planName, planShort, planShortText, type OrgoPlan, type PlanShort } from "@/lib/orgo-plans";
+import { orgoHeaders } from "./app-version";
 import { cloudOn, cloudSessionNow } from "./cloud";
 import { computerChanges, orgo, OrgoError, ownedWorkspace } from "./orgo";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
@@ -32,7 +33,7 @@ export type Got<T> = { ok: true; json: T } | { ok: false; denied: boolean };
 
 export async function askOrgo<T>(key: string, path: string): Promise<Got<T>> {
   try {
-    const res = await fetch(`${orgoOrigin()}${path}`, { headers: { Authorization: `Bearer ${key}` }, cache: "no-store", signal: AbortSignal.timeout(8000) });
+    const res = await fetch(`${orgoOrigin()}${path}`, { headers: { ...orgoHeaders(), Authorization: `Bearer ${key}` }, cache: "no-store", signal: AbortSignal.timeout(8000) });
     if (!res.ok) return { ok: false, denied: res.status === 401 || res.status === 403 };
     return { ok: true, json: (await res.json()) as T };
   } catch {
@@ -52,7 +53,7 @@ async function callOrgo<T>(
   try {
     const res = await fetch(`${orgoOrigin()}${path}`, {
       method,
-      headers: { ...headers, Authorization: `Bearer ${key}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+      headers: { ...orgoHeaders(), ...headers, Authorization: `Bearer ${key}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),

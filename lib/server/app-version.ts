@@ -25,3 +25,15 @@ export const appHeaders = (): Record<string, string> => {
   const v = appVersion();
   return { ...(v ? { [APP_VERSION_HEADER]: v } : {}), ...(telemetryHere() ? {} : { [TELEMETRY_HEADER]: "off" }) };
 };
+
+/**
+ * What tells orgo-web which Bops app is calling, for every call to Orgo's API: the version alone, never
+ * a usage switch (an API call isn't a usage event). Orgo takes a Bops computer off its server while it
+ * sleeps only when every app its owner uses waits for it to wake again rather than taking it for broken
+ * (this release and later: lib/server/orgo.ts, sessions.ts ensureComputer); an older app, or one that
+ * doesn't say, keeps the user's computer where it is.
+ */
+export const orgoHeaders = (): Record<string, string> => {
+  const v = appVersion();
+  return v ? { [APP_VERSION_HEADER]: v } : {};
+};

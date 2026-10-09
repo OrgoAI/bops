@@ -671,6 +671,8 @@ replies = {
     if (c.method === "GET" && what === "screens")
       return screensUp ? json(200, { screens: [99, 100, 101, 102].map((d) => ({ id: `s${d}`, display: `:${d}`, width: 1280, height: 960, default: d === 99 })) }) : json(404, { error: "No screens yet" });
     if (c.method === "POST" && what === "bash") return json(200, { output: "", exit_code: 0 });
+    // Asleep in storage, it's woken: Orgo answers at once (202, waking) and it runs a little later.
+    if (c.method === "POST" && what === "resume") return (status = "running"), json(202, { success: true, pending: true, waking: true, expected_seconds: 90 });
     // Its disk: the plan's default, and at most 50 GB on this plan.
     if (c.method === "GET" && what === "resize") return json(200, { current_disk_gb: 20, max_disk_gb: 50 });
     if (c.method === "PATCH" && what === "resize") return json(200, { ok: true });
@@ -693,6 +695,7 @@ assert.equal(calls.filter((c) => c.method === "POST" && c.path === "/api/compute
 assert.equal(asked("DELETE", "/api/computers/c-up-1"), 0);
 assert.equal(S.session("ses_up1").status, "failed");
 assert.equal(said("ses_up1"), "I couldn't start Task ses_up1: Boppy's computer couldn't be set up (Orgo GET /computers/c-up-1/screens → 404: No screens yet). The next task tries again.");
+assert.equal(main().computerNeverReady, "c-up-1", "made by Bops and never ready: nothing has run on it");
 // Its one more try fails too: deleted, so it stops using up the plan, and the next task makes a new one.
 task("ses_up2");
 n = asked("POST", "/api/computers");
@@ -705,6 +708,7 @@ assert.match(said("ses_up2"), /\(Orgo GET \/computers\/c-up-1\/screens → 404: 
 screensUp = true;
 await X.ensureComputer("boppy");
 assert.deepEqual({ id: main().computerId, status: main().computerStatus, ram: main().computerRam }, { id: "c-up-2", status: "ready", ram: 8 });
+assert.equal(main().computerNeverReady, undefined, "ready: from now on it may hold the user's work");
 assert.deepEqual(
   calls.filter((c) => c.method === "PATCH" && c.path === "/api/computers/c-up-2/resize").map((c) => c.body),
   [{ disk_size_gb: 50 }],
@@ -735,6 +739,43 @@ await L.orgoPlan();
 replies["GET /api/billing/compute-limits"] = answers("hacker_v2", 1, 0)["GET /api/billing/compute-limits"];
 await X.ensureComputer("boppy");
 assert.deepEqual({ id: main().computerId, status: main().computerStatus }, { id: "c-up-4", status: "ready" });
+
+// A computer the bot already had, or one Bops didn't make here (the user's free one taken up again, one
+// from another Mac), is never deleted for a failed setup, whatever Orgo says: it may hold the user's work.
+// Orgo says it's stopped, twice: kept both times, and the task says so.
+upComputers.set("c-had-1", 8);
+S.update(() => Object.assign(main(), { computerId: "c-had-1", computerStatus: "error", computerNeverReady: undefined }));
+status = "stopped";
+task("ses_had1");
+await X.ensureComputer("boppy");
+assert.equal(asked("DELETE", "/api/computers/c-had-1"), 0, "kept");
+assert.deepEqual({ id: main().computerId, status: main().computerStatus }, { id: "c-had-1", status: "error" });
+assert.equal(said("ses_had1"), "I couldn't start Task ses_had1: Boppy's computer couldn't be set up (Orgo says it's stopped). Bops kept it, so nothing on it is lost. The next task tries again.");
+task("ses_had2");
+await X.ensureComputer("boppy");
+assert.equal(asked("DELETE", "/api/computers/c-had-1"), 0, "its one more try fails too: still kept");
+assert.match(said("ses_had2"), /Bops kept it, so nothing on it is lost\. The next task tries again\.$/);
+// Its screens don't come up, twice (a wake from storage can be slow): kept as well.
+status = "running";
+screensUp = false;
+task("ses_had3");
+await X.ensureComputer("boppy");
+task("ses_had4");
+await X.ensureComputer("boppy");
+assert.equal(asked("DELETE", "/api/computers/c-had-1"), 0, "never deleted for a failed setup");
+assert.equal(main().computerId, "c-had-1");
+screensUp = true;
+// Asleep in storage (Orgo took it off its server while it slept): the setup wakes it (POST /resume, which
+// answers at once), waits while it comes back, and finishes. Nothing deleted.
+upComputers.set("c-had-2", 8);
+S.update(() => Object.assign(main(), { computerId: "c-had-2", computerStatus: "error" }));
+status = "suspended";
+n = calls.length;
+await X.ensureComputer("boppy");
+assert.equal(asked("POST", "/api/computers/c-had-2/resume", n), 1, "woken once");
+assert.deepEqual({ id: main().computerId, status: main().computerStatus }, { id: "c-had-2", status: "ready" });
+assert.equal(asked("DELETE", "/api/computers/c-had-2"), 0);
+status = "running";
 
 // Another user's state is swapped in (a hosted server) while Bops waits on Orgo for this one's computer:
 // nothing about it lands in theirs, though their main bot and its task have the same ids.
