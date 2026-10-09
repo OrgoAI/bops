@@ -388,8 +388,15 @@ export const APP_CLIENT_HEADER = "x-bops-client";
 export const IOS_CLIENT = "ios";
 /** The phone's time zone ("America/Los_Angeles"), so the main bot knows the time where the user is. UTC when it's missing or not one. */
 export const TIMEZONE_HEADER = "x-bops-timezone";
+/**
+ * Sent as "on" with a message (POST /v1/agent/messages) once the user allowed their chat to go to Bops'
+ * memory service, Honcho, too: only then does the turn read what's known about them and save the chat
+ * there (cloud/honcho.ts). Without it, the turn neither reads nor saves memory. The iPhone app sends it
+ * only after a notice that names Honcho (App Store 5.1.2(i): each third-party AI, asked first).
+ */
+export const MEMORY_HEADER = "x-bops-memory";
 
-/** 409: a turn is already answering one of the user's messages (from this phone or another). Try again in a moment. */
+/** 409: a turn is already answering another of the user's messages (from this phone or another). Try again in a moment. */
 export const AGENT_BUSY = "agent_busy";
 /** 409: the chat the phone named isn't the main bot's chat any more (the main bot changed): read GET /v1/agent again. */
 export const AGENT_CHANGED = "agent_changed";
@@ -403,7 +410,8 @@ export const AGENT_MAX_TEXT = 8000;
  * GET /v1/agent: the user's main bot (the main bot of the default workspace, else of the first
  * workspace, else any main bot), or Boppy (`isDefault`) for a user with no state yet (they never used
  * Bops on a Mac): the same bot a new Mac install makes, so the chat joins up if they install it later.
- * `seq` is the user's newest message write; `working` whether a turn is answering one of their messages.
+ * `seq` is the user's newest message write (or the highest seq of a removal swept for good, when that's
+ * newer): a cursor to poll from. `working`: whether a turn is answering one of their messages.
  */
 export type AgentInfo = {
   bot: { id: string; name: string; role: string; color: string; picture: string | null };
@@ -419,10 +427,15 @@ export type AgentInfo = {
 /**
  * One message as the phone shows it, made from the chat's row (never the row itself):
  * - "user" and "bot": what the user and the bot said. `via` where the user said it ("text": to the
- *   bot's number; "email": an email of their own; Slack, Telegram, Discord), nothing for the apps.
- * - "note": a line about something else (a call, someone else's email or text, a fact remembered).
- * `photos`: how many pictures it had (the phone doesn't show them). `taskId`: it's a task's result (a
- * newer result of the same task replaces it). `answers`: the phone message a cloud answer is for.
+ *   bot's number; "email": an email of their own; Slack, Telegram, Discord), nothing for the apps. A
+ *   bot's words lose what the Mac wrote for itself: words and links that send the user to buy, and a
+ *   link to one of the Mac's own pages or files keeps only its words, marked "(on your Mac)".
+ * - "note": a line about something else (a call, with who called and the message they left when it's
+ *   someone else's; someone else's email or text; a fact remembered).
+ * `options`: one-tap replies, on the cloud's own answers only (a Mac bot's question is for the Mac,
+ * where its tools are). `photos`: how many pictures it had (the phone doesn't show them). `taskId`:
+ * it's a task's result (a newer result of the same task replaces it). `answers`: the phone message a
+ * cloud answer is for.
  */
 export type PhoneMessage = {
   id: string;
@@ -444,19 +457,23 @@ export type PhoneRemoved = { id: string; seq: number; removed: true };
  * GET /v1/agent/messages?chatId=<main chat>[&afterSeq=<seq> | &beforeAt=<ms>][&limit=<n>], oldest first.
  * - afterSeq: what changed in this chat after the cursor, removals too (limit 200, at most 500).
  *   `seq` is the last row looked at across all the user's chats: the next cursor. `more`: ask again now.
+ *   `reset`: the cursor is older than a removal the cloud no longer keeps (removals are kept 30 days),
+ *   so the page is the newest one instead, as if asked with neither: the phone drops its copy of the
+ *   chat and keeps these messages, `seq` is the new cursor, and `more` says there are older ones.
  * - beforeAt: this chat's older messages, before that time (limit 50, at most 100); `more`: there are
  *   older ones still. Such a page leaves the cursor alone: its `seq` is 0.
- * - Neither: the newest messages (limit 50, at most 100), and `seq` is the user's newest write: the
- *   cursor to poll from.
+ * - Neither: the newest messages (limit 50, at most 100), and `seq` is the user's newest write (as
+ *   AgentInfo's): the cursor to poll from.
  * `working` is read before the messages, so the answer that first says false has the reply in it (or
  * an earlier one did).
  */
-export type PhoneMessagesPage = { messages: (PhoneMessage | PhoneRemoved)[]; seq: number; more: boolean; working: boolean };
+export type PhoneMessagesPage = { messages: (PhoneMessage | PhoneRemoved)[]; seq: number; more: boolean; working: boolean; reset?: true };
 
 /**
  * POST /v1/agent/messages: a message to the main bot, from the phone. `id` is the phone's own
  * ("msg_ios_<uuid>"), the same on every retry, so a message is written and answered once.
- * - 202 AgentAccepted: written (the user's Mac told), and a turn answers it in the background.
+ * - 202 AgentAccepted: written (the user's Mac told), and a turn answers it in the background. The
+ *   same for that id sent again while its turn still runs (the first 202 was lost on the way).
  * - 200 AgentAnswered: that id was answered already.
  * - 409 AGENT_BUSY, 409 AGENT_CHANGED, 402 AI_CREDIT_EMPTY (nothing written), 429 SLOW_DOWN, 400 or
  *   413 (no text, or longer than AGENT_MAX_TEXT), 426 APP_UPDATE_REQUIRED.

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { trackCloudEvent } from "./analytics.ts";
+import type { IncomingMessage } from "node:http";
 import {
   agentView,
   chatIdOf,
@@ -28,6 +28,7 @@ import {
   AGENT_MAX_TEXT,
   AGENT_SENDS_A_MINUTE,
   AI_CREDIT_EMPTY,
+  MEMORY_HEADER,
   SLOW_DOWN,
   TIMEZONE_HEADER,
   type AgentAccepted,
@@ -37,7 +38,7 @@ import {
   type PhoneMessagesPage,
   type PhoneRemoved,
 } from "./protocol.ts";
-import { answerTo, chatPage, chatSaid, checkUser, loadState, messagesById, newestSeq, rowsAfter, sendZipped, writeMessages, type MessageRow } from "./state.ts";
+import { answerTo, chatPage, chatSaid, checkUser, loadState, messagesById, newestSeq, rowsAfter, sendZipped, sweptSeq, writeMessages, type MessageRow } from "./state.ts";
 import { tidyAnswer } from "./style.ts";
 import { recordTokens } from "./usage.ts";
 
@@ -60,6 +61,9 @@ import { recordTokens } from "./usage.ts";
  *   (openai.tokens, source "iphone"). It runs on after the request, so it finishes if the phone goes
  *   away; the phone polls for the answer. One turn at a time per user, in this process's memory: a
  *   restart mid-turn loses it, and the phone offers Try again (the same message id).
+ * - Memory (cloud/honcho.ts) only when the phone says the user allowed it (MEMORY_HEADER), as Bops for
+ *   iPhone asks before anything goes to a third-party AI; and no usage events for the phone's calls
+ *   (cloud/analytics.ts), as it collects no usage data.
  * - The phone only makes short requests: never /v1/session, /v1/connect (the Mac's tunnel, one per
  *   user: server.ts refuses a phone's socket), PUT /v1/state or POST /v1/messages.
  */
@@ -156,6 +160,37 @@ const line = (t: string, max: number) => {
   return one.length > max ? `${one.slice(0, max)}…` : one;
 };
 
+/*
+ * Words the Mac's bots write that send the user to buy, which Bops for iPhone never shows (it sells
+ * nothing: App Store 3.1.1 and 3.1.3(f)). A sentence that starts with them (lib/server/cloud.ts
+ * OUT_OF_CREDIT, lib/server/plan.ts, cloud/credit.ts, cloud/turn-guard.ts, cloud/plans.ts) and the
+ * clause orgo-web's free hours end with ("…, or upgrade to Pro to keep it on").
+ */
+const BUY = /\s*\bUpgrade (?:in Settings|to (?:Max|Pro|Orgo)\b|to use it again|to get a number again|within \d+ days)[^.!?\n]*[.!?]?/g;
+const BUY_CLAUSE = /,? or upgrade to (?:Max|Pro)\b[^.!?\n]*/g;
+/** A Markdown link, with the space before it: [words](target) or [words](target "title"). */
+const LINK = /(\s*)\[([^\]\n]+)\]\(([^)\s]*)(?:\s+"[^"\n]*")?\)/g;
+/** Orgo's account page on its Plan or Usage tab (lib/server/plan.ts orgoPages): where a plan is bought. */
+const ORGO_PLAN_PAGE = /\/account\?(?:[^)\s]*&)?tab=(?:plan|usage)\b/;
+
+/**
+ * A bot's words as the phone shows them, without what the Mac wrote for itself: the words and links
+ * that send the user to buy (a link to Orgo's plan or usage page goes; lib/server/plan.ts limitText),
+ * and a link to the Mac's own pages or files ("Open: [Title](/api/pages/…)", lib/server/chat.ts and
+ * files.ts), which can't open on the phone: its words stay, marked "(on your Mac)". A link that only
+ * another app opens keeps its words. Web, mail and phone links stay as they are.
+ */
+export function forPhone(text: string): string {
+  return text
+    .replace(LINK, (all: string, space: string, words: string, target: string) => {
+      if (/^(?:https?|mailto|tel):/i.test(target)) return ORGO_PLAN_PAGE.test(target) ? "" : all;
+      return /^[a-z][a-z0-9+.-]*:/i.test(target) ? `${space}${words}` : `${space}${words} (on your Mac)`;
+    })
+    .replace(BUY, "")
+    .replace(BUY_CLAUSE, "")
+    .trim();
+}
+
 /**
  * A row of the chat as the phone shows it (PhoneMessage), never the row itself: what the user and the
  * bot said, a short note for anything else worth seeing (a call, another person's email or text, a
@@ -166,13 +201,20 @@ export function phoneMessage(r: MessageRow): PhoneMessage | PhoneRemoved | null 
   if (!r.json) return { id: r.id, seq: r.seq, removed: true };
   const m = r.json;
   const base = { id: r.id, seq: r.seq, at: typeof m.at === "number" && Number.isFinite(m.at) ? Math.floor(m.at) : r.at };
-  const text = textOf(m.text);
+  const text = m.role === "bot" ? forPhone(textOf(m.text)) : textOf(m.text);
   const photos = Array.isArray(m.images) ? m.images.length : 0;
   const note = (said: string): PhoneMessage => ({ ...base, role: "note", text: said });
   // A call's note has its caller's number as a text's too: it's the call.
   if (isObject(m.call)) {
     const seconds = Number(m.call.seconds) || 0;
-    return note(seconds < 60 ? "Call, under a minute" : `Call, ${Math.round(seconds / 60)} min`);
+    const long = seconds < 60 ? "under a minute" : `${Math.round(seconds / 60)} min`;
+    // Someone else's call that left a message (the Mac chimes for it: `ping`): who called, and the
+    // message, as the note's first paragraph says it (lib/server/phone-voice.ts, phone.ts cloudCall).
+    if (m.ping === true && isObject(m.sms)) {
+      const left = text.split(/\n{2,}/)[0].replace(/^While your Mac was away, someone called and left/, "Left");
+      return note(`Call from ${line(textOf(m.sms.from), 120) || "someone"}, ${long}. ${line(left, 140)}`);
+    }
+    return note(`Call, ${long}`);
   }
   if (isObject(m.email)) {
     const e = m.email;
@@ -186,7 +228,9 @@ export function phoneMessage(r: MessageRow): PhoneMessage | PhoneRemoved | null 
   if (m.role !== "user" && m.role !== "bot") return null;
   if (!text.trim() && !photos) return null;
   const via = typeof m.via === "string" ? VIA[m.via] : undefined;
-  const options = m.role === "bot" ? strings(m.options).slice(0, 4) : [];
+  // One-tap replies on the cloud's own answers only: a Mac bot's question waits on the Mac, where its
+  // tools are, and the cloud's bot, which has none, can't act on the choice.
+  const options = m.role === "bot" && typeof m.answers === "string" && m.answers ? strings(m.options).slice(0, 4) : [];
   return {
     ...base,
     role: m.role,
@@ -207,6 +251,11 @@ const shownOne = (r: MessageRow) => phoneMessage(r) as PhoneMessage;
 /* ---------------- Routes ---------------- */
 
 const userOf = (u: Parameters<Route["handle"]>[2]["user"]) => u!;
+/** A request header's first value. */
+const headerOf = (req: IncomingMessage, name: string) => {
+  const h = req.headers[name];
+  return Array.isArray(h) ? h[0] : h;
+};
 
 /** A whole number from the query, from `min` to `max`: `fallback` when it isn't there (none: it must be), else a 400 naming it. */
 function whole(url: URL, name: string, min: number, fallback: number | null, max = Number.MAX_SAFE_INTEGER): number {
@@ -238,6 +287,17 @@ const info: Route = {
   },
 };
 
+/** How many of the chat's newest messages a page has when the phone doesn't say. */
+const NEWEST = 50;
+
+/** The chat's newest messages, and the cursor to poll from. */
+async function newestPage(userId: string, chatId: string, limit: number) {
+  // The cursor first: a message written meanwhile comes again on the next poll, never goes missing.
+  const seq = await newestSeq(userId);
+  const page = await chatPage(userId, chatId, null, limit);
+  return { messages: shown(page.rows), seq, more: page.more };
+}
+
 const messages: Route = {
   method: "GET",
   path: "/v1/agent/messages",
@@ -256,15 +316,16 @@ const messages: Route = {
     if (hasAfter) {
       const after = whole(url, "afterSeq", 0, null);
       const page = await rowsAfter(user.id, after, whole(url, "limit", 1, 200, 500));
-      body = { messages: shown(page.rows.filter((r) => r.chatId === chatId)), seq: page.seq, more: page.more, working: busy };
+      // A removal is kept 30 days, then swept for good. A cursor from before the last one swept can't
+      // hear of it, so the phone starts over from the newest page. Read after the rows: a sweep that
+      // took one of them meanwhile has moved swept_seq by then (the same statement).
+      if (after < (await sweptSeq(user.id))) body = { ...(await newestPage(user.id, chatId, NEWEST)), working: busy, reset: true };
+      else body = { messages: shown(page.rows.filter((r) => r.chatId === chatId)), seq: page.seq, more: page.more, working: busy };
     } else if (hasBefore) {
-      const page = await chatPage(user.id, chatId, whole(url, "beforeAt", 1, null), whole(url, "limit", 1, 50, 100));
+      const page = await chatPage(user.id, chatId, whole(url, "beforeAt", 1, null), whole(url, "limit", 1, NEWEST, 100));
       body = { messages: shown(page.rows), seq: 0, more: page.more, working: busy };
     } else {
-      // The cursor first: a message written meanwhile comes again on the next poll, never goes missing.
-      const seq = await newestSeq(user.id);
-      const page = await chatPage(user.id, chatId, null, whole(url, "limit", 1, 50, 100));
-      body = { messages: shown(page.rows), seq, more: page.more, working: busy };
+      body = { ...(await newestPage(user.id, chatId, whole(url, "limit", 1, NEWEST, 100))), working: busy };
     }
     await sendZipped(req, res, 200, body);
   },
@@ -293,6 +354,9 @@ const send: Route = {
     if (before && (before.json?.role !== "user" || before.chatId !== chatId)) throw new HttpError(400, "That message id is taken");
     const answered = before ? await answerTo(user.id, id) : null;
     if (before && answered) return sendJson(res, 200, { message: shownOne(before), reply: shownOne(answered) } satisfies AgentAnswered);
+    // Sent again while its own turn still answers it (the first 202 was lost on the way): taken, as it
+    // was the first time. Only another message is told the bot is busy.
+    if (before && working(user.id) && turns.get(user.id)?.messageId === id) return sendJson(res, 202, { message: shownOne(before), working: true } satisfies AgentAccepted);
 
     const v = agentView((await loadState(user.id))?.state);
     const { bot } = mainBotOf(v);
@@ -315,11 +379,16 @@ const send: Route = {
         await writeMessages(user.id, [{ id, chatId, role: "user", text, at: Date.now(), sentFrom: "iphone" }]);
         [message] = await messagesById(user.id, [id]);
         if (!message) throw new Error("the message wasn't written");
-        trackCloudEvent(user.id, "bops_message_sent", { chat_kind: "bot", via: "iphone", image_count: 0, is_reply: false });
       }
       sendJson(res, 202, { message: shownOne(message), working: true } satisfies AgentAccepted);
-      const header = req.headers[TIMEZONE_HEADER];
-      void answer(t, { userId: user.id, orgoName: user.name ?? null, chatId, message: { id, text: textOf(message.json?.text), at: message.at }, tz: timeZoneOf(Array.isArray(header) ? header[0] : header) });
+      void answer(t, {
+        userId: user.id,
+        orgoName: user.name ?? null,
+        chatId,
+        message: { id, text: textOf(message.json?.text), at: message.at },
+        tz: timeZoneOf(headerOf(req, TIMEZONE_HEADER)),
+        memory: headerOf(req, MEMORY_HEADER)?.trim().toLowerCase() === "on",
+      });
     } catch (e) {
       letGo(user.id, t);
       throw e;
@@ -331,7 +400,8 @@ export const routes: Route[] = [info, messages, send];
 
 /* ---------------- The turn ---------------- */
 
-type TurnFor = { userId: string; orgoName: string | null; chatId: string; message: { id: string; text: string; at: number }; tz: string };
+/** What a turn answers. `memory`: the user allowed memory from the phone (MEMORY_HEADER); without it, nothing is read from or saved to Honcho. */
+type TurnFor = { userId: string; orgoName: string | null; chatId: string; message: { id: string; text: string; at: number }; tz: string; memory: boolean };
 type Answer = { id: string | null; model: unknown; usage: unknown; text: string };
 
 /** What went wrong, for the log: a status, or the kind of failure. Never what was said. */
@@ -380,17 +450,19 @@ async function answer(t: Turn, c: TurnFor) {
     // What an inline reply in the window quotes, when it's from before the window.
     const quoted = [...new Set(window.map((m) => m.replyTo).filter((x): x is string => typeof x === "string"))].filter((x) => !window.some((m) => m.id === x));
     const roots = new Map((await messagesById(c.userId, quoted)).flatMap((r) => (r.json ? [[r.id, r.json] as const] : [])));
-    const binding = bindingFor(workspaceOf(b), v.workspaces.find((w) => w.id === workspaceOf(b))?.memory);
-    const memory = await memoryBlock(c.userId, binding, c.message.text, owner, timing.memoryMs);
+    // Memory only with the user's say-so from the phone: it's another company's AI (Honcho).
+    const binding = c.memory ? bindingFor(workspaceOf(b), v.workspaces.find((w) => w.id === workspaceOf(b))?.memory) : null;
+    const memory = binding ? await memoryBlock(c.userId, binding, c.message.text, owner, timing.memoryMs) : "";
     const input = [...historyInput(window, roots, v, b.id, owner), nowNote(v, b, owner, c.tz, memory)];
     const a = await respond(instructionsFor(v, b, c.orgoName), input);
     try {
       const tidy = tidyAnswer(a.text);
-      if (!tidy.text.trim()) throw new TurnError("OpenAI answered with no text");
+      // An answer the phone would show nothing of (all of it words about buying) isn't one.
+      if (!forPhone(tidy.text)) throw new TurnError("OpenAI answered with no text");
       const reply = { id: `msg_cloud_${randomUUID()}`, chatId: c.chatId, role: "bot", botId: b.id, text: tidy.text, at: Math.max(Date.now(), c.message.at + 1), answers: c.message.id, ...(tidy.options ? { options: tidy.options } : {}) };
       await writeMessages(c.userId, [reply]);
       // Into the memory the bot's workspace shares, unless the user wants it kept from someone there.
-      if (!keptFromOthers(c.message.text)) saveChat(c.userId, binding, { id: c.chatId, name: b.name }, b, c.message.text, tidy.text);
+      if (binding && !keptFromOthers(c.message.text)) saveChat(c.userId, binding, { id: c.chatId, name: b.name }, b, c.message.text, tidy.text);
     } finally {
       // OpenAI charged for it whether or not the answer was written.
       if (a.id) await recordTokens(c.userId, a.id, a.usage, { model: a.model, source: "iphone", botId: b.id }).catch((e: Error) => console.warn(`[agent] ${c.userId}: usage: ${e.message}`));

@@ -20,7 +20,7 @@ export const POSTHOG_PROJECT = "phc_8yOV40FgnXKKKAJTdbPOoPdbWi9nP44h6BqZyqRo76H"
 export const POSTHOG_HOST = "https://us.i.posthog.com";
 export const POSTHOG_UI_HOST = "https://us.posthog.com";
 
-/** Who sends an event: the app's window, the Mac's Next server, or Bops Cloud. An event several send lists them. */
+/** Who sends an event: the app's window, the Mac's Next server, or Bops Cloud. */
 export type Sender = "app" | "mac_server" | "cloud";
 
 type OneOf = { readonly one: readonly string[] };
@@ -43,12 +43,11 @@ export const EVENTS = {
   bops_signed_in: { by: "mac_server", props: { method: { one: ["google", "email", "orgo"] }, switched_user: "bool" } },
   bops_signed_out: { by: "mac_server", props: {} },
   bops_bot_created: { by: "mac_server", props: { own_computer: "bool", workspace_bots: "count" } },
-  // A message to a bot: from the Mac's server, or from Bops Cloud for one sent from Bops for iPhone (via "iphone", cloud/agent.ts).
   bops_message_sent: {
-    by: ["mac_server", "cloud"],
+    by: "mac_server",
     props: {
       chat_kind: { one: ["bot", "group"] },
-      via: { one: ["app", "call", "sms", "email", "slack", "telegram", "discord", "iphone"] },
+      via: { one: ["app", "call", "sms", "email", "slack", "telegram", "discord"] },
       image_count: "count",
       is_reply: "bool",
     },
@@ -149,13 +148,8 @@ type RuleValue<R> = R extends "bool"
 export type BopsEvent = Exclude<keyof Events, "$exception">;
 /** Each event's properties, as types. */
 export type BopsEventProps = { [E in BopsEvent]: { -readonly [K in keyof Events[E]["props"]]: RuleValue<Events[E]["props"][K]> } };
-/** Whether `S` sends an event whose sender is `B`: that one, or one of a list. */
-type SentBy<B, S extends Sender> = B extends readonly (infer U)[] ? (S extends U ? true : false) : B extends S ? true : false;
 /** The events one sender may send. */
-export type EventsBy<S extends Sender> = { [E in BopsEvent]: SentBy<Events[E]["by"], S> extends true ? E : never }[BopsEvent];
-
-/** Whether `sender` may send an event whose sender is `by`: that one, one of a list, or "any". */
-const sends = (by: unknown, sender: Sender) => by === "any" || by === sender || (Array.isArray(by) && by.includes(sender));
+export type EventsBy<S extends Sender> = { [E in BopsEvent]: Events[E]["by"] extends S ? E : never }[BopsEvent];
 /** The person properties Bops sets. */
 export type BopsPersonProps = Partial<{ -readonly [K in keyof typeof PERSON]: RuleValue<(typeof PERSON)[K]> }>;
 
@@ -259,8 +253,8 @@ function cleanPerson(set: unknown): Record<string, unknown> | null {
  * dropped one by one.
  */
 export function cleanProperties(event: string, props: Record<string, unknown> | undefined, sender: Sender): Record<string, unknown> | null {
-  const spec = (EVENTS as unknown as Record<string, { by: string | readonly string[]; props: Record<string, Rule> } | undefined>)[event];
-  const allowed = Object.hasOwn(EVENTS, event) && spec ? sends(spec.by, sender) : sender === "app" && (event === "$identify" || event === "$set");
+  const spec = (EVENTS as unknown as Record<string, { by: string; props: Record<string, Rule> } | undefined>)[event];
+  const allowed = Object.hasOwn(EVENTS, event) && spec ? spec.by === sender || spec.by === "any" : sender === "app" && (event === "$identify" || event === "$set");
   if (!allowed) return null;
   const own: Record<string, Rule> = spec?.props ?? {};
   const out: Record<string, unknown> = {};

@@ -12,6 +12,7 @@ import { creditLeft } from "../credit.ts";
 import { closeDb, query } from "../db.ts";
 import type { AgentInfo, PhoneMessage, PhoneMessagesPage, PhoneRemoved } from "../protocol.ts";
 import { honchoPrefix } from "../session.ts";
+import { sweepRemovedMessages } from "../state.ts";
 import { LEDGER_IN_USE, TEST_DATABASE_URL, call, dropUsers, fakeProvider, gate, keyOf, prepareDb, startCloud, until, type Got, type Listening, type Reply } from "./core-fakes.ts";
 
 /**
@@ -61,6 +62,8 @@ const asMac = (userId: string, method: string, path: string, json?: unknown) =>
 
 const newId = () => `msg_ios_${randomUUID()}`;
 const send = (userId: string, id: string, text: string, chatId = "bot:boppy") => phone(userId, "POST", "/v1/agent/messages", { id, chatId, text });
+/** A send from a phone whose user allowed memory (Honcho) too. */
+const sendWithMemory = (userId: string, id: string, text: string) => phone(userId, "POST", "/v1/agent/messages", { id, chatId: "bot:boppy", text }, { "x-bops-memory": "on" });
 const page = async (userId: string, query: string) => (await phone(userId, "GET", `/v1/agent/messages?chatId=bot%3Aboppy&${query}`)).json as PhoneMessagesPage;
 const isMessage = (m: PhoneMessage | PhoneRemoved): m is PhoneMessage => !("removed" in m);
 
@@ -276,9 +279,16 @@ test("a message from the phone is written in the main bot's chat, answered once 
     assert.match(instructions, /Options: <reply 1> \| <reply 2>/);
     assert.match(instructions, /Your own email address is boppy@alex\.bops\.bot/);
     assert.match(instructions, /The team's phone number is yours: \+14155550100 \(texts\)/);
-    assert.match(instructions, /by text at \+14155550100; by email at boppy@alex\.bops\.bot; in Slack \(Acme\)/);
+    assert.match(instructions, /Where Alex reaches you: in Bops, on their Mac and their iPhone; by text at \+14155550100; by email at boppy@alex\.bops\.bot; in Slack \(Acme\)\./);
     assert.match(instructions, /Your teammates: Otto \(Outbound, otto@alex\.bops\.bot\)/);
-    assert.match(instructions, /You're answering in Bops on Alex's iPhone\. .*You can't start tasks, use a computer, use their apps, make pictures, or send email or texts from here yet\./);
+    assert.match(
+      instructions,
+      /You're answering in Bops on Alex's iPhone\. .*You can't start tasks, use a computer, use their apps, make pictures, or send email or texts from here yet\. If they ask for one of those, say so in one sentence, and say they can ask you in Bops on their Mac\./,
+    );
+    // What Bops for iPhone has, never a word that sends them to buy, and no diagrams on a narrow screen.
+    assert.match(instructions, /Bops for iPhone has one chat: this one, with you\. The gear at the top right opens Settings: their account, their plan and the AI credit left, Sign out, Delete account/);
+    assert.match(instructions, /Never tell them to upgrade, or to buy a plan or AI credit, or where to do it\. If they ask about their plan or credit, say they can see it in Settings\./);
+    assert.match(instructions, /Don't draw ASCII diagrams here: the screen is narrow, and screen readers can't read them\. Use a short numbered list instead\./);
     assert.ok(!instructions.includes("—"), "no em dashes");
     // The chat so far, as the Mac's bot reads it, then what's true now.
     const input = body.input as { role: string; content: string }[];
@@ -311,15 +321,6 @@ test("a message from the phone is written in the main bot's chat, answered once 
     assert.deepEqual([usage[0].detail.source, usage[0].detail.botId, usage[0].detail.input, usage[0].detail.output], ["iphone", "boppy", 1200, 40]);
     assert.ok(Number(usage[0].cost) > 0);
     assert.ok((await creditLeft(id)) < 5_000_000, "taken from the user's $5");
-
-    // One usage event, content-free, from the cloud, and not the iPhone's version as the Mac app's.
-    const [e] = await until(() => {
-      const l = events().filter((x) => x.distinct_id === id && x.event === "bops_message_sent");
-      return l.length ? l : null;
-    }, "bops_message_sent");
-    assert.deepEqual([e.properties.via, e.properties.chat_kind, e.properties.image_count, e.properties.is_reply, e.properties.source], ["iphone", "bot", 0, false, "cloud"]);
-    assert.equal(e.properties.app_version, undefined);
-    assert.ok(!JSON.stringify(e).includes("today"), "never what was said");
   } finally {
     mac.ws.close();
     delete process.env.BOPS_AGENT_MODEL;
@@ -334,13 +335,17 @@ test("a user who never used Bops on a Mac chats with Boppy; no state is made for
   const { seen } = await settle(id, 0);
   assert.equal(answerOf(seen, msgId)?.text, "Hi Jo. I'm Boppy.");
   assert.match(String(responses().at(-1)!.json.instructions), /^You are Boppy, Jo Park's chief of staff in Bops\. You work for Jo Park\./);
-  assert.match(String(responses().at(-1)!.json.instructions), /You run the team, which is just you so far\./);
+  const instructions = String(responses().at(-1)!.json.instructions);
+  assert.match(instructions, /You run the team, which is just you so far\./);
+  assert.match(instructions, /Where Jo Park reaches you: in Bops on their iPhone\./);
+  assert.match(instructions, /If they ask for one of those, say so in one sentence, and say that Bops on a Mac can do it\./);
+  assert.ok(!instructions.includes("on their Mac"), "never sent to a Mac they don't have");
   // Their chat is kept for when they sign in on a Mac, but the cloud writes no state of its own for them.
   assert.equal((await asMac(id, "GET", "/v1/state")).status, 404);
   assert.deepEqual((await rowsOf(id)).map((r) => r.chat_id), ["bot:boppy", "bot:boppy"]);
 });
 
-test("sent twice, answered once: busy while it's answering, the same answer after, and answered again only when it never was", async () => {
+test("sent twice, answered once: taken again while it's answering, busy for another, the same answer after, and answered again only when it never was", async () => {
   const id = await newUser(STATE);
   const held = gate();
   let asked = 0;
@@ -350,14 +355,17 @@ test("sent twice, answered once: busy while it's answering, the same answer afte
     return ok("Here's your day.");
   };
   const first = newId();
-  assert.equal((await send(id, first, "Plan my day")).status, 202);
-  // While it's answering: the same message again, or another one (from this phone or another).
-  for (const again of [first, newId()]) {
-    const r = await send(id, again, "Plan my day");
-    assert.equal(r.status, 409, r.text);
-    assert.equal(r.json.code, "agent_busy");
-    assert.equal(r.json.error, "Boppy is answering another message. Try again in a moment.");
-  }
+  const sent = await send(id, first, "Plan my day");
+  assert.equal(sent.status, 202);
+  // While it's answering, the same message again (its 202 was lost on the way): taken, as the first time, and not answered twice.
+  const same = await send(id, first, "Plan my day");
+  assert.equal(same.status, 202, same.text);
+  assert.deepEqual([same.json.message.id, same.json.message.seq, same.json.working], [first, sent.json.message.seq, true]);
+  // Another message (from this phone or another): busy.
+  const other = await send(id, newId(), "Plan my day");
+  assert.equal(other.status, 409, other.text);
+  assert.equal(other.json.code, "agent_busy");
+  assert.equal(other.json.error, "Boppy is answering another message. Try again in a moment.");
   assert.equal(((await phone(id, "GET", "/v1/agent")).json as AgentInfo).working, true);
   held.open();
   const { seen } = await settle(id, 0);
@@ -424,10 +432,18 @@ test("a chat that isn't the main bot's any more (409 agent_changed), and more th
 test("each call names the user, and a message needs its own id, the chat and some text", async () => {
   const id = await newUser(STATE);
   const other = await newUser(STATE);
-  assert.equal((await call(cloud.url, "GET", "/v1/agent", { key: keyOf(id), headers: PHONE_HEADERS })).status, 400, "no X-Bops-User");
-  const wrong = await phone(id, "GET", "/v1/agent", undefined, { "x-bops-user": other });
-  assert.deepEqual([wrong.status, wrong.json.code], [409, "wrong_user"]);
-  assert.equal((await call(cloud.url, "GET", "/v1/agent", { headers: PHONE_HEADERS })).status, 401);
+  // Every route: no X-Bops-User, another user's, or no key at all.
+  for (const [method, path, json] of [
+    ["GET", "/v1/agent", undefined],
+    ["GET", "/v1/agent/messages?chatId=bot%3Aboppy", undefined],
+    ["POST", "/v1/agent/messages", { id: newId(), chatId: "bot:boppy", text: "Hi" }],
+  ] as const) {
+    assert.equal((await call(cloud.url, method, path, { key: keyOf(id), json, headers: PHONE_HEADERS })).status, 400, `${method} ${path}: no X-Bops-User`);
+    const wrong = await phone(id, method, path, json, { "x-bops-user": other });
+    assert.deepEqual([wrong.status, wrong.json.code], [409, "wrong_user"], `${method} ${path}: another user's`);
+    assert.equal((await call(cloud.url, method, path, { json, headers: PHONE_HEADERS })).status, 401, `${method} ${path}: no key`);
+  }
+  assert.deepEqual([await rowsOf(id), await rowsOf(other)], [[], []], "nothing written for any of them");
   for (const [body, status] of [
     [{ id: "abc", chatId: "bot:boppy", text: "Hi" }, 400],
     [{ id: newId(), chatId: "boppy", text: "Hi" }, 400],
@@ -446,7 +462,7 @@ test("each call names the user, and a message needs its own id, the chat and som
     assert.equal((await phone(id, "GET", `/v1/agent/messages?${q}`)).status, 400, q);
 });
 
-test("the chat as the phone shows it: each kind of message, removals, older pages, and other chats passed over", async () => {
+test("the chat as the phone shows it: each kind of message, the Mac's own words left out, removals, older pages, and other chats passed over", async () => {
   const id = await newUser(STATE);
   const t0 = Date.now() - 600_000;
   const at = (i: number) => t0 + i * 1000;
@@ -460,13 +476,47 @@ test("the chat as the phone shows it: each kind of message, removals, older page
     { id: "r06", role: "system", text: "Here you go.", email: { dir: "out", from: "boppy@alex.bops.bot", to: ["jo@example.com", "kim@example.com"], subject: "Re: Quote" } },
     { id: "r07", role: "system", text: `Hello\nthere ${"y".repeat(200)}`, sms },
     { id: "r08", role: "system", text: "While your Mac was away, you called.", sms, call: { seconds: 125, phone: "+14155550199" } },
-    { id: "r09", role: "system", text: "Left a message.", sms, call: { seconds: 30 } },
+    // Someone else's call that left a message, as the Mac writes it (lib/server/phone-voice.ts): with a chime.
+    {
+      id: "r09",
+      role: "system",
+      text: 'Left a message (Dana): "Call me back about the quote" Reach them at +14155550123.\n\nCaller: Hi, is Alex there?\nBoppy: Alex can\'t talk now. Can I take a message?',
+      sms,
+      call: { seconds: 30, phone: "+14155550199" },
+      ping: true,
+    },
     { id: "r10", role: "system", text: "Remembered: Alex is vegetarian.", memory: { ws: "ws_main", id: "c_1", fact: "Alex is vegetarian." } },
     { id: "r11", role: "system", text: "Remembered: Alex likes jazz.", memory: { ws: "ws_main", id: "c_2", fact: "Alex likes jazz.", undone: true } },
     { id: "r12", role: "system", text: "Boppy did it: GMAIL_SEND_EMAIL", appResult: { action: "GMAIL_SEND_EMAIL", ok: true, output: "{}" } },
     { id: "r13", role: "system", text: 'Scheduled "Water" · daily' },
     { id: "r14", role: "bot", botId: "boppy", text: "", images: [{ id: "up_2", type: "image/png" }], picture: { prompt: "a cake" } },
     { id: "r15", role: "bot", botId: "boppy", text: "" },
+    // A call the cloud took while the Mac was away, as the Mac writes it once it's back (lib/server/phone.ts cloudCall).
+    {
+      id: "r20",
+      role: "system",
+      text: 'While your Mac was away, someone called and left a message: "Running late" Reach them at +14155550124.',
+      sms: { dir: "in", from: "", to: "+14155550100", id: "cloud-call:ev_1" },
+      call: { seconds: 200 },
+      ping: true,
+    },
+    // The Mac's words that send the user to buy (lib/server/cloud.ts, plan.ts; orgo-web's free hours).
+    { id: "r21", role: "bot", botId: "boppy", text: "I'm out of AI credit, so I've stopped. Upgrade in Settings to keep me going." },
+    {
+      id: "r22",
+      role: "bot",
+      botId: "boppy",
+      text: "I couldn't start Lisbon flights. Your Pro plan includes 2 computers, and 2 are in use. [Upgrade to Orgo Max](https://www.orgo.ai/account?tab=plan)\n\nYour free Bops computer has used its 10 hours this month. It's back on November 1, or upgrade to Pro to keep it on. Upgrade to Max in Settings.",
+    },
+    // Links to the Mac's own pages and files, a web link, a mail link, and one only another app opens.
+    {
+      id: "r23",
+      role: "bot",
+      botId: "boppy",
+      text: "Here it is.\n\nOpen: [Lisbon plan](/api/pages/pg_1)\nThe [report](/workspace/report.md), [the source](https://example.com/a), [Dana](mailto:dana@acme.com) and [a note](notes://n_1).",
+    },
+    // The cloud's own answer: its one-tap replies stay.
+    { id: "r24", role: "bot", botId: "boppy", text: "Want me to plan it?", options: ["Yes", "Not now"], answers: "msg_ios_earlier" },
   ].map((m, i) => ({ chatId: "bot:boppy", at: at(i), ...m }));
   await asMac(id, "POST", "/v1/messages", { upsert: [...rows, { id: "o01", chatId: "bot:otto", role: "user", text: "Otto's", at: at(20) }], remove: [] });
   const newest = await page(id, "limit=100");
@@ -476,15 +526,33 @@ test("the chat as the phone shows it: each kind of message, removals, older page
   assert.deepEqual(shown, [
     { id: "r01", at: at(0), role: "user", text: "From my phone", via: "text" },
     { id: "r02", at: at(1), role: "user", text: "From Slack", via: "slack" },
-    { id: "r03", at: at(2), role: "bot", text: "Flights found.", botId: "boppy", options: ["Book it", "Not yet"], photos: 1, taskId: "ses_1" },
+    // A Mac bot's question keeps its words, not its one-tap replies: they wait on the Mac, where its tools are.
+    { id: "r03", at: at(2), role: "bot", text: "Flights found.", botId: "boppy", photos: 1, taskId: "ses_1" },
     { id: "r04", at: at(3), role: "user", text: "Please send the deck", via: "email" },
     { id: "r05", at: at(4), role: "note", text: "Email from Dana <dana@acme.com>: Quote" },
     { id: "r06", at: at(5), role: "note", text: "Emailed jo@example.com, kim@example.com: Re: Quote" },
     { id: "r07", at: at(6), role: "note", text: `Text from +14155550199: ${`Hello there ${"y".repeat(200)}`.slice(0, 140)}…` },
     { id: "r08", at: at(7), role: "note", text: "Call, 2 min" },
-    { id: "r09", at: at(8), role: "note", text: "Call, under a minute" },
+    { id: "r09", at: at(8), role: "note", text: 'Call from +14155550199, under a minute. Left a message (Dana): "Call me back about the quote" Reach them at +14155550123.' },
     { id: "r10", at: at(9), role: "note", text: "Remembered: Alex is vegetarian." },
     { id: "r14", at: at(13), role: "bot", text: "", botId: "boppy", photos: 1 },
+    { id: "r20", at: at(15), role: "note", text: 'Call from someone, 3 min. Left a message: "Running late" Reach them at +14155550124.' },
+    { id: "r21", at: at(16), role: "bot", text: "I'm out of AI credit, so I've stopped.", botId: "boppy" },
+    {
+      id: "r22",
+      at: at(17),
+      role: "bot",
+      text: "I couldn't start Lisbon flights. Your Pro plan includes 2 computers, and 2 are in use.\n\nYour free Bops computer has used its 10 hours this month. It's back on November 1.",
+      botId: "boppy",
+    },
+    {
+      id: "r23",
+      at: at(18),
+      role: "bot",
+      text: "Here it is.\n\nOpen: Lisbon plan (on your Mac)\nThe report (on your Mac), [the source](https://example.com/a), [Dana](mailto:dana@acme.com) and a note.",
+      botId: "boppy",
+    },
+    { id: "r24", at: at(19), role: "bot", text: "Want me to plan it?", botId: "boppy", options: ["Yes", "Not now"], answers: "msg_ios_earlier" },
   ]);
 
   // Older pages, oldest first, before a time; the cursor isn't theirs to move.
@@ -512,7 +580,7 @@ test("the chat as the phone shows it: each kind of message, removals, older page
   assert.deepEqual([small.messages.length, small.more], [0, true], "only Otto's row in it");
 });
 
-test("memory: what's known goes in the turn's note, private lines left out; both lines are saved to the chat's session, unless it's to be kept from someone", async () => {
+test("memory, only when the user allowed it from the phone: what's known goes in the turn's note, private lines left out; both lines are saved to the chat's session, unless it's to be kept from someone", async () => {
   const id = await newUser(STATE);
   process.env.HONCHO_API_KEY = "honcho-test-key";
   try {
@@ -526,8 +594,17 @@ test("memory: what's known goes in the turn's note, private lines left out; both
     };
     answerWith = () => ok("Mornings it is.");
     const ws = `${honchoPrefix(id)}-bops`;
+
+    // Not allowed from the phone (no x-bops-memory: on): Honcho is another company's AI, so nothing is read or saved there.
+    const quiet = newId();
+    assert.equal((await send(id, quiet, "When should we meet?")).status, 202);
+    assert.ok(answerOf((await settle(id, 0)).seen, quiet));
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(honcho.got.length, 0, "no memory without the user's say-so");
+    assert.doesNotMatch(String((responses().at(-1)!.json.input as { content: string }[]).at(-1)!.content), /long-term memory/);
+
     const msgId = newId();
-    assert.equal((await send(id, msgId, "When should we meet?")).status, 202);
+    assert.equal((await sendWithMemory(id, msgId, "When should we meet?")).status, 202);
     await settle(id, 0);
     const note = String((responses().at(-1)!.json.input as { content: string }[]).at(-1)!.content);
     assert.match(note, /What you know about Alex, from their long-term memory\./);
@@ -561,7 +638,7 @@ test("memory: what's known goes in the turn's note, private lines left out; both
     // Kept from someone (typed on an iPhone: a curly apostrophe): answered, but nothing of it goes into the memory the team shares.
     const posts = honcho.got.filter((g) => g.method === "POST").length;
     const secret = newId();
-    assert.equal((await send(id, secret, "Don’t tell Otto, but I’m planning a party for him")).status, 202);
+    assert.equal((await sendWithMemory(id, secret, "Don’t tell Otto, but I’m planning a party for him")).status, 202);
     const { seen } = await settle(id, 0);
     assert.ok(answerOf(seen, secret));
     await new Promise((r) => setTimeout(r, 200));
@@ -570,12 +647,50 @@ test("memory: what's known goes in the turn's note, private lines left out; both
     // Honcho down: the turn goes on without memory.
     honchoContext = { status: 500, json: {} };
     const plain = newId();
-    assert.equal((await send(id, plain, "Hi again")).status, 202);
+    assert.equal((await sendWithMemory(id, plain, "Hi again")).status, 202);
     assert.ok(answerOf((await settle(id, 0)).seen, plain));
     assert.doesNotMatch(String((responses().at(-1)!.json.input as { content: string }[]).at(-1)!.content), /long-term memory/);
   } finally {
     delete process.env.HONCHO_API_KEY;
   }
+});
+
+test("a cursor from before a removal swept for good starts over from the newest page", async () => {
+  const id = await newUser(STATE);
+  const t0 = Date.now() - 60_000;
+  await asMac(id, "POST", "/v1/messages", { upsert: [1, 2, 3].map((i) => ({ id: `s0${i}`, chatId: "bot:boppy", role: "user", text: `Message ${i}`, at: t0 + i })), remove: [] });
+  const cursor = (await page(id, "limit=50")).seq;
+  // Deleted on the Mac (a pasted password, say) while the phone was away, and swept 30 days on.
+  await asMac(id, "POST", "/v1/messages", { upsert: [], remove: ["s02"] });
+  await query("UPDATE bops.chat_messages SET updated_at = now() - interval '31 days' WHERE user_id = $1 AND json IS NULL", [id]);
+  assert.ok((await sweepRemovedMessages()) >= 1);
+  const swept = (await query<{ seq: string }>("SELECT swept_seq AS seq FROM bops.app_state WHERE user_id = $1", [id])).rows[0];
+  assert.ok(Number(swept.seq) > cursor, "the user's highest seq swept is kept");
+
+  // The phone can't hear of that removal any more: the newest page instead, to keep in place of its copy.
+  // Its cursor is the seq swept (newer than any row left), so the next poll goes on from there.
+  const again = await page(id, `afterSeq=${cursor}`);
+  assert.deepEqual([again.reset, again.messages.map((m) => m.id), again.seq, again.more], [true, ["s01", "s03"], Number(swept.seq), false]);
+  assert.equal(((await phone(id, "GET", "/v1/agent")).json as AgentInfo).seq, Number(swept.seq));
+  // From the new cursor on, as before.
+  const next = await page(id, `afterSeq=${again.seq}`);
+  assert.deepEqual([next.reset, next.messages], [undefined, []]);
+  // A cursor past the swept seq never started over.
+  await asMac(id, "POST", "/v1/messages", { upsert: [{ id: "s04", chatId: "bot:boppy", role: "user", text: "Message 4", at: Date.now() }], remove: [] });
+  const later = await page(id, `afterSeq=${again.seq}`);
+  assert.deepEqual([later.reset, later.messages.map((m) => m.id)], [undefined, ["s04"]]);
+});
+
+test("Bops for iPhone collects no usage data: no event for the phone's calls, not even the turn that runs the credit out", async () => {
+  const id = await newUser(STATE);
+  await creditLeft(id);
+  await query("UPDATE public.bops_ai_credit SET free_micros = 1, plan_micros = 0 WHERE user_id = $1", [id]);
+  const msgId = newId();
+  assert.equal((await send(id, msgId, "Hi")).status, 202);
+  assert.ok(answerOf((await settle(id, 0)).seen, msgId));
+  assert.ok((await creditLeft(id)) <= 0, "this turn ran the credit out");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(events().filter((e) => e.distinct_id === id).map((e) => e.event), []);
 });
 
 test("the iPhone's version is its own: the Mac's stays, only ios_block_below holds it back, and a phone never opens the Mac's socket", async () => {

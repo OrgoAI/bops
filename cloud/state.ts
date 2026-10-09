@@ -90,8 +90,19 @@ async function lastSeq(userId: string, c: pg.PoolClient | null = null): Promise<
   return Number(r.rows[0].seq);
 }
 
-/** The user's newest message write's seq (0: none yet): where a reader that has everything up to now goes on from. */
-export const newestSeq = (userId: string) => lastSeq(userId);
+/**
+ * Where a reader that has everything up to now goes on from: the user's newest message write's seq, or
+ * the highest seq swept for good when that's newer (its rows are gone), so a cursor from here never has
+ * to start over (sweptSeq). 0: none yet.
+ */
+export async function newestSeq(userId: string): Promise<number> {
+  const r = await query<{ seq: string }>(
+    `SELECT GREATEST((SELECT COALESCE(max(seq), 0) FROM bops.chat_messages WHERE user_id = $1),
+                     (SELECT COALESCE(max(swept_seq), 0) FROM bops.app_state WHERE user_id = $1)) AS seq`,
+    [userId],
+  );
+  return Number(r.rows[0].seq);
+}
 
 async function head(userId: string): Promise<CloudStateHead> {
   const row = await readRow(userId);
@@ -293,6 +304,15 @@ export async function messagesById(userId: string, ids: string[]): Promise<Messa
   return r.rows.map(rowOf);
 }
 
+/**
+ * The highest seq of the user's removals swept for good (sweepRemovedMessages; 0: none yet). A reader
+ * whose cursor is below it may have missed a removal: it starts over (cloud/agent.ts `reset`).
+ */
+export async function sweptSeq(userId: string): Promise<number> {
+  const r = await query<{ seq: string }>("SELECT swept_seq AS seq FROM bops.app_state WHERE user_id = $1", [userId]);
+  return Number(r.rows[0]?.seq ?? 0);
+}
+
 /** The live message that answers `messageId` (its `answers`: the main bot's answer to a phone message, cloud/agent.ts), the newest if several; null when none. */
 export async function answerTo(userId: string, messageId: string): Promise<MessageRow | null> {
   const r = await query<RawRow>(
@@ -466,10 +486,25 @@ export const routes: Route[] = [get, getHead, put, getMessages, postMessages, po
 
 /* ---------------- Sweeps ---------------- */
 
-/** Rows of messages removed more than `days` ago go for good. */
+/**
+ * Rows of messages removed more than `days` ago go for good. In the same statement, each user's highest
+ * seq swept goes into app_state.swept_seq, so a reader with an older cursor knows it can't hear of every
+ * removal any more (sweptSeq). A Mac knows by time instead (lib/server/persist-cloud.ts reads everything
+ * again after 25 days away). Returns how many rows went.
+ */
 export async function sweepRemovedMessages(days = REMOVED_KEEP_DAYS): Promise<number> {
-  const r = await query("DELETE FROM bops.chat_messages WHERE json IS NULL AND updated_at < now() - make_interval(days => $1)", [days]);
-  return r.rowCount ?? 0;
+  const r = await query<{ n: string }>(
+    `WITH gone AS (
+       DELETE FROM bops.chat_messages WHERE json IS NULL AND updated_at < now() - make_interval(days => $1) RETURNING user_id, seq
+     ), marked AS (
+       UPDATE bops.app_state s SET swept_seq = g.seq
+       FROM (SELECT user_id, max(seq) AS seq FROM gone GROUP BY user_id) g
+       WHERE s.user_id = g.user_id AND s.swept_seq < g.seq
+     )
+     SELECT count(*) AS n FROM gone`,
+    [days],
+  );
+  return Number(r.rows[0]?.n ?? 0);
 }
 
 /** Sweep removed messages every hour; returns the stop. */
