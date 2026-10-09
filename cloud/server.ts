@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
-import { appVersionOf, noteAppVersion, requireAppVersion, startAppPolicy } from "./app-version.ts";
+import * as agent from "./agent.ts";
+import { appVersionOf, fromIphone, noteAppVersion, noteIphoneVersion, requireAppVersion, requireIphoneVersion, startAppPolicy } from "./app-version.ts";
 import { requireUser, type CloudUser } from "./auth.ts";
 import { captureCloudException, inTelemetryScope, shutdownTelemetry } from "./analytics.ts";
 import { config } from "./config.ts";
@@ -27,7 +28,7 @@ import * as verify from "./verify.ts";
 /**
  * Bops Cloud. One process serves every user: each module owns its routes (session.ts, proxy.ts,
  * verify.ts, lines.ts, handles.ts, plans.ts, ops.ts, tunnel.ts, hooks.ts, slack.ts, state.ts, pages.ts,
- * usage.ts) and this file only puts them together. See README.md.
+ * usage.ts, agent.ts) and this file only puts them together. See README.md.
  */
 
 const health: Route = {
@@ -60,6 +61,7 @@ export const routes = (): Route[] => [
   ...pages.routes,
   ...usage.routes,
   ...notices.routes,
+  ...agent.routes,
 ];
 export const upgrades = (): Upgrade[] => [...tunnel.upgrades, ...proxy.upgrades];
 
@@ -72,9 +74,16 @@ function requestUrl(req: IncomingMessage): URL | null {
   }
 }
 
-/** Which app a signed-in call came from: kept with the user's account, and an app too old for the cloud is told to update (app-version.ts). */
+/**
+ * Which app a signed-in call came from: kept with the user's account, and an app too old for the cloud
+ * is told to update (app-version.ts). Bops for iPhone's version is its own: it never stands in for the Mac's.
+ */
 function appCheck(req: IncomingMessage, userId: string, path: string) {
   const version = appVersionOf(req);
+  if (fromIphone(req)) {
+    noteIphoneVersion(userId, version);
+    return requireIphoneVersion(version);
+  }
   noteAppVersion(userId, version);
   requireAppVersion(path, version);
 }
@@ -111,6 +120,8 @@ export function makeServer(): Server {
     if (!url) return refuseUpgrade(socket, 400, "Bad Request");
     const up = ups.find((u) => matches(u.path, url.pathname));
     if (!up) return refuseUpgrade(socket, 404, "Not Found");
+    // A phone only polls its chat (agent.ts). The tunnel is one per user: a phone there would drop the user's Mac.
+    if (fromIphone(req)) return refuseUpgrade(socket, 403, "Forbidden");
     try {
       const user = await requireUser(req);
       appCheck(req, user.id, url.pathname);

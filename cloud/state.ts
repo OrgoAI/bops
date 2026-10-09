@@ -40,6 +40,9 @@ import { forgetTelemetryChoice } from "./analytics.ts";
  *
  * Every call that's for a user's state names that user (X-Bops-User), and it must be the key's: a Mac
  * that signed in as someone else since can't write into the wrong account (409 wrong_user).
+ *
+ * The cloud writes messages of its own too (writeMessages): one sent from the phone and the main
+ * bot's answer to it (cloud/agent.ts), read from here by the user's Macs like any other.
  */
 
 /** A state upload or a batch of messages, as sent and once unzipped. */
@@ -87,6 +90,9 @@ async function lastSeq(userId: string, c: pg.PoolClient | null = null): Promise<
   return Number(r.rows[0].seq);
 }
 
+/** The user's newest message write's seq (0: none yet): where a reader that has everything up to now goes on from. */
+export const newestSeq = (userId: string) => lastSeq(userId);
+
 async function head(userId: string): Promise<CloudStateHead> {
   const row = await readRow(userId);
   return { version: row?.version ?? 0, seq: await lastSeq(userId), writer: row?.writer ?? null };
@@ -112,8 +118,8 @@ const headerOf = (req: IncomingMessage, name: string) => {
 const newBuild = (req: IncomingMessage) => headerOf(req, BOPS_PROTOCOL_HEADER) === String(STATE_PROTOCOL);
 const deviceOf = (req: IncomingMessage) => headerOf(req, BOPS_DEVICE_HEADER).slice(0, 64) || null;
 
-/** The user the call names must be the key's. `required`: calls only a newer build makes must name one. */
-function checkUser(req: IncomingMessage, user: CloudUser, required: boolean) {
+/** The user the call names must be the key's. `required`: calls only a newer build makes must name one (and the phone's, cloud/agent.ts). */
+export function checkUser(req: IncomingMessage, user: CloudUser, required: boolean) {
   const named = headerOf(req, BOPS_USER_HEADER);
   if (!named) {
     if (required) throw new HttpError(400, `Name the user (${BOPS_USER_HEADER})`);
@@ -148,7 +154,7 @@ const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v =
 const wholeNumber = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
 /** JSON, gzipped for a client that asks: a whole state or a page of messages runs to megabytes, gzipped a tenth of that. */
-async function sendZipped(req: IncomingMessage, res: ServerResponse, status: number, body: unknown) {
+export async function sendZipped(req: IncomingMessage, res: ServerResponse, status: number, body: unknown) {
   const json = Buffer.from(JSON.stringify(body));
   const gzipped = /\bgzip\b/i.test(req.headers["accept-encoding"] ?? "");
   const data = gzipped ? await zip(json) : json;
@@ -213,6 +219,88 @@ async function lockUser(c: pg.PoolClient, userId: string) {
   await c.query(`INSERT INTO bops.app_state (user_id, state, version) VALUES ($1, '{}'::jsonb, 0) ON CONFLICT (user_id) DO NOTHING`, [userId]);
   const r = await c.query<{ version: string; protocol: number }>("SELECT version, protocol FROM bops.app_state WHERE user_id = $1 FOR UPDATE", [userId]);
   return { version: Number(r.rows[0].version), protocol: r.rows[0].protocol };
+}
+
+/* ---------------- The cloud's own messages, and one chat's (cloud/agent.ts) ---------------- */
+
+/**
+ * Write messages as the cloud's own (cloud/agent.ts: a message sent from the phone, and the main
+ * bot's answer to it), each replacing its row, on the user's locked row as POST /v1/messages writes
+ * them; then the user's connected Mac hears of it (a "state" frame) and reads them, as it reads
+ * another Mac's. Each needs an id, a chat and a time.
+ */
+export async function writeMessages(userId: string, messages: Record<string, unknown>[]): Promise<void> {
+  const msgs = messages.map(messageOf);
+  if (!msgs.length) return;
+  await tx(async (c) => {
+    await lockUser(c, userId);
+    await upsertMessages(c, userId, msgs);
+  });
+  announce(userId);
+}
+
+/** A message's row as kept: its JSON, or null when it was removed (the chat it was in stays). */
+export type MessageRow = { id: string; seq: number; chatId: string; at: number; json: Record<string, unknown> | null };
+type RawRow = { id: string; seq: string; chat_id: string; at: string; json: Record<string, unknown> | null };
+const rowOf = (x: RawRow): MessageRow => ({ id: x.id, seq: Number(x.seq), chatId: x.chat_id, at: Number(x.at), json: x.json });
+const ROW = "id, seq, chat_id, at, json";
+
+/**
+ * Every chat's rows written after `after`, removed ones too, oldest first, as GET /v1/messages pages
+ * them: `seq` is the last row's (the next cursor, past other chats' rows too), `more` whether there
+ * are more than `limit`.
+ */
+export async function rowsAfter(userId: string, after: number, limit: number): Promise<{ rows: MessageRow[]; seq: number; more: boolean }> {
+  const r = await query<RawRow>(`SELECT ${ROW} FROM bops.chat_messages WHERE user_id = $1 AND seq > $2 ORDER BY seq LIMIT $3`, [userId, after, limit + 1]);
+  const rows = r.rows.slice(0, limit).map(rowOf);
+  return { rows, seq: rows.length ? rows[rows.length - 1].seq : after, more: r.rows.length > limit };
+}
+
+/** One chat's newest `limit` live messages, or the newest before `beforeAt`, oldest first; `more`: there are older ones. */
+export async function chatPage(userId: string, chatId: string, beforeAt: number | null, limit: number): Promise<{ rows: MessageRow[]; more: boolean }> {
+  const r =
+    beforeAt === null
+      ? await query<RawRow>(`SELECT ${ROW} FROM bops.chat_messages WHERE user_id = $1 AND chat_id = $2 AND json IS NOT NULL ORDER BY at DESC, seq DESC LIMIT $3`, [userId, chatId, limit + 1])
+      : await query<RawRow>(`SELECT ${ROW} FROM bops.chat_messages WHERE user_id = $1 AND chat_id = $2 AND json IS NOT NULL AND at < $3 ORDER BY at DESC, seq DESC LIMIT $4`, [
+          userId,
+          chatId,
+          beforeAt,
+          limit + 1,
+        ]);
+  return { rows: r.rows.slice(0, limit).map(rowOf).reverse(), more: r.rows.length > limit };
+}
+
+/**
+ * What a bot reads of a chat (lib/server/chat.ts history): its messages, without the system lines that
+ * aren't an email, a text or an app's answer. The newest `limit` of them, oldest first, and how many
+ * the chat has in all (where the bot's window of them starts depends on it).
+ */
+export async function chatSaid(userId: string, chatId: string, limit: number): Promise<{ rows: MessageRow[]; total: number }> {
+  const r = await query<RawRow & { total: string }>(
+    `SELECT ${ROW}, count(*) OVER () AS total FROM bops.chat_messages
+     WHERE user_id = $1 AND chat_id = $2 AND json IS NOT NULL
+       AND (json->>'role' IS DISTINCT FROM 'system' OR jsonb_typeof(json->'email') = 'object' OR jsonb_typeof(json->'sms') = 'object' OR jsonb_typeof(json->'appResult') = 'object')
+     ORDER BY at DESC, seq DESC LIMIT $3`,
+    [userId, chatId, limit],
+  );
+  return { rows: r.rows.map(rowOf).reverse(), total: Number(r.rows[0]?.total ?? 0) };
+}
+
+/** The user's live messages with these ids. */
+export async function messagesById(userId: string, ids: string[]): Promise<MessageRow[]> {
+  if (!ids.length) return [];
+  const r = await query<RawRow>(`SELECT ${ROW} FROM bops.chat_messages WHERE user_id = $1 AND id = ANY($2::text[]) AND json IS NOT NULL`, [userId, ids]);
+  return r.rows.map(rowOf);
+}
+
+/** The live message that answers `messageId` (its `answers`: the main bot's answer to a phone message, cloud/agent.ts), the newest if several; null when none. */
+export async function answerTo(userId: string, messageId: string): Promise<MessageRow | null> {
+  const r = await query<RawRow>(
+    // `json ? 'answers'` is the index's own condition (chat_messages_answers, 0013), so the index serves it.
+    `SELECT ${ROW} FROM bops.chat_messages WHERE user_id = $1 AND json ? 'answers' AND json->>'answers' = $2 ORDER BY seq DESC LIMIT 1`,
+    [userId, messageId],
+  );
+  return r.rows[0] ? rowOf(r.rows[0]) : null;
 }
 
 /* ---------------- Routes ---------------- */

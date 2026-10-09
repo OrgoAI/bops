@@ -109,7 +109,8 @@ const SUPER_KEYS = ["app", "source", "platform", "environment", "app_version", "
 for (const [event, spec] of Object.entries(R.EVENTS)) {
   assert.ok(event === "$exception" || event.startsWith("bops_"), `${event} is Bops'`);
   assert.ok(!FUNNEL.includes(event), `${event} isn't an orgo-web funnel event`);
-  assert.ok(["app", "mac_server", "cloud", "any"].includes(spec.by), `${event}'s sender`);
+  // One sender, "any", or a list of senders (bops_message_sent: the Mac's server, and Bops Cloud for Bops for iPhone).
+  assert.ok([spec.by].flat().length > 0 && [spec.by].flat().every((by) => ["app", "mac_server", "cloud", "any"].includes(by)), `${event}'s sender`);
   for (const prop of Object.keys(spec.props)) {
     assert.ok(prop === "route_path" || !PERSONAL.test(prop), `${event}.${prop} names nothing personal`);
     assert.ok(!SUPER_KEYS.includes(prop), `${event}.${prop} doesn't collide with a property on every event`);
@@ -140,6 +141,11 @@ for (const [event, props] of [
 ])
   assert.deepEqual(clean(event, props, "mac_server"), {}, `${event} ${JSON.stringify(props)} doesn't fit`);
 assert.deepEqual(clean("bops_task_started", { task_id: "ses_mg9abc12x7k1" }, "mac_server"), { task_id: "ses_mg9abc12x7k1" });
+// A message sent from Bops for iPhone: Bops Cloud sends it (cloud/agent.ts), as the Mac's server sends its own.
+const fromPhone = { chat_kind: "bot", via: "iphone", image_count: 0, is_reply: false };
+assert.deepEqual(clean("bops_message_sent", fromPhone, "cloud"), fromPhone, "the cloud's, from the iPhone");
+assert.deepEqual(clean("bops_message_sent", { ...fromPhone, via: "app" }, "mac_server"), { ...fromPhone, via: "app" }, "the Mac's server's");
+assert.equal(clean("bops_message_sent", fromPhone, "app"), null, "never the window's");
 const posthogOwn = {
   $current_url: "http://localhost:3210/?chat=bot:ada",
   $host: "localhost:3210",
@@ -607,6 +613,16 @@ await C.inTelemetryScope(req({ "x-bops-version": "0.0.22" }), async () => C.trac
 const [ran] = await until(() => ofEvent("bops_ai_credit_ran_out", mark).length && ofEvent("bops_ai_credit_ran_out", mark), "bops_ai_credit_ran_out");
 assert.equal(ran.properties.app_version, "0.0.22", "the calling app's version");
 
+// Bops for iPhone's numbers are its own: never taken for the Mac app's version.
+mark = sent.length;
+await C.inTelemetryScope(req({ "x-bops-client": "ios", "x-bops-version": "0.2.0" }), async () =>
+  C.trackCloudEvent("u-9", "bops_message_sent", { chat_kind: "bot", via: "iphone", image_count: 0, is_reply: false }),
+);
+const [phoneSent] = await until(() => ofEvent("bops_message_sent", mark).length && ofEvent("bops_message_sent", mark), "the cloud's bops_message_sent");
+assert.equal(phoneSent.properties.via, "iphone");
+assert.equal(phoneSent.properties.source, "cloud");
+assert.equal(phoneSent.properties.app_version, undefined, "no Mac version for the iPhone's call");
+
 db.off["u-8"] = "true";
 mark = sent.length;
 C.trackCloudEvent("u-8", "bops_owner_contact_verified", { channel: "sms" });
@@ -664,7 +680,7 @@ for (const f of files) {
 }
 for (const [event, uses] of used) {
   assert.ok(Object.hasOwn(R.EVENTS, event), `${event} is in the catalog`);
-  for (const [by, f] of uses) assert.equal(R.EVENTS[event].by, by, `${event} is sent by its own sender (${f})`);
+  for (const [by, f] of uses) assert.ok([R.EVENTS[event].by].flat().includes(by), `${event} is sent by its own sender (${f})`);
 }
 for (const event of Object.keys(R.EVENTS)) if (event !== "$exception") assert.ok(used.has(event), `${event} is sent somewhere`);
 console.log("ok - the catalog matches the code");

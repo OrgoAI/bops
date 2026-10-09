@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { PostHog } from "posthog-node";
 import { cleanNodeEvent, fits, POSTHOG_PROJECT, quietFetch, type BopsEventProps, type BopsPersonProps, type EventsBy } from "./analytics-rules.ts";
+import { fromIphone } from "./app-version.ts";
 import { config } from "./config.ts";
 import { query } from "./db.ts";
 import { APP_VERSION_HEADER, TELEMETRY_HEADER } from "./protocol.ts";
@@ -45,10 +46,19 @@ const header = (req: IncomingMessage, name: string) => {
   return (Array.isArray(h) ? h[0] : h)?.trim();
 };
 
+/**
+ * The Mac app's version a call says (app_version on its events), or null. Bops for iPhone's numbers are
+ * its own, so they never stand for the Mac's: its events say where they're from instead (via "iphone").
+ */
+function macVersionOf(req: IncomingMessage): string | null {
+  if (fromIphone(req)) return null;
+  const v = header(req, APP_VERSION_HEADER);
+  return v && fits("version", v) ? v : null;
+}
+
 /** Run a call's handler with what it said about usage events: off, and which app it came from. */
 export function inTelemetryScope<T>(req: IncomingMessage, fn: () => T): T {
-  const v = header(req, APP_VERSION_HEADER);
-  return scope.run({ off: header(req, TELEMETRY_HEADER) === "off", appVersion: v && fits("version", v) ? v : null }, fn);
+  return scope.run({ off: header(req, TELEMETRY_HEADER) === "off", appVersion: macVersionOf(req) }, fn);
 }
 
 const TEN_MINUTES = 10 * 60_000;
@@ -118,8 +128,7 @@ export function captureCloudException(err: unknown, req: IncomingMessage, userId
   try {
     const ph = posthog();
     if (!ph || !userId || header(req, TELEMETRY_HEADER) === "off") return;
-    const v = header(req, APP_VERSION_HEADER);
-    const props = { ...superProps({ off: false, appVersion: v && fits("version", v) ? v : null }), surface: "cloud", ...(routePath ? { route_path: routePath } : {}) };
+    const props = { ...superProps({ off: false, appVersion: macVersionOf(req) }), surface: "cloud", ...(routePath ? { route_path: routePath } : {}) };
     const send = () => ph.captureException(err, userId, props);
     void switchedOff(userId).then(
       (off) => off || send(),
