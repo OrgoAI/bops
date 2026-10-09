@@ -105,6 +105,23 @@ function Bops({ state }: { state: AppState | null }) {
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
+  // A file dropped where nothing takes it (only the chat and the CRM do) is refused: left to the
+  // window, it would open the file in place of Bops. Only files: text dragged into a field drops as before.
+  useEffect(() => {
+    const files = (e: DragEvent) => !!e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files");
+    const over = (e: DragEvent) => {
+      if (e.defaultPrevented || !files(e)) return;
+      e.preventDefault();
+      e.dataTransfer!.dropEffect = "none";
+    };
+    const drop = (e: DragEvent) => files(e) && e.preventDefault();
+    window.addEventListener("dragover", over);
+    window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("drop", drop);
+    };
+  }, []);
   const [active, setActive] = useState(CHAT_TAB);
   // Where you were, so leaving a tab goes back there: the tabs you've had open (latest last), and how
   // the side panel was when the tab on it now opened it (hidden, or a computer full width).

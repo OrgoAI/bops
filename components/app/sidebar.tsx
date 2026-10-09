@@ -369,6 +369,13 @@ export function DeleteX({ label, onDelete, className = "" }: { label: string; on
         e.stopPropagation();
         onDelete();
       }}
+      // It's a button to the keyboard too: Enter or Space.
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        e.stopPropagation();
+        onDelete();
+      }}
       className={`flex size-5 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 hover:bg-black/[0.06] hover:text-[#B42318] ${className}`}
     >
       <svg width="9" height="9" viewBox="0 0 12 12">

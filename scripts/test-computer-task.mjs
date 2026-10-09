@@ -404,6 +404,27 @@ assert.equal(pc.status, "running");
 const zshot = asked.at(-1).input.find((i) => i.type === "computer_call_output");
 assert.equal(zshot?.output.type, "computer_screenshot", "the model got the screen");
 
+/* ---------------- A task someone outside Bops started: none of the user's CRM ---------------- */
+
+// An email or a text from someone else (StartOptions.outside) can start a cloud task, which also opens
+// any web page: it gets no crm_* tools and no CRM note, so neither can have it read the user's customers out.
+answers.push(() => response("resp_o1", [said("The table is booked for 8.")]));
+const fromOutside = X.startSession({ botId: main.id, goal: "Book a table for 8", title: "Table for 8", where: "cloud", fresh: true, outside: "an email from desk@hotel.example" });
+s = await ended(fromOutside.id);
+assert.equal(s.status, "done", `it finished (${s.error ?? ""})`);
+assert.equal(s.fromOutside, true, "marked as started from outside");
+const outsideAsk = asked.at(-1);
+assert.deepEqual(
+  outsideAsk.tools.map((t) => t.name ?? t.type).filter((n) => n.startsWith("crm_")),
+  [],
+  "no CRM tools",
+);
+assert.doesNotMatch(outsideAsk.instructions, /Bops CRM:/, "and no CRM note");
+// The user's own tasks still have them.
+answers.push(() => response("resp_o2", [said("Done.")]));
+await task("Book a table for 4", "Table for 4");
+assert.ok(asked.at(-1).tools.some((t) => t.name === "crm_read"), "a task the user started keeps the CRM");
+
 /* ---------------- AI credit used up ---------------- */
 
 answers.push(() => json({ error: { message: "You're out of AI credit.", code: "ai_credit_empty" }, code: "ai_credit_empty", upgrade: true }, 402));

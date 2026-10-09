@@ -206,6 +206,7 @@ export function startSession({ botId, goal, title, chatId, sentVia = "you", onWa
     // A watched screen's thread runs on that screen, in the cloud; everything else is decided first.
     ...(onWatch ? { runsOn: "cloud" as const } : { routing: true }),
     thenOnMac: (!outside && thenOnMac?.trim()) || undefined,
+    ...(outside ? { fromOutside: true as const } : {}),
     ...(movedFrom ? { movedFrom } : {}),
   };
   update((state) => state.sessions.push(s));
@@ -1266,7 +1267,7 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
     instructions(b.name, b.role, false, at.display, at.sharedWith, apps, !!b.autoApprove, false, true, false, true),
     appsNote(b, "task", { tools: apps }),
     dataNote(b, "task"),
-    crmNote(b, "task"),
+    s.fromOutside ? "" : crmNote(b, "task"),
     placesNote(b, "task"),
     memory,
   ]

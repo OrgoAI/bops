@@ -223,8 +223,12 @@ function records(text: string, d: string) {
  * ("Column 9"). A byte order mark is dropped; the delimiter is sniffed unless given. Rows that are
  * entirely blank are dropped, unless `keepBlankRows` (a file Bops wrote, where an empty row is one the
  * user added). `cut` counts cells over 2,000 characters, which are cut.
+ *
+ * Past 40 columns or 5,000 rows nothing is made but `over`, which says which: padding every row to
+ * the widest one first would let a small, odd file (one line of 100,000 commas over 10,000 short
+ * lines) grow to billions of cells.
  */
-export function parseCsv(text: string, opts: { delimiter?: string; keepBlankRows?: boolean } = {}): CsvTable & { cut: number } {
+export function parseCsv(text: string, opts: { delimiter?: string; keepBlankRows?: boolean } = {}): CsvTable & { cut: number; over?: "rows" | "columns" } {
   const t = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   const recs = records(t, opts.delimiter ?? sniffDelimiter(t)).filter((r) => !r.empty);
   const blank = (cells: string[]) => cells.every((c) => !c.trim());
@@ -234,6 +238,8 @@ export function parseCsv(text: string, opts: { delimiter?: string; keepBlankRows
   const body = recs.slice(at + 1).map((r) => r.cells).filter((cells) => opts.keepBlankRows || !blank(cells));
   let width = head.length;
   for (const r of body) width = Math.max(width, r.length);
+  if (width > CRM_LIMITS.columns) return { columns: [], rows: [], cut: 0, over: "columns" };
+  if (body.length > CRM_LIMITS.rows) return { columns: [], rows: [], cut: 0, over: "rows" };
   const columns = columnNames(Array.from({ length: width }, (_, i) => head[i] ?? ""));
   let cut = 0;
   const rows = body.map((r) =>

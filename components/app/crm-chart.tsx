@@ -147,11 +147,21 @@ function Bars({ wide, ...s }: Shared & { wide: boolean }) {
   );
 }
 
-/** Month labels: the year on the first one and on each January ("Sep 2026", "Oct", …, "Jan 2027"). */
-function axisLabel(g: Group, i: number) {
-  const m = /^(\d{4})-(\d{2})$/.exec(g.key);
-  if (!m) return g.label;
-  return i === 0 || m[2] === "01" ? g.label : g.label.slice(0, 3);
+/**
+ * The month labels drawn (every `every`th, so they stay apart): the year on the first one and on each
+ * one in a new year ("Sep 2026", "Nov", …, "Jan 2027"), whichever month that is, so a skipped January
+ * doesn't lose it. Years (a long span) are labels as they are.
+ */
+function axisLabels(groups: Group[], every: number) {
+  let year = "";
+  return groups.map((g, i) => {
+    if (i % every !== 0) return null;
+    const m = /^(\d{4})-(\d{2})$/.exec(g.key);
+    if (!m) return g.label;
+    const fresh = m[1] !== year;
+    year = m[1];
+    return fresh ? g.label : g.label.slice(0, 3);
+  });
 }
 
 function Line(s: Shared) {
@@ -159,6 +169,7 @@ function Line(s: Shared) {
   const n = s.groups.length;
   // Labels at least 44px apart.
   const every = Math.max(1, Math.ceil(44 / Math.max(1, L.spacing)));
+  const labels = axisLabels(s.groups, every);
   const nearest = (e: React.MouseEvent<SVGRectElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
     const at = e.clientX - r.left + L.gutter;
@@ -188,8 +199,8 @@ function Line(s: Shared) {
         );
       })}
       {s.groups.map((g, i) => {
-        if (i % every !== 0) return null;
-        const text = axisLabel(g, i);
+        const text = labels[i];
+        if (text === null) return null;
         const w = text.length * 6.6;
         const x = L.px(i);
         // Kept inside the plot: never under the value labels on the left, never past the right edge.

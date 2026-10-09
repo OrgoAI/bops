@@ -212,6 +212,51 @@ async function textOf(f: File) {
 
 const isCsv = (f: File) => /\.(csv|tsv|txt)$/i.test(f.name) || f.type === "text/csv";
 
+/** Whether a drag carries files (a CSV from Finder), not text or a link. */
+const dragsFiles = (e: React.DragEvent) => [...e.dataTransfer.types].includes("Files");
+
+/** A new file (a template, or an imported CSV's text): its name once it's made, or what went wrong. */
+async function makeFile(ws: string, body: { name: string; template?: "pipeline" | "sample"; text?: string }): Promise<{ name: string; note?: string } | { error: string }> {
+  const r = await send("/api/crm", "POST", { ws, template: null, text: null, ...body }).catch(() => null);
+  if (!r?.ok) return { error: r?.body.error ?? "Couldn't add that file. Try again." };
+  announce();
+  return { name: (r.body.file as CrmFileMeta).name, ...(typeof r.body.note === "string" ? { note: r.body.note } : {}) };
+}
+
+/** The workspace's file names as they are now (lowercased), when the caller has no list of its own. */
+async function namesIn(ws: string) {
+  const r = await send(`/api/crm?ws=${q(ws)}`, "GET").catch(() => null);
+  return new Set(((r?.body.files ?? []) as CrmFileMeta[]).map((f) => f.name.toLowerCase()));
+}
+
+/**
+ * CSV files the user picked or dropped (10 at most), each made a new file under a name that's free.
+ * The last one made opens. `say` gets each refusal (bad) and note (cells cut).
+ */
+async function importCsvs(ws: string, picked: File[], taken: Set<string> | null, open: ((ws: string, file: string) => void) | null, say: (text: string, bad: boolean) => void) {
+  const names = taken ?? (await namesIn(ws));
+  let last: string | null = null;
+  for (const f of picked.slice(0, 10)) {
+    if (!isCsv(f)) {
+      say(CRM_SAY.notCsv, true);
+      continue;
+    }
+    if (f.size > CRM_LIMITS.bytes) {
+      say(CRM_SAY.bytes, true);
+      continue;
+    }
+    const made = await makeFile(ws, { name: freeName(nameFromFile(f.name), names), text: await textOf(f) });
+    if ("error" in made) {
+      say(made.error, true);
+      continue;
+    }
+    names.add(made.name.toLowerCase());
+    last = made.name;
+    if (made.note) say(made.note, false);
+  }
+  if (last) open?.(ws, last);
+}
+
 /**
  * The CRM in the sidebar: the workspace's files with their row counts, newest work a click away.
  * + starts a pipeline, imports a CSV or puts the sample back; a CSV dropped here is imported. Rename
@@ -252,16 +297,28 @@ export function CrmSection({
   }, [said]);
   useEffect(() => {
     if (!menu) return;
-    const away = (e: MouseEvent) => !pop.current?.contains(e.target as Node) && !plus.current?.contains(e.target as Node) && setMenu(null);
-    // Esc closes the menu, and only the menu (preventDefault keeps the tab on the right open).
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && (e.preventDefault(), setMenu(null));
+    const outside = (t: EventTarget | null) => !pop.current?.contains(t as Node) && !plus.current?.contains(t as Node);
+    const away = (e: MouseEvent) => outside(e.target) && setMenu(null);
+    // Focus going anywhere else (Tab, a click into a field) closes it too.
+    const left = (e: FocusEvent) => outside(e.target) && setMenu(null);
+    // Esc closes the menu, and only the menu (preventDefault keeps the tab on the right open), back to +.
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      setMenu(null);
+      plus.current?.focus();
+    };
     const gone = () => setMenu(null);
     document.addEventListener("mousedown", away);
+    document.addEventListener("focusin", left);
     document.addEventListener("keydown", esc);
     window.addEventListener("resize", gone);
     document.addEventListener("scroll", gone, true);
+    // The menu sits at the end of the page: focus goes into it, so the keyboard can reach its items.
+    pop.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
     return () => {
       document.removeEventListener("mousedown", away);
+      document.removeEventListener("focusin", left);
       document.removeEventListener("keydown", esc);
       window.removeEventListener("resize", gone);
       document.removeEventListener("scroll", gone, true);
@@ -282,31 +339,28 @@ export function CrmSection({
     const up = r.bottom + 150 > window.innerHeight;
     setMenu({ x: Math.max(8, r.right - 220), y: up ? r.top - 6 : r.bottom + 6, up });
   };
-  const create = async (body: { name: string; template?: "pipeline" | "sample"; text?: string }) => {
-    const r = await send("/api/crm", "POST", { ws, template: null, text: null, ...body });
-    if (!r.ok) {
-      setSaid({ text: r.body.error ?? "Couldn't add that file. Try again.", bad: true });
+  const create = async (body: { name: string; template?: "pipeline" | "sample" }) => {
+    const made = await makeFile(ws, body);
+    if ("error" in made) {
+      setSaid({ text: made.error, bad: true });
       return null;
     }
-    const file = r.body.file as CrmFileMeta;
-    announce();
-    onOpen(ws, file.name);
-    if (typeof r.body.note === "string") setSaid({ text: r.body.note, bad: false });
-    return file.name;
+    onOpen(ws, made.name);
+    return made.name;
   };
-  const importFiles = async (picked: File[]) => {
-    const names = taken();
-    for (const f of picked.slice(0, 10)) {
-      if (!isCsv(f)) {
-        setSaid({ text: CRM_SAY.notCsv, bad: true });
-        continue;
-      }
-      if (f.size > CRM_LIMITS.bytes) {
-        setSaid({ text: CRM_SAY.bytes, bad: true });
-        continue;
-      }
-      const made = await create({ name: freeName(nameFromFile(f.name), names), text: await textOf(f) });
-      if (made) names.add(made.toLowerCase());
+  const importFiles = (picked: File[]) => importCsvs(ws, picked, files ? taken() : null, onOpen, (text, bad) => setSaid({ text, bad }));
+  /** Up and Down (Home, End) move through the menu; Tab leaves it, back on +. */
+  const menuKeys = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = [...e.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const to = e.key === "ArrowDown" ? (at + 1) % items.length : e.key === "ArrowUp" ? (at - 1 + items.length) % items.length : e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : -1;
+    if (to >= 0) {
+      e.preventDefault();
+      items[to]?.focus();
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      setMenu(null);
+      plus.current?.focus();
     }
   };
   const save = async () => {
@@ -325,12 +379,14 @@ export function CrmSection({
     onChange({ ws, from: naming.from, to });
     announce();
   };
-  const remove = async (name: string) => {
+  /** Delete a file. `keys`: asked from the keyboard, so focus goes back to + rather than nowhere once its row is gone. */
+  const remove = async (name: string, keys: boolean) => {
     setSure(null);
     const r = await send(`/api/crm?ws=${q(ws)}&name=${q(name)}`, "DELETE");
     if (!r.ok && r.status !== 404) return setSaid({ text: r.body.error ?? "Couldn't delete it. Try again.", bad: true });
     onChange({ ws, from: name, to: null });
     announce();
+    if (keys) plus.current?.focus();
   };
   const item = "flex h-9 items-center gap-2.5 rounded-[10px] px-2.5 text-left text-[14px] font-medium hover:bg-black/[0.04]";
 
@@ -354,6 +410,8 @@ export function CrmSection({
         <button
           ref={plus}
           aria-label="New CRM file"
+          aria-haspopup="menu"
+          aria-expanded={!!menu}
           onClick={() => (menu ? setMenu(null) : openMenu())}
           className={`flex size-5 items-center justify-center rounded-md hover:bg-black/[0.06] hover:text-ink ${menu ? "bg-black/[0.06] text-ink" : "text-[#9A9A98]"}`}
         >
@@ -366,10 +424,14 @@ export function CrmSection({
         createPortal(
           <div
             ref={pop}
+            role="menu"
+            aria-label="New CRM file"
+            onKeyDown={menuKeys}
             className="fixed z-50 flex w-[220px] flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]"
             style={{ left: menu.x, top: menu.y, transform: menu.up ? "translateY(-100%)" : undefined }}
           >
             <button
+              role="menuitem"
               className={item}
               onClick={() => {
                 setMenu(null);
@@ -380,9 +442,11 @@ export function CrmSection({
               New pipeline
             </button>
             <button
+              role="menuitem"
               className={item}
               onClick={() => {
                 setMenu(null);
+                plus.current?.focus();
                 picker.current?.click();
               }}
             >
@@ -391,9 +455,11 @@ export function CrmSection({
             </button>
             {files && !list.some((f) => f.sample) && (
               <button
+                role="menuitem"
                 className={item}
                 onClick={() => {
                   setMenu(null);
+                  plus.current?.focus();
                   void create({ name: freeName(SAMPLE_NAME, taken()), template: "sample" });
                 }}
               >
@@ -415,8 +481,9 @@ export function CrmSection({
           <div
             key={f.name}
             onMouseLeave={() => sure === f.name && setSure(null)}
-            className={`group/crm flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 ${isActive(f) ? "bg-[#EEEEEC]" : "hover:bg-black/[0.03]"}`}
+            className={`group/crm flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 has-[>button:first-child:focus-visible]:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${isActive(f) ? "bg-[#EEEEEC]" : "hover:bg-black/[0.03]"}`}
           >
+            {/* Its focus shows as a ring on the whole row (above). */}
             <button onClick={() => onOpen(ws, f.name)} className="flex h-full min-w-0 flex-1 items-center gap-2 text-left outline-none">
               <span className="text-[#6B6B6B]">
                 <CrmFileIcon />
@@ -424,7 +491,13 @@ export function CrmSection({
               <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px]">{f.name}</span>
             </button>
             {sure === f.name ? (
-              <button onClick={() => void remove(f.name)} title={`Delete ${f.name}`} className="h-7 shrink-0 rounded-md bg-[#B42318] px-2 text-[12px] font-medium text-white">
+              <button
+                autoFocus
+                onClick={(e) => void remove(f.name, e.detail === 0)}
+                onBlur={() => setSure(null)}
+                title={`Delete ${f.name}`}
+                className="h-7 shrink-0 rounded-md bg-[#B42318] px-2 text-[12px] font-medium text-white"
+              >
                 Delete
               </button>
             ) : (
@@ -448,7 +521,7 @@ export function CrmSection({
         ),
       )}
       {files && !list.length && !naming && (
-        <button onClick={openMenu} className="px-2.5 py-1 text-left text-[13px] leading-[18px] text-[#9A9A98] hover:text-[#6B6B6B]">
+        <button onClick={openMenu} aria-haspopup="menu" className="px-2.5 py-1 text-left text-[13px] leading-[18px] text-[#9A9A98] hover:text-[#6B6B6B]">
           No files yet. Start a pipeline or import a CSV.
         </button>
       )}
@@ -495,8 +568,22 @@ function writeView(ws: string, file: string, v: ChartView) {
   }
 }
 
-/** A file renamed keeps its chart as the user set it. */
+/**
+ * What the table shows for a file (the picked bar, the search, the sort, how many rows), while the app
+ * is open: the side panel and full width are two views of the same file, so going from one to the other
+ * keeps it.
+ */
+type TableView = { picked: string | null; search: string; sort: { col: number; dir: 1 | -1 } | null; shown: number };
+const tableViews = new Map<string, TableView>();
+const tableKey = (ws: string, file: string) => `${ws}\u0000${file.toLowerCase()}`;
+
+/** A file renamed keeps its chart as the user set it (and its table as it was). */
 function moveView(ws: string, from: string, to: string) {
+  const table = tableViews.get(tableKey(ws, from));
+  if (table) {
+    tableViews.delete(tableKey(ws, from));
+    tableViews.set(tableKey(ws, to), table);
+  }
   try {
     const v = localStorage.getItem(viewKey(ws, from));
     if (v === null || viewKey(ws, from) === viewKey(ws, to)) return;
@@ -563,6 +650,9 @@ function Pick({ label, value, onChange, children }: { label: string; value: stri
   );
 }
 
+/** The pinned Delete column's edge while columns are hidden behind it: a hairline and a soft shadow. */
+const PINNED_SHADOW = "shadow-[inset_1px_0_0_#ECECEA,-10px_0_12px_-10px_rgba(0,0,0,0.16)]";
+
 const EMPTY_COLUMNS: string[] = [];
 const EMPTY_ROWS: string[][] = [];
 
@@ -604,12 +694,45 @@ export function CrmView({
   }, [columns, rows, stored]);
   const { types, view, by, sum, grouped } = chart;
   const groups = grouped?.groups ?? [];
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(() => tableViews.get(tableKey(ws, file))?.picked ?? null);
   const pickedGroup = picked === null ? undefined : groups.find((g) => g.key === picked);
-  const [search, setSearch] = useState("");
-  const [sort, setSort] = useState<{ col: number; dir: 1 | -1 } | null>(null);
+  const [search, setSearch] = useState(() => tableViews.get(tableKey(ws, file))?.search ?? "");
+  const [sort, setSort] = useState<{ col: number; dir: 1 | -1 } | null>(() => tableViews.get(tableKey(ws, file))?.sort ?? null);
   const sortBefore = useRef<{ col: number; dir: 1 | -1 } | null>(null);
-  const [shown, setShown] = useState<number>(CRM_LIMITS.tableRows);
+  const [shown, setShown] = useState<number>(() => tableViews.get(tableKey(ws, file))?.shown ?? CRM_LIMITS.tableRows);
+  useEffect(() => {
+    tableViews.set(tableKey(ws, file), { picked, search, sort, shown });
+  }, [ws, file, picked, search, sort, shown]);
+  // The cell the keyboard is on: the table is one stop for Tab, and the arrow keys move inside it.
+  const [cursor, setCursor] = useState<{ row: number; col: number } | null>(null);
+  const grid = useRef<HTMLTableElement>(null);
+  // Columns hidden past the right edge: the row's Delete, pinned there, casts a shadow over them, and
+  // a chevron over it scrolls to them (and back to the first columns once at the end).
+  const scroller = useRef<HTMLDivElement>(null);
+  const [more, setMore] = useState(false);
+  const [across, setAcross] = useState(false);
+  const ready = !!data;
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const check = () => {
+      setMore(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+      setAcross(el.scrollLeft > 1);
+    };
+    check();
+    el.addEventListener("scroll", check, { passive: true });
+    const seen = new ResizeObserver(check);
+    seen.observe(el);
+    if (el.firstElementChild) seen.observe(el.firstElementChild);
+    return () => {
+      el.removeEventListener("scroll", check);
+      seen.disconnect();
+    };
+  }, [ready]);
+  // A CSV dropped on the tab is added as a new file, as in the sidebar.
+  const openFile = useContext(OpenCrm);
+  const [dropping, setDropping] = useState(false);
+  const [told, setTold] = useState<string | null>(null);
   const [edit, setEdit] = useState<{ row: number; col: number; draft: string } | null>(null);
   // The cell last closed, so a blur that comes after Tab or Esc moved on doesn't save it twice.
   const closed = useRef<string | null>(null);
@@ -640,6 +763,11 @@ export function CrmView({
     const t = setTimeout(() => setProblem(null), 6000);
     return () => clearTimeout(t);
   }, [problem]);
+  useEffect(() => {
+    if (!told) return;
+    const t = setTimeout(() => setTold(null), 6000);
+    return () => clearTimeout(t);
+  }, [told]);
 
   const order = useMemo(() => {
     const inGroup = picked === null ? undefined : chart.grouped?.groups.find((g) => g.key === picked);
@@ -710,9 +838,25 @@ export function CrmView({
     return true;
   };
 
+  const drop: Drop = {
+    dropping,
+    onDragOver: (e) => {
+      if (!dragsFiles(e)) return;
+      e.preventDefault();
+      if (!dropping) setDropping(true);
+    },
+    onDragLeave: (e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDropping(false),
+    onDrop: (e) => {
+      if (!dragsFiles(e)) return;
+      e.preventDefault();
+      setDropping(false);
+      void importCsvs(ws, [...e.dataTransfer.files], null, openFile, (text, bad) => (bad ? setProblem(text) : setTold(text)));
+    },
+  };
+
   if (status === "gone" || (!data && status === "failed"))
     return (
-      <Frame mode={mode}>
+      <Frame mode={mode} drop={drop}>
         <div className="flex flex-col items-center gap-3 py-16 text-center">
           <span className="text-[13.5px] leading-5 text-[#6B6B6B]">{status === "gone" ? "This file isn't there anymore." : "Couldn't load this file."}</span>
           <button onClick={status === "gone" ? onClose : reload} className="rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-medium leading-4 text-white">
@@ -721,7 +865,7 @@ export function CrmView({
         </div>
       </Frame>
     );
-  if (!data) return <Frame mode={mode}>{null}</Frame>;
+  if (!data) return <Frame mode={mode} drop={drop}>{null}</Frame>;
 
   const typeOf = (c: number) => types[c]?.type;
   const money = sum >= 0 ? types[sum]?.money ?? null : null;
@@ -753,6 +897,28 @@ export function CrmView({
     if (c >= columns.length) [r, c] = [r + 1, 0];
     else if (c < 0) [r, c] = [r - 1, columns.length - 1];
     return r >= 0 && r < visible.length ? { row: visible[r], col: c } : null;
+  };
+  /** Focus a cell (past the last column: its row's Delete) once it's drawn. */
+  const focusCell = (row: number, col: number) => requestAnimationFrame(() => grid.current?.querySelector<HTMLElement>(`[data-cell="${row}:${col}"]`)?.focus());
+  // The one cell Tab stops at: the one the keyboard was last on, while it's shown, else the first.
+  const home = cursor && visible.includes(cursor.row) && cursor.col <= columns.length ? cursor : visible.length ? { row: visible[0], col: 0 } : null;
+  const stop = (row: number, col: number) => (home?.row === row && home.col === col ? 0 : -1);
+  const onCell = (row: number, col: number) => setCursor((k) => (k?.row === row && k.col === col ? k : { row, col }));
+  /** Arrow keys (Home, End; with Command or Control, the table's first and last cell) move from cell to cell. True when one did. */
+  const gridKeys = (e: React.KeyboardEvent, row: number, col: number) => {
+    const r = visible.indexOf(row);
+    const far = e.metaKey || e.ctrlKey;
+    let to: { row: number; col: number } | null;
+    if (e.key === "ArrowRight") to = { row, col: Math.min(columns.length, col + 1) };
+    else if (e.key === "ArrowLeft") to = { row, col: Math.max(0, col - 1) };
+    else if (e.key === "ArrowDown") to = r + 1 < visible.length ? { row: visible[r + 1], col } : null;
+    else if (e.key === "ArrowUp") to = r > 0 ? { row: visible[r - 1], col } : null;
+    else if (e.key === "Home") to = { row: far ? visible[0] : row, col: 0 };
+    else if (e.key === "End") to = { row: far ? visible[visible.length - 1] : row, col: columns.length - 1 };
+    else return false;
+    e.preventDefault();
+    if (to) focusCell(to.row, to.col);
+    return true;
   };
   /** Close the cell being edited, saving what's typed when it changed, and go on to `then` (Tab). */
   const finish = (row: number, col: number, draft: string, then: { row: number; col: number } | null) => {
@@ -812,7 +978,7 @@ export function CrmView({
   const widthOf = (c: number) => (/^notes?$/i.test(columns[c]) ? "min-w-[120px] max-w-[360px]" : "min-w-[120px] max-w-[280px]");
 
   return (
-    <Frame mode={mode}>
+    <Frame mode={mode} drop={drop}>
       <div className="flex items-start gap-3.5">
         <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-ink text-highlighter">
           <CrmBarsIcon size={18} />
@@ -824,6 +990,7 @@ export function CrmView({
             {saving === "saving" ? " · Saving…" : saving === "saved" ? " · Saved" : ""}
           </span>
           {problem && <span className="text-[13px] leading-[19px] text-[#B42318]">{problem}</span>}
+          {told && !problem && <span className="text-[13px] leading-[19px] text-[#6B6B6B]">{told}</span>}
         </div>
         <div className="mt-1.5 flex shrink-0 gap-1.5">
           {mode === "focus" ? (
@@ -957,14 +1124,14 @@ export function CrmView({
           </button>
         </div>
 
-        <div className="max-h-[70vh] overflow-auto rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
-          <table className="w-max min-w-full border-separate border-spacing-0 text-[13px] leading-[18px] text-[#3A3A38]">
+        <div ref={scroller} className="max-h-[70vh] overflow-auto rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
+          <table ref={grid} role="grid" aria-label={`${data.name} rows`} className="w-max min-w-full border-separate border-spacing-0 text-[13px] leading-[18px] text-[#3A3A38]">
             <thead>
               <tr>
                 {columns.map((name, c) => {
                   const right = typeOf(c) === "number";
                   return (
-                    <th key={`${c}:${name}`} className={`${headCell} z-[1]`}>
+                    <th key={`${c}:${name}`} aria-sort={sort?.col === c ? (sort.dir === 1 ? "ascending" : "descending") : "none"} className={`${headCell} z-[2]`}>
                       {renaming?.col === c ? (
                         <input
                           autoFocus
@@ -994,7 +1161,14 @@ export function CrmView({
                             setAdding(null);
                             setRenaming({ col: c, name });
                           }}
-                          title="Click to sort, double-click to rename"
+                          onKeyDown={(e) => {
+                            if (e.key !== "F2") return;
+                            e.preventDefault();
+                            named.current = false;
+                            setAdding(null);
+                            setRenaming({ col: c, name });
+                          }}
+                          title="Click to sort. Double-click or press F2 to rename."
                           className={`flex w-full items-center gap-1 ${right ? "justify-end" : ""} ${widthOf(c)} hover:text-ink`}
                         >
                           <span className="truncate">{name}</span>
@@ -1008,7 +1182,7 @@ export function CrmView({
                     </th>
                   );
                 })}
-                <th className={`${headCell} z-[1] w-0 whitespace-nowrap`}>
+                <th className={`${headCell} z-[2] w-0 whitespace-nowrap`}>
                   {adding === null ? (
                     <button
                       onClick={() => {
@@ -1039,6 +1213,25 @@ export function CrmView({
                     />
                   )}
                 </th>
+                {/* Over each row's Delete, pinned to the right edge. */}
+                <th className={`sticky right-0 top-0 z-[3] w-0 border-b border-[#ECECEA] bg-white px-2 py-1 align-middle ${more ? PINNED_SHADOW : ""}`}>
+                  {(more || across) && (
+                    <button
+                      aria-label={more ? "More columns" : "Back to the first columns"}
+                      onClick={() => {
+                        const el = scroller.current;
+                        if (!el) return;
+                        if (more) el.scrollBy({ left: Math.max(160, el.clientWidth - 240), behavior: "smooth" });
+                        else el.scrollTo({ left: 0, behavior: "smooth" });
+                      }}
+                      className="ml-auto flex size-6 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.06] hover:text-ink"
+                    >
+                      <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden>
+                        <path d={more ? "M4.5 2.5L8 6l-3.5 3.5" : "M7.5 2.5L4 6l3.5 3.5"} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+                  )}
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -1051,9 +1244,17 @@ export function CrmView({
                     return (
                       <td
                         key={c}
-                        tabIndex={editing ? -1 : 0}
+                        data-cell={`${i}:${c}`}
+                        tabIndex={editing ? -1 : stop(i, c)}
+                        onFocus={(e) => e.target === e.currentTarget && onCell(i, c)}
                         onClick={() => !editing && startEdit(i, c)}
-                        onKeyDown={(e) => !editing && (e.key === "Enter" || e.key === "F2") && (e.preventDefault(), startEdit(i, c))}
+                        onKeyDown={(e) => {
+                          if (editing || e.target !== e.currentTarget) return;
+                          if (e.key === "Enter" || e.key === "F2") {
+                            e.preventDefault();
+                            startEdit(i, c);
+                          } else gridKeys(e, i, c);
+                        }}
                         className={`border-b border-[#F0F0EE] px-3 align-top outline-none group-hover/row:bg-black/[0.02] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${editing ? "py-1" : "cursor-text py-2"}`}
                       >
                         {editing ? (
@@ -1069,17 +1270,22 @@ export function CrmView({
                             }}
                             onChange={(e) => setEdit({ row: i, col: c, draft: e.target.value })}
                             onKeyDown={(e) => {
+                              // Back on the cell after Enter, Esc, or Tab past the last one, so the keyboard keeps its place.
                               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                                 e.preventDefault();
                                 finish(i, c, edit.draft, null);
+                                focusCell(i, c);
                               } else if (e.key === "Tab") {
                                 e.preventDefault();
-                                finish(i, c, edit.draft, nextCell(i, c, e.shiftKey));
+                                const then = nextCell(i, c, e.shiftKey);
+                                finish(i, c, edit.draft, then);
+                                if (!then) focusCell(i, c);
                               } else if (e.key === "Escape") {
                                 e.preventDefault();
                                 e.stopPropagation();
                                 closed.current = `${i}:${c}`;
                                 setEdit(null);
+                                focusCell(i, c);
                               }
                             }}
                             onBlur={() => finish(i, c, edit.draft, null)}
@@ -1092,22 +1298,50 @@ export function CrmView({
                       </td>
                     );
                   })}
-                  <td className="border-b border-[#F0F0EE] px-2 py-1 text-right align-middle group-hover/row:bg-black/[0.02]">
+                  {/* Under "+ Add column". */}
+                  <td className="border-b border-[#F0F0EE] group-hover/row:bg-black/[0.02]" />
+                  <td className={`sticky right-0 z-[1] border-b border-[#F0F0EE] bg-white px-2 py-1 text-right align-middle group-hover/row:bg-[#FAFAFA] ${more ? PINNED_SHADOW : ""}`}>
                     {deleting === i ? (
-                      <span ref={reveal} className="flex items-center justify-end gap-1">
+                      <span
+                        ref={reveal}
+                        className="flex items-center justify-end gap-1"
+                        onKeyDown={(e) => {
+                          if (e.key !== "Escape") return;
+                          e.stopPropagation();
+                          setDeleting(null);
+                          focusCell(i, columns.length);
+                        }}
+                      >
                         <button
-                          onClick={() => (setDeleting(null), change([{ op: "delete", row: i, was: rows[i] }]))}
+                          autoFocus
+                          onClick={(e) => {
+                            // From the keyboard: on to the next row's Delete (rows after this one move up by one).
+                            const r = visible.indexOf(i);
+                            const next = visible[r + 1] ?? visible[r - 1];
+                            setDeleting(null);
+                            if (change([{ op: "delete", row: i, was: rows[i] }]) && e.detail === 0 && next !== undefined) focusCell(next > i ? next - 1 : next, columns.length);
+                          }}
                           className="rounded-full bg-[#B42318] px-2.5 py-1 text-[12px] font-semibold leading-4 text-white"
                         >
                           Delete
                         </button>
-                        <button onClick={() => setDeleting(null)} className="rounded-full px-2 py-1 text-[12px] leading-4 text-[#6B6B6B]">
+                        <button
+                          onClick={(e) => {
+                            setDeleting(null);
+                            if (e.detail === 0) focusCell(i, columns.length);
+                          }}
+                          className="rounded-full px-2 py-1 text-[12px] leading-4 text-[#6B6B6B]"
+                        >
                           Keep
                         </button>
                       </span>
                     ) : (
                       <button
                         aria-label="Delete row"
+                        data-cell={`${i}:${columns.length}`}
+                        tabIndex={stop(i, columns.length)}
+                        onFocus={() => onCell(i, columns.length)}
+                        onKeyDown={(e) => gridKeys(e, i, columns.length)}
                         onClick={() => setDeleting(i)}
                         className="ml-auto flex size-6 items-center justify-center rounded-md text-[#9A9A98] opacity-0 hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 group-hover/row:opacity-100"
                       >
@@ -1144,11 +1378,26 @@ export function CrmView({
   );
 }
 
-/** The tab's page: it scrolls, fills the side panel, and in full width is capped and centered. */
-function Frame({ mode, children }: { mode: "panel" | "focus"; children: React.ReactNode }) {
+type Drop = {
+  dropping: boolean;
+  onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragLeave: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
+};
+
+/** The tab's page: it scrolls, fills the side panel, and in full width is capped and centered. A CSV dropped on it is added. */
+function Frame({ mode, drop, children }: { mode: "panel" | "focus"; drop: Drop; children: React.ReactNode }) {
+  const { dropping, ...on } = drop;
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-8 pt-7">
-      <div className={`flex w-full flex-col gap-5 ${mode === "focus" ? "mx-auto max-w-[1200px]" : ""}`}>{children}</div>
+    <div className="relative flex min-h-0 flex-1 flex-col" {...on}>
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pb-8 pt-7">
+        <div className={`flex w-full flex-col gap-5 ${mode === "focus" ? "mx-auto max-w-[1200px]" : ""}`}>{children}</div>
+      </div>
+      {dropping && (
+        <div className="pointer-events-none absolute inset-2 flex items-start justify-center rounded-2xl pt-4 shadow-[inset_0_0_0_1.5px_#0A0A0A]">
+          <span className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white">Drop a CSV to add it</span>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import "server-only";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import {
   applyOps,
@@ -200,7 +200,9 @@ function readParsed(file: string): Parsed {
   const { st, buf } = readBytes(file);
   // Far bigger than Bops writes (made some other way): not read at all.
   if (!buf) throw new CrmError(400, CRM_SAY.bytes);
-  const { columns, rows } = parseCsv(buf.toString("utf8"), { delimiter: ",", keepBlankRows: true });
+  const { columns, rows, over } = parseCsv(buf.toString("utf8"), { delimiter: ",", keepBlankRows: true });
+  // Past the limits (made some other way): refused before its rows are made.
+  if (over) throw new CrmError(400, over === "rows" ? CRM_SAY.rows : CRM_SAY.columns);
   const parsed = { columns, rows, version: versionOf(buf), bytes: buf.length, mtimeMs: st.mtimeMs };
   keep(file, st.mtimeMs, st.size, parsed);
   return parsed;
@@ -287,7 +289,11 @@ function subDir(dir: string, name: string) {
 /** Move a file to the workspace's .trash (the newest 20 kept there). */
 function toTrash(f: Found) {
   const trash = subDir(f.dir, ".trash");
-  renameSync(/*turbopackIgnore: true*/ f.file, join(/*turbopackIgnore: true*/ trash, `${f.name}__${Date.now()}.csv`));
+  const dest = join(/*turbopackIgnore: true*/ trash, `${f.name}__${Date.now()}.csv`);
+  renameSync(/*turbopackIgnore: true*/ f.file, dest);
+  // A move keeps the file's last edit time, and the trash keeps the newest: dated now, the file just deleted stays.
+  const now = new Date();
+  utimesSync(/*turbopackIgnore: true*/ dest, now, now);
   cache.delete(f.file);
   prune(trash, CRM_LIMITS.trash);
 }
@@ -313,15 +319,18 @@ function metas(dir: string): CrmFileMeta[] {
   return files
     .map((e) => {
       const sample = same(e.name, SAMPLE_NAME);
+      let st: { mtimeMs: number; size: number } | undefined;
       try {
-        const st = statSync(/*turbopackIgnore: true*/ e.file);
+        st = statSync(/*turbopackIgnore: true*/ e.file);
         const hit = listedCache.get(e.file);
         if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return { name: e.name, rows: hit.rows, columns: hit.columns, bytes: hit.bytes, updatedAt: hit.mtimeMs, sample };
         const meta = metaOf(e.name, readParsed(e.file));
         listedCache.set(e.file, { mtimeMs: st.mtimeMs, size: st.size, rows: meta.rows, columns: meta.columns, bytes: meta.bytes });
         return meta;
       } catch {
-        return { name: e.name, rows: 0, columns: [], bytes: 0, updatedAt: 0, sample };
+        // Kept as unreadable until it changes, so a list (and every chat turn's note) doesn't read it again.
+        if (st) listedCache.set(e.file, { mtimeMs: st.mtimeMs, size: st.size, rows: 0, columns: [], bytes: 0 });
+        return { name: e.name, rows: 0, columns: [], bytes: 0, updatedAt: st?.mtimeMs ?? 0, sample };
       }
     })
     .sort((a, b) => a.name.localeCompare(b.name, "en", { numeric: true, sensitivity: "base" }));
@@ -375,6 +384,7 @@ export async function createFile(ws: unknown, name: unknown, from: CrmSource): P
       if (Buffer.byteLength(from.text, "utf8") > CRM_LIMITS.bytes) throw new CrmError(400, CRM_SAY.bytes);
       if (notText(from.text)) throw new CrmError(400, CRM_SAY.notCsv);
       const t = parseCsv(from.text);
+      if (t.over) throw new CrmError(400, t.over === "rows" ? CRM_SAY.rows : CRM_SAY.columns);
       if (!t.columns.length) throw new CrmError(400, CRM_SAY.empty);
       ({ columns, rows } = t);
       if (t.cut) note = CRM_SAY.cut;

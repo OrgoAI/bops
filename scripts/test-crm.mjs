@@ -9,7 +9,7 @@
 // live in a throwaway folder: nothing reaches a real service or the user's own data.
 // Usage: node --conditions=react-server scripts/test-crm.mjs
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -154,6 +154,15 @@ assert.equal(C.parseCsv(`a\n${"y".repeat(2100)}\nshort\n`).cut, 1, "cells cut on
 // An unclosed quote takes the rest of the file, rather than failing.
 assert.deepEqual(C.parseCsv('a,b\n"open,1\n2\n').rows, [["open,1\n2", ""]]);
 assert.deepEqual(C.parseCsv(""), { columns: [], rows: [], cut: 0 });
+// Past 40 columns or 5,000 rows nothing is made: a small file with one very wide line over many short
+// ones would otherwise be padded out to a billion cells (seconds of work and hundreds of MB, or a crash).
+const WIDE = `a${",".repeat(100_000)}\n${"x\n".repeat(10_000)}`;
+let started = performance.now();
+assert.deepEqual(C.parseCsv(WIDE), { columns: [], rows: [], cut: 0, over: "columns" });
+assert.ok(performance.now() - started < 1000, `refused quickly (${Math.round(performance.now() - started)} ms)`);
+assert.equal(C.parseCsv(`a\n${"1\n".repeat(5001)}`).over, "rows");
+assert.equal(C.parseCsv(`a,b\n${"1,2\n".repeat(5000)}`).over, undefined, "5,000 rows and 40 columns are fine");
+assert.equal(C.parseCsv(`${Array.from({ length: 40 }, (_, i) => `c${i}`).join(",")}\n1\n`).columns.length, 40);
 
 /* ---------------- Writing CSV ---------------- */
 
@@ -337,6 +346,10 @@ const over = async (text, error) => {
 await over(`a\n${"y".repeat(C.CRM_LIMITS.bytes - 1)}`, "That file is over 2 MB. Split it or remove columns, then try again.");
 await over(`a\n${"1\n".repeat(5001)}`, "That file has more than 5,000 rows. Split it, then try again.");
 await over(`${Array.from({ length: 41 }, (_, i) => `c${i}`).join(",")}\n`, "That file has more than 40 columns. Remove some, then try again.");
+// One very wide line over many short ones (about 120 KB): refused at once, before any row is padded out.
+started = performance.now();
+await over(WIDE, "That file has more than 40 columns. Remove some, then try again.");
+assert.ok(performance.now() - started < 1000, `refused quickly (${Math.round(performance.now() - started)} ms)`);
 await over("\n\n , \n", "That file is empty.");
 await over("PK\u0003\u0004xl/workbook.xml", "Bops opens CSV files. In Numbers, Excel or Google Sheets, export a CSV first.");
 assert.equal(existsSync(join(folder(), "Too much.csv")), false, "nothing written for a refusal");
@@ -433,6 +446,22 @@ for (const f of (await list()).body.files) if (/^File \d+$/.test(f.name)) await 
 assert.deepEqual((await list()).body.files.map((f) => f.name), ["Leads", "Sample pipeline"]);
 // Only the newest 20 deleted files are kept.
 assert.equal(readdirSync(join(folder(), ".trash")).length, 20);
+// Newest by when they were deleted, not last edited: a file nobody touched for weeks, deleted now, stays.
+assert.equal((await create({ name: "Old deals", template: "pipeline" })).status, 201);
+const weeksAgo = new Date(Date.now() - 40 * 86_400_000);
+utimesSync(join(folder(), "Old deals.csv"), weeksAgo, weeksAgo);
+assert.equal((await remove("Old deals")).status, 200);
+const trashNow = readdirSync(join(folder(), ".trash"));
+assert.equal(trashNow.length, 20);
+assert.ok(trashNow.some((f) => /^Old deals__\d+\.csv$/.test(f)), "the file just deleted is in the trash");
+// A file far past the limits put in the folder some other way: listed empty at once, and opening it says why.
+writeFileSync(join(folder(), "Wide.csv"), WIDE);
+started = performance.now();
+const wideMeta = (await list()).body.files.find((f) => f.name === "Wide");
+assert.deepEqual([wideMeta?.rows, wideMeta?.columns], [0, []]);
+assert.deepEqual((await read("Wide")).body, { error: "That file has more than 40 columns. Remove some, then try again." });
+assert.ok(performance.now() - started < 2000, `quickly (${Math.round(performance.now() - started)} ms)`);
+rmSync(join(folder(), "Wide.csv"));
 
 /* ---------------- The bots' tools ---------------- */
 
