@@ -228,6 +228,12 @@ export type Message = {
   asked?: { botId: string; question: string; answer: string; questionId?: string }[];
   /** Set on a "Remembered: …" line: the fact (so it can be undone) and an older one it may replace. */
   memory?: { ws: string; id: string; fact: string; undone?: boolean; old?: { id: string; text: string; forgotten?: boolean } };
+  /**
+   * Set on the note a bot's save to the CRM leaves (lib/server/crm.ts): the workspace and file, how many
+   * rows it added and changed (or that it made the file), the copy from before it (`snapshot`) and the
+   * file's version after it, so the note can open the file and undo the save while nothing changed since.
+   */
+  crm?: { ws: string; file: string; added: number; changed: number; created?: true; snapshot?: string; after: string; undone?: true };
 };
 
 export type EmailInfo = {

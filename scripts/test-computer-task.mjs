@@ -216,8 +216,9 @@ assert.equal(s.runner, "computer", "a new cloud task runs on the computer tool")
 assert.equal(s.agentSessionId, undefined, "no Agents API session");
 assert.equal(s.owed, undefined, "nothing owed after an answer");
 assert.equal(asked.length, 3);
-// What the model is given: the screen, web search, a shell, signing in from the vault, its instructions; each call follows the last.
-assert.deepEqual(asked[0].tools.map((t) => t.name ?? t.type), ["computer", "web_search", "run_command", "sign_in_from_vault"]);
+// What the model is given: the screen, web search, a shell, signing in from the vault, the user's CRM (crm.ts), its instructions; each call follows the last.
+assert.deepEqual(asked[0].tools.map((t) => t.name ?? t.type), ["computer", "web_search", "run_command", "sign_in_from_vault", "crm_files", "crm_read", "crm_save_rows", "crm_create_file"]);
+assert.match(asked[0].instructions, /Bops CRM: .* save them with crm_save_rows as you go/, "told about the CRM, as a task");
 assert.match(asked[0].instructions, /call sign_in_from_vault: Bops fills/, "told to use it (no helpers' screens here)");
 assert.equal(asked[0].previous_response_id, undefined);
 assert.match(userText(asked[0]), /^Make the report/);

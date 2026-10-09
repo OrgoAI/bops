@@ -5,6 +5,7 @@ import { BLOCKER_ASK, live, pairChatId, TAPBACK_EMOJI, TAPBACKS, type AppApprova
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
 import { OpenLink } from "./panel-tabs";
+import { CrmNote } from "./crm";
 import { MacIcon } from "./mac-tab";
 import { AttachmentTray, MessageImages, useAttachments } from "./attachments";
 import { ComposerInput } from "./composer-input";
@@ -1036,6 +1037,9 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   if (m.role === "system" && m.email) return <EmailCard m={m} state={state} />;
 
   if (m.role === "system" && m.memory) return <MemoryNote m={m} />;
+
+  // A bot's save to the CRM: Open the file, or Undo it.
+  if (m.role === "system" && m.crm) return <CrmNote m={m} />;
 
   if (m.role === "system")
     return (

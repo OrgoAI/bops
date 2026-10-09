@@ -28,6 +28,7 @@ import { ASKING, tidyAnswer, withBriefing, WRITING } from "./style";
 import { accountsOf, appsKeyFor, bopsAddress, composioOn, serveApps } from "./composio";
 import { appsNote, placesNote } from "./skills";
 import { dataNote, dataOn } from "./treg";
+import { crmNote } from "./crm";
 import { memoryBlock, saveToMemory, wsOf } from "./memory";
 import { pingIfWorthIt } from "./attention";
 import { emailResult } from "./mail";
@@ -1265,6 +1266,7 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
     instructions(b.name, b.role, false, at.display, at.sharedWith, apps, !!b.autoApprove, false, true, false, true),
     appsNote(b, "task", { tools: apps }),
     dataNote(b, "task"),
+    crmNote(b, "task"),
     placesNote(b, "task"),
     memory,
   ]
