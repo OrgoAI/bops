@@ -70,6 +70,30 @@ async function call<T>(method: string, path: string, body?: unknown, attempt = 0
   return json as T;
 }
 
+/**
+ * One call to Orgo with `key`, the key passed in and only that (never apiKey's fallbacks): its status and
+ * JSON (an empty object when it had none), or null when it didn't answer within `timeoutMs`. `headers` go
+ * along (an Idempotency-Key), never in place of the key. `path` starts with /api.
+ */
+export async function callOrgo<T>(
+  key: string,
+  path: string,
+  { method = "GET", body, headers, timeoutMs = 15_000 }: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: unknown; headers?: Record<string, string>; timeoutMs?: number } = {},
+): Promise<{ status: number; json: T } | null> {
+  try {
+    const res = await fetch(`${orgoOrigin()}${path}`, {
+      method,
+      headers: { ...headers, Authorization: `Bearer ${key}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return { status: res.status, json: (await res.json().catch(() => ({}))) as T };
+  } catch {
+    return null;
+  }
+}
+
 const lanes = new Map<string, Promise<unknown>>();
 /** Run calls for one computer one at a time. */
 function inLane<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -140,6 +164,69 @@ export async function ownedWorkspace(): Promise<string | null> {
   const owned = await ownedWorkspaces();
   return (owned.find(isBops) ?? owned[0])?.id ?? null;
 }
+
+/**
+ * The user's own "bops" workspace as the People sheet finds it: its id (with how many have access, the
+ * user included, when Orgo said), none yet, or why Orgo couldn't say ("denied": it turned the key down).
+ */
+export type BopsWorkspaceFound =
+  | { kind: "found"; id: string; memberCount?: number; cached?: true }
+  | { kind: "none" }
+  | { kind: "denied" }
+  | { kind: "unreachable" }
+  | { kind: "error"; status: number };
+
+/**
+ * The user's own "bops" workspace, found and never made, with `key` (theirs, signed in): the id
+ * bopsWorkspace() already has for them (unless `fresh`), else the one they own named "bops" (any case,
+ * spaces trimmed). Never one shared with them, never another of theirs (unlike ownedWorkspace), and
+ * nothing is made (unlike bopsWorkspace): "none" until a bot of theirs has had a computer. The people
+ * the user adds are this workspace's members (lib/server/members.ts).
+ */
+export async function findBopsWorkspace(key: string, { fresh = false } = {}): Promise<BopsWorkspaceFound> {
+  const known = fresh ? undefined : await g.bopsOrgoWorkspace?.catch(() => undefined);
+  if (known) return { kind: "found", id: known, cached: true };
+  const got = await callOrgo<{ workspaces?: unknown }>(key, "/api/workspaces");
+  if (!got) return { kind: "unreachable" };
+  if (got.status === 401) return { kind: "denied" };
+  if (got.status !== 200) return { kind: "error", status: got.status };
+  const list = Array.isArray(got.json.workspaces) ? (got.json.workspaces as (Partial<OrgoWorkspace> & { member_count?: unknown })[]) : [];
+  const mine = list.find((w) => typeof w?.id === "string" && typeof w.name === "string" && (w.role ?? "owner") === "owner" && isBops(w as OrgoWorkspace));
+  if (!mine?.id) return { kind: "none" };
+  return { kind: "found", id: mine.id, ...(Number.isSafeInteger(mine.member_count) ? { memberCount: mine.member_count as number } : {}) };
+}
+
+/** A member of a workspace as orgo-web lists it: the owner first, then everyone else (guests have no email). */
+export type OrgoMember = { id?: unknown; alt?: unknown; role?: unknown; email?: unknown };
+/** An invite as orgo-web lists it (the token only for the owner; the times from an orgo-web that sends them). */
+export type OrgoInvite = { email?: unknown; role?: unknown; status?: unknown; token?: unknown; created_at?: unknown; expires_at?: unknown; expired?: unknown };
+
+/**
+ * Who has access to a workspace, and changes to that (orgo-web's member routes; /api/workspaces/{id}/…
+ * is its name for /api/projects/[id]/…), always with the signed-in key passed in: never ORGO_API_KEY or
+ * the Orgo CLI's login. Only the owner may invite, change or remove people. Each answers Orgo's status
+ * and JSON, or null when Orgo didn't answer. The workspace is findBopsWorkspace's, never one from the app.
+ */
+export const orgoMembers = {
+  /** The members (the owner first) and the invites still waiting; orgo-web with plan rules adds `seats`. */
+  list: (key: string, workspace: string) =>
+    callOrgo<{ members?: unknown; invites?: unknown; seats?: unknown; seats_error?: unknown; error?: unknown; code?: unknown }>(key, `/api/workspaces/${encodeURIComponent(workspace)}/members`),
+  /**
+   * Invite someone by email: "viewer" (View only) or "admin" (Full access). Again for the same email,
+   * Orgo replaces the invite: a new email, a new link and 7 more days, and the old link stops working.
+   */
+  invite: (key: string, workspace: string, email: string, permission: "viewer" | "admin") =>
+    callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/invite`, { method: "POST", body: { email, permission } }),
+  /** Cancel an invite still waiting: its link stops working. */
+  revoke: (key: string, workspace: string, email: string) =>
+    callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/invite`, { method: "DELETE", body: { email } }),
+  /** Take someone's access away (Orgo stops their open screens within seconds). */
+  remove: (key: string, workspace: string, memberId: string) =>
+    callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/members`, { method: "DELETE", body: { memberId } }),
+  /** Change what someone can do. Orgo's words here: "member" (View only) or "admin" (Full access). */
+  setRole: (key: string, workspace: string, memberId: string, role: "member" | "admin") =>
+    callOrgo<Record<string, unknown>>(key, `/api/workspaces/${encodeURIComponent(workspace)}/members`, { method: "PATCH", body: { memberId, role } }),
+};
 
 /**
  * Sam's computer launches from this template (built from orgo/bops-base.mjs; keep the versions in

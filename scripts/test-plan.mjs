@@ -1263,9 +1263,26 @@ assert.equal(PI.upgradeLabel("max"), "Upgrade to Max");
 assert.deepEqual(
   PI.PLAN_CARDS.map((c) => [c.name, c.price, `${c.computers.title}: ${c.computers.detail}`, ...c.lines.map((l) => (l.no ? `- ${l.text}` : l.text))]),
   [
-    ["Free", "$0", "1 computer included: 10 hours a month, 4 cores, 16 GB RAM, multi-screen", "$5 of AI credit, once", "As many bots as you like, sharing it", "- No phone number or email"],
-    ["Pro", "$20", "1 computer included: Always on, 4 cores, 16 GB RAM, templates, multi-screen", "$20 of AI credit every month", "As many bots as you like, sharing it", "1 phone number and 1 email", "- No extra computers"],
-    ["Max", "$200", "Up to 3 computers: Always on, 4 cores, 16 GB RAM each", "$200 of AI credit every month", "As many bots as you like, on any of them", "Up to 5 phone numbers and 5 emails"],
+    ["Free", "$0", "1 computer included: 10 hours a month, 4 cores, 16 GB RAM, multi-screen", "$5 of AI credit, once", "As many bots as you like, sharing it", "- No phone number or email", "- No sharing with other people"],
+    [
+      "Pro",
+      "$20",
+      "1 computer included: Always on, 4 cores, 16 GB RAM, templates, multi-screen",
+      "$20 of AI credit every month",
+      "As many bots as you like, sharing it",
+      "1 phone number and 1 email",
+      "Share your bots' computers with 2 people",
+      "- No extra computers",
+    ],
+    [
+      "Max",
+      "$200",
+      "Up to 3 computers: Always on, 4 cores, 16 GB RAM each",
+      "$200 of AI credit every month",
+      "As many bots as you like, on any of them",
+      "Up to 5 phone numbers and 5 emails",
+      "Share your bots' computers with up to 5 people",
+    ],
   ],
 );
 for (const c of PI.PLAN_CARDS) for (const text of [c.computers.title, c.computers.detail, ...c.lines.map((l) => l.text)]) noDashes(text);

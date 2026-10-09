@@ -335,11 +335,15 @@ export const PLAN_LIMIT = "plan_limit";
  *   it ends. Max's others come only when the user asks (Get a number, Get an email). The cloud holds
  *   each plan to its numbers (requireRoomForNumber); the app to its emails (lib/server/mail.ts),
  *   since the Mac makes inboxes in its own AgentMail pod.
+ * - `people`: people the user can add to their bots' computers on Orgo (the People sheet), besides
+ *   themselves: members of their Orgo workspace named "bops" plus invites still waiting. orgo-web
+ *   holds the workspace to it (lib/workspace-seats.ts) and sends its own numbers; the app shows these
+ *   only when it doesn't.
  */
 export const BOPS_TIERS = {
-  free_bops: { name: "Free", priceCents: 0, creditMicros: 5_000_000, monthly: false, computers: 1, phoneNumbers: 0, emails: 0 },
-  pro_bops: { name: "Pro", priceCents: 2_000, creditMicros: 20_000_000, monthly: true, computers: 1, phoneNumbers: 1, emails: 1 },
-  max_bops: { name: "Max", priceCents: 20_000, creditMicros: 200_000_000, monthly: true, computers: 3, phoneNumbers: 5, emails: 5 },
+  free_bops: { name: "Free", priceCents: 0, creditMicros: 5_000_000, monthly: false, computers: 1, phoneNumbers: 0, emails: 0, people: 0 },
+  pro_bops: { name: "Pro", priceCents: 2_000, creditMicros: 20_000_000, monthly: true, computers: 1, phoneNumbers: 1, emails: 1, people: 2 },
+  max_bops: { name: "Max", priceCents: 20_000, creditMicros: 200_000_000, monthly: true, computers: 3, phoneNumbers: 5, emails: 5, people: 5 },
 } as const;
 
 export type BopsTier = keyof typeof BOPS_TIERS;

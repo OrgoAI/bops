@@ -10,6 +10,8 @@
  *   1 phone number and 1 email (the main bot's, set up with the plan); no more computers.
  * - Max, $200 a month: $200 of AI credit every month, up to 3 Bops computers, and up to 5 phone
  *   numbers and 5 emails (the main bot's with the plan, the others when the user asks).
+ * - People who can see the bots' computers on Orgo (the People sheet): none on Free, 2 on Pro, up to
+ *   5 on Max.
  *
  * Shared by the server and the app (no server imports).
  */
@@ -43,6 +45,7 @@ export const PLAN_CARDS: PlanCard[] = [
       { text: "$5 of AI credit, once" },
       { text: "As many bots as you like, sharing it" },
       { text: "No phone number or email", no: true },
+      { text: "No sharing with other people", no: true },
     ],
   },
   {
@@ -55,6 +58,7 @@ export const PLAN_CARDS: PlanCard[] = [
       { text: "$20 of AI credit every month" },
       { text: "As many bots as you like, sharing it" },
       { text: "1 phone number and 1 email" },
+      { text: `Share your bots' computers with ${BOPS_TIERS.pro_bops.people} people` },
       { text: "No extra computers", no: true },
     ],
   },
@@ -68,6 +72,7 @@ export const PLAN_CARDS: PlanCard[] = [
       { text: "$200 of AI credit every month" },
       { text: "As many bots as you like, on any of them" },
       { text: "Up to 5 phone numbers and 5 emails" },
+      { text: `Share your bots' computers with up to ${BOPS_TIERS.max_bops.people} people` },
     ],
   },
 ];
@@ -166,4 +171,46 @@ export function computerShort(tier: BopsTier, held: number, more = 1): PlanRoomS
   if (held + more <= limit) return null;
   if (tier === "max_bops") return { text: `Max includes up to ${MAX.computers} Bops computers, and you have ${MAX.computers}.`, upgrade: null };
   return { text: `${BOPS_TIERS[tier].name} includes ${limit} Bops computer. Max includes up to ${MAX.computers}.`, upgrade: "max" };
+}
+
+/* ---------------- People ---------------- */
+
+/**
+ * Where the user's plan stands on people who can see their bots' computers (lib/members.ts
+ * MemberSeats): the plan, how many people it includes besides the user (null: no limit), how many
+ * have access or an invite still waiting, and how many Pro and Max include.
+ */
+export type PeopleRoom = { plan: BopsTier; limit: number | null; used: number; caps: { pro_bops: number; max_bops: number } };
+
+/** What Pro and Max include, from BOPS_TIERS: shown only when orgo-web doesn't send its own numbers. */
+export const PEOPLE_CAPS = { pro_bops: BOPS_TIERS.pro_bops.people, max_bops: BOPS_TIERS.max_bops.people } as const;
+
+/** "1 person", "2 people". */
+export const peopleCount = (n: number) => `${n} ${n === 1 ? "person" : "people"}`;
+
+/** The counter beside Add someone ("1 of 2 people"); null when there's no limit. */
+export const peopleAside = (s: PeopleRoom) => (s.limit === null ? null : `${s.used} of ${s.limit === 1 ? "1 person" : `${s.limit} people`}`);
+
+/**
+ * Why the user can't add someone now, in the People sheet's words, and the plan that has room: null when
+ * they can. `withAccess`: the people who have access now (not invites); `invited`: invites still waiting.
+ * People over a limit keep their access (a plan changed after they joined): the words say so, and that
+ * adding someone needs room first. `note`: a second line, when cancelling an invite would make room.
+ * The numbers are orgo-web's when it sent them (it holds the workspace to them), else BOPS_TIERS'.
+ */
+export function peopleShort(s: PeopleRoom, { withAccess, invited }: { withAccess: number; invited: number }): (PlanRoomShort & { note?: string }) | null {
+  const max = s.caps.max_bops;
+  if (s.plan === "free_bops" || s.limit === 0) {
+    const keep = withAccess === 1 ? "The 1 person who has access keeps it." : `The ${withAccess} people who have access keep it.`;
+    return { text: `Free doesn't include adding people. ${withAccess > 0 ? keep : `Pro includes ${s.caps.pro_bops}, and Max up to ${max}.`}`, upgrade: "plan" };
+  }
+  if (s.limit === null || s.used < s.limit) return null;
+  const over = s.used > s.limit;
+  if (s.plan === "pro_bops")
+    return over
+      ? { text: `Pro includes ${peopleCount(s.limit)}, and you have ${s.used} from before. They keep access, but to add someone, upgrade to Max or remove people.`, upgrade: "max" }
+      : { text: `Pro includes ${peopleCount(s.limit)}, and you have ${s.used}. Max includes up to ${max}.`, upgrade: "max", ...(invited ? { note: "Or cancel an invite below to make room." } : {}) };
+  return over
+    ? { text: `Max includes up to ${peopleCount(s.limit)}, and you have ${s.used} from before. They keep access, but to add someone, remove people first.`, upgrade: null }
+    : { text: `Max includes up to ${peopleCount(s.limit)}, and you have ${s.used}. ${invited ? "Remove someone or cancel an invite" : "Remove someone"} to add someone else.`, upgrade: null };
 }
