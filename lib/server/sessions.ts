@@ -719,10 +719,12 @@ export async function ensureComputer(botId: string): Promise<void> {
       if (!b.isMain) b.computer = "own";
     });
     // Up when Orgo says it's running. One asleep (suspended) is woken: from storage that takes a minute or
-    // a few, so the wait grows to wakeWaitMs and a wake that didn't work is asked for again. A computer in
-    // error, stopped or frozen doesn't get there by itself.
-    let until = Date.now() + UP_WAIT_MS;
+    // a few, so the wait runs to wakeWaitMs after the FIRST ask, and a wake that didn't work is asked for
+    // again within it (never past it: a wake that keeps failing must not hold the setup, and the tasks
+    // waiting on it, for ever). A computer in error, stopped or frozen doesn't get there by itself.
+    const startedAt = Date.now();
     let wokenAt = 0;
+    let firstWakeAt = 0;
     for (;;) {
       const c = await orgo.computer(clone.id).catch(() => null);
       if (swapped()) return;
@@ -734,17 +736,17 @@ export async function ensureComputer(botId: string): Promise<void> {
         broken = c.status;
         throw new Error(`Orgo says it's ${c.status === "error" ? "broken" : c.status}`);
       }
-      if (c?.status === "suspended" && Date.now() - wokenAt >= WAKE_ASK_MS) {
+      if (c?.status === "suspended" && Date.now() - wokenAt >= setupWait.wakeAskMs && Date.now() < setupWaitUntil(startedAt, firstWakeAt)) {
         wokenAt = Date.now();
-        until = Math.max(until, wokenAt + wakeWaitMs());
+        if (!firstWakeAt) firstWakeAt = wokenAt;
         // Orgo's own words when it won't wake it (402: Free's hours this month used) end the setup.
         await orgo.resume(clone.id).catch((e: unknown) => {
           if (!computerWakingError(e) && !(e instanceof OrgoError && e.status === 409 && /not suspended/i.test(e.said ?? ""))) throw e;
         });
         if (swapped()) return;
       }
-      if (Date.now() >= until) break;
-      await new Promise((r) => setTimeout(r, 3000));
+      if (Date.now() >= setupWaitUntil(startedAt, firstWakeAt)) break;
+      await new Promise((r) => setTimeout(r, setupWait.pollMs));
     }
     await orgo.growDisk(clone.id).catch((e: Error) => console.warn(`[disk] ${b.id}: ${e.message}`));
     // Its screen streams over UDP (Orgo's WebRTC) where Orgo can; the app falls back to VNC where it can't.
@@ -796,10 +798,19 @@ export async function ensureComputer(botId: string): Promise<void> {
 
 /** Orgo statuses a computer doesn't come back from by itself (a computer that's been deleted isn't usually listed at all). */
 const BROKEN = new Set(["error", "stopped", "frozen", "deleted"]);
-/** How long a setup waits for a computer to run before going on (a computer waking waits up to wakeWaitMs). */
-const UP_WAIT_MS = 3 * 60_000;
-/** How often a setup asks Orgo again to wake a computer that's still asleep. */
-const WAKE_ASK_MS = 60_000;
+/**
+ * How long a setup waits for a computer to run before going on (upMs; a computer it wakes waits up to
+ * wakeWaitMs after the first ask), how often it asks Orgo again to wake one that's still asleep
+ * (wakeAskMs), and how often it looks (pollMs). Mutable for the tests only.
+ */
+export const setupWait = { upMs: 3 * 60_000, wakeAskMs: 60_000, pollMs: 3000 };
+
+/**
+ * When a setup stops waiting for its computer to run: upMs after it began or, once it first asked Orgo
+ * to wake it, wakeWaitMs after that first ask, whichever is later. Asking again never moves it.
+ */
+export const setupWaitUntil = (startedAt: number, firstWakeAt: number): number =>
+  Math.max(startedAt + setupWait.upMs, firstWakeAt ? firstWakeAt + wakeWaitMs() : 0);
 
 /** Orgo's answer for a computer that's gone: deleted (404), or out of this account's reach (403). */
 export const computerGone = (e: unknown) => e instanceof OrgoError && (e.status === 403 || e.status === 404);

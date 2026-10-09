@@ -776,6 +776,38 @@ assert.equal(asked("POST", "/api/computers/c-had-2/resume", n), 1, "woken once")
 assert.deepEqual({ id: main().computerId, status: main().computerStatus }, { id: "c-had-2", status: "ready" });
 assert.equal(asked("DELETE", "/api/computers/c-had-2"), 0);
 status = "running";
+// Asleep in storage and its wake keeps failing (Orgo answers 503 wake_failed and it stays asleep): the
+// setup waits until wakeWaitMs after its FIRST ask, asking again within it, and then ends, the tasks
+// told, the computer kept. Asking again never moves the end (it used to, every minute, for ever).
+upComputers.set("c-had-3", 8);
+S.update(() => Object.assign(main(), { computerId: "c-had-3", computerStatus: "error" }));
+const wakeRoute = replies.route;
+replies.route = (c) =>
+  c.method === "POST" && c.path === "/api/computers/c-had-3/resume"
+    ? json(503, { error: "This computer couldn't wake up just now.", code: "wake_failed", retry_after: 1 })
+    : wakeRoute(c);
+Object.assign(X.setupWait, { upMs: 300, wakeAskMs: 100, pollMs: 20 });
+process.env.BOPS_WAKE_WAIT_MS = "600";
+status = "suspended";
+screensUp = false; // as orgo-web: a computer asleep in storage lists no screens
+task("ses_had5");
+n = calls.length;
+const waitStart = Date.now();
+await X.ensureComputer("boppy");
+const took = Date.now() - waitStart;
+assert.ok(took >= 550 && took < 3000, `ended about wakeWaitMs after the first ask (${took} ms)`);
+const asks = asked("POST", "/api/computers/c-had-3/resume", n);
+assert.ok(asks >= 3 && asks <= 8, `asked again within the wait, not past it (${asks})`);
+assert.equal(X.setupWaitUntil(1000, 0), 1300, "no ask: upMs after it began");
+assert.equal(X.setupWaitUntil(1000, 1100), 1700, "the first ask: wakeWaitMs after it");
+assert.equal(asked("DELETE", "/api/computers/c-had-3"), 0, "kept");
+assert.equal(S.session("ses_had5").status, "failed");
+assert.equal(main().computerId, "c-had-3");
+replies.route = wakeRoute;
+screensUp = true;
+Object.assign(X.setupWait, { upMs: 3 * 60_000, wakeAskMs: 60_000, pollMs: 3000 });
+delete process.env.BOPS_WAKE_WAIT_MS;
+status = "running";
 
 // Another user's state is swapped in (a hosted server) while Bops waits on Orgo for this one's computer:
 // nothing about it lands in theirs, though their main bot and its task have the same ids.
