@@ -12,6 +12,7 @@ import {
   type MembersRefusal,
   type MemberSeats,
   type Person,
+  type SeatsError,
 } from "@/lib/members";
 import { PEOPLE_CAPS } from "@/lib/plan-includes";
 import { trackServerEvent } from "./analytics";
@@ -19,7 +20,6 @@ import { reachableFromComputers } from "./composio";
 import { computerToolOn } from "./computer-task";
 import { findBopsWorkspace, orgoMembers, type OrgoInvite, type OrgoMember } from "./orgo";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
-import { readBopsPlan } from "./plan";
 import { getState, stateInCloud } from "./store";
 
 /*
@@ -30,9 +30,11 @@ import { getState, stateInCloud } from "./store";
  * self-hosted or hosted server can keep its own keys on the bots' computers, so it points at orgo.ai.
  *
  * orgo-web decides who may be added (Free nobody, Pro 2 people, Max up to 5) and sends its numbers with
- * the list (seats); this puts its answers in the app's words. From an orgo-web that doesn't send them,
- * the app's copy of the plan table (BOPS_TIERS.people) stands in, and an invite it has no room for is
- * turned down here. Nothing here logs or tracks an email.
+ * the list (seats); this puts its answers in the app's words. Only those numbers let anyone in: an
+ * orgo-web that sends none is one from before its plan rule (lib/workspace-seats.ts), where nothing holds
+ * the workspace to a plan and View only can read the commands the bots run (its timeline), so nobody is
+ * added from here until it has shipped (ORGO_NOT_READY). Taking access away always works. Nothing here
+ * logs or tracks an email.
  */
 
 /** A route's answer: its status and JSON. */
@@ -139,29 +141,18 @@ function seatsFromOrgo(raw: unknown): MemberSeats | undefined {
     used,
     upgrade: s.upgrade_tier === "pro_bops" ? "plan" : s.upgrade_tier === "max_bops" ? "max" : null,
     caps: { pro_bops: whole(caps.pro_bops) ?? PEOPLE_CAPS.pro_bops, max_bops: whole(caps.max_bops) ?? PEOPLE_CAPS.max_bops },
-    from: "orgo",
   };
 }
 
 /**
- * The seats from the app's copy of the plan table, for an orgo-web that sends none: the Bops plan as Orgo
- * says it (GET /api/bops/plan), and the people and invites still waiting. Null when Orgo didn't say the
- * plan: then nobody is added (never taken for Free, or for room).
+ * The seats in orgo-web's members answer, or why there are none. orgo-web gives its owner `seats` (null
+ * with seats_error when it couldn't read the plan); an answer with neither comes from an orgo-web before
+ * its plan rule, and the app never stands in for that rule with a guess of its own.
  */
-async function seatsFromPlan(key: string, people: Person[], invites: Invite[]): Promise<MemberSeats | null> {
-  const plan = await readBopsPlan(key);
-  if (!plan) return null;
-  const limit = BOPS_TIERS[plan.tier].people;
-  const used = people.length + invites.filter((i) => !i.expired).length;
-  return {
-    plan: plan.tier,
-    canAdd: limit > 0 && used < limit,
-    limit,
-    used,
-    upgrade: plan.tier === "free_bops" ? "plan" : plan.tier === "pro_bops" ? "max" : null,
-    caps: { ...PEOPLE_CAPS },
-    from: "app",
-  };
+function seatsOf(json: Record<string, unknown>): { seats: MemberSeats; seatsError?: undefined } | { seats: null; seatsError: SeatsError } {
+  if (!("seats" in json) && !("seats_error" in json)) return { seats: null, seatsError: "ORGO_NOT_READY" };
+  const seats = seatsFromOrgo(json.seats);
+  return seats ? { seats } : { seats: null, seatsError: "PLAN_UNAVAILABLE" };
 }
 
 /** Orgo's list as the sheet shows it: the user, everyone else by name, and the invites newest first. */
@@ -223,10 +214,8 @@ async function load(key: string, { fresh = false } = {}): Promise<Loaded> {
     if (got.status !== 200) return { kind: "refused", answer: got.status === 403 ? no(403, "NOT_OWNER", WORDS.notOwner) : no(502, "ORGO_ERROR", WORDS.orgoLoadError) };
     const workspace = found.id;
     const { you, people, invites } = listOf(got.json, workspace);
-    // An orgo-web that sends seats holds the workspace to them: when it couldn't say (null, or nothing the app
-    // can read), adding people waits, as it does there, rather than the app's copy standing in for its gate.
-    const orgoSays = "seats" in got.json || "seats_error" in got.json;
-    const seats = orgoSays ? (seatsFromOrgo(got.json.seats) ?? null) : await seatsFromPlan(key, people, invites);
+    // Adding people waits whenever orgo-web didn't give seats it holds the workspace to (seatsOf).
+    const { seats, seatsError } = seatsOf(got.json);
     g.bopsMembersCount = { key, at: Date.now(), count: people.length };
     return {
       kind: "ready",
@@ -236,11 +225,12 @@ async function load(key: string, { fresh = false } = {}): Promise<Loaded> {
         orgoUrl: `${orgoOrigin()}/workspaces?project_id=${encodeURIComponent(workspace)}`,
         host: getState().host === "mac" ? "mac" : "orgo",
         fullAccess: fullAccessNow(),
+        keysOnComputers: keysOnComputers(),
         you,
         people,
         invites,
         seats,
-        ...(seats ? {} : { seatsError: "PLAN_UNAVAILABLE" as const }),
+        ...(seatsError ? { seatsError } : {}),
       },
     };
   }
@@ -322,15 +312,10 @@ export async function invite(body: { email?: unknown; role?: unknown }): Promise
   if (info.you.email?.toLowerCase() === email) return no(400, "SELF", WORDS.self);
   if (info.people.some((p) => p.email?.toLowerCase() === email)) return no(409, "ALREADY_IN", WORDS.alreadyIn(email));
   const waiting = info.invites.find((i) => i.email === email);
-  if (!info.seats) return counted(no(503, "PLAN_UNAVAILABLE", WORDS.planUnavailableShort));
-  if (info.seats.from === "app") {
-    // An orgo-web that doesn't hold the workspace to the plan: the app's copy does. Sending an invite
-    // again replaces it, so it takes no more room.
-    const s = info.seats;
-    const used = s.used - (waiting && !waiting.expired ? 1 : 0);
-    if (s.plan === "free_bops" || s.limit === 0) return counted(no(402, "UPGRADE_REQUIRED", WORDS.upgradeRequired, { upgrade: "plan" }));
-    if (s.limit !== null && used >= s.limit) return counted(no(402, "SEAT_LIMIT", WORDS.seatLimit, { upgrade: s.upgrade, limit: s.limit, used: s.used }));
-  }
+  // Only orgo-web's own seats let anyone in, a resend too: it holds the workspace to the plan, and Bops never
+  // stands in for that. None at all is an orgo-web before that rule; none it could read, a plan to read again.
+  if (!info.seats)
+    return info.seatsError === "ORGO_NOT_READY" ? no(503, "ORGO_NOT_READY", WORDS.orgoNotReadyShort) : counted(no(503, "PLAN_UNAVAILABLE", WORDS.planUnavailableShort));
   const got = (await orgoMembers.invite(who.key, workspace, email, role)) as Got;
   if (!done(got)) return counted(refusalOf(got, { invite: true, email }));
   forgetCount();

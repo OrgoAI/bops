@@ -6,7 +6,8 @@
  * (lib/server/orgo.ts bopsWorkspace). The people the user adds are members of that Orgo workspace:
  * they sign in on orgo.ai and see the bots' computers there, never this Mac, the chats or the vault.
  * Bops keeps none of this itself: orgo-web holds the list, the invites and the plan's rules (Free
- * adds nobody, Pro 2 people, Max up to 5), and the app shows what it says.
+ * adds nobody, Pro 2 people, Max up to 5), and the app shows what it says. Nobody is added from an
+ * orgo-web that doesn't send its numbers (seats): one from before that rule holds no plan to it.
  *
  * Orgo's two roles keep Orgo's names, so an invitee reads the same words on orgo.ai: View only (Orgo's
  * "member": watch the screens, change nothing) and Full access (Orgo's "admin": use the computers as
@@ -27,10 +28,9 @@ export type Person = { id: string; name: string; email?: string; role: MemberRol
 export type Invite = { email: string; role: MemberRole; expiresAt: number | null; expired: boolean; link?: string };
 
 /**
- * Where the plan stands on people: orgo-web's numbers (`from` "orgo", which it holds the workspace to),
- * else the app's copy of the plan table (BOPS_TIERS.people) from an orgo-web that doesn't send them.
- * `limit`: people besides the user (null: no limit). `used`: people with access and invites still
- * waiting. `upgrade`: the plan with more room ("plan" from Free, "max" from Pro).
+ * Where the plan stands on people: orgo-web's numbers, which it holds the workspace to (never the
+ * app's guess). `limit`: people besides the user (null: no limit). `used`: people with access and
+ * invites still waiting. `upgrade`: the plan with more room ("plan" from Free, "max" from Pro).
  */
 export type MemberSeats = {
   plan: BopsTier;
@@ -39,8 +39,14 @@ export type MemberSeats = {
   used: number;
   upgrade: "plan" | "max" | null;
   caps: { pro_bops: number; max_bops: number };
-  from: "orgo" | "app";
 };
+
+/**
+ * Why there are no seats, so nobody is added: orgo-web couldn't read the plan (PLAN_UNAVAILABLE), or it
+ * sent no seats at all (ORGO_NOT_READY): an orgo-web from before its plan rule, which also shows View
+ * only the commands the bots run.
+ */
+export type SeatsError = "PLAN_UNAVAILABLE" | "ORGO_NOT_READY";
 
 /**
  * Whether the app offers Full access: "on"; "off" while Bops puts its own keys on the bots' computers
@@ -61,11 +67,16 @@ export type MembersInfo =
       /** Where the bots work now: on this Mac, people the user adds see nothing of it. */
       host: "orgo" | "mac";
       fullAccess: FullAccess;
+      /**
+       * Bops puts keys of its own on the bots' computers (BOPS_LISTEN_ALL's apps.json, the executor's
+       * key, Tailscale's): anyone with Full access, root there, can read them, offered or not.
+       */
+      keysOnComputers: boolean;
       you: { id: string; name: string; email?: string };
       people: Person[];
       invites: Invite[];
       seats: MemberSeats | null;
-      seatsError?: "PLAN_UNAVAILABLE";
+      seatsError?: SeatsError;
     };
 
 /** Why a members call didn't do what was asked: a code the app acts on, and words to show. */
@@ -85,7 +96,8 @@ export type InviteSent = { email: string; role: MemberRole; emailSent: boolean; 
  * Full access in the app. Off until removing someone with Full access also changes the computers'
  * passwords (orgo-web and the hosts): someone removed could still use a password they copied. Until
  * then the sheet adds people with View only, and can move anyone with Full access to View only or
- * remove them. BOPS_MEMBERS_FULL_ACCESS=1 offers it before that (lib/server/members.ts).
+ * remove them, saying a password they copied outlasts that (WORDS.copiedPassword).
+ * BOPS_MEMBERS_FULL_ACCESS=1 offers it before that (lib/server/members.ts).
  */
 export const FULL_ACCESS_IN_BOPS = false;
 
@@ -118,6 +130,8 @@ export const WORDS = {
   noComputers: "Your bots don't have a computer on Orgo yet. Once they do, you can add people to watch it here.",
   planUnavailable: "Couldn't check your plan just now, so adding people is paused. Try again in a minute.",
   planUnavailableShort: "Couldn't check your plan just now. Try again in a minute.",
+  orgoNotReady: "Adding people isn't ready on Orgo yet. Once it is, you can add them here.",
+  orgoNotReadyShort: "Adding people isn't ready on Orgo yet.",
   upgradeRequired: "Your plan doesn't include adding people right now.",
   seatLimit: "Your plan has no room for more people right now.",
   rateLimited: "That's a lot of invites for now. Try again in an hour.",
@@ -129,6 +143,10 @@ export const WORDS = {
   fullAccessOff: "Full access is off while your bots' computers hold keys from this Mac.",
   fullAccessOffTip: "Off while your bots' computers hold keys from this Mac.",
   fullAccessNotYet: "Bops adds people with View only for now.",
+  keysOff: "Your bots' computers hold keys from this Mac, so Full access is off.",
+  keysOffFull: "Anyone who already has it can read those keys. Switch them to View only.",
+  keysHeld: "Your bots' computers hold keys from this Mac. Anyone with Full access can read them. Switch them to View only.",
+  copiedPassword: "A computer password they copied keeps working until it's changed.",
   appUnreachable: "Couldn't reach Bops. Try again.",
   whatToSend: "Say who to add, and what they can do.",
   alreadyIn: (email: string) => `${email} already has access.`,

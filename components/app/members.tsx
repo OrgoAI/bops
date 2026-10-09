@@ -1,9 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import { trackEvent } from "@/lib/analytics";
-import { emailOf, ROLE_LINES, ROLE_NAMES, WORDS, type FullAccess, type Invite, type InviteSent, type MemberRole, type MembersInfo, type MembersRefusal, type Person } from "@/lib/members";
+import {
+  emailOf,
+  FULL_ACCESS_IN_BOPS,
+  ROLE_LINES,
+  ROLE_NAMES,
+  WORDS,
+  type FullAccess,
+  type Invite,
+  type InviteSent,
+  type MemberRole,
+  type MembersInfo,
+  type MembersRefusal,
+  type Person,
+} from "@/lib/members";
 import { peopleAside, peopleShort, upgradeLabel } from "@/lib/plan-includes";
 import type { AppState } from "@/lib/types";
 import { initialsFrom, LoadFailed, Notice, Placeholder, Section, signOutOfOrgo } from "./account";
@@ -274,16 +287,14 @@ export function Members({ state, onClose, onUpgrade }: { state: AppState; onClos
 /** Who has access, and adding people: the sheet once Orgo has said. */
 function ReadyView({ info, state, act, onRetry, onUpgrade }: { info: Ready; state: AppState; act: Act; onRetry: () => void; onUpgrade: () => void }) {
   const someoneFull = info.people.some((p) => p.role === "admin");
+  // Bops' own keys on the computers: said whenever someone with Full access can read them, whether or not
+  // the app offers it (people added on orgo.ai have it too), and when they're why the app doesn't.
+  const keys = info.fullAccess === "off" || (info.keysOnComputers && someoneFull);
   return (
     <>
-      {(info.fullAccess === "off" || info.host === "mac") && (
+      {(keys || info.host === "mac") && (
         <div className="flex flex-col gap-2 px-[22px] pt-[18px]">
-          {info.fullAccess === "off" && (
-            <Notice>
-              Your bots&apos; computers hold keys from this Mac, so Full access is off.
-              {someoneFull && " Anyone who already has it can read the keys Bops puts on those computers. Switch them to View only."}
-            </Notice>
-          )}
+          {keys && <Notice>{info.fullAccess === "off" ? `${WORDS.keysOff}${someoneFull ? ` ${WORDS.keysOffFull}` : ""}` : WORDS.keysHeld}</Notice>}
           {info.host === "mac" && <Notice>Right now your bots work on this Mac, which people you add never see. They&apos;d only see your bots&apos; cloud computers.</Notice>}
         </div>
       )}
@@ -298,22 +309,45 @@ function ReadyView({ info, state, act, onRetry, onUpgrade }: { info: Ready; stat
 
 /**
  * The invite form while the plan has room (with "1 of 2 people" beside it), else why not and the upgrade
- * that has room, in the plan's words (lib/plan-includes.ts peopleShort, with orgo-web's numbers).
+ * that has room, in the plan's words (lib/plan-includes.ts peopleShort, with orgo-web's numbers). Without
+ * orgo-web's numbers nobody is added: it couldn't read the plan, or it's an orgo-web from before its plan
+ * rule. What the last invite did is kept here, not in the form: the invite that takes the last seat swaps
+ * the form for the plan's block, and its line (an email that didn't go out, with its link) stays under it.
  */
 function AddSomeone({ info, state, act, onRetry, onUpgrade }: { info: Ready; state: AppState; act: Act; onRetry: () => void; onUpgrade: () => void }) {
+  const [said, setSaid] = useState<Said | null>(null);
+  // "Sent" for a moment on the button, and "Invite sent to …" for a few seconds under it.
+  const [sent, setSent] = useState(false);
+  useEffect(() => {
+    if (!sent) return;
+    const t = setTimeout(() => setSent(false), 1500);
+    return () => clearTimeout(t);
+  }, [sent]);
+  useEffect(() => {
+    if (!said?.brief) return;
+    const t = setTimeout(() => setSaid((x) => (x === said ? null : x)), 4000);
+    return () => clearTimeout(t);
+  }, [said]);
+  const line = said && <SaidLine said={said} />;
   const s = info.seats;
   if (!s)
     return (
       <Section title="Add someone">
-        <Notice
-          action={
-            <button onClick={onRetry} className={quiet}>
-              Try again
-            </button>
-          }
-        >
-          {WORDS.planUnavailable}
-        </Notice>
+        {info.seatsError === "ORGO_NOT_READY" ? (
+          <Notice>{WORDS.orgoNotReady}</Notice>
+        ) : (
+          <Notice
+            action={
+              <button onClick={onRetry} className={quiet}>
+                Try again
+              </button>
+            }
+          >
+            {WORDS.planUnavailable}
+          </Notice>
+        )}
+        {/* The notice says why adding waits, so only what an invite did before is kept: sent, or its link. */}
+        {said?.tone === "muted" && line}
       </Section>
     );
   const waiting = info.invites.filter((i) => !i.expired).length;
@@ -325,7 +359,13 @@ function AddSomeone({ info, state, act, onRetry, onUpgrade }: { info: Ready; sta
       {aside}
     </span>
   );
-  if (s.canAdd) return <Section title="Add someone" aside={counter}>{<InviteForm info={info} act={act} />}</Section>;
+  if (s.canAdd)
+    return (
+      <Section title="Add someone" aside={counter}>
+        <InviteForm info={info} act={act} sent={sent} onSent={setSent} onSaid={setSaid} />
+        {line}
+      </Section>
+    );
   const upgrade = short ? short.upgrade : s.upgrade;
   return (
     <Section title="Add someone" aside={s.plan === "free_bops" ? null : counter}>
@@ -342,6 +382,7 @@ function AddSomeone({ info, state, act, onRetry, onUpgrade }: { info: Ready; sta
         {short?.note && <span className="block text-[#6B6B6B]">{short.note}</span>}
         {s.plan === "free_bops" && <OrgoPlanLine state={state} />}
       </Notice>
+      {line}
     </Section>
   );
 }
@@ -353,51 +394,51 @@ function OrgoPlanLine({ state }: { state: AppState }) {
   return <span className="block text-[#6B6B6B]">Your Orgo plan covers your other Orgo workspaces, not your bots&apos; computers.</span>;
 }
 
-/** The line under the form: what happened last (muted, or red for a problem), with the invite's link when the email didn't go out. */
+/** What the last invite did (muted, or red for a problem), with the invite's link when the email didn't go out. */
 type Said = { tone: "muted" | "bad"; text: string; link?: string; brief?: true };
+
+/** The line under the form, or under the plan's block once the invite took the last seat. */
+function SaidLine({ said }: { said: Said }) {
+  return (
+    <span role={said.tone === "bad" ? "alert" : "status"} className={`flex flex-wrap items-center gap-x-2 text-[12px] leading-4 ${said.tone === "bad" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
+      {said.text}
+      {said.link && <CopyLink link={said.link} />}
+    </span>
+  );
+}
 
 /**
  * Invite someone by email, with View only picked each time it opens and after every invite (Full access
  * only when the app offers it, with its one warning under the field). The address is checked here first:
  * its shape, not the user's own, not someone who has access. Typing an address with an invite waiting
- * sends that invite again, with the access picked now.
+ * sends that invite again, with the access picked now. What happened goes to AddSomeone (`onSaid`,
+ * `onSent`), which outlasts the form.
  */
-function InviteForm({ info, act }: { info: Ready; act: Act }) {
+function InviteForm({ info, act, sent, onSent, onSaid }: { info: Ready; act: Act; sent: boolean; onSent: (sent: boolean) => void; onSaid: Dispatch<SetStateAction<Said | null>> }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<MemberRole>("viewer");
   const [busy, setBusy] = useState(false);
-  const [sent, setSent] = useState(false);
-  const [said, setSaid] = useState<Said | null>(null);
   const offer = info.fullAccess;
   const picked = offer === "not_yet" ? "viewer" : role;
   const again = info.invites.some((i) => i.email === email.trim().toLowerCase());
-  // "Sent" for a moment on the button, and "Invite sent to …" for a few seconds under it.
-  useEffect(() => {
-    if (!sent) return;
-    const t = setTimeout(() => setSent(false), 1500);
-    return () => clearTimeout(t);
-  }, [sent]);
-  useEffect(() => {
-    if (!said?.brief) return;
-    const t = setTimeout(() => setSaid((x) => (x === said ? null : x)), 4000);
-    return () => clearTimeout(t);
-  }, [said]);
 
   const send = async () => {
     const address = emailOf(email);
-    if (!address) return setSaid({ tone: "bad", text: WORDS.badEmail });
-    if (info.you.email?.toLowerCase() === address) return setSaid({ tone: "bad", text: WORDS.self });
-    if (info.people.some((p) => p.email?.toLowerCase() === address)) return setSaid({ tone: "bad", text: WORDS.alreadyIn(address) });
+    if (!address) return onSaid({ tone: "bad", text: WORDS.badEmail });
+    if (info.you.email?.toLowerCase() === address) return onSaid({ tone: "bad", text: WORDS.self });
+    if (info.people.some((p) => p.email?.toLowerCase() === address)) return onSaid({ tone: "bad", text: WORDS.alreadyIn(address) });
     setBusy(true);
-    setSaid(null);
+    onSaid(null);
+    // The sheet reads who has access again before this answers: an invite that took the last seat has
+    // already swapped this form for the plan's block, so what happened is said by AddSomeone.
     const r = await act("POST", { email: address, role: picked });
     setBusy(false);
-    if (r.status !== 200) return setSaid({ tone: "bad", text: saidOf(r) });
+    if (r.status !== 200) return onSaid({ tone: "bad", text: saidOf(r) });
     const made = r.json as InviteSent;
     setEmail("");
     setRole("viewer");
-    setSent(made.emailSent);
-    setSaid(
+    onSent(made.emailSent);
+    onSaid(
       made.emailSent
         ? { tone: "muted", text: `Invite sent to ${made.email}.`, brief: true }
         : { tone: "muted", text: "Invite made, but the email didn't go out. Copy the link and send it to them yourself.", ...(made.link ? { link: made.link } : {}) },
@@ -422,7 +463,7 @@ function InviteForm({ info, act }: { info: Ready; act: Act }) {
           maxLength={254}
           onChange={(e) => {
             setEmail(e.target.value);
-            setSaid((x) => (x?.tone === "bad" ? null : x));
+            onSaid((x) => (x?.tone === "bad" ? null : x));
           }}
           placeholder="name@example.com"
           aria-label="Their email"
@@ -435,12 +476,6 @@ function InviteForm({ info, act }: { info: Ready; act: Act }) {
         </button>
       </div>
       <RoleLine role={picked} />
-      {said && (
-        <span role={said.tone === "bad" ? "alert" : "status"} className={`flex flex-wrap items-center gap-x-2 text-[12px] leading-4 ${said.tone === "bad" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
-          {said.text}
-          {said.link && <CopyLink link={said.link} />}
-        </span>
-      )}
     </form>
   );
 }
@@ -532,20 +567,29 @@ function WhoHasAccess({ info, act }: { info: Ready; act: Act }) {
 /**
  * Someone with access: who, and what they can do. View only applies at once; Full access asks first. In
  * the View only release their access is words, and Full access has a Make View only on hover. Remove asks
- * first too.
+ * first too. Until taking Full access away also changes the computers' passwords (FULL_ACCESS_IN_BOPS),
+ * Remove and View only say that a password they copied keeps working: never "access ended" when it hasn't.
  */
 function PersonRow({ person: p, fullAccess, act }: { person: Person; fullAccess: FullAccess; act: Act }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Their Full access was taken away in this sheet: they may still hold what it gave them.
+  const [demoted, setDemoted] = useState(false);
   const [asking, setAsking] = useState<"remove" | "full" | null>(null);
   const [confirmError, setConfirmError] = useState<string | null>(null);
+  const hadFull = p.role === "admin" || demoted;
+  // A computer password they copied with Full access outlasts it (FULL_ACCESS_IN_BOPS).
+  const copied = hadFull && !FULL_ACCESS_IN_BOPS;
   const change = async (role: MemberRole) => {
     setBusy(true);
     setError(null);
     setConfirmError(null);
     const r = await act("PATCH", { memberId: p.id, role });
     setBusy(false);
-    if (r.status === 200) return setAsking(null);
+    if (r.status === 200) {
+      if (role === "viewer" && p.role === "admin") setDemoted(true);
+      return setAsking(null);
+    }
     const text = errorOf(r, "Couldn't change their access. Try again.");
     if (asking) setConfirmError(text);
     else setError(text);
@@ -575,7 +619,12 @@ function PersonRow({ person: p, fullAccess, act }: { person: Person; fullAccess:
         {fullAccess === "not_yet" ? (
           <>
             {p.role === "admin" && (
-              <button disabled={busy} onClick={() => void change("viewer")} className={`${rowAction} text-[#3A3A38] hover:bg-[#F2F2F0] disabled:opacity-50`}>
+              <button
+                disabled={busy}
+                data-tip={copied ? WORDS.copiedPassword : undefined}
+                onClick={() => void change("viewer")}
+                className={`${rowAction} text-[#3A3A38] hover:bg-[#F2F2F0] disabled:opacity-50`}
+              >
                 {busy ? "Changing…" : "Make View only"}
               </button>
             )}
@@ -593,10 +642,15 @@ function PersonRow({ person: p, fullAccess, act }: { person: Person; fullAccess:
           {error}
         </span>
       )}
+      {copied && p.role === "viewer" && (
+        <span role="status" className="pl-12 pt-1.5 text-[12px] leading-4 text-[#6B6B6B]">
+          {WORDS.copiedPassword}
+        </span>
+      )}
       {asking === "remove" && (
         <Confirm
           title={`Remove ${p.name}?`}
-          line={`They lose access to your bots' computers right away.${p.role === "admin" ? " Anything they changed on the computers stays." : ""}`}
+          line={`They lose access to your bots' computers right away.${hadFull ? " Anything they changed on the computers stays." : ""}${copied ? ` ${WORDS.copiedPassword}` : ""}`}
           action="Remove"
           danger
           busy={busy}
@@ -648,7 +702,7 @@ function Invited({ info, act }: { info: Ready; act: Act }) {
     >
       <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
         {info.invites.map((i) => (
-          <InviteRow key={i.email} invite={i} fullAccess={info.fullAccess} act={act} />
+          <InviteRow key={i.email} invite={i} fullAccess={info.fullAccess} canSend={!!s} act={act} />
         ))}
       </div>
     </Section>
@@ -658,9 +712,10 @@ function Invited({ info, act }: { info: Ready; act: Act }) {
 /**
  * An invite: to whom, with what access, and when it expires. Resend (Send again once it's expired) emails
  * a new link and the old one stops working; Copy link is for sending it another way; Cancel asks once.
- * A Full access invite is sent again only while the app offers Full access.
+ * A Full access invite is sent again only while the app offers Full access, and none while adding people
+ * waits for orgo-web's numbers (`canSend` false: the route would turn it down).
  */
-function InviteRow({ invite: i, fullAccess, act }: { invite: Invite; fullAccess: FullAccess; act: Act }) {
+function InviteRow({ invite: i, fullAccess, canSend, act }: { invite: Invite; fullAccess: FullAccess; canSend: boolean; act: Act }) {
   const [busy, setBusy] = useState<"resend" | "cancel" | null>(null);
   const [sure, setSure] = useState(false);
   const [sent, setSent] = useState(false);
@@ -695,7 +750,7 @@ function InviteRow({ invite: i, fullAccess, act }: { invite: Invite; fullAccess:
     setSure(false);
     if (r.status !== 200) setError(errorOf(r, "Couldn't cancel the invite. Try again."));
   };
-  const canResend = i.role === "viewer" || fullAccess === "on";
+  const canResend = canSend && (i.role === "viewer" || fullAccess === "on");
   const showing = busy === "resend" || sent;
   return (
     <div className={row}>

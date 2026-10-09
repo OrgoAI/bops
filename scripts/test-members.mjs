@@ -3,9 +3,10 @@
 // (lib/members.ts, lib/plan-includes.ts peopleShort). The workspace is only ever the user's own "bops" one, found and
 // never made, whatever the request names; every call runs on the signed-in key alone; changes come only from the Bops
 // window; orgo-web's refusals come back in the app's words (plan refusals as 402 with the plan that has room); Full
-// access stays off until it's offered, and off while Bops puts its keys on the computers; an orgo-web that sends no
-// seats gets the app's copy of the plan table. Orgo is a fake fetch on a made-up origin, the Keychain a stand-in
-// `security` that has nothing, and the state a throwaway file store in a temporary folder: nothing reaches Orgo.
+// access stays off until it's offered, and off while Bops puts its keys on the computers (which the sheet says
+// whenever someone has Full access); nobody is added without orgo-web's seats (an orgo-web from before its plan
+// rule sends none). Orgo is a fake fetch on a made-up origin, the Keychain a stand-in `security` that has nothing,
+// and the state a throwaway file store in a temporary folder: nothing reaches Orgo.
 // Usage: node --conditions=react-server scripts/test-members.mjs
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -206,17 +207,18 @@ assert.deepEqual(
 );
 assert.equal(ready.invites[0].link, `https://orgo.test/accept-invite?token=tok-pat&project_id=${WS}`, "the accept link on Orgo's origin");
 assert.equal(ready.invites[0].expiresAt, Date.parse(INVITES[1].expires_at));
-assert.deepEqual(ready.seats, { plan: "max_bops", canAdd: true, limit: 5, used: 4, upgrade: null, caps: { pro_bops: 2, max_bops: 5 }, from: "orgo" }, "orgo-web's seats as they are");
+assert.deepEqual(ready.seats, { plan: "max_bops", canAdd: true, limit: 5, used: 4, upgrade: null, caps: { pro_bops: 2, max_bops: 5 } }, "orgo-web's seats as they are");
 assert.equal(ready.seatsError, undefined);
 assert.equal(ready.orgoUrl, `https://orgo.test/workspaces?project_id=${WS}`);
 assert.equal(ready.host, "orgo");
 assert.equal(ready.fullAccess, "not_yet", "Full access isn't offered yet");
+assert.equal(ready.keysOnComputers, false, "nothing of Bops' on the computers");
 assert.ok(!JSON.stringify(ready).includes(KEY), "the key never goes to the window");
 // The upgrade orgo-web offers, in the app's words; seats it couldn't read; an orgo-web without times.
 list = { ...list, seats: seatsOf({ plan: "pro_bops", limit: 2, used: 4, can_add: false, upgrade_tier: "max_bops" }) };
-assert.deepEqual((await get()).body.seats, { plan: "pro_bops", canAdd: false, limit: 2, used: 4, upgrade: "max", caps: { pro_bops: 2, max_bops: 5 }, from: "orgo" });
+assert.deepEqual((await get()).body.seats, { plan: "pro_bops", canAdd: false, limit: 2, used: 4, upgrade: "max", caps: { pro_bops: 2, max_bops: 5 } });
 list = { ...list, seats: seatsOf({ plan: "free_bops", limit: 0, can_add: false, upgrade_tier: "pro_bops", caps: undefined }) };
-assert.deepEqual((await get()).body.seats, { plan: "free_bops", canAdd: false, limit: 0, used: 4, upgrade: "plan", caps: { pro_bops: 2, max_bops: 5 }, from: "orgo" });
+assert.deepEqual((await get()).body.seats, { plan: "free_bops", canAdd: false, limit: 0, used: 4, upgrade: "plan", caps: { pro_bops: 2, max_bops: 5 } });
 list = { members: MEMBERS, invites: INVITES, seats: null, seats_error: "PLAN_UNAVAILABLE" };
 r = await get();
 assert.equal(r.body.seats, null);
@@ -226,7 +228,7 @@ for (const seats of [null, { product: "orgo", plan: "hacker_v2", limit: 1, used:
   r = await get();
   assert.deepEqual([r.body.seats, r.body.seatsError], [null, "PLAN_UNAVAILABLE"], `orgo-web's seats it can't use: ${JSON.stringify(seats)}`);
 }
-assert.ok(!calls.some((c) => c.path === "/api/bops/plan"), "orgo-web's seats are never second-guessed with the app's copy");
+assert.ok(!calls.some((c) => c.path === "/api/bops/plan"), "the app never reads the plan to stand in for orgo-web's seats");
 list = { members: MEMBERS, invites: INVITES.map((i) => ({ id: i.id, email: i.email, alt: i.alt, role: i.role, status: i.status, token: i.token })), seats: seatsOf() };
 assert.deepEqual(
   (await get()).body.invites.map((i) => [i.expiresAt, i.expired]),
@@ -267,7 +269,7 @@ assert.equal(r.status, 200);
 const touched = memberCalls().slice(0);
 assert.ok(calls.length > n);
 assert.ok(
-  calls.slice(n).every((c) => c.path === "/api/workspaces" || c.path.startsWith(`/api/workspaces/${WS}/`) || c.path === "/api/bops/plan"),
+  calls.slice(n).every((c) => c.path === "/api/workspaces" || c.path.startsWith(`/api/workspaces/${WS}/`)),
   `only the user's bops workspace: ${calls
     .slice(n)
     .map((c) => c.path)
@@ -379,62 +381,56 @@ r = await route("DELETE", { memberId: "u-owner" });
 assert.deepEqual([r.status, r.body.code], [502, "ORGO_ERROR"]);
 console.log("ok - orgo-web's refusals in the app's words");
 
-/* ---------------- 6. The app's copy of the plan table, for an orgo-web without seats ---------------- */
+/* ---------------- 6. Nobody is added without orgo-web's seats ---------------- */
 
+// An orgo-web from before its plan rule sends the list with no seats: nothing there holds the workspace to a plan,
+// and its timeline shows View only the commands the bots run. Nobody is added from Bops then, not even by sending a
+// waiting invite again, and the app never reads the plan to guess for it. Taking access away still works.
 const noSeats = (people, invites) => ({ members: [MEMBERS[0], ...people], invites });
 const pending = (email, ms = now + 3 * DAY) => ({ email, role: "member", status: "pending", token: `t-${email}`, expires_at: iso(ms), expired: ms <= now });
 const invited = () => calls.filter((c) => c.method === "POST" && c.path.endsWith("/invite"));
-let bopsPlan = () => json(200, { tier: "free_bops" });
-const withPlan = () => ({ ...usual(), "GET /api/bops/plan": () => bopsPlan() });
-// Free: no room at all, and the invite is never sent.
-list = noSeats([], []);
-replies = withPlan();
+replies = { ...usual(), "GET /api/bops/plan": () => json(200, { tier: "max_bops" }) };
+list = noSeats([MEMBERS[1], MEMBERS[2]], [pending("pat@example.com")]);
+n = calls.length;
+const before = invited().length;
 r = await get();
-assert.deepEqual(r.body.seats, { plan: "free_bops", canAdd: false, limit: 0, used: 0, upgrade: "plan", caps: { pro_bops: 2, max_bops: 5 }, from: "app" });
-n = invited().length;
-r = await route("POST", { email: "new@example.com", role: "viewer" });
-assert.deepEqual([r.status, r.body.code, r.body.upgrade, r.body.error], [402, "UPGRADE_REQUIRED", "plan", M.WORDS.upgradeRequired]);
-assert.equal(invited().length, n, "Free: nobody invited");
-// Pro: 1 person and 1 invite waiting fill its 2. An expired invite doesn't count.
-bopsPlan = () => json(200, { tier: "pro_bops" });
-list = noSeats([MEMBERS[2]], [pending("pat@example.com"), pending("gone@example.com", now - DAY)]);
-r = await get();
-assert.deepEqual(r.body.seats, { plan: "pro_bops", canAdd: false, limit: 2, used: 2, upgrade: "max", caps: { pro_bops: 2, max_bops: 5 }, from: "app" });
-r = await route("POST", { email: "new@example.com", role: "viewer" });
-assert.deepEqual([r.status, r.body.code, r.body.upgrade, r.body.limit, r.body.used], [402, "SEAT_LIMIT", "max", 2, 2]);
-assert.equal(invited().length, n, "no room: nobody invited");
-// Sending the waiting one again takes no more room; sending the expired one again needs room it hasn't.
-r = await route("POST", { email: "pat@example.com", role: "viewer" });
-assert.equal(r.status, 200, "sent again");
-assert.equal(invited().length, n + 1);
-r = await route("POST", { email: "gone@example.com", role: "viewer" });
-assert.deepEqual([r.status, r.body.code], [402, "SEAT_LIMIT"]);
-// Room: one person, nothing waiting.
-list = noSeats([MEMBERS[2]], []);
-r = await route("POST", { email: "new@example.com", role: "viewer" });
 assert.equal(r.status, 200);
-// Max: 5.
-bopsPlan = () => json(200, { tier: "max_bops" });
-list = noSeats([MEMBERS[1], MEMBERS[2], MEMBERS[3]], [pending("pat@example.com"), pending("lee@example.com")]);
-r = await get();
-assert.deepEqual([r.body.seats.limit, r.body.seats.used, r.body.seats.canAdd, r.body.seats.upgrade], [5, 5, false, null]);
-r = await route("POST", { email: "new@example.com", role: "viewer" });
-assert.deepEqual([r.status, r.body.code, r.body.upgrade], [402, "SEAT_LIMIT", null]);
-// The plan couldn't be read: never taken for Free or for room. Adding waits.
-bopsPlan = () => json(500, { error: "boom" });
-list = noSeats([], []);
-n = invited().length;
+assert.deepEqual([r.body.state, r.body.seats, r.body.seatsError], ["ready", null, "ORGO_NOT_READY"], "no seats from orgo-web: adding waits for it");
+assert.deepEqual(
+  r.body.people.map((p) => p.id),
+  ["u-jamie", "u-sam"],
+  "who has access still shows",
+);
+for (const [body, what] of [
+  [{ email: "new@example.com", role: "viewer" }, "a new invite"],
+  [{ email: "pat@example.com", role: "viewer" }, "a waiting invite sent again"],
+  [{ email: "Lee@Example.com", role: "viewer" }, "another address"],
+]) {
+  r = await route("POST", body);
+  assert.deepEqual([r.status, r.body.code, r.body.error], [503, "ORGO_NOT_READY", M.WORDS.orgoNotReadyShort], what);
+}
+assert.equal(invited().length, before, "nobody invited");
+r = await route("PATCH", { memberId: "u-sam", role: "viewer" });
+assert.equal(r.status, 200, "moving someone to View only");
+r = await route("DELETE", { memberId: "u-jamie" });
+assert.equal(r.status, 200, "removing someone");
+r = await route("DELETE", { email: "pat@example.com" });
+assert.equal(r.status, 200, "cancelling an invite");
+assert.ok(!calls.slice(n).some((c) => c.path === "/api/bops/plan"), "the plan is never read to stand in for orgo-web's seats");
+// seats_error alone: orgo-web's rule couldn't read the plan. Adding waits too, and says why.
+list = { ...noSeats([], []), seats_error: "PLAN_UNAVAILABLE" };
 r = await get();
 assert.deepEqual([r.body.seats, r.body.seatsError], [null, "PLAN_UNAVAILABLE"]);
 r = await route("POST", { email: "new@example.com", role: "viewer" });
-assert.deepEqual([r.status, r.body.code], [503, "PLAN_UNAVAILABLE"]);
-assert.equal(invited().length, n, "nobody invited without the plan");
-// orgo-web's own seats (it holds the workspace to them): the app doesn't second-guess them.
+assert.deepEqual([r.status, r.body.code, r.body.error], [503, "PLAN_UNAVAILABLE", M.WORDS.planUnavailableShort]);
+assert.equal(invited().length, before, "nobody invited without the plan");
+// orgo-web's own seats: it decides (here, a waiting invite sent again with every seat taken).
 list = { ...noSeats([MEMBERS[2]], [pending("pat@example.com")]), seats: seatsOf({ plan: "pro_bops", limit: 2, used: 2, can_add: false, upgrade_tier: "max_bops" }) };
 replies = usual();
 r = await route("POST", { email: "pat@example.com", role: "viewer" });
 assert.equal(r.status, 200, "orgo-web decides");
-console.log("ok - the app's copy of the plan table, only without orgo-web's seats");
+assert.equal(invited().length, before + 1);
+console.log("ok - nobody is added without orgo-web's seats");
 
 /* ---------------- 7. Full access ---------------- */
 
@@ -448,9 +444,23 @@ r = await route("PATCH", { memberId: "u-jamie", role: "admin" });
 assert.deepEqual([r.status, r.body.code], [409, "FULL_ACCESS_NOT_YET"]);
 assert.equal(invited().length, n);
 assert.equal(calls.at(-1).method === "PATCH", false, "nothing changed on Orgo");
+// Bops' own keys on the computers are said even while Full access isn't offered: people added on orgo.ai can have it.
+for (const [k, v] of [
+  ["HOSTNAME", "0.0.0.0"],
+  ["TAILSCALE_AUTH_KEY", "tskey-auth-example"],
+  ["BOPS_COMPUTER_TOOL", "0"],
+]) {
+  const was = process.env[k];
+  process.env[k] = v;
+  r = await get();
+  assert.deepEqual([r.body.fullAccess, r.body.keysOnComputers], ["not_yet", true], k);
+  if (was === undefined) delete process.env[k];
+  else process.env[k] = was;
+}
 // Offered (BOPS_MEMBERS_FULL_ACCESS=1), and nothing of Bops' on the computers: on.
 process.env.BOPS_MEMBERS_FULL_ACCESS = "1";
-assert.equal((await get()).body.fullAccess, "on");
+r = await get();
+assert.deepEqual([r.body.fullAccess, r.body.keysOnComputers], ["on", false]);
 r = await route("POST", { email: "new@example.com", role: "admin" });
 assert.equal(r.status, 200);
 assert.deepEqual(calls.filter((c) => c.method === "POST").at(-1).body, { email: "new@example.com", permission: "admin" }, "Orgo's invite words: admin");
@@ -465,7 +475,8 @@ for (const [k, v] of [
 ]) {
   const was = process.env[k];
   process.env[k] = v;
-  assert.equal((await get()).body.fullAccess, "off", k);
+  r = await get();
+  assert.deepEqual([r.body.fullAccess, r.body.keysOnComputers], ["off", true], k);
   n = calls.length;
   r = await route("POST", { email: "new@example.com", role: "admin" });
   assert.deepEqual([r.status, r.body.code], [409, "FULL_ACCESS_OFF"], k);

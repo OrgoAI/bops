@@ -336,9 +336,9 @@ export const PLAN_LIMIT = "plan_limit";
  *   each plan to its numbers (requireRoomForNumber); the app to its emails (lib/server/mail.ts),
  *   since the Mac makes inboxes in its own AgentMail pod.
  * - `people`: people the user can add to their bots' computers on Orgo (the People sheet), besides
- *   themselves: members of their Orgo workspace named "bops" plus invites still waiting. orgo-web
- *   holds the workspace to it (lib/workspace-seats.ts) and sends its own numbers; the app shows these
- *   only when it doesn't.
+ *   themselves: members of their Orgo workspace named "bops" plus invites still waiting. The plan
+ *   cards say it; orgo-web holds the workspace to its own copy (lib/workspace-seats.ts) and sends the
+ *   numbers the sheet shows, and nobody is added from the app without them.
  */
 export const BOPS_TIERS = {
   free_bops: { name: "Free", priceCents: 0, creditMicros: 5_000_000, monthly: false, computers: 1, phoneNumbers: 0, emails: 0, people: 0 },

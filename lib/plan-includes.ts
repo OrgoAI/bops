@@ -182,7 +182,7 @@ export function computerShort(tier: BopsTier, held: number, more = 1): PlanRoomS
  */
 export type PeopleRoom = { plan: BopsTier; limit: number | null; used: number; caps: { pro_bops: number; max_bops: number } };
 
-/** What Pro and Max include, from BOPS_TIERS: shown only when orgo-web doesn't send its own numbers. */
+/** What Pro and Max include, from BOPS_TIERS: named in the People sheet only when orgo-web's seats leave their caps out. */
 export const PEOPLE_CAPS = { pro_bops: BOPS_TIERS.pro_bops.people, max_bops: BOPS_TIERS.max_bops.people } as const;
 
 /** "1 person", "2 people". */
@@ -196,7 +196,7 @@ export const peopleAside = (s: PeopleRoom) => (s.limit === null ? null : `${s.us
  * they can. `withAccess`: the people who have access now (not invites); `invited`: invites still waiting.
  * People over a limit keep their access (a plan changed after they joined): the words say so, and that
  * adding someone needs room first. `note`: a second line, when cancelling an invite would make room.
- * The numbers are orgo-web's when it sent them (it holds the workspace to them), else BOPS_TIERS'.
+ * The numbers are orgo-web's (it holds the workspace to them).
  */
 export function peopleShort(s: PeopleRoom, { withAccess, invited }: { withAccess: number; invited: number }): (PlanRoomShort & { note?: string }) | null {
   const max = s.caps.max_bops;

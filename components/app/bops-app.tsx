@@ -204,11 +204,19 @@ function Bops({ state }: { state: AppState | null }) {
 
   // What Esc does to the tab on the right, set on every render (see escTab.current below).
   const escTab = useRef<(e: KeyboardEvent) => void>(() => {});
+  // A sheet open over People (Account from its upgrade, Setup from there), set on every render: Esc
+  // closes that alone and goes back to People, as its X does.
+  const overPeople = useRef(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
         setComposing(true);
+      }
+      if (e.key === "Escape" && overPeople.current) {
+        setAccount(false);
+        setSetup(false);
+        return;
       }
       if (e.key === "Escape") {
         setThreadId(null);
@@ -343,6 +351,8 @@ function Bops({ state }: { state: AppState | null }) {
   };
   /** A page-like tab's own X (and Esc) closes it. */
   const leaveTab = closeTab;
+  // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
+  overPeople.current = members && (account || setup);
   // Esc leaves a tab that reads as a page (the Vault, a bot's profile) for where you were, once nothing
   // nearer wants it: a sheet, a thread or a dialog (the app picker, an image) closes first, something
   // inside that used it (a form) says so with preventDefault, and Esc while typing elsewhere (the chat,
