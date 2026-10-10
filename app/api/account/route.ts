@@ -146,8 +146,8 @@ async function cloudUsage(from: number, to: number): Promise<CloudUsage | null> 
   });
 }
 
-/** What each cloud row is on the page: tokens by kind of work, and what AI credit paid for. */
-const TOKEN_SOURCE: Record<string, TokenSource> = { chat: "chat", session: "session", agent: "session", memory: "memory", call: "call", phone: "call" };
+/** What each cloud row is on the page: tokens by kind of work, and what AI credit paid for. "iphone": the main bot's chat answered in the cloud for Bops for iPhone. */
+const TOKEN_SOURCE: Record<string, TokenSource> = { chat: "chat", session: "session", agent: "session", memory: "memory", call: "call", phone: "call", iphone: "chat" };
 function spendKind(kind: string, source?: string): SpendKind {
   if (kind === "openai.tokens") return TOKEN_SOURCE[source ?? ""] ?? "other";
   if (kind === "openai.web_search") return "search";

@@ -259,14 +259,20 @@ test("Start over keeps a copy of the whole state, messages and all", async () =>
   assert.deepEqual(r.rows[0].state.messages.map((m) => m.id), ["msg_000001", "msg_000002"]);
 });
 
-test("removed messages are swept after 30 days; live ones never are", async () => {
+test("removed messages are swept after 30 days; live ones never are; the user's highest seq swept is kept", async () => {
   const id = user("sweep");
   await postMessages(id, [msg(1), msg(2)]);
   await postMessages(id, [], ["msg_000001"]);
+  const removed = (await query<{ seq: string }>("SELECT seq FROM bops.chat_messages WHERE user_id = $1 AND json IS NULL", [id])).rows[0];
   await query("UPDATE bops.chat_messages SET updated_at = now() - make_interval(days => $2) WHERE user_id = $1", [id, REMOVED_KEEP_DAYS + 1]);
-  await sweepRemovedMessages();
+  assert.ok((await sweepRemovedMessages()) >= 1, "it says how many went");
   const r = await query<{ id: string }>("SELECT id FROM bops.chat_messages WHERE user_id = $1", [id]);
   assert.deepEqual(r.rows.map((x) => x.id), ["msg_000002"]);
+  // So a reader with an older cursor knows it missed a removal (cloud/agent.ts); a later sweep never moves it back.
+  const kept = async () => Number((await query<{ seq: string }>("SELECT swept_seq AS seq FROM bops.app_state WHERE user_id = $1", [id])).rows[0].seq);
+  assert.equal(await kept(), Number(removed.seq));
+  await sweepRemovedMessages();
+  assert.equal(await kept(), Number(removed.seq));
 });
 
 test("the migration moves messages out of the states already uploaded, and runs again safely", async () => {

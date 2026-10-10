@@ -35,3 +35,52 @@ jobs:
         run: npm run lint
       - name: Secret scan (whole history)
         run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f git /repo --redact --log-opts="--all"
+
+  # Bops Cloud's tests (cloud/test/): fakes on localhost for Orgo and every provider, and a throwaway
+  # Postgres, the version Orgo's production database runs. Each test file is its own process.
+  cloud-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.4@sha256:a02db8cac496f15b094798a38254f14d6e00741f709360e5e00bb6668ea31636
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # The cloud runs on Node 24+, which runs its TypeScript as is (cloud/README.md).
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # One database for the core tests (they add orgo-web's credit ledger to it themselves:
+      # cloud/test/fixtures) and one for the edge tests, as db/provision.sql sets Bops up in Orgo's.
+      # bops_app owns each, so it can make the ledger's stand-in tables.
+      - name: Test databases
+        env:
+          PG: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$PG" psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE bops_app LOGIN PASSWORD 'bops-local'"
+          for db in orgo_core orgo_edge; do
+            docker exec "$PG" psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE $db OWNER bops_app"
+            docker exec -i "$PG" psql -U postgres -d "$db" -v ON_ERROR_STOP=1 -v bops_app_password=bops-local -f - < db/provision.sql
+          done
+      - name: Bops Cloud core tests
+        run: node --test "cloud/test/core-*.test.ts"
+        env:
+          BOPS_TEST_DATABASE_URL: postgres://bops_app:bops-local@127.0.0.1:5432/orgo_core
+      - name: Bops Cloud edge and router tests
+        run: node --test "cloud/test/edge-*.test.ts" cloud/test/server.test.ts
+        env:
+          BOPS_TEST_DATABASE_URL: postgres://bops_app:bops-local@127.0.0.1:5432/orgo_edge

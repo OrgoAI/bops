@@ -1,7 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import { query } from "./db.ts";
 import { HttpError } from "./http.ts";
-import { APP_UPDATE_REQUIRED, APP_VERSION_HEADER } from "./protocol.ts";
+import { APP_CLIENT_HEADER, APP_UPDATE_REQUIRED, APP_VERSION_HEADER, IOS_CLIENT } from "./protocol.ts";
 
 /**
  * Which Bops app each user is on, and keeping old ones out. Every call from the app says its version
@@ -13,6 +13,11 @@ import { APP_UPDATE_REQUIRED, APP_VERSION_HEADER } from "./protocol.ts";
  * that, or one that doesn't say, is answered 426 (APP_UPDATE_REQUIRED) on every call but its state's
  * (/v1/state, /v1/messages): those still go through, so nothing the old app holds is lost, and the updated
  * app picks it up. Read again every minute, so it takes effect without a deploy.
+ *
+ * Bops for iPhone says so (APP_CLIENT_HEADER "ios") with its own version numbers. Those never touch the
+ * Mac's: they're kept in cloud_accounts.ios_version and ios_seen_at (only for a user the cloud has set up
+ * from a Mac: the phone never makes the account row, whose making counts a new Bops user), and held to
+ * app_policy.ios_block_below instead of block_below. The phone's calls are only its chat's (cloud/agent.ts).
  */
 
 const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}$/;
@@ -22,6 +27,12 @@ export function appVersionOf(req: IncomingMessage): string | null {
   const h = req.headers[APP_VERSION_HEADER];
   const v = (Array.isArray(h) ? h[0] : h)?.trim();
   return v && VERSION.test(v) ? v : null;
+}
+
+/** Whether a call (or a socket) is from Bops for iPhone: it says x-bops-client: ios. */
+export function fromIphone(req: IncomingMessage): boolean {
+  const h = req.headers[APP_CLIENT_HEADER];
+  return (Array.isArray(h) ? h[0] : h)?.trim().toLowerCase() === IOS_CLIENT;
 }
 
 /** Whether version `a` comes before `b`, place by place. */
@@ -37,29 +48,48 @@ const noted = new Map<string, { version: string | null; at: number }>();
 
 /** Keep the version a user's app said (and when), on the side: a failure to keep it never fails the call. */
 export function noteAppVersion(userId: string, version: string | null): void {
-  const last = noted.get(userId);
+  note(`mac:${userId}`, version, "UPDATE bops.cloud_accounts SET app_version = $2, app_seen_at = now() WHERE user_id = $1", userId);
+}
+
+/** The same for Bops for iPhone: its own columns, so the Mac's version stays the Mac's. */
+export function noteIphoneVersion(userId: string, version: string | null): void {
+  note(`ios:${userId}`, version, "UPDATE bops.cloud_accounts SET ios_version = $2, ios_seen_at = now() WHERE user_id = $1", userId);
+}
+
+/** Written when it changes, and otherwise at most every few minutes. */
+function note(key: string, version: string | null, sql: string, userId: string) {
+  const last = noted.get(key);
   if (last && last.version === version && Date.now() - last.at < NOTE_MS) return;
   if (noted.size > 50_000) noted.clear();
-  noted.set(userId, { version, at: Date.now() });
-  void query("UPDATE bops.cloud_accounts SET app_version = $2, app_seen_at = now() WHERE user_id = $1", [userId, version]).catch((e: Error) => {
-    noted.delete(userId);
+  noted.set(key, { version, at: Date.now() });
+  void query(sql, [userId, version]).catch((e: Error) => {
+    noted.delete(key);
     console.warn(`[cloud] app version: ${e.message}`);
   });
 }
 
 export const UPDATE_BOPS = "This version of Bops is too old to keep working. Update it from bops.bot to keep going.";
+/** What an iPhone app too old for the cloud is told (it shows its own words, with a way to the App Store). */
+export const UPDATE_BOPS_IPHONE = "This version of Bops for iPhone is too old to keep working. Update it to keep going.";
 
 /** Calls an old app still makes: its state's, so nothing it holds is lost. */
 const OPEN_TO_OLD_APPS = /^\/v1\/(state|messages)(\/|$)/;
 
 /** The oldest app the cloud serves (bops.app_policy.block_below), as last read; null: every app. */
 let blockBelow: string | null = null;
+/** The oldest iPhone app it serves (ios_block_below); null: every one. */
+let iphoneBlockBelow: string | null = null;
 
-/** Read which apps the cloud serves again (every minute: startAppPolicy). */
+const versionIn = (x: string | null | undefined) => {
+  const v = x?.trim();
+  return v && VERSION.test(v) ? v : null;
+};
+
+/** Read which apps the cloud serves again (every minute: startAppPolicy). Answers the Mac's oldest. */
 export async function refreshAppPolicy(): Promise<string | null> {
-  const r = await query<{ block_below: string | null }>("SELECT block_below FROM bops.app_policy WHERE id");
-  const v = r.rows[0]?.block_below?.trim();
-  blockBelow = v && VERSION.test(v) ? v : null;
+  const r = await query<{ block_below: string | null; ios_block_below: string | null }>("SELECT block_below, ios_block_below FROM bops.app_policy WHERE id");
+  blockBelow = versionIn(r.rows[0]?.block_below);
+  iphoneBlockBelow = versionIn(r.rows[0]?.ios_block_below);
   return blockBelow;
 }
 
@@ -83,6 +113,14 @@ export function requireAppVersion(path: string, version: string | null): void {
   if (version && !olderThan(version, min)) return;
   const extra = path.startsWith("/proxy/openai/") ? { error: { message: UPDATE_BOPS, code: APP_UPDATE_REQUIRED } } : {};
   throw new HttpError(426, UPDATE_BOPS, { code: APP_UPDATE_REQUIRED, ...extra });
+}
+
+/** 426 when an iPhone app is older than ios_block_below (or doesn't say). block_below never applies to it. */
+export function requireIphoneVersion(version: string | null): void {
+  const min = iphoneBlockBelow;
+  if (!min) return;
+  if (version && !olderThan(version, min)) return;
+  throw new HttpError(426, UPDATE_BOPS_IPHONE, { code: APP_UPDATE_REQUIRED });
 }
 
 /** For tests: forget which versions were kept. */
