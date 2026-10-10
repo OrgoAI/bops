@@ -166,6 +166,21 @@ export function RoundButton({ label, onClick, children, active }: { label: strin
   );
 }
 
+/**
+ * Something needs the user: a small amber dot with an exclamation mark. On their initials while this Mac
+ * still needs something (setup.tsx), and on Full access's one warning in the People sheet (members.tsx).
+ */
+export function NeedsYouDot({ className = "" }: { className?: string }) {
+  return (
+    <span className={`flex size-4 shrink-0 items-center justify-center rounded-full bg-[#E59A0B] ${className}`}>
+      <svg width="8" height="8" viewBox="0 0 8 8">
+        <path d="M4 1.3v3.1" stroke="#FFFFFF" strokeWidth="1.5" strokeLinecap="round" />
+        <circle cx="4" cy="6.3" r="0.85" fill="#FFFFFF" />
+      </svg>
+    </span>
+  );
+}
+
 /** The round X the Account sheet closes with, for a tab on the right that reads as a page (the Vault, a bot's profile). */
 export function CloseButton({ onClick, className = "" }: { onClick: () => void; className?: string }) {
   return (

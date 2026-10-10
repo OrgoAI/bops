@@ -46,8 +46,12 @@ import { refreshState } from "./ui";
 /** The initials on the avatar: the Orgo name, else the email, else the name in Settings. */
 export function initialsOf(state: AppState) {
   const u = state.account?.user;
-  const from = u?.name?.trim() || state.owner?.name.trim() || u?.email?.split("@")[0] || "";
-  const parts = from.split(/[\s._-]+/).filter(Boolean);
+  return initialsFrom(u?.name?.trim() || state.owner?.name.trim() || u?.email || "");
+}
+
+/** Initials for a name or an email: "Alex Rivera" is AR, "jamie.chen@example.com" JC, "sam" SA; "?" for nothing. */
+export function initialsFrom(label: string) {
+  const parts = label.split("@")[0].split(/[\s._-]+/).filter(Boolean);
   return ((parts[0]?.[0] ?? "") + (parts.length > 1 ? parts[parts.length - 1][0] : (parts[0]?.[1] ?? ""))).toUpperCase() || "?";
 }
 
@@ -155,7 +159,7 @@ export function Account({ state, onClose, onThisMac }: { state: AppState; onClos
   );
 }
 
-function Section({ title, aside, children }: { title: string; aside?: React.ReactNode; children: React.ReactNode }) {
+export function Section({ title, aside, children }: { title: string; aside?: React.ReactNode; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-2 px-[22px] pt-[18px]">
       <div className="flex min-h-6 items-center justify-between gap-3">
@@ -167,7 +171,7 @@ function Section({ title, aside, children }: { title: string; aside?: React.Reac
   );
 }
 
-function Placeholder({ title }: { title: string }) {
+export function Placeholder({ title }: { title: string }) {
   return (
     <Section title={title}>
       <div className="flex h-[92px] items-center justify-center rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
@@ -773,7 +777,7 @@ function ConfirmCredit({
   );
 }
 
-function LoadFailed({ onRetry }: { onRetry: () => void }) {
+export function LoadFailed({ onRetry, text = "Couldn't load your account." }: { onRetry: () => void; text?: string }) {
   return (
     <Notice
       action={
@@ -782,12 +786,12 @@ function LoadFailed({ onRetry }: { onRetry: () => void }) {
         </button>
       }
     >
-      Couldn&apos;t load your account.
+      {text}
     </Notice>
   );
 }
 
-function Notice({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) {
+export function Notice({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) {
   return (
     <div className="flex items-center gap-3 rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]">
       <span className="flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">{children}</span>

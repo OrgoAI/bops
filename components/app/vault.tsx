@@ -124,7 +124,7 @@ function LoginRow({ state, login: l, last, onEdit }: { state: AppState; login: V
   );
 }
 
-function Badge({ children }: { children: React.ReactNode }) {
+export function Badge({ children }: { children: React.ReactNode }) {
   return <span className="shrink-0 rounded-full bg-[#F2F2F0] px-1.5 py-px text-[10.5px] font-medium leading-[14px] text-[#3A3A38]">{children}</span>;
 }
 

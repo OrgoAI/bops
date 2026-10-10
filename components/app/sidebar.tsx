@@ -4,12 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import { DISPLAYS, live, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
 import { KeyIcon } from "./screen-cards";
+import { MembersButton } from "./members";
 import { Mascot } from "./mascot";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
 import { useSetupNeedsYou } from "./setup";
 import { UpdateNotice } from "./update-notice";
 import { WATCH, WatchEye, watchName } from "./watch-overlay";
-import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, post, RoundButton, StatusIcon, teamOf, useNow } from "./ui";
+import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, NeedsYouDot, post, RoundButton, StatusIcon, teamOf, useNow } from "./ui";
 
 /**
  * The sidebar for one workspace (switch at the top). The list: one row per conversation (Sam pinned, then by latest activity), each with its
@@ -27,6 +28,7 @@ export function Sidebar({
   onAccount,
   onSetup,
   onVault,
+  onMembers,
   onOpenWatch,
 }: {
   state: AppState;
@@ -39,6 +41,8 @@ export function Sidebar({
   /** The setup screen: what this Mac gives Bops (setup.tsx). */
   onSetup: () => void;
   onVault: () => void;
+  /** The People sheet: who can see the bots' computers on Orgo (members.tsx). */
+  onMembers: () => void;
   /** Show a watched screen or Mac window. */
   onOpenWatch: (watch: Watch) => void;
 }) {
@@ -131,6 +135,7 @@ export function Sidebar({
       <UpdateNotice />
       <div className="flex items-center gap-2.5 p-1 pt-3">
         <YouMenu state={state} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />
+        <MembersButton state={state} onClick={onMembers} />
         <button
           onClick={onCompose}
           className="flex h-10 flex-1 items-center justify-center rounded-full bg-white text-[14px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
@@ -147,18 +152,6 @@ export function Sidebar({
         </button>
       </div>
     </aside>
-  );
-}
-
-/** Something on this Mac still needs you (setup.tsx): a small amber dot with an exclamation mark. */
-function NeedsYouDot({ className = "" }: { className?: string }) {
-  return (
-    <span className={`flex size-4 shrink-0 items-center justify-center rounded-full bg-[#E59A0B] ${className}`}>
-      <svg width="8" height="8" viewBox="0 0 8 8">
-        <path d="M4 1.3v3.1" stroke="#FFFFFF" strokeWidth="1.5" strokeLinecap="round" />
-        <circle cx="4" cy="6.3" r="0.85" fill="#FFFFFF" />
-      </svg>
-    </span>
   );
 }
 

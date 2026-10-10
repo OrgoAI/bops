@@ -6,7 +6,7 @@ import { botChatId, freeComputerBot, type Bot } from "@/lib/types";
 import { bopsComputerShort, bopsComputers, computerRam, mainOwnShort, ownComputerShort, planComputers, planFix, planName, planShort, planShortText, type OrgoPlan, type PlanShort } from "@/lib/orgo-plans";
 import { orgoHeaders } from "./app-version";
 import { cloudOn, cloudSessionNow } from "./cloud";
-import { computerChanges, orgo, OrgoError, ownedWorkspace } from "./orgo";
+import { callOrgo, computerChanges, orgo, OrgoError, ownedWorkspace } from "./orgo";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
 import { addMessage, getState, stateEpoch, update } from "./store";
 
@@ -38,29 +38,6 @@ export async function askOrgo<T>(key: string, path: string): Promise<Got<T>> {
     return { ok: true, json: (await res.json()) as T };
   } catch {
     return { ok: false, denied: false };
-  }
-}
-
-/**
- * One call to Orgo with the user's key: its status and JSON (an empty object when it had none), or null
- * when it didn't answer. `headers` go along (an Idempotency-Key), never in place of the key.
- */
-async function callOrgo<T>(
-  key: string,
-  path: string,
-  { method = "GET", body, headers, timeoutMs = 15_000 }: { method?: "GET" | "POST"; body?: unknown; headers?: Record<string, string>; timeoutMs?: number } = {},
-): Promise<{ status: number; json: T } | null> {
-  try {
-    const res = await fetch(`${orgoOrigin()}${path}`, {
-      method,
-      headers: { ...orgoHeaders(), ...headers, Authorization: `Bearer ${key}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      cache: "no-store",
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    return { status: res.status, json: (await res.json().catch(() => ({}))) as T };
-  } catch {
-    return null;
   }
 }
 

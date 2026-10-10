@@ -37,7 +37,8 @@ export const EVENTS = {
   // The window (posthog-js): what only the screen sees.
   bops_app_opened: { by: "app", props: {} },
   bops_app_updated: { by: "app", props: { from_version: "version" } },
-  bops_upgrade_clicked: { by: "app", props: { surface: { one: ["chat", "bot_panel"] } } },
+  bops_upgrade_clicked: { by: "app", props: { surface: { one: ["chat", "bot_panel", "members"] } } },
+  bops_members_opened: { by: "app", props: { people: "count" } },
 
   // The Mac's server (posthog-node): what the user does in Bops.
   bops_signed_in: { by: "mac_server", props: { method: { one: ["google", "email", "orgo"] }, switched_user: "bool" } },
@@ -72,6 +73,14 @@ export const EVENTS = {
   bops_credit_topup_charged: {
     by: "mac_server",
     props: { amount_cents: "cents", result: { one: ["succeeded", "pending", "checkout", "card_changed", "refused"] } },
+  },
+  // The People sheet (lib/server/members.ts): never an email, a name or who it was.
+  bops_member_invited: { by: "mac_server", props: { role: { one: ["viewer", "admin"] }, resend: "bool", delivered: "bool" } },
+  bops_member_access_changed: { by: "mac_server", props: { to_role: { one: ["viewer", "admin"] } } },
+  bops_member_removed: { by: "mac_server", props: { invite: "bool" } },
+  bops_member_refused: {
+    by: "mac_server",
+    props: { code: { one: ["UPGRADE_REQUIRED", "SEAT_LIMIT", "PLAN_UNAVAILABLE", "INVITE_RATE_LIMITED", "FULL_ACCESS_OFF", "FULL_ACCESS_NOT_YET"] } },
   },
 
   // Bops Cloud (posthog-node): what only the cloud knows.

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { botChatId, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
 import { Account } from "./account";
+import { Members } from "./members";
 import { BotPanel, type Section } from "./bot-panel";
 import { CallBar } from "./call-bar";
 import { ChatView, ThreadSheet, ToPicker } from "./chat-view";
@@ -116,6 +117,8 @@ function Bops({ state }: { state: AppState | null }) {
   const [settings, setSettings] = useState(false);
   const [account, setAccount] = useState(false);
   const [setup, setSetup] = useState(false);
+  // The People sheet (members.tsx): who can see the bots' computers.
+  const [members, setMembers] = useState(false);
   // Heads-ups already brought forward (null until the first state arrives), and the way back.
   const [cutAlerts, setCutAlerts] = useState<Set<string> | null>(null);
   const [cutBack, setCutBack] = useState<{ name: string; back: string } | null>(null);
@@ -201,11 +204,19 @@ function Bops({ state }: { state: AppState | null }) {
 
   // What Esc does to the tab on the right, set on every render (see escTab.current below).
   const escTab = useRef<(e: KeyboardEvent) => void>(() => {});
+  // A sheet open over People (Account from its upgrade, Setup from there), set on every render: Esc
+  // closes that alone and goes back to People, as its X does.
+  const overPeople = useRef(false);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
         setComposing(true);
+      }
+      if (e.key === "Escape" && overPeople.current) {
+        setAccount(false);
+        setSetup(false);
+        return;
       }
       if (e.key === "Escape") {
         setThreadId(null);
@@ -213,6 +224,7 @@ function Bops({ state }: { state: AppState | null }) {
         setSettings(false);
         setAccount(false);
         setSetup(false);
+        setMembers(false);
         // Last, so going back can bring a full-width computer back.
         escTab.current(e);
       }
@@ -339,6 +351,8 @@ function Bops({ state }: { state: AppState | null }) {
   };
   /** A page-like tab's own X (and Esc) closes it. */
   const leaveTab = closeTab;
+  // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
+  overPeople.current = members && (account || setup);
   // Esc leaves a tab that reads as a page (the Vault, a bot's profile) for where you were, once nothing
   // nearer wants it: a sheet, a thread or a dialog (the app picker, an image) closes first, something
   // inside that used it (a form) says so with preventDefault, and Esc while typing elsewhere (the chat,
@@ -346,7 +360,7 @@ function Bops({ state }: { state: AppState | null }) {
   // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
   escTab.current = (e) => {
     const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot") ? tab : undefined;
-    if (!page || e.defaultPrevented || thread || composing || settings || account || setup || document.querySelector('[role="dialog"]')) return;
+    if (!page || e.defaultPrevented || thread || composing || settings || account || setup || members || document.querySelector('[role="dialog"]')) return;
     const el = e.target instanceof HTMLElement ? e.target : null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && !panelRef.current?.contains(el)) return;
     leaveTab(page.id);
@@ -493,7 +507,7 @@ function Bops({ state }: { state: AppState | null }) {
           }}
         />
         <div className={`grid min-h-0 flex-1 ${columns}`}>
-          <Sidebar state={state} chatId={chat.id} onOpenChat={openChat} onOpenThread={openThread} onCompose={() => setComposing(true)} onSettings={() => setSettings(true)} onAccount={() => setAccount(true)} onSetup={() => setSetup(true)} onVault={openVault} onOpenWatch={showWatch} />
+          <Sidebar state={state} chatId={chat.id} onOpenChat={openChat} onOpenThread={openThread} onCompose={() => setComposing(true)} onSettings={() => setSettings(true)} onAccount={() => setAccount(true)} onSetup={() => setSetup(true)} onVault={openVault} onMembers={() => setMembers(true)} onOpenWatch={showWatch} />
           {focus && macFocus ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
               <MacComputer state={state} mode="focus" showThread={thread?.runsOn === "mac" ? thread.id : undefined} onBack={() => setFocus(false)} onOpenThread={openThread} />
@@ -620,6 +634,17 @@ function Bops({ state }: { state: AppState | null }) {
             <CallBar bot={callBot} owner={state.owner?.name} compact={!(callHere && slotBox)} onOpen={() => openChat(botChatId(callBot.id))} onClose={() => setCall(null)} />
           </div>
         )}
+        {/* Before Account, so the plans open on top of it and closing them shows it again. */}
+        {members && (
+          <Members
+            state={state}
+            onClose={() => setMembers(false)}
+            onUpgrade={() => {
+              trackEvent("bops_upgrade_clicked", { surface: "members" });
+              setAccount(true);
+            }}
+          />
+        )}
         {settings && <Settings state={state} onClose={() => setSettings(false)} />}
         {account && (
           <Account
@@ -633,7 +658,7 @@ function Bops({ state }: { state: AppState | null }) {
         )}
         {setup && <Setup state={state} onClose={() => setSetup(false)} />}
         {/* The first time a workspace gets email: "Pick your Bops address" (or an offer to change one Bops picked). */}
-        {!settings && !account && !setup && <MailAddressStep state={state} />}
+        {!settings && !account && !setup && !members && <MailAddressStep state={state} />}
         {/* What bots are doing on the user's Mac, live, in the corner (hidden while the Your Mac tab is open). */}
         {!(tab?.kind === "mac" && panelOpen) && <MacPreviews state={state} onOpen={openMac} />}
       </div>
