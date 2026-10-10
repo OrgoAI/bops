@@ -1,0 +1,2 @@
+- Invite people to see your bots' computers, and manage who has access.
+- Bops waits for an asleep computer to wake, and keeps your work.
