@@ -1,1 +1,0 @@
-- Delete and stop buttons in the sidebar work from the keyboard too.
