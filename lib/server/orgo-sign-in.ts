@@ -2,6 +2,7 @@ import "server-only";
 import { execFile } from "node:child_process";
 import { hostname } from "node:os";
 import { trackServerEvent } from "./analytics";
+import { orgoHeaders } from "./app-version";
 import { stopChannels } from "./channels";
 import { startCloud, stopCloud } from "./cloud-tunnel";
 import { checkMac } from "./mac";
@@ -61,7 +62,7 @@ const clampSeconds = (v: unknown, lo: number, hi: number) => (typeof v === "numb
 async function orgoPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${orgoOrigin()}${path}`, {
     method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    headers: { ...orgoHeaders(), Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify(body),
     cache: "no-store",
     signal: AbortSignal.timeout(15_000),
@@ -260,7 +261,7 @@ function seedOwnerName(user: OrgoUser) {
 async function whoIs(apiKey: string): Promise<OrgoUser | "denied" | null> {
   try {
     const res = await fetch(`${orgoOrigin()}/api/user/profile`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { ...orgoHeaders(), Authorization: `Bearer ${apiKey}` },
       cache: "no-store",
       signal: AbortSignal.timeout(10_000),
     });

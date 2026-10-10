@@ -29,6 +29,13 @@ export type Bot = {
    */
   freeComputer?: boolean;
   computerStatus: "none" | "cloning" | "ready" | "error";
+  /**
+   * Its computer's id while Bops has made it and never had it ready: nothing has run on it, so a setup
+   * that fails may delete it (ensureComputer). Cleared once it's ready. A computer Bops didn't make (the
+   * user's free one taken up again, one from another Mac) or once had working never has it: a failed
+   * setup never deletes that one, whatever Orgo says about it.
+   */
+  computerNeverReady?: string;
   /** Its computer, asleep, couldn't be woken when the user last took control, and why (cleared when a takeover wakes it). */
   wakeFailed?: { why: string; at: number };
   /** How to reach the bot, shown on its Details card. Empty until its phone and inbox exist. */

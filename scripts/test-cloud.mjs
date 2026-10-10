@@ -1888,12 +1888,17 @@ console.log("notices: passed on as the cloud sends them and put away there; none
 const stubbed = new Set(["api.openai.com", "api.agentphone.ai", "api.agentmail.to", "api.honcho.dev", "backend.composio.dev", "api.typesafe.ai", "registry.npmjs.org", "telemetry.composio.dev", "www.orgo.ai"]);
 assert.deepEqual(web.calls.filter((c) => !stubbed.has(c.host)), []);
 // Every call to Bops Cloud said which app it came from, sockets too (cloud/app-version.ts keeps old apps
-// out by it); a provider called directly (self-hosting) or Orgo never hears it.
+// out by it), and so did every call to Orgo's API (orgo-web takes a Bops computer off its server only for
+// apps that wait for it to wake: app-version.ts orgoHeaders); a provider called directly (self-hosting)
+// never hears it, and Orgo never hears the usage switch.
 const unsaid = [...cloud.requests, ...cloud.stateRequests].filter((r) => r.headers["x-bops-version"] !== "9.9.9").map((r) => `${r.method} ${r.path}`);
 assert.deepEqual(unsaid, [], "every call to the cloud says the app's version");
 assert.ok(cloud.upgrades.length > 0 && cloud.upgrades.every((u) => u.version === "9.9.9"), `every socket says it: ${JSON.stringify(cloud.upgrades.map((u) => [u.path, u.version]))}`);
 assert.ok(cloud.requests.some((r) => r.path.startsWith("/proxy/openai/")) && cloud.requests.some((r) => r.path.startsWith("/proxy/composio")), "through the providers' proxies too");
-assert.deepEqual(web.calls.filter((c) => c.headers["x-bops-version"]).map((c) => c.host), [], "never to anyone else");
+const toOrgo = web.calls.filter((c) => c.host === "www.orgo.ai");
+assert.ok(toOrgo.length > 0 && toOrgo.every((c) => c.headers["x-bops-version"] === "9.9.9"), "every call to Orgo says the app's version");
+assert.deepEqual(web.calls.filter((c) => c.headers["x-bops-version"] && c.host !== "www.orgo.ai").map((c) => c.host), [], "never to anyone else");
+assert.ok(toOrgo.every((c) => c.headers["x-bops-telemetry"] === undefined), "Orgo's API never gets the usage switch");
 console.log(`all cloud tests passed (${cloud.requests.length} requests to the fake cloud, ${cloud.connections.length} tunnels, ${web.calls.length} stubbed calls, none to the network)`);
 // The link to the project's node_modules goes first, on its own, so nothing behind it is touched.
 unlinkSync(join(scratch, "node_modules"));
