@@ -112,6 +112,13 @@ transaction mode.
   `0010_chat_messages.sql`, Bops Cloud's `cloud/state.ts`): each chat message its own row, moved out
   of the state blobs, with a seq bumped on every write; which build last wrote a user's state, and
   from which Mac (cloud/README.md, "The app's state").
+- `bops.cloud_accounts.ios_version` and `ios_seen_at`, `bops.app_policy.ios_block_below`, the
+  `chat_messages_answers` index and `bops.app_state.swept_seq` (0013, `0013_ios_client.sql`, Bops
+  Cloud's `cloud/app-version.ts`, `cloud/agent.ts` and `cloud/state.ts`): Bops for iPhone's own
+  version, kept apart from the Mac's, and the oldest one the cloud serves; the index that finds the
+  cloud's answer to a message sent from the phone, so a message sent twice is answered once; and each
+  user's highest seq of removed messages swept for good, so a phone whose cursor is older loads its
+  chat again (cloud/README.md, "The main bot's chat from the phone").
 
 ## Test against a throwaway database
 

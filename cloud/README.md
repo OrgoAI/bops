@@ -1,7 +1,7 @@
 # Bops Cloud
 
 The server Orgo runs for hosted Bops. The Bops app on each user's Mac still does the work (bots,
-screens, Mac apps, routing through the Mac); the cloud does the four things a Mac can't:
+screens, Mac apps, routing through the Mac); the cloud does the five things a Mac can't:
 
 1. **Holds the keys.** Orgo's OpenAI, AgentPhone, AgentMail, Honcho, Composio, Typesafe and Twilio
    keys live here, never on a user's Mac. The Mac calls those services through the cloud with the
@@ -16,6 +16,9 @@ screens, Mac apps, routing through the Mac); the cloud does the four things a Ma
    offline): the owner's bot takes a note, anyone else gets a bot that only takes a message, and the
    Mac hears about it when it's back. Who the owner is comes from `bops.phone_lines` (the first phone
    to call or text a new number in its 15 minutes), never from the app's state.
+5. **Answers the main bot's chat from the iPhone.** Bops for iPhone sends its messages here, and the
+   cloud answers each one itself, whether the Mac is awake, asleep, closed or not there at all, into
+   the same chat the Mac shows (see "The main bot's chat from the phone").
 
 Self-hosters don't need any of this: with `BOPS_SELF_HOSTED=1` and their own keys in `.env.local`,
 the app calls every service directly, as before.
@@ -29,7 +32,9 @@ node cloud/server.ts        # Node 24+, which runs TypeScript directly
 Plain TypeScript that Node runs as is: erasable syntax only (no enums, namespaces or parameter
 properties), relative imports with `.ts` extensions, no `@/` aliases, nothing from Next.js and no
 `server-only`. Dependencies: `pg`, `ws` and `posthog-node` (from the repo root `package.json`) and Node's own
-modules. Type-check with `npx tsc -p cloud/tsconfig.json`. Tests: `node --test cloud/test/`.
+modules. Type-check with `npx tsc -p cloud/tsconfig.json`. Tests: `node --test cloud/test/`, against a
+throwaway Postgres (the core tests in `orgo_core`, the edge tests in `orgo_edge`, owned by `bops_app`,
+or `BOPS_TEST_DATABASE_URL`). CI runs them on every push (`.github/workflows/ci.yml`, `cloud-tests`).
 
 It listens on 127.0.0.1 (`BOPS_CLOUD_PORT`, default 8790) behind a TLS proxy (Caddy) at
 `BOPS_CLOUD_PUBLIC_URL` (at Orgo: `https://bops.orgo.ai/api`; Caddy strips the `/api`, so the routes
@@ -42,7 +47,8 @@ seals the secrets the cloud keeps), `BOPS_CLOUD_PUBLIC_URL`, `BOPS_ORGO_ORIGIN`,
 `AGENTPHONE_API_KEY`, `AGENTMAIL_API_KEY`, `HONCHO_API_KEY`, `COMPOSIO_API_KEY`, `TYPESAFE_API_KEY`,
 `TREG_TOKEN` (an org-scoped token of Orgo's treg team), `TWILIO_*`), and `BOPS_UPSTREAM_*` to point a
 provider at a fake server in tests. Calls:
-`BOPS_PHONE_MODEL` (the model for a call's turns, default `gpt-6.1-sol`), and `BOPS_SIP_TRUNKS=1`
+`BOPS_PHONE_MODEL` (the model for a call's turns, default `gpt-6.1-sol`), `BOPS_AGENT_MODEL` (the model the main
+bot answers its chat from the phone with, default `gpt-6.1-sol`; see "The main bot's chat from the phone"), and `BOPS_SIP_TRUNKS=1`
 to make each user's SIP trunk to `OPENAI_SIP_URI` again (off: the GPT-Live path is dormant). For Bops' own Slack
 app: `BOPS_SLACK_APP_ID` (public; at Orgo `A0C6UNXT54J`, the "Bops" app) and
 `BOPS_SLACK_SIGNING_SECRET` (secret: checks its events). `BOPS_COMPOSIO_AUTH_CONFIGS` (optional,
@@ -71,6 +77,14 @@ account, `bops.cloud_accounts.app_version` (NULL: an app that didn't say) and `a
 426 (`app_update_required`, with a line telling the user to update) on every call and socket but its
 state's (`/v1/state`, `/v1/messages`), which still go through so nothing it holds is lost.
 
+Bops for iPhone says so too (`x-bops-client: ios`) and sends its own version numbers (`0.2.0`),
+which never stand for the Mac's: they're kept in `cloud_accounts.ios_version` and `ios_seen_at`
+(only for a user the cloud set up from a Mac: the phone never makes the account row, whose making
+counts a new Bops user), `app_version` stays the Mac's, and an iPhone app is held to
+`bops.app_policy.ios_block_below` (426 below it, or when it doesn't say), never to `block_below`. Its
+calls send no usage events (see "Usage events"). A phone's socket is refused (403): it only polls its
+chat, and the tunnel is one per user (see "The main bot's chat from the phone").
+
 ### Notices
 
 What Orgo tells users (`cloud/notices.ts`): rows in `bops.notices` (a title, a few lines, a link if
@@ -88,6 +102,9 @@ Webhooks are public and proven by the provider's signature instead.
 | | `GET /health` | anyone | database reachable, how many Macs are connected |
 | 1 | `POST /v1/session` | Mac | set the user up on first contact, answer a `CloudSession` (`protocol.ts`) |
 | 1 | `GET/PUT /v1/state`, `GET /v1/state/head`, `GET/POST /v1/messages`, `POST /v1/state/backups` | Mac | the app's state, kept here per user (see "The app's state") and read to answer calls |
+| 5 | `GET /v1/agent` | iPhone | the user's main bot and its chat (see "The main bot's chat from the phone") |
+| 5 | `GET /v1/agent/messages?chatId=&afterSeq=\|beforeAt=&limit=` | iPhone | that chat as the phone shows it: what changed after a cursor, or older pages |
+| 5 | `POST /v1/agent/messages` | iPhone | a message to the main bot, written into its chat and answered here |
 | 2 | `/proxy/openai/*` | Mac | OpenAI, HTTP + streaming + WebSocket (the call sideband) |
 | 2 | `/proxy/agentphone/*` | Mac | AgentPhone, always in the user's own sub-account |
 | 2 | `/proxy/honcho/*` | Mac | Honcho, only the user's own workspaces |
@@ -254,7 +271,7 @@ keeps the bot it was made for (`cloud_objects.bot_id`).
 
 | Kind | What | Price |
 |---|---|---|
-| `openai.tokens` | each response (by its id: an answer and its stream event are one), each agent turn (by its id, at the turn's own count: a helper's turn is its own), each turn of a call the cloud answers | the model's input, cached, cache-write and output rates; long-context rates for one response past 272K input, never for an agent turn (many requests summed) |
+| `openai.tokens` | each response (by its id: an answer and its stream event are one), each agent turn (by its id, at the turn's own count: a helper's turn is its own), each turn of a call the cloud answers (source `phone`), each answer to a message from the phone (source `iphone`) | the model's input, cached, cache-write and output rates; long-context rates for one response past 272K input, never for an agent turn (many requests summed) |
 | `openai.web_search` | each web search call an agent made (by its item id), from the session's stream or its items; units 1 for a search, 0 for opening a page or finding in one | $10 per 1K searches; opening a page or finding in one, nothing |
 | `openai.live_seconds` | a GPT-Live call's audio seconds: in the app (the cloud listens on the session's sideband with its own key, as audio never passes through it), or over SIP (the bridge, or a call the cloud answers) | $0.05 a minute, plus the SIP leg over SIP |
 | `agentphone.voice_seconds` | every call through a number's voice agent (by its callId), whoever answers its turns, a paused number's too | 13 cents a minute, by the second (the bot's words are its own tokens) |
@@ -262,7 +279,7 @@ keeps the bot it was made for (`cloud_objects.bot_id`).
 | `typesafe.tokens` | each Jev answer: its input tokens (estimated from the question's size when Typesafe doesn't say), read to the end even when the Mac stopped waiting | $0.042 per 1M input tokens |
 | `composio.calls` | each tool run (an action, a session's tool, an app's own API, and the cloud's own Slack `auth.test`), by tool, app and bot | `COMPOSIO_CALL`, $0 while it's negotiated |
 | `treg.calls` | each treg call (by its `X-Treg-Call-Id`, whatever its status), by endpoint, the provider that served it, and bot | what treg charged (`X-Treg-Cost-Micro`): the provider's own rate; misses on per-success endpoints, failed calls and replays are $0 |
-| `honcho.calls` | each memory question, search and messages saved (not a list of them) | `HONCHO_CALL`, $0 until it's set |
+| `honcho.calls` | each memory question, search and messages saved (not a list of them), the cloud's own saves of the phone's chat too | `HONCHO_CALL`, $0 until it's set |
 | `verify.sms`, `verify.email` | a code sent | Twilio's |
 
 A model answer the Mac stops waiting for, whole or streamed, is still read to the end and counted
@@ -309,7 +326,9 @@ its one free Bops computer; Pro and Max also bring the main bot a number and an 
   `accept`, `v1/agents/sessions` and its `events`; AgentPhone's `POST v1/numbers` and
   `v1/messages`; Typesafe; treg's calls, which are also capped at what's left) is answered 402 `{error, code: "ai_credit_empty", upgrade: true}`
   (`AI_CREDIT_EMPTY`) when the user has nothing left, before anything is sent on; a number needs
-  its month's price left (an iMessage line's is $150 or $250). The balance is read every time, so an
+  its month's price left (an iMessage line's is $150 or $250). A message sent from the phone
+  (`POST /v1/agent/messages`) is refused the same way before it's written, in the phone's own shape
+  (no `upgrade`). The balance is read every time, so an
   upgrade counts at once. Reads, hanging up and turning a call away are never refused, nor are
   texted codes (setting up the account; they're still paid for) or webhooks. A call the cloud would
   answer is turned away (`reject` 402) instead. Nothing is cut off mid-turn or mid-call.
@@ -615,6 +634,109 @@ from before still `PUT /v1/state { version, state }` their whole state as a back
 become rows) and `GET` it back with the messages in, until a newer build writes for the user
 (`protocol` 2): then the old upload is refused (426).
 
+## The main bot's chat from the phone
+
+Bops for iPhone (sign-in, the main bot's chat, settings) talks to the main bot through three routes
+(`agent.ts`, with `agent-prompt.ts` and `honcho.ts`). The cloud answers every message sent from the
+phone itself, so each one has exactly one answerer: a Mac never answers a message it reads from the
+cloud (only its own chat, calls, texts and channels start a turn there). It answers whenever the
+phone has a connection, whether the Mac is awake, asleep, closed, on an old build or not there at
+all, and nothing changes on the Mac: it shows both messages in the main bot's chat and reads them as
+history on its next turn.
+
+Every call carries the user's Orgo key as Bearer, `X-Bops-User` (the key's user, else 409
+`wrong_user`), `X-Bops-Client: ios`, `X-Bops-Version` (the iPhone app's own; see "Which app"),
+`X-Bops-Device: ios-<uuid>` and `X-Bops-Timezone` (IANA; UTC when it's missing or not one); a
+message carries `X-Bops-Memory: on` once the user allowed memory (below). Bodies are camelCase JSON
+(`protocol.ts`: `AgentInfo`, `PhoneMessage`, `PhoneMessagesPage`, `AgentSendBody`). The phone only
+polls with short requests: never `/v1/session`, `/v1/connect` (refused: the tunnel is one per user,
+and a phone there would drop the user's Mac), `PUT /v1/state` or `POST /v1/messages`.
+
+- `GET /v1/agent`: the main bot (the default workspace's main bot, else the first workspace's, else
+  any main bot), its chat `bot:<id>`, the user's name (Settings → You, else their Orgo name), the
+  newest message `seq` and whether a turn is `working`. A user with no state (they never used Bops on
+  a Mac) gets Boppy (`isDefault`), as a new Mac install makes it, so the chat joins up if they install
+  it later: the cloud keeps their chat but saves no state of its own for them. `picture` is every main
+  bot's mascot, `<public>/mascot/main-0A0A0A.png`.
+- `GET /v1/agent/messages?chatId=bot:<id>`, oldest first:
+  - `afterSeq=<seq>`: what changed in the chat after the cursor, removals too (`{id, seq, removed:
+    true}`), from every chat's rows as `GET /v1/messages` reads them (limit 200, at most 500): `seq` is
+    the last row looked at, past other chats' rows too, and `more` says to ask again now. A removal is
+    kept 30 days, then swept for good (each user's highest seq swept is kept, `app_state.swept_seq`):
+    a cursor from before it can't hear of that removal, so the answer is the newest page instead, with
+    `reset: true`, and the phone drops its copy of the chat for it. The newest `seq` is never below the
+    one swept, so a cursor from there never starts over.
+  - `beforeAt=<ms>`: the chat's older messages (limit 50, at most 100), `more` while there are older
+    ones. Such a page leaves the cursor alone (`seq` 0).
+  - Neither: the newest messages (limit 50, at most 100), and the user's newest `seq`, read before the
+    rows, as the cursor.
+  - `working` is read before the rows: a turn writes its answer before it ends, so the page that first
+    says it ended has the answer, or an earlier one did.
+
+  Each row goes out as the phone shows it, never as it's kept: what the user and the bots said (`via`
+  "text" for the bot's number, "email" for the user's own email, or Slack, Telegram, Discord;
+  `taskId` on a task's result, which a newer result of the same task replaces; `photos`, a count, as
+  pictures aren't sent; `answers` and `options` on the cloud's answer only, as a Mac bot's question
+  waits on the Mac, where its tools are), and a short `note` for a call ("Call, 2 min"; someone else's
+  that left a message: "Call from +1…, 2 min. Left a message (Dana): …"), someone else's email or
+  text ("Email from Dana: Quote", a text's first 140 characters) and a fact remembered. An app's
+  answer and the app's own lines aren't sent. A bot's words lose what the Mac wrote for itself: the
+  sentences and links that send the user to buy (the Mac's "Upgrade in Settings…", "Upgrade to Max in
+  Settings.", links to Orgo's plan and usage pages), as Bops for iPhone sells nothing (App Store 3.1.1
+  and 3.1.3(f)); and a link to one of the Mac's own pages or files (`[Title](/api/pages/…)`), which
+  can't open on the phone, keeps its words, marked "(on your Mac)".
+- `POST /v1/agent/messages {id, chatId, text}`: `id` is the phone's own (`msg_ios_<uuid>`), the same on
+  every retry. In order:
+  - 400 for a bad id or chat, no text, or an id a message of another kind has; 413 past 8,000 characters.
+  - A message already answered: 200 `{message, reply}`, whatever else is going on. One its turn is
+    still answering (the first 202 was lost on the way): 202 `{message, working: true}` again.
+  - 409 `agent_changed` when `chatId` isn't the main bot's chat now; 503 when this cloud has no OpenAI
+    key; 409 `agent_busy` while a turn answers another of the user's messages (one at a time per
+    user, from any phone).
+  - 429 `slow_down` past 20 sends a minute (`bops.cloud_limits`, `agent:send:<user>`), then 402
+    `ai_credit_empty` with no AI credit left, in the phone's own shape: no `upgrade` and no words about
+    upgrading, as the phone offers no way to buy. Nothing is written for any of these.
+  - Then the message is written into the chat, `{id, chatId, role: "user", text, at, sentFrom:
+    "iphone"}`, the user's connected Mac gets a `state` frame, and the answer is 202 `{message,
+    working: true}`. A message sent before and never answered (its turn failed, or the cloud
+    restarted) is answered again from the row it has, never written twice.
+
+A turn runs on after the request, so it finishes if the phone goes away. It's one Responses call
+(`BOPS_AGENT_MODEL`, low reasoning, not stored, at most 2,000 output tokens, no tools, 60 s). Its
+instructions are the Mac's `persona()` for the main bot, ported (`agent-prompt.ts`): who it is and
+who it works for (with what they wrote about themselves), how every bot writes and asks and what
+Bops is (the Mac's own words: `cloud/style.ts`, which `lib/server/style.ts` re-exports), how it's
+reached, its team, and that it's answering on the iPhone, where it can talk, answer questions, plan
+and write drafts but can't start tasks, use a computer or the user's apps, make pictures, or send
+email or texts, and says so (that Bops on their Mac can, or, for a user with no Mac, that Bops on a
+Mac can). It's also told what Bops for iPhone has (this one chat, and Settings with the plan and AI
+credit left), never to tell the user to upgrade or buy, or where (they can see their plan in
+Settings), and to use a short numbered list where it would draw an ASCII diagram on a Mac. Its input
+is the Mac's `history()`, ported: the chat's last 24 to 31 messages (a start that moves 8 at a time,
+for OpenAI's prompt cache), text only, emails and other people's texts marked as information, then a
+note with the time where the user is, the bot's tasks under way in the last state upload (titles and
+statuses only) and, with Honcho set up and the user's say-so (below), its memory. The answer, its
+`Options:` line taken out as `options`, is written into the chat as `{id: "msg_cloud_<uuid>",
+chatId, role: "bot", botId, text, at, answers: <the message's id>, options?}` (the Mac gets a
+`state` frame, and keeps both new fields without reading either). Its tokens are paid from AI credit
+and counted for the bot (`openai.tokens`, source `iphone`), whether or not the answer was written.
+On any failure nothing is written, one log line says why (a status, never what was said), and the
+phone, seeing the turn end without an answer, offers Try again. Turns live in this process's memory:
+a restart mid-turn loses that turn the same way.
+
+Memory (`honcho.ts`, with `HONCHO_API_KEY` set), only for a message sent with `X-Bops-Memory: on`:
+Honcho is another company's AI, so the phone sends it only once the user allowed it in a notice that
+names Honcho (App Store 5.1.2(i)). Without it, nothing is read from or saved to Honcho. It's the
+bank the user's bots use on their Mac for the bot's workspace (its own binding, else `<prefix>-bops`
+for the default workspace), always under the user's prefix. Before the turn, one read within 2.5 s
+(the user's card and what Honcho learned that matters for the message), private-looking lines left
+out by the Mac's patterns (its second check, Jev, isn't here). After it, the message and the answer
+go into the chat's session (`bops-chat-bot-<id>`, as the Mac names it) without waiting, unless the
+user asks to keep it from someone ("don't tell Sam"), counted as `honcho.calls` (route `messages`).
+The Mac's auto-remember ("Remembered: …") isn't here.
+
+No usage events go out for anything the phone's calls do, the turn included (see "Usage events").
+
 ## Usage events
 
 With `BOPS_TELEMETRY=1` (`analytics.ts`), the cloud sends Orgo's PostHog project (the one orgo.ai
@@ -630,10 +752,12 @@ before it leaves. Never message, mail or call content, names, numbers or address
 Nothing is sent for a user whose state has `analyticsOff` (Settings → You → Share usage data; read
 from `app_state` and kept 10 minutes, forgotten at each state upload), or for anything a call marked
 `x-bops-telemetry: off` does (an app whose Mac sends none: `BOPS_TELEMETRY=0`, `DO_NOT_TRACK=1`, a
-development build). Events the cloud sees on its own, outside any call from the app (AI credit
-running out from a text, a call or reconcile; a plan notice from orgo-web; a number the plan set up),
-carry no such header: only `analyticsOff` stops them. A send PostHog can't take is dropped with one
-log line every 10 minutes at most. `BOPS_UPSTREAM_POSTHOG` points it at a fake server in tests. Events are flushed on
+development build), or for anything a call from Bops for iPhone does (`x-bops-client: ios`), its
+500s included: the iPhone app collects no usage data, and its App Store privacy answers say so.
+Events the cloud sees on its own, outside any call from the app (AI credit running out from a text,
+a call or reconcile; a plan notice from orgo-web; a number the plan set up), carry no such header:
+only `analyticsOff` stops them. A send PostHog can't take is dropped with one log line every 10
+minutes at most. `BOPS_UPSTREAM_POSTHOG` points it at a fake server in tests. Events are flushed on
 SIGTERM, before the server closes.
 
 ## Data
@@ -650,7 +774,11 @@ each line (`phone_lines.status`, `checked_at`, `problem`, `plan`, `agent_id`, `p
 `0009_usage.sql`: `cloud_objects.bot_id`, `used_at`, `checked_at`, `settled_at` (an agent session's
 bot, and when its turns were last read back) and an index to find a use by its `ref` (see "What's counted").
 `0010_chat_messages.sql`: `chat_messages` (each chat message its own row, moved out of the state
-blobs), `app_state.protocol` and `app_state.writer` (see "The app's state").
+blobs), `app_state.protocol` and `app_state.writer` (see "The app's state"). `0013_ios_client.sql`:
+`cloud_accounts.ios_version` and `ios_seen_at` and `app_policy.ios_block_below` (see "Which app"),
+`chat_messages_answers`, the index that finds the cloud's answer to a message from the phone, and
+`app_state.swept_seq`, each user's highest seq of removed messages swept for good (see "The main
+bot's chat from the phone").
 
 ## Code layout
 
@@ -665,6 +793,8 @@ blobs), `app_state.protocol` and `app_state.writer` (see "The app's state").
 | `ops.ts` | each user's bot number and email for Orgo's staff page (signed, read only) |
 | `tunnel.ts`, `hooks.ts`, `slack.ts`, `state.ts` | 3: the tunnel, webhooks, Slack, state |
 | `lines.ts`, `voice.ts`, `calls.ts` | 4: who owns each line, a call's turns answered here, GPT-Live calls (dormant) |
+| `agent.ts`, `agent-prompt.ts`, `honcho.ts` | 5: the main bot's chat from the phone, what the bot is told there, and its memory |
+| `style.ts` | how every bot writes and asks, and what Bops is: the words the Mac's bots and the cloud's share (the app imports it too) |
 | `pages.ts`, `public/` | the public pages and pictures (`/connected`, `/oauth/callback`, `/mascot`, `/brand`) |
 | `test/` | `node --test`, fake upstreams on localhost, a throwaway Postgres schema |
 

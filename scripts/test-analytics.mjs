@@ -607,6 +607,14 @@ await C.inTelemetryScope(req({ "x-bops-version": "0.0.22" }), async () => C.trac
 const [ran] = await until(() => ofEvent("bops_ai_credit_ran_out", mark).length && ofEvent("bops_ai_credit_ran_out", mark), "bops_ai_credit_ran_out");
 assert.equal(ran.properties.app_version, "0.0.22", "the calling app's version");
 
+// Bops for iPhone collects no usage data: nothing for what its calls do, whatever else they say.
+mark = sent.length;
+await C.inTelemetryScope(req({ "x-bops-client": "ios", "x-bops-version": "0.2.0" }), async () => {
+  await sleep(1);
+  C.trackCloudEvent("u-9", "bops_ai_credit_ran_out", {});
+});
+await nothingSent(mark, flushCloud, "a call from Bops for iPhone: nothing for what it does");
+
 db.off["u-8"] = "true";
 mark = sent.length;
 C.trackCloudEvent("u-8", "bops_owner_contact_verified", { channel: "sms" });
@@ -631,6 +639,9 @@ await nothingSent(mark, flushCloud, "a 500 on a public route (no user, no switch
 mark = sent.length;
 C.captureCloudException(new Error("x"), req({ "x-bops-telemetry": "off" }), "u-9", "/v1/session");
 await nothingSent(mark, flushCloud, "a 500 on a call marked off: nothing");
+mark = sent.length;
+C.captureCloudException(new Error("x"), req({ "x-bops-client": "ios" }), "u-9", "/v1/agent/messages");
+await nothingSent(mark, flushCloud, "a 500 on a call from Bops for iPhone: nothing");
 
 assert.equal(C.cloudEnvironment(), "production");
 process.env.BOPS_CLOUD_PUBLIC_URL = "https://bops-staging.orgo.ai/api";
