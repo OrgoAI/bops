@@ -1,7 +1,7 @@
 {
   "name": "bops",
   "description": "A team of AI bots that work for you, each with its own computer.",
-  "version": "0.0.24",
+  "version": "0.0.25",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
   "scripts": {
