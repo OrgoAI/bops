@@ -1,7 +1,7 @@
 import "server-only";
 import { APIConnectionTimeoutError } from "openai";
 import { openaiClient } from "./openai-client";
-import { computerAsleepError, orgo, screenId } from "./orgo";
+import { computerAsleepError, computerWakingError, orgo, screenId } from "./orgo";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { bot, patchSession, session, stateEpoch } from "./store";
@@ -195,12 +195,13 @@ function record(t: ComputerTurn, o: OutputItem, more: boolean) {
 /**
  * The screen, as the computer tool takes it: full size, so the model's coordinates are the screen's.
  * Orgo left the computer asleep for it (409 computer_asleep: nobody said it's in use for 15 minutes, say
- * on a hosted server, which doesn't beat): an action wakes it, and the screenshot is taken again, once.
+ * on a hosted server, which doesn't beat), or it's waking from storage: an action wakes it (and waits
+ * while it does), and the screenshot is taken again, once.
  */
 async function screen(t: ComputerTurn) {
   const shot = () => orgo.screenshot(t.computerId, screenId(t.display), 1, "png");
   const png = await shot().catch(async (e: unknown) => {
-    if (!computerAsleepError(e)) throw e;
+    if (!computerAsleepError(e) && !computerWakingError(e)) throw e;
     await orgo.bash(t.computerId, "true", 30);
     return shot();
   });
