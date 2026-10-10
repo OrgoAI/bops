@@ -158,6 +158,9 @@ function seen(text: string) {
 /** Whether any address in `text` is someone business data found. */
 export const foundByBots = (text: string) => (text.match(EMAIL) ?? []).some((m) => found.has(m.toLowerCase()));
 
+/** Count the addresses in `text` as found by the bots: what a bot read from the user's CRM (crm.ts) asks before a send the same way. */
+export const markFound = (text: string) => seen(text);
+
 /* ---------------- business_search ---------------- */
 
 /** One input the bot may give business_search, flat, so one schema serves every job. */

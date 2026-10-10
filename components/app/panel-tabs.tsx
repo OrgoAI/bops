@@ -3,6 +3,7 @@
 import { createContext, createElement, useEffect, useRef, useState } from "react";
 import { live, type AppState } from "@/lib/types";
 import type { Section } from "./bot-panel";
+import { CrmFileIcon } from "./crm";
 import { Mascot } from "./mascot";
 import { MacIcon } from "./mac-tab";
 import { KeyIcon } from "./screen-cards";
@@ -20,7 +21,9 @@ export type PanelTab =
   | { id: string; kind: "web"; url: string; title?: string }
   | { id: string; kind: "new" }
   | { id: string; kind: "vault" }
-  | { id: string; kind: "mac" };
+  | { id: string; kind: "mac" }
+  /** A CRM file (crm.tsx), in the workspace it belongs to. */
+  | { id: string; kind: "crm"; ws: string; file: string };
 
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";
@@ -84,7 +87,19 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
   const needsYou =
     t.kind === "computer" && (state.watches?.some((w) => w.botId === t.botId && w.alert) || state.sessions.some((s) => s.botId === t.botId && live(s) && s.blocker));
   const label =
-    t.kind === "computer" ? `${b?.name ?? "Bot"}'s computer` : t.kind === "bot" ? (b?.name ?? "Bot") : t.kind === "web" ? t.title || hostOf(t.url) : t.kind === "vault" ? "Vault" : t.kind === "mac" ? "Your Mac" : "New tab";
+    t.kind === "computer"
+      ? `${b?.name ?? "Bot"}'s computer`
+      : t.kind === "bot"
+        ? (b?.name ?? "Bot")
+        : t.kind === "web"
+          ? t.title || hostOf(t.url)
+          : t.kind === "vault"
+            ? "Vault"
+            : t.kind === "mac"
+              ? "Your Mac"
+              : t.kind === "crm"
+                ? t.file
+                : "New tab";
   return (
     <div
       onClick={onPick}
@@ -102,6 +117,8 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
         <KeyIcon />
       ) : t.kind === "mac" ? (
         <MacIcon />
+      ) : t.kind === "crm" ? (
+        <CrmFileIcon />
       ) : (
         <GlobeIcon />
       )}

@@ -8,6 +8,8 @@ import { BotPanel, type Section } from "./bot-panel";
 import { CallBar } from "./call-bar";
 import { ChatView, ThreadSheet, ToPicker } from "./chat-view";
 import { ComputerPeek, ComputerView, defaultDisplay } from "./computer";
+import { crmOpen } from "@/lib/crm-access";
+import { CrmView, OpenCrm } from "./crm";
 import { BusyBots, Mascot } from "./mascot";
 import { CHAT_TAB, hostOf, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
 
@@ -23,7 +25,7 @@ import { MacPreviews } from "./mac-tab";
 import { OPEN_MAC_KEY } from "./mac-pip";
 import { MacComputer } from "./mac-computer";
 import { NoticePopup } from "./notice-popup";
-import { chatInWorkspace, post, teamOf, useAppState, useSelfHosted } from "./ui";
+import { chatInWorkspace, currentWorkspace, post, teamOf, useAppState, useSelfHosted } from "./ui";
 import { UsageData, useAnalytics } from "./usage-data";
 import { trackEvent } from "@/lib/analytics";
 import { OwnerEmail, useOwnerEmailInfo } from "./owner-email";
@@ -90,6 +92,8 @@ function Bops({ state }: { state: AppState | null }) {
   const [focus, setFocus] = useState(false);
   // Full width shows your Mac instead of a bot's computer.
   const [macFocus, setMacFocus] = useState(false);
+  // ...or a CRM file (crm.tsx), from its tab's Full width.
+  const [crmFocus, setCrmFocus] = useState<{ ws: string; file: string } | null>(null);
   // The right side's tabs (the chat's own computer is always first; see panel-tabs.tsx).
   // Only the computer is open from the start; the rest open as you need them.
   const [openTabs, setTabs] = useState<PanelTab[]>([]);
@@ -102,6 +106,23 @@ function Bops({ state }: { state: AppState | null }) {
     const onStorage = (e: StorageEvent) => e.key === OPEN_MAC_KEY && openMacRef.current();
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
+  }, []);
+  // A file dropped where nothing takes it (only the chat and the CRM do) is refused: left to the
+  // window, it would open the file in place of Bops. Only files: text dragged into a field drops as before.
+  useEffect(() => {
+    const files = (e: DragEvent) => !!e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files");
+    const over = (e: DragEvent) => {
+      if (e.defaultPrevented || !files(e)) return;
+      e.preventDefault();
+      e.dataTransfer!.dropEffect = "none";
+    };
+    const drop = (e: DragEvent) => files(e) && e.preventDefault();
+    window.addEventListener("dragover", over);
+    window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("drop", drop);
+    };
   }, []);
   const [active, setActive] = useState(CHAT_TAB);
   // Where you were, so leaving a tab goes back there: the tabs you've had open (latest last), and how
@@ -195,12 +216,13 @@ function Bops({ state }: { state: AppState | null }) {
   // (No app-wide clock: redrawing everything every second cost a full render a second. What shows a
   // running time keeps its own: the open thread, the sidebar's "5m", watch pills, the call timer.)
 
-  // Clicking into a computer takes over its screen; leaving the full view hands it back.
+  // Clicking into a computer takes over its screen; leaving the full view hands it back (a CRM file full width took nothing).
   const wasFocused = useRef(false);
+  const computerFocus = focus && !crmFocus;
   useEffect(() => {
-    if (wasFocused.current && !focus) void post("/api/takeover", {}, "DELETE");
-    wasFocused.current = focus;
-  }, [focus]);
+    if (wasFocused.current && !computerFocus) void post("/api/takeover", {}, "DELETE");
+    wasFocused.current = computerFocus;
+  }, [computerFocus]);
 
   // What Esc does to the tab on the right, set on every render (see escTab.current below).
   const escTab = useRef<(e: KeyboardEvent) => void>(() => {});
@@ -242,10 +264,13 @@ function Bops({ state }: { state: AppState | null }) {
   const thread = threadId ? state.sessions.find((s) => s.id === threadId) : undefined;
   // The first tab shows the computer of the bot you're talking to (or whose thread is open).
   const chatBotId = thread?.botId ?? chat.botIds[0];
-  // A deleted bot's tabs go with it; the profile tab is always the chat's bot.
+  // A deleted bot's tabs go with it; the profile tab is always the chat's bot. A CRM file shows in its own workspace only,
+  // and only to an account the CRM is open to (lib/crm-access.ts).
+  const crm = crmOpen(state);
   const tabs = openTabs
     .map((t) => (t.id === PROFILE_TAB && t.kind === "bot" ? { ...t, botId: chatBotId } : t))
-    .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId));
+    .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId))
+    .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)));
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
   if (recent.at(-1) !== active) {
     setRecent([...recent.filter((id) => id !== active), active].slice(-20));
@@ -259,7 +284,7 @@ function Bops({ state }: { state: AppState | null }) {
   const leadKey = lead ? `${lead.id}:${lead.runsOn}` : "";
   if (leadKey !== followed) {
     setFollowed(leadKey);
-    const browsing = tab && (tab.kind === "web" || tab.kind === "vault" || (tab.kind === "computer" && tab.botId !== chatBotId) || (tab.kind === "bot" && tab.id !== PROFILE_TAB));
+    const browsing = tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || (tab.kind === "computer" && tab.botId !== chatBotId) || (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
       if (lead.runsOn === "mac") {
         // Your Mac's tab, however it was opened (from a new tab it keeps that tab's id): never a second one.
@@ -296,6 +321,7 @@ function Bops({ state }: { state: AppState | null }) {
   // Full screen, when asked for explicitly (taking control happens in place, in the panel).
   const clickIn = () => {
     setMacFocus(false);
+    setCrmFocus(null);
     setFocus(true);
   };
 
@@ -326,6 +352,26 @@ function Bops({ state }: { state: AppState | null }) {
       (t) => ({ ...t, section }) as PanelTab,
     );
   const openVault = () => openTab((t) => t.kind === "vault", () => ({ id: tabId(), kind: "vault" }));
+  /** A CRM file, as a tab (one per file). */
+  const openCrm = (ws: string, file: string) =>
+    openTab(
+      (t) => t.kind === "crm" && t.ws === ws && t.file.toLowerCase() === file.toLowerCase(),
+      () => ({ id: tabId(), kind: "crm", ws, file }),
+      (t) => ({ ...t, file }) as PanelTab,
+    );
+  /** A CRM file was renamed or deleted in the sidebar: its tab (and the full view of it) follows, or closes. */
+  const crmChanged = ({ ws, from, to }: { ws: string; from: string; to: string | null }) => {
+    const same = (x: { ws: string; file: string }) => x.ws === ws && x.file.toLowerCase() === from.toLowerCase();
+    if (to) setTabs(openTabs.map((t) => (t.kind === "crm" && same(t) ? { ...t, file: to } : t)));
+    else for (const t of tabs) if (t.kind === "crm" && same(t)) closeTab(t.id);
+    if (crmFocus && same(crmFocus)) {
+      if (to) setCrmFocus({ ws, file: to });
+      else {
+        setCrmFocus(null);
+        setFocus(false);
+      }
+    }
+  };
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
   // eslint-disable-next-line react-hooks/refs -- kept current for the storage listener above
   openMacRef.current = openMac;
@@ -344,6 +390,12 @@ function Bops({ state }: { state: AppState | null }) {
   };
   const closeTab = (id: string) => {
     const i = tabs.findIndex((t) => t.id === id);
+    const gone = tabs[i];
+    // A CRM file shown full width goes with its tab (back to where you were, not to a computer).
+    if (gone?.kind === "crm" && crmFocus && gone.ws === crmFocus.ws && gone.file.toLowerCase() === crmFocus.file.toLowerCase()) {
+      setCrmFocus(null);
+      setFocus(false);
+    }
     const rest = tabs.filter((t) => t.id !== id);
     setTabs(rest);
     setRecent(recent.filter((r) => r !== id));
@@ -359,7 +411,7 @@ function Bops({ state }: { state: AppState | null }) {
   // a search) stays there.
   // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
   escTab.current = (e) => {
-    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot") ? tab : undefined;
+    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm") ? tab : undefined;
     if (!page || e.defaultPrevented || thread || composing || settings || account || setup || members || document.querySelector('[role="dialog"]')) return;
     const el = e.target instanceof HTMLElement ? e.target : null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && !panelRef.current?.contains(el)) return;
@@ -391,7 +443,7 @@ function Bops({ state }: { state: AppState | null }) {
     const alerting = (state.watches ?? []).filter((w) => w.alert && (w.alert.level ?? "now") === "now" && team.some((b) => b.id === w.botId));
     if (cutAlerts === null) return setCutAlerts(new Set(alerting.map(key)));
     const fresh = alerting.find((w) => !cutAlerts.has(key(w)));
-    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault") return;
+    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault" || tab?.kind === "crm") return;
     const el = document.activeElement as HTMLInputElement | null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && (el.value ?? el.textContent ?? "").trim()) return;
     setCutAlerts(new Set([...cutAlerts, key(fresh)]));
@@ -482,7 +534,15 @@ function Bops({ state }: { state: AppState | null }) {
   const callHere = !!callBot && !composing && !focus && !!callSlot && chat.kind === "bot" && chat.botIds[0] === callBot.id;
   const columns = focus || !panelOpen ? "grid-cols-[340px_minmax(0,1fr)]" : "grid-cols-[340px_440px_minmax(0,1fr)]";
   const tabBar = (panelOpen || focus) && (
-    <TabBar state={state} tabs={tabs} active={focus ? CHAT_TAB : active} chatBotId={chatBotId} onPick={pickTab} onClose={closeTab} onNew={() => openTab(() => false, () => ({ id: tabId(), kind: "new" }))} />
+    <TabBar
+      state={state}
+      tabs={tabs}
+      active={focus ? (crmFocus ? (tabs.find((t) => t.kind === "crm" && t.ws === crmFocus.ws && t.file.toLowerCase() === crmFocus.file.toLowerCase())?.id ?? CHAT_TAB) : CHAT_TAB) : active}
+      chatBotId={chatBotId}
+      onPick={pickTab}
+      onClose={closeTab}
+      onNew={() => openTab(() => false, () => ({ id: tabId(), kind: "new" }))}
+    />
   );
 
   // Bots at work open their eyes (every mascot reads this): a running thread, typing, or on a call.
@@ -491,6 +551,7 @@ function Bops({ state }: { state: AppState | null }) {
   return (
     <BusyBots.Provider value={busy}>
     <OpenLink.Provider value={openWeb}>
+    <OpenCrm.Provider value={openCrm}>
       <TooltipLayer />
       <NoticePopup />
       <div className="flex h-screen flex-col bg-white font-sans text-ink antialiased">
@@ -507,8 +568,42 @@ function Bops({ state }: { state: AppState | null }) {
           }}
         />
         <div className={`grid min-h-0 flex-1 ${columns}`}>
-          <Sidebar state={state} chatId={chat.id} onOpenChat={openChat} onOpenThread={openThread} onCompose={() => setComposing(true)} onSettings={() => setSettings(true)} onAccount={() => setAccount(true)} onSetup={() => setSetup(true)} onVault={openVault} onMembers={() => setMembers(true)} onOpenWatch={showWatch} />
-          {focus && macFocus ? (
+          <Sidebar
+            state={state}
+            chatId={chat.id}
+            onOpenChat={openChat}
+            onOpenThread={openThread}
+            onCompose={() => setComposing(true)}
+            onSettings={() => setSettings(true)}
+            onAccount={() => setAccount(true)}
+            onSetup={() => setSetup(true)}
+            onVault={openVault}
+            onMembers={() => setMembers(true)}
+            onOpenWatch={showWatch}
+            onOpenCrm={openCrm}
+            activeCrm={focus ? (crmFocus ?? undefined) : panelOpen && tab?.kind === "crm" ? { ws: tab.ws, file: tab.file } : undefined}
+            onCrmChange={crmChanged}
+          />
+          {focus && crmFocus && crm ? (
+            <div className="flex min-h-0 min-w-0 flex-col bg-white">
+              <CrmView
+                key={`${crmFocus.ws}:${crmFocus.file}`}
+                state={state}
+                ws={crmFocus.ws}
+                file={crmFocus.file}
+                mode="focus"
+                onBack={() => setFocus(false)}
+                onClose={() => {
+                  const t = tabs.find((x) => x.kind === "crm" && x.ws === crmFocus.ws && x.file.toLowerCase() === crmFocus.file.toLowerCase());
+                  if (t) closeTab(t.id);
+                  else {
+                    setCrmFocus(null);
+                    setFocus(false);
+                  }
+                }}
+              />
+            </div>
+          ) : focus && macFocus ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
               <MacComputer state={state} mode="focus" showThread={thread?.runsOn === "mac" ? thread.id : undefined} onBack={() => setFocus(false)} onOpenThread={openThread} />
             </div>
@@ -588,6 +683,20 @@ function Bops({ state }: { state: AppState | null }) {
                     />
                   ) : tab?.kind === "vault" ? (
                     <VaultTab state={state} onClose={() => leaveTab(tab.id)} />
+                  ) : tab?.kind === "crm" ? (
+                    <CrmView
+                      key={`${tab.id}:${tab.file}`}
+                      state={state}
+                      ws={tab.ws}
+                      file={tab.file}
+                      mode="panel"
+                      onClose={() => leaveTab(tab.id)}
+                      onFocus={() => {
+                        setMacFocus(false);
+                        setCrmFocus({ ws: tab.ws, file: tab.file });
+                        setFocus(true);
+                      }}
+                    />
                   ) : null}
                   {/* Your Mac stays capturing, hidden, for two minutes after you leave it (restarting capture is slow). */}
                   {(showingMac || macHeld) && (
@@ -598,6 +707,7 @@ function Bops({ state }: { state: AppState | null }) {
                         showThread={thread?.runsOn === "mac" ? thread.id : undefined}
                         onFocus={() => {
                           setMacFocus(true);
+                          setCrmFocus(null);
                           setFocus(true);
                         }}
                         onOpenThread={openThread}
@@ -662,6 +772,7 @@ function Bops({ state }: { state: AppState | null }) {
         {/* What bots are doing on the user's Mac, live, in the corner (hidden while the Your Mac tab is open). */}
         {!(tab?.kind === "mac" && panelOpen) && <MacPreviews state={state} onOpen={openMac} />}
       </div>
+    </OpenCrm.Provider>
     </OpenLink.Provider>
     </BusyBots.Provider>
   );

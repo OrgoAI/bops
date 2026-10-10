@@ -4,6 +4,7 @@ import { openaiClient } from "./openai-client";
 import { computerAsleepError, computerWakingError, orgo, screenId } from "./orgo";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
+import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
 import { bot, patchSession, session, stateEpoch } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import type { Session } from "@/lib/types";
@@ -84,8 +85,9 @@ export async function computerTurn(t: ComputerTurn): Promise<string> {
   const b = bot(s.botId)!;
   const epoch = stateEpoch();
   const started = Date.now();
-  // Business data runs in this process (treg.ts), so the task has it wherever its computer is.
-  const tools = [{ type: "computer" }, { type: "web_search" }, SHELL_TOOL, VAULT_TOOL, ...(t.apps ? APP_TOOLS(b) : []), ...DATA_TOOLS(b)];
+  // Business data and the user's CRM run in this process (treg.ts, crm.ts), so the task has them wherever its computer is.
+  // Not the CRM for a task someone outside Bops started (Session.fromOutside), as for a chat turn of theirs.
+  const tools = [{ type: "computer" }, { type: "web_search" }, SHELL_TOOL, VAULT_TOOL, ...(t.apps ? APP_TOOLS(b) : []), ...DATA_TOOLS(b), ...(s.fromOutside ? [] : CRM_TOOLS(b))];
   // A turn that was stopped mid-step owes OpenAI the outputs of the calls it was answering.
   let input: unknown[] = [...(await settle(t, s.owed ?? [])), { role: "user", content: [{ type: "input_text", text: t.input }] }];
   let prev = s.responseId;
@@ -362,6 +364,9 @@ async function runFunction(t: ComputerTurn, o: OutputItem) {
     } else if (o.name && DATA_TOOL_NAMES.has(o.name)) {
       t.step(o.name, o.name === "business_search" ? `looked up ${String(args.job ?? "business data")}` : o.name === "find_data" ? `looked for "${String(args.query ?? "").slice(0, 60)}" in business data` : `got ${String(args.endpoint_id ?? "data")}`);
       output = await runDataTool(s.botId, o.name, args, { sessionId: t.sessionId });
+    } else if (o.name && CRM_TOOL_NAMES.has(o.name) && !s.fromOutside) {
+      t.step(o.name, crmStep(o.name, args));
+      output = await runCrmTool(s.botId, o.name, args, { sessionId: t.sessionId });
     } else output = `Unknown tool ${o.name}.`;
   } catch (e) {
     output = `Failed: ${(e as Error).message}`;

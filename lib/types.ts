@@ -235,6 +235,12 @@ export type Message = {
   asked?: { botId: string; question: string; answer: string; questionId?: string }[];
   /** Set on a "Remembered: …" line: the fact (so it can be undone) and an older one it may replace. */
   memory?: { ws: string; id: string; fact: string; undone?: boolean; old?: { id: string; text: string; forgotten?: boolean } };
+  /**
+   * Set on the note a bot's save to the CRM leaves (lib/server/crm.ts): the workspace and file, how many
+   * rows it added and changed (or that it made the file), the copy from before it (`snapshot`) and the
+   * file's version after it, so the note can open the file and undo the save while nothing changed since.
+   */
+  crm?: { ws: string; file: string; added: number; changed: number; created?: true; snapshot?: string; after: string; undone?: true };
 };
 
 export type EmailInfo = {
@@ -292,6 +298,12 @@ export type Session = {
   emailBack?: { inboxId: string; messageId: string };
   /** The exact window on the user's Mac this task last worked in (from its tools: window id, process id). */
   macWindow?: { windowId: number; pid?: number; at: number };
+  /**
+   * Started on a turn someone else began (an email, a text or a call from outside Bops: StartOptions.outside).
+   * Such a task gets none of the user's CRM (no crm_* tools, no CRM note), as a chat turn like that doesn't:
+   * a stranger's words, or a page it opens, can't have it read the user's customers out.
+   */
+  fromOutside?: true;
   /** The user dismissed it: it stopped, and it doesn't ask for them again. */
   dismissed?: boolean;
   /** A newer thread took over this job (moved to the Mac, or asked for again); this one stays quiet. */

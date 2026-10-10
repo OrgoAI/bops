@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { DISPLAYS, live, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
+import { crmOpen } from "@/lib/crm-access";
+import { CrmSection } from "./crm";
 import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
 import { Mascot } from "./mascot";
@@ -30,6 +32,9 @@ export function Sidebar({
   onVault,
   onMembers,
   onOpenWatch,
+  onOpenCrm,
+  activeCrm,
+  onCrmChange,
 }: {
   state: AppState;
   chatId: string;
@@ -45,6 +50,12 @@ export function Sidebar({
   onMembers: () => void;
   /** Show a watched screen or Mac window. */
   onOpenWatch: (watch: Watch) => void;
+  /** Open a CRM file as a tab on the right (crm.tsx). */
+  onOpenCrm: (ws: string, file: string) => void;
+  /** The CRM file showing on the right, if one is. */
+  activeCrm?: { ws: string; file: string };
+  /** A CRM file was renamed (`to`) or deleted (null): its tabs follow. */
+  onCrmChange: (change: { ws: string; from: string; to: string | null }) => void;
 }) {
   const [query, setQuery] = useState<string | null>(null);
   const q = query?.trim().toLowerCase();
@@ -85,7 +96,7 @@ export function Sidebar({
             onKeyDown={(e) => e.key === "Escape" && setQuery(null)}
             // Clicking away from an empty search closes it (not when the click is on the search button, which toggles it).
             onBlur={(e) => !query.trim() && e.relatedTarget?.getAttribute("aria-label") !== "Search" && setQuery(null)}
-            placeholder="Search bots, chats, threads"
+            placeholder={crmOpen(state) ? "Search bots, chats, threads, files" : "Search bots, chats, threads"}
             className="mr-2 h-[34px] min-w-0 flex-1 rounded-full bg-white px-3.5 text-[13px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98]"
           />
         )}
@@ -110,6 +121,9 @@ export function Sidebar({
               <ChatRow key={c.id} chat={c} state={state} selected={c.id === chatId} onClick={() => onOpenChat(c.id)} last={lastMessage(c)} />
             ))}
         </div>
+
+        {/* The workspace's CRM: its files, each a chart and a table on the right. Orgo's team's for now (lib/crm-access.ts). */}
+        {crmOpen(state) && <CrmSection state={state} query={q} active={activeCrm} onOpen={onOpenCrm} onChange={onCrmChange} />}
 
         {!q && <Watching state={state} onOpen={onOpenWatch} />}
 
@@ -349,6 +363,13 @@ export function DeleteX({ label, onDelete, className = "" }: { label: string; on
         e.stopPropagation();
         onDelete();
       }}
+      // It's a button to the keyboard too: Enter or Space.
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        e.stopPropagation();
+        onDelete();
+      }}
       className={`flex size-5 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 hover:bg-black/[0.06] hover:text-[#B42318] ${className}`}
     >
       <svg width="9" height="9" viewBox="0 0 12 12">
@@ -531,7 +552,8 @@ function Watching({ state, onOpen }: { state: AppState; onOpen: (w: Watch) => vo
   );
 }
 
-function NameInput({ value, placeholder, onChange, onSave, onCancel }: { value: string; placeholder?: string; onChange: (v: string) => void; onSave: () => void; onCancel: () => void }) {
+/** A name typed in place (a workspace, a CRM file): Enter saves, Esc cancels. With a placeholder, it makes a new one. */
+export function NameInput({ value, placeholder, onChange, onSave, onCancel }: { value: string; placeholder?: string; onChange: (v: string) => void; onSave: () => void; onCancel: () => void }) {
   return (
     <form
       onSubmit={(e) => {
