@@ -65,7 +65,8 @@ async function until(check, what, ms = 15_000) {
 process.env.BOPS_CLOUD_URL = "https://cloud.test";
 process.env.BOPS_ORGO_ORIGIN = "https://orgo.test";
 globalThis.bopsOrgoKey = "sk_orgo_test";
-const USER = { id: "u_1", email: "me@example.com", name: "Test" };
+// An @orgo.ai account: the CRM is Orgo's team's while it's being finished (lib/crm-access.ts).
+const USER = { id: "u_1", email: "me@orgo.ai", name: "Test" };
 const COMPUTER = "comp_1";
 // A 1x1 PNG: what Orgo answers for a screenshot.
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
@@ -216,8 +217,9 @@ assert.equal(s.runner, "computer", "a new cloud task runs on the computer tool")
 assert.equal(s.agentSessionId, undefined, "no Agents API session");
 assert.equal(s.owed, undefined, "nothing owed after an answer");
 assert.equal(asked.length, 3);
-// What the model is given: the screen, web search, a shell, signing in from the vault, its instructions; each call follows the last.
-assert.deepEqual(asked[0].tools.map((t) => t.name ?? t.type), ["computer", "web_search", "run_command", "sign_in_from_vault"]);
+// What the model is given: the screen, web search, a shell, signing in from the vault, the user's CRM (crm.ts), its instructions; each call follows the last.
+assert.deepEqual(asked[0].tools.map((t) => t.name ?? t.type), ["computer", "web_search", "run_command", "sign_in_from_vault", "crm_files", "crm_read", "crm_save_rows", "crm_create_file"]);
+assert.match(asked[0].instructions, /Bops CRM: .* save them with crm_save_rows as you go/, "told about the CRM, as a task");
 assert.match(asked[0].instructions, /call sign_in_from_vault: Bops fills/, "told to use it (no helpers' screens here)");
 assert.equal(asked[0].previous_response_id, undefined);
 assert.match(userText(asked[0]), /^Make the report/);
@@ -402,6 +404,34 @@ assert.ok(bash.slice(bashBefore).includes("true"), "woken by an action");
 assert.equal(pc.status, "running");
 const zshot = asked.at(-1).input.find((i) => i.type === "computer_call_output");
 assert.equal(zshot?.output.type, "computer_screenshot", "the model got the screen");
+
+/* ---------------- A task someone outside Bops started: none of the user's CRM ---------------- */
+
+// An email or a text from someone else (StartOptions.outside) can start a cloud task, which also opens
+// any web page: it gets no crm_* tools and no CRM note, so neither can have it read the user's customers out.
+answers.push(() => response("resp_o1", [said("The table is booked for 8.")]));
+const fromOutside = X.startSession({ botId: main.id, goal: "Book a table for 8", title: "Table for 8", where: "cloud", fresh: true, outside: "an email from desk@hotel.example" });
+s = await ended(fromOutside.id);
+assert.equal(s.status, "done", `it finished (${s.error ?? ""})`);
+assert.equal(s.fromOutside, true, "marked as started from outside");
+const outsideAsk = asked.at(-1);
+assert.deepEqual(
+  outsideAsk.tools.map((t) => t.name ?? t.type).filter((n) => n.startsWith("crm_")),
+  [],
+  "no CRM tools",
+);
+assert.doesNotMatch(outsideAsk.instructions, /Bops CRM:/, "and no CRM note");
+// The user's own tasks still have them.
+answers.push(() => response("resp_o2", [said("Done.")]));
+await task("Book a table for 4", "Table for 4");
+assert.ok(asked.at(-1).tools.some((t) => t.name === "crm_read"), "a task the user started keeps the CRM");
+// An account outside Orgo's team has no CRM at all (lib/crm-access.ts): no crm_* tools, no CRM note.
+S.update((st) => (st.account = { user: { ...USER, email: "me@example.com" }, signedInAt: Date.now() }));
+answers.push(() => response("resp_o3", [said("Done.")]));
+await task("Book a table for 2", "Table for 2");
+assert.deepEqual(asked.at(-1).tools.map((t) => t.name ?? t.type).filter((n) => n.startsWith("crm_")), [], "no CRM tools outside Orgo's team");
+assert.doesNotMatch(asked.at(-1).instructions, /Bops CRM:/, "and no CRM note");
+S.update((st) => (st.account = { user: USER, signedInAt: Date.now() }));
 
 /* ---------------- AI credit used up ---------------- */
 
