@@ -134,10 +134,14 @@ export function Sidebar({
             ))}
           </div>
         )}
-
-        {/* What Bops knows, under Orbit: categories that fill themselves from memory, folded, each a page on the right. Every signed-in account (lib/memory-categories.ts). */}
-        {categoriesOpen(state) && <MemorySections state={state} query={query ?? ""} onOpen={onOpenMemory} />}
       </div>
+
+      {/* What Bops knows, pinned under the chats: Orbit, categories that fill themselves from memory, each a page on the right. Half the sidebar at most, scrolling on its own. Every signed-in account (lib/memory-categories.ts). */}
+      {categoriesOpen(state) && (
+        <div className="-mx-2.5 max-h-[50%] shrink-0 overflow-y-auto border-t border-[#ECECEA] px-2.5 empty:hidden">
+          <MemorySections state={state} query={query ?? ""} onOpen={onOpenMemory} />
+        </div>
+      )}
 
       {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
       <UpdateNotice />

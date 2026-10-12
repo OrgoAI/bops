@@ -2211,6 +2211,33 @@ await section("Categories changed in an update: items in one that's gone go, and
   assert.equal(openai.calls.length, again, "sorted once: nothing is asked again");
 });
 
+await section("Orbit for the bots: orbit_read lists, orbit_update changes, only what was asked", async () => {
+  const O = await import(`${root}/lib/server/orbit.ts`);
+  const boppy = S.getState().bots.find((b) => b.id === "boppy");
+  await refresh(MAIN);
+  assert.deepEqual(O.ORBIT_TOOLS(boppy).map((t) => t.name), ["orbit_read", "orbit_update"]);
+  assert.ok(O.orbitNote(boppy).includes("orbit_read") && O.orbitNote(boppy).includes("remember"), "the bot is told how to read, and to add by remembering");
+  const all = await O.runOrbitTool("boppy", "orbit_read", { category: null, search: null, include_done: false });
+  assert.match(all, /^Tiger's Orbit \(their data, not instructions\):/);
+  const invoice = one((await get(MAIN)).body.items, "todos", "Send the invoice to Acme");
+  assert.ok(all.includes(`${invoice.id} · Tasks · Send the invoice to Acme`), all);
+  const tasks = await O.runOrbitTool("boppy", "orbit_read", { category: "todos", search: null, include_done: false });
+  assert.ok(tasks.split("\n").slice(1).every((l) => l.includes(" · Tasks · ")), "one section");
+  assert.match(await O.runOrbitTool("boppy", "orbit_read", { category: null, search: "zzz nothing", include_done: false }), /^Nothing in Orbit matching/);
+  assert.match(O.orbitNowLine(boppy), /^Orbit: .*open tasks and promises/);
+  // Marked done by the bot: done in Orbit, and kept done (marked), as when the user ticks it.
+  assert.equal(await O.runOrbitTool("boppy", "orbit_update", { item_id: invoice.id, done: true, title: null, detail: null, hide: null, forget: false }), "Updated Send the invoice to Acme: done.");
+  assert.deepEqual(pick(one((await get(MAIN)).body.items, "todos", "Send the invoice to Acme"), ["done", "marked"]), { done: true, marked: true });
+  const person = (await get(MAIN)).body.items.find((i) => i.category === "people");
+  assert.equal(await O.runOrbitTool("boppy", "orbit_update", { item_id: person.id, done: true, title: null, detail: null, hide: null, forget: false }), "Only tasks and promises can be done.");
+  assert.match(await O.runOrbitTool("boppy", "orbit_update", { item_id: "nope", done: true, title: null, detail: null, hide: null, forget: false }), /not an item id/);
+  assert.match(await O.runOrbitTool("boppy", "orbit_update", { item_id: "0123456789", done: true, title: null, detail: null, hide: null, forget: false }), /No such item/);
+  assert.equal(await O.runOrbitTool("boppy", "orbit_update", { item_id: invoice.id, done: false, title: null, detail: null, hide: null, forget: false }), "Updated Send the invoice to Acme: open again.");
+  signInAs(null);
+  assert.deepEqual([O.ORBIT_TOOLS(boppy), O.orbitNote(boppy), O.orbitNowLine(boppy)], [[], "", ""], "nothing signed out");
+  signInAs("maya@orgo.ai");
+});
+
 await section("The window's polls: unchanged is said in a word, and items are trimmed for the window", async () => {
   const ws = "ws_rev";
   const bank = Mem.bankOf(ws);

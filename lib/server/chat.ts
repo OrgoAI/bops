@@ -6,6 +6,7 @@ import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { appsNote, placesNote } from "./skills";
 import { DATA_TOOL_NAMES, DATA_TOOLS, dataNote, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmNote, crmNowLine, runCrmTool } from "./crm";
+import { ORBIT_TOOL_NAMES, ORBIT_TOOLS, orbitNote, orbitNowLine, runOrbitTool } from "./orbit";
 import { openaiClient } from "./openai-client";
 import { contactLine, createBot } from "./bots";
 import { creditsOut, noteOutOfCredit, OUT_OF_CREDIT } from "./cloud";
@@ -378,7 +379,7 @@ async function acknowledge(b: Bot | undefined, request: string, task: string, pa
 const saidNo = (result: string) => /\bsaid no\. Don't\b/.test(result);
 
 /** Tools whose answers go back to the model before it replies (app lookups, memory). */
-const LOOKUPS = new Set(["find_app_actions", "use_app", "remember", "recall", "watch", "stop_watch", "ask_teammate", "check_email", "read_email", "send_email", "reply_email", "text_me", ...DATA_TOOL_NAMES, ...CRM_TOOL_NAMES]);
+const LOOKUPS = new Set(["find_app_actions", "use_app", "remember", "recall", "watch", "stop_watch", "ask_teammate", "check_email", "read_email", "send_email", "reply_email", "text_me", ...DATA_TOOL_NAMES, ...CRM_TOOL_NAMES, ...ORBIT_TOOL_NAMES]);
 
 /** The user's latest message in a chat: what memory is searched for. */
 function lastWords(chatId: string) {
@@ -673,6 +674,8 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
       ...(opts.outside ? [] : DATA_TOOLS(b)),
       // The user's own CRM (crm.ts): not for a turn someone else started, like business data.
       ...(opts.outside ? [] : CRM_TOOLS(b)),
+      // Orbit (orbit.ts), the user's people, tasks and events: likewise only on their own turns.
+      ...(opts.outside ? [] : ORBIT_TOOLS(b)),
       ...(textingLine(b) && ownerPhone()
         ? [
             fn("text_me", `Text ${owner} on their phone (iMessage or SMS) from the team's number. Use it whenever they ask you to text or message them, or for news they'd want on their phone. Never use their Mac's Messages app for this.`, {
@@ -753,6 +756,7 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
       appsNote(b, "chat"),
       opts.outside ? "" : dataNote(b, "chat"),
       opts.outside ? "" : crmNote(b, "chat"),
+      opts.outside ? "" : orbitNote(b),
     ].join("\n");
     const now = [
       ...nowLines(b),
@@ -775,6 +779,8 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
       noOwnRoom ? `${owner}'s Orgo plan has no room for a new bot's own computer right now (${noOwnRoom}), so a bot you create works on yours.` : "",
       // The CRM's files right now (they change; the tools' words don't).
       opts.outside ? "" : crmNowLine(b),
+      // What's pressing in Orbit (coming up, open tasks), so "what's on my plate?" needs no lookup.
+      opts.outside ? "" : orbitNowLine(b),
       // What's known about the user (Honcho), for what they just said.
       // Searched only when knowing the user helps with this message (Jev); small talk and plain commands skip it.
       await memoryBlock(workspaceOf(b), lastWords(chatId), 2500, { search: await needsMemory(lastWords(chatId)) }),
@@ -814,6 +820,8 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
                   ).catch((e: Error) => `Failed: ${e.message}`)
                 : CRM_TOOL_NAMES.has(c.name)
                 ? await runCrmTool(botId, c.name, a as Record<string, unknown>, { chatId }).catch((e: Error) => `Failed: ${e.message}`)
+                : ORBIT_TOOL_NAMES.has(c.name)
+                ? await runOrbitTool(botId, c.name, a as Record<string, unknown>).catch((e: Error) => `Failed: ${e.message}`)
                 : c.name === "ask_teammate"
                 ? await askTeammate(b, (a as { bot_id?: string }).bot_id ?? "", (a as { question?: string }).question ?? "", chatId, asked).catch((e: Error) => `Couldn't reach them: ${e.message}`)
                 : c.name === "watch"
