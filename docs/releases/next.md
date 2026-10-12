@@ -1,4 +1,0 @@
-- Orbit: your people, tasks and events fill in as you chat.
-- Tell Orbit something yourself from any section's page.
-- Your bots can read Orbit and mark tasks done when you ask.
-- Calls answered while your Mac was away are now remembered.
