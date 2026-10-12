@@ -261,7 +261,7 @@ const CARD = "card:";
  * one that replaces an older fact (their parents moved) says so in the chat, with a button to forget
  * the old one. The chat line has an Undo. Returns what happened, for the bot.
  */
-export function learn(ws: string, fact: string, chatId?: string): Promise<string> {
+export function learn(ws: string, fact: string, chatId?: string, opts: { auto?: boolean } = {}): Promise<string> {
   if (!on()) return Promise.resolve("Memory isn't set up.");
   const text = fact.trim().slice(0, 1000);
   if (!text) return Promise.resolve("Nothing to save.");
@@ -291,8 +291,9 @@ export function learn(ws: string, fact: string, chatId?: string): Promise<string
     if (!ours()) return "Not saved: another account signed in.";
     const [made] = await p.conclusions.create([{ content: text }]);
     x.recent.push({ id: made.id, text, at: Date.now() });
-    // A fact saved now is sorted into the categories now, not after the next look.
-    categoriesNudge(ws, "learned");
+    // A fact saved by hand or by a bot is sorted into the categories in seconds; one Bops noted on its
+    // own from what the user said waits to be sorted with the next few (each sort is a model call).
+    categoriesNudge(ws, opts.auto ? "saved" : "learned");
     let best = -1;
     ids.forEach((_, i) => prob(i, "replaces") >= 0.7 && (best < 0 || prob(i, "replaces") > prob(best, "replaces")) && (best = i));
     const old = best >= 0 ? { id: ids[best], text: known.get(ids[best])! } : undefined;
@@ -368,7 +369,7 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
       .map((l) => l.replace(/^[-*•\d.)\s]+/, "").trim())
       .filter((l) => l && l !== "NONE" && l.length < 400)
       .slice(0, 3);
-    for (const f of facts) if (ours()) await learn(ws, f, chatId);
+    for (const f of facts) if (ours()) await learn(ws, f, chatId, { auto: true });
   })().catch((e: Error) => console.warn(`[memory] auto-remember: ${e.message}`));
 }
 
@@ -764,6 +765,7 @@ export async function fixFact(ws: string, id: string, text: string) {
     await p.setCard(((await p.getCard()) ?? []).map((l) => (l === old ? t : l)));
     bankFor(b).card = undefined;
     categoriesDropped(b.bank, [id]);
+    categoriesNudge(ws, "card");
     return;
   }
   await p.conclusions.delete(id);
@@ -781,6 +783,7 @@ export async function pinFact(ws: string, text: string) {
   if (lines.length >= 40) throw new Error("About you is full (40 lines). Remove one first.");
   await p.setCard([...lines, text.trim().slice(0, 300)]);
   bankFor(b).card = undefined;
+  categoriesNudge(ws, "card");
 }
 
 /** Delete a fact or a card line. */
@@ -790,7 +793,7 @@ export const forgetFact = (ws: string, id: string) => forget(bindingOf(ws), id);
  * For the categories (memory-categories.ts), which sort what's in memory into People, Events,
  * To-dos and the rest. Loaded when first needed: it imports this module.
  */
-function categoriesNudge(ws: string, why: "saved" | "learned") {
+function categoriesNudge(ws: string, why: "saved" | "learned" | "card") {
   void import("./memory-categories").then((m) => m.nudge(ws, why)).catch(() => {});
 }
 

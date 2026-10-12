@@ -37,45 +37,64 @@ const isSnapshot = (j: unknown): j is MemorySnapshot =>
 
 /* ---------------- Data ---------------- */
 
-/** A workspace's categories, one copy for the sidebar and the page. */
+/** A workspace's categories as one Orgo account sees them: one copy for the sidebar and the page. */
 type Shared = {
+  /** The account (state.account.user.id) and the workspace. */
+  user: string;
+  ws: string;
   snap: MemorySnapshot | null;
   /** Who shows them (the sidebar, the page), told of every change. Reading stops when none are left. */
   users: Set<() => void>;
   /** Answers count in the order they were asked: one older than what's shown is dropped. */
   asked: number;
   shown: number;
-  /** Reads on their way. */
+  /** Reads on their way, and when the copy was last known to be current (an answer, or one saying nothing changed). */
   reading: number;
+  readAt: number;
   timer?: ReturnType<typeof setTimeout>;
   /** Reads when Bops comes back in sight or to the front. */
   back?: () => void;
 };
 
 const shared = new Map<string, Shared>();
+const keyOf = (user: string, ws: string) => `${user}:${ws}`;
+/** The account that asked last: copies of any other account go once nothing shows them (signed out, or someone else signed in). */
+let current = "";
 
-function sharedOf(ws: string) {
-  let s = shared.get(ws);
-  if (!s) shared.set(ws, (s = { snap: null, users: new Set(), asked: 0, shown: 0, reading: 0 }));
+function sharedOf(user: string, ws: string) {
+  let s = shared.get(keyOf(user, ws));
+  if (!s) shared.set(keyOf(user, ws), (s = { user, ws, snap: null, users: new Set(), asked: 0, shown: 0, reading: 0, readAt: 0 }));
   return s;
 }
 
+/** A snapshot's version (it changes with anything in it), when the server sends one. */
+const revOf = (snap: MemorySnapshot | null) => (typeof snap?.rev === "number" ? snap.rev : undefined);
+
 /** Shows an answer to everyone showing the categories (unless a newer one is shown already), and sets the next read. */
-function show(s: Shared, ws: string, snap: MemorySnapshot, asked = ++s.asked) {
+function show(s: Shared, snap: MemorySnapshot, asked = ++s.asked) {
   if (asked < s.shown) return;
   s.shown = asked;
   s.snap = snap;
+  s.readAt = Date.now();
   for (const changed of s.users) changed();
-  plan(s, ws);
+  plan(s);
 }
 
-function read(s: Shared, ws: string) {
+/** Reads the categories, saying which version is here already: the answer is then only that nothing changed, if nothing did. */
+function read(s: Shared) {
   const asked = ++s.asked;
+  const rev = revOf(s.snap);
   s.reading++;
-  void fetch(`/api/memory/categories?ws=${encodeURIComponent(ws)}`, { cache: "no-store" })
+  void fetch(`/api/memory/categories?ws=${encodeURIComponent(s.ws)}${rev === undefined ? "" : `&rev=${rev}`}`, { cache: "no-store" })
     .then((r) => (r.ok ? r.json() : null))
     .then((j: unknown) => {
-      if (isSnapshot(j)) show(s, ws, j, asked);
+      if (isSnapshot(j)) show(s, j, asked);
+      else if ((j as { unchanged?: unknown } | null)?.unchanged === true && s.snap && asked >= s.shown) {
+        // The copy here is current: as good as a new one, for when to read next.
+        s.shown = asked;
+        s.readAt = Date.now();
+        plan(s);
+      }
     })
     .catch(() => {})
     .finally(() => {
@@ -84,60 +103,66 @@ function read(s: Shared, ws: string) {
 }
 
 /** The next read: in a minute, or in 5 seconds while new things are being sorted. None while Bops is out of sight, or once no one shows them. */
-function plan(s: Shared, ws: string) {
+function plan(s: Shared) {
   clearTimeout(s.timer);
   s.timer = undefined;
   if (!s.users.size) return;
   s.timer = setTimeout(
     () => {
-      if (!document.hidden) read(s, ws);
-      plan(s, ws);
+      if (!document.hidden) read(s);
+      plan(s);
     },
     s.snap?.syncing ? 5_000 : 60_000,
   );
 }
 
-/** One more place shows a workspace's categories (the first starts reading them). Returns how it stops. */
-function watch(ws: string, changed: () => void) {
-  const s = sharedOf(ws);
+/**
+ * One more place shows an account's categories for a workspace (the first starts reading them, and
+ * one that opens on a copy older than 3 seconds reads them now). Returns how it stops.
+ */
+function watch(user: string, ws: string, changed: () => void) {
+  current = user;
+  for (const [key, other] of shared) if (other.user !== user && !other.users.size) shared.delete(key);
+  const s = sharedOf(user, ws);
   s.users.add(changed);
   if (s.users.size === 1) {
     // Back in sight, or in front again: read now (once, when both happen together).
     const back = () => {
-      if (!document.hidden && !s.reading) read(s, ws);
+      if (!document.hidden && !s.reading) read(s);
     };
     s.back = back;
     window.addEventListener("focus", back);
     document.addEventListener("visibilitychange", back);
-    if (!s.reading) read(s, ws);
-    plan(s, ws);
+    plan(s);
   }
+  if (!s.reading && Date.now() - s.readAt > 3_000) read(s);
   return () => {
     s.users.delete(changed);
     if (s.users.size) return;
-    plan(s, ws);
+    plan(s);
     if (s.back) {
       window.removeEventListener("focus", s.back);
       document.removeEventListener("visibilitychange", s.back);
       s.back = undefined;
     }
+    if (s.user !== current) shared.delete(keyOf(s.user, s.ws));
   };
 }
 
 /** Asks for a change: everyone showing the categories gets them as they are after it. */
-async function change(ws: string, body: MemoryAction): Promise<string | null> {
-  const s = sharedOf(ws);
+async function change(user: string, ws: string, body: MemoryAction): Promise<string | null> {
+  const s = sharedOf(user, ws);
   try {
     const r = await fetch("/api/memory/categories", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, ws }) });
     const j: unknown = await r.json().catch(() => null);
     if (!r.ok || !isSnapshot(j)) {
       // What's shown may be out of date (an item gone already): read it again.
-      read(s, ws);
+      read(s);
       const said = (j as { error?: unknown } | null)?.error;
       return typeof said === "string" && said ? said : "That didn't work. Try again.";
     }
     // Newer than any read still on its way.
-    show(s, ws, j);
+    show(s, j);
     return null;
   } catch {
     return "Couldn't reach Bops. Try again.";
@@ -145,13 +170,14 @@ async function change(ws: string, body: MemoryAction): Promise<string | null> {
 }
 
 /**
- * A workspace's categories (null until they're in), the same copy wherever they show. `act` asks for
- * a change, and every list shows the categories as they are after it.
+ * A workspace's categories as the signed-in account (`user`: state.account.user.id) sees them, null
+ * until they're in: the same copy wherever they show. `act` asks for a change, and every list shows
+ * the categories as they are after it.
  */
-export function useMemoryCategories(ws: string) {
-  const subscribe = useCallback((changed: () => void) => watch(ws, changed), [ws]);
-  const snap = useSyncExternalStore(subscribe, () => shared.get(ws)?.snap ?? null, () => null);
-  const act = useCallback<MemoryAct>((body) => change(ws, body), [ws]);
+export function useMemoryCategories(ws: string, user = "") {
+  const subscribe = useCallback((changed: () => void) => watch(user, ws, changed), [user, ws]);
+  const snap = useSyncExternalStore(subscribe, () => shared.get(keyOf(user, ws))?.snap ?? null, () => null);
+  const act = useCallback<MemoryAct>((body) => change(user, ws, body), [user, ws]);
   return { snap, act };
 }
 
@@ -164,12 +190,35 @@ const soonest = (a: MemoryItem, b: MemoryItem) => (a.when && b.when ? cmp(a.when
 /** The latest date first. */
 const latest = (a: MemoryItem, b: MemoryItem) => cmp(b.when ?? "", a.when ?? "") || newest(a, b);
 
+/**
+ * Where an open to-do or promise stands: 0 needs the user now (due today, or up to a week overdue), 1
+ * coming up, 2 more than a week overdue (after two, it's in Older), 3 no date.
+ */
+function standing(i: MemoryItem) {
+  if (!i.when) return 3;
+  const day = i.when.slice(0, 10);
+  return day > dayFromToday(0) ? 1 : day >= dayFromToday(-7) ? 0 : 2;
+}
+
+/**
+ * Open to-dos and promises, what matters first: due today, then up to a week overdue (the least
+ * overdue first), then coming up (the soonest first), then 8 to 14 days overdue, then the undated
+ * (the newest mention first). On the page and in the sidebar's first five.
+ */
+function mattersFirst(a: MemoryItem, b: MemoryItem) {
+  const x = standing(a);
+  const by = x - standing(b);
+  if (by || x === 3) return by || newest(a, b);
+  // Coming up: the soonest first. Overdue: the latest day first (today before yesterday), its earliest time first.
+  return (x === 1 ? cmp(a.when!, b.when!) : cmp(b.when!.slice(0, 10), a.when!.slice(0, 10)) || cmp(a.when!, b.when!)) || newest(a, b);
+}
+
 /** `now`: what matters now, all the sidebar shows of a category (the page shows every group). */
 export type ItemGroup = { label?: string; items: MemoryItem[]; now?: boolean };
 
 /**
  * A category's items in its order, in groups. Events: coming up (soonest first), past (latest first),
- * then those with no date yet. To-dos and promises: open (soonest due first, then the newest), older
+ * then those with no date yet. To-dos and promises: open (what matters first: mattersFirst), older
  * (left open long after they mattered: lib/memory-categories.ts settled), then done. The rest: the
  * newest mention first. The sidebar shows the first few of what matters now: events coming up, open
  * to-dos and promises, all of the rest.
@@ -185,7 +234,7 @@ export function groupsOf(category: CategoryId, items: MemoryItem[]): ItemGroup[]
         ]
       : category === "todos" || category === "promises"
         ? [
-            { label: "Open", items: mine.filter((i) => !i.done && !settled(i)).sort(soonest), now: true },
+            { label: "Open", items: mine.filter((i) => !i.done && !settled(i)).sort(mattersFirst), now: true },
             { label: "Older", items: mine.filter((i) => !i.done && settled(i)).sort(latest) },
             { label: "Done", items: mine.filter((i) => i.done).sort(newest) },
           ]
@@ -350,20 +399,21 @@ function When({ item }: { item: MemoryItem }) {
 /** Items a section shows before "Show all". */
 const FIRST = 5;
 
-const openKey = (ws: string, c: CategoryId) => `bops.memory.open.${ws}.${c}`;
+/** Where this Mac keeps whether a section is open: per Orgo account and workspace. */
+const openKey = (user: string, ws: string, c: CategoryId) => `bops.memory.open.${user}.${ws}.${c}`;
 
 /** Whether a section is open, as the user left it on this Mac (folded until opened). */
-function readOpen(ws: string, c: CategoryId) {
+function readOpen(user: string, ws: string, c: CategoryId) {
   try {
-    return localStorage.getItem(openKey(ws, c)) === "1";
+    return localStorage.getItem(openKey(user, ws, c)) === "1";
   } catch {
     return false;
   }
 }
 
-function writeOpen(ws: string, c: CategoryId, open: boolean) {
+function writeOpen(user: string, ws: string, c: CategoryId, open: boolean) {
   try {
-    localStorage.setItem(openKey(ws, c), open ? "1" : "0");
+    localStorage.setItem(openKey(user, ws, c), open ? "1" : "0");
   } catch {
     /* kept until Bops reloads */
   }
@@ -378,16 +428,31 @@ function writeOpen(ws: string, c: CategoryId, open: boolean) {
  */
 export function MemorySections({ state, query, onOpen }: { state: AppState; query?: string; onOpen: (open: MemoryOpen) => void }) {
   if (!categoriesOpen(state)) return null;
-  return <LiveSections ws={currentWorkspace(state)} query={query} onOpen={onOpen} />;
+  return <LiveSections user={state.account?.user.id ?? ""} ws={currentWorkspace(state)} query={query} onOpen={onOpen} />;
 }
 
-function LiveSections({ ws, query, onOpen }: { ws: string; query?: string; onOpen: (open: MemoryOpen) => void }) {
-  const { snap } = useMemoryCategories(ws);
-  return <SidebarSections ws={ws} snap={snap} query={query} onOpen={onOpen} />;
+function LiveSections({ user, ws, query, onOpen }: { user: string; ws: string; query?: string; onOpen: (open: MemoryOpen) => void }) {
+  const { snap } = useMemoryCategories(ws, user);
+  return <SidebarSections user={user} ws={ws} snap={snap} query={query} onOpen={onOpen} />;
 }
 
-/** The sections for a snapshot of the categories (MemorySections, without the fetching). `query`: the sidebar's search, as typed. */
-export function SidebarSections({ ws, snap, query = "", onOpen }: { ws: string; snap: MemorySnapshot | null; query?: string; onOpen: (open: MemoryOpen) => void }) {
+/**
+ * The sections for a snapshot of the categories (MemorySections, without the fetching). `user`: the
+ * Orgo account, whose folded sections this Mac remembers; `query`: the sidebar's search, as typed.
+ */
+export function SidebarSections({
+  user = "",
+  ws,
+  snap,
+  query = "",
+  onOpen,
+}: {
+  user?: string;
+  ws: string;
+  snap: MemorySnapshot | null;
+  query?: string;
+  onOpen: (open: MemoryOpen) => void;
+}) {
   // Sections folded or opened since Bops opened, over what this Mac remembers.
   const [toggled, setToggled] = useState<Record<string, boolean>>({});
   if (!snap?.on) return null;
@@ -412,12 +477,12 @@ export function SidebarSections({ ws, snap, query = "", onOpen }: { ws: string; 
       {!snap.items.length && (
         <div className="flex items-center gap-2 px-2.5 text-[13px] leading-[18px] text-[#9A9A98]">
           {snap.syncing && <Spinner size={11} color="#9A9A98" />}
-          What your bots learn shows up here
+          {snap.hidden?.length ? "Everything Bops learned is hidden." : "What your bots learn shows up here"}
         </div>
       )}
       {sections.map(({ c, items }) => {
-        const key = `${ws}.${c.id}`;
-        const open = !!q || (toggled[key] ?? readOpen(ws, c.id));
+        const key = `${user}.${ws}.${c.id}`;
+        const open = !!q || (toggled[key] ?? readOpen(user, ws, c.id));
         return (
           <div key={c.id} className="flex flex-col">
             <button
@@ -425,7 +490,7 @@ export function SidebarSections({ ws, snap, query = "", onOpen }: { ws: string; 
                 // While searching, every section stays open.
                 if (q) return;
                 setToggled({ ...toggled, [key]: !open });
-                writeOpen(ws, c.id, !open);
+                writeOpen(user, ws, c.id, !open);
               }}
               aria-expanded={open}
               className="flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
@@ -482,30 +547,47 @@ function SidebarRow({ item, onClick }: { item: MemoryItem; onClick: () => void }
 /* ---------------- The page ---------------- */
 
 /**
- * One category as a page on the right (a tab per workspace): its items in groups, each opening in
- * place. `focus` opens one and brings it into view; `query` fills in the search (Show all, from the
- * sidebar's search); `focusAt` is when they were asked for, so asking again for the same item (it was
- * closed since, or scrolled away) does it again.
+ * One category as a page on the right (a tab per workspace, of the signed-in account `user`): its
+ * items in groups, each opening in place. `focus` opens one and brings it into view; `query` fills in
+ * the search once (Show all, from the sidebar's search: `onQueryUsed` then takes it off the tab, so it
+ * doesn't come back); `focusAt` is when they were asked for, so asking again for the same item (it
+ * was closed since, or scrolled away) does it again.
  */
 export function MemoryView({
+  user,
   ws,
   category,
   focus,
   focusAt,
   query,
+  onQueryUsed,
   onCategory,
   onClose,
 }: {
+  user?: string;
   ws: string;
   category: CategoryId;
   focus?: string;
   focusAt?: number;
   query?: string;
+  onQueryUsed?: () => void;
   onCategory: (category: CategoryId) => void;
   onClose: () => void;
 }) {
-  const { snap, act } = useMemoryCategories(ws);
-  return <MemoryPage snap={snap} act={act} category={category} focus={focus} focusAt={focusAt} query={query} onCategory={onCategory} onClose={onClose} />;
+  const { snap, act } = useMemoryCategories(ws, user);
+  return (
+    <MemoryPage
+      snap={snap}
+      act={act}
+      category={category}
+      focus={focus}
+      focusAt={focusAt}
+      query={query}
+      onQueryUsed={onQueryUsed}
+      onCategory={onCategory}
+      onClose={onClose}
+    />
+  );
 }
 
 const BUTTON = "rounded-full bg-[#F2F2F0] px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#EAEAE7] disabled:opacity-40";
@@ -518,6 +600,7 @@ export function MemoryPage({
   focus,
   focusAt,
   query,
+  onQueryUsed,
   onCategory,
   onClose,
 }: {
@@ -527,6 +610,7 @@ export function MemoryPage({
   focus?: string;
   focusAt?: number;
   query?: string;
+  onQueryUsed?: () => void;
   onCategory: (category: CategoryId) => void;
   onClose: () => void;
 }) {
@@ -542,6 +626,10 @@ export function MemoryPage({
     if (asked.focusAt !== focusAt) setSearch(query ?? "");
     if (focus) setOpenId(focus);
   }
+  // The search asked for is filled in once: then it's off the tab (coming back to it, it isn't filled in again).
+  useEffect(() => {
+    if (query) onQueryUsed?.();
+  }, [query, onQueryUsed]);
   const [busy, setBusy] = useState<"refresh" | "sort-older" | "tidy-up" | null>(null);
   const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
   const list = useRef<HTMLDivElement>(null);
@@ -628,12 +716,10 @@ export function MemoryPage({
               />
             </label>
             <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
-              {/* What's going on, and new facts waiting to be sorted together (Refresh sorts them now). */}
               <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[12.5px] leading-4 text-[#6B6B6B]">
                 {sorting && <Spinner size={11} color="#6B6B6B" />}
                 <span className="truncate">
                   {busy === "sort-older" ? "Sorting older things" : sorting ? "Sorting new things" : snap.syncedAt ? updated(snap.syncedAt) : "Not updated yet"}
-                  {!!snap.waiting && <span className="text-[#9A9A98]"> · {snap.waiting.toLocaleString("en-US")} new waiting to sort</span>}
                 </span>
               </span>
               <button onClick={() => void run("refresh")} disabled={!!busy} title="Look for new things in memory and sort them now" className={BUTTON}>
@@ -649,6 +735,10 @@ export function MemoryPage({
                 Tidy up
               </button>
             </div>
+            {/* New facts wait to be sorted together (Refresh sorts them now); not while sorting, which is taking them. */}
+            {!!snap.waiting && !sorting && (
+              <span className="-mt-1 text-[12.5px] leading-4 text-[#9A9A98]">{snap.waiting.toLocaleString("en-US")} new waiting to sort</span>
+            )}
             {/* Facts older than the newest ones sorted at first wait here, and Sort older sorts 300 more. */}
             {!!snap.behind && (
               <span className="-mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] leading-4 text-[#9A9A98]">
@@ -681,7 +771,9 @@ export function MemoryPage({
           ) : !all.length ? (
             <div className="flex flex-col items-center gap-3 py-12 text-center">
               <Mascot botId="boppy" color="#0A0A0A" size={52} />
-              <span className="max-w-[300px] text-[13.5px] leading-5 text-[#6B6B6B]">{c.empty}</span>
+              <span className="max-w-[300px] text-[13.5px] leading-5 text-[#6B6B6B]">
+                {snap.hidden?.some((h) => h.category === c.id) ? "Everything here is hidden." : c.empty}
+              </span>
             </div>
           ) : !groups.length ? (
             <div className="py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">
@@ -964,9 +1056,14 @@ export function Sources({ sources }: { sources: ItemSource[] }) {
  */
 export function ForgetConfirm({ busy, onForget, onCancel }: { busy: boolean; onForget: () => void; onCancel: () => void }) {
   const box = useRef<HTMLDivElement>(null);
-  // While it forgets both buttons are off and focus would drop out of here (Esc would then close the page): it stays here.
+  const cancel = useRef<HTMLButtonElement>(null);
+  const was = useRef(busy);
+  // While it forgets both buttons are off, and Chrome drops focus from a button that turns off (Esc would
+  // then close the page, and a failure's error with it): the box has focus. If it failed, Cancel again.
   useEffect(() => {
-    if (busy && box.current && !box.current.contains(document.activeElement)) box.current.focus();
+    if (busy) box.current?.focus();
+    else if (was.current) cancel.current?.focus();
+    was.current = busy;
   }, [busy]);
   return (
     <div
@@ -986,6 +1083,7 @@ export function ForgetConfirm({ busy, onForget, onCancel }: { busy: boolean; onF
           {busy ? "Forgetting…" : "Forget"}
         </button>
         <button
+          ref={cancel}
           autoFocus
           onClick={onCancel}
           disabled={busy}
@@ -998,7 +1096,7 @@ export function ForgetConfirm({ busy, onForget, onCancel }: { busy: boolean; onF
   );
 }
 
-/** An item's name and line, changed in place: Enter saves, Esc cancels. Only what changed is sent. */
+/** An item's name and line, changed in place: Enter saves, Esc cancels (not while saving). Only what changed is sent. */
 export function EditForm({
   item,
   busy,
@@ -1014,31 +1112,35 @@ export function EditForm({
 }) {
   const [title, setTitle] = useState(item.title);
   const [detail, setDetail] = useState(item.detail);
+  const name = useRef<HTMLInputElement>(null);
   const field = "w-full rounded-xl bg-[#F7F7F6] px-3 py-2 text-[13.5px] leading-[18px] outline-none placeholder:text-[#9A9A98] focus:bg-white focus:shadow-[0_0_0_1.5px_#0A0A0A]";
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
+        // Save turns off while it saves, and Chrome drops focus from a button that turns off (Esc would then
+        // close the page, and a failure's error with it): the name has focus instead, unless a field has it.
+        if (!(document.activeElement instanceof HTMLInputElement)) name.current?.focus();
         const patch = { ...(title.trim() !== item.title ? { title: title.trim() } : {}), ...(detail.trim() !== item.detail ? { detail: detail.trim() } : {}) };
         if (Object.keys(patch).length) onSave(patch);
         else onCancel();
       }}
-      // Esc cancels the edit, and only the edit (preventDefault keeps the page open).
+      // Esc cancels the edit, and only the edit (preventDefault keeps the page open); while it saves, nothing.
       onKeyDown={(e) => {
         if (e.key !== "Escape") return;
         e.preventDefault();
-        onCancel();
+        if (!busy) onCancel();
       }}
       className="flex flex-col gap-2"
     >
-      <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} aria-label="Name" placeholder="Name" maxLength={90} className={`${field} font-medium`} />
+      <input ref={name} autoFocus value={title} onChange={(e) => setTitle(e.target.value)} aria-label="Name" placeholder="Name" maxLength={90} className={`${field} font-medium`} />
       <input value={detail} onChange={(e) => setDetail(e.target.value)} aria-label="Line" placeholder="A line about it" maxLength={160} className={field} />
       {error && <span className="text-[12.5px] leading-4 text-[#B42318]">{error}</span>}
       <span className="flex items-center gap-2">
         <button type="submit" disabled={busy || !title.trim()} className="rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-semibold leading-4 text-white disabled:opacity-40">
           {busy ? "Saving…" : "Save"}
         </button>
-        <button type="button" onClick={onCancel} className="rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0]">
+        <button type="button" onClick={onCancel} disabled={busy} className="rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0] disabled:opacity-40">
           Cancel
         </button>
       </span>

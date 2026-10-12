@@ -11,9 +11,11 @@ export const dynamic = "force-dynamic";
 
 /** A workspace's categories as sorted so far ({on: false} where there are none: memory off, signed out, not open to this account). */
 export async function GET(request: Request) {
-  const ws = wsOrCurrent(new URL(request.url).searchParams.get("ws"));
+  const u = new URL(request.url).searchParams;
+  const ws = wsOrCurrent(u.get("ws"));
+  const rev = Number(u.get("rev"));
   try {
-    return Response.json(snapshot(ws));
+    return Response.json(snapshot(ws, u.has("rev") && Number.isFinite(rev) ? rev : undefined));
   } catch (e) {
     return Response.json({ error: (e as Error).message }, { status: 500 });
   }

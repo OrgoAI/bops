@@ -54,12 +54,18 @@ const DREAM_EVERY_MS = 60 * 60_000;
 
 const MODEL = process.env.BOPS_MEMORY_MODEL ?? process.env.BOPS_CHAT_MODEL ?? process.env.BOPS_SAM_MODEL ?? "gpt-6.1-sol";
 
+/** What one fact said about one item, kept so the item can be worked out again when a fact goes: its name, line, date, who, done, how it was learned, private. */
+type Said = { t: string; d: string; w?: string; o?: string; x?: boolean; h: ItemSource["how"]; p?: boolean; at: number };
+
+/** An item as kept here: what the app sees, and whether its line came from a private fact. */
+type Item = MemoryItem & { detailPrivate?: boolean };
+
 type Index = {
   v: 1;
   bank: string;
-  /** Every fact (and card line, "card:<line>") already sorted, and the items it went into. */
-  facts: Record<string, { items: string[]; at: number }>;
-  items: Record<string, MemoryItem>;
+  /** Every fact (and card line, "card:<line>") already sorted, the items it went into, and what it said about each. */
+  facts: Record<string, { items: string[]; at: number; wrote?: Record<string, Said> }>;
+  items: Record<string, Item>;
   /** Items the user forgot ("<category>:<key>", and when): only something said in a chat after that makes one again. */
   forgotten: Record<string, number>;
   /** How many of the newest facts are sorted (Sort older adds to it), and the date of the oldest of them. */
@@ -76,6 +82,8 @@ type Index = {
   behind?: number;
   /** New facts waiting to be sorted together. */
   waiting?: number;
+  /** A look left sorting to do (more than one look takes): the next one reads the sorted depth, not just the newest page. */
+  more?: boolean;
   error?: string;
 };
 
@@ -97,6 +105,8 @@ type Bank = {
   forgetting?: Promise<unknown>;
   /** The facts last read to the sorted depth, for the next look that continues sorting them (not read again for 10 minutes). */
   rows?: { at: number; depth: number; rows: FactRow[]; total: number };
+  /** Changes with anything a snapshot shows, so the window's polls can be answered "unchanged". */
+  rev: number;
 };
 type Live = { banks: Map<string, Bank>; timer?: ReturnType<typeof setInterval> };
 const g = globalThis as unknown as { bopsCategories?: Live };
@@ -109,7 +119,7 @@ export const categoriesOn = () => !onPostgres() && userDir() !== null && memoryO
 
 const bankState = (bank: string) => {
   let b = live.banks.get(bank);
-  if (!b) live.banks.set(bank, (b = { timers: new Map() }));
+  if (!b) live.banks.set(bank, (b = { timers: new Map(), rev: Date.now() }));
   return b;
 };
 
@@ -141,6 +151,7 @@ function load(bank: string): Index {
   b.index = index;
   b.file = file ?? undefined;
   b.rows = undefined;
+  b.rev++;
   return index;
 }
 
@@ -153,6 +164,7 @@ function save(bank: string, index: Index) {
   const b = bankState(bank);
   const file = fileOf(bank);
   if (!file || b.index !== index || b.file !== file) return;
+  b.rev++;
   mkdirSync(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ file, ".."), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
   try {
@@ -208,11 +220,33 @@ const howOf = (level: string, session: string | null): ItemSource["how"] =>
 type Raw = { category: string; title: string; detail: string; key: string; when: string; who: string; done: boolean };
 
 /**
- * Add what a fact says about one item: a new item, or one more mention of a known one. A newer
- * mention says how things stand now (its line, its date, done or not); an older one, or a card line
- * about something chats already said more of, only fills in what's missing. Returns the item's id.
+ * One mention's part in an item. A newer mention says how things stand now (its line, its date, done
+ * or not); an older one, or a card line about something chats already said, only fills in what's
+ * missing. `chats`: when the chat mentions already in were learned. A fuller name ("Priya" to "Priya
+ * Shah") wins from any mention. What the user set (edited, marked done) stays.
  */
-function upsert(index: Index, byKey: Map<string, string>, raw: Raw, src: ItemSource): string | null {
+function mention(item: Item, said: Said, chats: number[]) {
+  const newer = said.h === "card" ? !chats.length && said.at >= item.last : said.at >= Math.max(0, ...chats);
+  if (!item.edited && said.d && (newer || !item.detail)) {
+    item.detail = said.d;
+    item.detailPrivate = said.p || undefined;
+  }
+  if (!item.edited && said.t.length > item.title.length && said.t.toLowerCase().startsWith(`${item.title.toLowerCase()} `)) item.title = said.t;
+  if (said.w && (newer || !item.when)) item.when = said.w;
+  if (said.o && (newer || !item.who)) item.who = said.o;
+  if (newer && !item.marked && (item.category === "todos" || item.category === "promises")) item.done = said.x || undefined;
+  item.first = Math.min(item.first, said.at);
+  item.last = Math.max(item.last, said.at);
+}
+
+/** Locked when it's known only from private lines, or its line came from one. */
+const lockOf = (item: Item) => (item.sources.length > 0 && item.sources.every((s) => s.private)) || !!item.detailPrivate || undefined;
+
+/**
+ * Add what a fact says about one item: a new item, or one more mention of a known one. Returns the
+ * item's id and what the fact said about it (kept with the fact).
+ */
+function upsert(index: Index, byKey: Map<string, string>, raw: Raw, src: ItemSource): { id: string; said: Said } | null {
   if (!CATEGORY_IDS.includes(raw.category as CategoryId)) return null;
   const category = raw.category as CategoryId;
   const title = clip(raw.title, 90);
@@ -227,26 +261,51 @@ function upsert(index: Index, byKey: Map<string, string>, raw: Raw, src: ItemSou
   const known = byKey.get(key);
   let item = known && Object.hasOwn(index.items, known) ? index.items[known] : undefined;
   if (!item) {
-    item = { id: randomBytes(5).toString("hex"), category, key, title, detail: clip(raw.detail, 160), sources: [], first: src.at, last: src.at };
+    item = { id: randomBytes(5).toString("hex"), category, key, title, detail: "", sources: [], first: src.at, last: src.at };
     index.items[item.id] = item;
     byKey.set(key, item.id);
   }
-  const said = item.sources.filter((s) => s.how !== "card");
-  const newer = src.how === "card" ? !said.length && src.at >= item.last : src.at >= Math.max(0, ...said.map((s) => s.at));
-  const detail = clip(raw.detail, 160);
-  if (!item.edited && detail && (newer || !item.detail)) item.detail = detail;
-  // "Priya" becomes "Priya Shah" when any mention has the fuller name.
-  if (!item.edited && title.length > item.title.length && title.toLowerCase().startsWith(`${item.title.toLowerCase()} `)) item.title = title;
+  const said: Said = { t: title, d: clip(raw.detail, 160), h: src.how, at: src.at };
   const when = whenOf(raw.when);
-  if (when && (newer || !item.when)) item.when = when;
   const who = clip(raw.who, 90);
-  if (who && (newer || !item.who)) item.who = who;
-  if (newer && !item.marked && (category === "todos" || category === "promises")) item.done = raw.done || undefined;
+  if (when) said.w = when;
+  if (who) said.o = who;
+  if (raw.done) said.x = true;
+  if (src.private) said.p = true;
+  mention(
+    item,
+    said,
+    item.sources.filter((s) => s.how !== "card").map((s) => s.at),
+  );
   item.sources = [src, ...item.sources.filter((s) => s.fact !== src.fact)].sort((a, b) => b.at - a.at).slice(0, 12);
-  item.private = item.sources.every((s) => s.private) || undefined;
-  item.first = Math.min(item.first, src.at);
-  item.last = Math.max(item.last, src.at);
-  return item.id;
+  item.private = lockOf(item);
+  return { id: item.id, said };
+}
+
+/**
+ * An item worked out again from the facts still behind it, oldest first, as if they came in now: what
+ * a deleted fact said (a line, an address, a date) goes with it. Left as it is when some fact behind it
+ * was sorted before facts kept what they said.
+ */
+function rebuild(index: Index, item: Item) {
+  const behind = Object.values(index.facts).filter((f) => f.items.includes(item.id));
+  if (!behind.length || behind.some((f) => !f.wrote?.[item.id])) return;
+  const said = behind.map((f) => f.wrote![item.id]).sort((a, b) => a.at - b.at);
+  if (!item.edited) {
+    item.title = said[0].t;
+    item.detail = "";
+    item.detailPrivate = undefined;
+  }
+  item.when = undefined;
+  item.who = undefined;
+  if (!item.marked) item.done = undefined;
+  item.first = said[0].at;
+  item.last = said[0].at;
+  const chats: number[] = [];
+  for (const x of said) {
+    mention(item, x, chats);
+    if (x.h !== "card") chats.push(x.at);
+  }
 }
 
 /**
@@ -268,8 +327,20 @@ function dropMany(index: Index, facts: string[]) {
     if (!Object.hasOwn(index.items, id)) continue;
     const item = index.items[id];
     item.sources = item.sources.filter((s) => !gone.has(s.fact));
-    item.private = (item.sources.length > 0 && item.sources.every((s) => s.private)) || undefined;
-    if (!backed.has(id) && !item.edited && !item.marked && !item.hidden) delete index.items[id];
+    if (!backed.has(id)) {
+      if (!item.edited && !item.marked && !item.hidden) {
+        delete index.items[id];
+        continue;
+      }
+      // Kept for the user's sake (hidden, marked, renamed): what the facts said goes with them.
+      if (!item.edited) {
+        item.detail = "";
+        item.detailPrivate = undefined;
+      }
+      item.when = undefined;
+      item.who = undefined;
+    } else rebuild(index, item);
+    item.private = lockOf(item);
   }
   return true;
 }
@@ -278,6 +349,8 @@ function dropMany(index: Index, facts: string[]) {
 export function dropFacts(bank: string, ids: string[]) {
   if (!categoriesOn()) return;
   const index = load(bank);
+  // A fact not sorted yet mustn't be sorted from rows read before it went.
+  bankState(bank).rows = undefined;
   if (dropMany(index, ids)) save(bank, index);
 }
 
@@ -327,10 +400,12 @@ type Fresh = FactRow & { how: ItemSource["how"] };
 
 /**
  * What each fact says about which items, by one call of a small model: a map from each fact's place in
- * the batch to its items. Null when it couldn't answer (tried again later), "credit" when the AI credit
- * ran out, "gone" when another account signed in before it was asked.
+ * the batch to its items. "unusable" when the model answered but not usably (no JSON, a refusal, a
+ * place outside the batch: one of these facts may be why), "down" when it couldn't be asked (down,
+ * slow, rate limited, not allowed: no fact's fault, the look stops and tries again later), "credit"
+ * when the AI credit ran out, "gone" when another account signed in before it was asked.
  */
-async function sortFacts(facts: Fresh[], known: Record<string, unknown>, epoch: number, ours: () => boolean): Promise<Map<number, Raw[]> | null | "credit" | "gone"> {
+async function sortFacts(facts: Fresh[], known: Record<string, unknown>, epoch: number, ours: () => boolean): Promise<Map<number, Raw[]> | "unusable" | "refused" | "down" | "credit" | "gone"> {
   const owner = ownerName();
   const bots = getState().bots.map((b) => b.name).filter(Boolean);
   const instructions = [
@@ -366,14 +441,17 @@ async function sortFacts(facts: Fresh[], known: Record<string, unknown>, epoch: 
     // A place that isn't in the batch: the answer can't be trusted, the batch is tried again.
     const map = new Map<number, Raw[]>();
     for (const f of out.facts) {
-      if (!Number.isInteger(f.i) || f.i < 0 || f.i >= facts.length) return null;
+      if (!Number.isInteger(f.i) || f.i < 0 || f.i >= facts.length) return "unusable";
       map.set(f.i, [...(map.get(f.i) ?? []), ...f.items]);
     }
     return map;
   } catch (e) {
     if (noteOutOfCredit(e)) return "credit";
     console.warn(`[categories] sort: ${(e as Error).message}`);
-    return null;
+    const status = (e as { status?: unknown }).status;
+    // An answer that isn't JSON, or a request refused for what's in it: maybe a fact's doing ("refused";
+    // a refused request can also be a wrong setting: see apply). Anything else: the model couldn't be reached.
+    return e instanceof SyntaxError || status === 422 ? "unusable" : status === 400 ? "refused" : "down";
   }
 }
 
@@ -418,6 +496,7 @@ export function sync(ws: string, opts: SyncOpts = {}): Promise<void> {
   const ours = sameState();
   const epoch = stateEpoch();
   const index = load(bank);
+  b.rev++;
   b.running = run(ws, bank, index, opts, ours, epoch)
     .catch((e: Error) => {
       console.warn(`[categories] ${bank}: ${e.message}`);
@@ -427,6 +506,7 @@ export function sync(ws: string, opts: SyncOpts = {}): Promise<void> {
     })
     .finally(() => {
       b.running = undefined;
+      b.rev++;
       const again = b.again;
       b.again = undefined;
       if (again && ours()) void sync(ws, again);
@@ -441,6 +521,8 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
   // A sweep every 6 hours (never on the first look: nothing to check yet).
   if (!first && mode !== "quick" && (!index.sweptAt || Date.now() - index.sweptAt > SWEEP_MS)) mode = "sweep";
   if (first && RANK[mode] < RANK.fill) mode = "fill";
+  // The last look left sorting to do: this one reads as deep as the sorting goes.
+  if (index.more && mode === "look") mode = "fill";
   const now = !!opts.now || first;
   if (mode !== "quick") index.triedAt = Date.now();
   const depth = index.depth ?? FIRST_DEPTH;
@@ -459,25 +541,36 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
       b.rows = { at: Date.now(), depth, rows: rows.slice(0, depth), total };
       // Facts older than the sorted depth aren't sorted (Sort older adds 300).
       index.floorAt = rows.length >= depth ? rows[depth - 1].at : 0;
-      index.behind = Math.max(0, total - depth) || undefined;
+      // Older and not sorted: beyond the depth, less what was sorted when it was newer.
+      const sortedOlder = Object.entries(index.facts).filter(([id, f]) => !id.startsWith("card:") && !!index.floorAt && f.at < index.floorAt).length;
+      index.behind = Math.max(0, total - depth - sortedOlder) || undefined;
     }
   }
   const lines = mode === "quick" ? null : await cardOf(ws).catch(() => null);
   if (!ours()) return;
   if (index.error === "Couldn't reach memory just now. It tries again on its own.") index.error = undefined;
+  const failing = (id: string) => {
+    const f = index.failures?.[id];
+    return !!f && Date.now() - f.at < WAIT_MS * 2 ** (f.n - 1);
+  };
 
   // A sweep: what was sorted and isn't among the newest is checked with memory itself (free, by id: a
   // listing that missed a fact doesn't mean it's gone), and card lines no longer on the card go.
   if (first) index.sweptAt = Date.now();
   if (mode === "sweep") {
-    const listed = new Set(rows.map((r) => r.id));
-    const unlisted = Object.keys(index.facts).filter((id) => !id.startsWith("card:") && !listed.has(id));
+    const listed = new Map(rows.map((r) => [r.id, r.at]));
+    // Sorted facts, and facts waiting to be tried again, that the listing didn't show: asked for by id.
+    const failed = Object.keys(index.failures ?? {});
+    const unlisted = [...new Set([...Object.keys(index.facts), ...failed])].filter((id) => !id.startsWith("card:") && !listed.has(id));
     const still = await existingFacts(ws, unlisted);
     if (!ours()) return;
     dropMany(index, unlisted.filter((id) => !still.has(id)));
-    if (lines) {
-      const onCard = new Set(lines.map((l) => `card:${l}`));
-      dropMany(index, Object.keys(index.facts).filter((id) => id.startsWith("card:") && !onCard.has(id)));
+    const onCard = lines ? new Set(lines.map((l) => `card:${l}`)) : null;
+    if (onCard) dropMany(index, Object.keys(index.facts).filter((id) => id.startsWith("card:") && !onCard.has(id)));
+    // A failing fact that's gone, off the card, or now older than what's sorted won't come up again.
+    for (const id of failed) {
+      const gone = id.startsWith("card:") ? !!onCard && !onCard.has(id) : listed.has(id) ? !!index.floorAt && listed.get(id)! < index.floorAt : !still.has(id);
+      if (gone) delete index.failures![id];
     }
     index.sweptAt = Date.now();
     b.rows = undefined;
@@ -485,19 +578,17 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
 
   // New: card lines first (who the user is, their people), then the newest facts not sorted yet. A fact
   // that failed waits longer each time (30 minutes, then an hour) before it's tried again.
-  const failing = (id: string) => {
-    const f = index.failures?.[id];
-    return !!f && Date.now() - f.at < WAIT_MS * 2 ** (f.n - 1);
-  };
   const inScope = (r: FactRow) => !index.floorAt || r.at >= index.floorAt;
   const pending: Fresh[] = [
     ...(lines ?? []).filter((l) => !Object.hasOwn(index.facts, `card:${l}`) && !failing(`card:${l}`)).map((l) => ({ id: `card:${l}`, text: l, at: Date.now(), session: null, level: "card", how: "card" as const })),
     ...rows.filter((r) => !Object.hasOwn(index.facts, r.id) && inScope(r) && !failing(r.id)).map((r) => ({ ...r, how: howOf(r.level, r.session) })),
   ];
 
-  // Sorted together: now when asked, or when enough wait, or the oldest has waited long enough.
+  // Sorted together: now when asked, when the card changed (a few lines, and what the user is), when
+  // enough wait, or when the oldest has waited long enough.
   const oldest = Math.min(...pending.map((f) => f.at || Date.now()));
-  if (pending.length && !now && pending.length < WAIT_FOR && Date.now() - oldest < WAIT_MS) {
+  const card = pending.some((f) => f.how === "card");
+  if (pending.length && !now && !card && pending.length < WAIT_FOR && Date.now() - oldest < WAIT_MS) {
     index.waiting = pending.length;
     if (mode !== "quick") index.syncedAt = Date.now();
     save(bank, index);
@@ -515,8 +606,14 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
   const byKey = new Map(Object.values(index.items).map((i) => [i.key, i.id] as [string, string]));
   let failed = false;
   let stopped = false;
-  /** One batch's facts, sorted into items; a batch that fails is split in two and each half tried once, so one bad fact doesn't hold up the rest. */
-  const apply = async (batch: Fresh[], split: boolean): Promise<void> => {
+  /** A call this look was answered: a refused one after that is about its facts, not a wrong setting. */
+  let answered = false;
+  /**
+   * One batch's facts, sorted into items. An answer that can't be used is asked again in halves, down to
+   * single facts, so one fact the model can't handle doesn't hold up (or give up) the rest. A model that
+   * can't be reached stops the look: no fact is counted against, it's all tried again on the next look.
+   */
+  const apply = async (batch: Fresh[]): Promise<void> => {
     // Which lines memory keeps out of prompts (asked per batch: Jev reads up to 80 lines a call).
     const priv = await privateLines(batch.map((f) => f.text)).catch(() => new Set<string>());
     if (!ours()) return void (stopped = true);
@@ -526,11 +623,21 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
       index.error = "Out of AI credit: new things wait until there's more.";
       return void (stopped = true);
     }
-    if (!got) {
-      if (split && batch.length > 1) {
+    if (got === "down") {
+      index.error = "Couldn't sort new things just now. Bops tries again on its own.";
+      return void (stopped = true);
+    }
+    // Refused with nothing answered this look, down to a single fact: a wrong setting (every request is
+    // refused), not the fact. Stopped, nothing counted against it, tried again later.
+    if (got === "refused" && batch.length === 1 && !answered) {
+      index.error = "Couldn't sort new things just now. Bops tries again on its own.";
+      return void (stopped = true);
+    }
+    if (got === "unusable" || got === "refused") {
+      if (batch.length > 1) {
         const mid = Math.ceil(batch.length / 2);
-        await apply(batch.slice(0, mid), false);
-        if (!stopped) await apply(batch.slice(mid), false);
+        await apply(batch.slice(0, mid));
+        if (!stopped) await apply(batch.slice(mid));
         return;
       }
       failed = true;
@@ -545,6 +652,7 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
       }
       return;
     }
+    answered = true;
     batch.forEach((f, j) => {
       const src: ItemSource = {
         fact: f.id,
@@ -554,21 +662,26 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
         how: f.how,
         ...(priv.has(f.text) ? { private: true } : {}),
       };
-      const ids = (got.get(j) ?? []).map((raw) => upsert(index, byKey, raw, src)).filter((x): x is string => !!x);
-      index.facts[f.id] = { items: [...new Set(ids)], at: src.at };
+      const made = (got.get(j) ?? []).map((raw) => upsert(index, byKey, raw, src)).filter((x) => !!x);
+      index.facts[f.id] = { items: [...new Set(made.map((m) => m.id))], at: src.at, wrote: Object.fromEntries(made.map((m) => [m.id, m.said])) };
       if (index.failures?.[f.id]) delete index.failures[f.id];
     });
   };
   // One batch after another: each sees what the ones before it found (Dana, the demo), so mentions merge.
   for (let i = 0; i < todo.length && !stopped; i += BATCH) {
-    await apply(todo.slice(i, i + BATCH), true);
+    await apply(todo.slice(i, i + BATCH));
     if (ours()) save(bank, index);
   }
   if (!ours()) return;
   const left = pending.length - todo.length;
-  index.waiting = undefined;
-  clearTimeout(b.timers.get("waiting"));
-  b.timers.delete("waiting");
+  // What was waiting is sorted (a quick look that found nothing on the newest page leaves the count to the full looks).
+  if (mode !== "quick" || pending.length) {
+    index.waiting = undefined;
+    clearTimeout(b.timers.get("waiting"));
+    b.timers.delete("waiting");
+  }
+  // Sorting left for the next look (more than one look takes, or it stopped).
+  index.more = left > 0 || (stopped && pending.some((f) => !Object.hasOwn(index.facts, f.id))) || (mode === "quick" && index.more) || undefined;
   if (mode !== "quick" && !stopped) index.syncedAt = Date.now();
   // Said while facts wait to be tried again (a fact given up after three tries no longer counts).
   if (!stopped) index.error = failed || Object.keys(index.failures ?? {}).length ? "Some new things couldn't be sorted yet. They're tried again later." : undefined;
@@ -608,16 +721,28 @@ function ensureTimer() {
  * was saved (Honcho works out its facts over the next minutes: a quick look in 3, not pushed back by
  * the next message).
  */
-export function nudge(ws: string, why: "saved" | "learned") {
+export function nudge(ws: string, why: "saved" | "learned" | "card") {
   if (!categoriesOn()) return;
   ensureTimer();
   const bank = bankOf(ws);
   if (why === "learned") later(ws, bank, "learned", 4_000, { mode: "quick", now: true });
+  // A card line fixed or pinned: a look that reads the card, in a few seconds.
+  else if (why === "card") later(ws, bank, "card", 4_000, { mode: "look", now: true });
   else later(ws, bank, "saved", 3 * 60_000, { mode: "quick" }, true);
 }
 
-/** A workspace's categories for the app, as sorted so far. Asking starts a look when the last one is old. */
-export function snapshot(ws: string): MemorySnapshot {
+/** An item as the window gets it: at most 6 sources, each up to 300 characters, and nothing kept only for the engine. */
+function forWindow(item: Item): MemoryItem {
+  const out: Item = { ...item, sources: item.sources.slice(0, 6).map((s) => ({ ...s, text: s.text.slice(0, 300) })) };
+  delete out.detailPrivate;
+  return out;
+}
+
+/**
+ * A workspace's categories for the app, as sorted so far. Asking starts a look when the last one is
+ * old. `since`: the rev the window has; when nothing changed it gets {unchanged: true}.
+ */
+export function snapshot(ws: string, since?: number): MemorySnapshot | { unchanged: true; rev: number } {
   if (!categoriesOn()) return { on: false, ws, items: [], syncing: false };
   ensureTimer();
   const bank = bankOf(ws);
@@ -625,11 +750,13 @@ export function snapshot(ws: string): MemorySnapshot {
   const b = bankState(bank);
   const last = Math.max(index.syncedAt ?? 0, index.triedAt ?? 0);
   if (!b.running && Date.now() - last > STALE_MS) void sync(ws, { mode: "look" });
+  if (since === b.rev) return { unchanged: true, rev: b.rev };
   const all = Object.values(index.items);
   return {
     on: true,
     ws,
-    items: all.filter((i) => !i.hidden),
+    rev: b.rev,
+    items: all.filter((i) => !i.hidden).map(forWindow),
     hidden: all.filter((i) => i.hidden).map((i) => ({ id: i.id, category: i.category, title: i.title })),
     syncing: !!b.running,
     syncedAt: index.syncedAt,
@@ -700,6 +827,8 @@ export function editItem(ws: string, id: string, patch: { title?: string; detail
   if (patch.detail !== undefined) {
     item.detail = clip(patch.detail, 160, true);
     item.edited = true;
+    item.detailPrivate = undefined;
+    item.private = lockOf(item);
   }
   if (patch.done !== undefined) {
     item.done = patch.done || undefined;

@@ -704,11 +704,14 @@ function Bops({ state }: { state: AppState | null }) {
                   ) : tab?.kind === "memory" ? (
                     <MemoryView
                       key={tab.id}
+                      user={state.account?.user.id}
                       ws={tab.ws}
                       category={tab.category}
                       focus={tab.focus}
                       focusAt={tab.focusAt}
                       query={tab.query}
+                      // The search asked for is used once: off the tab, so coming back doesn't fill it in again.
+                      onQueryUsed={() => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, query: undefined } : t)))}
                       onCategory={(category) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, category, focus: undefined } : t)))}
                       onClose={() => leaveTab(tab.id)}
                     />

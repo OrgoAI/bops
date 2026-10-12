@@ -6,9 +6,11 @@
 // sorted together (10 at a time, after 30 minutes, or at once when asked); a fact saved now sorted within
 // seconds; a big memory (the newest 300, 150 a look, Sort older for the rest); sweeps that check what was
 // sorted with memory itself; facts gone from memory; the user's changes (rename, done, hide, forget) and
-// what may bring a forgotten item back; tidying up; what goes wrong (the model, memory, a damaged file,
-// another account signing in mid-look); and the route taking only an item's id. Every user-facing line is
-// checked for dashes. Honcho is a fake answering the REST calls its SDK makes, OpenAI a fake
+// what may bring a forgotten item back; an item worked out again from the facts left when one goes (and
+// its lock); what's left to sort (behind, more, failures let go, kept rows); a new card line and a fact
+// saved by hand sorted at once, Bops's own notes batched; tidying up; what goes wrong (the model down or
+// answering unusably, memory, a damaged file, another account signing in mid-look); the window's polls
+// (rev); and the route taking only an item's id. Every user-facing line is checked for dashes. Honcho is a fake answering the REST calls its SDK makes, OpenAI a fake
 // /v1/responses that answers each fact from a table below, Jev isn't set up (privacy falls back to the
 // patterns), the Keychain is a stand-in that's never there, and the state and files live in a throwaway
 // folder: nothing reaches a real service or the user's own data.
@@ -190,10 +192,16 @@ const response = (text) => ({
 });
 /** The model's answer, as given (for openai.fail): [{i, items}]. */
 const answer = (facts) => json(response(JSON.stringify({ facts })));
-/** The model refusing (400: the SDK doesn't try again). */
-const refused = (message = "The model is busy.") => json({ error: { message, type: "invalid_request_error" } }, 400);
-/** OpenAI overloaded (500: the SDK tries again, at once here). */
-const overloaded = () => new Response(JSON.stringify({ error: { message: "Overloaded", type: "server_error" } }), { status: 500, headers: { "content-type": "application/json", "retry-after-ms": "0" } });
+/** The model refusing what it was given (422: the SDK doesn't try again; counted against the facts). */
+const refused = (message = "The model is busy.") => json({ error: { message, type: "invalid_request_error" } }, 422);
+/** A request the model rejects outright (400): a wrong setting refuses every call. */
+const rejected = (message = "Unsupported parameter.") => json({ error: { message, type: "invalid_request_error" } }, 400);
+/** OpenAI answering with an HTTP error; the SDK tries again at once when it does (429, 5xx). */
+const httpError = (status, message = `Error ${status}`) => new Response(JSON.stringify({ error: { message, type: "api_error" } }), { status, headers: { "content-type": "application/json", "retry-after-ms": "0" } });
+/** OpenAI overloaded (500). */
+const overloaded = () => httpError(500, "Overloaded");
+/** OpenAI not reachable at all (for openai.fail: thrown where fetch would, the SDK's connection error). */
+const unreachable = () => new TypeError("fetch failed (connection refused)");
 const releaseOpenai = () => {
   openai.hold = null;
   for (const r of openai.held.splice(0)) r();
@@ -209,6 +217,7 @@ async function openaiAnswer(req) {
   openai.calls.push(call);
   if (openai.hold?.(call)) await new Promise((r) => openai.held.push(r));
   const failed = openai.fail?.(call);
+  if (failed instanceof Error) throw failed;
   if (failed) return failed;
   // Answered in reverse order: the engine must go by `i`, not by place.
   const facts = [...input.facts].reverse().map((f) => {
@@ -262,6 +271,12 @@ const request = async (handler, method, path, body, { quiet = false } = {}) => {
 };
 const get = (ws) => request(R.GET, "GET", `/api/memory/categories${ws ? `?ws=${encodeURIComponent(ws)}` : ""}`);
 const post = (body, opts) => request(R.POST, "POST", "/api/memory/categories", body, opts);
+/** The window's poll: the categories, saying which version (rev) it has. */
+const getRev = (ws, rev) => request(R.GET, "GET", `/api/memory/categories?ws=${encodeURIComponent(ws)}&rev=${encodeURIComponent(rev)}`);
+/** The pages of a bank's memory read since `h` (not counting facts asked for by id). */
+const pagesOf = (bank, h) => honcho.calls.slice(h).filter((c) => c.path === `/v3/workspaces/${bank}/conclusions/list` && !c.body?.filters?.id).map((c) => c.query.page);
+/** How many facts (and card lines) a bank's index has sorted. */
+const sortedIn = (bank) => Object.keys(indexOf(bank).facts).length;
 /** Look at memory now (Refresh): the categories after. */
 async function refresh(ws) {
   const r = await post({ action: "refresh", ws });
@@ -322,6 +337,16 @@ let ahead = 0;
 function newFact(ws, text, items, opts = {}) {
   SORTS.set(text, items);
   return addFact(Mem.bankOf(ws), text, { at: Date.now() + ++ahead * 1000, ...opts });
+}
+/** `count` facts in a bank that make no items ("<prefix> <k>."), a day old and a minute apart unless `at` says when. */
+function many(bank, prefix, count, at = (k) => Date.now() - 86_400_000 - k * 60_000) {
+  const out = [];
+  for (let k = 0; k < count; k++) {
+    const text = `${prefix} ${k}.`;
+    SORTS.set(text, []);
+    out.push(addFact(bank, text, { at: at(k) }));
+  }
+  return out;
 }
 /** Every object in a JSON schema closed, with every property required (OpenAI's strict mode). */
 function strictSchema(s, where = "schema") {
@@ -395,6 +420,7 @@ const WORKSPACES = [
   ...["ws_done", "ws_i18n", "ws_drop", "ws_edit", "ws_forget", "ws_many", "ws_forgetfail", "ws_back", "ws_twice", "ws_gone", "ws_fail", "ws_down", "ws_damaged", "ws_oldshape"],
   ...["ws_big", "ws_window", "ws_scan", "ws_switch", "ws_tidy", "ws_tidy2", "ws_tidy3", "ws_tidy4", "ws_tz", "ws_budget", "ws_retry", "ws_split", "ws_range", "ws_more", "ws_serial"],
   ...["ws_hide", "ws_card", "ws_card2", "ws_older", "ws_names", "ws_keys", "ws_ranges", "ws_known", "ws_ids"],
+  ...["ws_outage", "ws_lock", "ws_oldidx", "ws_behind", "ws_more2", "ws_more3", "ws_prune", "ws_rows", "ws_cardnow", "ws_wait2", "ws_learn", "ws_rev", "ws_setting"],
 ];
 S.update((s) => {
   s.owner = { name: "Tiger" };
@@ -612,9 +638,20 @@ await section("A first look at memory: the card first, then the newest facts, so
   assert.deepEqual(pick(one(items, "promises", "Dana sends the signed contract"), ["when", "who"]), { when: undefined, who: "Dana Reyes" }, "\"next Monday\" isn't a date");
   assert.deepEqual(pick(one(items, "projects", "Bops"), ["key", "detail"]), { key: "projects:bops", detail: "An app for teams of AI assistants" }, "\"Project Bops\" is Bops; no full stop");
   noDashes(one(items, "decisions", "Pro plan at 40 dollars a month").detail);
+  // What each fact said about each item is kept with the fact (its name, line, date, who, done, how it was
+  // learned, private), so an item can be worked out again when a fact goes.
+  assert.deepEqual(idx.facts[F.f1.id].wrote, {
+    [meeting.id]: { t: "Meeting with Dana", d: "About the quote", w: "2026-10-16T15:00", o: "Dana Reyes", h: "said", at: F.f1.at },
+    [dana.id]: { t: "Dana Reyes", d: "Your contact at Acme", h: "said", at: F.f1.at },
+    [acme.id]: { t: "Acme", d: "Your customer", h: "said", at: F.f1.at },
+  });
+  assert.deepEqual(idx.facts[F.f4.id].wrote, { [leo.id]: { t: "Leo", d: "Phone number on file", h: "saved", p: true, at: F.f4.at } }, "and that the fact was private");
+  assert.deepEqual(idx.facts["card:Sister: Ana"].wrote, { [ana.id]: { t: "Ana", d: "", h: "card", at: ana.sources[0].at } });
+  assert.deepEqual(idx.facts[F.f8.id].wrote[one(items, "decisions", "Pro plan at 40 dollars a month").id].d, "To cover costs, servers and support", "as the item shows it");
   // Small talk makes nothing, but it's marked sorted so it isn't sent again; so is a card line about Tiger.
-  assert.deepEqual(idx.facts[F.f10.id], { items: [], at: F.f10.at });
+  assert.deepEqual(idx.facts[F.f10.id], { items: [], at: F.f10.at, wrote: {} });
   assert.deepEqual(idx.facts["card:Tiger lives in Oakland."].items, []);
+  assert.ok(items.every((i) => !Object.hasOwn(i, "detailPrivate")), "nothing kept only for the engine goes to the window");
 
   // The file: <userDir>/memory-categories/bops.json, the user's only.
   const dir = join(work, ".data", "memory-categories");
@@ -1302,6 +1339,9 @@ await section("Another account signing in mid-look: nothing of the last one's is
   openai.hold = () => true;
   const pending = post({ action: "refresh", ws });
   await until(() => openai.held.length === 1, "the look to reach the model");
+  // The window, meanwhile: sorting.
+  const during = (await get(ws)).body;
+  assert.equal(during.syncing, true);
   await S.bindSignIn("u_lee");
   assert.equal(MC.categoriesOn(), false, "a fresh state: nobody's account");
   releaseOpenai();
@@ -1314,6 +1354,9 @@ await section("Another account signing in mid-look: nothing of the last one's is
   await S.releaseSignOut();
   assert.equal(S.getState().account?.user.email, "maya@orgo.ai");
   assert.equal(MC.categoriesOn(), true);
+  // The look ended without writing anything: still a change, so the window that saw it sorting isn't told "unchanged".
+  const back = await getRev(ws, during.rev);
+  assert.deepEqual([back.body.unchanged, back.body.syncing], [undefined, false], "the end of a look is a change");
   one((await refresh(ws)).items, "people", "Felix");
 
   await check("Another account signing in while an item is forgotten: nothing written to its folder (forgetItem saves without sameState)", async () => {
@@ -1540,74 +1583,131 @@ await section("New facts wait to be sorted together: 10 at a time, after 30 minu
 
 /* ---------------- The model failing ---------------- */
 
-await section("A model that fails or answers wrong: split in two, tried again later, given up after three", async () => {
-  // A server error: the SDK tries once more (not twice), every call with a 90 second timeout.
+await section("A model that's down or answers unusably: an outage counts nothing, a bad answer is narrowed to its fact", async () => {
+  const UNSORTED = "Some new things couldn't be sorted yet. They're tried again later.";
+  const DOWN = "Couldn't sort new things just now. Bops tries again on its own.";
+  // A server error: the SDK tries once more (not twice), every call not kept at OpenAI and 90 seconds at most.
   {
     const ws = "ws_retry";
-    const bank = Mem.bankOf(ws);
     seed(ws, [["t1", 10, "Tiger's tailor is Marco.", [item("people", "Marco", { key: "marco", detail: "Your tailor" })]]]);
     let first = true;
     openai.fail = () => (first ? ((first = false), overloaded()) : null);
-    let n = openai.calls.length;
-    let r = await refresh(ws);
-    assert.deepEqual(openai.calls.slice(n).map((c) => [c.headers.retry, c.headers.timeout, c.body.store]), [["0", "90", false], ["1", "90", false]], "tried again once");
+    const n = openai.calls.length;
+    const r = await refresh(ws);
+    assert.deepEqual(openai.calls.slice(n).map((c) => [c.headers.retry, c.headers.timeout, c.body.store]), [["0", "90", false], ["1", "90", false]], "tried again once, and it worked");
     one(r.items, "people", "Marco");
-    const t2 = newFact(ws, "Tiger's cobbler is Ezra.", [item("people", "Ezra", { key: "ezra", detail: "Your cobbler" })]);
-    openai.fail = () => overloaded();
-    n = openai.calls.length;
-    r = await refresh(ws);
-    assert.deepEqual(openai.calls.slice(n).map((c) => c.headers.retry), ["0", "1"], "two tries, not three");
-    assert.equal(indexOf(bank).failures[t2.id].n, 1, "then it waits");
     openai.fail = null;
   }
-  // A batch that fails is split in two, each half tried once: one bad fact doesn't hold up the rest.
+  // Down (still overloaded after that, rate limited, a key refused, not allowed, no such model, unreachable):
+  // no fact's fault. The look stops, nothing is counted against any fact, and they're all sorted once it's back.
+  {
+    const ws = "ws_outage";
+    const bank = Mem.bankOf(ws);
+    const list = [];
+    for (let k = 0; k < 60; k++) list.push([`o${k}`, k + 1, `Tiger's filing note ${k} is in.`, []]);
+    seed(ws, list);
+    let calls = 0;
+    openai.fail = () => (++calls > 1 ? overloaded() : null);
+    let n = openai.calls.length;
+    let r = await refresh(ws);
+    assert.deepEqual(openai.calls.slice(n).map((c) => [c.texts.length, c.headers.retry]), [[25, "0"], [25, "0"], [25, "1"]], "the second batch, down after one more try: the look stops there");
+    let idx = indexOf(bank);
+    assert.deepEqual([sortedIn(bank), idx.failures ?? {}, idx.more, r.error], [25, {}, true, DOWN], "nothing counted against a fact, and sorting left to do");
+    for (const [what, down, tries] of [
+      ["rate limited", () => httpError(429, "Rate limit reached"), 2],
+      ["a key refused", () => httpError(401, "Incorrect API key"), 1],
+      ["not allowed", () => httpError(403, "Not allowed"), 1],
+      ["no such model", () => httpError(404, "The model does not exist"), 1],
+      ["unreachable", unreachable, 2],
+    ]) {
+      openai.fail = down;
+      n = openai.calls.length;
+      r = await refresh(ws);
+      assert.equal(openai.calls.length - n, tries, `${what}: asked ${tries} time${tries === 1 ? "" : "s"}`);
+      idx = indexOf(bank);
+      assert.deepEqual([sortedIn(bank), idx.failures ?? {}, idx.more, r.error], [25, {}, true, DOWN], what);
+    }
+    // Back: the next look (reading as deep as the sorting goes) sorts the rest, and the line goes.
+    openai.fail = null;
+    await MC.sync(ws, { mode: "look" });
+    idx = indexOf(bank);
+    assert.deepEqual([sortedIn(bank), idx.failures ?? {}, idx.more, idx.error], [60, {}, undefined, undefined]);
+  }
+  // A wrong setting (the model rejects every request, 400): narrowed down to single facts, but with nothing
+  // answered this look it's the setting, not the facts. The look stops, nothing is counted, and once the
+  // setting is fixed they're all sorted. One fact rejected while the others are answered is about that fact.
+  {
+    const ws = "ws_setting";
+    const bank = Mem.bankOf(ws);
+    const F = seed(ws, [
+      ["w1", 10, "Tiger's barber is Luis.", [item("people", "Luis", { key: "luis", detail: "Your barber" })]],
+      ["w2", 20, "Tiger's gym is Peak Fitness.", [item("companies", "Peak Fitness", { key: "peak fitness" })]],
+      ["w3", 30, "Tiger's dentist is Dr. Okafor.", [item("people", "Dr. Okafor", { key: "dr okafor", detail: "Your dentist" })]],
+    ]);
+    openai.fail = () => rejected();
+    let r = await refresh(ws);
+    let idx = indexOf(bank);
+    assert.deepEqual([sortedIn(bank), idx.failures ?? {}, idx.more, r.error], [0, {}, true, DOWN], "every call rejected: nothing counted against a fact");
+    openai.fail = null;
+    await MC.sync(ws, { mode: "look" });
+    idx = indexOf(bank);
+    assert.deepEqual([sortedIn(bank), idx.failures ?? {}, idx.error], [3, {}, undefined], "sorted once the setting is fixed");
+    // Only one fact rejected, the rest answered: that fact is counted.
+    const odd = addFact(bank, "Tiger's locksmith is Abe.");
+    const fine = addFact(bank, "Tiger's florist is June.");
+    SORTS.set(fine.text, [item("people", "June", { key: "june", detail: "Your florist" })]);
+    SORTS.set(odd.text, [item("people", "Abe", { key: "abe", detail: "Your locksmith" })]);
+    openai.fail = (c) => (c.texts.includes(odd.text) ? rejected() : null);
+    r = await refresh(ws);
+    idx = indexOf(bank);
+    assert.equal(idx.failures?.[odd.id]?.n, 1, "the rejected fact is counted when others were answered");
+    assert.ok(Object.hasOwn(idx.facts, fine.id) && !Object.hasOwn(idx.facts, odd.id), "and the other is sorted");
+    assert.ok(F.w1 && r.items.some((i) => i.title === "June"));
+    openai.fail = null;
+  }
+  // An answer that can't be used (refused for what's in it, not JSON, a place outside the batch): asked again
+  // in halves, down to the one fact it's about. Only that fact counts as failed (tried again in 30 minutes,
+  // then an hour, then given up), and every other fact is sorted.
   {
     const ws = "ws_split";
     const bank = Mem.bankOf(ws);
-    const F = seed(ws, [
-      ["s1", 10, "Tiger's florist is Lin.", [item("people", "Lin", { key: "lin", detail: "Your florist" })]],
-      ["s2", 20, "Tiger's locksmith is Ode.", [item("people", "Ode", { key: "ode", detail: "Your locksmith" })]],
-      ["bad", 30, "Tiger's notes from the offsite, part 3.", [item("decisions", "Offsite notes", { key: "offsite notes" })]],
-      ["s3", 40, "Tiger's mechanic is Oskar.", [item("people", "Oskar", { key: "oskar", detail: "Your mechanic" })]],
-    ]);
-    const names = new Map(Object.entries(F).map(([k, f]) => [f.text, k]));
-    const tried = (n) => openai.calls.slice(n).map((c) => c.texts.map((t) => names.get(t)));
-    openai.fail = (c) => (c.texts.includes(F.bad.text) ? refused("The model choked.") : null);
+    const list = [];
+    for (let k = 0; k < 25; k++) list.push([`s${k}`, k + 1, `Tiger's supplier ${k} delivers on Mondays.`, [item("companies", `Supplier ${k}`, { key: `supplier ${k}` })]]);
+    const F = seed(ws, list);
+    const BAD = F.s17;
+    openai.fail = (c) => (c.texts.includes(BAD.text) ? refused("The model choked.") : null);
     let n = openai.calls.length;
     let r = await refresh(ws);
-    assert.deepEqual(tried(n), [["s1", "s2", "bad", "s3"], ["s1", "s2"], ["bad", "s3"]], "the batch, then each half once");
-    assert.deepEqual(r.items.map((i) => i.title).sort(), ["Lin", "Ode"]);
-    assert.equal(r.error, "Some new things couldn't be sorted yet. They're tried again later.");
-    let idx = indexOf(bank);
-    assert.deepEqual(Object.entries(idx.failures).map(([id, f]) => [names.get(hbank(bank).facts.find((x) => x.id === id).text), f.n]).sort(), [["bad", 1], ["s3", 1]]);
-    // Not tried again at once.
-    n = openai.calls.length;
-    await refresh(ws);
-    assert.deepEqual(tried(n), [], "they wait 30 minutes");
-    // 30 minutes on: tried again and split again; Oskar gets through, the bad one fails a second time.
-    skew += 30 * 60_000 + 1000;
+    assert.deepEqual(openai.calls.slice(n).map((c) => c.texts.length), [25, 13, 12, 6, 3, 3, 2, 1, 1, 1, 6], "halves of halves, down to the one fact");
+    assert.equal(r.items.length, 24, "the other 24 sorted");
+    assert.deepEqual(Object.entries(indexOf(bank).failures).map(([id, f]) => [id, f.n]), [[BAD.id, 1]], "only that fact counted");
+    assert.equal(r.error, UNSORTED);
+    // Not tried again at once (and the line stays while it waits).
     n = openai.calls.length;
     r = await refresh(ws);
-    assert.deepEqual(tried(n), [["bad", "s3"], ["bad"], ["s3"]]);
-    one(r.items, "people", "Oskar");
-    assert.deepEqual(indexOf(bank).failures, { [F.bad.id]: { n: 2, at: indexOf(bank).failures[F.bad.id].at } });
-    // Now it waits an hour: not after 30 minutes,
+    assert.deepEqual([openai.calls.length - n, r.error], [0, UNSORTED], "it waits 30 minutes");
+    // 30 minutes on: tried again, alone. Failing a second time, it waits an hour.
     skew += 30 * 60_000 + 1000;
     n = openai.calls.length;
     await refresh(ws);
-    assert.deepEqual(tried(n), [], "the second wait is an hour");
-    // but after the hour. Failing a third time, it's given up: sorted as nothing, never sent again.
+    assert.deepEqual(openai.calls.slice(n).map((c) => c.texts), [[BAD.text]]);
+    assert.equal(indexOf(bank).failures[BAD.id].n, 2);
+    skew += 30 * 60_000 + 1000;
+    n = openai.calls.length;
+    await refresh(ws);
+    assert.equal(openai.calls.length, n, "the second wait is an hour");
+    // After the hour, the third time: given up, sorted as nothing, never sent again.
     skew += 30 * 60_000;
     n = openai.calls.length;
     await refresh(ws);
-    assert.deepEqual(tried(n), [["bad"]]);
-    idx = indexOf(bank);
-    assert.deepEqual(idx.facts[F.bad.id], { items: [], at: F.bad.at });
-    assert.ok(!Object.hasOwn(idx.failures, F.bad.id));
+    assert.deepEqual(openai.calls.slice(n).map((c) => c.texts), [[BAD.text]]);
+    const idx = indexOf(bank);
+    assert.deepEqual([idx.facts[BAD.id], idx.failures], [{ items: [], at: BAD.at }, {}]);
     skew += 3 * 3_600_000;
     n = openai.calls.length;
-    await refresh(ws);
-    assert.deepEqual(tried(n), [], "never again");
+    r = await refresh(ws);
+    assert.equal(openai.calls.length, n, "never again");
+    assert.equal(r.error, undefined, "nothing waits to be tried again: the line goes");
     openai.fail = null;
   }
   // An answer about a fact that isn't in the batch can't be trusted: nothing of it is kept, and the fact is tried again later.
@@ -1635,6 +1735,14 @@ await section("A model that fails or answers wrong: split in two, tried again la
     r = await refresh(ws);
     const [ada, bo] = [one(r.items, "people", "Ada"), one(r.items, "people", "Bo")];
     assert.deepEqual([...indexOf(bank).facts[u3.id].items].sort(), [ada.id, bo.id].sort());
+    // A request refused for what's in it (422), and an answer that isn't JSON: the same, counted on the fact.
+    const u4 = newFact(ws, "Tiger's uncle Abe fishes.", [item("people", "Abe", { key: "abe", detail: "Your uncle" })]);
+    openai.fail = (c) => (c.texts.includes(u4.text) ? httpError(422, "Unprocessable") : null);
+    await refresh(ws);
+    const u5 = newFact(ws, "Tiger's niece Ivy draws.", [item("people", "Ivy", { key: "ivy", detail: "Your niece" })]);
+    openai.fail = (c) => (c.texts.includes(u5.text) ? json(response("I can't sort that.")) : null);
+    await refresh(ws);
+    assert.deepEqual([indexOf(bank).failures[u4.id].n, indexOf(bank).failures[u5.id].n], [1, 1]);
     openai.fail = null;
   }
   // More than one look takes, and a batch failed: the rest wait for the next look, not a minute.
@@ -1651,8 +1759,9 @@ await section("A model that fails or answers wrong: split in two, tried again la
     }
     openai.fail = (c) => (c.texts.includes(texts[3]) ? refused("The model choked.") : null);
     const r = await refresh(ws);
-    assert.equal(r.error, "Some new things couldn't be sorted yet. They're tried again later.");
+    assert.equal(r.error, UNSORTED);
     assert.ok(!timersOf(bank).includes("more"), "no look in a minute");
+    assert.deepEqual([sortedIn(bank), indexOf(bank).more], [149, true], "149 sorted, and the next look goes on with the rest");
     openai.fail = null;
   }
   // One call after another: each is told what the ones before it found.
@@ -1802,6 +1911,262 @@ await section("What a mention may change: hidden stays hidden, the card fills in
     await refresh(ws);
     assert.equal(Object.values(openai.calls[n].input.known).flat().length, 40, "43 share a word or a fortnight with it: 40 at most");
   }
+});
+
+/* ---------------- Worked out again ---------------- */
+
+await section("When a fact goes, its item is worked out again from the facts left: a deleted address leaves the line, and the lock follows", async () => {
+  {
+    const ws = "ws_lock";
+    const bank = Mem.bankOf(ws);
+    const F = seed(ws, [
+      ["a1", 10, "Leo lives at 12 Elm Street.", [item("people", "Leo", { key: "leo", detail: "Lives at 12 Elm Street" })]],
+      ["a2", 20, "Leo is Tiger's climbing partner.", [item("people", "Leo", { key: "leo", detail: "Your climbing partner" })]],
+      ["r1", 30, "Tiger renewed the car registration.", [item("todos", "Renew the car registration", { key: "renew car registration", done: true })]],
+      ["r2", 40, "Tiger has to renew the car registration by December 1.", [item("todos", "Renew the car registration", { key: "renew car registration", when: "2026-12-01" })]],
+      ["m1", 50, "Mara's phone number is +44 7700 900123.", [item("people", "Mara", { key: "mara", detail: "Phone number on file" })]],
+      ["m2", 60, "Mara is Tiger's editor.", [item("people", "Mara", { key: "mara", detail: "Your editor" })]],
+    ]);
+    let r = await refresh(ws);
+    let leo = one(r.items, "people", "Leo");
+    // Its line came from a private fact (an address): locked, though not everything it was learned from is private.
+    assert.deepEqual(pick(leo, ["detail", "private"]), { detail: "Lives at 12 Elm Street", private: true });
+    assert.deepEqual(leo.sources.map((s) => [s.fact, !!s.private]), [[F.a1.id, true], [F.a2.id, false]]);
+    assert.ok(!Object.hasOwn(leo, "detailPrivate"), "the window doesn't get the engine's own field");
+    assert.deepEqual(pick(one(r.items, "todos", "Renew the car registration"), ["done", "when"]), { done: true, when: "2026-12-01" });
+    // The address is deleted in memory: the line goes with it, and so does the lock. And the fact saying the
+    // registration was renewed turns out wrong and is deleted: open again, the date kept.
+    removeFact(bank, F.a1.id);
+    removeFact(bank, F.r1.id);
+    r = await refresh(ws);
+    leo = one(r.items, "people", "Leo");
+    assert.deepEqual(pick(leo, ["detail", "private", "first", "last"]), { detail: "Your climbing partner", private: undefined, first: F.a2.at, last: F.a2.at });
+    assert.deepEqual(pick(one(r.items, "todos", "Renew the car registration"), ["done", "when"]), { done: undefined, when: "2026-12-01" });
+    assert.ok(!readFileSync(fileFor(bank), "utf8").includes("Elm Street"), "the address is nowhere in the categories' file");
+    // Mara: locked too, her line from her phone number.
+    const mara = one(r.items, "people", "Mara");
+    assert.deepEqual(pick(mara, ["detail", "private"]), { detail: "Phone number on file", private: true });
+    await check("A line the user types over a private one isn't locked by it (editItem leaves detailPrivate, and private, as they were)", async () => {
+      const e = await post({ action: "edit", ws, id: mara.id, detail: "My editor at the paper" });
+      assert.deepEqual(pick(one(e.body.items, "people", "Mara"), ["detail", "private"]), { detail: "My editor at the paper", private: undefined });
+    });
+  }
+  // An index from before facts kept what they said: an item is left as it is when a fact behind it goes (it can't be worked out again).
+  {
+    const ws = "ws_oldidx";
+    const bank = Mem.bankOf(ws);
+    const F = seed(ws, [
+      ["p1", 10, "Pia is Tiger's new landlord.", [item("people", "Pia", { key: "pia", detail: "Your new landlord" })]],
+      ["p2", 20, "Pia is Tiger's neighbor.", [item("people", "Pia", { key: "pia", detail: "Your neighbor" })]],
+    ]);
+    await refresh(ws);
+    const old = indexOf(bank);
+    for (const f of Object.values(old.facts)) delete f.wrote;
+    writeFileSync(fileFor(bank), JSON.stringify(old));
+    liveBank(bank).index = undefined; // read from the file again, as after a restart
+    removeFact(bank, F.p1.id);
+    const r = await refresh(ws);
+    const pia = one(r.items, "people", "Pia");
+    assert.deepEqual([pia.detail, pia.sources.map((s) => s.fact), r.error], ["Your new landlord", [F.p2.id], undefined], "its line as it was; the deleted fact no longer a source");
+  }
+});
+
+/* ---------------- What's left to sort ---------------- */
+
+await section("What's left to sort: behind counts only what isn't sorted, more makes the next look a fill, failures and kept rows let go", async () => {
+  // behind: facts older than the sorted depth that aren't sorted, not the ones sorted while they were newer.
+  {
+    const ws = "ws_behind";
+    const bank = Mem.bankOf(ws);
+    const T = Date.now() - 86_400_000;
+    many(bank, "Tiger's receipt", 300, (k) => T - k * 60_000);
+    await refresh(ws);
+    await fire(ws, "more");
+    assert.deepEqual([sortedIn(bank), (await get(ws)).body.behind], [300, undefined]);
+    // 50 newer: the 50 oldest are now past the sorted depth (300), but they're sorted, so nothing is behind.
+    many(bank, "Tiger's newer receipt", 50, (k) => T + (k + 1) * 60_000);
+    let r = await refresh(ws);
+    assert.deepEqual([sortedIn(bank), r.behind], [350, undefined]);
+    // 20 older ones never sorted: those are behind.
+    many(bank, "Tiger's oldest receipt", 20, (k) => T - (400 + k) * 60_000);
+    r = await refresh(ws);
+    assert.deepEqual([sortedIn(bank), r.behind], [350, 20]);
+  }
+  // more: a look that leaves sorting to do says so, and the next look (the window's, every 15 minutes) reads
+  // as deep as the sorting goes, not only until a page it has seen all of.
+  {
+    const ws = "ws_more2";
+    const bank = Mem.bankOf(ws);
+    many(bank, "Tiger's support ticket", 200);
+    await refresh(ws);
+    assert.deepEqual([sortedIn(bank), indexOf(bank).more], [150, true]);
+    clearTimers(bank); // the look set for a minute later doesn't come (Bops was closed, say)
+    const h = honcho.calls.length;
+    await MC.sync(ws, { mode: "look" });
+    assert.deepEqual(pagesOf(bank, h), ["1", "2"], "the sorted depth, though the newest page is all seen");
+    assert.deepEqual([sortedIn(bank), indexOf(bank).more], [200, undefined]);
+  }
+  await check("A quick look in between (a fact saved, a chat saved) leaves 'more' as it was: it read only the newest page (run() sets index.more from that look alone)", async () => {
+    const ws = "ws_more3";
+    const bank = Mem.bankOf(ws);
+    many(bank, "Tiger's invoice line", 200);
+    await refresh(ws);
+    clearTimers(bank);
+    await MC.sync(ws, { mode: "quick" });
+    assert.equal(indexOf(bank).more, true, "still sorting left to do");
+    await MC.sync(ws, { mode: "look" });
+    assert.equal(sortedIn(bank), 200, "and the next look does it");
+  });
+  // A sweep lets go of failures that won't come up again: a fact memory no longer has, a card line no longer
+  // on the card, a fact now older than the sorted depth.
+  {
+    const ws = "ws_prune";
+    const bank = Mem.bankOf(ws);
+    const LINE = "Tiger's motto is a riddle no model parses.";
+    const F = seed(ws, [["gone", 10, "Tiger's note that memory will delete.", []], ["old", 20, "Tiger's note that newer ones will push down.", []]], { cards: [[LINE, []]] });
+    const bad = new Set([F.gone.text, F.old.text, LINE]);
+    openai.fail = (c) => (c.texts.some((t) => bad.has(t)) ? refused() : null);
+    await refresh(ws);
+    assert.deepEqual(Object.keys(indexOf(bank).failures).sort(), [F.gone.id, F.old.id, `card:${LINE}`].sort());
+    openai.fail = null;
+    removeFact(bank, F.gone.id);
+    await Mem.forgetFact(ws, `card:${LINE}`);
+    many(bank, "Tiger's later note", 300, (k) => Date.now() - (k + 1) * 1000);
+    const r = await refresh(ws);
+    assert.deepEqual([indexOf(bank).failures, r.error], [{}, undefined], "all three let go, and the line with them");
+  }
+  // Kept rows let go when a fact is deleted through Bops: the next look reads again, and doesn't sort a fact that's gone.
+  {
+    const ws = "ws_rows";
+    const bank = Mem.bankOf(ws);
+    const rows = many(bank, "Tiger's errand log", 300);
+    await get(ws);
+    await settled(ws); // the first look reads the newest 300 (kept for the next look) and sorts 150
+    assert.equal(sortedIn(bank), 150);
+    const doomed = rows[200];
+    await Mem.forgetFact(ws, doomed.id); // deleted in a bot's Memory tab
+    await until(() => !liveBank(bank).rows, "the kept rows let go");
+    const h = honcho.calls.length;
+    await fire(ws, "more");
+    assert.deepEqual(pagesOf(bank, h), ["1", "2", "3"], "read again");
+    assert.deepEqual([sortedIn(bank), Object.hasOwn(indexOf(bank).facts, doomed.id)], [299, false], "the deleted fact isn't sorted");
+  }
+});
+
+/* ---------------- At once, or with the next few ---------------- */
+
+await section("A new card line is sorted at once; Bops's own notes wait for the next few, a bot's remember doesn't; a quick look keeps the wait", async () => {
+  // A card line pinned: a look in a few seconds that reads the card and sorts the line.
+  {
+    const ws = "ws_cardnow";
+    const bank = Mem.bankOf(ws);
+    seed(ws, [["c0", 10, "Tiger's cat is called Miso.", []]]);
+    await refresh(ws);
+    const LINE = "Tiger's business partner is Jonas Berg.";
+    SORTS.set(LINE, [item("people", "Jonas Berg", { key: "jonas berg", detail: "Your business partner" })]);
+    await Mem.pinFact(ws, LINE);
+    await until(() => timersOf(bank).includes("card"), "a look set for a few seconds later");
+    assert.equal(delayOf(bank, "card"), 4000);
+    await fire(ws, "card");
+    one((await get(ws)).body.items, "people", "Jonas Berg");
+    // Changed by hand (Fix): the old line goes at once, and the new one is sorted in seconds.
+    const FIXED = "Tiger's business partner is Jonas Berg, from Oslo.";
+    SORTS.set(FIXED, [item("people", "Jonas Berg", { key: "jonas berg", detail: "Your business partner, from Oslo" })]);
+    await Mem.fixFact(ws, `card:${LINE}`, FIXED);
+    await until(() => !Object.hasOwn(indexOf(bank).facts, `card:${LINE}`) && timersOf(bank).includes("card"), "the old line dropped, and a look set");
+    await fire(ws, "card");
+    assert.equal(one((await get(ws)).body.items, "people", "Jonas Berg").detail, "Your business partner, from Oslo");
+    // Any look that finds a new card line sorts it then (a line or two, and who the user is), not kept waiting like a new fact.
+    const LINE2 = "Tiger's mentor is Ruth Ade.";
+    SORTS.set(LINE2, [item("people", "Ruth Ade", { key: "ruth ade", detail: "Your mentor" })]);
+    await Mem.pinFact(ws, LINE2);
+    await until(() => timersOf(bank).includes("card"), "a look set");
+    clearTimers(bank);
+    await MC.sync(ws, { mode: "look" });
+    assert.deepEqual([Object.hasOwn(indexOf(bank).facts, `card:${LINE2}`), indexOf(bank).waiting], [true, undefined], "sorted, not waiting");
+  }
+  // A quick look that finds nothing new on the newest page leaves the wait as it was (what waits is further down).
+  {
+    const ws = "ws_wait2";
+    const bank = Mem.bankOf(ws);
+    const T = Date.now();
+    many(bank, "Tiger's chat note", 100, (k) => T - 5 * 60_000 - k);
+    await refresh(ws);
+    // Five facts learned a little before those, found only now: they wait for more.
+    many(bank, "Tiger's earlier note", 5, (k) => T - 10 * 60_000 - k);
+    await MC.sync(ws, { mode: "fill" });
+    assert.equal(indexOf(bank).waiting, 5);
+    const timer = liveBank(bank).timers.get("waiting");
+    assert.ok(timer, "a look set for when they've waited 30 minutes");
+    await MC.sync(ws, { mode: "quick" });
+    assert.equal(indexOf(bank).waiting, 5, "still waiting");
+    assert.equal(liveBank(bank).timers.get("waiting"), timer, "and their look still set");
+  }
+  // A fact Bops noted on its own from what the user said (auto remember) waits to be sorted with the next
+  // few; one a bot was asked to remember is sorted in seconds (with whatever waits).
+  {
+    const ws = "ws_learn";
+    const bank = Mem.bankOf(ws);
+    seed(ws, [["l0", 10, "Tiger's piano is a Yamaha.", []]]);
+    await refresh(ws);
+    const AUTO = "Tiger is allergic to cats.";
+    SORTS.set(AUTO, [item("preferences", "Allergic to cats", { key: "allergic to cats" })]);
+    assert.equal(await Mem.learn(ws, AUTO, undefined, { auto: true }), "Saved.");
+    await until(() => timersOf(bank).includes("saved"), "a quick look in 3 minutes");
+    assert.deepEqual([timersOf(bank), delayOf(bank, "saved")], [["saved"], 180_000], "not one in seconds");
+    await fire(ws, "saved");
+    assert.equal(indexOf(bank).waiting, 1, "it waits for the next few");
+    const BOT = "Tiger's gym locker is number 12.";
+    SORTS.set(BOT, [item("preferences", "Gym locker 12", { key: "gym locker" })]);
+    assert.equal(await Mem.learn(ws, BOT), "Saved.");
+    await until(() => timersOf(bank).includes("learned"), "a quick look in seconds");
+    assert.equal(delayOf(bank, "learned"), 4000);
+    await fire(ws, "learned");
+    const r = (await get(ws)).body;
+    assert.deepEqual([r.waiting, r.items.map((i) => i.title).sort()], [undefined, ["Allergic to cats", "Gym locker 12"]]);
+  }
+});
+
+/* ---------------- The window's polls ---------------- */
+
+await section("The window's polls: unchanged is said in a word, and items are trimmed for the window", async () => {
+  const ws = "ws_rev";
+  const bank = Mem.bankOf(ws);
+  const long = `Tiger's travel notes: ${"window seat, early flight, ".repeat(20)}done.`;
+  const list = [["v0", 10, long, [item("people", "Vera", { key: "vera", detail: "Your travel agent" })]]];
+  for (let k = 1; k < 9; k++) list.push([`v${k}`, 10 + k, `Vera booked Tiger's trip number ${k}.`, [item("people", "Vera", { key: "vera" })]]);
+  seed(ws, list);
+  const r = await refresh(ws);
+  // At most 6 sources for the window, each up to 300 characters; the engine keeps more.
+  const vera = one(r.items, "people", "Vera");
+  assert.deepEqual([vera.sources.length, vera.sources[0].text.length], [6, 300]);
+  const kept = indexOf(bank).items[vera.id];
+  assert.deepEqual([kept.sources.length, kept.sources[0].text.length], [9, long.length]);
+  // Every snapshot has a rev: sent back with nothing changed, that's the answer.
+  assert.equal(typeof r.rev, "number");
+  let x = await getRev(ws, r.rev);
+  assert.deepEqual(x.body, { unchanged: true, rev: r.rev });
+  // A change gives a new rev, and the whole snapshot to a window with the old one.
+  const e = await post({ action: "edit", ws, id: vera.id, detail: "Books your trips" });
+  assert.ok(e.body.rev > r.rev);
+  x = await getRev(ws, r.rev);
+  assert.deepEqual([x.body.unchanged, x.body.rev, one(x.body.items, "people", "Vera").detail], [undefined, e.body.rev, "Books your trips"]);
+  // A look starting is a change (it shows as syncing), and so is its end.
+  newFact(ws, "Vera moved her agency to Porto.", [item("people", "Vera", { key: "vera" })]);
+  openai.hold = () => true;
+  const looking = refresh(ws);
+  let during;
+  try {
+    await until(() => openai.held.length === 1, "the look to reach the model");
+    during = (await getRev(ws, e.body.rev)).body;
+  } finally {
+    releaseOpenai();
+  }
+  assert.deepEqual([during.syncing, during.rev > e.body.rev], [true, true]);
+  const after = await looking;
+  assert.deepEqual([after.syncing, after.rev > during.rev], [false, true]);
+  // A rev that isn't a number: the whole snapshot.
+  for (const bad of ["abc", "", "1e999"]) assert.ok(Array.isArray((await getRev(ws, bad)).body.items), JSON.stringify(bad));
 });
 
 /* ---------------- The route ---------------- */

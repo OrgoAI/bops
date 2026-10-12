@@ -138,6 +138,8 @@ export type MemorySnapshot = {
   /** Memory is set up (signed in to Bops Cloud, or a Honcho key when self-hosting). */
   on: boolean;
   ws: string;
+  /** Changes with anything in this snapshot: send it back (?rev=) and an unchanged one comes back as {unchanged: true}. */
+  rev?: number;
   items: MemoryItem[];
   /** What the user hid, to show again. */
   hidden?: Pick<MemoryItem, "id" | "category" | "title">[];
