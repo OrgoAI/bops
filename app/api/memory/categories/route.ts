@@ -1,0 +1,64 @@
+import { categoriesOn, editItem, forgetItem, snapshot, sync, tidyUp, wsOrCurrent } from "@/lib/server/memory-categories";
+import { notReady } from "@/lib/server/ready";
+
+export const dynamic = "force-dynamic";
+
+/*
+ * The categories that fill themselves from memory (lib/server/memory-categories.ts), for the sidebar
+ * and their page. Only the Bops window may call these (proxy.ts). `ws` is the workspace, the current
+ * one when not given.
+ */
+
+/** A workspace's categories as sorted so far ({on: false} where there are none: memory off, signed out, not open to this account). */
+export async function GET(request: Request) {
+  const ws = wsOrCurrent(new URL(request.url).searchParams.get("ws"));
+  try {
+    return Response.json(snapshot(ws));
+  } catch (e) {
+    return Response.json({ error: (e as Error).message }, { status: 500 });
+  }
+}
+
+type Body = {
+  action: "refresh" | "tidy-up" | "edit" | "forget";
+  ws?: string;
+  id?: string;
+  title?: string;
+  detail?: string;
+  done?: boolean;
+  hidden?: boolean;
+};
+
+/**
+ * refresh: look at memory now. tidy-up: ask memory to tidy up (dreaming), at most once an hour.
+ * edit {id, title?, detail?, done?, hidden?}. forget {id}: memory forgets what it learned only about it.
+ * Answers the categories as they are after it.
+ */
+export async function POST(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
+  if (!categoriesOn()) return Response.json({ error: "Memory isn't set up." }, { status: 404 });
+  const b = (await request.json().catch(() => ({}))) as Body;
+  const ws = wsOrCurrent(b.ws);
+  try {
+    switch (b.action) {
+      case "refresh":
+        await sync(ws);
+        break;
+      case "tidy-up":
+        await tidyUp(ws);
+        break;
+      case "edit":
+        editItem(ws, b.id ?? "", { title: b.title, detail: b.detail, done: b.done, hidden: b.hidden });
+        break;
+      case "forget":
+        await forgetItem(ws, b.id ?? "");
+        break;
+      default:
+        return Response.json({ error: "Unknown action." }, { status: 400 });
+    }
+    return Response.json(snapshot(ws));
+  } catch (e) {
+    return Response.json({ error: (e as Error).message }, { status: 400 });
+  }
+}

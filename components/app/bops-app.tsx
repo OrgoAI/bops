@@ -9,8 +9,10 @@ import { CallBar } from "./call-bar";
 import { ChatView, ThreadSheet, ToPicker } from "./chat-view";
 import { ComputerPeek, ComputerView, defaultDisplay } from "./computer";
 import { crmOpen } from "@/lib/crm-access";
+import { categoriesOpen } from "@/lib/memory-categories";
 import { CrmView, OpenCrm } from "./crm";
 import { BoppyLoading, BusyBots, Mascot } from "./mascot";
+import { MemoryView, type MemoryOpen } from "./memory-categories";
 import { CHAT_TAB, hostOf, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
 
 /** Your Mac's tab, and the chat's bot's profile (it follows the chat, like the computer tab); both open on demand. */
@@ -266,12 +268,14 @@ function Bops({ state }: { state: AppState | null }) {
   // The first tab shows the computer of the bot you're talking to (or whose thread is open).
   const chatBotId = thread?.botId ?? chat.botIds[0];
   // A deleted bot's tabs go with it; the profile tab is always the chat's bot. A CRM file shows in its own workspace only,
-  // and only to an account the CRM is open to (lib/crm-access.ts).
+  // and only to an account the CRM is open to (lib/crm-access.ts); the same for the memory page (lib/memory-categories.ts).
   const crm = crmOpen(state);
+  const memory = categoriesOpen(state);
   const tabs = openTabs
     .map((t) => (t.id === PROFILE_TAB && t.kind === "bot" ? { ...t, botId: chatBotId } : t))
     .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId))
-    .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)));
+    .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)))
+    .filter((t) => t.kind !== "memory" || (memory && t.ws === currentWorkspace(state)));
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
   if (recent.at(-1) !== active) {
     setRecent([...recent.filter((id) => id !== active), active].slice(-20));
@@ -285,7 +289,8 @@ function Bops({ state }: { state: AppState | null }) {
   const leadKey = lead ? `${lead.id}:${lead.runsOn}` : "";
   if (leadKey !== followed) {
     setFollowed(leadKey);
-    const browsing = tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || (tab.kind === "computer" && tab.botId !== chatBotId) || (tab.kind === "bot" && tab.id !== PROFILE_TAB));
+    const browsing =
+      tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || tab.kind === "memory" || (tab.kind === "computer" && tab.botId !== chatBotId) || (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
       if (lead.runsOn === "mac") {
         // Your Mac's tab, however it was opened (from a new tab it keeps that tab's id): never a second one.
@@ -360,18 +365,18 @@ function Bops({ state }: { state: AppState | null }) {
       () => ({ id: tabId(), kind: "crm", ws, file }),
       (t) => ({ ...t, file }) as PanelTab,
     );
-  /** A CRM file was renamed or deleted in the sidebar: its tab (and the full view of it) follows, or closes. */
-  const crmChanged = ({ ws, from, to }: { ws: string; from: string; to: string | null }) => {
-    const same = (x: { ws: string; file: string }) => x.ws === ws && x.file.toLowerCase() === from.toLowerCase();
-    if (to) setTabs(openTabs.map((t) => (t.kind === "crm" && same(t) ? { ...t, file: to } : t)));
-    else for (const t of tabs) if (t.kind === "crm" && same(t)) closeTab(t.id);
-    if (crmFocus && same(crmFocus)) {
-      if (to) setCrmFocus({ ws, file: to });
-      else {
-        setCrmFocus(null);
-        setFocus(false);
-      }
-    }
+  /**
+   * What Bops knows, one category at a time (memory-categories.tsx): the workspace's one memory tab,
+   * switched to the category asked for and at the item asked for, or opened.
+   */
+  const openMemory = ({ category, focus: item }: MemoryOpen) => {
+    const ws = currentWorkspace(state);
+    const focusAt = Date.now();
+    openTab(
+      (t) => t.kind === "memory" && t.ws === ws,
+      () => ({ id: tabId(), kind: "memory", ws, category, focus: item, focusAt }),
+      (t) => ({ ...t, category, focus: item, focusAt }) as PanelTab,
+    );
   };
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
   // eslint-disable-next-line react-hooks/refs -- kept current for the storage listener above
@@ -412,7 +417,7 @@ function Bops({ state }: { state: AppState | null }) {
   // a search) stays there.
   // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
   escTab.current = (e) => {
-    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm") ? tab : undefined;
+    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm" || tab?.kind === "memory") ? tab : undefined;
     if (!page || e.defaultPrevented || thread || composing || settings || account || setup || members || document.querySelector('[role="dialog"]')) return;
     const el = e.target instanceof HTMLElement ? e.target : null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && !panelRef.current?.contains(el)) return;
@@ -444,7 +449,7 @@ function Bops({ state }: { state: AppState | null }) {
     const alerting = (state.watches ?? []).filter((w) => w.alert && (w.alert.level ?? "now") === "now" && team.some((b) => b.id === w.botId));
     if (cutAlerts === null) return setCutAlerts(new Set(alerting.map(key)));
     const fresh = alerting.find((w) => !cutAlerts.has(key(w)));
-    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault" || tab?.kind === "crm") return;
+    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault" || tab?.kind === "crm" || tab?.kind === "memory") return;
     const el = document.activeElement as HTMLInputElement | null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && (el.value ?? el.textContent ?? "").trim()) return;
     setCutAlerts(new Set([...cutAlerts, key(fresh)]));
@@ -581,9 +586,7 @@ function Bops({ state }: { state: AppState | null }) {
             onVault={openVault}
             onMembers={() => setMembers(true)}
             onOpenWatch={showWatch}
-            onOpenCrm={openCrm}
-            activeCrm={focus ? (crmFocus ?? undefined) : panelOpen && tab?.kind === "crm" ? { ws: tab.ws, file: tab.file } : undefined}
-            onCrmChange={crmChanged}
+            onOpenMemory={openMemory}
           />
           {focus && crmFocus && crm ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
@@ -697,6 +700,16 @@ function Bops({ state }: { state: AppState | null }) {
                         setCrmFocus({ ws: tab.ws, file: tab.file });
                         setFocus(true);
                       }}
+                    />
+                  ) : tab?.kind === "memory" ? (
+                    <MemoryView
+                      key={tab.id}
+                      ws={tab.ws}
+                      category={tab.category}
+                      focus={tab.focus}
+                      focusAt={tab.focusAt}
+                      onCategory={(category) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, category, focus: undefined } : t)))}
+                      onClose={() => leaveTab(tab.id)}
                     />
                   ) : null}
                   {/* Your Mac stays capturing, hidden, for two minutes after you leave it (restarting capture is slow). */}
@@ -1016,7 +1029,7 @@ function PhoneService() {
       <div className="flex flex-col gap-1 rounded-[14px] p-3.5 text-[12.5px] leading-[18px] text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3]">
         <span>
           <span className="text-[#9A9A98]">Texting back:</span> {texting}
-          {info.texting === "none" ? " (carriers approve business texting first (A2P 10DLC), about 7–10 business days)" : ""}
+          {info.texting === "none" ? " (carriers approve business texting first (A2P 10DLC), about 7 to 10 business days)" : ""}
         </span>
         <span>
           <span className="text-[#9A9A98]">Calls to the bots&apos; numbers:</span> {info.calls === "agent" ? "on (each number's agent passes every turn to Bops)" : (info.calls ?? "unknown")}

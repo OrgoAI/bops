@@ -20,6 +20,8 @@ import { pathToFileURL } from "node:url";
 
 for (const k of Object.keys(process.env)) if (/^(BOPS|OPENAI|AGENTPHONE|AGENTMAIL|HONCHO|COMPOSIO|TYPESAFE|TWILIO|ORGO|CODEX|TAILSCALE)_/.test(k)) delete process.env[k];
 process.env.BOPS_DEVICE_SEED = "test-computer-task";
+// The CRM's tools are off for bots now (lib/server/crm.ts crmForBots); this test still checks them.
+process.env.BOPS_CRM_TOOLS = "1";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 // Modules that would start processes when loaded, or that Node can't load, are stand-ins: each export does nothing.
 const STAND_INS = new Set(["relay", "desktop", "mirror"]);

@@ -3,11 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import { DISPLAYS, live, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
-import { crmOpen } from "@/lib/crm-access";
-import { CrmSection } from "./crm";
+import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
 import { Mascot } from "./mascot";
+import { MemorySections, type MemoryOpen } from "./memory-categories";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
 import { useSetupNeedsYou } from "./setup";
 import { UpdateNotice } from "./update-notice";
@@ -32,9 +32,7 @@ export function Sidebar({
   onVault,
   onMembers,
   onOpenWatch,
-  onOpenCrm,
-  activeCrm,
-  onCrmChange,
+  onOpenMemory,
 }: {
   state: AppState;
   chatId: string;
@@ -50,12 +48,8 @@ export function Sidebar({
   onMembers: () => void;
   /** Show a watched screen or Mac window. */
   onOpenWatch: (watch: Watch) => void;
-  /** Open a CRM file as a tab on the right (crm.tsx). */
-  onOpenCrm: (ws: string, file: string) => void;
-  /** The CRM file showing on the right, if one is. */
-  activeCrm?: { ws: string; file: string };
-  /** A CRM file was renamed (`to`) or deleted (null): its tabs follow. */
-  onCrmChange: (change: { ws: string; from: string; to: string | null }) => void;
+  /** Open a category of what Bops knows on the right, at one of its items (memory-categories.tsx). */
+  onOpenMemory: (open: MemoryOpen) => void;
 }) {
   const [query, setQuery] = useState<string | null>(null);
   const q = query?.trim().toLowerCase();
@@ -96,7 +90,7 @@ export function Sidebar({
             onKeyDown={(e) => e.key === "Escape" && setQuery(null)}
             // Clicking away from an empty search closes it (not when the click is on the search button, which toggles it).
             onBlur={(e) => !query.trim() && e.relatedTarget?.getAttribute("aria-label") !== "Search" && setQuery(null)}
-            placeholder={crmOpen(state) ? "Search bots, chats, threads, files" : "Search bots, chats, threads"}
+            placeholder={categoriesOpen(state) ? "Search bots, chats, threads, memory" : "Search bots, chats, threads"}
             className="mr-2 h-[34px] min-w-0 flex-1 rounded-full bg-white px-3.5 text-[13px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98]"
           />
         )}
@@ -122,8 +116,8 @@ export function Sidebar({
             ))}
         </div>
 
-        {/* The workspace's CRM: its files, each a chart and a table on the right. Orgo's team's for now (lib/crm-access.ts). */}
-        {crmOpen(state) && <CrmSection state={state} query={q} active={activeCrm} onOpen={onOpenCrm} onChange={onCrmChange} />}
+        {/* What Bops knows, in categories that fill themselves from memory, each a page on the right. Orgo's team's for now (lib/memory-categories.ts). */}
+        {categoriesOpen(state) && <MemorySections state={state} query={q} onOpen={onOpenMemory} />}
 
         {!q && <Watching state={state} onOpen={onOpenWatch} />}
 

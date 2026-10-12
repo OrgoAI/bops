@@ -54,6 +54,14 @@ const crmHere = () => !onPostgres() && userDir() !== null;
  */
 export const crmOn = () => crmHere() && crmOpen(getState());
 
+/*
+ * Bots no longer get the CRM: what they learn fills the categories instead (People, Events, To-dos…,
+ * lib/server/memory-categories.ts), and a table no one sees in the sidebar isn't worth writing. The
+ * files, the routes and the chat notes stay, so a note from before still opens its file. The tests
+ * of the CRM's tools turn them back on (BOPS_CRM_TOOLS=1).
+ */
+const crmForBots = () => crmOn() && process.env.BOPS_CRM_TOOLS === "1";
+
 /** A refusal in plain words, with the status the route answers with (and, for a conflict, the file as it is now). */
 export class CrmError extends Error {
   status: number;
@@ -496,7 +504,7 @@ const NULLABLE = (type: string, description: string) => ({ type: [type, "null"],
  * (prompt caching, chat.ts): which files there are is in the note after the conversation (crmNowLine).
  */
 export const CRM_TOOLS = (b: Bot) => {
-  if (!crmOn() || !b) return [];
+  if (!crmForBots() || !b) return [];
   const tool = (name: string, description: string, properties: Record<string, unknown>) => ({
     type: "function" as const,
     name,
@@ -552,7 +560,7 @@ const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}… (cut
 export async function runCrmTool(botId: string, name: string, args: Record<string, unknown>, where: { chatId?: string; sessionId?: string }): Promise<string> {
   const b = bot(botId);
   if (!b) return "Unknown bot.";
-  if (!crmOn()) return "The CRM isn't available here.";
+  if (!crmForBots()) return "The CRM isn't available here.";
   try {
     if (name === "crm_files") return filesFor(b);
     if (name === "crm_read") return readFor(b, args);
@@ -800,7 +808,7 @@ async function createFor(b: Bot, args: Record<string, unknown>, where: { chatId?
 
 /** What a bot is told about the CRM, in its chat and its tasks (treg.ts dataNote style). */
 export function crmNote(b: Bot, mode: "chat" | "task") {
-  if (!crmOn() || !(getState().workspaces ?? []).some((w) => w.id === workspaceOf(b))) return "";
+  if (!crmForBots() || !(getState().workspaces ?? []).some((w) => w.id === workspaceOf(b))) return "";
   const owner = ownerName();
   return [
     `Bops CRM: ${owner}'s own CRM is a set of tables in Bops (CSV files${mode === "chat" ? ", listed in the note after the conversation" : ""}). crm_files lists them, crm_read reads rows or totals (like deal value by Stage), crm_save_rows adds rows or updates rows already there, and crm_create_file makes a new file.`,
@@ -816,7 +824,7 @@ export function crmNote(b: Bot, mode: "chat" | "task") {
 
 /** The workspace's CRM files right now, for the chat's "As of now" note. Never makes the sample. */
 export function crmNowLine(b: Bot) {
-  if (!crmOn()) return "";
+  if (!crmForBots()) return "";
   try {
     const files = (() => {
       const dir = wsDirIfAny(workspaceOf(b));
