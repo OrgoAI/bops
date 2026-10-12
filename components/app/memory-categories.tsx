@@ -149,6 +149,14 @@ function watch(user: string, ws: string, changed: () => void) {
   };
 }
 
+/** Something may have changed them (a bot just answered: it can mark a task done, or remember something that's sorted in a few seconds): read now, and again in 6 seconds. */
+function soon(user: string, ws: string) {
+  const s = shared.get(keyOf(user, ws));
+  if (!s?.users.size) return;
+  read(s);
+  setTimeout(() => s.users.size && read(s), 6_000);
+}
+
 /** Asks for a change: everyone showing the categories gets them as they are after it. */
 async function change(user: string, ws: string, body: MemoryAction): Promise<string | null> {
   const s = sharedOf(user, ws);
@@ -458,11 +466,18 @@ function OpenIcon() {
  */
 export function MemorySections({ state, query, onOpen }: { state: AppState; query?: string; onOpen: (open: MemoryOpen) => void }) {
   if (!categoriesOpen(state)) return null;
-  return <LiveSections user={state.account?.user.id ?? ""} ws={currentWorkspace(state)} query={query} onOpen={onOpen} />;
+  return <LiveSections user={state.account?.user.id ?? ""} ws={currentWorkspace(state)} last={state.messages[state.messages.length - 1]?.id} query={query} onOpen={onOpen} />;
 }
 
-function LiveSections({ user, ws, query, onOpen }: { user: string; ws: string; query?: string; onOpen: (open: MemoryOpen) => void }) {
+function LiveSections({ user, ws, last, query, onOpen }: { user: string; ws: string; last?: string; query?: string; onOpen: (open: MemoryOpen) => void }) {
   const { snap } = useMemoryCategories(ws, user);
+  // A new message (a bot's answer may have changed Orbit): read it again soon, not at the next minute.
+  const seen = useRef(last);
+  useEffect(() => {
+    if (last === seen.current) return;
+    seen.current = last;
+    soon(user, ws);
+  }, [last, user, ws]);
   return <SidebarSections user={user} ws={ws} snap={snap} query={query} onOpen={onOpen} />;
 }
 
