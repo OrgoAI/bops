@@ -207,6 +207,132 @@
 }
 
 /*
+ * Boppy listening to music while Bops loads (BoppyLoading in components/app/mascot.tsx): it bops to
+ * the beat, leaning one way then the other, and notes drift out of its headphones. The same scene as
+ * the window's splash (desktop/splash.html), so one hands over to the other without a jump.
+ */
+.boppy-loading-scene {
+  position: relative;
+  width: 88px;
+  height: 96px;
+}
+.boppy-loading-boppy {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 88px;
+  height: 88px;
+  transform-origin: 50% 90%;
+  animation: boppy-bop 1.1s ease-in-out infinite;
+}
+.boppy-loading-shadow {
+  position: absolute;
+  left: 22px;
+  bottom: 0;
+  width: 44px;
+  height: 6px;
+  border-radius: 50%;
+  background: #0a0a0a;
+  opacity: 0.08;
+  animation: boppy-shadow 0.55s ease-in-out infinite;
+}
+.boppy-loading-note {
+  position: absolute;
+  top: 34px;
+  width: 14px;
+  height: 14px;
+  opacity: 0;
+  /* Longhands: the shorthand without a name was minified to "animation: none". */
+  animation-duration: 2.2s;
+  animation-timing-function: cubic-bezier(0.2, 0.6, 0.35, 1);
+  animation-iteration-count: infinite;
+}
+.boppy-loading-note.l {
+  left: 4px;
+  animation-name: boppy-note-l;
+}
+.boppy-loading-note.r {
+  right: 4px;
+  animation-name: boppy-note-r;
+}
+.boppy-loading-note:nth-of-type(2) {
+  animation-delay: 0.55s;
+}
+.boppy-loading-note:nth-of-type(3) {
+  animation-delay: 1.1s;
+}
+.boppy-loading-note:nth-of-type(4) {
+  animation-delay: 1.65s;
+}
+@keyframes boppy-bop {
+  0%,
+  100% {
+    transform: translateY(-3px) rotate(-5deg);
+  }
+  25%,
+  75% {
+    transform: translateY(3px) rotate(0deg) scale(1.04, 0.95);
+  }
+  50% {
+    transform: translateY(-3px) rotate(5deg);
+  }
+}
+@keyframes boppy-shadow {
+  0%,
+  100% {
+    transform: scaleX(0.85);
+    opacity: 0.06;
+  }
+  50% {
+    transform: scaleX(1.05);
+    opacity: 0.1;
+  }
+}
+@keyframes boppy-note-l {
+  0% {
+    transform: translate(0, 0) rotate(0deg) scale(0.5);
+    opacity: 0;
+  }
+  20% {
+    transform: translate(-8px, -10px) rotate(-6deg) scale(1);
+    opacity: 1;
+  }
+  70% {
+    opacity: 0.9;
+  }
+  100% {
+    transform: translate(-24px, -46px) rotate(-18deg) scale(0.85);
+    opacity: 0;
+  }
+}
+@keyframes boppy-note-r {
+  0% {
+    transform: translate(0, 0) rotate(0deg) scale(0.5);
+    opacity: 0;
+  }
+  20% {
+    transform: translate(8px, -10px) rotate(6deg) scale(1);
+    opacity: 1;
+  }
+  70% {
+    opacity: 0.9;
+  }
+  100% {
+    transform: translate(24px, -46px) rotate(18deg) scale(0.85);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .boppy-loading-boppy,
+  .boppy-loading-shadow {
+    animation: none;
+  }
+  .boppy-loading-note {
+    display: none;
+  }
+}
+
+/*
  * Scrollbars like macOS overlay ones: thin, no track, and only there while the pointer is over
  * the list. In the base layer so a utility like [scrollbar-width:none] still hides one outright.
  */

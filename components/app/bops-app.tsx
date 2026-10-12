@@ -10,7 +10,7 @@ import { ChatView, ThreadSheet, ToPicker } from "./chat-view";
 import { ComputerPeek, ComputerView, defaultDisplay } from "./computer";
 import { crmOpen } from "@/lib/crm-access";
 import { CrmView, OpenCrm } from "./crm";
-import { BusyBots, Mascot } from "./mascot";
+import { BoppyLoading, BusyBots, Mascot } from "./mascot";
 import { CHAT_TAB, hostOf, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
 
 /** Your Mac's tab, and the chat's bot's profile (it follows the chat, like the computer tab); both open on demand. */
@@ -25,6 +25,7 @@ import { MacPreviews } from "./mac-tab";
 import { OPEN_MAC_KEY } from "./mac-pip";
 import { MacComputer } from "./mac-computer";
 import { NoticePopup } from "./notice-popup";
+import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
 import { chatInWorkspace, currentWorkspace, post, teamOf, useAppState, useSelfHosted } from "./ui";
 import { UsageData, useAnalytics } from "./usage-data";
 import { trackEvent } from "@/lib/analytics";
@@ -255,7 +256,7 @@ function Bops({ state }: { state: AppState | null }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  if (!state) return <div className="flex h-screen items-center justify-center text-pencil">Loading Bops…</div>;
+  if (!state) return <FirstLoad />;
 
   // Stay inside the workspace you're in: a chat from another one falls back to this one's main bot.
   const team = teamOf(state);
@@ -1211,5 +1212,35 @@ function Settings({ state, onClose }: { state: AppState; onClose: () => void }) 
         {selfHosted && <SelfHosting state={state} />}
       </div>
     </div>
+  );
+}
+
+/**
+ * The app's first load. One that takes far longer than usual (a server that won't answer this window,
+ * the Keychain or Bops Cloud stuck) says so and offers a restart, rather than bopping on forever.
+ */
+function FirstLoad() {
+  const [slow, setSlow] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const canRestart = useCanRestart();
+  useEffect(() => {
+    const t = setTimeout(() => setSlow(true), 20_000);
+    return () => clearTimeout(t);
+  }, []);
+  return (
+    <BoppyLoading label="Loading Bops…">
+      {slow && (
+        <div className="flex flex-col items-center gap-3">
+          <span>This is taking longer than usual.</span>
+          {canRestart && (
+            <button onClick={() => setConfirm(true)} className="flex items-center gap-1.5 rounded-full bg-[#F2F2F0] px-3.5 py-1.5 text-[13px] font-medium leading-4 text-ink hover:bg-[#EAEAE7]">
+              <RestartIcon />
+              Restart Bops
+            </button>
+          )}
+          {confirm && <RestartConfirm onClose={() => setConfirm(false)} />}
+        </div>
+      )}
+    </BoppyLoading>
   );
 }

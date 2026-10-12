@@ -1,0 +1,3 @@
+- Bops no longer opens to a blank window on some Macs.
+- If Bops can't start, it says why and offers Try again.
+- Boppy bops to music while Bops starts.

@@ -40,3 +40,34 @@ export function Spinner({ size = 13, color = "#0A0A0A" }: { size?: number; color
     </svg>
   );
 }
+
+/** ♪ and ♫, as on bops.bot (site/notes.js). */
+const NOTES = [
+  '<ellipse cx="7" cy="17.5" rx="3.3" ry="2.5" transform="rotate(-20 7 17.5)"/><rect x="9.4" y="4" width="1.8" height="13.6" rx=".9"/><path d="M11.2 4c0 3.2 4.8 3.8 4.8 7.6-.9-1.7-2.7-2.4-4.8-2.7z"/>',
+  '<ellipse cx="6" cy="18.3" rx="3" ry="2.3" transform="rotate(-20 6 18.3)"/><ellipse cx="17.6" cy="16.3" rx="3" ry="2.3" transform="rotate(-20 17.6 16.3)"/><rect x="8.1" y="6.2" width="1.7" height="12" rx=".85"/><rect x="19.7" y="4.2" width="1.7" height="12" rx=".85"/><path d="M8.1 6.2 21.4 3.6v2.9L8.1 9.1z"/>',
+];
+
+/**
+ * Boppy listening to music, bopping to the beat while notes drift out of its headphones: the app's
+ * first load, the same scene as the window's splash (desktop/splash.html). CSS only (globals.css).
+ */
+export function BoppyLoading({ label, children }: { label: string; children?: React.ReactNode }) {
+  return (
+    <div className="flex h-screen flex-col items-center justify-center gap-3.5 text-[13px] text-pencil select-none">
+      <div className="boppy-loading-scene" aria-hidden="true">
+        <div className="boppy-loading-shadow" />
+        {(["l", "r", "l", "r"] as const).map((side, i) => (
+          <svg key={i} className={`boppy-loading-note ${side}`} viewBox="0 0 24 24" dangerouslySetInnerHTML={{ __html: `<g fill="#0A0A0A">${NOTES[i === 0 || i === 3 ? 0 : 1]}</g>` }} />
+        ))}
+        <svg className="boppy-loading-boppy" viewBox="0 0 40 40" dangerouslySetInnerHTML={{ __html: mascotMarkup("boppy", "#0A0A0A", { mood: "awake" }) }} />
+      </div>
+      <div>{label}</div>
+      {/* Below the label without moving it: the scene stays where the splash had it. */}
+      {children && (
+        <div className="relative -mt-3.5 h-0 w-full">
+          <div className="absolute top-3.5 left-1/2 -translate-x-1/2">{children}</div>
+        </div>
+      )}
+    </div>
+  );
+}

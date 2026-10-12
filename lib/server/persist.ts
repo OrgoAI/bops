@@ -65,7 +65,7 @@ export const onPostgres = () => !!process.env.BOPS_DATABASE_URL;
 /** Self-hosting: keys in .env.local, no Bops Cloud, the state in files on this Mac. */
 export const selfHosted = () => process.env.BOPS_SELF_HOSTED === "1";
 
-const gx = globalThis as unknown as { __bopsExitWork?: Map<string, () => Promise<unknown>>; __bopsExitHooked?: boolean };
+const gx = globalThis as unknown as { __bopsExitWork?: Map<string, () => Promise<unknown>>; __bopsExitHooked?: boolean; __bopsStopping?: boolean };
 const exitWork = (gx.__bopsExitWork ??= new Map());
 
 /**
@@ -83,11 +83,17 @@ export function hookExit(first: () => void = () => {}, last: () => Promise<unkno
   if (gx.__bopsExitHooked) return;
   gx.__bopsExitHooked = true;
   for (const sig of ["SIGINT", "SIGTERM"] as const)
-    process.once(sig, () => {
-      first();
-      void lastWork()
-        .then(last)
-        .finally(() => process.exit(0));
+    // Kept on, so a second signal while the exit work runs (the app quitting, then a new Bops
+    // stopping what it finds) doesn't fall to Node's default and cut the last save short.
+    process.on(sig, () => {
+      if (gx.__bopsStopping) return;
+      // Health answers 503 from here on (app/api/health): this server is going.
+      gx.__bopsStopping = true;
+      try {
+        first();
+      } catch {}
+      // Exits within 8 seconds whatever the work does: repeat signals are ignored meanwhile.
+      void Promise.race([lastWork().then(last), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
     });
 }
 
