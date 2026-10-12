@@ -148,8 +148,13 @@ function load(bank: string): Index {
       if (read?.v === 1 && read.items && read.facts) {
         index = { ...empty(bank), ...read };
         if (Array.isArray(index.forgotten)) index.forgotten = Object.fromEntries((index.forgotten as unknown as string[]).map((k) => [k, Date.now()]));
-        // Sorted before a category was added: what made nothing then may fit one now (the next look sorts it again).
-        if (read.cats !== CATS) for (const [id, f] of Object.entries(index.facts)) if (!f.items.length) delete index.facts[id];
+        // Sorted before a category was added: what made nothing then may fit one now. It's sorted again
+        // at the window's next poll, not 15 minutes after the last look (an update, then a restart).
+        if (read.cats !== CATS) {
+          const before = Object.keys(index.facts).length;
+          for (const [id, f] of Object.entries(index.facts)) if (!f.items.length) delete index.facts[id];
+          if (Object.keys(index.facts).length < before) index.syncedAt = index.triedAt = undefined;
+        }
         index.cats = CATS;
       }
     } catch (e) {

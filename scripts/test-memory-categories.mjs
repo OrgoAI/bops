@@ -2164,8 +2164,10 @@ await section("About you: what memory learns about the user themselves; what mad
       sweptAt: at,
     }),
   );
+  // The window's next poll looks at once, though the last look was a minute ago (Bops was just updated).
   const n = openai.calls.length;
-  const r = await refresh(ws);
+  await get(ws);
+  const r = await settled(ws);
   const asked = openai.calls.slice(n).flatMap((c) => c.texts);
   assert.deepEqual([...asked].sort(), [WORK, F.name.text].sort(), "what made nothing is sorted again, and only that");
   assert.deepEqual(pick(one(r.items, "you", "Name"), ["detail", "category"]), { detail: "Teequi", category: "you" });
