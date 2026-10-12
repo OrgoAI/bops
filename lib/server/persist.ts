@@ -89,10 +89,11 @@ export function hookExit(first: () => void = () => {}, last: () => Promise<unkno
       if (gx.__bopsStopping) return;
       // Health answers 503 from here on (app/api/health): this server is going.
       gx.__bopsStopping = true;
-      first();
-      void lastWork()
-        .then(last)
-        .finally(() => process.exit(0));
+      try {
+        first();
+      } catch {}
+      // Exits within 8 seconds whatever the work does: repeat signals are ignored meanwhile.
+      void Promise.race([lastWork().then(last), new Promise((r) => setTimeout(r, 8000))]).finally(() => process.exit(0));
     });
 }
 

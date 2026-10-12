@@ -9,9 +9,17 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 
 const PORT = 3210;
 const URL = `http://localhost:${PORT}`;
+/*
+ * The server listens on 127.0.0.1 only. "localhost" can also mean ::1, where another account on this
+ * Mac could listen and pass health on to the real server; so this app's own calls go to 127.0.0.1,
+ * and the window, which keeps its localhost address, is told localhost is 127.0.0.1.
+ */
+const LOCAL = `http://127.0.0.1:${PORT}`;
+app.commandLine.appendSwitch("host-resolver-rules", "MAP localhost 127.0.0.1");
 
 /**
  * The Bops window's token (lib/server/ui-token.ts): what only the window may do (turn on Full access,
@@ -56,7 +64,10 @@ let pipWin;
 function mainLog(text) {
   try {
     fs.mkdirSync(app.getPath("logs"), { recursive: true });
-    fs.appendFileSync(path.join(app.getPath("logs"), "main.log"), `${new Date().toISOString()} ${text}\n`);
+    const file = path.join(app.getPath("logs"), "main.log");
+    // Starts over once it passes 5 MB, like server.log.
+    if ((fs.statSync(file, { throwIfNoEntry: false })?.size ?? 0) > 5 * 1024 * 1024) fs.writeFileSync(file, "");
+    fs.appendFileSync(file, `${new Date().toISOString()} ${text}\n`);
   } catch {}
 }
 
@@ -88,7 +99,6 @@ function loginPath() {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      pathProbe = undefined;
       if (why) mainLog(`login shell PATH: ${why}; using ${fallback}`);
       resolve(found ?? fallback);
     };
@@ -101,15 +111,23 @@ function loginPath() {
       } catch {}
       finish(null, "took over 4s");
     }, 4000);
-    sh.stdout.on("data", (d) => {
+    const take = (d) => {
       out += d;
-      const found = new RegExp(`${PATH_MARK}(/[^\\n]*?)${PATH_MARK}`).exec(out)?.[1];
-      if (!found) return;
-      sh.stdout.destroy();
-      finish(found);
-    });
+      const between = new RegExp(`${PATH_MARK}([^\\n]*?)${PATH_MARK}`).exec(out)?.[1];
+      if (between === undefined) return;
+      // Only absolute folders: an rc's unset variable leaves an empty entry ("$UNSET:$PATH").
+      const dirs = [...new Set(between.split(":").filter((d) => d.startsWith("/")))];
+      // Still drained: a background job the rc started may write to it later, and a closed pipe would kill it.
+      sh.stdout.off("data", take);
+      sh.stdout.resume();
+      finish(dirs.length ? dirs.join(":") : null, dirs.length ? null : "no folders in its PATH");
+    };
+    sh.stdout.on("data", take);
     sh.once("error", (e) => finish(null, e.message));
-    sh.once("exit", (code) => setTimeout(() => finish(null, `exited with ${code} and no PATH`), 200));
+    sh.once("exit", (code) => {
+      pathProbe = undefined;
+      setTimeout(() => finish(null, `exited with ${code} and no PATH`), 200);
+    });
   });
   return shellPath;
 }
@@ -159,17 +177,17 @@ async function whoAnswers() {
   const nonce = crypto.randomBytes(16).toString("hex");
   let res;
   try {
-    res = await fetch(`${URL}/api/health?nonce=${nonce}`, { signal: AbortSignal.timeout(1500) });
+    res = await fetch(`${LOCAL}/api/health?nonce=${nonce}`, { signal: AbortSignal.timeout(1500) });
   } catch {
     return { up: false };
   }
   const health = await res.json().catch(() => null);
-  if (res.status === 503 && health?.bops && health.stopping) return { up: false };
+  if (res.status === 503 && health?.bops && health.stopping) return { up: false, stopping: true };
   if (!res.ok || !health?.bops) return { up: true, bops: false };
   // A development server: as before, any Bops will do.
   if (!isRelease()) return { up: true, bops: true, mine: true };
   const want = crypto.createHmac("sha256", windowToken()).update(nonce).digest("hex");
-  const proven = typeof health.proof === "string" && health.proof.length === want.length && crypto.timingSafeEqual(Buffer.from(health.proof), Buffer.from(want));
+  const proven = typeof health.proof === "string" && /^[0-9a-f]{64}$/.test(health.proof) && crypto.timingSafeEqual(Buffer.from(health.proof, "hex"), Buffer.from(want, "hex"));
   const build = ourBuild();
   const why =
     health.proof === undefined
@@ -189,12 +207,16 @@ async function whoAnswers() {
  * its id, name, user, parent and folder. Null when there's none, or it can't be seen (another user's).
  */
 async function listener() {
-  const out = await output("lsof", ["-b", "-w", "-nP", `-iTCP:${PORT}`, "-sTCP:LISTEN", "-Fpc"]);
-  const pid = Number(/^p(\d+)/m.exec(out ?? "")?.[1]);
-  if (!Number.isInteger(pid) || pid <= 1) return null;
-  const ps = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(((await output("ps", ["-p", String(pid), "-o", "uid=,ppid=,comm="])) ?? "").trim());
-  const home = /^n(.+)$/m.exec((await output("lsof", ["-b", "-w", "-a", "-p", String(pid), "-d", "cwd", "-Fn"])) ?? "")?.[1];
-  return { pid, name: /^c(.+)$/m.exec(out)?.[1] ?? "a program", uid: ps ? Number(ps[1]) : undefined, ppid: ps ? Number(ps[2]) : undefined, comm: ps?.[3] ?? "", home };
+  const out = (await output("lsof", ["-b", "-w", "-nP", `-iTCP:${PORT}`, "-sTCP:LISTEN", "-Fpc"])) ?? "";
+  // One entry per process ("p<pid>" then "c<name>"); a port can have more than one (127.0.0.1 and ::1).
+  const found = [...out.matchAll(/^p(\d+)\n(?:c(.*))?/gm)].map((m) => ({ pid: Number(m[1]), name: m[2] || "a program" })).filter((l) => l.pid > 1);
+  const all = [];
+  for (const { pid, name } of found.slice(0, 3)) {
+    const ps = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(((await output("ps", ["-p", String(pid), "-o", "uid=,ppid=,comm="])) ?? "").trim());
+    const home = /^n(.+)$/m.exec((await output("lsof", ["-b", "-w", "-a", "-p", String(pid), "-d", "cwd", "-Fn"])) ?? "")?.[1];
+    all.push({ pid, name, uid: ps ? Number(ps[1]) : undefined, ppid: ps ? Number(ps[2]) : undefined, comm: ps?.[3] ?? "", home });
+  }
+  return all.find((l) => stoppable(l)) ?? all[0] ?? null;
 }
 
 /** "Docker (pid 812)", for the trouble page and the log. */
@@ -229,9 +251,14 @@ async function stopProcess(pid) {
   };
   kill("SIGINT");
   for (let i = 0; i < 28 && (await portTaken()); i++) await sleep(250);
-  if (await portTaken()) kill("SIGKILL");
+  if (await portTaken()) {
+    mainLog(`pid ${pid} still holds the port 7s after SIGINT: SIGKILL`);
+    kill("SIGKILL");
+  }
   for (let i = 0; i < 20 && (await portTaken()); i++) await sleep(250);
-  return !(await portTaken());
+  const free = !(await portTaken());
+  if (!free) mainLog(`the port is still taken after stopping pid ${pid}`);
+  return free;
 }
 
 /*
@@ -386,7 +413,9 @@ async function ensureServer() {
   for (;;) {
     const who = await whoAnswers();
     if (who.up && who.mine) {
-      watchAdopted(server ? undefined : (await listener())?.pid);
+      // One found running: watched, and stopped on quit, only when it's ours to stop.
+      const l = server ? null : await listener();
+      watchAdopted(isRelease() && stoppable(l) ? l.pid : undefined);
       mainLog(`server answering after ${((Date.now() - started) / 1000).toFixed(1)}s${adopted ? ` (one already running, pid ${adopted})` : ""}`);
       return { ok: true };
     }
@@ -408,23 +437,28 @@ async function ensureServer() {
         mainLog(spawned === 1 ? "starting the server" : `starting the server again (it ${serverEnded ?? "stopped"})`);
         await spawnServer();
       }
-    } else if (isRelease()) {
-      // Taken, and nothing answers. Not Bops at all: say so now. Bops: give it a while (it may be
-      // starting, or saving on its way out), then stop it if it's ours to stop.
-      silentSince ||= Date.now();
-      const l = server ? null : await listener();
+    } else if (isRelease() && !server) {
+      // Taken by something we didn't start, and nothing answers. Not Bops at all: say so now. A Bops
+      // server: give it a while (it may be starting, or saving on its way out), then stop it if it's
+      // ours to stop, or say so if it isn't. (Our own server starting is just waited on.)
+      const l = await listener();
       if (l && !looksLikeBops(l)) {
-        mainLog(`port ${PORT} held by ${named(l)}, which doesn't answer`);
+        mainLog(`port ${PORT} held by ${named(l)}, which isn't Bops${who.stopping ? " (it answers as a Bops on its way out)" : " and doesn't answer"}`);
         return { ok: false, reason: "port-taken", detail: named(l) };
       }
-      if (!stopped && Date.now() - silentSince > SILENT_MS) {
-        const pid = server?.pid ?? (stoppable(l) ? l.pid : undefined);
-        if (pid) {
-          stopped = true;
-          mainLog(`the Bops server (pid ${pid}) holds the port but hasn't answered in ${SILENT_MS / 1000}s: stopping it`);
-          await stopProcess(pid);
-          continue;
+      if (!silentSince) {
+        silentSince = Date.now();
+        mainLog(`port ${PORT} held by ${named(l) ?? "a program Bops can't see"}${who.stopping ? ", a Bops on its way out" : ", not answering"}: waiting`);
+      }
+      if (!stopped && l && Date.now() - silentSince > SILENT_MS) {
+        if (!stoppable(l)) {
+          mainLog(`${named(l)} hasn't answered in ${SILENT_MS / 1000}s and isn't ours to stop (its parent is pid ${l.ppid})`);
+          return { ok: false, reason: "other-bops", detail: named(l) };
         }
+        stopped = true;
+        mainLog(`the Bops server (pid ${l.pid}) holds the port but hasn't answered in ${SILENT_MS / 1000}s: stopping it`);
+        await stopProcess(l.pid);
+        continue;
       }
     }
     if (Date.now() - started > START_MS) {
@@ -434,6 +468,12 @@ async function ensureServer() {
         return { ok: false, reason: looksLikeBops(l) || !l ? "other-bops" : "port-taken", detail: named(l) };
       }
       mainLog(`no server after ${START_MS / 1000}s${serverEnded ? ` (it ${serverEnded})` : ""}`);
+      // Ours never answered (stuck before it listened, say): stopped, so Try again starts a new one.
+      if (server) {
+        const pid = server.pid;
+        mainLog(`our server (pid ${pid}) never answered: stopping it`);
+        await stopProcess(pid);
+      }
       return { ok: false, reason: "server-slow", detail: serverEnded };
     }
     await sleep(500);
@@ -448,27 +488,53 @@ const TROUBLE = path.join(__dirname, "trouble.html");
 /** When the server stopped or the page failed lately, to tell one that keeps failing from one that failed once. */
 let failures = [];
 
-/** Starts the server if it isn't ours and running, then shows the app; or what went wrong, never a blank window. */
+/*
+ * Starts the server if it isn't ours and running, then shows the app; or what went wrong, never a
+ * blank window. One at a time per window. Trouble that comes while the app's page is loading (the
+ * server going, the load failing) is kept and taken care of once this open is done, not dropped.
+ */
 let opening;
+let openingWin;
+let goneWhileOpening = false;
 function openApp(win) {
-  opening ??= (async () => {
+  if (opening && openingWin === win) return opening;
+  openingWin = win;
+  const run = (async () => {
+    let failed = false;
     try {
       const result = await ensureServer().catch((e) => ({ ok: false, reason: "error", detail: e?.message ?? String(e) }));
+      // What happened to a server before ours answered was ensureServer's to handle.
+      goneWhileOpening = false;
       if (win.isDestroyed()) return;
       if (!result.ok) return showTrouble(win, result);
       await giveWindowToken();
-      // A failed load is handled by did-fail-load (createWindow); one that never finishes, here.
-      const loaded = await Promise.race([win.loadURL(URL).then(() => true, () => true), sleep(30_000).then(() => false)]);
+      // A load that fails is tried again from the start (below); one that never finishes says so.
+      const loaded = await Promise.race([
+        win.loadURL(URL).then(
+          () => true,
+          (e) => {
+            if (e?.code !== "ERR_ABORTED") failed = true;
+            return true;
+          },
+        ),
+        sleep(30_000).then(() => false),
+      ]);
       if (!loaded && !win.isDestroyed()) {
         mainLog("the app's page took over 30s to load");
+        goneWhileOpening = false;
         win.webContents.stop();
         showTrouble(win, { reason: "server-slow" });
       }
     } finally {
-      opening = undefined;
+      if (opening === run) opening = openingWin = undefined;
+      if ((failed || goneWhileOpening) && !win.isDestroyed() && !leaving) {
+        goneWhileOpening = false;
+        setImmediate(() => void serverGone());
+      }
     }
   })();
-  return opening;
+  opening = run;
+  return run;
 }
 
 function showTrouble(win, { reason, detail }) {
@@ -479,27 +545,52 @@ function showTrouble(win, { reason, detail }) {
 
 /*
  * The server stopped, or the app's page didn't load or its renderer went: start again from the
- * splash. An open already under way takes care of it. More than three in two minutes, and the
- * window says Bops keeps stopping instead of trying forever.
+ * splash, once per incident (an open under way takes it on). More than three in two minutes, and
+ * the window says Bops keeps stopping instead of trying forever.
  */
-async function serverGone() {
+let reopening = false;
+async function serverGone(what = "server") {
   const win = mainWin;
-  if (!win || win.isDestroyed() || leaving || opening) return;
-  const now = Date.now();
-  failures = failures.filter((t) => now - t < 120_000);
-  failures.push(now);
-  if (failures.length > 3) return showTrouble(win, { reason: "server-crashed", detail: serverEnded });
-  await win.loadFile(SPLASH).catch(() => {});
-  await openApp(win);
+  if (!win || win.isDestroyed() || leaving) return;
+  if (opening && openingWin === win) {
+    goneWhileOpening = true;
+    return;
+  }
+  if (reopening) return;
+  reopening = true;
+  try {
+    const now = Date.now();
+    failures = failures.filter((t) => now - t < 120_000);
+    failures.push(now);
+    if (failures.length > 3) {
+      // Saying so already: not again, or a page that can't run would go round and round.
+      if (!win.webContents.getURL().startsWith(pathToFileURL(TROUBLE).href)) showTrouble(win, { reason: what === "page" ? "page-crashed" : "server-crashed", detail: serverEnded });
+      return;
+    }
+    await win.loadFile(SPLASH).catch(() => {});
+    await openApp(win);
+  } finally {
+    reopening = false;
+  }
 }
 
 ipcMain.handle("startup-retry", async () => {
+  mainLog("Try again");
   failures = [];
   if (!mainWin || mainWin.isDestroyed()) return;
+  if (opening && openingWin === mainWin) return opening;
   await mainWin.loadFile(SPLASH).catch(() => {});
   await openApp(mainWin);
 });
 ipcMain.handle("startup-logs", () => shell.openPath(app.getPath("logs")));
+
+/** Brings the Bops window forward, or opens it again when it was closed (the Mac previews' window can outlive it). */
+function showMain() {
+  if (!mainWin || mainWin.isDestroyed()) return void createWindow();
+  if (mainWin.isMinimized()) mainWin.restore();
+  mainWin.show();
+  mainWin.focus();
+}
 
 async function createWindow() {
   const win = new BrowserWindow({
@@ -531,7 +622,9 @@ async function createWindow() {
   win.webContents.on("render-process-gone", (_, details) => {
     if (leaving || details.reason === "clean-exit") return;
     mainLog(`the window's page crashed: ${details.reason} (${details.exitCode})`);
-    void serverGone();
+    // A page that can't start at all would only go round: it's logged, and that's all.
+    if (details.reason === "launch-failed") return;
+    setTimeout(() => void serverGone("page"), 1000);
   });
   await win.loadFile(SPLASH).catch(() => {});
   await openApp(win);
@@ -818,18 +911,35 @@ ipcMain.handle("perm-screen-restart", () => mac && screenAtLaunch !== "granted" 
 let restarting;
 function restart() {
   restarting ??= (async () => {
+    mainLog("Restart Bops");
     let pid;
-    try {
-      const res = await fetch(`${URL}/api/restart`, { method: "POST", headers: { "x-bops-window": windowToken() }, signal: AbortSignal.timeout(20_000) });
-      pid = (await res.json()).pid;
-    } catch {}
+    // A server that doesn't answer isn't asked (that only waited out the 20s).
+    if ((await whoAnswers()).up)
+      try {
+        const res = await fetch(`${LOCAL}/api/restart`, { method: "POST", headers: { "x-bops-window": windowToken() }, signal: AbortSignal.timeout(20_000) });
+        pid = (await res.json()).pid;
+      } catch (e) {
+        mainLog(`restart: the server didn't let go cleanly: ${e?.message ?? e}`);
+      }
+    else mainLog("restart: the server isn't answering");
     leaving = true;
-    // Wait for the port to close, so the new Bops starts its own server instead of finding the old
-    // one still answering and then losing it. One that won't let go (stuck) is stopped hard.
-    if (stopServer() || (await stopOtherServer(pid))) for (let i = 0; i < 60 && (await portTaken()); i++) await sleep(250);
+    // Wait for the port to close (its last save gets up to 5s), so the new Bops starts its own server
+    // instead of finding the old one still answering and then losing it. One that won't let go is
+    // stopped hard.
+    if (stopServer() || (await stopOtherServer(pid))) for (let i = 0; i < 28 && (await portTaken()); i++) await sleep(250);
     if (await portTaken()) {
       const l = await listener();
-      if (stoppable(l)) await stopProcess(l.pid);
+      if (stoppable(l)) {
+        mainLog(`restart: the server (pid ${l.pid}) still holds the port: SIGKILL`);
+        try {
+          process.kill(-l.pid, "SIGKILL");
+        } catch {
+          try {
+            process.kill(l.pid, "SIGKILL");
+          } catch {}
+        }
+        for (let i = 0; i < 20 && (await portTaken()); i++) await sleep(250);
+      }
     }
     app.relaunch();
     app.exit(0);
@@ -886,12 +996,7 @@ ipcMain.handle("mac-pip-open", () => {
   pipWin.on("closed", () => (pipWin = undefined));
 });
 ipcMain.handle("mac-pip-close", () => pipWin?.close());
-ipcMain.handle("mac-show-main", () => {
-  if (!mainWin || mainWin.isDestroyed()) return;
-  if (mainWin.isMinimized()) mainWin.restore();
-  mainWin.show();
-  mainWin.focus();
-});
+ipcMain.handle("mac-show-main", () => showMain());
 
 /*
  * New versions. Bops doesn't update itself: it asks bops.bot for the newest release
@@ -986,15 +1091,15 @@ app.setName("Bops");
  * of the two fighting over the server.
  */
 const first = app.requestSingleInstanceLock();
-if (!first) app.quit();
-app.on("second-instance", () => {
-  if (!mainWin || mainWin.isDestroyed()) return;
-  if (mainWin.isMinimized()) mainWin.restore();
-  mainWin.show();
-  mainWin.focus();
-});
+if (!first) {
+  // `npm run app` shares the installed app's folder: say why it closed.
+  if (!app.isPackaged) console.error("Bops is already open (the installed app, or another npm run app). Quit it to run this one.");
+  app.quit();
+}
+app.on("second-instance", () => app.isReady() && showMain());
 app.whenReady().then(() => {
   if (!first) return;
+  mainLog(`Bops ${app.getVersion()} opening (pid ${process.pid})`);
   if (process.platform === "darwin" && fs.existsSync(ICON)) app.dock.setIcon(nativeImage.createFromPath(ICON));
   // Release builds only: not `npm run app`, nor a build that runs the source folder (desktop/repo.json).
   if (isRelease()) {
@@ -1002,7 +1107,7 @@ app.whenReady().then(() => {
     setInterval(() => void checkForUpdate(), 60 * 60_000);
   }
   void createWindow();
-  app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && void createWindow());
+  app.on("activate", () => showMain());
 });
 
 app.on("window-all-closed", () => app.quit());
@@ -1015,7 +1120,11 @@ function stopServer() {
   watchAdopted(undefined);
   try {
     process.kill(-pid, "SIGTERM");
-  } catch {}
+  } catch {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+  }
   try {
     execFileSync("pkill", ["-f", ".bops/chrome/"]);
   } catch {}

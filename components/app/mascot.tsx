@@ -62,7 +62,12 @@ export function BoppyLoading({ label, children }: { label: string; children?: Re
         <svg className="boppy-loading-boppy" viewBox="0 0 40 40" dangerouslySetInnerHTML={{ __html: mascotMarkup("boppy", "#0A0A0A", { mood: "awake" }) }} />
       </div>
       <div>{label}</div>
-      {children}
+      {/* Below the label without moving it: the scene stays where the splash had it. */}
+      {children && (
+        <div className="relative h-0 w-full">
+          <div className="absolute top-0 left-1/2 -translate-x-1/2">{children}</div>
+        </div>
+      )}
     </div>
   );
 }
