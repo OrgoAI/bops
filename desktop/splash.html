@@ -1,0 +1,58 @@
+<!doctype html>
+<!--
+  What the Bops window shows while its server starts: Boppy (lib/mascot.ts, the main bot awake, as on
+  bops.bot) listening to music, bopping to the beat while notes drift out of its headphones. CSS only,
+  transform and opacity only, and still with reduced motion. components/app/mascot.tsx (BoppyLoading)
+  draws the same scene for the app's own first load, so one hands over to the other without a jump.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bops</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; font: 13px -apple-system, system-ui, sans-serif; color: #6B6B6B; -webkit-app-region: drag; user-select: none; }
+  .scene { position: relative; width: 88px; height: 96px; }
+  .boppy { position: absolute; left: 0; top: 0; width: 88px; height: 88px; transform-origin: 50% 90%; animation: bop 1.1s ease-in-out infinite; }
+  .shadow { position: absolute; left: 22px; bottom: 0; width: 44px; height: 6px; border-radius: 50%; background: #0A0A0A; opacity: 0.08; animation: shadow 0.55s ease-in-out infinite; }
+  .note { position: absolute; top: 34px; width: 14px; height: 14px; opacity: 0; animation: 2.2s cubic-bezier(.2,.6,.35,1) infinite; }
+  .note.l { left: 4px; animation-name: note-l; }
+  .note.r { right: 4px; animation-name: note-r; }
+  .note:nth-of-type(2) { animation-delay: 0.55s; }
+  .note:nth-of-type(3) { animation-delay: 1.1s; }
+  .note:nth-of-type(4) { animation-delay: 1.65s; }
+  /* Two beats a bar: down on each beat, leaning one way then the other. */
+  @keyframes bop {
+    0%, 100% { transform: translateY(-3px) rotate(-5deg); }
+    25% { transform: translateY(3px) rotate(0deg) scale(1.04, 0.95); }
+    50% { transform: translateY(-3px) rotate(5deg); }
+    75% { transform: translateY(3px) rotate(0deg) scale(1.04, 0.95); }
+  }
+  @keyframes shadow { 0%, 100% { transform: scaleX(0.85); opacity: 0.06; } 50% { transform: scaleX(1.05); opacity: 0.1; } }
+  @keyframes note-l {
+    0% { transform: translate(0, 0) rotate(0deg) scale(0.5); opacity: 0; }
+    20% { opacity: 1; transform: translate(-8px, -10px) rotate(-6deg) scale(1); }
+    70% { opacity: 0.9; }
+    100% { transform: translate(-24px, -46px) rotate(-18deg) scale(0.85); opacity: 0; }
+  }
+  @keyframes note-r {
+    0% { transform: translate(0, 0) rotate(0deg) scale(0.5); opacity: 0; }
+    20% { opacity: 1; transform: translate(8px, -10px) rotate(6deg) scale(1); }
+    70% { opacity: 0.9; }
+    100% { transform: translate(24px, -46px) rotate(18deg) scale(0.85); opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) { .boppy, .shadow { animation: none; } .note { display: none; } }
+</style>
+</head>
+<body>
+  <div class="scene" aria-hidden="true">
+    <div class="shadow"></div>
+    <svg class="note l" viewBox="0 0 24 24"><g fill="#0A0A0A"><ellipse cx="7" cy="17.5" rx="3.3" ry="2.5" transform="rotate(-20 7 17.5)"/><rect x="9.4" y="4" width="1.8" height="13.6" rx=".9"/><path d="M11.2 4c0 3.2 4.8 3.8 4.8 7.6-.9-1.7-2.7-2.4-4.8-2.7z"/></g></svg>
+    <svg class="note r" viewBox="0 0 24 24"><g fill="#0A0A0A"><ellipse cx="6" cy="18.3" rx="3" ry="2.3" transform="rotate(-20 6 18.3)"/><ellipse cx="17.6" cy="16.3" rx="3" ry="2.3" transform="rotate(-20 17.6 16.3)"/><rect x="8.1" y="6.2" width="1.7" height="12" rx=".85"/><rect x="19.7" y="4.2" width="1.7" height="12" rx=".85"/><path d="M8.1 6.2 21.4 3.6v2.9L8.1 9.1z"/></g></svg>
+    <svg class="note l" viewBox="0 0 24 24"><g fill="#0A0A0A"><ellipse cx="6" cy="18.3" rx="3" ry="2.3" transform="rotate(-20 6 18.3)"/><ellipse cx="17.6" cy="16.3" rx="3" ry="2.3" transform="rotate(-20 17.6 16.3)"/><rect x="8.1" y="6.2" width="1.7" height="12" rx=".85"/><rect x="19.7" y="4.2" width="1.7" height="12" rx=".85"/><path d="M8.1 6.2 21.4 3.6v2.9L8.1 9.1z"/></g></svg>
+    <svg class="note r" viewBox="0 0 24 24"><g fill="#0A0A0A"><ellipse cx="7" cy="17.5" rx="3.3" ry="2.5" transform="rotate(-20 7 17.5)"/><rect x="9.4" y="4" width="1.8" height="13.6" rx=".9"/><path d="M11.2 4c0 3.2 4.8 3.8 4.8 7.6-.9-1.7-2.7-2.4-4.8-2.7z"/></g></svg>
+    <svg class="boppy" viewBox="0 0 40 40"><g transform="translate(20 23) scale(.8) translate(-20 -21)"><path d="M20 4c7.5 0 13.5 4.5 15.5 11 2.8 2.4 3.8 6 2.8 9.6C36.6 32.5 29.6 37 20 37S3.4 32.5 1.7 24.6C.7 21 1.7 17.4 4.5 15 6.5 8.5 12.5 4 20 4z" fill="#0A0A0A"/><ellipse cx="15.5" cy="22.3" rx="1.9" ry="2.6" fill="#fff"/><ellipse cx="24.5" cy="22.3" rx="1.9" ry="2.6" fill="#fff"/></g><path d="M6.3 21.5C6.3 8.9 12.4 3.6 20 3.6s13.7 5.3 13.7 17.9" fill="none" stroke="#E9FF3B" stroke-width="2.1" stroke-linecap="round"/><rect x="2.4" y="17" width="6.4" height="11" rx="3" fill="#E9FF3B"/><rect x="31.2" y="17" width="6.4" height="11" rx="3" fill="#E9FF3B"/><rect x="7.4" y="18.6" width="1.6" height="7.8" rx=".8" fill="#0A0A0A"/><rect x="31" y="18.6" width="1.6" height="7.8" rx=".8" fill="#0A0A0A"/></svg>
+  </div>
+  <div>Starting Bops…</div>
+</body>
+</html>

@@ -10,7 +10,7 @@ import { ChatView, ThreadSheet, ToPicker } from "./chat-view";
 import { ComputerPeek, ComputerView, defaultDisplay } from "./computer";
 import { crmOpen } from "@/lib/crm-access";
 import { CrmView, OpenCrm } from "./crm";
-import { BusyBots, Mascot } from "./mascot";
+import { BoppyLoading, BusyBots, Mascot } from "./mascot";
 import { CHAT_TAB, hostOf, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
 
 /** Your Mac's tab, and the chat's bot's profile (it follows the chat, like the computer tab); both open on demand. */
@@ -255,7 +255,7 @@ function Bops({ state }: { state: AppState | null }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  if (!state) return <div className="flex h-screen items-center justify-center text-pencil">Loading Bops…</div>;
+  if (!state) return <BoppyLoading label="Loading Bops…" />;
 
   // Stay inside the workspace you're in: a chat from another one falls back to this one's main bot.
   const team = teamOf(state);
