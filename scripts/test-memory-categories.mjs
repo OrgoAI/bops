@@ -1344,7 +1344,7 @@ await section("Another account signing in mid-look: nothing of the last one's is
   const bank = Mem.bankOf(ws);
   seed(ws, [["s1", 20, "Tiger's piano teacher is Clara Moss.", [item("people", "Clara Moss", { key: "clara moss", detail: "Your piano teacher" })]]]);
   one((await refresh(ws)).items, "people", "Clara Moss");
-  newFact(ws, "Tiger's barber is Felix.", [item("people", "Felix", { key: "felix", detail: "Your barber" })]);
+  newFact(ws, "Tiger's barber is Otto.", [item("people", "Otto", { key: "otto", detail: "Your barber" })]);
   const before = readFileSync(fileFor(bank), "utf8");
   openai.hold = () => true;
   const pending = post({ action: "refresh", ws });
@@ -1367,7 +1367,7 @@ await section("Another account signing in mid-look: nothing of the last one's is
   // The look ended without writing anything: still a change, so the window that saw it sorting isn't told "unchanged".
   const back = await getRev(ws, during.rev);
   assert.deepEqual([back.body.unchanged, back.body.syncing], [undefined, false], "the end of a look is a change");
-  one((await refresh(ws)).items, "people", "Felix");
+  one((await refresh(ws)).items, "people", "Otto");
 
   await check("Another account signing in while an item is forgotten: nothing written to its folder (forgetItem saves without sameState)", async () => {
     honcho.hold = (c) => c.method === "DELETE";
@@ -1458,14 +1458,14 @@ await section("Tidying up memory: asked of Honcho, at most once an hour, and swe
     const ws4 = "ws_tidy4";
     const b4 = Mem.bankOf(ws4);
     const OLD = "Tiger's gym is Atlas Fitness.";
-    const FELIX = "Tiger's barber is Felix.";
-    seed(ws4, [], { cards: [[OLD, [item("companies", "Atlas Fitness", { key: "atlas fitness", detail: "Your gym" })]], [FELIX, [item("people", "Felix", { key: "felix", detail: "Your barber" })]]] });
-    const felix = one((await refresh(ws4)).items, "people", "Felix");
+    const OTTO = "Tiger's barber is Otto.";
+    seed(ws4, [], { cards: [[OLD, [item("companies", "Atlas Fitness", { key: "atlas fitness", detail: "Your gym" })]], [OTTO, [item("people", "Otto", { key: "otto", detail: "Your barber" })]]] });
+    const otto = one((await refresh(ws4)).items, "people", "Otto");
     assert.equal((await post({ action: "tidy-up", ws: ws4 })).status, 200);
     // Memory tidies up and writes the card again: one line reworded, one as it was.
     const NEW = "Tiger trains at Atlas Fitness on Mondays.";
     SORTS.set(NEW, [item("companies", "Atlas Fitness", { key: "atlas fitness", detail: "Your gym, Mondays" })]);
-    hbank(b4).cards.set("user", [NEW, FELIX]);
+    hbank(b4).cards.set("user", [NEW, OTTO]);
     const n = openai.calls.length;
     await fire(ws4, "dream-soon");
     assert.deepEqual(openai.calls.slice(n).map((c) => c.texts), [[NEW]], "the new line, sorted at once");
@@ -1473,7 +1473,7 @@ await section("Tidying up memory: asked of Honcho, at most once an hour, and swe
     const items = (await get(ws4)).body.items;
     assert.deepEqual(pick(one(items, "companies", "Atlas Fitness"), ["detail"]), { detail: "Your gym, Mondays" });
     assert.deepEqual(one(items, "companies", "Atlas Fitness").sources.map((s) => s.fact), [`card:${NEW}`]);
-    assert.equal(one(items, "people", "Felix").id, felix.id, "a line left as it was keeps its item");
+    assert.equal(one(items, "people", "Otto").id, otto.id, "a line left as it was keeps its item");
   });
 });
 
