@@ -64,8 +64,8 @@ export function BoppyLoading({ label, children }: { label: string; children?: Re
       <div>{label}</div>
       {/* Below the label without moving it: the scene stays where the splash had it. */}
       {children && (
-        <div className="relative h-0 w-full">
-          <div className="absolute top-0 left-1/2 -translate-x-1/2">{children}</div>
+        <div className="relative -mt-3.5 h-0 w-full">
+          <div className="absolute top-3.5 left-1/2 -translate-x-1/2">{children}</div>
         </div>
       )}
     </div>

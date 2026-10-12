@@ -19,7 +19,8 @@ const URL = `http://localhost:${PORT}`;
  * and the window, which keeps its localhost address, is told localhost is 127.0.0.1.
  */
 const LOCAL = `http://127.0.0.1:${PORT}`;
-app.commandLine.appendSwitch("host-resolver-rules", "MAP localhost 127.0.0.1");
+// Bops' port only: other localhost pages (a dev server in a tab) still reach ::1.
+app.commandLine.appendSwitch("host-resolver-rules", `MAP localhost:${PORT} 127.0.0.1:${PORT}`);
 
 /**
  * The Bops window's token (lib/server/ui-token.ts): what only the window may do (turn on Full access,
@@ -237,9 +238,19 @@ const stoppable = (l) =>
 /**
  * Stops a server by its process group (its bots' tools with it): SIGINT first, which lets one in the
  * middle of its last save to Bops Cloud finish it (up to 5s, lib/server/persist.ts), then SIGKILL.
+ * Waits for the process to end as well as the port (one stuck before it listened holds none).
  * Resolves whether the port is free.
  */
 async function stopProcess(pid) {
+  const running = () => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      return e?.code === "EPERM";
+    }
+  };
+  const holding = async () => running() || (await portTaken());
   const kill = (sig) => {
     try {
       process.kill(-pid, sig);
@@ -250,12 +261,12 @@ async function stopProcess(pid) {
     }
   };
   kill("SIGINT");
-  for (let i = 0; i < 28 && (await portTaken()); i++) await sleep(250);
-  if (await portTaken()) {
-    mainLog(`pid ${pid} still holds the port 7s after SIGINT: SIGKILL`);
+  for (let i = 0; i < 28 && (await holding()); i++) await sleep(250);
+  if (await holding()) {
+    mainLog(`pid ${pid} still running 7s after SIGINT: SIGKILL`);
     kill("SIGKILL");
   }
-  for (let i = 0; i < 20 && (await portTaken()); i++) await sleep(250);
+  for (let i = 0; i < 20 && (await holding()); i++) await sleep(250);
   const free = !(await portTaken());
   if (!free) mainLog(`the port is still taken after stopping pid ${pid}`);
   return free;
@@ -322,6 +333,10 @@ let adopted;
 async function spawnServer() {
   const packaged = packagedServer();
   const PATH = await loginPath();
+  if (leaving) {
+    if (packaged) fs.closeSync(packaged.log);
+    return;
+  }
   serverEnded = undefined;
   const child = packaged
     ? // Run as Node by the app's Helper binary (LSUIElement), not the app's own: run by the app's
@@ -364,27 +379,35 @@ async function spawnServer() {
     if (server === child) server = undefined;
   });
   child.once("exit", (code, signal) => {
+    // Only the current server's end counts: one Bops stopped on purpose was let go first.
+    if (server !== child) return;
     serverEnded = signal ? `stopped by ${signal}` : `exited with code ${code}`;
-    if (server === child) server = undefined;
+    server = undefined;
     if (leaving) return;
     mainLog(`server (pid ${child.pid}) ${serverEnded}`);
     void serverGone();
   });
 }
 
-/** Watches a server this app found running and uses, which it has no exit event for. */
+/**
+ * Watches a server this app found running and uses, which it has no exit event for: when it goes,
+ * Bops starts its own. Only one that's ours to stop (`ours`) is stopped on quit (`adopted`).
+ */
 let adoptedWatch;
-function watchAdopted(pid) {
+let found;
+function watchAdopted(pid, ours = false) {
   clearInterval(adoptedWatch);
-  adopted = pid;
+  found = pid;
+  adopted = pid && ours ? pid : undefined;
   if (!pid) return;
   adoptedWatch = setInterval(() => {
     try {
       process.kill(pid, 0);
-    } catch {
+    } catch (e) {
+      if (e?.code === "EPERM") return;
       clearInterval(adoptedWatch);
-      if (adopted !== pid) return;
-      adopted = undefined;
+      if (found !== pid) return;
+      found = adopted = undefined;
       serverEnded = "went away";
       if (leaving) return;
       mainLog(`server (pid ${pid}) went away`);
@@ -405,18 +428,22 @@ function watchAdopted(pid) {
  */
 const START_MS = 60_000;
 const SILENT_MS = 15_000;
-async function ensureServer() {
+/** One start at a time, whichever window asks. */
+let ensuring;
+const ensureServer = () => (ensuring ??= startOrFind().finally(() => (ensuring = undefined)));
+async function startOrFind() {
   const started = Date.now();
   let spawned = 0;
   let stopped = false;
   let silentSince = 0;
   for (;;) {
+    if (leaving) return { ok: false, reason: "error", detail: "Bops is quitting" };
     const who = await whoAnswers();
     if (who.up && who.mine) {
       // One found running: watched, and stopped on quit, only when it's ours to stop.
       const l = server ? null : await listener();
-      watchAdopted(isRelease() && stoppable(l) ? l.pid : undefined);
-      mainLog(`server answering after ${((Date.now() - started) / 1000).toFixed(1)}s${adopted ? ` (one already running, pid ${adopted})` : ""}`);
+      watchAdopted(isRelease() && l ? l.pid : undefined, stoppable(l));
+      mainLog(`server answering after ${((Date.now() - started) / 1000).toFixed(1)}s${found ? ` (one already running, pid ${found}${adopted ? "" : ", not ours to stop"})` : ""}`);
       return { ok: true };
     }
     if (who.up) {
@@ -447,7 +474,7 @@ async function ensureServer() {
         return { ok: false, reason: "port-taken", detail: named(l) };
       }
       if (!silentSince) {
-        silentSince = Date.now();
+        silentSince = started;
         mainLog(`port ${PORT} held by ${named(l) ?? "a program Bops can't see"}${who.stopping ? ", a Bops on its way out" : ", not answering"}: waiting`);
       }
       if (!stopped && l && Date.now() - silentSince > SILENT_MS) {
@@ -470,9 +497,11 @@ async function ensureServer() {
       mainLog(`no server after ${START_MS / 1000}s${serverEnded ? ` (it ${serverEnded})` : ""}`);
       // Ours never answered (stuck before it listened, say): stopped, so Try again starts a new one.
       if (server) {
-        const pid = server.pid;
-        mainLog(`our server (pid ${pid}) never answered: stopping it`);
-        await stopProcess(pid);
+        const child = server;
+        server = undefined;
+        serverEnded = "never answered";
+        mainLog(`our server (pid ${child.pid}) never answered: stopping it`);
+        await stopProcess(child.pid);
       }
       return { ok: false, reason: "server-slow", detail: serverEnded };
     }
@@ -495,7 +524,8 @@ let failures = [];
  */
 let opening;
 let openingWin;
-let goneWhileOpening = false;
+/** What went while an open was under way ("server", "page" or "load"), taken care of when it's done. */
+let goneWhileOpening = null;
 function openApp(win) {
   if (opening && openingWin === win) return opening;
   openingWin = win;
@@ -504,7 +534,7 @@ function openApp(win) {
     try {
       const result = await ensureServer().catch((e) => ({ ok: false, reason: "error", detail: e?.message ?? String(e) }));
       // What happened to a server before ours answered was ensureServer's to handle.
-      goneWhileOpening = false;
+      goneWhileOpening = null;
       if (win.isDestroyed()) return;
       if (!result.ok) return showTrouble(win, result);
       await giveWindowToken();
@@ -521,16 +551,15 @@ function openApp(win) {
       ]);
       if (!loaded && !win.isDestroyed()) {
         mainLog("the app's page took over 30s to load");
-        goneWhileOpening = false;
+        goneWhileOpening = null;
         win.webContents.stop();
         showTrouble(win, { reason: "server-slow" });
       }
     } finally {
       if (opening === run) opening = openingWin = undefined;
-      if ((failed || goneWhileOpening) && !win.isDestroyed() && !leaving) {
-        goneWhileOpening = false;
-        setImmediate(() => void serverGone());
-      }
+      const what = goneWhileOpening ?? (failed ? "load" : null);
+      goneWhileOpening = null;
+      if (what && !win.isDestroyed() && !leaving) setImmediate(() => void serverGone(what));
     }
   })();
   opening = run;
@@ -549,11 +578,14 @@ function showTrouble(win, { reason, detail }) {
  * the window says Bops keeps stopping instead of trying forever.
  */
 let reopening = false;
+/** How the window's page last went: "crashed (5)". */
+let lastPageGone;
 async function serverGone(what = "server") {
   const win = mainWin;
   if (!win || win.isDestroyed() || leaving) return;
   if (opening && openingWin === win) {
-    goneWhileOpening = true;
+    // A crashed page says more than the failed load it causes.
+    if (goneWhileOpening !== "page") goneWhileOpening = what;
     return;
   }
   if (reopening) return;
@@ -563,8 +595,13 @@ async function serverGone(what = "server") {
     failures = failures.filter((t) => now - t < 120_000);
     failures.push(now);
     if (failures.length > 3) {
-      // Saying so already: not again, or a page that can't run would go round and round.
-      if (!win.webContents.getURL().startsWith(pathToFileURL(TROUBLE).href)) showTrouble(win, { reason: what === "page" ? "page-crashed" : "server-crashed", detail: serverEnded });
+      // Saying so already: not again (a page that can't run would go round and round), unless the
+      // trouble page itself crashed, a few times at most.
+      const showing = win.webContents.getURL().startsWith(pathToFileURL(TROUBLE).href);
+      if (!showing || (win.webContents.isCrashed() && failures.length <= 8)) {
+        const reason = { page: "page-crashed", load: "page-failed" }[what] ?? "server-crashed";
+        showTrouble(win, { reason, detail: what === "page" ? lastPageGone : what === "load" ? null : serverEnded });
+      }
       return;
     }
     await win.loadFile(SPLASH).catch(() => {});
@@ -617,13 +654,16 @@ async function createWindow() {
   win.webContents.on("did-fail-load", (_, code, description, url, isMainFrame) => {
     if (!isMainFrame || code === -3 || !url.startsWith(URL) || leaving) return;
     mainLog(`the app's page didn't load: ${description} (${code})`);
-    void serverGone();
+    void serverGone("load");
   });
   win.webContents.on("render-process-gone", (_, details) => {
     if (leaving || details.reason === "clean-exit") return;
-    mainLog(`the window's page crashed: ${details.reason} (${details.exitCode})`);
+    lastPageGone = `${details.reason} (${details.exitCode})`;
+    mainLog(`the window's page crashed: ${lastPageGone}`);
     // A page that can't start at all would only go round: it's logged, and that's all.
     if (details.reason === "launch-failed") return;
+    // During an open, the open takes it on (its load fails too); otherwise a moment later.
+    if (opening && openingWin === win) return void serverGone("page");
     setTimeout(() => void serverGone("page"), 1000);
   });
   await win.loadFile(SPLASH).catch(() => {});
@@ -914,14 +954,15 @@ function restart() {
     mainLog("Restart Bops");
     let pid;
     // A server that doesn't answer isn't asked (that only waited out the 20s).
-    if ((await whoAnswers()).up)
+    const who = await whoAnswers();
+    if (who.up && who.mine)
       try {
         const res = await fetch(`${LOCAL}/api/restart`, { method: "POST", headers: { "x-bops-window": windowToken() }, signal: AbortSignal.timeout(20_000) });
         pid = (await res.json()).pid;
       } catch (e) {
         mainLog(`restart: the server didn't let go cleanly: ${e?.message ?? e}`);
       }
-    else mainLog("restart: the server isn't answering");
+    else mainLog(`restart: ${who.up ? "the server answering isn't this Bops'" : "the server isn't answering"}`);
     leaving = true;
     // Wait for the port to close (its last save gets up to 5s), so the new Bops starts its own server
     // instead of finding the old one still answering and then losing it. One that won't let go is
@@ -1133,7 +1174,12 @@ function stopServer() {
 
 app.on("will-quit", () => {
   leaving = true;
-  stopServer();
+  const pid = server?.pid ?? adopted;
+  // A server too stuck to act on SIGTERM would outlive Bops: stopped hard once its exit work's 8s are up.
+  if (stopServer() && pid)
+    try {
+      spawn("/bin/sh", ["-c", `sleep 10; kill -KILL -${pid} 2>/dev/null || kill -KILL ${pid} 2>/dev/null`], { detached: true, stdio: "ignore" }).unref();
+    } catch {}
   // A login shell still being asked for its PATH (a stuck ~/.zshrc) goes too.
   if (pathProbe)
     try {
