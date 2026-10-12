@@ -171,7 +171,8 @@ async function startServer() {
   for (let i = 0; i < 240 && !(await serverUp()); i++) await new Promise((r) => setTimeout(r, 500));
 }
 
-const splash = `data:text/html,${encodeURIComponent(`<body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;font:13px -apple-system,system-ui;color:#6B6B6B;-webkit-app-region:drag">Starting Bops…</body>`)}`;
+// The charset matters: without it the page is read as Latin-1 and "…" shows as "â€¦".
+const splash = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><meta charset="utf-8"><body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;font:13px -apple-system,system-ui;color:#6B6B6B;-webkit-app-region:drag">Starting Bops…</body>`)}`;
 
 async function createWindow() {
   const win = new BrowserWindow({
