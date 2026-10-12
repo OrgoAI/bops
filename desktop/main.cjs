@@ -49,25 +49,52 @@ let server;
 let mainWin;
 let pipWin;
 
-/** Apps opened from Finder get a bare PATH; borrow the login shell's so node and codex resolve. */
+/**
+ * Startup and other trouble the window can't show, for support: ~/Library/Logs/Bops/main.log (the
+ * server's own output is in server.log). Never throws.
+ */
+function mainLog(text) {
+  try {
+    fs.mkdirSync(app.getPath("logs"), { recursive: true });
+    fs.appendFileSync(path.join(app.getPath("logs"), "main.log"), `${new Date().toISOString()} ${text}\n`);
+  } catch {}
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/*
+ * Apps opened from Finder get a bare PATH; borrow the login shell's so node and codex resolve. Asked
+ * without blocking the window, and cut off hard: an interactive zsh ignores the SIGTERM a plain timeout
+ * sends, so a slow or stuck ~/.zshrc used to hold Bops on its splash for as long as it ran.
+ */
+const FALLBACK_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 function loginPath() {
-  try {
-    return execFileSync(process.env.SHELL || "/bin/zsh", ["-ilc", 'printf %s "$PATH"'], { timeout: 5000 }).toString();
-  } catch {
-    return process.env.PATH;
-  }
+  const fallback = [...new Set([...(process.env.PATH ?? "").split(":").filter(Boolean), ...FALLBACK_PATH])].join(":");
+  return new Promise((resolve) => {
+    let out = "";
+    let done = false;
+    const finish = (path, why) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (why) mainLog(`login shell PATH: ${why}; using ${fallback}`);
+      resolve(path);
+    };
+    // In a process group of its own, so what its rc started goes with it.
+    const sh = spawn(process.env.SHELL || "/bin/zsh", ["-ilc", 'printf %s "$PATH"'], { stdio: ["ignore", "pipe", "ignore"], detached: true });
+    const timer = setTimeout(() => {
+      try {
+        process.kill(-sh.pid, "SIGKILL");
+      } catch {}
+      finish(fallback, "took over 4s");
+    }, 4000);
+    sh.stdout.on("data", (d) => (out += d));
+    sh.once("error", (e) => finish(fallback, e.message));
+    sh.once("close", (code) => finish(code === 0 && out.includes("/") ? out : fallback, code === 0 ? null : `exited with ${code}`));
+  });
 }
 
-/** Bops' server is answering. /api/health imports nothing, so a missing key can't hold up the start. */
-async function serverUp() {
-  try {
-    return (await fetch(`${URL}/api/health`, { signal: AbortSignal.timeout(1500) })).ok;
-  } catch {
-    return false;
-  }
-}
-
-/** Something already listens on the port (a server from an earlier start that's still loading, say). */
+/** Something listens on the port: a server still loading, one on its way out, or another program. */
 function portTaken() {
   return new Promise((resolve) => {
     const s = net.connect(PORT, "127.0.0.1");
@@ -77,13 +104,131 @@ function portTaken() {
   });
 }
 
+/** A release build: it runs the server it carries, not `next dev` from a source folder. */
+const isRelease = () => app.isPackaged && !fs.existsSync(path.join(__dirname, "repo.json"));
+
+/** This build's id (Next's BUILD_ID, which the server it carries reports too), or null when it can't be read. */
+let buildId;
+function ourBuild() {
+  if (buildId !== undefined) return buildId;
+  try {
+    buildId = fs.readFileSync(path.join(process.resourcesPath, "server", ".next", "BUILD_ID"), "utf8").trim() || null;
+  } catch {
+    buildId = null;
+  }
+  return buildId;
+}
+
+/** How the server's health names the window token it was started with (app/api/health/route.ts). */
+const tokenMark = () => crypto.createHash("sha256").update(windowToken()).digest("hex").slice(0, 16);
+
+/*
+ * Who answers on the port. Only our own server will do: started with this window's token, and in a
+ * release, from this very build. Anything else answering there used to be taken as Bops all the
+ * same, and left the window stuck: another copy's server whose files were replaced since (its pages
+ * ask for scripts that are gone), or one with another token (every call refused, "Loading Bops…"
+ * for good). A server on its way out says so (503) and counts as not answering.
+ */
+async function whoAnswers() {
+  let res;
+  try {
+    res = await fetch(`${URL}/api/health`, { signal: AbortSignal.timeout(1500) });
+  } catch {
+    return { up: false };
+  }
+  if (res.status === 503) return { up: false };
+  const health = await res.json().catch(() => null);
+  if (!res.ok || !health?.bops) return { up: true, bops: false };
+  // A development server: as before, any Bops will do.
+  if (!isRelease()) return { up: true, bops: true, mine: true };
+  const mine = health.window === tokenMark() && (!ourBuild() || health.build === ourBuild());
+  // A server from before health said who it is (0.0.26 and older): found by its port instead.
+  let { pid, home } = health;
+  if (!Number.isInteger(pid)) {
+    pid = listenerPid();
+    home = pid ? cwdOf(pid) : undefined;
+  }
+  return { up: true, bops: true, mine, pid, home, version: health.version };
+}
+
+/** The process listening on the port, or undefined. */
+function listenerPid() {
+  try {
+    const pid = Number(/^p(\d+)/m.exec(execFileSync("lsof", ["-nP", `-iTCP:${PORT}`, "-sTCP:LISTEN", "-Fp"]).toString())?.[1]);
+    return Number.isInteger(pid) && pid > 1 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A process's working folder, or undefined. */
+function cwdOf(pid) {
+  try {
+    return /^n(.+)$/m.exec(execFileSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]).toString())?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+/** The user and executable of a process, or null when there's none. */
+function processInfo(pid) {
+  try {
+    const [uid, ...comm] = execFileSync("ps", ["-p", String(pid), "-o", "uid=,comm="]).toString().trim().split(/\s+/);
+    return { uid: Number(uid), comm: comm.join(" ") };
+  } catch {
+    return null;
+  }
+}
+
+/*
+ * Whether a process is a Bops server of this user's, from this Mac's Application Support: what
+ * Bops may stop. Next renames its process ("next-server (v16…)"), so the command line can't tell;
+ * the server's folder (its health says it) and the user can.
+ */
+function ourOwnServer(pid, home) {
+  if (!Number.isInteger(pid) || pid <= 1 || home !== path.join(app.getPath("userData"), "server")) return false;
+  const p = processInfo(pid);
+  return !!p && p.uid === process.getuid() && (p.comm.startsWith("next-server") || p.comm.includes("Bops Helper"));
+}
+
+/** Stops a server by its process group (its bots' tools with it), harder after a few seconds. Resolves once the port is free, or false. */
+async function stopProcess(pid) {
+  const kill = (sig) => {
+    try {
+      process.kill(-pid, sig);
+    } catch {
+      try {
+        process.kill(pid, sig);
+      } catch {}
+    }
+  };
+  kill("SIGTERM");
+  // Its last save to Bops Cloud gets up to 5s (lib/server/persist.ts).
+  for (let i = 0; i < 28 && (await portTaken()); i++) await sleep(250);
+  if (await portTaken()) kill("SIGKILL");
+  for (let i = 0; i < 20 && (await portTaken()); i++) await sleep(250);
+  return !(await portTaken());
+}
+
+/** What holds the port, by name, for the message: "Docker (pid 812)". */
+function portHolder() {
+  try {
+    const out = execFileSync("lsof", ["-nP", `-iTCP:${PORT}`, "-sTCP:LISTEN", "-Fpc"]).toString();
+    const pid = /^p(\d+)/m.exec(out)?.[1];
+    const name = /^c(.+)$/m.exec(out)?.[1];
+    return pid ? `${name ?? "a program"} (pid ${pid})` : null;
+  } catch {
+    return null;
+  }
+}
+
 /*
  * Where the server runs from. A release build carries a prebuilt server (Next's standalone output,
  * copied to Resources/server by electron-builder) and runs it with the app's own Node. A build made
  * with `npm run app:build` (desktop/repo.json) or `npm run app` runs `next dev` in the source folder.
  */
 function packagedServer() {
-  if (!app.isPackaged || fs.existsSync(path.join(__dirname, "repo.json"))) return null;
+  if (!isRelease()) return null;
   const dir = path.join(process.resourcesPath, "server");
   if (!fs.existsSync(path.join(dir, "server.js"))) return null;
   // The app bundle is read-only (and sealed by its signature), but the server keeps its state in
@@ -128,15 +273,16 @@ function nodeBinary() {
   return fs.existsSync(helper) ? helper : process.execPath;
 }
 
-async function startServer() {
-  if (await serverUp()) return;
-  // A second server on a taken port only fails (EADDRINUSE): wait for the one that's there instead.
-  if (await portTaken()) {
-    for (let i = 0; i < 240 && !(await serverUp()); i++) await new Promise((r) => setTimeout(r, 500));
-    return;
-  }
+/** How the server we started ended, while it hasn't been replaced: "exited with code 1", "stopped by SIGKILL". */
+let serverEnded;
+/** Quitting or restarting: the server going away then is expected. */
+let leaving = false;
+
+async function spawnServer() {
   const packaged = packagedServer();
-  server = packaged
+  const PATH = await loginPath();
+  serverEnded = undefined;
+  const child = packaged
     ? // Run as Node by the app's Helper binary (LSUIElement), not the app's own: run by the app's
       // binary, macOS listed the server in the Dock as a second app ("exec"). server.js changes into
       // its folder on start; keeping the working folder in Application Support is what lets the
@@ -146,7 +292,7 @@ async function startServer() {
         env: {
           ...process.env,
           ...packaged.env,
-          PATH: loginPath(),
+          PATH,
           ELECTRON_RUN_AS_NODE: "1",
           BOPS_SERVER_JS: path.join(packaged.dir, "server.js"),
           NODE_ENV: "production",
@@ -164,15 +310,119 @@ async function startServer() {
       })
     : spawn("npx", ["next", "dev", "--port", String(PORT)], {
         cwd: REPO,
-        env: { ...process.env, PATH: loginPath(), BOPS_UI_TOKEN: windowToken() },
+        env: { ...process.env, PATH, BOPS_UI_TOKEN: windowToken() },
         stdio: "ignore",
         detached: true,
       });
-  for (let i = 0; i < 240 && !(await serverUp()); i++) await new Promise((r) => setTimeout(r, 500));
+  if (packaged) fs.closeSync(packaged.log);
+  server = child;
+  // A server that can't start, or stops later, is noticed now, not after a long wait on its port.
+  child.once("error", (e) => {
+    serverEnded = `couldn't start: ${e.message}`;
+    mainLog(`server ${serverEnded}`);
+    if (server === child) server = undefined;
+  });
+  child.once("exit", (code, signal) => {
+    serverEnded = signal ? `stopped by ${signal}` : `exited with code ${code}`;
+    if (server === child) server = undefined;
+    if (leaving) return;
+    mainLog(`server (pid ${child.pid}) ${serverEnded}`);
+    void serverGone();
+  });
+}
+
+/*
+ * Has our own server answering on the port, or says why it can't. Waits against a deadline, with
+ * what holds the port checked each time round:
+ * - our server answering: done;
+ * - an old server of this user's (a Bops that quit badly, perhaps a since replaced copy): stopped, and ours started;
+ * - another Bops (another user on this Mac) or another program answering there: we can't use the port;
+ * - the port taken but nothing answering (a server starting, or on its way out): wait for it to answer or let go;
+ * - the port free: start ours (again, if it stopped).
+ */
+const START_MS = 60_000;
+async function ensureServer() {
+  const deadline = Date.now() + START_MS;
+  let spawned = 0;
+  let stopped = false;
+  for (;;) {
+    const who = await whoAnswers();
+    if (who.up && who.mine) return { ok: true };
+    if (who.up && who.bops && !stopped && ourOwnServer(who.pid, who.home)) {
+      mainLog(`an old Bops server (pid ${who.pid}, ${who.version ?? "unknown version"}) holds the port: stopping it`);
+      stopped = true;
+      if (await stopProcess(who.pid)) continue;
+    }
+    if (who.up) {
+      const holder = portHolder();
+      mainLog(`port ${PORT} answered by ${who.bops ? "another Bops" : "something else"}: ${holder ?? "unknown"}`);
+      return who.bops ? { ok: false, reason: "other-bops", detail: holder } : { ok: false, reason: "port-taken", detail: holder };
+    }
+    if (!server && !(await portTaken())) {
+      if (spawned >= 2) return { ok: false, reason: "server-ended", detail: serverEnded };
+      spawned++;
+      await spawnServer();
+    }
+    if (Date.now() > deadline) {
+      const holder = server ? null : portHolder();
+      mainLog(`no server after ${START_MS / 1000}s${holder ? `, port held by ${holder}` : ""}`);
+      return holder ? { ok: false, reason: "port-taken", detail: holder } : { ok: false, reason: "server-slow", detail: serverEnded };
+    }
+    await sleep(500);
+  }
 }
 
 /** Boppy bopping to music while the server starts (desktop/splash.html). */
 const SPLASH = path.join(__dirname, "splash.html");
+/** What the window shows when Bops can't start, with Try again (desktop/trouble.html). */
+const TROUBLE = path.join(__dirname, "trouble.html");
+
+/** The window's last loads of the app, to tell a page that keeps failing from one that failed once. */
+let loadFailures = [];
+
+/** Starts the server if it isn't ours and running, then shows the app; or what went wrong, never a blank window. */
+let opening;
+function openApp(win) {
+  opening ??= (async () => {
+    try {
+      const result = await ensureServer().catch((e) => ({ ok: false, reason: "error", detail: e?.message ?? String(e) }));
+      if (win.isDestroyed()) return;
+      if (!result.ok) return showTrouble(win, result);
+      await giveWindowToken();
+      // A failed load is handled by did-fail-load (createWindow), not here.
+      await win.loadURL(URL).catch(() => {});
+    } finally {
+      opening = undefined;
+    }
+  })();
+  return opening;
+}
+
+function showTrouble(win, { reason, detail }) {
+  mainLog(`showing trouble: ${reason}${detail ? ` (${detail})` : ""}`);
+  if (win.isDestroyed()) return;
+  void win.loadFile(TROUBLE, { query: { reason, detail: detail ?? "", logs: app.getPath("logs") } }).catch(() => {});
+}
+
+/** The server stopped by itself while Bops was open: start it again, a couple of times; then say so. */
+async function serverGone() {
+  const win = mainWin;
+  if (!win || win.isDestroyed() || leaving) return;
+  const now = Date.now();
+  loadFailures = loadFailures.filter((t) => now - t < 120_000);
+  loadFailures.push(now);
+  if (loadFailures.length > 3) return showTrouble(win, { reason: "server-ended", detail: serverEnded });
+  await win.loadFile(SPLASH).catch(() => {});
+  await openApp(win);
+}
+
+ipcMain.handle("startup-retry", async () => {
+  loadFailures = [];
+  if (!mainWin || mainWin.isDestroyed()) return;
+  await mainWin.loadFile(SPLASH).catch(() => {});
+  await openApp(mainWin);
+});
+ipcMain.handle("startup-logs", () => shell.openPath(app.getPath("logs")));
 
 async function createWindow() {
   const win = new BrowserWindow({
@@ -194,10 +444,15 @@ async function createWindow() {
     void shell.openExternal(url);
     return { action: "deny" };
   });
-  await win.loadFile(SPLASH);
-  await startServer();
-  await giveWindowToken();
-  await win.loadURL(URL);
+  // The app's page didn't load (the server went away between its health and the page, say): try
+  // again from the start; one that keeps failing shows what went wrong instead of a blank window.
+  win.webContents.on("did-fail-load", (_, code, description, url, isMainFrame) => {
+    if (!isMainFrame || code === -3 || !url.startsWith(URL) || leaving) return;
+    mainLog(`the app's page didn't load: ${description} (${code})`);
+    void serverGone();
+  });
+  await win.loadFile(SPLASH).catch(() => {});
+  await openApp(win);
 }
 
 // A page in a tab that opens a new window opens it in your browser instead.
@@ -486,10 +741,10 @@ function restart() {
       const res = await fetch(`${URL}/api/restart`, { method: "POST", headers: { "x-bops-window": windowToken() }, signal: AbortSignal.timeout(20_000) });
       pid = (await res.json()).pid;
     } catch {}
+    leaving = true;
     // Wait for the port to close, so the new Bops starts its own server instead of finding the old
     // one still answering and then losing it.
-    if (stopServer() || stopOtherServer(pid))
-      for (let i = 0; i < 60 && ((await serverUp()) || (await portTaken())); i++) await new Promise((r) => setTimeout(r, 250));
+    if (stopServer() || stopOtherServer(pid)) for (let i = 0; i < 60 && (await portTaken()); i++) await sleep(250);
     app.relaunch();
     app.exit(0);
   })();
@@ -497,15 +752,17 @@ function restart() {
 }
 ipcMain.handle("relaunch", () => restart());
 
-/** Stops a release build's server this app didn't start, by the process id it gave. Says whether it did. */
+/** Stops a release build's server this app didn't start, by the process id it gave, once it's surely Bops' own. Says whether it did. */
 function stopOtherServer(pid) {
-  if (!app.isPackaged || fs.existsSync(path.join(__dirname, "repo.json")) || !Number.isInteger(pid) || pid <= 1) return false;
+  if (!isRelease() || !ourOwnServer(pid, path.join(app.getPath("userData"), "server"))) return false;
   try {
-    // The server runs as `<Helper> -e "…require(process.env.BOPS_SERVER_JS)"` (startServer above).
-    if (!execFileSync("ps", ["-p", String(pid), "-o", "command="]).toString().includes("BOPS_SERVER_JS")) return false;
-    process.kill(pid, "SIGTERM");
+    process.kill(-pid, "SIGTERM");
   } catch {
-    return false;
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      return false;
+    }
   }
   try {
     execFileSync("pkill", ["-f", ".bops/chrome/"]);
@@ -638,7 +895,7 @@ app.setName("Bops");
 app.whenReady().then(() => {
   if (process.platform === "darwin" && fs.existsSync(ICON)) app.dock.setIcon(nativeImage.createFromPath(ICON));
   // Release builds only: not `npm run app`, nor a build that runs the source folder (desktop/repo.json).
-  if (app.isPackaged && !fs.existsSync(path.join(__dirname, "repo.json"))) {
+  if (isRelease()) {
     void checkForUpdate();
     setInterval(() => void checkForUpdate(), 60 * 60_000);
   }
@@ -661,4 +918,7 @@ function stopServer() {
   return true;
 }
 
-app.on("will-quit", () => void stopServer());
+app.on("will-quit", () => {
+  leaving = true;
+  stopServer();
+});

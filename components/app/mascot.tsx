@@ -51,7 +51,7 @@ const NOTES = [
  * Boppy listening to music, bopping to the beat while notes drift out of its headphones: the app's
  * first load, the same scene as the window's splash (desktop/splash.html). CSS only (globals.css).
  */
-export function BoppyLoading({ label }: { label: string }) {
+export function BoppyLoading({ label, children }: { label: string; children?: React.ReactNode }) {
   return (
     <div className="flex h-screen flex-col items-center justify-center gap-3.5 text-[13px] text-pencil select-none">
       <div className="boppy-loading-scene" aria-hidden="true">
@@ -62,6 +62,7 @@ export function BoppyLoading({ label }: { label: string }) {
         <svg className="boppy-loading-boppy" viewBox="0 0 40 40" dangerouslySetInnerHTML={{ __html: mascotMarkup("boppy", "#0A0A0A", { mood: "awake" }) }} />
       </div>
       <div>{label}</div>
+      {children}
     </div>
   );
 }

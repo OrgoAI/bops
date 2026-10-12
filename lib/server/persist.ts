@@ -65,7 +65,7 @@ export const onPostgres = () => !!process.env.BOPS_DATABASE_URL;
 /** Self-hosting: keys in .env.local, no Bops Cloud, the state in files on this Mac. */
 export const selfHosted = () => process.env.BOPS_SELF_HOSTED === "1";
 
-const gx = globalThis as unknown as { __bopsExitWork?: Map<string, () => Promise<unknown>>; __bopsExitHooked?: boolean };
+const gx = globalThis as unknown as { __bopsExitWork?: Map<string, () => Promise<unknown>>; __bopsExitHooked?: boolean; __bopsStopping?: boolean };
 const exitWork = (gx.__bopsExitWork ??= new Map());
 
 /**
@@ -84,6 +84,8 @@ export function hookExit(first: () => void = () => {}, last: () => Promise<unkno
   gx.__bopsExitHooked = true;
   for (const sig of ["SIGINT", "SIGTERM"] as const)
     process.once(sig, () => {
+      // Health answers 503 from here on (app/api/health): this server is going.
+      gx.__bopsStopping = true;
       first();
       void lastWork()
         .then(last)

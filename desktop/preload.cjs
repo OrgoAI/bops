@@ -21,6 +21,11 @@ contextBridge.exposeInMainWorld("bopsMac", {
   // Restart Bops, cleanly: the state saved, cached sessions dropped, the server started
   // again, and the app opened again. Still signed in, nothing lost (desktop/main.cjs).
   relaunch: () => ipcRenderer.invoke("relaunch"),
+  // The page shown when Bops can't start (desktop/trouble.html): start again, or open the logs folder.
+  startup: {
+    retry: () => ipcRenderer.invoke("startup-retry"),
+    logs: () => ipcRenderer.invoke("startup-logs"),
+  },
   // A newer release on bops.bot ({ version, notes } or null), as it changes; Bops doesn't update itself.
   update: {
     info: () => ipcRenderer.invoke("update-info"),
