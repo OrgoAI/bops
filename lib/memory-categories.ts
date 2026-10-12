@@ -1,14 +1,14 @@
 import type { AppState } from "./types";
 
 /*
- * What Bops knows, sorted into categories that fill themselves as people use their bots: who they are,
- * the people they deal with, what's coming up, what they still have to do, what was promised and
- * decided, and how they like things. Read from the workspace's memory (Honcho), where every chat and finished task
+ * What Bops knows, sorted into categories that fill themselves as people use their bots: the people
+ * they deal with, what's coming up, what they still have to do, what was promised and decided, and how
+ * they like things. Read from the workspace's memory (Honcho), where every chat and finished task
  * already goes (lib/server/memory.ts), and sorted on this Mac (lib/server/memory-categories.ts). Each
  * category is a section of the sidebar that folds open (components/app/memory-categories.tsx).
  */
 
-export type CategoryId = "you" | "people" | "companies" | "projects" | "events" | "todos" | "promises" | "decisions" | "preferences";
+export type CategoryId = "people" | "companies" | "projects" | "events" | "todos" | "promises" | "decisions" | "preferences";
 
 export type Category = {
   id: CategoryId;
@@ -22,21 +22,21 @@ export type Category = {
   empty: string;
 };
 
-/** In the sidebar's order. A fact can land in more than one ("Tiger meets Dana from Acme on Friday": Events, People, Companies). */
+/** In the sidebar's order, each a section from the start (blank until chats fill it). A fact can land in more than one ("Tiger meets Dana from Acme on Friday": Events, People, Companies). */
 export const CATEGORIES: Category[] = [
-  {
-    id: "you",
-    label: "About you",
-    one: "detail",
-    about: "You: your name, where you live, your work, your family and what you're like.",
-    empty: "What your bots learn about you shows up here.",
-  },
   {
     id: "people",
     label: "People",
     one: "person",
     about: "The people you deal with: family, friends, coworkers, customers, vendors.",
     empty: "People you mention to your bots show up here.",
+  },
+  {
+    id: "todos",
+    label: "Tasks",
+    one: "task",
+    about: "What you still have to do, including what you promised someone. Your bots' work is in Threads.",
+    empty: "Things you say you need to do show up here.",
   },
   {
     id: "events",
@@ -46,13 +46,6 @@ export const CATEGORIES: Category[] = [
     empty: "Meetings, trips and dates you mention show up here.",
   },
   {
-    id: "todos",
-    label: "To-dos",
-    one: "to-do",
-    about: "What you still have to do, including what you promised someone. Your bots' work is in Threads.",
-    empty: "Things you say you need to do show up here.",
-  },
-  {
     id: "promises",
     label: "Promises",
     one: "promise",
@@ -60,18 +53,18 @@ export const CATEGORIES: Category[] = [
     empty: "When someone commits to something, it shows up here.",
   },
   {
-    id: "projects",
-    label: "Projects",
-    one: "project",
-    about: "What's in the works and where it stands.",
-    empty: "Projects you talk about show up here.",
-  },
-  {
     id: "companies",
     label: "Companies",
     one: "company",
     about: "Companies and organizations: customers, vendors, partners, your own.",
     empty: "Companies you mention show up here.",
+  },
+  {
+    id: "projects",
+    label: "Projects",
+    one: "project",
+    about: "What's in the works and where it stands.",
+    empty: "Projects you talk about show up here.",
   },
   {
     id: "decisions",

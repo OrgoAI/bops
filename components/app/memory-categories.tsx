@@ -300,13 +300,6 @@ const TIDY = "Memory works out what follows from what it knows, drops what's out
 /* ---------------- Icons ---------------- */
 
 const GLYPHS: Record<CategoryId, React.ReactNode> = {
-  you: (
-    <>
-      <rect x="2" y="3.2" width="12" height="9.6" rx="2" />
-      <circle cx="5.9" cy="7" r="1.4" />
-      <path d="M3.9 10.6c.4-1 1.1-1.5 2-1.5s1.6.5 2 1.5M9.6 6.6h2.6M9.6 9h2.6" />
-    </>
-  ),
   people: (
     <>
       <circle cx="8" cy="5.4" r="2.6" />
@@ -427,11 +420,12 @@ function writeOpen(user: string, ws: string, c: CategoryId, open: boolean) {
 }
 
 /**
- * What Bops knows, in the sidebar, under Memory (which opens the page): a section per category with
- * something that matters now (events coming up, open to-dos and promises, all of the rest), in the
- * registry's order, each with its first five, folded until the user opens it (this Mac remembers).
- * While the sidebar searches, everything that matches, every section open. Nothing for an account the
- * categories aren't open to (lib/memory-categories.ts), or where memory is off.
+ * What Bops knows, in the sidebar, under Memory (which opens the page): a section per category from
+ * the start, blank until chats fill it ("Fills in as you chat"), in the registry's order. Each counts
+ * and lists what matters now (events coming up, open tasks and promises, all of the rest), its first
+ * five, folded until the user opens it (this Mac remembers); one with nothing now but something
+ * before offers the page. While the sidebar searches, only sections with a match, every one open.
+ * Nothing for an account the categories aren't open to (lib/memory-categories.ts), or where memory is off.
  */
 export function MemorySections({ state, query, onOpen }: { state: AppState; query?: string; onOpen: (open: MemoryOpen) => void }) {
   if (!categoriesOpen(state)) return null;
@@ -466,9 +460,10 @@ export function SidebarSections({
   const typed = query.trim();
   const q = typed.toLowerCase();
   const sections = CATEGORIES.map((c) => {
-    const groups = groupsOf(c.id, snap.items);
-    return { c, items: q ? groups.flatMap((g) => g.items).filter((i) => matches(i, q)) : groups.filter((g) => g.now).flatMap((g) => g.items) };
-  }).filter((s) => s.items.length);
+    const all = groupsOf(c.id, snap.items);
+    const mine = all.flatMap((g) => g.items);
+    return { c, total: mine.length, items: q ? mine.filter((i) => matches(i, q)) : all.filter((g) => g.now).flatMap((g) => g.items) };
+  }).filter((s) => !q || s.items.length);
   if (q && !sections.length) return null;
   // Memory opens the page at the first category with something in it (or something hidden), so the page is always a click away.
   const first =
@@ -481,13 +476,13 @@ export function SidebarSections({
       >
         Memory
       </button>
-      {!snap.items.length && (
-        <div className="flex items-center gap-2 px-2.5 text-[13px] leading-[18px] text-[#9A9A98]">
+      {!q && !snap.items.length && (
+        <div className="mb-1 flex items-center gap-2 px-2.5 text-[13px] leading-[18px] text-[#9A9A98]">
           {snap.syncing && <Spinner size={11} color="#9A9A98" />}
-          {snap.hidden?.length ? "Everything Bops learned is hidden." : "What your bots learn shows up here"}
+          {snap.hidden?.length ? "Everything Bops learned is hidden." : "Fills in as you chat"}
         </div>
       )}
-      {sections.map(({ c, items }) => {
+      {sections.map(({ c, total, items }) => {
         const key = `${user}.${ws}.${c.id}`;
         const open = !!q || (toggled[key] ?? readOpen(user, ws, c.id));
         return (
@@ -506,19 +501,20 @@ export function SidebarSections({
                 <CategoryIcon id={c.id} />
               </span>
               <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-ink">{c.label}</span>
-              <span className="shrink-0 text-[12px] tabular-nums text-[#9A9A98]">{items.length}</span>
+              {items.length > 0 && <span className="shrink-0 text-[12px] tabular-nums text-[#9A9A98]">{items.length}</span>}
               <span className="text-[#B0B0AD]">
                 <Chevron open={open} />
               </span>
             </button>
+            {open && !items.length && !total && <div className="flex h-[30px] shrink-0 items-center pl-8 pr-2.5 text-[13px] leading-[18px] text-[#9A9A98]">Fills in as you chat</div>}
             {open && items.slice(0, FIRST).map((i) => <SidebarRow key={i.id} item={i} onClick={() => onOpen({ category: c.id, focus: i.id })} />)}
-            {open && items.length > FIRST && (
+            {open && (items.length > FIRST || (!items.length && total > 0)) && (
               <button
                 // From a search, the page opens with it filled in, showing the same matches.
                 onClick={() => onOpen(q ? { category: c.id, query: typed } : { category: c.id })}
                 className="flex h-[30px] shrink-0 items-center rounded-[10px] pl-8 pr-2.5 text-left text-[13px] leading-[18px] text-[#6B6B6B] outline-none hover:bg-black/[0.03] hover:text-ink focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
               >
-                Show all {items.length}
+                {items.length ? `Show all ${items.length}` : `See all ${total}`}
               </button>
             )}
           </div>
@@ -852,7 +848,6 @@ function HiddenList({ hidden, act }: { hidden: NonNullable<MemorySnapshot["hidde
 
 /** Where an open item's details start: under its name, past its date, initial or check. */
 const INDENT: Record<CategoryId, string> = {
-  you: "pl-3.5",
   people: "pl-[62px]",
   companies: "pl-[62px]",
   events: "pl-[62px]",

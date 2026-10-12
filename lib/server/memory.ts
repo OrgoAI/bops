@@ -234,7 +234,7 @@ export function saveToMemory(ws: string, kind: "chat" | "task", id: string, mess
     const peers = await Promise.all(msgs.map((m) => peer(b, m.who)));
     await s.addMessages(msgs.map((m, i) => peers[i].message(m.text.slice(0, 8000), { metadata: { app: "bops", kind } })));
     // Memory works out new facts from it in the background, minutes later: the categories look again then.
-    categoriesNudge(ws, "saved");
+    categoriesNudge(ws, "chat");
   })().catch((e: Error) => {
     // Set up again next time (the session may have been deleted in Honcho).
     bankFor(b).sessions.delete(sid);
@@ -790,10 +790,10 @@ export async function pinFact(ws: string, text: string) {
 export const forgetFact = (ws: string, id: string) => forget(bindingOf(ws), id);
 
 /*
- * For the categories (memory-categories.ts), which sort what's in memory into People, Events,
- * To-dos and the rest. Loaded when first needed: it imports this module.
+ * For the categories (memory-categories.ts), which sort what's in memory into People, Tasks,
+ * Events and the rest. Loaded when first needed: it imports this module.
  */
-function categoriesNudge(ws: string, why: "saved" | "learned" | "card") {
+function categoriesNudge(ws: string, why: "chat" | "saved" | "learned" | "card") {
   void import("./memory-categories").then((m) => m.nudge(ws, why)).catch(() => {});
 }
 

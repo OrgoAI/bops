@@ -21,11 +21,11 @@ import { currentWorkspaceId } from "./workspaces";
  * the app can say where it was learned, and forgetting it forgets them in memory too.
  *
  * When: while Bops is open (its server runs only then). A look reads the newest facts (free) and
- * stops at the first page it has seen all of. It runs on opening and every 15 minutes, a few minutes
- * after a chat or task is saved (Honcho needs that long to work out new facts), seconds after a fact
- * is saved by hand or by a bot, and on Refresh. Sorting costs AI credit, so new facts wait to be
- * sorted together: when 10 are waiting, or the oldest has waited 30 minutes (a fact saved by hand,
- * Refresh and the first look sort at once). Every 6 hours, on Refresh and after Tidy up, a sweep also
+ * stops at the first page it has seen all of. It runs on opening and every 15 minutes, 4 and 10
+ * minutes after a chat or task is saved (Honcho needs that long to work out new facts), seconds after a
+ * fact is saved by hand or by a bot, and on Refresh. Sorting costs AI credit, so other new facts wait
+ * to be sorted together: when 10 are waiting, or the oldest has waited 30 minutes (what a chat taught,
+ * a fact saved by hand, Refresh and the first look sort at once). Every 6 hours, on Refresh and after Tidy up, a sweep also
  * checks that what was sorted is still in memory (deleted facts leave their items).
  *
  * The first look sorts the card and the newest 300 facts; older ones are counted, and sorted 300 at a
@@ -63,7 +63,7 @@ type Item = MemoryItem & { detailPrivate?: boolean };
 type Index = {
   v: 1;
   bank: string;
-  /** The categories it was sorted into: when there are new ones, facts that made nothing are sorted again (About you came later). */
+  /** The categories it was sorted into: when they change, items in one that's gone go, and facts that made nothing are sorted again. */
   cats?: string;
   /** Every fact (and card line, "card:<line>") already sorted, the items it went into, and what it said about each. */
   facts: Record<string, { items: string[]; at: number; wrote?: Record<string, Said> }>;
@@ -148,11 +148,17 @@ function load(bank: string): Index {
       if (read?.v === 1 && read.items && read.facts) {
         index = { ...empty(bank), ...read };
         if (Array.isArray(index.forgotten)) index.forgotten = Object.fromEntries((index.forgotten as unknown as string[]).map((k) => [k, Date.now()]));
-        // Sorted before a category was added: what made nothing then may fit one now. It's sorted again
-        // at the window's next poll, not 15 minutes after the last look (an update, then a restart).
+        // Sorted into other categories: items in one that's gone go with it, and what made nothing may fit
+        // one now. That's sorted again at the window's next poll, not 15 minutes after the last look (an
+        // update, then a restart).
         if (read.cats !== CATS) {
+          for (const [id, item] of Object.entries(index.items)) if (!CATEGORY_IDS.includes(item.category)) delete index.items[id];
           const before = Object.keys(index.facts).length;
-          for (const [id, f] of Object.entries(index.facts)) if (!f.items.length) delete index.facts[id];
+          for (const [id, f] of Object.entries(index.facts)) {
+            f.items = f.items.filter((i) => Object.hasOwn(index.items, i));
+            if (f.wrote) for (const i of Object.keys(f.wrote)) if (!Object.hasOwn(index.items, i)) delete f.wrote[i];
+            if (!f.items.length) delete index.facts[id];
+          }
           if (Object.keys(index.facts).length < before) index.syncedAt = index.triedAt = undefined;
         }
         index.cats = CATS;
@@ -428,7 +434,6 @@ async function sortFacts(facts: Fresh[], known: Record<string, unknown>, epoch: 
     "- Only what the fact says. Never guess, never add.",
     "- Most facts give zero or one item. One fact can give several: a meeting with Dana from Acme on Friday is an event, Dana in people and Acme in companies.",
     `- Never an item in people for ${owner} themselves${bots.length ? `, or for their AI assistants (${bots.join(", ")})` : ""}.`,
-    `- you: what a fact says about ${owner} themselves: their name, where they live or are from, their work, family, health, habits. title: what it's about in a word or two, the same each time it comes up ("Name", "Home", "Work", "Gym"); detail: what's known ("Tiger Wang", "Lisbon", "CEO of Orgo"). What they like is a preference; their plans are events or todos.`,
     "- Known lists items already in the categories that these facts may be about, with their keys and what they are. When a fact is about one of them (the same person, company, project, meeting or to-do, even in other words or by a fuller name), use its key exactly. Two people who only share a first name are not the same; a first name at the same company or in the same role is the same person (\"Dana, your contact at Acme\" and \"Dana Brooks of Acme\").",
     `- people, companies and projects: title is the name, the fullest one known. detail: who or what they are to ${owner}, a few words addressed to ${owner} ("Your sister", "Your accountant at Acme", "Your customer, wants a quote"); empty when the fact doesn't say who they are.`,
     "- events: title is a short name (\"Dentist\", \"Flight to Denver\", \"Call with Dana\"). when: its date as YYYY-MM-DD, or YYYY-MM-DDTHH:MM with a time. For a fact that was said or saved, work out words like Friday or tomorrow from the day it was learned; for one worked out by the memory system or a card line, only a date written out in it. Empty when there's no date. who: who it's with.",
@@ -732,18 +737,23 @@ function ensureTimer() {
 }
 
 /**
- * Memory changed (memory.ts): a fact was saved just now (sorted in a few seconds), or a chat or task
- * was saved (Honcho works out its facts over the next minutes: a quick look in 3, not pushed back by
- * the next message).
+ * Memory changed (memory.ts): a fact was saved just now (sorted in a few seconds); a chat or task was
+ * saved (Honcho works out its facts over the next minutes, about 4 when measured: quick looks in 4 and
+ * in 10 sort what they find at once, which is what fills the sections as the user chats); or Bops
+ * noted a fact on its own (a quick look in 3 that leaves it waiting for the next few). The next message
+ * saved doesn't set a look again or push it back.
  */
-export function nudge(ws: string, why: "saved" | "learned" | "card") {
+export function nudge(ws: string, why: "chat" | "saved" | "learned" | "card") {
   if (!categoriesOn()) return;
   ensureTimer();
   const bank = bankOf(ws);
   if (why === "learned") later(ws, bank, "learned", 4_000, { mode: "quick", now: true });
   // A card line fixed or pinned: a look that reads the card, in a few seconds.
   else if (why === "card") later(ws, bank, "card", 4_000, { mode: "look", now: true });
-  else later(ws, bank, "saved", 3 * 60_000, { mode: "quick" }, true);
+  else if (why === "chat") {
+    later(ws, bank, "chat", 4 * 60_000, { mode: "quick", now: true }, true);
+    later(ws, bank, "chat-late", 10 * 60_000, { mode: "quick", now: true }, true);
+  } else later(ws, bank, "saved", 3 * 60_000, { mode: "quick" }, true);
 }
 
 /** An item as the window gets it: at most 6 sources, each up to 300 characters, and nothing kept only for the engine. */

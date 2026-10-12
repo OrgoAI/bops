@@ -3,7 +3,7 @@
 // lines first, then the newest facts, sorted into People, Events, To-dos and the rest; one fact making
 // several items; where and how each was learned; private lines; the file on this Mac); mentions merging,
 // and what each mention may change; a look with nothing new costing nothing; new facts waiting to be
-// sorted together (10 at a time, after 30 minutes, or at once when asked); a fact saved now sorted within
+// sorted together (10 at a time, after 30 minutes, or at once when asked; what a chat taught at once); a fact saved now sorted within
 // seconds; a big memory (the newest 300, 150 a look, Sort older for the rest); sweeps that check what was
 // sorted with memory itself; facts gone from memory; the user's changes (rename, done, hide, forget) and
 // what may bring a forgotten item back; an item worked out again from the facts left when one goes (and
@@ -421,7 +421,7 @@ const WORKSPACES = [
   ...["ws_big", "ws_window", "ws_scan", "ws_switch", "ws_tidy", "ws_tidy2", "ws_tidy3", "ws_tidy4", "ws_tz", "ws_budget", "ws_retry", "ws_split", "ws_range", "ws_more", "ws_serial"],
   ...["ws_hide", "ws_card", "ws_card2", "ws_older", "ws_names", "ws_keys", "ws_ranges", "ws_known", "ws_ids"],
   ...["ws_outage", "ws_lock", "ws_oldidx", "ws_behind", "ws_more2", "ws_more3", "ws_prune", "ws_rows", "ws_cardnow", "ws_wait2", "ws_learn", "ws_rev", "ws_setting"],
-  ...["ws_you"],
+  ...["ws_you", "ws_chat"],
 ];
 S.update((s) => {
   s.owner = { name: "Tiger" };
@@ -781,14 +781,18 @@ await section("A fact saved now (by hand or a bot) is sorted within seconds", as
   assert.deepEqual(looks.filter((c) => c.path.endsWith("/conclusions/list")).map((c) => c.query), [{ page: "1", size: "100" }], "a quick look reads the newest page");
   assert.ok(!looks.some((c) => c.method === "GET" && c.path.endsWith("/card")), "and not the card");
   assert.equal((await get(MAIN)).body.syncedAt, was.syncedAt, "a quick look isn't a full one");
-  // A chat or task saved: memory works out its facts over the next minutes, so one quick look in 3; the
-  // next message saved doesn't set it again or push it back.
+  // A chat or task saved: memory works out its facts over the next minutes, so quick looks in 4 and 10
+  // that sort what they find at once; the next message saved doesn't set them again or push them back.
+  MC.nudge(MAIN, "chat");
+  assert.deepEqual(timersOf("bops"), ["chat", "chat-late"]);
+  assert.deepEqual([delayOf("bops", "chat"), delayOf("bops", "chat-late")], [240_000, 600_000]);
+  const set = liveBank("bops").timers.get("chat");
+  MC.nudge(MAIN, "chat");
+  assert.equal(liveBank("bops").timers.get("chat"), set, "the same look, kept");
+  clearTimers("bops");
+  // Bops noted a fact on its own: one quick look in 3, which leaves it waiting for the next few (below).
   MC.nudge(MAIN, "saved");
-  assert.deepEqual(timersOf("bops"), ["saved"]);
-  assert.equal(delayOf("bops", "saved"), 180_000);
-  const set = liveBank("bops").timers.get("saved");
-  MC.nudge(MAIN, "saved");
-  assert.equal(liveBank("bops").timers.get("saved"), set, "the same look, kept");
+  assert.deepEqual([timersOf("bops"), delayOf("bops", "saved")], [["saved"], 180_000]);
   clearTimers("bops");
 });
 
@@ -2133,31 +2137,58 @@ await section("A new card line is sorted at once; Bops's own notes wait for the 
     const r = (await get(ws)).body;
     assert.deepEqual([r.waiting, r.items.map((i) => i.title).sort()], [undefined, ["Allergic to cats", "Gym locker 12"]]);
   }
+  // What a chat taught is sorted by the look 4 minutes after it, not left waiting for more: that's what
+  // fills the sections as the user chats.
+  {
+    const ws = "ws_chat";
+    const bank = Mem.bankOf(ws);
+    seed(ws, [["k0", 10, "Tiger's car is a Volvo.", []]]);
+    await refresh(ws);
+    const NEW = "Tiger's sister Ana moved to Lisbon.";
+    SORTS.set(NEW, [item("people", "Ana", { key: "ana", detail: "Your sister, in Lisbon" })]);
+    addFact(bank, NEW, { session: MAX_CHAT });
+    MC.nudge(ws, "chat");
+    await fire(ws, "chat");
+    const r = (await get(ws)).body;
+    assert.deepEqual([r.waiting, one(r.items, "people", "Ana").detail], [undefined, "Your sister, in Lisbon"], "sorted at once, one fact or not");
+    clearTimers(bank);
+  }
 });
 
 /* ---------------- The window's polls ---------------- */
 
-await section("About you: what memory learns about the user themselves; what made nothing is sorted again when a category is added", async () => {
+await section("Categories changed in an update: items in one that's gone go, and what made nothing is sorted again at the next poll", async () => {
   const ws = "ws_you";
   const bank = Mem.bankOf(ws);
   // Memory has the user's name (misheard on a call) and their sister; the card says where they work.
   const F = seed(ws, [
-    ["name", 10, "user's name is Teequi", [item("you", "Name", { key: "name", detail: "Teequi" })]],
+    ["name", 10, "user's name is Teequi", []],
     ["sis", 20, "Tiger's sister Ana lives in Lisbon.", [item("people", "Ana", { key: "ana", detail: "Your sister" })]],
   ]);
   const WORK = "ATTRIBUTE: Works at Orgo";
   hbank(bank).cards.set("user", [WORK]);
-  SORTS.set(WORK, [item("you", "Work", { key: "work", detail: "Works at Orgo" })]);
-  // Sorted by a Bops from before About you: the name and the card line made nothing, the sister made Ana.
+  SORTS.set(WORK, [item("companies", "Orgo", { key: "orgo", detail: "Where you work" })]);
+  // Sorted by a Bops with other categories: the name went into one this one doesn't have ("you"), the
+  // card line made nothing, the sister made Ana. Its last look was a minute ago.
   const ana = "a1b2c3d4e5";
+  const gone = "f0e1d2c3b4";
   const at = Date.now() - 60_000;
+  const said = (f) => ({ fact: f.id, text: f.text, at: f.at, from: "Chat with Boppy", how: "said" });
   writeFileSync(
     fileFor(bank),
     JSON.stringify({
       v: 1,
       bank,
-      facts: { [F.name.id]: { items: [], at: F.name.at }, [F.sis.id]: { items: [ana], at: F.sis.at }, [`card:${WORK}`]: { items: [], at } },
-      items: { [ana]: { id: ana, category: "people", key: "people:ana", title: "Ana", detail: "Your sister", sources: [{ fact: F.sis.id, text: F.sis.text, at: F.sis.at, from: "Chat with Boppy", how: "said" }], first: F.sis.at, last: F.sis.at } },
+      cats: "you,people,events,todos,promises,projects,companies,decisions,preferences",
+      facts: {
+        [F.name.id]: { items: [gone], at: F.name.at, wrote: { [gone]: { t: "Name", d: "Teequi", h: "said", at: F.name.at } } },
+        [F.sis.id]: { items: [ana], at: F.sis.at },
+        [`card:${WORK}`]: { items: [], at },
+      },
+      items: {
+        [gone]: { id: gone, category: "you", key: "you:name", title: "Name", detail: "Teequi", sources: [said(F.name)], first: F.name.at, last: F.name.at },
+        [ana]: { id: ana, category: "people", key: "people:ana", title: "Ana", detail: "Your sister", sources: [said(F.sis)], first: F.sis.at, last: F.sis.at },
+      },
       forgotten: {},
       syncedAt: at,
       triedAt: at,
@@ -2169,15 +2200,12 @@ await section("About you: what memory learns about the user themselves; what mad
   await get(ws);
   const r = await settled(ws);
   const asked = openai.calls.slice(n).flatMap((c) => c.texts);
-  assert.deepEqual([...asked].sort(), [WORK, F.name.text].sort(), "what made nothing is sorted again, and only that");
-  assert.deepEqual(pick(one(r.items, "you", "Name"), ["detail", "category"]), { detail: "Teequi", category: "you" });
-  assert.equal(one(r.items, "you", "Work").sources[0].how, "card");
+  assert.deepEqual([...asked].sort(), [WORK, F.name.text].sort(), "what made nothing (or only an item that's gone) is sorted again, and only that");
+  assert.deepEqual(r.items.map((i) => `${i.category}:${i.title}`).sort(), ["companies:Orgo", "people:Ana"]);
   assert.equal(one(r.items, "people", "Ana").id, ana, "what was sorted stays as it was");
-  assert.equal(indexOf(bank).cats, Cat.CATEGORY_IDS.join(","), "the index says which categories it was sorted into");
-  // The name heard right later: the same item, its line as it stands now.
-  newFact(ws, "user's name is Tiger Wang", [item("you", "Name", { key: "name", detail: "Tiger Wang" })]);
-  const after = await refresh(ws);
-  assert.deepEqual(pick(one(after.items, "you", "Name"), ["detail"]), { detail: "Tiger Wang" });
+  assert.equal(one(r.items, "companies", "Orgo").sources[0].how, "card");
+  const idx = indexOf(bank);
+  assert.deepEqual([idx.cats, Object.hasOwn(idx.items, gone)], [Cat.CATEGORY_IDS.join(","), false], "the index says which categories it was sorted into, and the old one's item is gone");
   const again = openai.calls.length;
   await refresh(ws);
   assert.equal(openai.calls.length, again, "sorted once: nothing is asked again");

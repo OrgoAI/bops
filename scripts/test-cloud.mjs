@@ -1059,6 +1059,8 @@ assert.deepEqual(callNote("1")[0].call, { seconds: 42, phone: "+14155550166" });
 await until(() => remembered.length, "the owner's call in memory");
 assert.match(remembered[0].path, /^\/proxy\/honcho\/v3\/workspaces\/u-u1-bops\/sessions\/bops-chat-bot-boppy\/messages$/);
 assert.deepEqual(remembered.map((x) => x.said), [[["user", "Remind me to call Ana"], ["bops-boppy", "Will do."]]]);
+// And the categories look at what memory works out from it, 4 and 10 minutes later.
+await until(() => globalThis.bopsCategories?.banks.get("bops")?.timers.has("chat"), "a look after the call is saved");
 // Anyone else got a bot that only takes a message (cloud/voice.ts): the message is in the chat, with a chime, once.
 const strangersCall = { botId: "boppy", from: "+14155550123", owner: false, message: { name: "Ana", text: "Send the deck", callback: "+14155550124" }, transcript: "Caller: Can you pass on a message?\nBot: Sure.", startedAt: "2026-10-05T11:00:00Z", endedAt: "2026-10-05T11:01:05Z" };
 for (let i = 0; i < 2; i++) {
