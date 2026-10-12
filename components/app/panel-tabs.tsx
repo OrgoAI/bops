@@ -1,11 +1,13 @@
 "use client";
 
 import { createContext, createElement, useEffect, useRef, useState } from "react";
+import { categoryOf, type CategoryId } from "@/lib/memory-categories";
 import { live, type AppState } from "@/lib/types";
 import type { Section } from "./bot-panel";
 import { CrmFileIcon } from "./crm";
 import { Mascot } from "./mascot";
 import { MacIcon } from "./mac-tab";
+import { CategoryIcon } from "./memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MonitorIcon, teamOf } from "./ui";
 
@@ -23,7 +25,14 @@ export type PanelTab =
   | { id: string; kind: "vault" }
   | { id: string; kind: "mac" }
   /** A CRM file (crm.tsx), in the workspace it belongs to. */
-  | { id: string; kind: "crm"; ws: string; file: string };
+  | { id: string; kind: "crm"; ws: string; file: string }
+  /**
+   * What Bops knows, one category at a time (memory-categories.tsx): one tab per workspace, at the item
+   * asked for (`focus`), or with a search filled in (`query`: Show all, from the sidebar's search; it's
+   * taken off once the page has filled it in). `focusAt` is when they were asked for, so asking again
+   * for the same one shows it again.
+   */
+  | { id: string; kind: "memory"; ws: string; category: CategoryId; focus?: string; focusAt?: number; query?: string };
 
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";
@@ -99,7 +108,9 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
               ? "Your Mac"
               : t.kind === "crm"
                 ? t.file
-                : "New tab";
+                : t.kind === "memory"
+                  ? (categoryOf(t.category)?.label ?? "Memory")
+                  : "New tab";
   return (
     <div
       onClick={onPick}
@@ -119,6 +130,8 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
         <MacIcon />
       ) : t.kind === "crm" ? (
         <CrmFileIcon />
+      ) : t.kind === "memory" ? (
+        <CategoryIcon id={t.category} />
       ) : (
         <GlobeIcon />
       )}

@@ -233,6 +233,8 @@ export function saveToMemory(ws: string, kind: "chat" | "task", id: string, mess
     const s = await session(b, sid, who, { kind, ...metadata });
     const peers = await Promise.all(msgs.map((m) => peer(b, m.who)));
     await s.addMessages(msgs.map((m, i) => peers[i].message(m.text.slice(0, 8000), { metadata: { app: "bops", kind } })));
+    // Memory works out new facts from it in the background, minutes later: the categories look again then.
+    categoriesNudge(ws, "chat");
   })().catch((e: Error) => {
     // Set up again next time (the session may have been deleted in Honcho).
     bankFor(b).sessions.delete(sid);
@@ -259,7 +261,7 @@ const CARD = "card:";
  * one that replaces an older fact (their parents moved) says so in the chat, with a button to forget
  * the old one. The chat line has an Undo. Returns what happened, for the bot.
  */
-export function learn(ws: string, fact: string, chatId?: string): Promise<string> {
+export function learn(ws: string, fact: string, chatId?: string, opts: { auto?: boolean } = {}): Promise<string> {
   if (!on()) return Promise.resolve("Memory isn't set up.");
   const text = fact.trim().slice(0, 1000);
   if (!text) return Promise.resolve("Nothing to save.");
@@ -289,6 +291,9 @@ export function learn(ws: string, fact: string, chatId?: string): Promise<string
     if (!ours()) return "Not saved: another account signed in.";
     const [made] = await p.conclusions.create([{ content: text }]);
     x.recent.push({ id: made.id, text, at: Date.now() });
+    // A fact saved by hand or by a bot is sorted into the categories in seconds; one Bops noted on its
+    // own from what the user said waits to be sorted with the next few (each sort is a model call).
+    categoriesNudge(ws, opts.auto ? "saved" : "learned");
     let best = -1;
     ids.forEach((_, i) => prob(i, "replaces") >= 0.7 && (best < 0 || prob(i, "replaces") > prob(best, "replaces")) && (best = i));
     const old = best >= 0 ? { id: ids[best], text: known.get(ids[best])! } : undefined;
@@ -364,7 +369,7 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
       .map((l) => l.replace(/^[-*•\d.)\s]+/, "").trim())
       .filter((l) => l && l !== "NONE" && l.length < 400)
       .slice(0, 3);
-    for (const f of facts) if (ours()) await learn(ws, f, chatId);
+    for (const f of facts) if (ours()) await learn(ws, f, chatId, { auto: true });
   })().catch((e: Error) => console.warn(`[memory] auto-remember: ${e.message}`));
 }
 
@@ -397,6 +402,7 @@ async function forget(b: Binding, id: string) {
     await p.conclusions.delete(id);
     x.recent = x.recent.filter((r) => r.id !== id);
   }
+  categoriesDropped(b.bank, [id]);
 }
 
 /** Ask the user's memory a question ("what's their shipping address?", "what did we decide about pricing?"). */
@@ -443,9 +449,9 @@ const FACT_KIND = (fact: string): Question => {
     type: "choice",
     instructions: `Which is this fact, learned by an AI memory system watching ${owner}'s chats with their AI agents? Fact: "${fact}"`,
     criteria: {
-      about_owner: `A real, lasting fact about ${owner}: who they are, what they like or prefer, their work, their plans, their decisions and rules for their agents, or the people in their life (partner, family, friends, team) and facts about them.`,
+      about_owner: `A real, lasting fact about ${owner}: who they are, what they like or prefer, their work, their plans, their decisions and rules for their agents, or the people and companies they deal with (partner, family, friends, team, customers, vendors) and facts about them.`,
       agent_rule: `Really an AI agent's own instructions or behavior (how to reply, what tools to use, what not to say), wrongly written as if it were about ${owner}. A rule ${owner} set for their own agents is not this.`,
-      someone_else: `Really about a stranger an agent was talking to (a message sender, a customer, a contact), filed as if it were about ${owner}. Facts about the people in ${owner}'s own life are not this.`,
+      someone_else: `Really a stranger's own details filed as if they were ${owner}'s (a message sender's name, age, job or likes written as ${owner}'s). A fact about someone ${owner} deals with, written as about that person ("${owner}'s accountant is Dana", "Dana wants the quote Friday"), is not this.`,
       passing: "A passing moment or task detail that won't matter later (what they asked at some time, a step in a task).",
     },
   };
@@ -553,6 +559,7 @@ export function deleteGroup(ws: string, group: MemoryGroup) {
       const chunk = ids.slice(i, i + 8);
       const gone = new Set<string>();
       await Promise.all(chunk.map((id) => p.conclusions.delete(id).then(() => gone.add(id)).catch(() => {})));
+      categoriesDropped(b.bank, [...gone]);
       setReview(
         b.bank,
         (x) => {
@@ -757,10 +764,14 @@ export async function fixFact(ws: string, id: string, text: string) {
     const old = id.slice(CARD.length);
     await p.setCard(((await p.getCard()) ?? []).map((l) => (l === old ? t : l)));
     bankFor(b).card = undefined;
+    categoriesDropped(b.bank, [id]);
+    categoriesNudge(ws, "card");
     return;
   }
   await p.conclusions.delete(id);
+  categoriesDropped(b.bank, [id]);
   await p.conclusions.create([{ content: t }]);
+  categoriesNudge(ws, "learned");
 }
 
 /** Put a fact on the card ("About you"), which every bot sees with every message. The card holds 40 lines. */
@@ -772,7 +783,109 @@ export async function pinFact(ws: string, text: string) {
   if (lines.length >= 40) throw new Error("About you is full (40 lines). Remove one first.");
   await p.setCard([...lines, text.trim().slice(0, 300)]);
   bankFor(b).card = undefined;
+  categoriesNudge(ws, "card");
 }
 
 /** Delete a fact or a card line. */
 export const forgetFact = (ws: string, id: string) => forget(bindingOf(ws), id);
+
+/*
+ * For the categories (memory-categories.ts), which sort what's in memory into People, Tasks,
+ * Events and the rest. Loaded when first needed: it imports this module.
+ */
+function categoriesNudge(ws: string, why: "chat" | "saved" | "learned" | "card") {
+  void import("./memory-categories").then((m) => m.nudge(ws, why)).catch(() => {});
+}
+
+/** Facts deleted from memory here (Delete, Undo, Fix, the review's Delete all): out of the categories at once. */
+function categoriesDropped(bank: string, ids: string[]) {
+  if (ids.length) void import("./memory-categories").then((m) => m.dropFacts(bank, ids)).catch(() => {});
+}
+
+/** Of these fact ids, the ones still in memory (free: listed by id, 100 a call). */
+export async function existingFacts(ws: string, ids: string[]) {
+  if (!ids.length) return new Set<string>();
+  const got = await (await peer(bindingOf(ws))).conclusions.getMany(ids);
+  return new Set(got.map((c) => c.id));
+}
+
+/**
+ * Delete facts and card lines from memory, for the categories' Forget: one after another in the bank's
+ * queue (with learn and other forgets), and the card written once, so two at a time can't put a line back.
+ * A fact already gone is fine.
+ */
+export function forgetFacts(ws: string, ids: string[]): Promise<void> {
+  const b = bindingOf(ws);
+  const x = bankFor(b);
+  const run = x.queue.then(async () => {
+    const p = await peer(b);
+    for (const id of ids.filter((i) => !i.startsWith(CARD))) {
+      try {
+        await p.conclusions.delete(id);
+      } catch (e) {
+        if ((e as { status?: number }).status !== 404) throw e;
+      }
+      x.recent = x.recent.filter((r) => r.id !== id);
+    }
+    const lines = ids.filter((i) => i.startsWith(CARD)).map((i) => i.slice(CARD.length));
+    if (lines.length) {
+      const card = (await p.getCard()) ?? [];
+      if (card.some((l) => lines.includes(l))) await p.setCard(card.filter((l) => !lines.includes(l)));
+      x.card = undefined;
+    }
+  });
+  x.queue = run.catch(() => {});
+  return run;
+}
+
+/** A fact in memory as the categories read it. */
+export type FactRow = { id: string; text: string; at: number; session: string | null; level: string };
+
+/**
+ * The newest facts in a workspace's memory, newest first, up to `max` (listing is free; 100 a page).
+ * `enough` can stop it early after a page: when everything on it was seen before, say.
+ */
+export async function scanFacts(ws: string, max: number, enough?: (page: FactRow[]) => boolean): Promise<{ rows: FactRow[]; total: number }> {
+  const p = await peer(bindingOf(ws));
+  const out: FactRow[] = [];
+  let page: Awaited<ReturnType<typeof p.conclusions.list>> | null = await p.conclusions.list({ size: 100 });
+  const total = page.total;
+  while (page) {
+    const rows = page.items.map((c) => ({ id: c.id, text: c.content, at: Date.parse(c.createdAt) || 0, session: c.sessionId, level: c.level ?? "explicit" }));
+    out.push(...rows);
+    if (out.length >= max || !rows.length || enough?.(rows)) break;
+    page = page.hasNextPage ? await page.getNextPage() : null;
+  }
+  return { rows: out.slice(0, max), total };
+}
+
+/** The user's card (who they are, their people, their rules), as memory keeps it now. */
+export async function cardOf(ws: string) {
+  return card(bindingOf(ws));
+}
+
+/** Which bank (Honcho workspace) a workspace's memory is in: workspaces can share one. */
+export const bankOf = (ws: string) => bindingOf(ws).bank;
+
+/** Where a fact was learned, in words. */
+export const factSource = (sessionId: string | null) => sourceOf(sessionId);
+
+/** Of these lines, the ones memory keeps out of prompts (an address, a phone number, health). */
+export async function privateLines(lines: string[]) {
+  const ok = new Set(await shareable(lines));
+  return new Set(lines.filter((l) => !ok.has(l)));
+}
+
+/**
+ * Ask memory to tidy up now (Honcho's "dreaming"): it works out what follows from what it has
+ * learned, drops what's out of date, and rewrites the user's card. It runs in the background on
+ * Honcho's side, and on its own every so often; this only asks for it now.
+ */
+export async function dream(ws: string) {
+  if (!on()) throw new Error("Memory isn't set up.");
+  const b = bindingOf(ws);
+  const x = bankFor(b);
+  await peer(b);
+  await x.client.scheduleDream({ observer: b.peer, observed: b.peer });
+  x.card = undefined;
+}

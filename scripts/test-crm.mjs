@@ -18,6 +18,8 @@ import { pathToFileURL } from "node:url";
 for (const k of Object.keys(process.env)) if (/^(BOPS|OPENAI|AGENTPHONE|AGENTMAIL|HONCHO|COMPOSIO|TYPESAFE|TWILIO|ORGO|CODEX|TAILSCALE|TREG)_/.test(k)) delete process.env[k];
 // A self-hosted install with nobody signed in: the state is a file in the working folder, and so are the CRM's files.
 process.env.BOPS_SELF_HOSTED = "1";
+// The CRM's tools are off for bots now (lib/server/crm.ts crmForBots); these tests still check them.
+process.env.BOPS_CRM_TOOLS = "1";
 process.env.BOPS_ORGO_ORIGIN = "https://orgo.test";
 process.env.OPENAI_API_KEY = "sk-test-crm";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
