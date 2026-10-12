@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
-import { CATEGORIES, categoriesOpen, categoryOf, settled, upcoming, whenLabel, type CategoryId, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
+import { CATEGORIES, categoriesOpen, categoryOf, GROUP_NAME, settled, upcoming, whenLabel, type CategoryId, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
 import type { AppState } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { ago, clockTime, CloseButton, currentWorkspace, useNow } from "./ui";
@@ -419,13 +419,42 @@ function writeOpen(user: string, ws: string, c: CategoryId, open: boolean) {
   }
 }
 
+/** Where this Mac keeps whether the whole group is open (open until folded). */
+const groupKey = (user: string, ws: string) => `bops.memory.group.${user}.${ws}`;
+
+function readGroupOpen(user: string, ws: string) {
+  try {
+    return localStorage.getItem(groupKey(user, ws)) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function writeGroupOpen(user: string, ws: string, open: boolean) {
+  try {
+    localStorage.setItem(groupKey(user, ws), open ? "1" : "0");
+  } catch {
+    /* kept until Bops reloads */
+  }
+}
+
+/** The group's mark for opening its page: an arrow out. */
+function OpenIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" className="shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M4.5 3h4.5v4.5M9 3L3.5 8.5" />
+    </svg>
+  );
+}
+
 /**
- * What Bops knows, in the sidebar, under Memory (which opens the page): a section per category from
- * the start, blank until chats fill it ("Fills in as you chat"), in the registry's order. Each counts
- * and lists what matters now (events coming up, open tasks and promises, all of the rest), its first
- * five, folded until the user opens it (this Mac remembers); one with nothing now but something
- * before offers the page. While the sidebar searches, only sections with a match, every one open.
- * Nothing for an account the categories aren't open to (lib/memory-categories.ts), or where memory is off.
+ * What Bops knows, in the sidebar, under its name (GROUP_NAME, Orbit): a section per category from the
+ * start, blank until chats fill it ("Fills in as you chat"), in the registry's order. The name folds
+ * the whole group, and an arrow beside it opens the page. Each section counts and lists what matters
+ * now (events coming up, open tasks and promises, all of the rest), its first five, folded until the
+ * user opens it (this Mac remembers both); one with nothing now but something before offers the page.
+ * While the sidebar searches, only sections with a match, every one open. Nothing for an account the
+ * categories aren't open to (lib/memory-categories.ts), or where memory is off.
  */
 export function MemorySections({ state, query, onOpen }: { state: AppState; query?: string; onOpen: (open: MemoryOpen) => void }) {
   if (!categoriesOpen(state)) return null;
@@ -454,8 +483,9 @@ export function SidebarSections({
   query?: string;
   onOpen: (open: MemoryOpen) => void;
 }) {
-  // Sections folded or opened since Bops opened, over what this Mac remembers.
+  // Sections, and the whole group, folded or opened since Bops opened, over what this Mac remembers.
   const [toggled, setToggled] = useState<Record<string, boolean>>({});
+  const [groupToggled, setGroupToggled] = useState<Record<string, boolean>>({});
   if (!snap?.on) return null;
   const typed = query.trim();
   const q = typed.toLowerCase();
@@ -465,24 +495,44 @@ export function SidebarSections({
     return { c, total: mine.length, items: q ? mine.filter((i) => matches(i, q)) : all.filter((g) => g.now).flatMap((g) => g.items) };
   }).filter((s) => !q || s.items.length);
   if (q && !sections.length) return null;
-  // Memory opens the page at the first category with something in it (or something hidden), so the page is always a click away.
+  // The arrow opens the page at the first category with something in it (or something hidden), so the page is always a click away.
   const first =
     CATEGORIES.find((c) => snap.items.some((i) => i.category === c.id)) ?? CATEGORIES.find((c) => snap.hidden?.some((h) => h.category === c.id)) ?? CATEGORIES[0];
+  const gk = `${user}.${ws}`;
+  // While searching, the group stays open.
+  const shown = !!q || (groupToggled[gk] ?? readGroupOpen(user, ws));
   return (
     <div className="flex flex-col pt-4">
-      <button
-        onClick={() => onOpen({ category: first.id })}
-        className="mb-1.5 self-start rounded-[6px] px-2.5 text-left text-[13px] font-medium leading-4 text-[#9A9A98] outline-none hover:text-[#6B6B6B] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
-      >
-        Memory
-      </button>
-      {!q && !snap.items.length && (
+      <div className="group/orbit mb-1.5 flex items-center pr-1">
+        <button
+          onClick={() => {
+            if (q) return;
+            setGroupToggled({ ...groupToggled, [gk]: !shown });
+            writeGroupOpen(user, ws, !shown);
+          }}
+          aria-expanded={shown}
+          className="flex items-center gap-1.5 rounded-[6px] px-2.5 text-left text-[13px] font-medium leading-4 text-[#9A9A98] outline-none hover:text-[#6B6B6B] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+        >
+          {GROUP_NAME}
+          <Chevron open={shown} />
+        </button>
+        <span className="flex-1" />
+        <button
+          onClick={() => onOpen({ category: first.id })}
+          aria-label={`Open ${GROUP_NAME}`}
+          title={`Open ${GROUP_NAME}`}
+          className="flex size-6 items-center justify-center rounded-[6px] text-[#9A9A98] opacity-0 outline-none hover:bg-black/[0.04] hover:text-[#6B6B6B] focus-visible:opacity-100 focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] group-hover/orbit:opacity-100"
+        >
+          <OpenIcon />
+        </button>
+      </div>
+      {shown && !q && !snap.items.length && (
         <div className="mb-1 flex items-center gap-2 px-2.5 text-[13px] leading-[18px] text-[#9A9A98]">
           {snap.syncing && <Spinner size={11} color="#9A9A98" />}
           {snap.hidden?.length ? "Everything Bops learned is hidden." : "Fills in as you chat"}
         </div>
       )}
-      {sections.map(({ c, total, items }) => {
+      {shown && sections.map(({ c, total, items }) => {
         const key = `${user}.${ws}.${c.id}`;
         const open = !!q || (toggled[key] ?? readOpen(user, ws, c.id));
         return (

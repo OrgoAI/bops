@@ -90,7 +90,7 @@ export function Sidebar({
             onKeyDown={(e) => e.key === "Escape" && setQuery(null)}
             // Clicking away from an empty search closes it (not when the click is on the search button, which toggles it).
             onBlur={(e) => !query.trim() && e.relatedTarget?.getAttribute("aria-label") !== "Search" && setQuery(null)}
-            placeholder={categoriesOpen(state) ? "Search bots, chats, threads, memory" : "Search bots, chats, threads"}
+            placeholder={categoriesOpen(state) ? "Search bots, chats, threads, people" : "Search bots, chats, threads"}
             className="mr-2 h-[34px] min-w-0 flex-1 rounded-full bg-white px-3.5 text-[13px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98]"
           />
         )}
@@ -135,7 +135,7 @@ export function Sidebar({
           </div>
         )}
 
-        {/* What Bops knows, under Memory: categories that fill themselves from memory, folded, each a page on the right. Every signed-in account (lib/memory-categories.ts). */}
+        {/* What Bops knows, under Orbit: categories that fill themselves from memory, folded, each a page on the right. Every signed-in account (lib/memory-categories.ts). */}
         {categoriesOpen(state) && <MemorySections state={state} query={query ?? ""} onOpen={onOpenMemory} />}
       </div>
 
