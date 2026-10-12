@@ -28,9 +28,10 @@ export type PanelTab =
   | { id: string; kind: "crm"; ws: string; file: string }
   /**
    * What Bops knows, one category at a time (memory-categories.tsx): one tab per workspace, at the item
-   * asked for (`focus`). `focusAt` is when it was asked for, so asking again for the same one shows it again.
+   * asked for (`focus`), or with a search filled in (`query`: Show all, from the sidebar's search).
+   * `focusAt` is when they were asked for, so asking again for the same one shows it again.
    */
-  | { id: string; kind: "memory"; ws: string; category: CategoryId; focus?: string; focusAt?: number };
+  | { id: string; kind: "memory"; ws: string; category: CategoryId; focus?: string; focusAt?: number; query?: string };
 
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";

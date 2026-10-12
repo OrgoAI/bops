@@ -1,4 +1,4 @@
-import { categoriesOn, editItem, forgetItem, snapshot, sync, tidyUp, wsOrCurrent } from "@/lib/server/memory-categories";
+import { categoriesOn, editItem, forgetItem, refresh, snapshot, sortOlder, tidyUp, wsOrCurrent } from "@/lib/server/memory-categories";
 import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
@@ -20,7 +20,7 @@ export async function GET(request: Request) {
 }
 
 type Body = {
-  action: "refresh" | "tidy-up" | "edit" | "forget";
+  action: "refresh" | "sort-older" | "tidy-up" | "edit" | "forget";
   ws?: string;
   id?: string;
   title?: string;
@@ -30,7 +30,8 @@ type Body = {
 };
 
 /**
- * refresh: look at memory now. tidy-up: ask memory to tidy up (dreaming), at most once an hour.
+ * refresh: look at memory now (and sort what's new now). sort-older: sort 300 more of the older facts.
+ * tidy-up: ask memory to tidy up (dreaming), at most once an hour.
  * edit {id, title?, detail?, done?, hidden?}. forget {id}: memory forgets what it learned only about it.
  * Answers the categories as they are after it.
  */
@@ -38,12 +39,17 @@ export async function POST(request: Request) {
   const unready = notReady();
   if (unready) return unready;
   if (!categoriesOn()) return Response.json({ error: "Memory isn't set up." }, { status: 404 });
-  const b = (await request.json().catch(() => ({}))) as Body;
+  const b = ((await request.json().catch(() => null)) ?? {}) as Body;
   const ws = wsOrCurrent(b.ws);
+  // Items' ids are 10 hex characters (memory-categories.ts upsert).
+  if ((b.action === "edit" || b.action === "forget") && !/^[0-9a-f]{10}$/.test(b.id ?? "")) return Response.json({ error: "That's gone already." }, { status: 400 });
   try {
     switch (b.action) {
       case "refresh":
-        await sync(ws);
+        await refresh(ws);
+        break;
+      case "sort-older":
+        await sortOlder(ws);
         break;
       case "tidy-up":
         await tidyUp(ws);

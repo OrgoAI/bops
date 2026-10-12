@@ -401,6 +401,7 @@ async function forget(b: Binding, id: string) {
     await p.conclusions.delete(id);
     x.recent = x.recent.filter((r) => r.id !== id);
   }
+  categoriesDropped(b.bank, [id]);
 }
 
 /** Ask the user's memory a question ("what's their shipping address?", "what did we decide about pricing?"). */
@@ -557,6 +558,7 @@ export function deleteGroup(ws: string, group: MemoryGroup) {
       const chunk = ids.slice(i, i + 8);
       const gone = new Set<string>();
       await Promise.all(chunk.map((id) => p.conclusions.delete(id).then(() => gone.add(id)).catch(() => {})));
+      categoriesDropped(b.bank, [...gone]);
       setReview(
         b.bank,
         (x) => {
@@ -761,10 +763,13 @@ export async function fixFact(ws: string, id: string, text: string) {
     const old = id.slice(CARD.length);
     await p.setCard(((await p.getCard()) ?? []).map((l) => (l === old ? t : l)));
     bankFor(b).card = undefined;
+    categoriesDropped(b.bank, [id]);
     return;
   }
   await p.conclusions.delete(id);
+  categoriesDropped(b.bank, [id]);
   await p.conclusions.create([{ content: t }]);
+  categoriesNudge(ws, "learned");
 }
 
 /** Put a fact on the card ("About you"), which every bot sees with every message. The card holds 40 lines. */
@@ -789,19 +794,66 @@ function categoriesNudge(ws: string, why: "saved" | "learned") {
   void import("./memory-categories").then((m) => m.nudge(ws, why)).catch(() => {});
 }
 
+/** Facts deleted from memory here (Delete, Undo, Fix, the review's Delete all): out of the categories at once. */
+function categoriesDropped(bank: string, ids: string[]) {
+  if (ids.length) void import("./memory-categories").then((m) => m.dropFacts(bank, ids)).catch(() => {});
+}
+
+/** Of these fact ids, the ones still in memory (free: listed by id, 100 a call). */
+export async function existingFacts(ws: string, ids: string[]) {
+  if (!ids.length) return new Set<string>();
+  const got = await (await peer(bindingOf(ws))).conclusions.getMany(ids);
+  return new Set(got.map((c) => c.id));
+}
+
+/**
+ * Delete facts and card lines from memory, for the categories' Forget: one after another in the bank's
+ * queue (with learn and other forgets), and the card written once, so two at a time can't put a line back.
+ * A fact already gone is fine.
+ */
+export function forgetFacts(ws: string, ids: string[]): Promise<void> {
+  const b = bindingOf(ws);
+  const x = bankFor(b);
+  const run = x.queue.then(async () => {
+    const p = await peer(b);
+    for (const id of ids.filter((i) => !i.startsWith(CARD))) {
+      try {
+        await p.conclusions.delete(id);
+      } catch (e) {
+        if ((e as { status?: number }).status !== 404) throw e;
+      }
+      x.recent = x.recent.filter((r) => r.id !== id);
+    }
+    const lines = ids.filter((i) => i.startsWith(CARD)).map((i) => i.slice(CARD.length));
+    if (lines.length) {
+      const card = (await p.getCard()) ?? [];
+      if (card.some((l) => lines.includes(l))) await p.setCard(card.filter((l) => !lines.includes(l)));
+      x.card = undefined;
+    }
+  });
+  x.queue = run.catch(() => {});
+  return run;
+}
+
 /** A fact in memory as the categories read it. */
 export type FactRow = { id: string; text: string; at: number; session: string | null; level: string };
 
-/** The newest facts in a workspace's memory, newest first, up to `max` (listing is free; 100 a page). */
-export async function scanFacts(ws: string, max: number): Promise<FactRow[]> {
+/**
+ * The newest facts in a workspace's memory, newest first, up to `max` (listing is free; 100 a page).
+ * `enough` can stop it early after a page: when everything on it was seen before, say.
+ */
+export async function scanFacts(ws: string, max: number, enough?: (page: FactRow[]) => boolean): Promise<{ rows: FactRow[]; total: number }> {
   const p = await peer(bindingOf(ws));
   const out: FactRow[] = [];
-  const page = await p.conclusions.list({ size: 100 });
-  for await (const c of page) {
-    out.push({ id: c.id, text: c.content, at: Date.parse(c.createdAt) || 0, session: c.sessionId, level: c.level ?? "explicit" });
-    if (out.length >= max) break;
+  let page: Awaited<ReturnType<typeof p.conclusions.list>> | null = await p.conclusions.list({ size: 100 });
+  const total = page.total;
+  while (page) {
+    const rows = page.items.map((c) => ({ id: c.id, text: c.content, at: Date.parse(c.createdAt) || 0, session: c.sessionId, level: c.level ?? "explicit" }));
+    out.push(...rows);
+    if (out.length >= max || !rows.length || enough?.(rows)) break;
+    page = page.hasNextPage ? await page.getNextPage() : null;
   }
-  return out;
+  return { rows: out.slice(0, max), total };
 }
 
 /** The user's card (who they are, their people, their rules), as memory keeps it now. */

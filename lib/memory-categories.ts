@@ -29,7 +29,7 @@ export const CATEGORIES: Category[] = [
     id: "people",
     label: "People",
     one: "person",
-    about: "The people you and your bots deal with: family, friends, your team, customers, vendors.",
+    about: "The people you deal with: family, friends, coworkers, customers, vendors.",
     empty: "People you mention to your bots show up here.",
   },
   {
@@ -43,14 +43,14 @@ export const CATEGORIES: Category[] = [
     id: "todos",
     label: "To-dos",
     one: "to-do",
-    about: "Things you still have to do yourself, apart from your bots' threads.",
+    about: "What you still have to do, including what you promised someone. Your bots' work is in Threads.",
     empty: "Things you say you need to do show up here.",
   },
   {
     id: "promises",
     label: "Promises",
     one: "promise",
-    about: "What someone said they would do, for you or for someone else, and when.",
+    about: "What others said they would do, for you or someone else, and by when.",
     empty: "When someone commits to something, it shows up here.",
   },
   {
@@ -95,8 +95,12 @@ export type ItemSource = {
   at: number;
   /** "Chat with Max", "Task: Book the flight", "Your other agents". */
   from: string;
-  /** "said": taken from what was said. "figured": worked out from several things (memory's dreaming). "card": the user's card. */
-  how: "said" | "figured" | "card";
+  /**
+   * "said": from what the user said in a chat. "saved": saved as a fact (by the user, a bot, or memory from
+   * a task), with no chat to point to. "figured": worked out from several things (memory's dreaming).
+   * "card": the user's card.
+   */
+  how: "said" | "saved" | "figured" | "card";
   /** A line memory keeps out of prompts (an address, a phone number, health). */
   private?: boolean;
 };
@@ -142,6 +146,8 @@ export type MemorySnapshot = {
   syncedAt?: number;
   /** Facts in memory not sorted yet (more than one run takes). */
   behind?: number;
+  /** New facts waiting to be sorted together (sorting a few at a time costs the same as many). */
+  waiting?: number;
   /** When memory last tidied up on request ("dreaming"), and when it can again. */
   dreamAt?: number;
   dreamReadyAt?: number;
@@ -151,6 +157,16 @@ export type MemorySnapshot = {
 /** Who has the categories while they're being finished: Orgo's own team, like the CRM they replace (lib/crm-access.ts). */
 export const categoriesOpenTo = crmOpenTo;
 export const categoriesOpen = (state: Pick<AppState, "account">) => categoriesOpenTo(state.account?.user.email);
+
+/**
+ * A to-do or promise left open long after it mattered (14 days past due, or no date and not mentioned
+ * for 30 days): memory rarely hears that it was done, so it moves to Older instead of piling up.
+ */
+export function settled(item: Pick<MemoryItem, "category" | "done" | "when" | "last">, now = new Date()) {
+  if ((item.category !== "todos" && item.category !== "promises") || item.done) return false;
+  if (item.when) return new Date(item.when.length > 10 ? item.when : `${item.when}T23:59`).getTime() < now.getTime() - 14 * 86_400_000;
+  return item.last < now.getTime() - 30 * 86_400_000;
+}
 
 /** An event still to come (today counts), by its date. */
 export function upcoming(item: Pick<MemoryItem, "when">, now = new Date()) {

@@ -116,9 +116,6 @@ export function Sidebar({
             ))}
         </div>
 
-        {/* What Bops knows, in categories that fill themselves from memory, each a page on the right. Orgo's team's for now (lib/memory-categories.ts). */}
-        {categoriesOpen(state) && <MemorySections state={state} query={q} onOpen={onOpenMemory} />}
-
         {!q && <Watching state={state} onOpen={onOpenWatch} />}
 
         {threads.length > 0 && (
@@ -137,6 +134,9 @@ export function Sidebar({
             ))}
           </div>
         )}
+
+        {/* What Bops knows, under Memory: categories that fill themselves from memory, folded, each a page on the right. Orgo's team's for now (lib/memory-categories.ts). */}
+        {categoriesOpen(state) && <MemorySections state={state} query={query ?? ""} onOpen={onOpenMemory} />}
       </div>
 
       {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}

@@ -367,15 +367,15 @@ function Bops({ state }: { state: AppState | null }) {
     );
   /**
    * What Bops knows, one category at a time (memory-categories.tsx): the workspace's one memory tab,
-   * switched to the category asked for and at the item asked for, or opened.
+   * switched to the category asked for, at the item asked for or with the search asked for, or opened.
    */
-  const openMemory = ({ category, focus: item }: MemoryOpen) => {
+  const openMemory = ({ category, focus: item, query }: MemoryOpen) => {
     const ws = currentWorkspace(state);
     const focusAt = Date.now();
     openTab(
       (t) => t.kind === "memory" && t.ws === ws,
-      () => ({ id: tabId(), kind: "memory", ws, category, focus: item, focusAt }),
-      (t) => ({ ...t, category, focus: item, focusAt }) as PanelTab,
+      () => ({ id: tabId(), kind: "memory", ws, category, focus: item, focusAt, query }),
+      (t) => ({ ...t, category, focus: item, focusAt, query }) as PanelTab,
     );
   };
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
@@ -708,6 +708,7 @@ function Bops({ state }: { state: AppState | null }) {
                       category={tab.category}
                       focus={tab.focus}
                       focusAt={tab.focusAt}
+                      query={tab.query}
                       onCategory={(category) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, category, focus: undefined } : t)))}
                       onClose={() => leaveTab(tab.id)}
                     />
