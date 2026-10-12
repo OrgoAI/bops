@@ -1001,7 +1001,13 @@ await section("Forgetting an item: memory forgets what was only about it, and on
     assert.ok(!back.items.some((i) => i.title === "Priya Nair"), "still forgotten");
     for (const [what, id] of [["the card line", `card:${line}`], ["what memory worked out", figured.id], ["a fact saved with no chat", saved.id], ["something said before", before.id]])
       assert.deepEqual(indexOf(bb).facts[id]?.items, [], `${what}: sorted as nothing`);
-    // Said in a chat afterwards: she's back.
+    // Said in a chat minutes later: memory still working out facts from the chat that asked to forget her. Not back.
+    const soon = newFact(wb, "Tiger mentioned Priya Nair while asking to forget her.", P(), { session: MAX_CHAT, at: at + 5 * 60_000 });
+    back = await refresh(wb);
+    assert.ok(!back.items.some((i) => i.title === "Priya Nair"), "not from what was said 5 minutes after");
+    assert.deepEqual(indexOf(bb).facts[soon.id]?.items, [], "sorted as nothing");
+    // Said in a chat well afterwards: she's back.
+    skew += 16 * 60_000;
     const said = newFact(wb, "Tiger said Priya Nair leads the next round.", P("Leads your next round"), { session: MAX_CHAT });
     back = await refresh(wb);
     const again = one(back.items, "people", "Priya Nair");

@@ -49,6 +49,8 @@ const WAIT_MS = 30 * 60_000;
 /** A look when the last was this long ago (the window asking, or the timer), and a sweep this often. */
 const STALE_MS = 15 * 60_000;
 const SWEEP_MS = 6 * 60 * 60_000;
+/** After an item is forgotten, what memory learns from chats this soon is still from before (it takes minutes to work out facts): it doesn't bring the item back. */
+const FORGET_SETTLES_MS = 15 * 60_000;
 /** Tidying up (dreaming) on request, at most this often. */
 const DREAM_EVERY_MS = 60 * 60_000;
 
@@ -271,10 +273,12 @@ function upsert(index: Index, byKey: Map<string, string>, raw: Raw, src: ItemSou
   const title = clip(raw.title, 90);
   const key = title ? keyOf(category, raw.key, title) : null;
   if (!key) return null;
-  // Forgotten: only something said in a chat after that brings it back, never a rewritten card line or what memory works out from before.
+  // Forgotten: only something said in a chat well after that brings it back (memory works out facts from the
+  // chat for minutes after, the very chat that asked to forget it among them), never a rewritten card line or
+  // what memory works out.
   const forgot = Object.hasOwn(index.forgotten, key) ? index.forgotten[key] : 0;
   if (forgot) {
-    if (src.how !== "said" || src.at <= forgot) return null;
+    if (src.how !== "said" || src.at <= forgot + FORGET_SETTLES_MS) return null;
     delete index.forgotten[key];
   }
   const known = byKey.get(key);
