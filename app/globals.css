@@ -242,7 +242,10 @@
   width: 14px;
   height: 14px;
   opacity: 0;
-  animation: 2.2s cubic-bezier(0.2, 0.6, 0.35, 1) infinite;
+  /* Longhands: the shorthand without a name was minified to "animation: none". */
+  animation-duration: 2.2s;
+  animation-timing-function: cubic-bezier(0.2, 0.6, 0.35, 1);
+  animation-iteration-count: infinite;
 }
 .boppy-loading-note.l {
   left: 4px;

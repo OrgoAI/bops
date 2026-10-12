@@ -15,7 +15,7 @@
   .scene { position: relative; width: 88px; height: 96px; }
   .boppy { position: absolute; left: 0; top: 0; width: 88px; height: 88px; transform-origin: 50% 90%; animation: bop 1.1s ease-in-out infinite; }
   .shadow { position: absolute; left: 22px; bottom: 0; width: 44px; height: 6px; border-radius: 50%; background: #0A0A0A; opacity: 0.08; animation: shadow 0.55s ease-in-out infinite; }
-  .note { position: absolute; top: 34px; width: 14px; height: 14px; opacity: 0; animation: 2.2s cubic-bezier(.2,.6,.35,1) infinite; }
+  .note { position: absolute; top: 34px; width: 14px; height: 14px; opacity: 0; animation-duration: 2.2s; animation-timing-function: cubic-bezier(.2,.6,.35,1); animation-iteration-count: infinite; }
   .note.l { left: 4px; animation-name: note-l; }
   .note.r { right: 4px; animation-name: note-r; }
   .note:nth-of-type(2) { animation-delay: 0.55s; }

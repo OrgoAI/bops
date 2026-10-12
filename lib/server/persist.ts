@@ -83,7 +83,10 @@ export function hookExit(first: () => void = () => {}, last: () => Promise<unkno
   if (gx.__bopsExitHooked) return;
   gx.__bopsExitHooked = true;
   for (const sig of ["SIGINT", "SIGTERM"] as const)
-    process.once(sig, () => {
+    // Kept on, so a second signal while the exit work runs (the app quitting, then a new Bops
+    // stopping what it finds) doesn't fall to Node's default and cut the last save short.
+    process.on(sig, () => {
+      if (gx.__bopsStopping) return;
       // Health answers 503 from here on (app/api/health): this server is going.
       gx.__bopsStopping = true;
       first();
