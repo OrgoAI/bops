@@ -421,7 +421,7 @@ const WORKSPACES = [
   ...["ws_big", "ws_window", "ws_scan", "ws_switch", "ws_tidy", "ws_tidy2", "ws_tidy3", "ws_tidy4", "ws_tz", "ws_budget", "ws_retry", "ws_split", "ws_range", "ws_more", "ws_serial"],
   ...["ws_hide", "ws_card", "ws_card2", "ws_older", "ws_names", "ws_keys", "ws_ranges", "ws_known", "ws_ids"],
   ...["ws_outage", "ws_lock", "ws_oldidx", "ws_behind", "ws_more2", "ws_more3", "ws_prune", "ws_rows", "ws_cardnow", "ws_wait2", "ws_learn", "ws_rev", "ws_setting"],
-  ...["ws_you", "ws_chat"],
+  ...["ws_you", "ws_chat", "ws_add"],
 ];
 S.update((s) => {
   s.owner = { name: "Tiger" };
@@ -2242,6 +2242,25 @@ await section("Orbit for the bots: orbit_read lists, orbit_update changes, only 
   signInAs(null);
   assert.deepEqual([O.ORBIT_TOOLS(boppy), O.orbitNote(boppy), O.orbitNowLine(boppy)], [[], "", ""], "nothing signed out");
   signInAs("maya@orgo.ai");
+});
+
+await section("Telling Orbit something: saved to memory as a fact, sorted in seconds", async () => {
+  const ws = "ws_add";
+  const bank = Mem.bankOf(ws);
+  seed(ws, [["a0", 10, "Tiger's car is a Volvo.", []]]);
+  await refresh(ws);
+  const TEXT = "Priya Shah is my accountant";
+  SORTS.set(TEXT, [item("people", "Priya Shah", { key: "priya shah", detail: "Your accountant" })]);
+  const r = await post({ action: "add", ws, text: `  ${TEXT}  ` });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.note, "Saved. It shows up here in a few seconds.");
+  assert.ok(hbank(bank).facts.some((f) => f.text === TEXT), "in memory, as a fact");
+  await until(() => timersOf(bank).includes("learned"), "a look in a few seconds");
+  await fire(ws, "learned");
+  assert.equal(one((await get(ws)).body.items, "people", "Priya Shah").sources[0].how, "saved");
+  const empty = await post({ action: "add", ws, text: "   " });
+  assert.deepEqual([empty.status, empty.body.error], [400, "Write something to add."]);
+  clearTimers(bank);
 });
 
 await section("The window's polls: unchanged is said in a word, and items are trimmed for the window", async () => {

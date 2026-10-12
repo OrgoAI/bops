@@ -1,4 +1,5 @@
 import { categoriesOn, editItem, forgetItem, refresh, snapshot, sortOlder, tidyUp, wsOrCurrent } from "@/lib/server/memory-categories";
+import { learn } from "@/lib/server/memory";
 import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
@@ -22,7 +23,8 @@ export async function GET(request: Request) {
 }
 
 type Body = {
-  action: "refresh" | "sort-older" | "tidy-up" | "edit" | "forget";
+  action: "refresh" | "sort-older" | "tidy-up" | "edit" | "forget" | "add";
+  text?: string;
   ws?: string;
   id?: string;
   title?: string;
@@ -35,6 +37,8 @@ type Body = {
  * refresh: look at memory now (and sort what's new now). sort-older: sort 300 more of the older facts.
  * tidy-up: ask memory to tidy up (dreaming), at most once an hour.
  * edit {id, title?, detail?, done?, hidden?}. forget {id}: memory forgets what it learned only about it.
+ * add {text}: something the user tells Orbit ("Priya Shah is my accountant"), saved to memory as a fact
+ * (as a bot's remember is) and sorted in a few seconds; with `note`, what memory said ("Saved.", "Already known: …").
  * Answers the categories as they are after it.
  */
 export async function POST(request: Request) {
@@ -62,6 +66,14 @@ export async function POST(request: Request) {
       case "forget":
         await forgetItem(ws, b.id ?? "");
         break;
+      case "add": {
+        const text = typeof b.text === "string" ? b.text.trim() : "";
+        if (!text) return Response.json({ error: "Write something to add." }, { status: 400 });
+        const said = await learn(ws, text.slice(0, 500));
+        // Not saved (kept from someone, memory off, another account): said as the error.
+        if (!said.startsWith("Saved") && !said.startsWith("Already known")) return Response.json({ error: said }, { status: 400 });
+        return Response.json({ ...snapshot(ws), note: said.startsWith("Already known") ? "Orbit knows that already." : "Saved. It shows up here in a few seconds." });
+      }
       default:
         return Response.json({ error: "Unknown action." }, { status: 400 });
     }

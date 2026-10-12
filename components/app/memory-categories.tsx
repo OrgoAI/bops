@@ -27,10 +27,11 @@ export type MemoryAction =
   | { action: "sort-older" }
   | { action: "tidy-up" }
   | { action: "edit"; id: string; title?: string; detail?: string; done?: boolean; hidden?: boolean }
-  | { action: "forget"; id: string };
+  | { action: "forget"; id: string }
+  | { action: "add"; text: string };
 
-/** Asks for a change and answers what went wrong, if anything (null: done, and the categories show it). */
-export type MemoryAct = (body: MemoryAction) => Promise<string | null>;
+/** Asks for a change and answers what went wrong, if anything (null: done, and the categories show it; `note`: done, with something to say). */
+export type MemoryAct = (body: MemoryAction) => Promise<string | { note: string } | null>;
 
 const isSnapshot = (j: unknown): j is MemorySnapshot =>
   !!j && typeof j === "object" && typeof (j as MemorySnapshot).on === "boolean" && Array.isArray((j as MemorySnapshot).items);
@@ -158,7 +159,7 @@ function soon(user: string, ws: string) {
 }
 
 /** Asks for a change: everyone showing the categories gets them as they are after it. */
-async function change(user: string, ws: string, body: MemoryAction): Promise<string | null> {
+async function change(user: string, ws: string, body: MemoryAction): Promise<string | { note: string } | null> {
   const s = sharedOf(user, ws);
   try {
     const r = await fetch("/api/memory/categories", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, ws }) });
@@ -171,7 +172,10 @@ async function change(user: string, ws: string, body: MemoryAction): Promise<str
     }
     // Newer than any read still on its way.
     show(s, j);
-    return null;
+    // Added: sorted in a few seconds, so read again then.
+    if (body.action === "add") soon(user, ws);
+    const note = (j as { note?: unknown }).note;
+    return typeof note === "string" ? { note } : null;
   } catch {
     return "Couldn't reach Bops. Try again.";
   }
@@ -579,7 +583,7 @@ export function SidebarSections({
                 onClick={() => onOpen(q ? { category: c.id, query: typed } : { category: c.id })}
                 className="flex h-[30px] shrink-0 items-center rounded-[10px] pl-8 pr-2.5 text-left text-[13px] leading-[18px] text-[#6B6B6B] outline-none hover:bg-black/[0.03] hover:text-ink focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
               >
-                {items.length ? `Show all ${items.length}` : `See all ${total}`}
+                {items.length ? `Show all ${items.length}` : c.id === "events" ? `${total} past` : snap.items.every((i) => i.category !== c.id || i.done) ? `${total} done` : `${total} older`}
               </button>
             )}
           </div>
@@ -660,6 +664,18 @@ export function MemoryView({
 
 const BUTTON = "rounded-full bg-[#F2F2F0] px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#EAEAE7] disabled:opacity-40";
 
+/** What the add box suggests telling Orbit, on each section's page. */
+const EXAMPLE: Record<CategoryId, string> = {
+  people: "Priya Shah is my accountant",
+  todos: "Send Priya the receipts by Thursday",
+  events: "Dentist on Friday at 3pm",
+  promises: "Dana will send the contract tomorrow",
+  companies: "Acme is our biggest customer",
+  projects: "Atlas launches in November",
+  decisions: "We chose Stripe for billing",
+  preferences: "I prefer aisle seats",
+};
+
 /** The page for a snapshot of the categories (MemoryView, without the fetching). */
 export function MemoryPage({
   snap,
@@ -700,6 +716,20 @@ export function MemoryPage({
   }, [query, onQueryUsed]);
   const [busy, setBusy] = useState<"refresh" | "sort-older" | "tidy-up" | null>(null);
   const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
+  // Told Orbit something (saved to memory, sorted in a few seconds): what's typed, and while it saves.
+  const [adding, setAdding] = useState("");
+  const [saving, setSaving] = useState(false);
+  const add = async () => {
+    const text = adding.trim();
+    if (!text || saving) return;
+    setSaving(true);
+    setNote(null);
+    const r = await act({ action: "add", text });
+    setSaving(false);
+    if (typeof r === "string") return setNote({ text: r, bad: true });
+    setAdding("");
+    if (r) setNote({ text: r.note, bad: false });
+  };
   const list = useRef<HTMLDivElement>(null);
   // ...and comes into view, once it's there (the categories may still be on their way).
   const there = !!focus && !!snap?.items.some((i) => i.id === focus);
@@ -718,7 +748,7 @@ export function MemoryPage({
     setNote(null);
     const error = await act({ action });
     setBusy(null);
-    if (error) setNote({ text: error, bad: true });
+    if (typeof error === "string") setNote({ text: error, bad: true });
     else if (action === "tidy-up") setNote({ text: "Memory is tidying up. What changes shows up here over the next few minutes.", bad: false });
   };
 
@@ -766,6 +796,31 @@ export function MemoryPage({
 
         {snap?.on && (
           <div className="flex flex-col gap-2.5">
+            {/* Tell Orbit something by hand: saved to memory like a bot's remember, sorted into the right section in seconds. */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void add();
+              }}
+              className="flex h-9 items-center gap-2 rounded-full bg-white pl-3.5 pr-1 shadow-[0_0_0_1px_#E6E6E3] focus-within:shadow-[0_0_0_1.5px_#0A0A0A]"
+            >
+              <span aria-hidden className="text-[16px] leading-none text-[#9A9A98]">
+                +
+              </span>
+              <input
+                value={adding}
+                onChange={(e) => setAdding(e.target.value)}
+                placeholder={`Tell ${GROUP_NAME} something: ${EXAMPLE[c.id]}`}
+                aria-label={`Tell ${GROUP_NAME} something`}
+                maxLength={500}
+                className="min-w-0 flex-1 bg-transparent text-[13.5px] leading-5 text-ink outline-none placeholder:text-[#9A9A98]"
+              />
+              {adding.trim() && (
+                <button type="submit" disabled={saving} className={BUTTON}>
+                  {saving ? "Saving" : "Add"}
+                </button>
+              )}
+            </form>
             <label className="flex h-9 items-center gap-2 rounded-full bg-[#F7F7F6] px-3.5 text-[#9A9A98] focus-within:bg-white focus-within:shadow-[0_0_0_1.5px_#0A0A0A]">
               <SearchIcon />
               <input
@@ -895,7 +950,7 @@ function HiddenList({ hidden, act }: { hidden: NonNullable<MemorySnapshot["hidde
                     setFailed(null);
                     const error = await act({ action: "edit", id: h.id, hidden: false });
                     setBusy(null);
-                    if (error) setFailed({ id: h.id, text: error });
+                    if (typeof error === "string") setFailed({ id: h.id, text: error });
                   }}
                   className={BUTTON}
                 >
@@ -946,8 +1001,8 @@ export function ItemRow({ item, last, open, onToggle, act }: { item: MemoryItem;
     setError(null);
     const e = await act(body);
     setBusy(false);
-    setError(e);
-    return !e;
+    setError(typeof e === "string" ? e : null);
+    return typeof e !== "string";
   };
   const toggleDone = () => void run({ action: "edit", id: item.id, done: !item.done });
   const errorLine = error && !editing && <span className={`pr-3.5 text-[12.5px] leading-4 text-[#B42318] ${INDENT[item.category] ?? "pl-3.5"}`}>{error}</span>;
