@@ -3,7 +3,7 @@
  * isn't already running, opens the window with the Mac title bar from the design, and on quit
  * stops what it started, including the bots' background browsers.
  */
-const { app, BrowserWindow, desktopCapturer, ipcMain, nativeImage, Notification, screen, session, shell, systemPreferences } = require("electron");
+const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, nativeImage, Notification, screen, session, shell, systemPreferences } = require("electron");
 const { execFile, execFileSync, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -329,6 +329,8 @@ let serverEnded;
 let leaving = false;
 /** A server of ours this app found running (left by a Bops that quit badly) and uses: watched, and stopped on quit, like one it started. */
 let adopted;
+/** Our server being stopped because it never answered: killed outright if Bops quits meanwhile (it has nothing to save). */
+let lettingGo;
 
 async function spawnServer() {
   const packaged = packagedServer();
@@ -479,7 +481,8 @@ async function startOrFind() {
       }
       if (!stopped && l && Date.now() - silentSince > SILENT_MS) {
         if (!stoppable(l)) {
-          mainLog(`${named(l)} hasn't answered in ${SILENT_MS / 1000}s and isn't ours to stop (its parent is pid ${l.ppid})`);
+          const why = l.uid !== process.getuid() ? "another user's" : realpath(l.home ?? "") !== realpath(serverHome()) ? `it runs in ${l.home ?? "a folder Bops can't see"}` : `its parent is pid ${l.ppid}`;
+          mainLog(`${named(l)} hasn't answered in ${SILENT_MS / 1000}s and isn't ours to stop (${why})`);
           return { ok: false, reason: "other-bops", detail: named(l) };
         }
         stopped = true;
@@ -501,7 +504,9 @@ async function startOrFind() {
         server = undefined;
         serverEnded = "never answered";
         mainLog(`our server (pid ${child.pid}) never answered: stopping it`);
+        lettingGo = child.pid;
         await stopProcess(child.pid);
+        lettingGo = undefined;
       }
       return { ok: false, reason: "server-slow", detail: serverEnded };
     }
@@ -549,6 +554,20 @@ function openApp(win) {
         ),
         sleep(30_000).then(() => false),
       ]);
+      // A page that crashed reports its load failed a few ms before the crash itself: wait for that
+      // report, so the incident is told as a crash, and once.
+      if (failed && !goneWhileOpening && !win.isDestroyed()) {
+        const wc = win.webContents;
+        await new Promise((resolve) => {
+          const done = () => {
+            clearTimeout(timer);
+            wc.off("render-process-gone", done);
+            resolve();
+          };
+          const timer = setTimeout(done, 500);
+          wc.on("render-process-gone", done);
+        });
+      }
       if (!loaded && !win.isDestroyed()) {
         mainLog("the app's page took over 30s to load");
         goneWhileOpening = null;
@@ -566,7 +585,10 @@ function openApp(win) {
   return run;
 }
 
+/** What the trouble page said last, to say again if the page itself crashes. */
+let lastTrouble;
 function showTrouble(win, { reason, detail }) {
+  lastTrouble = { reason, detail };
   mainLog(`showing trouble: ${reason}${detail ? ` (${detail})` : ""}`);
   if (win.isDestroyed()) return;
   void win.loadFile(TROUBLE, { query: { reason, detail: detail ?? "", logs: app.getPath("logs") } }).catch(() => {});
@@ -578,14 +600,15 @@ function showTrouble(win, { reason, detail }) {
  * the window says Bops keeps stopping instead of trying forever.
  */
 let reopening = false;
+const GONE_RANK = { load: 0, server: 1, page: 2 };
 /** How the window's page last went: "crashed (5)". */
 let lastPageGone;
 async function serverGone(what = "server") {
   const win = mainWin;
   if (!win || win.isDestroyed() || leaving) return;
   if (opening && openingWin === win) {
-    // A crashed page says more than the failed load it causes.
-    if (goneWhileOpening !== "page") goneWhileOpening = what;
+    // A crashed page says more than a stopped server, which says more than the failed load it causes.
+    if (goneWhileOpening == null || GONE_RANK[what] > GONE_RANK[goneWhileOpening]) goneWhileOpening = what;
     return;
   }
   if (reopening) return;
@@ -598,10 +621,18 @@ async function serverGone(what = "server") {
       // Saying so already: not again (a page that can't run would go round and round), unless the
       // trouble page itself crashed, a few times at most.
       const showing = win.webContents.getURL().startsWith(pathToFileURL(TROUBLE).href);
-      if (!showing || (win.webContents.isCrashed() && failures.length <= 8)) {
+      if (!showing) {
         const reason = { page: "page-crashed", load: "page-failed" }[what] ?? "server-crashed";
-        showTrouble(win, { reason, detail: what === "page" ? lastPageGone : what === "load" ? null : serverEnded });
+        return showTrouble(win, { reason, detail: what === "page" ? lastPageGone : what === "load" ? null : serverEnded });
       }
+      if (!win.webContents.isCrashed()) return;
+      // The trouble page itself crashed: the same words again, a few times; then a dialog, which needs no page.
+      if (failures.length <= 8) return showTrouble(win, lastTrouble ?? { reason: "page-crashed", detail: lastPageGone });
+      const { response } = await dialog.showMessageBox(win, { type: "warning", message: "Bops' window keeps crashing", detail: `Try again, and if it happens again, send us the logs (${app.getPath("logs")}).`, buttons: ["Try again", "Quit"], defaultId: 0, cancelId: 1 });
+      if (response === 1) return app.quit();
+      failures = [];
+      await win.loadFile(SPLASH).catch(() => {});
+      await openApp(win);
       return;
     }
     await win.loadFile(SPLASH).catch(() => {});
@@ -1174,6 +1205,14 @@ function stopServer() {
 
 app.on("will-quit", () => {
   leaving = true;
+  if (lettingGo)
+    try {
+      process.kill(-lettingGo, "SIGKILL");
+    } catch {
+      try {
+        process.kill(lettingGo, "SIGKILL");
+      } catch {}
+    }
   const pid = server?.pid ?? adopted;
   // A server too stuck to act on SIGTERM would outlive Bops: stopped hard once its exit work's 8s are up.
   if (stopServer() && pid)
