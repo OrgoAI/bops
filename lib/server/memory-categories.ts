@@ -63,6 +63,8 @@ type Item = MemoryItem & { detailPrivate?: boolean };
 type Index = {
   v: 1;
   bank: string;
+  /** The categories it was sorted into: when there are new ones, facts that made nothing are sorted again (About you came later). */
+  cats?: string;
   /** Every fact (and card line, "card:<line>") already sorted, the items it went into, and what it said about each. */
   facts: Record<string, { items: string[]; at: number; wrote?: Record<string, Said> }>;
   items: Record<string, Item>;
@@ -129,7 +131,10 @@ const fileOf = (bank: string) => {
   return dir ? join(/*turbopackIgnore: true*/ dir, "memory-categories", `${bank.replace(/[^A-Za-z0-9_-]/g, "-")}.json`) : null;
 };
 
-const empty = (bank: string): Index => ({ v: 1, bank, facts: {}, items: {}, forgotten: {} });
+/** The categories as they are now, for Index.cats. */
+const CATS = CATEGORY_IDS.join(",");
+
+const empty = (bank: string): Index => ({ v: 1, bank, cats: CATS, facts: {}, items: {}, forgotten: {} });
 
 /** The bank's index for the account signed in, from its file once (a damaged file starts over: everything in it can be sorted again). */
 function load(bank: string): Index {
@@ -143,6 +148,9 @@ function load(bank: string): Index {
       if (read?.v === 1 && read.items && read.facts) {
         index = { ...empty(bank), ...read };
         if (Array.isArray(index.forgotten)) index.forgotten = Object.fromEntries((index.forgotten as unknown as string[]).map((k) => [k, Date.now()]));
+        // Sorted before a category was added: what made nothing then may fit one now (the next look sorts it again).
+        if (read.cats !== CATS) for (const [id, f] of Object.entries(index.facts)) if (!f.items.length) delete index.facts[id];
+        index.cats = CATS;
       }
     } catch (e) {
       console.warn(`[categories] ${bank}: unreadable index, starting over (${(e as Error).message})`);
@@ -415,7 +423,8 @@ async function sortFacts(facts: Fresh[], known: Record<string, unknown>, epoch: 
     "- Only what the fact says. Never guess, never add.",
     "- Most facts give zero or one item. One fact can give several: a meeting with Dana from Acme on Friday is an event, Dana in people and Acme in companies.",
     `- Never an item in people for ${owner} themselves${bots.length ? `, or for their AI assistants (${bots.join(", ")})` : ""}.`,
-    "- Known lists items already in the categories that these facts may be about, with their keys and what they are. When a fact is about one of them (the same person, company, project, meeting or to-do, even in other words), use its key exactly. Two people who only share a first name are not the same.",
+    `- you: what a fact says about ${owner} themselves: their name, where they live or are from, their work, family, health, habits. title: what it's about in a word or two, the same each time it comes up ("Name", "Home", "Work", "Gym"); detail: what's known ("Tiger Wang", "Lisbon", "CEO of Orgo"). What they like is a preference; their plans are events or todos.`,
+    "- Known lists items already in the categories that these facts may be about, with their keys and what they are. When a fact is about one of them (the same person, company, project, meeting or to-do, even in other words or by a fuller name), use its key exactly. Two people who only share a first name are not the same; a first name at the same company or in the same role is the same person (\"Dana, your contact at Acme\" and \"Dana Brooks of Acme\").",
     `- people, companies and projects: title is the name, the fullest one known. detail: who or what they are to ${owner}, a few words addressed to ${owner} ("Your sister", "Your accountant at Acme", "Your customer, wants a quote"); empty when the fact doesn't say who they are.`,
     "- events: title is a short name (\"Dentist\", \"Flight to Denver\", \"Call with Dana\"). when: its date as YYYY-MM-DD, or YYYY-MM-DDTHH:MM with a time. For a fact that was said or saved, work out words like Friday or tomorrow from the day it was learned; for one worked out by the memory system or a card line, only a date written out in it. Empty when there's no date. who: who it's with.",
     `- todos: what ${owner} has to do, including what ${owner} said they would do for someone, as a short instruction ("Renew the passport", "Send Priya the receipts"). who: for whom. when: the due date, if any. done: true only when the fact says it's done. What ${owner} asked an AI assistant to do is that assistant's work, not a todo.`,
@@ -423,7 +432,7 @@ async function sortFacts(facts: Fresh[], known: Record<string, unknown>, epoch: 
     "- decisions: title is what was decided, detail why. preferences: title is the preference or rule (\"Aisle seats\", \"Sign emails as Tiger\").",
     "- key: the same for every mention of the same thing: the lowercase name for people, companies and projects; the name and date for events (\"dentist 2026-10-17\"); a few lowercase words for the rest.",
     "- detail: plain words, no full stop at the end. Empty strings for what isn't known. No dashes.",
-    `- No item for a passing moment, small talk, what an AI assistant did or how it works, or anything else about the AI system itself. A rule ${owner} set for their bots ("keep replies short") is a preference.`,
+    `- No item for a passing moment, small talk, checking that a call or the app works ("can you hear me"), what an AI assistant did or how it works, or anything else about the AI system itself. A rule ${owner} set for their bots ("keep replies short") is a preference.`,
   ].join("\n");
   const input = JSON.stringify({
     today: localDay(Date.now()),

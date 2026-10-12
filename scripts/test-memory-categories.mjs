@@ -421,6 +421,7 @@ const WORKSPACES = [
   ...["ws_big", "ws_window", "ws_scan", "ws_switch", "ws_tidy", "ws_tidy2", "ws_tidy3", "ws_tidy4", "ws_tz", "ws_budget", "ws_retry", "ws_split", "ws_range", "ws_more", "ws_serial"],
   ...["ws_hide", "ws_card", "ws_card2", "ws_older", "ws_names", "ws_keys", "ws_ranges", "ws_known", "ws_ids"],
   ...["ws_outage", "ws_lock", "ws_oldidx", "ws_behind", "ws_more2", "ws_more3", "ws_prune", "ws_rows", "ws_cardnow", "ws_wait2", "ws_learn", "ws_rev", "ws_setting"],
+  ...["ws_you"],
 ];
 S.update((s) => {
   s.owner = { name: "Tiger" };
@@ -2135,6 +2136,50 @@ await section("A new card line is sorted at once; Bops's own notes wait for the 
 });
 
 /* ---------------- The window's polls ---------------- */
+
+await section("About you: what memory learns about the user themselves; what made nothing is sorted again when a category is added", async () => {
+  const ws = "ws_you";
+  const bank = Mem.bankOf(ws);
+  // Memory has the user's name (misheard on a call) and their sister; the card says where they work.
+  const F = seed(ws, [
+    ["name", 10, "user's name is Teequi", [item("you", "Name", { key: "name", detail: "Teequi" })]],
+    ["sis", 20, "Tiger's sister Ana lives in Lisbon.", [item("people", "Ana", { key: "ana", detail: "Your sister" })]],
+  ]);
+  const WORK = "ATTRIBUTE: Works at Orgo";
+  hbank(bank).cards.set("user", [WORK]);
+  SORTS.set(WORK, [item("you", "Work", { key: "work", detail: "Works at Orgo" })]);
+  // Sorted by a Bops from before About you: the name and the card line made nothing, the sister made Ana.
+  const ana = "a1b2c3d4e5";
+  const at = Date.now() - 60_000;
+  writeFileSync(
+    fileFor(bank),
+    JSON.stringify({
+      v: 1,
+      bank,
+      facts: { [F.name.id]: { items: [], at: F.name.at }, [F.sis.id]: { items: [ana], at: F.sis.at }, [`card:${WORK}`]: { items: [], at } },
+      items: { [ana]: { id: ana, category: "people", key: "people:ana", title: "Ana", detail: "Your sister", sources: [{ fact: F.sis.id, text: F.sis.text, at: F.sis.at, from: "Chat with Boppy", how: "said" }], first: F.sis.at, last: F.sis.at } },
+      forgotten: {},
+      syncedAt: at,
+      triedAt: at,
+      sweptAt: at,
+    }),
+  );
+  const n = openai.calls.length;
+  const r = await refresh(ws);
+  const asked = openai.calls.slice(n).flatMap((c) => c.texts);
+  assert.deepEqual([...asked].sort(), [WORK, F.name.text].sort(), "what made nothing is sorted again, and only that");
+  assert.deepEqual(pick(one(r.items, "you", "Name"), ["detail", "category"]), { detail: "Teequi", category: "you" });
+  assert.equal(one(r.items, "you", "Work").sources[0].how, "card");
+  assert.equal(one(r.items, "people", "Ana").id, ana, "what was sorted stays as it was");
+  assert.equal(indexOf(bank).cats, Cat.CATEGORY_IDS.join(","), "the index says which categories it was sorted into");
+  // The name heard right later: the same item, its line as it stands now.
+  newFact(ws, "user's name is Tiger Wang", [item("you", "Name", { key: "name", detail: "Tiger Wang" })]);
+  const after = await refresh(ws);
+  assert.deepEqual(pick(one(after.items, "you", "Name"), ["detail"]), { detail: "Tiger Wang" });
+  const again = openai.calls.length;
+  await refresh(ws);
+  assert.equal(openai.calls.length, again, "sorted once: nothing is asked again");
+});
 
 await section("The window's polls: unchanged is said in a word, and items are trimmed for the window", async () => {
   const ws = "ws_rev";

@@ -1035,6 +1035,17 @@ cloud.handle = null;
 // The tunnel's events: only with the token; a call the cloud answered becomes a note in the bot's chat, once.
 const callNote = (id) => S.getState().messages.filter((m) => m.sms?.id === `cloud-call:${id}`);
 const ownersCall = { botId: "boppy", from: "+14155550166", owner: true, message: { text: "Remind me to call Ana" }, transcript: "Caller: Remind me to call Ana\nBot: Will do.", startedAt: "2026-10-05T10:00:00Z", endedAt: "2026-10-05T10:00:42Z" };
+// What goes into memory (Honcho, through the cloud): the messages of each save.
+const remembered = [];
+cloud.handle = (r) => {
+  if (!r.path.startsWith("/proxy/honcho/")) return cloudDefault(r);
+  const body = r.method === "POST" ? json(r) : {};
+  if (r.method === "POST" && /\/sessions\/[^/]+\/messages$/.test(r.path)) {
+    remembered.push({ path: r.path, said: body.messages.map((m) => [m.peer_id, m.content]) });
+    return { json: [] };
+  }
+  return { json: { id: body.id ?? "user", metadata: {}, configuration: {}, created_at: "2026-01-01T00:00:00Z" } };
+};
 res = await EV.POST(request("/api/cloud/event", {}, JSON.stringify({ id: "1", kind: "call", payload: ownersCall })));
 assert.equal(res.status, 403);
 for (let i = 0; i < 2; i++) {
@@ -1044,6 +1055,10 @@ for (let i = 0; i < 2; i++) {
 assert.equal(callNote("1").length, 1, "handed over twice, noted once");
 assert.equal(callNote("1")[0].text, 'While your Mac was away, you called: "Remind me to call Ana"\n\nCaller: Remind me to call Ana\nBot: Will do.');
 assert.deepEqual(callNote("1")[0].call, { seconds: 42, phone: "+14155550166" });
+// The owner's call goes into memory too, as a call this Mac answers does (phone-voice.ts), once.
+await until(() => remembered.length, "the owner's call in memory");
+assert.match(remembered[0].path, /^\/proxy\/honcho\/v3\/workspaces\/u-u1-bops\/sessions\/bops-chat-bot-boppy\/messages$/);
+assert.deepEqual(remembered.map((x) => x.said), [[["user", "Remind me to call Ana"], ["bops-boppy", "Will do."]]]);
 // Anyone else got a bot that only takes a message (cloud/voice.ts): the message is in the chat, with a chime, once.
 const strangersCall = { botId: "boppy", from: "+14155550123", owner: false, message: { name: "Ana", text: "Send the deck", callback: "+14155550124" }, transcript: "Caller: Can you pass on a message?\nBot: Sure.", startedAt: "2026-10-05T11:00:00Z", endedAt: "2026-10-05T11:01:05Z" };
 for (let i = 0; i < 2; i++) {
@@ -1054,10 +1069,13 @@ assert.equal(callNote("2").length, 1);
 assert.equal(callNote("2")[0].text, 'While your Mac was away, someone called and left a message (Ana): "Send the deck" Reach them at +14155550124.\n\nCaller: Can you pass on a message?\nBot: Sure.');
 assert.deepEqual([callNote("2")[0].sms.from, callNote("2")[0].call, callNote("2")[0].ping], ["+14155550123", { seconds: 65, phone: "+14155550123" }, true]);
 assert.equal(S.getState().ownerPhones.some((p) => p.number === "+14155550123"), false, "a stranger's number is nobody's");
+assert.equal(remembered.length, 1, "a stranger's call isn't the user's memory");
 // A first call that claimed the line (the cloud answered it): that phone is the user's here too.
 res = await EV.POST(request("/api/cloud/event", { "x-bops-cloud": token }, JSON.stringify({ id: "4", kind: "call", payload: { ...ownersCall, from: "+14155550177", claimed: "call" } })));
 assert.equal(res.status, 200);
 assert.equal(S.getState().ownerPhones.find((p) => p.number === "+14155550177")?.claimedVia, "call");
+await until(() => remembered.length === 2, "that call in memory too");
+cloud.handle = null;
 res = await EV.POST(request("/api/cloud/event", { "x-bops-cloud": token }, JSON.stringify({ id: "3", kind: "mystery", payload: {} })));
 assert.equal(res.status, 422, "a kind this app doesn't know waits for one that does");
 res = await EV.POST(request("/api/cloud/event", { "x-bops-cloud": token }, JSON.stringify({ kind: "call", payload: ownersCall })));

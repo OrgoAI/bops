@@ -1,14 +1,14 @@
 import type { AppState } from "./types";
 
 /*
- * What Bops knows, sorted into categories that fill themselves as people use their bots: the people
- * they deal with, what's coming up, what they still have to do, what was promised and decided, and how
- * they like things. Read from the workspace's memory (Honcho), where every chat and finished task
+ * What Bops knows, sorted into categories that fill themselves as people use their bots: who they are,
+ * the people they deal with, what's coming up, what they still have to do, what was promised and
+ * decided, and how they like things. Read from the workspace's memory (Honcho), where every chat and finished task
  * already goes (lib/server/memory.ts), and sorted on this Mac (lib/server/memory-categories.ts). Each
  * category is a section of the sidebar that folds open (components/app/memory-categories.tsx).
  */
 
-export type CategoryId = "people" | "companies" | "projects" | "events" | "todos" | "promises" | "decisions" | "preferences";
+export type CategoryId = "you" | "people" | "companies" | "projects" | "events" | "todos" | "promises" | "decisions" | "preferences";
 
 export type Category = {
   id: CategoryId;
@@ -24,6 +24,13 @@ export type Category = {
 
 /** In the sidebar's order. A fact can land in more than one ("Tiger meets Dana from Acme on Friday": Events, People, Companies). */
 export const CATEGORIES: Category[] = [
+  {
+    id: "you",
+    label: "About you",
+    one: "detail",
+    about: "You: your name, where you live, your work, your family and what you're like.",
+    empty: "What your bots learn about you shows up here.",
+  },
   {
     id: "people",
     label: "People",

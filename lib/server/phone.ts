@@ -15,6 +15,7 @@ import { installId } from "./mail";
 import { onPostgres } from "./persist";
 import { ownerPhoneTable } from "./persist-pg";
 import { forgetOwnerNumber, syncCloudLines, tellCloudLine } from "./phone-lines";
+import { saveToMemory, wsOf } from "./memory";
 import { saveUpload } from "./uploads";
 import { addMessage, bot, getState, ofThisUser, ownerName, patchSession, react, sameState, stateEpoch, stateReady, stateUser, update, userDir } from "./store";
 import { recordCallMinutes, recordUsage } from "./usage";
@@ -927,9 +928,10 @@ function runCall(b: Bot, sessionId: string, from: string) {
 /**
  * A call Bops Cloud answered while this Mac was away (asleep, off or offline), handed over by the
  * tunnel once it's back, as a message in the bot's chat with the call as text. The owner's (the cloud
- * decided who that is): their note. Anyone else's (the bot only took a message, cloud/voice.ts): the
- * message they left, with a chime. A first call that claimed the line makes that number the user's
- * here too. The cloud hands an event over again if its acknowledgment was lost: it's added once.
+ * decided who that is): their note, and the call into memory, as a call this Mac answers goes
+ * (phone-voice.ts finish). Anyone else's (the bot only took a message, cloud/voice.ts): the message
+ * they left, with a chime. A first call that claimed the line makes that number the user's here too.
+ * The cloud hands an event over again if its acknowledgment was lost: it's added once.
  */
 export function cloudCall(p: CloudCallPayload, eventId: string) {
   const key = `cloud-call:${eventId}`;
@@ -961,6 +963,19 @@ export function cloudCall(p: CloudCallPayload, eventId: string) {
     sms: { dir: "in", from: p.from ?? "", to: lineOf(b)?.phone ?? b.phone ?? "", id: key },
     call: { seconds, phone: p.from },
   });
+  const turns = callTurns(p.transcript);
+  if (turns.length) saveToMemory(wsOf(b.id), "chat", botChatId(b.id), turns.slice(-200).map((t) => ({ who: t.caller ? "owner" : b.id, text: t.text.slice(0, 2000) })), { chat: "call" });
+}
+
+/** The cloud's transcript of a call ("Caller: …" and "Bot: …" lines) as turns; a line with no speaker goes with the turn before it. */
+function callTurns(transcript: string | undefined) {
+  const turns: { caller: boolean; text: string }[] = [];
+  for (const line of (transcript ?? "").split("\n")) {
+    const m = /^(Caller|Bot): ?(.*)$/.exec(line);
+    if (m) turns.push({ caller: m[1] === "Caller", text: m[2] });
+    else if (turns.length && line.trim()) turns[turns.length - 1].text += `\n${line}`;
+  }
+  return turns.filter((t) => t.text.trim());
 }
 
 /** After a rename: the bot's AgentPhone agents carry its new name (its own number's, and its workspace number's). */

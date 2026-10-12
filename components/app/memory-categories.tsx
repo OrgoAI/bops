@@ -300,6 +300,13 @@ const TIDY = "Memory works out what follows from what it knows, drops what's out
 /* ---------------- Icons ---------------- */
 
 const GLYPHS: Record<CategoryId, React.ReactNode> = {
+  you: (
+    <>
+      <rect x="2" y="3.2" width="12" height="9.6" rx="2" />
+      <circle cx="5.9" cy="7" r="1.4" />
+      <path d="M3.9 10.6c.4-1 1.1-1.5 2-1.5s1.6.5 2 1.5M9.6 6.6h2.6M9.6 9h2.6" />
+    </>
+  ),
   people: (
     <>
       <circle cx="8" cy="5.4" r="2.6" />
@@ -845,6 +852,7 @@ function HiddenList({ hidden, act }: { hidden: NonNullable<MemorySnapshot["hidde
 
 /** Where an open item's details start: under its name, past its date, initial or check. */
 const INDENT: Record<CategoryId, string> = {
+  you: "pl-3.5",
   people: "pl-[62px]",
   companies: "pl-[62px]",
   events: "pl-[62px]",
