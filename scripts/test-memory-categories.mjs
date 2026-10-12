@@ -437,9 +437,8 @@ const signInAs = (email) =>
 
 /* ---------------- Who has them ---------------- */
 
-await section("The gate: @orgo.ai accounts only, signed in, memory set up, on this Mac", async () => {
-  assert.equal(Cat.categoriesOpen({ account: { user: { id: "u", email: " Maya@ORGO.AI " } } }), true, "case and spaces don't matter");
-  for (const email of ["maya@example.com", "maya@orgo.ai.example.com", "maya@sub.orgo.ai", ""]) assert.equal(Cat.categoriesOpen({ account: { user: { id: "u", email } } }), false, email);
+await section("The gate: every account signed in, memory set up, on this Mac", async () => {
+  for (const email of ["maya@orgo.ai", "maya@example.com", ""]) assert.equal(Cat.categoriesOpen({ account: { user: { id: "u", email } } }), true, `open to ${email || "an account with no email"}`);
   assert.equal(Cat.categoriesOpen({}), false, "signed out");
 
   const answered = [];
@@ -469,7 +468,7 @@ await section("The gate: @orgo.ai accounts only, signed in, memory set up, on th
   signInAs(null);
   await closed("signed out");
   signInAs("sam@example.com");
-  await closed("for an account outside Orgo");
+  assert.equal(MC.categoriesOn(), true, "on for an account outside Orgo too");
   signInAs("maya@orgo.ai");
   delete process.env.HONCHO_API_KEY;
   assert.equal(Mem.memoryOn(), false);
@@ -691,14 +690,14 @@ await section("A look with nothing new: no model call", async () => {
 
 await section("Mentions merging: a newer one updates the line, unless the user changed it", async () => {
   const F = first;
-  // A newer mention of Ana: her line says how things stand now. The model is told what's known, with keys.
+  // A newer mention of Ana: her line says how things stand now. The model is told what's known, with keys and lines.
   const m1 = newFact(MAIN, "Ana moved to Porto last month.", [item("people", "Ana", { key: "ana", detail: "Your sister, lives in Porto now" })]);
   let n = openai.calls.length;
   let r = await refresh(MAIN);
   const known = openai.calls[n].input.known;
   assert.ok(known.people.some((k) => k.title === "Ana" && k.key === "ana"), "Ana is known, with her key");
   assert.ok(known.people.some((k) => k.title === "Dana Reyes" && k.key === "dana reyes"));
-  assert.deepEqual(known.events, [{ title: "Meeting with Dana", key: "meeting with dana 2026-10-16", when: "2026-10-16T15:00" }]);
+  assert.deepEqual(known.events, [{ title: "Meeting with Dana", key: "meeting with dana 2026-10-16", detail: "About the quote", when: "2026-10-16T15:00" }]);
   assert.ok(known.preferences.some((k) => k.title === "Aisle seats"), "a small index (40 items or fewer) goes whole, even what the fact isn't about");
   let ana = one(r.items, "people", "Ana");
   assert.equal(ana.detail, "Your sister, lives in Porto now");
@@ -1903,7 +1902,7 @@ await section("What a mention may change: hidden stays hidden, the card fills in
     await refresh(ws);
     assert.deepEqual(
       openai.calls[n].input.known,
-      { people: [{ title: "Dana Kim", key: "dana kim" }], events: [{ title: "Board meeting", key: `board meeting ${soon}`, when: soon }] },
+      { people: [{ title: "Dana Kim", key: "dana kim", detail: "Works with you on the budget" }], events: [{ title: "Board meeting", key: `board meeting ${soon}`, when: soon }] },
       "Dana by her name, the meeting by its date: not the habits, nor the trip two months away",
     );
     newFact(ws, "Tiger dropped a habit.", []);
@@ -1934,6 +1933,14 @@ await section("When a fact goes, its item is worked out again from the facts lef
     assert.deepEqual(leo.sources.map((s) => [s.fact, !!s.private]), [[F.a1.id, true], [F.a2.id, false]]);
     assert.ok(!Object.hasOwn(leo, "detailPrivate"), "the window doesn't get the engine's own field");
     assert.deepEqual(pick(one(r.items, "todos", "Renew the car registration"), ["done", "when"]), { done: true, when: "2026-12-01" });
+    await check("The model is told what known items are, but never a line that's locked (it came from a private fact)", async () => {
+      const n = openai.calls.length;
+      newFact(ws, "Leo and Mara met at the climbing gym.", []);
+      await refresh(ws);
+      const known = openai.calls[n].input.known;
+      assert.deepEqual(known.people.find((k) => k.key === "leo"), { title: "Leo", key: "leo" }, "Leo's line is from his address");
+      assert.deepEqual(known.people.find((k) => k.key === "mara"), { title: "Mara", key: "mara" }, "Mara's is from her phone number");
+    });
     // The address is deleted in memory: the line goes with it, and so does the lock. And the fact saying the
     // registration was renewed turns out wrong and is deleted: open again, the date kept.
     removeFact(bank, F.a1.id);

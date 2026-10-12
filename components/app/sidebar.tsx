@@ -135,7 +135,7 @@ export function Sidebar({
           </div>
         )}
 
-        {/* What Bops knows, under Memory: categories that fill themselves from memory, folded, each a page on the right. Orgo's team's for now (lib/memory-categories.ts). */}
+        {/* What Bops knows, under Memory: categories that fill themselves from memory, folded, each a page on the right. Every signed-in account (lib/memory-categories.ts). */}
         {categoriesOpen(state) && <MemorySections state={state} query={query ?? ""} onOpen={onOpenMemory} />}
       </div>
 

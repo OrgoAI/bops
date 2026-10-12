@@ -1,4 +1,3 @@
-import { crmOpenTo } from "./crm-access";
 import type { AppState } from "./types";
 
 /*
@@ -78,7 +77,7 @@ export const CATEGORIES: Category[] = [
     id: "preferences",
     label: "Preferences",
     one: "preference",
-    about: "How you like things done, and the rules you set for your bots.",
+    about: "What you like and how you like things done (food, travel, work), and the rules you set for your bots.",
     empty: "How you like things done shows up here.",
   },
 ];
@@ -156,9 +155,8 @@ export type MemorySnapshot = {
   error?: string;
 };
 
-/** Who has the categories while they're being finished: Orgo's own team, like the CRM they replace (lib/crm-access.ts). */
-export const categoriesOpenTo = crmOpenTo;
-export const categoriesOpen = (state: Pick<AppState, "account">) => categoriesOpenTo(state.account?.user.email);
+/** Who has the categories: every account signed in (they're kept in the account's own folder on this Mac). */
+export const categoriesOpen = (state: Pick<AppState, "account">) => !!state.account?.user.id;
 
 /**
  * A to-do or promise left open long after it mattered (14 days past due, or no date and not mentioned

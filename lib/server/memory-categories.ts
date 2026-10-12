@@ -415,7 +415,7 @@ async function sortFacts(facts: Fresh[], known: Record<string, unknown>, epoch: 
     "- Only what the fact says. Never guess, never add.",
     "- Most facts give zero or one item. One fact can give several: a meeting with Dana from Acme on Friday is an event, Dana in people and Acme in companies.",
     `- Never an item in people for ${owner} themselves${bots.length ? `, or for their AI assistants (${bots.join(", ")})` : ""}.`,
-    "- Known lists items already in the categories that these facts may be about, with their keys. When a fact is about one of them (the same person, company, project, meeting or to-do, even in other words), use its key exactly. Two people who only share a first name are not the same.",
+    "- Known lists items already in the categories that these facts may be about, with their keys and what they are. When a fact is about one of them (the same person, company, project, meeting or to-do, even in other words), use its key exactly. Two people who only share a first name are not the same.",
     `- people, companies and projects: title is the name, the fullest one known. detail: who or what they are to ${owner}, a few words addressed to ${owner} ("Your sister", "Your accountant at Acme", "Your customer, wants a quote"); empty when the fact doesn't say who they are.`,
     "- events: title is a short name (\"Dentist\", \"Flight to Denver\", \"Call with Dana\"). when: its date as YYYY-MM-DD, or YYYY-MM-DDTHH:MM with a time. For a fact that was said or saved, work out words like Friday or tomorrow from the day it was learned; for one worked out by the memory system or a card line, only a date written out in it. Empty when there's no date. who: who it's with.",
     `- todos: what ${owner} has to do, including what ${owner} said they would do for someone, as a short instruction ("Renew the passport", "Send Priya the receipts"). who: for whom. when: the due date, if any. done: true only when the fact says it's done. What ${owner} asked an AI assistant to do is that assistant's work, not a todo.`,
@@ -423,7 +423,7 @@ async function sortFacts(facts: Fresh[], known: Record<string, unknown>, epoch: 
     "- decisions: title is what was decided, detail why. preferences: title is the preference or rule (\"Aisle seats\", \"Sign emails as Tiger\").",
     "- key: the same for every mention of the same thing: the lowercase name for people, companies and projects; the name and date for events (\"dentist 2026-10-17\"); a few lowercase words for the rest.",
     "- detail: plain words, no full stop at the end. Empty strings for what isn't known. No dashes.",
-    "- No item for a passing moment, small talk, an AI assistant's own instructions or behavior, or anything about the AI system itself.",
+    `- No item for a passing moment, small talk, what an AI assistant did or how it works, or anything else about the AI system itself. A rule ${owner} set for their bots ("keep replies short") is a preference.`,
   ].join("\n");
   const input = JSON.stringify({
     today: localDay(Date.now()),
@@ -462,7 +462,8 @@ const wordsOf = (s: string) => (s.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [
 /**
  * The known items these facts may be about, so a new mention of Dana or of the same meeting gets the
  * same key: those whose name shares a word with the facts, and events within two weeks of when they
- * were learned (at most 40, the latest first). A small index goes whole.
+ * were learned (at most 40, the latest first). A small index goes whole. Each says what it is (its
+ * line, unless that's private), or "Dana" can't be told from Dana Brooks at the same company.
  */
 function knownFor(index: Index, batch: Fresh[]) {
   let items = Object.values(index.items);
@@ -476,7 +477,7 @@ function knownFor(index: Index, batch: Fresh[]) {
       .slice(0, 40);
   }
   return Object.fromEntries(
-    CATEGORY_IDS.map((c) => [c, items.filter((i) => i.category === c).map((i) => ({ title: i.title, key: i.key.slice(c.length + 1), ...(i.when ? { when: i.when } : {}) }))]).filter(([, list]) => list.length),
+    CATEGORY_IDS.map((c) => [c, items.filter((i) => i.category === c).map((i) => ({ title: i.title, key: i.key.slice(c.length + 1), ...(i.detail && !lockOf(i) ? { detail: i.detail.slice(0, 80) } : {}), ...(i.when ? { when: i.when } : {}) }))]).filter(([, list]) => list.length),
   );
 }
 
