@@ -556,7 +556,7 @@ function openApp(win) {
       ]);
       // A page that crashed reports its load failed a few ms before the crash itself: wait for that
       // report, so the incident is told as a crash, and once.
-      if (failed && !goneWhileOpening && !win.isDestroyed()) {
+      if (failed && goneWhileOpening !== "page" && !win.isDestroyed()) {
         const wc = win.webContents;
         await new Promise((resolve) => {
           const done = () => {
@@ -628,7 +628,9 @@ async function serverGone(what = "server") {
       if (!win.webContents.isCrashed()) return;
       // The trouble page itself crashed: the same words again, a few times; then a dialog, which needs no page.
       if (failures.length <= 8) return showTrouble(win, lastTrouble ?? { reason: "page-crashed", detail: lastPageGone });
+      mainLog("the trouble page keeps crashing: asking in a dialog");
       const { response } = await dialog.showMessageBox(win, { type: "warning", message: "Bops' window keeps crashing", detail: `Try again, and if it happens again, send us the logs (${app.getPath("logs")}).`, buttons: ["Try again", "Quit"], defaultId: 0, cancelId: 1 });
+      mainLog(`dialog: ${response === 1 ? "Quit" : "Try again"}`);
       if (response === 1) return app.quit();
       failures = [];
       await win.loadFile(SPLASH).catch(() => {});
