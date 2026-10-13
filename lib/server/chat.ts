@@ -1,4 +1,5 @@
 import "server-only";
+import { setting } from "./models";
 import { trackServerEvent } from "./analytics";
 import { fullAccessOn } from "./full-access";
 import { isSecret, learn, memoryBlock, memoryOn, recall, rememberMessage, saveToMemory, wsOf } from "./memory";
@@ -37,9 +38,9 @@ import { recordTokens, usageTags } from "./usage";
  */
 
 const client = openaiClient();
-const CHAT_MODEL = process.env.BOPS_CHAT_MODEL ?? process.env.BOPS_SAM_MODEL ?? "gpt-6.1-sol";
+const CHAT_MODEL = setting("gpt-6.1-sol", "BOPS_CHAT_MODEL", "BOPS_SAM_MODEL");
 /** Texting should feel instant: chat turns mostly reply and route, so they think lightly. Threads think harder. */
-const CHAT_REASONING = { effort: (process.env.BOPS_CHAT_EFFORT ?? "low") as "low" | "medium" | "high" };
+const CHAT_REASONING = { effort: setting("low", "BOPS_CHAT_EFFORT") as "low" | "medium" | "high" };
 
 const SCHEDULE_PARAMS = {
   type: "object",

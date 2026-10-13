@@ -1,4 +1,5 @@
 import "server-only";
+import { setting } from "./models";
 import { trackServerEvent } from "./analytics";
 import { botChatId, DISPLAYS, live, MAIN_WORKSPACE, workspaceOf, type Watch } from "@/lib/types";
 import { decide, chose, yes } from "./decide";
@@ -50,7 +51,7 @@ function busy(botId: string, display: number) {
 const screenNo = (display: number) => DISPLAYS.indexOf(display) + 1;
 
 const client = openaiClient();
-const SUGGEST_MODEL = process.env.BOPS_CHAT_MODEL ?? process.env.BOPS_SAM_MODEL ?? "gpt-6.1-sol";
+const SUGGEST_MODEL = setting("gpt-6.1-sol", "BOPS_CHAT_MODEL", "BOPS_SAM_MODEL");
 export type Suggestion = { site: string; lookFor: string; picks: string[] };
 const suggested = new Map<string, { at: number; s: Suggestion }>();
 

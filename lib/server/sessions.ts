@@ -1,4 +1,5 @@
 import "server-only";
+import { setting } from "./models";
 import { trackServerEvent } from "./analytics";
 import type { BopsEventProps } from "@/cloud/analytics-rules";
 import { openaiClient } from "./openai-client";
@@ -54,9 +55,9 @@ import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours
  */
 
 const client = openaiClient();
-const SESSION_MODEL = process.env.BOPS_SESSION_MODEL ?? "gpt-6.1-sol";
+const SESSION_MODEL = setting("gpt-6.1-sol", "BOPS_SESSION_MODEL");
 /** For tasks Jev rates hard: GPT-6 Astra, what OpenAI's dots run on (slower and about 5× the price). */
-const HARD_MODEL = process.env.BOPS_HARD_MODEL ?? "gpt-6-astra";
+const HARD_MODEL = setting("gpt-6-astra", "BOPS_HARD_MODEL");
 /** Helpers a thread can run at once, each on its own screen (a bot has 4). */
 const MAX_HELPERS = 3;
 /**
@@ -1432,7 +1433,7 @@ async function suggestReplies(task: string, recent: Session["replies"], question
   const owner = ownerName();
   const epoch = stateEpoch();
   const res = await client.responses.create({
-    model: process.env.BOPS_CHAT_MODEL ?? "gpt-6.1-sol",
+    model: setting("gpt-6.1-sol", "BOPS_CHAT_MODEL"),
     reasoning: { effort: "low" },
     instructions:
       `A bot asked ${owner} something while working on a task. Suggest 2 or 3 short replies (2 to 8 words each) that ${owner} could tap to answer it, written the way ${owner} would say them. Make them different real answers, not "I don't know". When the question shows the bot misunderstood, include a reply that clears it up. Don't suggest "never mind" or "stop": Bops already has that button. No full stops at the end.`,

@@ -1,4 +1,5 @@
 import "server-only";
+import { setting } from "./models";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -54,7 +55,7 @@ const FORGET_SETTLES_MS = 15 * 60_000;
 /** Tidying up (dreaming) on request, at most this often. */
 const DREAM_EVERY_MS = 60 * 60_000;
 
-const MODEL = process.env.BOPS_MEMORY_MODEL ?? process.env.BOPS_CHAT_MODEL ?? process.env.BOPS_SAM_MODEL ?? "gpt-6.1-sol";
+const MODEL = setting("gpt-6.1-sol", "BOPS_MEMORY_MODEL", "BOPS_CHAT_MODEL", "BOPS_SAM_MODEL");
 
 /** What one fact said about one item, kept so the item can be worked out again when a fact goes: its name, line, date, who, done, how it was learned, private. */
 type Said = { t: string; d: string; w?: string; o?: string; x?: boolean; h: ItemSource["how"]; p?: boolean; at: number };

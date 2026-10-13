@@ -145,8 +145,8 @@ async function respond(c: VoiceCall, instructions: string): Promise<{ text: stri
     signal: AbortSignal.timeout(timing.openaiMs),
   });
   if (!res.ok) throw new Error(`OpenAI answered ${res.status}`);
-  const r = (await res.json()) as { id?: unknown; model?: unknown; usage?: unknown; output?: Output[] };
-  if (typeof r.id === "string") void recordTokens(c.userId, r.id, r.usage, { model: r.model, source: "phone", botId: c.bot.id }).catch((e: Error) => console.warn(`[voice] usage: ${e.message}`));
+  const r = (await res.json()) as { id?: unknown; model?: unknown; usage?: unknown; service_tier?: unknown; output?: Output[] };
+  if (typeof r.id === "string") void recordTokens(c.userId, r.id, r.usage, { model: r.model, source: "phone", botId: c.bot.id, tier: r.service_tier }).catch((e: Error) => console.warn(`[voice] usage: ${e.message}`));
   const out = Array.isArray(r.output) ? r.output : [];
   const text = out
     .filter((o) => o.type === "message")
