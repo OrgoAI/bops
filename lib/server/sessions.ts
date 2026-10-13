@@ -37,7 +37,7 @@ import { channelResult } from "./channels";
 import { asksForMac, chooseWhere } from "./where";
 import { addMessage, bot, getState, id, ownerLine, ownerName, patchSession, session, stateEpoch, stateReady, update } from "./store";
 import { recordTokens, usageTags } from "./usage";
-import { computerToolOn, computerTurn } from "./computer-task";
+import { computerToolOn, computerTurn, PAGE_RUNNER } from "./computer-task";
 import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours";
 
 /**
@@ -1222,7 +1222,8 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
     ...(apps ? [`${owner}'s apps (find_app_actions, then use_app; see "Your apps" below) for their email, calendar, documents, CRM and anything else they connected.`] : []),
     "web_search to look things up and read pages as text quickly (search, open a page, find in a page).",
     "run_command for files, data and code: download, fetch a page or an API (curl), parse, calculate, and write documents in /workspace.",
-    `The computer, for websites and apps you need to use, not only read: you see your screen and use its mouse and keyboard, in Chrome and any app on the computer, so ${owner} sees it happen. Go straight to URLs you know (ctrl+l, type it, Enter).`,
+    `page_script to read a website and use it by its elements (a field by its label, a button by its text): faster and surer than the screen. It runs on the Chrome on your screen, so ${owner} sees the page change.`,
+    `The computer, for what a page script can't do (a canvas, a native dialog, an app other than Chrome) and to check how a page looks: you see your screen and use its mouse and keyboard, so ${owner} sees it happen. Go straight to URLs you know (ctrl+l, type it, Enter).`,
   ].map((t, i) => `(${i + 1}) ${t}`);
   return [
     `You are ${botName}, the ${role} bot in Bops.`,
@@ -1259,7 +1260,7 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
             : `You work on ${screenLabel(display)} of your own Linux computer, where Chrome is open. ${owner} can watch that screen live.`,
           "For each step, use the first tool in this list that can do it. Go further down the list only when the tools before it can't:",
           ...(computer ? computerTools : tools),
-          `Use the screen for what ${owner} should see happen or check (signing in, filling a form, writing a post or a draft) and for what only a screen can do. To look things up or read, don't use the screen: search, and read pages as text.`,
+          `Do what ${owner} should see happen or check (signing in, filling a form, writing a post or a draft) in the Chrome on your screen. To look things up or read, don't use the screen: search, and read pages as text.`,
           `This task runs in the cloud and can't reach ${owner}'s Mac: no tool or setting here switches to it. If you're asked to carry on on their Mac, don't look for a way: say in one sentence that it has to be moved there (when ${owner} asks for their Mac, Bops moves it, with a record of what you did here), and stop.`,
           "Bops gives a task the screen that already has its site open, when one does: if yours shows the site you need, carry on from that page rather than opening it again in a new tab.",
           ...(computer
@@ -1343,6 +1344,7 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         timeoutMs: TURN_MAX_MS,
         idleMs: TURN_IDLE_MS,
         step: (tool, detail) => step(sessionId, tool, detail),
+        pages: () => ensureBrowserTool(at.computerId),
         steer: () => {
           const pending = unsent(sessionId);
           if (!pending.length || stopped.has(sessionId)) return undefined;
@@ -1463,18 +1465,33 @@ export function dismissWaiting(sessionId: string) {
 const BROWSER_MCP = "/opt/bops/pw/node_modules/@playwright/mcp/cli.js";
 /** Brings the page the bot navigates to the front of its screen (vm/browser-front.cjs). */
 const BROWSER_FRONT = "/opt/bops/pw/front.cjs";
-const browserReady = new Set<string>();
-/** Install the browser tools on a computer once (same version as this copy of Bops uses). */
-async function ensureBrowserTool(computerId: string) {
-  if (browserReady.has(computerId)) return;
+/** Each computer's install of the browser tools, once per run of Bops: true once they're there. One that failed is tried again next time. */
+const browserReady = new Map<string, Promise<boolean>>();
+/**
+ * Install the browser tools on a computer once (same version as this copy of Bops uses): Playwright
+ * MCP for Agents API threads, and the page-script runner (vm/page-script.cjs, computer-task.ts
+ * page_script) next to the playwright-core it brings. True when they're there.
+ */
+function ensureBrowserTool(computerId: string): Promise<boolean> {
+  const known = browserReady.get(computerId);
+  if (known) return known;
   const v = JSON.parse(readFileSync(join(process.cwd(), "node_modules/@playwright/mcp/package.json"), "utf8")).version as string;
   const front = readFileSync(join(process.cwd(), "vm/browser-front.cjs")).toString("base64");
-  const r = await orgo.bash(
-    computerId,
-    `mkdir -p /opt/bops/pw && echo ${front} | base64 -d > ${BROWSER_FRONT} && cd /opt/bops/pw && (grep -q '"version": "${v}"' node_modules/@playwright/mcp/package.json 2>/dev/null || npm install --silent --no-audit --no-fund @playwright/mcp@${v} >/tmp/pw-install.log 2>&1) && test -f ${BROWSER_MCP} && echo ok`,
-    240,
-  );
-  if (r.output.includes("ok")) browserReady.add(computerId);
+  const runner = readFileSync(join(process.cwd(), "vm/page-script.cjs")).toString("base64");
+  const ready = orgo
+    .bash(
+      computerId,
+      `mkdir -p /opt/bops/pw && echo ${front} | base64 -d > ${BROWSER_FRONT} && echo ${runner} | base64 -d > ${PAGE_RUNNER} && cd /opt/bops/pw && (grep -q '"version": "${v}"' node_modules/@playwright/mcp/package.json 2>/dev/null || npm install --silent --no-audit --no-fund @playwright/mcp@${v} >/tmp/pw-install.log 2>&1) && test -f ${BROWSER_MCP} && test -d node_modules/playwright-core && echo ok`,
+      240,
+    )
+    .then((r) => r.output.includes("ok"))
+    .catch(() => false)
+    .then((ok) => {
+      if (!ok) browserReady.delete(computerId);
+      return ok;
+    });
+  browserReady.set(computerId, ready);
+  return ready;
 }
 
 // The screen tools every computer needs to run threads, kept matching this copy of Bops.
@@ -1580,8 +1597,10 @@ async function run(sessionId: string) {
       await ensureTailnet(c).catch(() => null);
       // The computer's screen ledger: drop stale claims, then take this thread's screen.
       await ensureScreenTools(computerId, b.id);
-      // Not fatal: without them the task still has web search, the shell and the screen tools.
-      if (!onComputerTool) await ensureBrowserTool(computerId).catch(() => {});
+      // Not fatal: without them the task still has web search, the shell and the screen tools. A thread on
+      // the computer tool doesn't wait for them: its first page_script does (computerToolTurns).
+      if (!onComputerTool) await ensureBrowserTool(computerId);
+      else void ensureBrowserTool(computerId);
       // Every bot's live threads on this computer, not just this bot's: a sync that left out a bot
       // sharing it would drop that bot's claims. Thread ids are unique across bots, so claims never collide.
       const liveOwners = getState().sessions.filter((x) => sameComputer(x.botId, b.id) && live(x)).map((x) => `thread:${x.id}`);
