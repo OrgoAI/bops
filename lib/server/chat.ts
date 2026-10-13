@@ -68,6 +68,25 @@ const fn = (name: string, description: string, properties: Record<string, unknow
   parameters: { type: "object", additionalProperties: false, properties, required: Object.keys(properties) },
 });
 
+/**
+ * OpenAI's hosted web search: it runs inside the model call (no lookup round of ours), so a question
+ * about the web is answered in the chat in seconds, not by a task on a computer. A small search
+ * context keeps a reply quick, and the user's time zone places it (OpenAI assumes the United States
+ * otherwise). It leads the tools and never changes, so the cached prefix stays the same from turn to
+ * turn. Bops Cloud counts each search (cloud/usage.ts isWebSearch).
+ */
+const WEB_SEARCH = {
+  type: "web_search" as const,
+  search_context_size: "low" as const,
+  user_location: { type: "approximate" as const, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+};
+
+/** How a bot uses WEB_SEARCH in its chat. Not on a turn someone else started, which has no web search. */
+const SEARCHING = [
+  "To look something up on the web (a fact, a price, the news, opening hours, a quick comparison), search it yourself with web_search and answer here. Don't start a task for that.",
+  "When you answer from the web, name your source with one link, like ([site.com](https://site.com/page)), and keep the reply short.",
+].join("\n");
+
 const TASK = {
   title: { type: "string", description: "A 2-5 word label, e.g. \"Lisbon flights\"." },
   goal: { type: "string", description: "A complete, standalone instruction. The worker sees only this." },
@@ -116,9 +135,9 @@ function persona(b: Bot, others: Bot[]) {
         ? `You can also work on ${owner}'s own Mac with full access: a Chrome of your own there (so websites see their home internet), a shell, their files and the apps installed on it (Messages, Notes, Calendar, Finder…). Tasks that need their files or Mac apps go there (start_task with where "mac"); most other work belongs on your cloud computer. Those Mac apps aren't your apps (below): for an app you have there, use it yourself, never a Mac app of the same name.`
         : `You can also work on ${owner}'s own Mac, in a Chrome of your own there, so websites see their home internet. You can't use the apps on their Mac (Messages, Notes, Finder…) or their files for now. Most work belongs on your cloud computer; use their Mac only when the task needs it or they ask (start_task with where).`
       : "",
-    "When something needs the computer or the web, call start_task once per independent task, then say in one short sentence what you're on.",
+    "Start a task (start_task) for work on a website (signing in, filling a form, posting, booking, buying), for something to make (a document, a list, a draft), or for research across many sources. Call it once per independent task, then say in one short sentence what you're on.",
     `If ${owner} asks for something on a schedule or later, call schedule.`,
-    "If nothing needs a computer, just answer.",
+    "If nothing needs a task, just answer.",
     `When ${owner} attaches images (screenshots, photos), look at them and use what's in them. A task you start can't see them in the cloud, so put what matters from them into its goal.`,
     contactLine(b),
     // Every place the user reaches it (texts, calls, email, Slack, Telegram, Discord), and how a message from there reads.
@@ -601,6 +620,8 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     const noOwnRoom =
       b.isMain && getState().host !== "mac" ? await Promise.race([noOwnComputer(workspaceOf(b)), new Promise<null>((r) => setTimeout(() => r(null), 1500))]) : null;
     const tools = [
+      // First, so it never moves the cached prefix. Not for someone else's turn: what they wrote could send it to their site with what it read here.
+      ...(opts.outside ? [] : [WEB_SEARCH]),
       ...(answering
         ? [
             fn("react", "Tapback the message you're answering, like in iMessage: a quick acknowledgement, or instead of a reply when words would add nothing (\"thanks!\" gets a love, \"sounds good\" gets a like).", {
@@ -751,6 +772,7 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     // every turn instead (at 1.25×), and never read back.
     const instructions = [
       persona(b, others),
+      opts.outside ? "" : SEARCHING,
       "If a tapback says it all (thanks, ok, sounds good), react instead of replying.",
       "When you start, hand off or tell a task something, or make a picture, its `say` is your reply: write no other text, and don't answer the request yourself; the task will.",
       appsNote(b, "chat"),
