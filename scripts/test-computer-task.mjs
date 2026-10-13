@@ -219,6 +219,10 @@ let s = S.session(first);
 assert.equal(s.status, "done", `it finished (${s.error ?? ""}; ${warned.join(" | ")})`);
 assert.equal(s.answer, FINAL);
 assert.equal(s.runner, "computer", "a new cloud task runs on the computer tool");
+// Its route (lib/server/routing.ts): the bot is set to medium, so that, on Sol, and Jev isn't asked.
+assert.deepEqual(s.route, { by: "setting", model: "gpt-6.1-sol", effort: "medium" });
+// Its first steps after the user started it run on Ultrafast (someone's waiting); every call here is one of them.
+assert.deepEqual(asked.slice(0, 3).map((b) => [b.model, b.service_tier]), [["gpt-6.1-sol", "ultrafast"], ["gpt-6.1-sol", "ultrafast"], ["gpt-6.1-sol", "ultrafast"]]);
 assert.equal(s.agentSessionId, undefined, "no Agents API session");
 assert.equal(s.owed, undefined, "nothing owed after an answer");
 assert.equal(asked.length, 3);
@@ -313,6 +317,9 @@ const pageOut = (call) => asked.find((b) => b.input?.some((i) => i.call_id === c
 assert.equal(pageOut("call_p1"), '[\n "Basic $8"\n]\n\n(Now on https://example.com/pricing)');
 assert.equal(pageOut("call_p2"), "Failed: locator.click: Timeout 30000ms exceeded.\n\n(Now on https://example.com/pricing)");
 assert.equal(pageOut("call_p3"), "Failed: node: not found");
+// Past its first steps, with nobody looking at it, a step runs at standard speed.
+const callOf = (call) => asked.find((b) => b.input?.some((i) => i.call_id === call));
+assert.deepEqual([callOf("call_p1").service_tier, callOf("call_p2").service_tier, callOf("call_p3").service_tier], ["ultrafast", "ultrafast", undefined]);
 // The thread says what each did, in the bot's words.
 const pageSteps = paged.steps.filter((x) => x.tool === "page").map((x) => x.detail);
 assert.deepEqual(pageSteps, ["read the price table", "clicked Save", "used the page"]);

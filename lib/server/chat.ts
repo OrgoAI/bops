@@ -29,6 +29,7 @@ import { checkEmail, emailOwner, mailOn, readEmail, replyEmail, sendEmail } from
 import { isOwner, ownerPhone, textingLine, textOwner } from "./phone";
 import { pingIfWorthIt } from "./attention";
 import { recordTokens, usageTags } from "./usage";
+import { LIGHT, logRoute, routeChat, speedFor, tierParam, withSpeed, type Config } from "./routing";
 
 /**
  * Chat engine. Every bot answers in its own chat, like texting a person: it replies, starts
@@ -376,14 +377,21 @@ async function acknowledge(b: Bot | undefined, request: string, task: string, pa
   const epoch = stateEpoch();
   const plain = passTo ? `Passing that to ${passTo}.` : `Adding that to ${task.charAt(0).toLowerCase()}${task.slice(1)}.`;
   try {
+    // One short line, said while they wait: Luna (its job is a fixed shape), as fast as Luna goes.
+    const model = LIGHT();
     const res = await Promise.race([
-      client.responses
-        .create({
-          model: CHAT_MODEL,
-          reasoning: { effort: "low" },
+      withSpeed(speedFor(model, true), (tier, last) =>
+        client.responses.create(
+          {
+          model,
+          reasoning: { effort: "none" },
+          ...tierParam(tier),
           instructions: `You are ${b?.name ?? "a bot"}, texting ${ownerName()} back. They just added something to a task you're already doing${passTo ? ` (${passTo} is doing it; say you'll pass it on)` : ""}. Reply with one short, natural line about what you'll do now, in words that fit what they said, like a friend would text. The task isn't done yet: never give an answer or a result, and never say it's done. No "On it.", no quotes, no emoji, under 12 words.`,
           input: JSON.stringify({ task, owner_said: request }),
-        }, usageTags("chat", b?.id))
+          },
+          { ...usageTags("chat", b?.id), ...(last ? {} : { maxRetries: 0 }) },
+        ),
+      )
         // Counted when it arrives, even after the plain words won the race: it cost the same.
         .then((r) => (recordTokens("chat", r.model, r.usage, b?.id, epoch), r)),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
@@ -550,12 +558,10 @@ async function askTeammate(asker: Bot, toId: string, question: string, chatId: s
       `This is your conversation with ${asker.name} (${asker.role}), your teammate; ${asker.name} asks you things while helping ${owner}. Answer ${asker.name} in one to three plain sentences, from what you know. If you don't know, say so plainly and say how you'd find out. You can't start tasks or ask anyone else here.`,
     ].join("\n");
     stillOurs(ours);
-    const res = await client.responses.create({
-      model: CHAT_MODEL,
-      reasoning: CHAT_REASONING,
-      instructions,
-      input: history(pair, t.id).slice(-16),
-    }, usageTags("chat", t.id));
+    // The user is waiting on the answer this goes into: fast.
+    const res = await withSpeed(speedFor(CHAT_MODEL, true), (tier, last) =>
+      client.responses.create({ model: CHAT_MODEL, reasoning: CHAT_REASONING, instructions, input: history(pair, t.id).slice(-16), ...tierParam(tier) }, { ...usageTags("chat", t.id), ...(last ? {} : { maxRetries: 0 }) }),
+    );
     stillOurs(ours);
     recordTokens("chat", res.model, res.usage, t.id);
     const answer = tidyAnswer(res.output_text ?? "").text.trim() || "I don't know.";
@@ -618,6 +624,12 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     // there, and still cost them, so the bot doesn't make one from there.
     const lastAsk = [...getState().messages].reverse().find((m) => m.chatId === chatId && m.role === "user");
     const relayed = !!opts.emailBack || !!lastAsk?.via;
+    // Someone's waiting on this reply: the user's own message, in the app, by text or in a channel (not
+    // an email, which nobody expects back in seconds, or a turn someone else started). It runs fast.
+    const waiting = !!opts.answering && !opts.outside && !opts.emailBack;
+    const base: Config = { model: CHAT_MODEL, effort: CHAT_REASONING.effort };
+    // How much thinking the message needs (routing.ts routeChat: Jev, alongside what's below). Only the user's own.
+    const routing = waiting ? routeChat(base, lastWords(chatId), botId).catch(() => ({ config: base })) : Promise.resolve({ config: base });
     const noOwnRoom =
       b.isMain && getState().host !== "mac" ? await Promise.race([noOwnComputer(workspaceOf(b)), new Promise<null>((r) => setTimeout(() => r(null), 1500))]) : null;
     const tools = [
@@ -810,7 +822,14 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     ].filter(Boolean);
     const input = [...history(chatId, botId), { role: "developer" as const, content: `As of now (from Bops, not ${owner}):\n${now.join("\n")}` }];
     stillOurs(ours);
-    let response = await client.responses.create({ model: CHAT_MODEL, reasoning: CHAT_REASONING, instructions, input, tools }, usageTags("chat", botId));
+    const routed = await routing;
+    if ("router" in routed && routed.router) logRoute({ kind: "chat", chatId, botId, words: lastWords(chatId).slice(0, 400), ran: routed.config, router: routed.router });
+    const { model, effort, mode } = routed.config;
+    const reasoning = { effort, ...(mode ? { mode } : {}) };
+    const speed = speedFor(model, waiting);
+    let response = await withSpeed(speed, (tier, last) =>
+      client.responses.create({ model, reasoning, instructions, input, tools, ...tierParam(tier) }, { ...usageTags("chat", botId), ...(last ? {} : { maxRetries: 0 }) }),
+    );
     stillOurs(ours);
     recordTokens("chat", response.model, response.usage, botId);
     // App lookups come back to the model before it answers (a few rounds at most). Other tools
@@ -906,14 +925,21 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
       const rest = response.output.filter((o) => o.type === "function_call" && !calls.includes(o as never)) as { call_id: string }[];
       earlier.push(...(rest as never[]));
       stillOurs(ours);
-      response = await client.responses.create({
-        model: CHAT_MODEL,
-        reasoning: CHAT_REASONING,
-        instructions,
-        previous_response_id: response.id,
-        input: [...outputs, ...rest.map((o) => ({ type: "function_call_output" as const, call_id: o.call_id, output: "ok" }))],
-        tools,
-      }, usageTags("chat", botId));
+      const previous = response.id;
+      response = await withSpeed(speed, (tier, last) =>
+        client.responses.create(
+          {
+            model,
+            reasoning,
+            instructions,
+            previous_response_id: previous,
+            input: [...outputs, ...rest.map((o) => ({ type: "function_call_output" as const, call_id: o.call_id, output: "ok" }))],
+            tools,
+            ...tierParam(tier),
+          },
+          { ...usageTags("chat", botId), ...(last ? {} : { maxRetries: 0 }) },
+        ),
+      );
       stillOurs(ours);
       recordTokens("chat", response.model, response.usage, botId);
     }

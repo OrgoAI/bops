@@ -1,5 +1,5 @@
 import "server-only";
-import { setting } from "./models";
+import { LIGHT, speedFor, tierParam } from "./routing";
 import { trackServerEvent } from "./analytics";
 import { botChatId, DISPLAYS, live, MAIN_WORKSPACE, workspaceOf, type Watch } from "@/lib/types";
 import { decide, chose, yes } from "./decide";
@@ -51,7 +51,8 @@ function busy(botId: string, display: number) {
 const screenNo = (display: number) => DISPLAYS.indexOf(display) + 1;
 
 const client = openaiClient();
-const SUGGEST_MODEL = setting("gpt-6.1-sol", "BOPS_CHAT_MODEL", "BOPS_SAM_MODEL");
+/** A site's name and a few words to watch for: Luna, without reasoning (routing.ts LIGHT), as fast as Luna goes (the user is waiting). */
+const SUGGEST_MODEL = () => LIGHT();
 export type Suggestion = { site: string; lookFor: string; picks: string[] };
 const suggested = new Map<string, { at: number; s: Suggestion }>();
 
@@ -75,8 +76,9 @@ export async function suggestWatch(botId: string, display: number): Promise<Sugg
   const owner = ownerName();
   try {
     const res = await client.responses.create({
-      model: SUGGEST_MODEL,
-      reasoning: { effort: "low" },
+      model: SUGGEST_MODEL(),
+      reasoning: { effort: "none" },
+      ...tierParam(speedFor(SUGGEST_MODEL(), true)),
       instructions:
         `${owner} can ask their bot to keep a screen on a web page and give them a heads-up when something on it is worth their attention. Given the page, name the site the way ${owner} would say it, suggest 3 or 4 short things (2 to 5 words each) they would most plausibly want a heads-up about on THIS page, and one plain sentence describing the most useful default. Only suggest things that can actually appear or change on this page.`,
       input: JSON.stringify({ url: page.url, title: page.title, text: page.lines.slice(0, 50).join("\n").slice(0, 3500) }),
@@ -476,8 +478,9 @@ export async function watchInstead(sessionId: string, text: string): Promise<Wat
   // What to watch for, short and in their words ("Bitcoin goes above $86,000").
   const res = await client.responses
     .create({
-      model: SUGGEST_MODEL,
-      reasoning: { effort: "low" },
+      model: SUGGEST_MODEL(),
+      reasoning: { effort: "none" },
+      ...tierParam(speedFor(SUGGEST_MODEL(), true)),
       instructions: `${owner} asked for a screen to be watched. Write what to watch for as one short phrase in their words, like "Bitcoin goes above $86,000" or "a reply from Dana". Just the phrase.`,
       input: `Screen: ${s.title}. ${owner}: ${text.slice(0, 1500)}`,
     }, usageTags("chat", s.botId))

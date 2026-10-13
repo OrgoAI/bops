@@ -164,6 +164,24 @@ export function workBot(b: Bot, bots: Bot[]): Bot {
 }
 
 export type Effort = "auto" | "low" | "medium" | "high";
+/** How hard a task's model thinks: OpenAI's reasoning efforts. */
+export type TaskEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+/** How much thinking a job needs (lib/server/routing.ts): each is a model and an effort. */
+export type RouteTier = "quick" | "standard" | "deep" | "max";
+/**
+ * What a task runs on and who chose it (lib/server/routing.ts routeTask): the bot's own setting, the
+ * old rule (a hard task on Astra) or the router; what the router picked when it was asked (in
+ * shadow, not what ran); and tiers up since (a retry after a failure, or the user saying it's wrong).
+ */
+export type TaskRoute = {
+  model: string;
+  effort: TaskEffort;
+  by: "setting" | "rule" | "router";
+  tier?: RouteTier;
+  router?: { model: string; effort: TaskEffort; tier: RouteTier; why: string };
+  bumps?: number;
+  long?: boolean;
+};
 
 /** Where bots' screens live: Chrome windows on the user's Mac, or Orgo cloud computers. */
 export type Host = "mac" | "orgo";
@@ -351,7 +369,9 @@ export type Session = {
   replies: ThreadReply[];
   answer?: string;
   /** The reasoning effort this thread runs at. */
-  effort?: Exclude<Effort, "auto">;
+  effort?: TaskEffort;
+  /** What it runs on and who chose it (lib/server/routing.ts). Threads from before it have only `effort`. */
+  route?: TaskRoute;
   /** When it's waiting on the user: the replies it offered, shown as buttons. */
   options?: string[];
   /** Helpers (subagents) this thread started, by name, in the order it started them. */

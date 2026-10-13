@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "@/cloud/protocol";
-import { BLOCKER_LABEL, botChatId, DISPLAYS, live, MAIN_WORKSPACE, MAX_SCREENS, workBot, workspaceOf, type Bot, type Effort, type Session, type ThreadReply } from "@/lib/types";
+import { BLOCKER_LABEL, botChatId, DISPLAYS, live, MAIN_WORKSPACE, MAX_SCREENS, workBot, workspaceOf, type Bot, type Session, type ThreadReply } from "@/lib/types";
 import { CloudError, creditsOut, executorKey, noteOutOfCredit, OUT_OF_CREDIT, outOfCreditError, shortOfCredit } from "./cloud";
 import { appsMcp, appsSocket, browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
 import { relayNewComputer } from "./relay";
@@ -39,6 +39,8 @@ import { asksForMac, chooseWhere } from "./where";
 import { addMessage, bot, getState, id, ownerLine, ownerName, patchSession, session, stateEpoch, stateReady, update } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { computerToolOn, computerTurn, PAGE_RUNNER } from "./computer-task";
+import { ASKS_AGAIN, LIGHT, logRoute, routeTask, speedFor, taskConfig } from "./routing";
+import { watching } from "./presence";
 import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours";
 
 /**
@@ -484,6 +486,11 @@ export function replyToSession(sessionId: string, text: string, note?: string, f
   });
   if (!live(s)) {
     stopped.delete(sessionId);
+    // It failed, or the user says it's wrong: on the router's route, the next turn thinks a tier harder (routing.ts taskConfig).
+    if (s.route?.by === "router" && (s.status === "failed" || ASKS_AGAIN.test(text)))
+      patchSession(sessionId, (x) => {
+        if (x.route) x.route.bumps = (x.route.bumps ?? 0) + 1;
+      });
     patchSession(sessionId, { status: "queued", error: undefined, endedAt: undefined });
     void pump();
   } else steerers.get(sessionId)?.();
@@ -1302,6 +1309,26 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
   ].join(" ");
 }
 
+/** A task's steps after the user starts or answers it that count as them waiting, wherever they look. */
+const FIRST_STEPS = 3;
+
+/**
+ * Whether someone is waiting on a task's step now, so it runs fast (routing.ts speedFor): the user is
+ * looking at it (its thread or chat open in the window in front: presence.ts), or it's one of its first
+ * steps after they started or answered it. Not a routine's, or one someone outside Bops started.
+ */
+function waitingOn(sessionId: string, calls: number): boolean {
+  const s = session(sessionId);
+  if (!s) return false;
+  return watching(s) || (calls < FIRST_STEPS && s.sentVia !== "routine" && !s.fromOutside);
+}
+
+/** A new task's route, next to what the router would have picked, for the comparison (routing.ts logRoute). */
+function logTaskRoute(sessionId: string) {
+  const s = session(sessionId);
+  if (s?.route) logRoute({ kind: "task", id: s.id, botId: s.botId, goal: s.goal.slice(0, 400), ran: { model: s.route.model, effort: s.route.effort, by: s.route.by }, router: s.route.router });
+}
+
 /**
  * A thread's turns on the computer tool (computer-task.ts). A new thread gets its effort set (as an
  * Agents API one does). Its instructions are made fresh each run, memory included: there's no agent
@@ -1310,8 +1337,14 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
 async function computerToolTurns(sessionId: string, at: { computerId: string; display: number; sharedWith?: string; resuming: boolean }) {
   const s = session(sessionId)!;
   const b = bot(s.botId)!;
-  if (!at.resuming) patchSession(sessionId, { runner: "computer", effort: await threadEffort(b.effort, s.goal, b.id) });
-  const effort = session(sessionId)!.effort ?? "medium";
+  if (!at.resuming) {
+    const route = await routeTask(b.effort, s.goal, b.id);
+    patchSession(sessionId, { runner: "computer", effort: route.effort, route });
+    logTaskRoute(sessionId);
+  }
+  // What this turn runs on: the route (a tier up for each bump), or for a thread from before routes, the old rule.
+  const now = session(sessionId)!;
+  const config = taskConfig(now.route) ?? { model: now.effort === "high" ? HARD_MODEL : SESSION_MODEL, effort: now.effort ?? "medium" };
   // Its apps are tools in this process (composio.ts), so it has them wherever its computer is.
   const apps = composioOn() && accountsOf(b).length > 0;
   const memory = await memoryBlock(wsOf(s.botId), s.goal, 3000);
@@ -1335,9 +1368,8 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         sessionId,
         computerId: at.computerId,
         display: at.display,
-        // Hard tasks get the model Dots runs on; the rest the faster, cheaper one.
-        model: effort === "high" ? HARD_MODEL : SESSION_MODEL,
-        effort,
+        model: config.model,
+        effort: config.effort,
         instructions: text,
         apps,
         input,
@@ -1345,6 +1377,7 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         timeoutMs: TURN_MAX_MS,
         idleMs: TURN_IDLE_MS,
         step: (tool, detail) => step(sessionId, tool, detail),
+        speed: (calls) => speedFor(config.model, waitingOn(sessionId, calls)),
         pages: () => ensureBrowserTool(at.computerId),
         steer: () => {
           const pending = unsent(sessionId);
@@ -1374,27 +1407,6 @@ async function startOrgoExecutor(computerId: string, display: number, env: { id:
     30,
   );
   if (started.exit_code !== 0) throw new Error(`executor failed: ${started.output.slice(0, 200)}`);
-}
-
-/**
- * How hard a thread thinks: the bot's own setting, or on "auto" Jev's read of the task. Hard tasks
- * (many steps, research across several sources, careful forms) get high effort; the rest medium.
- */
-async function threadEffort(setting: Effort | undefined, goal: string, botId?: string): Promise<Exclude<Effort, "auto">> {
-  if (setting && setting !== "auto") return setting;
-  const a = await decide(
-    { task: goal },
-    {
-      hard: {
-        type: "noul",
-        instructions: "Is `task` hard: many steps, research across several sources, comparing or judging, or careful form-filling where mistakes matter?",
-        criteria: { true: "Hard: worth thinking it through carefully", false: "Simple: a quick lookup or a few clicks" },
-      },
-    },
-    { botId },
-  );
-  // Jev is conservative here: a multi-source research task scores about 0.4, a one-page lookup about 0.03.
-  return (yes(a?.hard) ?? 0) >= 0.3 ? "high" : "medium";
 }
 
 /** Is the bot's latest answer waiting on the user? Decides whether the thread shows "needs you". */
@@ -1433,8 +1445,9 @@ async function suggestReplies(task: string, recent: Session["replies"], question
   const owner = ownerName();
   const epoch = stateEpoch();
   const res = await client.responses.create({
-    model: setting("gpt-6.1-sol", "BOPS_CHAT_MODEL"),
-    reasoning: { effort: "low" },
+    // A few words of a fixed shape: Luna, without reasoning.
+    model: LIGHT(),
+    reasoning: { effort: "none" },
     instructions:
       `A bot asked ${owner} something while working on a task. Suggest 2 or 3 short replies (2 to 8 words each) that ${owner} could tap to answer it, written the way ${owner} would say them. Make them different real answers, not "I don't know". When the question shows the bot misunderstood, include a reply that clears it up. Don't suggest "never mind" or "stop": Bops already has that button. No full stops at the end.`,
     input: JSON.stringify({ task, recent: recent.map((r) => `${r.role === "user" ? owner : "Bot"}: ${r.text}`).join("\n").slice(-3000), question }),
@@ -1655,14 +1668,15 @@ async function run(sessionId: string) {
     if (onComputerTool) turn = await computerToolTurns(sessionId, { computerId, display, sharedWith: c.id !== b.id ? c.name : undefined, resuming });
     else {
       if (!resuming) {
-        const effort = await threadEffort(b.effort, s.goal, b.id);
-        patchSession(sessionId, { effort });
+        const route = await routeTask(b.effort, s.goal, b.id);
+        patchSession(sessionId, { effort: route.effort, route });
+        logTaskRoute(sessionId);
         // What's known about the user that bears on this task (long-term memory).
         const memory = await memoryBlock(wsOf(s.botId), s.goal, 3000);
         const created = (await client.beta.agents.sessions.create({
           agent: {
-            // Hard tasks get the model Dots runs on; the rest the faster, cheaper one.
-            model: session(sessionId)!.effort === "high" ? HARD_MODEL : SESSION_MODEL,
+            // Fixed for the session: an Agents API thread can't move to another model (a bump only reaches the computer tool's).
+            model: route.model,
             // Reasoning summaries become the thread's live caption ("checking the pricing page…").
             reasoning: { effort: session(sessionId)!.effort ?? "medium", summary: "auto" },
             instructions: [
@@ -1968,7 +1982,7 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
   let mainTurn: string | undefined;
   // Each turn's tokens (the thread's and its helpers'), counted once when it ends; `seen` keeps it once.
   const s = session(sessionId);
-  const model = s?.effort === "high" ? HARD_MODEL : SESSION_MODEL;
+  const model = s?.route?.model ?? (s?.effort === "high" ? HARD_MODEL : SESSION_MODEL);
   // Whose state this turn belongs to: tokens counted after a hosted server swapped users are dropped (stateEpoch).
   const epoch = stateEpoch();
   const countTurn = (turnId: string, usage: TokenCount) => {

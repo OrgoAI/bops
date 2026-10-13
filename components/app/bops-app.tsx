@@ -560,6 +560,7 @@ function Bops({ state }: { state: AppState | null }) {
     <OpenCrm.Provider value={openCrm}>
       <TooltipLayer />
       <NoticePopup />
+      <ViewReporter chatId={chat.id} threadId={thread?.id ?? null} />
       <div className="flex h-screen flex-col bg-white font-sans text-ink antialiased">
         <TitleBar
           columns={columns}
@@ -1260,4 +1261,34 @@ function FirstLoad() {
       )}
     </BoppyLoading>
   );
+}
+
+/**
+ * Tells the server what's in front of you (lib/server/presence.ts): the chat and thread open, and
+ * whether this window is focused. A task you're looking at runs its steps fast; one you've left runs
+ * at standard speed. Said when it changes, and every 5 seconds so the server knows it's still true.
+ */
+function ViewReporter({ chatId, threadId }: { chatId: string; threadId: string | null }) {
+  const sent = useRef("");
+  useEffect(() => {
+    const say = (again = false) => {
+      const body = JSON.stringify({ chatId, threadId, focused: document.hasFocus() && document.visibilityState === "visible" });
+      if (!again && body === sent.current) return;
+      sent.current = body;
+      void fetch("/api/view", { method: "POST", headers: { "Content-Type": "application/json" }, body }).catch(() => {});
+    };
+    say();
+    const changed = () => say();
+    const beat = setInterval(() => say(true), 5000);
+    window.addEventListener("focus", changed);
+    window.addEventListener("blur", changed);
+    document.addEventListener("visibilitychange", changed);
+    return () => {
+      clearInterval(beat);
+      window.removeEventListener("focus", changed);
+      window.removeEventListener("blur", changed);
+      document.removeEventListener("visibilitychange", changed);
+    };
+  }, [chatId, threadId]);
+  return null;
 }

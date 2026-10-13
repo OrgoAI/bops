@@ -40,6 +40,7 @@ import {
 } from "./protocol.ts";
 import { answerTo, chatPage, chatSaid, checkUser, loadState, messagesById, newestSeq, rowsAfter, sendZipped, sweptSeq, writeMessages, type MessageRow } from "./state.ts";
 import { tidyAnswer } from "./style.ts";
+import { atSpeed } from "./speed.ts";
 import { isWebSearch, recordTokens, recordWebSearch } from "./usage.ts";
 
 /**
@@ -418,12 +419,17 @@ const webSearch = (tz: string) => ({ type: "web_search", search_context_size: "l
 async function respond(instructions: string, input: InputItem[], tz: string): Promise<Answer> {
   let res: Response;
   try {
-    res = await fetch(`${config.upstream.openai()}/v1/responses`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${config.openaiKey()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: MODEL(), instructions, input, tools: [webSearch(tz)], reasoning: { effort: "low" }, max_output_tokens: MAX_OUTPUT_TOKENS, store: false }),
-      signal: AbortSignal.timeout(timing.openaiMs),
-    });
+    // The user is waiting on the phone: as fast as the model goes, a tier down when OpenAI's busy (speed.ts).
+    const model = MODEL();
+    const signal = AbortSignal.timeout(timing.openaiMs);
+    res = await atSpeed(model, (tier) =>
+      fetch(`${config.upstream.openai()}/v1/responses`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${config.openaiKey()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, instructions, input, tools: [webSearch(tz)], reasoning: { effort: "low" }, max_output_tokens: MAX_OUTPUT_TOKENS, store: false, ...tier }),
+        signal,
+      }),
+    );
   } catch (e) {
     throw new TurnError(`OpenAI couldn't be reached (${(e as Error)?.name ?? "error"})`);
   }

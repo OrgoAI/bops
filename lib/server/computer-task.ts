@@ -1,4 +1,5 @@
 import "server-only";
+import { tierParam, withSpeed, type Speed } from "./routing";
 import { APIConnectionTimeoutError } from "openai";
 import { openaiClient } from "./openai-client";
 import { computerAsleepError, computerWakingError, orgo, screenId } from "./orgo";
@@ -81,6 +82,8 @@ export type ComputerTurn = {
   steer?: () => { text: string; sent: () => void } | undefined;
   /** The page-script runner on the computer, put there with the browser tools (sessions.ts ensureBrowserTool): true once it's there. */
   pages?: () => Promise<boolean>;
+  /** How fast its `calls`th model call of this turn runs (routing.ts speedFor): fast while someone's waiting on it. */
+  speed?: (calls: number) => Speed;
 };
 
 /** One turn: from the user's message to the bot's answer. Returns the answer. */
@@ -104,18 +107,22 @@ export async function computerTurn(t: ComputerTurn): Promise<string> {
     // rather than wait for the turn to end. Marked sent once the model has them; a failed call leaves them for the next turn.
     const said = calls > 0 ? t.steer?.() : undefined;
     if (said) input.push({ role: "user", content: [{ type: "input_text", text: said.text }] });
-    const r = (await client.responses.create(
-      {
-        model: t.model,
-        instructions: t.instructions,
-        tools,
-        reasoning: { effort: t.effort, summary: "auto" },
-        input,
-        previous_response_id: prev,
-        truncation: "auto",
-      } as never,
-      // A step that hangs is the turn stalling: it ends rather than waiting out the hour.
-      { ...usageTags("session", b.id), signal: t.signal, timeout: t.idleMs, maxRetries: 1 },
+    // Fast while someone's waiting on it, falling back a tier when OpenAI's busy (routing.ts withSpeed).
+    const r = (await withSpeed(t.speed?.(calls) ?? "default", (tier, last) =>
+      client.responses.create(
+        {
+          model: t.model,
+          instructions: t.instructions,
+          tools,
+          reasoning: { effort: t.effort, summary: "auto" },
+          input,
+          previous_response_id: prev,
+          truncation: "auto",
+          ...tierParam(tier),
+        } as never,
+        // A step that hangs is the turn stalling: it ends rather than waiting out the hour.
+        { ...usageTags("session", b.id), signal: t.signal, timeout: t.idleMs, maxRetries: last ? 1 : 0 },
+      ),
     ).catch((e: Error) => {
       throw e instanceof APIConnectionTimeoutError ? new Error(`Stuck: nothing happened for ${Math.round(t.idleMs / 60_000)} minutes`) : e;
     })) as unknown as { id: string; model: string; usage: Usage; output: OutputItem[] };
