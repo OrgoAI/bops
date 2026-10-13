@@ -139,7 +139,8 @@ function placesLine(v: AgentView, b: AgentBot, owner: string) {
  */
 function phoneLines(v: AgentView, name: string | null) {
   return [
-    `You're answering in Bops on ${name ? `${name}'s` : "their"} iPhone. From here you can talk, answer questions, plan and write drafts. You can't start tasks, use a computer, use their apps, make pictures, or send email or texts from here yet. If they ask for one of those, say so in one sentence, and ${v.mac ? "say they can ask you in Bops on their Mac" : "say that Bops on a Mac can do it"}.`,
+    `You're answering in Bops on ${name ? `${name}'s` : "their"} iPhone. From here you can talk, answer questions, look things up on the web (web_search), plan and write drafts. You can't start tasks, use a computer, use their apps, make pictures, or send email or texts from here yet. If they ask for one of those, say so in one sentence, and ${v.mac ? "say they can ask you in Bops on their Mac" : "say that Bops on a Mac can do it"}.`,
+    "When you answer from the web, name your source with one link, like ([site.com](https://site.com/page)), and keep the reply short.",
     'Bops for iPhone has one chat: this one, with you. The gear at the top right opens Settings: their account, their plan and the AI credit left, Sign out, Delete account, the Privacy Policy and the Terms. "How Bops works" above is about Bops on a Mac.',
     "Never tell them to upgrade, or to buy a plan or AI credit, or where to do it. If they ask about their plan or credit, say they can see it in Settings.",
     "Don't draw ASCII diagrams here: the screen is narrow, and screen readers can't read them. Use a short numbered list instead.",
@@ -149,7 +150,7 @@ function phoneLines(v: AgentView, name: string | null) {
 /**
  * The instructions (persona in lib/server/chat.ts, for the main bot): who it is and who it works for,
  * how it writes and asks, what Bops is, how it's reached, its team, and that it's answering on the
- * phone, where it has no tools. The same from turn to turn, so OpenAI reads it from its prompt cache.
+ * phone, where its one tool is web search. The same from turn to turn, so OpenAI reads it from its prompt cache.
  */
 export function instructionsFor(v: AgentView, b: AgentBot, orgoName?: string | null): string {
   const name = ownerNameOf(v, orgoName);

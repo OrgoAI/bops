@@ -268,11 +268,14 @@ test("a message from the phone is written in the main bot's chat, answered once 
     assert.deepEqual({ role: reply.role, botId: reply.botId, text: reply.text, options: reply.options }, { role: "bot", botId: "boppy", text: "Morning, Alex. What do you need?", options: ["Plan my day", "Nothing yet"] });
     assert.ok(reply.at > sent.json.message.at);
 
-    // One Responses call: the main bot's model, thinking lightly, nothing stored, no tools.
+    // One Responses call: the main bot's model, thinking lightly, nothing stored, web search its one tool (placed by the phone's time zone).
     assert.equal(responses().length, 1);
     const body = responses()[0].json;
     assert.equal(body.model, "gpt-agent-test");
-    assert.deepEqual([body.store, body.reasoning, body.max_output_tokens, body.tools], [false, { effort: "low" }, 2000, undefined]);
+    assert.deepEqual(
+      [body.store, body.reasoning, body.max_output_tokens, body.tools],
+      [false, { effort: "low" }, 2000, [{ type: "web_search", search_context_size: "low", user_location: { type: "approximate", timezone: "America/Los_Angeles" } }]],
+    );
     const instructions = String(body.instructions);
     assert.match(instructions, /^You are Boppy, Alex's chief of staff in Bops\. You work for Alex\. About Alex: Runs a bakery in Oakland\./);
     assert.match(instructions, /How Bops works/);
@@ -283,8 +286,9 @@ test("a message from the phone is written in the main bot's chat, answered once 
     assert.match(instructions, /Your teammates: Otto \(Outbound, otto@alex\.bops\.bot\)/);
     assert.match(
       instructions,
-      /You're answering in Bops on Alex's iPhone\. .*You can't start tasks, use a computer, use their apps, make pictures, or send email or texts from here yet\. If they ask for one of those, say so in one sentence, and say they can ask you in Bops on their Mac\./,
+      /You're answering in Bops on Alex's iPhone\. From here you can talk, answer questions, look things up on the web \(web_search\), plan and write drafts\. You can't start tasks, use a computer, use their apps, make pictures, or send email or texts from here yet\. If they ask for one of those, say so in one sentence, and say they can ask you in Bops on their Mac\./,
     );
+    assert.match(instructions, /When you answer from the web, name your source with one link, like \(\[site\.com\]\(https:\/\/site\.com\/page\)\), and keep the reply short\./);
     // What Bops for iPhone has, never a word that sends them to buy, and no diagrams on a narrow screen.
     assert.match(instructions, /Bops for iPhone has one chat: this one, with you\. The gear at the top right opens Settings: their account, their plan and the AI credit left, Sign out, Delete account/);
     assert.match(instructions, /Never tell them to upgrade, or to buy a plan or AI credit, or where to do it\. If they ask about their plan or credit, say they can see it in Settings\./);
@@ -343,6 +347,38 @@ test("a user who never used Bops on a Mac chats with Boppy; no state is made for
   // Their chat is kept for when they sign in on a Mac, but the cloud writes no state of its own for them.
   assert.equal((await asMac(id, "GET", "/v1/state")).status, 404);
   assert.deepEqual((await rowsOf(id)).map((r) => r.chat_id), ["bot:boppy", "bot:boppy"]);
+});
+
+test("a look-up from the phone: OpenAI searches inside the call, each search is counted for the bot (reading a page free), and the answer keeps its source without OpenAI's tag", async () => {
+  const id = await newUser(STATE);
+  const resp = `resp_${randomUUID()}`;
+  answerWith = () => ({
+    json: {
+      id: resp,
+      object: "response",
+      model: "gpt-6.1-sol",
+      status: "completed",
+      output: [
+        { type: "web_search_call", id: `ws_${resp}_1`, status: "completed", action: { type: "search", query: "sunset San Francisco today" } },
+        { type: "web_search_call", id: `ws_${resp}_page`, status: "completed", action: { type: "open_page", url: "https://www.timeanddate.com/sun/usa/san-francisco" } },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "Sunset is at 6:32 pm ([timeanddate.com](https://www.timeanddate.com/sun/usa/san-francisco?utm_source=openai))." }] },
+      ],
+      usage: { input_tokens: 3000, output_tokens: 60, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 20 } },
+    },
+  });
+  const msgId = newId();
+  assert.equal((await send(id, msgId, "When's sunset today?")).status, 202);
+  const { seen } = await settle(id, 0);
+  assert.equal(answerOf(seen, msgId)?.text, "Sunset is at 6:32 pm ([timeanddate.com](https://www.timeanddate.com/sun/usa/san-francisco)).");
+  const searches = (await query<{ units: string; detail: Record<string, unknown> }>("SELECT units, detail FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'openai.web_search'", [id])).rows;
+  assert.deepEqual(
+    searches.map((r) => [r.detail.ref, Number(r.units), r.detail.action, r.detail.botId]).sort(),
+    [
+      [`ws_${resp}_1`, 1, "search", "boppy"],
+      [`ws_${resp}_page`, 0, "open_page", "boppy"],
+    ],
+  );
+  assert.equal((await query("SELECT 1 FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'openai.tokens'", [id])).rowCount, 1, "and its tokens, once");
 });
 
 test("sent twice, answered once: taken again while it's answering, busy for another, the same answer after, and answered again only when it never was", async () => {
