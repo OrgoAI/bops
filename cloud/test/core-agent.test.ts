@@ -276,6 +276,8 @@ test("a message from the phone is written in the main bot's chat, answered once 
       [body.store, body.reasoning, body.max_output_tokens, body.tools],
       [false, { effort: "low" }, 2000, [{ type: "web_search", search_context_size: "low", user_location: { type: "approximate", timezone: "America/Los_Angeles" } }]],
     );
+    // The user is waiting on the phone: as fast as the model goes (this test's model has no Ultrafast, so Fast: cloud/speed.ts).
+    assert.equal(body.service_tier, "fast");
     const instructions = String(body.instructions);
     assert.match(instructions, /^You are Boppy, Alex's chief of staff in Bops\. You work for Alex\. About Alex: Runs a bakery in Oakland\./);
     assert.match(instructions, /How Bops works/);
@@ -379,6 +381,33 @@ test("a look-up from the phone: OpenAI searches inside the call, each search is 
     ],
   );
   assert.equal((await query("SELECT 1 FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'openai.tokens'", [id])).rowCount, 1, "and its tokens, once");
+});
+
+test("the phone's answer runs on Ultrafast on 6.1 Sol, a tier down when OpenAI turns one down, and is priced at the tier it ran on", async () => {
+  const id = await newUser(STATE);
+  process.env.BOPS_AGENT_MODEL = "gpt-6.1-sol";
+  try {
+    const tiers: unknown[] = [];
+    answerWith = (g) => {
+      const tier = (g.json as { service_tier?: string }).service_tier;
+      tiers.push(tier);
+      if (tier === "ultrafast") return { status: 429, json: { error: { message: "Rate limit reached for service tier ultrafast" } } };
+      const r = ok("On it.") as { json: object };
+      return { json: { ...r.json, service_tier: tier ?? "default" } };
+    };
+    const msgId = newId();
+    assert.equal((await send(id, msgId, "Quick one")).status, 202);
+    const { seen } = await settle(id, 0);
+    assert.equal(answerOf(seen, msgId)?.text, "On it.");
+    assert.deepEqual(tiers, ["ultrafast", "fast"], "Ultrafast first, then Fast when it's full");
+    const usage = (await query<{ detail: Record<string, unknown>; cost: string }>("SELECT detail, cost_micros AS cost FROM bops.cloud_usage WHERE user_id = $1 AND kind = 'openai.tokens'", [id])).rows;
+    assert.equal(usage.length, 1, "only the answer that came is counted");
+    assert.equal(usage[0].detail.tier, "fast");
+    // 1200 input at $2 and 40 output at $10 (per 1M), twice for Fast.
+    assert.equal(Number(usage[0].cost), (1200 * 2 + 40 * 10) * 2);
+  } finally {
+    delete process.env.BOPS_AGENT_MODEL;
+  }
 });
 
 test("sent twice, answered once: taken again while it's answering, busy for another, the same answer after, and answered again only when it never was", async () => {
