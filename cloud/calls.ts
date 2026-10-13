@@ -358,7 +358,7 @@ type LiveEvent = {
   type?: string;
   delta?: string;
   error?: { message?: string };
-  event?: { type?: string; item?: ToolCall; response?: { id?: unknown; object?: unknown; model?: unknown; usage?: unknown } };
+  event?: { type?: string; item?: ToolCall; response?: { id?: unknown; object?: unknown; model?: unknown; usage?: unknown; service_tier?: unknown } };
 };
 
 /**
@@ -432,7 +432,7 @@ function converse(c: Call): Promise<CallRecord> {
       // The backend's answers (the two tools run on a Responses model): each one's tokens, once, for the bot.
       const r = e.type === "response.event" && /^response\.(completed|incomplete|failed)$/.test(e.event?.type ?? "") ? e.event?.response : undefined;
       if (r?.object === "response" && typeof r.id === "string")
-        void recordTokens(c.userId, r.id, r.usage, { model: r.model, source: "phone", botId: c.bot.id }).catch((err: Error) => console.warn(`[calls] ${c.sessionId}: usage: ${err.message}`));
+        void recordTokens(c.userId, r.id, r.usage, { model: r.model, source: "phone", botId: c.bot.id, tier: r.service_tier }).catch((err: Error) => console.warn(`[calls] ${c.sessionId}: usage: ${err.message}`));
       if (e.type === "session.started" && !record.startedAt) {
         record.startedAt = Date.now();
         send({ type: "session.commentary.append", delegation_id: null, content: greeting(c) });

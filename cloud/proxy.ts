@@ -339,7 +339,7 @@ function imageAsk(n: unknown, size: unknown, quality: unknown) {
   if (!IMAGE_QUALITIES.has(String(quality))) throw new HttpError(400, "Bops Cloud makes images at low, medium or high quality.");
 }
 
-type ResponseObject = { id?: unknown; object?: unknown; model?: unknown; usage?: unknown; output?: unknown };
+type ResponseObject = { id?: unknown; object?: unknown; model?: unknown; usage?: unknown; output?: unknown; service_tier?: unknown };
 
 /**
  * A response (JSON, or the `response` of a streamed event): its id is the user's, and its tokens are
@@ -349,7 +349,7 @@ async function recordResponse(call: Call, r: ResponseObject | undefined, done: b
   if (r?.object !== "response" || typeof r.id !== "string") return;
   await own(call, "openai", "response", r.id);
   if (!done) return;
-  counted(recordTokens(call.user.id, r.id, r.usage, { model: r.model, source: call.source ?? "responses", botId: call.bot }));
+  counted(recordTokens(call.user.id, r.id, r.usage, { model: r.model, source: call.source ?? "responses", botId: call.bot, tier: r.service_tier }));
   for (const item of Array.isArray(r.output) ? r.output : []) if (isWebSearch(item)) counted(recordWebSearch(call.user.id, item, call.bot));
 }
 

@@ -4,10 +4,14 @@
  * is rounded up to a whole micro-dollar. Every price is one named constant here, so it can change in
  * one place.
  *
- * Where each price comes from (checked 2026-10-06):
+ * Where each price comes from (checked 2026-10-06; Luna, 6-Sol and the speed tiers 2026-10-13):
  * - OpenAI tokens: developers.openai.com/api/docs/pricing. gpt-6.1-sol: $2.00 input, $0.10 cached
  *   input, $2.50 cache writes, $10.00 output per 1M tokens; gpt-6-astra: $10.00, $1.00, $12.50,
- *   $50.00. Reasoning is billed as output. One response past 272K input tokens is billed at the
+ *   $50.00; gpt-6-sol: $2.00, $0.20, $2.50, $10.00; gpt-6-luna: $0.10, $0.01, $0.125, $0.50.
+ *   Reasoning is billed as output. A response's service tier multiplies all of it (the pricing page,
+ *   fast-mode and ultrafast-mode guides): Fast (once Priority) 2×, Ultrafast 6×, Flex and Batch half;
+ *   standard ("default", "auto", "scale") as listed. A tier the cloud doesn't know is priced as
+ *   Ultrafast (the dearest), and logged. One response past 272K input tokens is billed at the
  *   long-context rates (input, cached and cache writes twice, output half as much again). That rule is
  *   per model request, so it's applied to a Responses API row (one response) and never to an agent
  *   turn's row, which sums many requests. A model not listed here, or an agent turn whose session's
@@ -42,8 +46,23 @@ type Rates = { input: number; cached: number; cacheWrite: number; output: number
 const MODELS: { model: RegExp; rates: Rates }[] = [
   { model: /^gpt-6\.1-sol(-\d{4}-\d{2}-\d{2})?$/, rates: { input: 2, cached: 0.1, cacheWrite: 2.5, output: 10 } },
   { model: /^gpt-6-astra(-\d{4}-\d{2}-\d{2})?$/, rates: { input: 10, cached: 1, cacheWrite: 12.5, output: 50 } },
+  { model: /^gpt-6-sol(-\d{4}-\d{2}-\d{2})?$/, rates: { input: 2, cached: 0.2, cacheWrite: 2.5, output: 10 } },
+  { model: /^gpt-6-luna(-\d{4}-\d{2}-\d{2})?$/, rates: { input: 0.1, cached: 0.01, cacheWrite: 0.125, output: 0.5 } },
 ];
 const DEAREST: Rates = { input: 10, cached: 1, cacheWrite: 12.5, output: 50 };
+
+/** What a response's service tier multiplies its tokens' price by. "priority" is Fast's old name, still accepted. */
+const TIERS: Record<string, number> = { default: 1, auto: 1, scale: 1, flex: 0.5, batch: 0.5, fast: 2, priority: 2, ultrafast: 6 };
+const DEAREST_TIER = 6;
+
+/** A service tier's multiplier: none said is standard; one the cloud doesn't know is the dearest, and logged. */
+export function tierMultiplier(tier: unknown): number {
+  if (tier === undefined || tier === null || tier === "") return 1;
+  const known = typeof tier === "string" ? TIERS[tier] : undefined;
+  if (known !== undefined) return known;
+  warnUnknown(`service tier ${String(tier)}`, "ultrafast");
+  return DEAREST_TIER;
+}
 
 /** Past this many input tokens in one model request, input costs twice as much and output half as much again. */
 const LONG_CONTEXT = 272_000;
@@ -94,6 +113,9 @@ export const HONCHO_CALL = 0;
 const TURN_HOLD: { model: RegExp; most: number; least: number }[] = [
   { model: /^gpt-6\.1-sol(-\d{4}-\d{2}-\d{2})?$/, most: 500_000 / 60, least: 330_000 / 60 },
   { model: /^gpt-6-astra(-\d{4}-\d{2}-\d{2})?$/, most: 4_000_000 / 60, least: 2_600_000 / 60 },
+  // Not measured yet: 6-Sol is held as 6.1 Sol (the same prices but its cache reads), Luna at a twentieth of it (its prices are).
+  { model: /^gpt-6-sol(-\d{4}-\d{2}-\d{2})?$/, most: 500_000 / 60, least: 330_000 / 60 },
+  { model: /^gpt-6-luna(-\d{4}-\d{2}-\d{2})?$/, most: 25_000 / 60, least: 16_500 / 60 },
 ];
 
 /** A running turn's hold at `model`, in micro-dollars a second: where a session starts, and the least its own turns may lower it to. */
@@ -122,7 +144,8 @@ const n = (x: unknown) => Math.max(0, Number(x) || 0);
 
 /**
  * An OpenAI answer's tokens (usage.ts recordTokens' detail): input, of which cached and written to the
- * cache, and output. `source` "agent" is an agent turn (many model requests, so never long context).
+ * cache, and output, at the service tier it ran on (`tier`). `source` "agent" is an agent turn (many
+ * model requests, so never long context).
  */
 export function tokenCost(detail: Record<string, unknown>): number {
   const r = ratesFor(detail.model);
@@ -132,7 +155,7 @@ export function tokenCost(detail: Record<string, unknown>): number {
   const output = n(detail.output);
   const long = detail.source !== "agent" && input > LONG_CONTEXT;
   const inputCost = ((input - cached - written) * r.input + cached * r.cached + written * r.cacheWrite) * (long ? 2 : 1);
-  return inputCost + output * r.output * (long ? 1.5 : 1);
+  return (inputCost + output * r.output * (long ? 1.5 : 1)) * tierMultiplier(detail.tier);
 }
 
 /** Whether the cloud knows an image model's price (only those are let through: proxy.ts). */

@@ -402,7 +402,7 @@ export const routes: Route[] = [info, messages, send];
 
 /** What a turn answers. `memory`: the user allowed memory from the phone (MEMORY_HEADER); without it, nothing is read from or saved to Honcho. */
 type TurnFor = { userId: string; orgoName: string | null; chatId: string; message: { id: string; text: string; at: number }; tz: string; memory: boolean };
-type Answer = { id: string | null; model: unknown; usage: unknown; text: string; searches: unknown[] };
+type Answer = { id: string | null; model: unknown; usage: unknown; tier: unknown; text: string; searches: unknown[] };
 
 /** What went wrong, for the log: a status, or the kind of failure. Never what was said. */
 class TurnError extends Error {}
@@ -428,7 +428,7 @@ async function respond(instructions: string, input: InputItem[], tz: string): Pr
     throw new TurnError(`OpenAI couldn't be reached (${(e as Error)?.name ?? "error"})`);
   }
   if (!res.ok) throw new TurnError(`OpenAI answered ${res.status}`);
-  const r = (await res.json().catch(() => null)) as { id?: unknown; model?: unknown; usage?: unknown; output?: unknown } | null;
+  const r = (await res.json().catch(() => null)) as { id?: unknown; model?: unknown; usage?: unknown; service_tier?: unknown; output?: unknown } | null;
   if (!r) throw new TurnError("OpenAI's answer wasn't JSON");
   const text = (Array.isArray(r.output) ? r.output : [])
     .filter((o) => isObject(o) && o.type === "message")
@@ -437,7 +437,7 @@ async function respond(instructions: string, input: InputItem[], tz: string): Pr
     .map((p) => p.text as string)
     .join("");
   const searches = (Array.isArray(r.output) ? r.output : []).filter(isWebSearch);
-  return { id: typeof r.id === "string" ? r.id : null, model: r.model, usage: r.usage, text, searches };
+  return { id: typeof r.id === "string" ? r.id : null, model: r.model, usage: r.usage, tier: r.service_tier, text, searches };
 }
 
 /**
@@ -472,7 +472,7 @@ async function answer(t: Turn, c: TurnFor) {
       if (binding && !keptFromOthers(c.message.text)) saveChat(c.userId, binding, { id: c.chatId, name: b.name }, b, c.message.text, tidy.text);
     } finally {
       // OpenAI charged for it whether or not the answer was written.
-      if (a.id) await recordTokens(c.userId, a.id, a.usage, { model: a.model, source: "iphone", botId: b.id }).catch((e: Error) => console.warn(`[agent] ${c.userId}: usage: ${e.message}`));
+      if (a.id) await recordTokens(c.userId, a.id, a.usage, { model: a.model, source: "iphone", botId: b.id, tier: a.tier }).catch((e: Error) => console.warn(`[agent] ${c.userId}: usage: ${e.message}`));
       // And each search, as the proxy counts the Mac's (cloud/proxy.ts recordResponse).
       for (const item of a.searches) await recordWebSearch(c.userId, item, b.id).catch((e: Error) => console.warn(`[agent] ${c.userId}: web search: ${e.message}`));
     }

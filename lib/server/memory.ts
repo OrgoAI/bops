@@ -1,4 +1,5 @@
 import "server-only";
+import { setting } from "./models";
 import { Honcho, type Peer, type Session as HonchoSession } from "@honcho-ai/sdk";
 import { openaiClient } from "./openai-client";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -28,7 +29,7 @@ import { recordTokens, usageTags } from "./usage";
  */
 
 const on = () => (cloudOn() ? !!cloudSessionNow()?.honcho : !!process.env.HONCHO_API_KEY);
-const MODEL = process.env.BOPS_CHAT_MODEL ?? process.env.BOPS_SAM_MODEL ?? "gpt-6.1-sol";
+const MODEL = setting("gpt-6.1-sol", "BOPS_CHAT_MODEL", "BOPS_SAM_MODEL");
 
 /** Which Honcho workspace (bank) a Bops workspace's memory lives in, and the user's peer in it. */
 export type Binding = { bank: string; peer: string };

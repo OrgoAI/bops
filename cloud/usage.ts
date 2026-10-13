@@ -130,8 +130,12 @@ export type UsageFor = { botId?: string | null; [key: string]: unknown };
 /** The detail without empty values (a bot that isn't known isn't written as null). */
 const kept = (detail: UsageFor) => Object.fromEntries(Object.entries(detail).filter(([, v]) => v !== undefined && v !== null && v !== ""));
 
-/** An OpenAI answer's token use (a response's `usage`, an agent turn's), once per response or turn, priced at its model. */
-export async function recordTokens(userId: string, ref: string, usage: unknown, detail: UsageFor & { model?: unknown; source: string }): Promise<void> {
+/**
+ * An OpenAI answer's token use (a response's `usage`, an agent turn's), once per response or turn, priced
+ * at its model and at the service tier it ran on (`tier`: the response's own `service_tier`, which says
+ * the tier OpenAI used, not the one asked for).
+ */
+export async function recordTokens(userId: string, ref: string, usage: unknown, detail: UsageFor & { model?: unknown; source: string; tier?: unknown }): Promise<void> {
   const u = (usage ?? {}) as TokenUsage;
   const input = Number(u.input_tokens) || 0;
   const output = Number(u.output_tokens) || 0;

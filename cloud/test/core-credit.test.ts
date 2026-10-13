@@ -141,6 +141,19 @@ test("each kind of use is priced at what it costs Orgo, rounded up to a whole mi
   // gpt-6-astra: 10 / 1 / 12.5 / 50.
   assert.equal(costOf("openai.tokens", 1100, { model: "gpt-6-astra", input: 1000, cached: 400, output: 100 }), 6000 + 400 + 5000);
   assert.equal(costOf("openai.tokens", 1100, { model: "gpt-6-astra", input: 1000, cached: 400, cacheWrite: 600, output: 100 }), 400 + 600 * 12.5 + 5000);
+  // gpt-6-sol: 2 / 0.2 / 2.5 / 10; gpt-6-luna: 0.1 / 0.01 / 0.125 / 0.5 (a twentieth of 6.1 Sol's, but its cache reads).
+  assert.equal(costOf("openai.tokens", 1100, { model: "gpt-6-sol", input: 1000, cached: 400, cacheWrite: 500, output: 100 }), 100 * 2 + 400 * 0.2 + 500 * 2.5 + 1000);
+  assert.equal(costOf("openai.tokens", 110_000, { model: "gpt-6-luna", input: 100_000, cached: 40_000, cacheWrite: 50_000, output: 10_000 }), 10_000 * 0.1 + 40_000 * 0.01 + 50_000 * 0.125 + 10_000 * 0.5);
+  assert.equal(costOf("openai.tokens", 1100, { model: "gpt-6-luna-2026-09-22", input: 1000, output: 100 }), 100 + 50);
+  // The service tier the answer ran on multiplies all of it: Ultrafast 6x, Fast (once Priority) 2x, Flex and Batch half, standard 1x.
+  const sol = { model: "gpt-6.1-sol", input: 1000, cached: 400, cacheWrite: 500, output: 100 };
+  const solCost = 100 * 2 + 40 + 500 * 2.5 + 1000;
+  for (const [tier, times] of [["default", 1], ["auto", 1], ["scale", 1], ["ultrafast", 6], ["fast", 2], ["priority", 2], ["flex", 0.5], ["batch", 0.5]] as const)
+    assert.equal(costOf("openai.tokens", 1100, { ...sol, tier }), Math.ceil(solCost * times), tier);
+  assert.equal(costOf("openai.tokens", 1100, { ...sol, tier: "" }), solCost, "no tier said: standard");
+  assert.equal(costOf("openai.tokens", 1100, { ...sol, tier: "warp" }), solCost * 6, "a tier the cloud doesn't know: the dearest");
+  // Long context and the tier both apply.
+  assert.equal(costOf("openai.tokens", 301_000, { model: "gpt-6.1-sol", input: 300_000, cached: 0, output: 1000, tier: "ultrafast" }), (300_000 * 2 * 2 + 1000 * 10 * 1.5) * 6);
   // A model with no price here, or none named, is priced as the dearest.
   assert.equal(costOf("openai.tokens", 1100, { model: "gpt-9-turbo", input: 1000, cached: 400, output: 100 }), 11_400);
   assert.equal(costOf("openai.tokens", 1100, { input: 1000, cached: 400, output: 100 }), 11_400);
