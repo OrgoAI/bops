@@ -1210,18 +1210,19 @@ function macChromeNote(owner: string) {
 function instructions(botName: string, role: string, mac: boolean, display: number, sharedWith?: string, apps = false, auto = false, full = false, computer = false, onMacChrome = false, vaultTool = false, ui = false) {
   const owner = ownerName();
   const appsLine = `For ${owner}'s email, calendar, documents, CRM and anything else they connected, use their apps (find_app_actions, then use_app; see "Your apps" below) before a website.`;
+  // The fastest tool first: each one only for what the ones before it can't do. The screen is last.
   const tools = [
     ...(apps ? [`${owner}'s apps (find_app_actions, then use_app; see "Your apps" below) for their email, calendar, documents, CRM and anything else they connected.`] : []),
     "web_search to look things up and read pages as text quickly (search, open a page, find in a page).",
+    "The shell (bash) and file edits for files, data and code: download, fetch a page or an API (curl), parse, calculate, and write documents in /workspace.",
     `The browser tools (browser_navigate, browser_snapshot, browser_click, browser_type, browser_fill_form, browser_select_option, browser_tabs…) to work in websites. They drive the Chrome on your screen, so ${owner} sees it happen. Read a page with browser_snapshot and act on its elements by ref; that's faster and surer than pixels.`,
-    "The shell (bash) and file edits for files, data and code: download, parse, calculate, and write documents in /workspace.",
     "The screen tools (screenshot, click, type_text, key, scroll, drag) for what the browser tools can't reach: native dialogs, canvas apps, drag and drop, or to check visually that something looks right. Coordinates come from the latest screenshot.",
   ].map((t, i) => `(${i + 1}) ${t}`);
   const computerTools = [
     ...(apps ? [`${owner}'s apps (find_app_actions, then use_app; see "Your apps" below) for their email, calendar, documents, CRM and anything else they connected.`] : []),
     "web_search to look things up and read pages as text quickly (search, open a page, find in a page).",
-    `The computer: you see your screen and use its mouse and keyboard, for websites in Chrome and any app on the computer, so ${owner} sees it happen. Go straight to URLs you know (ctrl+l, type it, Enter).`,
-    "run_command for files, data and code: download, parse, calculate, and write documents in /workspace.",
+    "run_command for files, data and code: download, fetch a page or an API (curl), parse, calculate, and write documents in /workspace.",
+    `The computer, for websites and apps you need to use, not only read: you see your screen and use its mouse and keyboard, in Chrome and any app on the computer, so ${owner} sees it happen. Go straight to URLs you know (ctrl+l, type it, Enter).`,
   ].map((t, i) => `(${i + 1}) ${t}`);
   return [
     `You are ${botName}, the ${role} bot in Bops.`,
@@ -1254,11 +1255,11 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
         ]
       : [
           sharedWith
-            ? `You work on ${screenLabel(display)} of the Linux computer you share with ${sharedWith}, where Chrome is open. ${sharedWith} and other bots may be working on its other screens: never touch a screen that isn't yours. Your screen is live for ${owner} to watch, so do the work there, in the open.`
-            : `You work on ${screenLabel(display)} of your own Linux computer, where Chrome is open. That screen is live for ${owner} to watch, so do the work there, in the open.`,
-          "Pick the right tool for each step, the way a capable person at a computer would:",
+            ? `You work on ${screenLabel(display)} of the Linux computer you share with ${sharedWith}, where Chrome is open. ${sharedWith} and other bots may be working on its other screens: never touch a screen that isn't yours. ${owner} can watch your screen live.`
+            : `You work on ${screenLabel(display)} of your own Linux computer, where Chrome is open. ${owner} can watch that screen live.`,
+          "For each step, use the first tool in this list that can do it. Go further down the list only when the tools before it can't:",
           ...(computer ? computerTools : tools),
-          `When the task is about a website ${owner} should see (signing in, filling a form, writing a post or a draft), do it in the browser on your screen, not only through search.`,
+          `Use the screen for what ${owner} should see happen or check (signing in, filling a form, writing a post or a draft) and for what only a screen can do. To look things up or read, don't use the screen: search, and read pages as text.`,
           `This task runs in the cloud and can't reach ${owner}'s Mac: no tool or setting here switches to it. If you're asked to carry on on their Mac, don't look for a way: say in one sentence that it has to be moved there (when ${owner} asks for their Mac, Bops moves it, with a record of what you did here), and stop.`,
           "Bops gives a task the screen that already has its site open, when one does: if yours shows the site you need, carry on from that page rather than opening it again in a new tab.",
           ...(computer

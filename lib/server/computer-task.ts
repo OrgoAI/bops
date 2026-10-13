@@ -315,7 +315,7 @@ const SHELL_TOOL = {
   type: "function",
   name: "run_command",
   description:
-    "Run a bash command on your computer (Linux, as root, in /workspace) and get its output: for files, data, downloads, calculations and documents. Don't use it to drive websites or apps: do that on the screen. Up to 300 seconds; start longer jobs in the background.",
+    "Run a bash command on your computer (Linux, as root, in /workspace) and get its output: for files, data, downloads, calculations and documents, and to fetch a page or an API (curl). Don't use it to sign in to or act on websites or apps: do that on the screen. Up to 300 seconds; start longer jobs in the background.",
   parameters: {
     type: "object",
     additionalProperties: false,

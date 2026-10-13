@@ -223,6 +223,12 @@ assert.equal(asked.length, 3);
 assert.deepEqual(asked[0].tools.map((t) => t.name ?? t.type), ["computer", "web_search", "run_command", "sign_in_from_vault", "crm_files", "crm_read", "crm_save_rows", "crm_create_file"]);
 assert.match(asked[0].instructions, /Bops CRM: .* save them with crm_save_rows as you go/, "told about the CRM, as a task");
 assert.match(asked[0].instructions, /call sign_in_from_vault: Bops fills/, "told to use it (no helpers' screens here)");
+// The fastest tool first and the screen last: web search, then the shell, then the computer; look-ups never need the screen.
+const ladder = asked[0].instructions;
+assert.match(ladder, /use the first tool in this list that can do it\. Go further down the list only when the tools before it can't: \(1\) web_search .*\(2\) run_command .*fetch a page or an API \(curl\).*\(3\) The computer, for websites and apps you need to use, not only read/);
+assert.match(ladder, /To look things up or read, don't use the screen: search, and read pages as text\./);
+assert.ok(!/in the open|the way a capable person/.test(ladder), "nothing tells it to do everything on the screen");
+assert.match(asked[0].tools.find((t) => t.name === "run_command").description, /and to fetch a page or an API \(curl\)\. Don't use it to sign in to or act on websites or apps/);
 assert.equal(asked[0].previous_response_id, undefined);
 assert.match(userText(asked[0]), /^Make the report/);
 assert.equal(asked[1].previous_response_id, "resp_1");

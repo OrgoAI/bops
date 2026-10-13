@@ -418,7 +418,7 @@ export async function findData(botId: string, query: string): Promise<string> {
   if (!r.ok) return `Failed: the catalog answered ${r.status}.`;
   const results = ((await r.json()) as { results?: Endpoint[] }).results ?? [];
   const ok = results.filter(callable).slice(0, 6);
-  if (!ok.length) return "Nothing in the catalog does that. Try other words, or do it on a computer.";
+  if (!ok.length) return "Nothing in the catalog does that. Try other words, or look it up on the web.";
   return clip(
     JSON.stringify(
       ok.map((e) => ({
