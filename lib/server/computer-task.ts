@@ -20,7 +20,9 @@ import type { Session } from "@/lib/types";
  * than the Agents API with the screen MCP, at the same success rate (.context/bench, 2026-10-06): it
  * does several actions per model call, and carries no harness prompt.
  *
- * What it doesn't have (the Agents API thread does): the browser tools (pages by DOM), and helpers.
+ * Pages by their elements, not pixels: page_script runs a short Playwright script on the screen's own
+ * Chrome (vm/page-script.cjs, over CDP on the computer), the code-execution way OpenAI recommends for
+ * GPT-6 Astra. What it doesn't have (the Agents API thread does): the browser tools as MCP, and helpers.
  */
 
 export const computerToolOn = () => process.env.BOPS_COMPUTER_TOOL !== "0";
@@ -77,6 +79,8 @@ export type ComputerTurn = {
   step: (tool: string, detail: string) => void;
   /** What the user has said in the thread since it last looked, and how to mark it sent once the model has it. */
   steer?: () => { text: string; sent: () => void } | undefined;
+  /** The page-script runner on the computer, put there with the browser tools (sessions.ts ensureBrowserTool): true once it's there. */
+  pages?: () => Promise<boolean>;
 };
 
 /** One turn: from the user's message to the bot's answer. Returns the answer. */
@@ -87,7 +91,7 @@ export async function computerTurn(t: ComputerTurn): Promise<string> {
   const started = Date.now();
   // Business data and the user's CRM run in this process (treg.ts, crm.ts), so the task has them wherever its computer is.
   // Not the CRM for a task someone outside Bops started (Session.fromOutside), as for a chat turn of theirs.
-  const tools = [{ type: "computer" }, { type: "web_search" }, SHELL_TOOL, VAULT_TOOL, ...(t.apps ? APP_TOOLS(b) : []), ...DATA_TOOLS(b), ...(s.fromOutside ? [] : CRM_TOOLS(b))];
+  const tools = [{ type: "computer" }, { type: "web_search" }, SHELL_TOOL, PAGE_TOOL, VAULT_TOOL, ...(t.apps ? APP_TOOLS(b) : []), ...DATA_TOOLS(b), ...(s.fromOutside ? [] : CRM_TOOLS(b))];
   // A turn that was stopped mid-step owes OpenAI the outputs of the calls it was answering.
   let input: unknown[] = [...(await settle(t, s.owed ?? [])), { role: "user", content: [{ type: "input_text", text: t.input }] }];
   let prev = s.responseId;
@@ -324,6 +328,29 @@ const SHELL_TOOL = {
   },
   strict: true,
 };
+/** Where the page-script runner (vm/page-script.cjs) is on a bot's computer: next to the browser tools' playwright-core. */
+export const PAGE_RUNNER = "/opt/bops/pw/page-script.cjs";
+/** The line the runner prints its answer after. */
+const PAGE_MARK = "@@bops-page@@";
+/** Pages by their elements (a field by its label, a button by its text), on the screen's own Chrome, so the user sees it happen. */
+const PAGE_TOOL = {
+  type: "function",
+  name: "page_script",
+  description:
+    "Run a short Playwright script on the Chrome on your screen and get what it returns: the fastest, surest way to read a website and to use it by its elements, not pixels. `page` is the tab in front of your screen and `context` its browser context. The script is the body of an async function: use await, and end with return (text, or anything JSON can hold; long answers are cut). Read: page.title(), page.innerText('main'), page.locator(...).allInnerTexts(). Act: page.goto(url), page.getByLabel('Email').fill(...), page.getByRole('button', { name: 'Save' }).click(), page.waitForLoadState(). The user sees the page change, and a page it opens comes to the front. Use the screen for what a script can't do (a canvas, a native dialog, an app other than Chrome), and to check how a page looks. Never type a password: sign_in_from_vault does that. Up to 120 seconds.",
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    required: ["what", "script", "timeout_seconds"],
+    properties: {
+      what: { type: "string", description: "What it does, in a few words, for the thread (\"read the search results\", \"filled in the sign-up form\")." },
+      script: { type: "string" },
+      timeout_seconds: { type: ["integer", "null"], description: "Default 60, at most 120." },
+    },
+  },
+  strict: true,
+};
+
 /** Signing in from the user's vault on the task's screen (vault.ts vaultSignIn): the bot never sees the secret. */
 const VAULT_TOOL = {
   type: "function",
@@ -335,6 +362,37 @@ const VAULT_TOOL = {
 };
 
 const clip = (s: string, max = 12_000) => (s.length > max ? `${s.slice(0, max / 2)}\n… (cut) …\n${s.slice(-max / 2)}` : s);
+
+/**
+ * A page script, run on the computer by its runner against the Chrome of the task's screen (its CDP
+ * port is 9200 + the display, vm/bin/bops-chrome). The script goes as base64, so it needs no quoting.
+ * The screen counts as busy while it runs, as it does for a click (the screen ledger reads that).
+ */
+async function pageScript(t: ComputerTurn, script: string, seconds: number) {
+  if (!script.trim()) return "Failed: the script is empty.";
+  if (!(await t.pages?.().catch(() => false))) return "Failed: the page tools aren't on this computer yet. Do this step on the screen.";
+  const limit = Math.min(120, Math.max(5, seconds));
+  const file = `/tmp/bops-page-${t.display}-${Date.now()}.js`;
+  const r = await orgo.bash(
+    t.computerId,
+    [
+      `mkdir -p /root/.bops/activity && echo "$(date +%s.%N) page" > /root/.bops/activity/${t.display}`,
+      `echo ${Buffer.from(script).toString("base64")} | base64 -d > ${file}`,
+      `node ${PAGE_RUNNER} ${9200 + t.display} ${limit} ${file}; rm -f ${file}`,
+    ].join("\n"),
+    limit + 30,
+  );
+  const at = r.output.lastIndexOf(PAGE_MARK);
+  if (at < 0) return `Failed: ${clip(r.output.trim() || `exit code ${r.exit_code}`, 2000)}`;
+  let out: { ok?: boolean; value?: string; error?: string; url?: string };
+  try {
+    out = JSON.parse(r.output.slice(at + PAGE_MARK.length).trim().split("\n")[0]);
+  } catch {
+    return `Failed: ${clip(r.output.slice(at + PAGE_MARK.length).trim(), 2000)}`;
+  }
+  const on = out.url ? `\n\n(Now on ${out.url.slice(0, 300)})` : "";
+  return out.ok ? `${clip(out.value ?? "")}${on}` : `Failed: ${out.error ?? "the script stopped"}${on}`;
+}
 
 async function runFunction(t: ComputerTurn, o: OutputItem) {
   const s = session(t.sessionId)!;
@@ -352,6 +410,9 @@ async function runFunction(t: ComputerTurn, o: OutputItem) {
       const timeout = Math.min(300, Math.max(5, Number(args.timeout_seconds) || 60));
       const r = await orgo.bash(t.computerId, `mkdir -p /workspace && cd /workspace && export DISPLAY=:${t.display}\n${command}`, timeout);
       output = `exit code ${r.exit_code}\n${clip(r.output)}`;
+    } else if (o.name === "page_script") {
+      t.step("page", String(args.what ?? "").trim().slice(0, 100) || "used the page");
+      output = await pageScript(t, String(args.script ?? ""), Number(args.timeout_seconds) || 60);
     } else if (o.name === "sign_in_from_vault") {
       t.step("vault", "signing in from your vault");
       output = await (await import("./vault")).vaultSignIn(s.botId, t.display, t.sessionId);

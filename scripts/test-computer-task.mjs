@@ -87,6 +87,8 @@ const orgoCalls = [];
 /** Every command Bops ran on the computer, and what a run_command answers (a function of the command, run when it's called). */
 const bash = [];
 let onCommand = () => ({ output: "", exit_code: 0 });
+/** What a page_script answers on the computer (vm/page-script.cjs prints it after its marker): a function of the command. */
+let onPage = () => ({ output: '\n@@bops-page@@{"ok":true,"value":"","url":"about:blank"}\n', exit_code: 0 });
 const response = (id, output) => ({ id, object: "response", model: "gpt-6.1-sol", status: "completed", output, usage: { input_tokens: 1000, output_tokens: 50, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } } });
 const said = (text) => ({ id: `msg_${text.length}`, type: "message", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] });
 
@@ -151,6 +153,7 @@ globalThis.fetch = async (input, init) => {
       const { command } = JSON.parse(body);
       bash.push(command);
       if (command.includes("cd /workspace && export DISPLAY")) return json(await onCommand(command));
+      if (command.includes("/opt/bops/pw/page-script.cjs ")) return json(await onPage(command));
       return json({ output: command.includes("echo ok") ? "ok" : "", exit_code: 0 });
     }
     if (path === `/computers/${COMPUTER}`) return json({ id: COMPUTER, status: pc.status });
@@ -220,12 +223,12 @@ assert.equal(s.agentSessionId, undefined, "no Agents API session");
 assert.equal(s.owed, undefined, "nothing owed after an answer");
 assert.equal(asked.length, 3);
 // What the model is given: the screen, web search, a shell, signing in from the vault, the user's CRM (crm.ts), its instructions; each call follows the last.
-assert.deepEqual(asked[0].tools.map((t) => t.name ?? t.type), ["computer", "web_search", "run_command", "sign_in_from_vault", "crm_files", "crm_read", "crm_save_rows", "crm_create_file"]);
+assert.deepEqual(asked[0].tools.map((t) => t.name ?? t.type), ["computer", "web_search", "run_command", "page_script", "sign_in_from_vault", "crm_files", "crm_read", "crm_save_rows", "crm_create_file"]);
 assert.match(asked[0].instructions, /Bops CRM: .* save them with crm_save_rows as you go/, "told about the CRM, as a task");
 assert.match(asked[0].instructions, /call sign_in_from_vault: Bops fills/, "told to use it (no helpers' screens here)");
-// The fastest tool first and the screen last: web search, then the shell, then the computer; look-ups never need the screen.
+// The fastest tool first and the screen last: web search, the shell, a page script, then the computer; look-ups never need the screen.
 const ladder = asked[0].instructions;
-assert.match(ladder, /use the first tool in this list that can do it\. Go further down the list only when the tools before it can't: \(1\) web_search .*\(2\) run_command .*fetch a page or an API \(curl\).*\(3\) The computer, for websites and apps you need to use, not only read/);
+assert.match(ladder, /use the first tool in this list that can do it\. Go further down the list only when the tools before it can't: \(1\) web_search .*\(2\) run_command .*fetch a page or an API \(curl\).*\(3\) page_script to read a website and use it by its elements .*\(4\) The computer, for what a page script can't do/);
 assert.match(ladder, /To look things up or read, don't use the screen: search, and read pages as text\./);
 assert.ok(!/in the open|the way a capable person/.test(ladder), "nothing tells it to do everything on the screen");
 assert.match(asked[0].tools.find((t) => t.name === "run_command").description, /and to fetch a page or an API \(curl\)\. Don't use it to sign in to or act on websites or apps/);
@@ -277,6 +280,42 @@ assert.deepEqual(
   ],
 );
 assert.ok(!existsSync(join(run, "PWNED")) && !existsSync(join(run, "PWNED2")), "a key's name never runs as a command");
+
+/* ---------------- A page script: a site by its elements, on the screen's own Chrome ---------------- */
+
+// The browser tools (and the runner next to them) were put on the computer as the task started, without making it wait.
+assert.ok(bash.some((c) => c.includes("/opt/bops/pw/page-script.cjs") && c.includes("npm install") && c.includes("test -d node_modules/playwright-core")), "the runner is installed with the browser tools");
+const PAGE = 'const rows = await page.locator("tr").allInnerTexts();\nreturn rows.slice(0, 3);';
+answers.push(
+  () => response("resp_p1", [{ id: "fc_p1", type: "function_call", call_id: "call_p1", name: "page_script", arguments: JSON.stringify({ what: "read the price table", script: PAGE, timeout_seconds: 500 }) }]),
+  () => response("resp_p2", [{ id: "fc_p2", type: "function_call", call_id: "call_p2", name: "page_script", arguments: JSON.stringify({ what: "clicked Save", script: "await page.getByRole('button', { name: 'Save' }).click()", timeout_seconds: null }) }]),
+  () => response("resp_p3", [{ id: "fc_p3", type: "function_call", call_id: "call_p3", name: "page_script", arguments: JSON.stringify({ what: "", script: "return 1", timeout_seconds: null }) }]),
+  () => response("resp_p4", [{ ...said("The cheapest plan is $8."), phase: "final_answer" }]),
+);
+const pageRuns = [];
+onPage = (c) => {
+  pageRuns.push(c);
+  if (pageRuns.length === 1) return { output: 'npm noise\n@@bops-page@@{"ok":true,"value":"[\\n \\"Basic $8\\"\\n]","url":"https://example.com/pricing"}\n', exit_code: 0 };
+  if (pageRuns.length === 2) return { output: '@@bops-page@@{"ok":false,"error":"locator.click: Timeout 30000ms exceeded.","url":"https://example.com/pricing"}\n', exit_code: 0 };
+  return { output: "node: not found", exit_code: 127 };
+};
+const paged = S.session(await task("Find the cheapest plan on example.com", "Cheapest plan"));
+assert.equal(paged.status, "done", `it finished (${paged.error ?? ""})`);
+assert.equal(paged.answer, "The cheapest plan is $8.");
+// Run on the task's own screen's Chrome (CDP 9200 + its display), the script as base64, its time capped at 120 seconds.
+const pageDisplay = paged.lastDisplay ?? paged.display;
+assert.match(pageRuns[0], new RegExp(`node /opt/bops/pw/page-script\\.cjs ${9200 + pageDisplay} 120 /tmp/bops-page-${pageDisplay}-\\d+\\.js; rm -f /tmp/bops-page-`));
+assert.ok(pageRuns[0].includes(`echo ${Buffer.from(PAGE).toString("base64")} | base64 -d > /tmp/bops-page-${pageDisplay}-`), "the script goes whole, as base64");
+assert.ok(pageRuns[0].includes(`/root/.bops/activity/${pageDisplay}`), "the screen counts as busy while it runs");
+assert.match(pageRuns[1], / 60 \/tmp\/bops-page-/, "60 seconds when it didn't say");
+// What came back: the value and the page it ended on; a failure as the runner said it; no marker, what the computer said.
+const pageOut = (call) => asked.find((b) => b.input?.some((i) => i.call_id === call)).input.find((i) => i.call_id === call).output;
+assert.equal(pageOut("call_p1"), '[\n "Basic $8"\n]\n\n(Now on https://example.com/pricing)');
+assert.equal(pageOut("call_p2"), "Failed: locator.click: Timeout 30000ms exceeded.\n\n(Now on https://example.com/pricing)");
+assert.equal(pageOut("call_p3"), "Failed: node: not found");
+// The thread says what each did, in the bot's words.
+const pageSteps = paged.steps.filter((x) => x.tool === "page").map((x) => x.detail);
+assert.deepEqual(pageSteps, ["read the price table", "clicked Save", "used the page"]);
 
 /* ---------------- Stopped mid-step: it picks up with what really happened ---------------- */
 
