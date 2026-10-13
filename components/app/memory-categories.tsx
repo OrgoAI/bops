@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
+import { Fold } from "./fold";
 import { CATEGORIES, categoriesOpen, categoryOf, GROUP_NAME, settled, upcoming, whenLabel, type CategoryId, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
 import type { AppState } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
@@ -55,6 +56,9 @@ type Shared = {
   timer?: ReturnType<typeof setTimeout>;
   /** Reads when Bops comes back in sight or to the front. */
   back?: () => void;
+  /** Items in the copies shown so far (none: nothing shown yet), and when each one not in the first copy came. */
+  known?: Set<string>;
+  arrived: Map<string, number>;
 };
 
 const shared = new Map<string, Shared>();
@@ -64,9 +68,16 @@ let current = "";
 
 function sharedOf(user: string, ws: string) {
   let s = shared.get(keyOf(user, ws));
-  if (!s) shared.set(keyOf(user, ws), (s = { user, ws, snap: null, users: new Set(), asked: 0, shown: 0, reading: 0, readAt: 0 }));
+  if (!s) shared.set(keyOf(user, ws), (s = { user, ws, snap: null, users: new Set(), asked: 0, shown: 0, reading: 0, readAt: 0, arrived: new Map() }));
   return s;
 }
+
+/**
+ * Whether an item just came (Orbit learned it in the last few seconds, after it was first shown): a row
+ * asks once, when it mounts, and rises in with a soft wash if so. Never for what was there already, so
+ * opening Orbit, a search or another category doesn't replay it.
+ */
+const justArrived = (id: string) => [...shared.values()].some((s) => Date.now() - (s.arrived.get(id) ?? 0) < 4_000);
 
 /** A snapshot's version (it changes with anything in it), when the server sends one. */
 const revOf = (snap: MemorySnapshot | null) => (typeof snap?.rev === "number" ? snap.rev : undefined);
@@ -77,6 +88,14 @@ function show(s: Shared, snap: MemorySnapshot, asked = ++s.asked) {
   s.shown = asked;
   s.snap = snap;
   s.readAt = Date.now();
+  // What's new since the first copy (that one is what was there: nothing in it is new).
+  if (!s.known) s.known = new Set(snap.items.map((i) => i.id));
+  else
+    for (const i of snap.items)
+      if (!s.known.has(i.id)) {
+        s.known.add(i.id);
+        s.arrived.set(i.id, Date.now());
+      }
   for (const changed of s.users) changed();
   plan(s);
 }
@@ -382,9 +401,29 @@ function CheckIcon({ size = 12, color = "#9A9A98" }: { size?: number; color?: st
   );
 }
 
+/**
+ * A section's count: drops into place when it goes up (something new was sorted in), not on the first
+ * copy, not while a search changes it or as one ends (`quiet` now or just before), and not on a switch to
+ * another workspace (`scope`). Nothing at zero, but still mounted, so 0 to 1 ticks too.
+ */
+function Count({ n, quiet, scope, className }: { n: number; quiet: boolean; scope: string; className: string }) {
+  const [was, setWas] = useState({ n, quiet, scope });
+  const [ticks, setTicks] = useState(0);
+  if (n !== was.n || quiet !== was.quiet || scope !== was.scope) {
+    setWas({ n, quiet, scope });
+    if (n > was.n && !quiet && !was.quiet && scope === was.scope) setTicks(ticks + 1);
+  }
+  if (!n) return null;
+  return (
+    <span key={ticks} className={`${className} ${ticks ? "motion-tick" : ""}`}>
+      {n}
+    </span>
+  );
+}
+
 function Chevron({ open }: { open: boolean }) {
   return (
-    <svg width="10" height="10" viewBox="0 0 12 12" className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`} aria-hidden>
+    <svg width="10" height="10" viewBox="0 0 12 12" className={`shrink-0 transition-transform duration-200 ease-out motion-reduce:transition-none ${open ? "rotate-90" : ""}`} aria-hidden>
       <path d="M4.5 3l3 3-3 3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
@@ -470,7 +509,10 @@ function OpenIcon() {
  */
 export function MemorySections({ state, query, onOpen }: { state: AppState; query?: string; onOpen: (open: MemoryOpen) => void }) {
   if (!categoriesOpen(state)) return null;
-  return <LiveSections user={state.account?.user.id ?? ""} ws={currentWorkspace(state)} last={state.messages[state.messages.length - 1]?.id} query={query} onOpen={onOpen} />;
+  const user = state.account?.user.id ?? "";
+  const ws = currentWorkspace(state);
+  // Keyed by account and workspace: a switch shows the other's sections as they are, nothing folding or ticking.
+  return <LiveSections key={`${user}:${ws}`} user={user} ws={ws} last={state.messages[state.messages.length - 1]?.id} query={query} onOpen={onOpen} />;
 }
 
 function LiveSections({ user, ws, last, query, onOpen }: { user: string; ws: string; last?: string; query?: string; onOpen: (open: MemoryOpen) => void }) {
@@ -540,55 +582,64 @@ export function SidebarSections({
           onClick={() => onOpen({ category: first.id })}
           aria-label={`Open ${GROUP_NAME}`}
           title={`Open ${GROUP_NAME}`}
-          className="flex size-6 items-center justify-center rounded-[6px] text-[#9A9A98] opacity-0 outline-none hover:bg-black/[0.04] hover:text-[#6B6B6B] focus-visible:opacity-100 focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] group-hover/orbit:opacity-100"
+          className="flex size-6 items-center justify-center rounded-[6px] text-[#9A9A98] opacity-0 outline-none transition-opacity duration-150 ease-out hover:bg-black/[0.04] hover:text-[#6B6B6B] focus-visible:opacity-100 focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] group-hover/orbit:opacity-100 motion-reduce:transition-none"
         >
           <OpenIcon />
         </button>
       </div>
-      {shown && !q && !snap.items.length && (
-        <div className="mb-1 flex items-center gap-2 px-2.5 text-[13px] leading-[18px] text-[#9A9A98]">
-          {snap.syncing && <Spinner size={11} color="#9A9A98" />}
-          {snap.hidden?.length ? "Everything Bops learned is hidden." : "Fills in as you chat"}
-        </div>
-      )}
-      {shown && sections.map(({ c, total, items }) => {
-        const key = `${user}.${ws}.${c.id}`;
-        const open = !!q || (toggled[key] ?? readOpen(user, ws, c.id));
-        return (
-          <div key={c.id} className="flex flex-col">
-            <button
-              onClick={() => {
-                // While searching, every section stays open.
-                if (q) return;
-                setToggled({ ...toggled, [key]: !open });
-                writeOpen(user, ws, c.id, !open);
-              }}
-              aria-expanded={open}
-              className="flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
-            >
-              <span className="text-[#6B6B6B]">
-                <CategoryIcon id={c.id} />
-              </span>
-              <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-ink">{c.label}</span>
-              {items.length > 0 && <span className="shrink-0 text-[12px] tabular-nums text-[#9A9A98]">{items.length}</span>}
-              <span className="text-[#B0B0AD]">
-                <Chevron open={open} />
-              </span>
-            </button>
-            {open && !items.length && !total && <div className="flex h-[30px] shrink-0 items-center pl-8 pr-2.5 text-[13px] leading-[18px] text-[#9A9A98]">Fills in as you chat</div>}
-            {open && items.slice(0, FIRST).map((i) => <SidebarRow key={i.id} item={i} onClick={() => onOpen({ category: c.id, focus: i.id })} />)}
-            {open && (items.length > FIRST || (!items.length && total > 0)) && (
-              <button
-                // From a search, the page opens with it filled in, showing the same matches.
-                onClick={() => onOpen(q ? { category: c.id, query: typed } : { category: c.id })}
-                className="flex h-[30px] shrink-0 items-center rounded-[10px] pl-8 pr-2.5 text-left text-[13px] leading-[18px] text-[#6B6B6B] outline-none hover:bg-black/[0.03] hover:text-ink focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
-              >
-                {items.length ? `Show all ${items.length}` : c.id === "events" ? `${total} past` : snap.items.every((i) => i.category !== c.id || i.done) ? `${total} done` : `${total} older`}
-              </button>
-            )}
+      {/* The whole group folds under its name, and each section under its own: animated (fold.tsx), kept mounted, out of reach while shut. */}
+      <Fold open={shown}>
+        {!q && !snap.items.length && (
+          <div className="mb-1 flex items-center gap-2 px-2.5 text-[13px] leading-[18px] text-[#9A9A98]">
+            {snap.syncing && <Spinner size={11} color="#9A9A98" />}
+            {snap.hidden?.length ? "Everything Bops learned is hidden." : "Fills in as you chat"}
           </div>
-        );
-      })}
+        )}
+        {sections.map(({ c, total, items }) => {
+          const key = `${user}.${ws}.${c.id}`;
+          const open = !!q || (toggled[key] ?? readOpen(user, ws, c.id));
+          return (
+            <div key={c.id} className="flex flex-col">
+              <button
+                onClick={() => {
+                  // While searching, every section stays open.
+                  if (q) return;
+                  setToggled({ ...toggled, [key]: !open });
+                  writeOpen(user, ws, c.id, !open);
+                }}
+                aria-expanded={open}
+                className="flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
+              >
+                <span className="text-[#6B6B6B]">
+                  <CategoryIcon id={c.id} />
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-ink">{c.label}</span>
+                <Count n={items.length} quiet={!!q} scope={`${user}.${ws}`} className="shrink-0 text-[12px] tabular-nums text-[#9A9A98]" />
+                <span className="text-[#B0B0AD]">
+                  <Chevron open={open} />
+                </span>
+              </button>
+              <Fold open={open}>
+                <div className="flex flex-col">
+                  {!items.length && !total && <div className="flex h-[30px] shrink-0 items-center pl-8 pr-2.5 text-[13px] leading-[18px] text-[#9A9A98]">Fills in as you chat</div>}
+                  {items.slice(0, FIRST).map((i) => (
+                    <SidebarRow key={i.id} item={i} onClick={() => onOpen({ category: c.id, focus: i.id })} />
+                  ))}
+                  {(items.length > FIRST || (!items.length && total > 0)) && (
+                    <button
+                      // From a search, the page opens with it filled in, showing the same matches.
+                      onClick={() => onOpen(q ? { category: c.id, query: typed } : { category: c.id })}
+                      className="flex h-[30px] shrink-0 items-center rounded-[10px] pl-8 pr-2.5 text-left text-[13px] leading-[18px] text-[#6B6B6B] outline-none hover:bg-black/[0.03] hover:text-ink focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
+                    >
+                      {items.length ? `Show all ${items.length}` : c.id === "events" ? `${total} past` : snap.items.every((i) => i.category !== c.id || i.done) ? `${total} done` : `${total} older`}
+                    </button>
+                  )}
+                </div>
+              </Fold>
+            </div>
+          );
+        })}
+      </Fold>
     </div>
   );
 }
@@ -596,10 +647,13 @@ export function SidebarSections({
 /** An item in the sidebar, under its section's name: its name, then its date or its line in grey (a private one: its name only). */
 function SidebarRow({ item, onClick }: { item: MemoryItem; onClick: () => void }) {
   const line = item.private ? null : item.when ? <When item={item} /> : undash(item.detail) || null;
+  // Rises in with a wash when Orbit just learned it; the class goes once the wash ends, so a re-sort moving the row doesn't replay it.
+  const [fresh, setFresh] = useState(() => justArrived(item.id));
   return (
     <button
       onClick={onClick}
-      className="flex h-[30px] shrink-0 items-center gap-2 rounded-[10px] pl-8 pr-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
+      onAnimationEnd={(e) => e.target === e.currentTarget && e.animationName === "wash" && setFresh(false)}
+      className={`flex h-[30px] shrink-0 items-center gap-2 rounded-[10px] pl-8 pr-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${fresh ? "motion-new-item" : ""}`}
     >
       <span className="min-w-0 flex-1 truncate text-[13.5px] leading-[18px]">
         <span className={greyed(item) ? "text-[#9A9A98]" : "text-ink"}>{undash(item.title)}</span>
@@ -735,7 +789,18 @@ export function MemoryPage({
   const there = !!focus && !!snap?.items.some((i) => i.id === focus);
   useEffect(() => {
     if (!there || !focus) return;
-    list.current?.querySelector(`[data-item="${CSS.escape(focus)}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    const el = list.current?.querySelector<HTMLElement>(`[data-item="${CSS.escape(focus)}"]`);
+    if (!el) return;
+    const go = () => el.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    go();
+    // Its details fold open over 200ms (fold.tsx): once they're in, bring all of it into view.
+    const opened = (e: TransitionEvent) => e.propertyName === "grid-template-rows" && go();
+    el.addEventListener("transitionend", opened);
+    const t = setTimeout(() => el.removeEventListener("transitionend", opened), 600);
+    return () => {
+      clearTimeout(t);
+      el.removeEventListener("transitionend", opened);
+    };
   }, [there, focus, focusAt]);
   useEffect(() => {
     if (!note) return;
@@ -785,7 +850,7 @@ export function MemoryPage({
                 key={x.id}
                 onClick={() => !on && onCategory(x.id)}
                 aria-pressed={on}
-                className={`flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}
+                className={`flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 transition-colors duration-150 ease-out motion-reduce:transition-none ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}
               >
                 {x.label}
                 {snap?.on && <span className={`tabular-nums ${on ? "text-white/60" : "text-[#9A9A98]"}`}>{count(x.id)}</span>}
@@ -884,7 +949,8 @@ export function MemoryPage({
           </div>
         )}
 
-        <div ref={list} className="flex flex-col gap-5">
+        {/* Another category: its list fades in (the key), not the page around it. */}
+        <div ref={list} key={c.id} className="motion-fade-in flex flex-col gap-5">
           {!snap ? (
             <div className="flex justify-center py-12">
               <Spinner size={16} color="#9A9A98" />
@@ -910,7 +976,7 @@ export function MemoryPage({
                     {g.label} <span className="font-normal tabular-nums text-[#B0B0AD]">{g.items.length}</span>
                   </span>
                 )}
-                <div className="flex flex-col rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
+                <div className="flex flex-col overflow-hidden rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
                   {g.items.map((i, n) => (
                     <ItemRow key={i.id} item={i} last={n === g.items.length - 1} open={openId === i.id} onToggle={() => setOpenId(openId === i.id ? null : i.id)} act={act} />
                   ))}
@@ -937,31 +1003,34 @@ function HiddenList({ hidden, act }: { hidden: NonNullable<MemorySnapshot["hidde
         <Chevron open={open} />
         Hidden <span className="font-normal tabular-nums text-[#B0B0AD]">{hidden.length}</span>
       </button>
-      {open && (
-        <div className="flex flex-col rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
-          {hidden.map((h, n) => (
-            <div key={h.id} data-hidden={h.id} className={`flex flex-col ${n < hidden.length - 1 ? "border-b border-[#F0F0EE]" : ""}`}>
-              <div className="flex h-11 items-center gap-3 px-4">
-                <span className="min-w-0 flex-1 truncate text-[13.5px] leading-5 text-[#6B6B6B]">{undash(h.title)}</span>
-                <button
-                  disabled={busy === h.id}
-                  onClick={async () => {
-                    setBusy(h.id);
-                    setFailed(null);
-                    const error = await act({ action: "edit", id: h.id, hidden: false });
-                    setBusy(null);
-                    if (typeof error === "string") setFailed({ id: h.id, text: error });
-                  }}
-                  className={BUTTON}
-                >
-                  Show
-                </button>
+      <Fold open={open}>
+        {/* 1px of room, or the fold's clip cuts off the card's outer ring. */}
+        <div className="p-px">
+          <div className="flex flex-col rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
+            {hidden.map((h, n) => (
+              <div key={h.id} data-hidden={h.id} className={`flex flex-col ${n < hidden.length - 1 ? "border-b border-[#F0F0EE]" : ""}`}>
+                <div className="flex h-11 items-center gap-3 px-4">
+                  <span className="min-w-0 flex-1 truncate text-[13.5px] leading-5 text-[#6B6B6B]">{undash(h.title)}</span>
+                  <button
+                    disabled={busy === h.id}
+                    onClick={async () => {
+                      setBusy(h.id);
+                      setFailed(null);
+                      const error = await act({ action: "edit", id: h.id, hidden: false });
+                      setBusy(null);
+                      if (typeof error === "string") setFailed({ id: h.id, text: error });
+                    }}
+                    className={BUTTON}
+                  >
+                    Show
+                  </button>
+                </div>
+                {failed?.id === h.id && <span className="px-4 pb-3 text-[12.5px] leading-4 text-[#B42318]">{failed.text}</span>}
               </div>
-              {failed?.id === h.id && <span className="px-4 pb-3 text-[12.5px] leading-4 text-[#B42318]">{failed.text}</span>}
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
-      )}
+      </Fold>
     </div>
   );
 }
@@ -1006,9 +1075,15 @@ export function ItemRow({ item, last, open, onToggle, act }: { item: MemoryItem;
   };
   const toggleDone = () => void run({ action: "edit", id: item.id, done: !item.done });
   const errorLine = error && !editing && <span className={`pr-3.5 text-[12.5px] leading-4 text-[#B42318] ${INDENT[item.category] ?? "pl-3.5"}`}>{error}</span>;
+  const [fresh, setFresh] = useState(() => justArrived(item.id));
+  // Shut, the row drops its Forget question: reopened, it shows the actions again (kept mounted, its autoFocus wouldn't run again).
+  if (!open && sure) setSure(false);
 
   return (
-    <div data-item={item.id} className={`flex flex-col ${last ? "" : "border-b border-[#F0F0EE]"}`}>
+    <div
+      data-item={item.id}
+      onAnimationEnd={(e) => e.target === e.currentTarget && e.animationName === "wash" && setFresh(false)}
+      className={`flex flex-col ${last ? "" : "border-b border-[#F0F0EE]"} ${fresh ? "motion-new-item" : ""}`}>
       {editing ? (
         <div className="px-3.5 py-3">
           <EditForm
@@ -1057,7 +1132,8 @@ export function ItemRow({ item, last, open, onToggle, act }: { item: MemoryItem;
           </button>
         </div>
       )}
-      {open && !editing ? (
+      {/* Where it was learned, and what can be done with it: folds open in place (rendered once first opened). */}
+      <Fold open={open && !editing} lazy>
         <div className={`flex flex-col gap-3 pb-3.5 pr-3.5 ${INDENT[item.category] ?? "pl-3.5"}`}>
           <Sources sources={item.sources} />
           {item.private && (
@@ -1103,9 +1179,8 @@ export function ItemRow({ item, last, open, onToggle, act }: { item: MemoryItem;
           )}
           {errorLine}
         </div>
-      ) : (
-        errorLine && <div className="flex flex-col pb-3">{errorLine}</div>
-      )}
+      </Fold>
+      {!(open && !editing) && errorLine && <div className="flex flex-col pb-3">{errorLine}</div>}
     </div>
   );
 }

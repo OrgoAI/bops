@@ -10,6 +10,9 @@ const when = (t: number) => {
   return a === "now" ? "just now" : /^\d/.test(a) ? `${a} ago` : `on ${a}`;
 };
 
+/** The open sheet ("bot:screen") once it has slid up; cleared as it's closed, so opening it again slides it up again. */
+let slidUp: string | null = null;
+
 /**
  * Setting up (or changing) a watched screen: what it's on, what's worth a heads-up, in quick picks
  * or the user's own words. Sits over the bottom of the screen it's about, so the page stays in view.
@@ -27,6 +30,17 @@ export function WatchSheet({
   watch?: Watch;
   onClose: () => void;
 }) {
+  // It slides up as it opens, once: the class comes off when that's done, so a hidden tab shown again
+  // doesn't replay it, and coming back to its screen (it unmounts meanwhile) doesn't either.
+  const shown = `${b.id}:${display}`;
+  const [sliding, setSliding] = useState(() => slidUp !== shown);
+  useEffect(() => {
+    slidUp = shown;
+  }, [shown]);
+  const close = () => {
+    slidUp = null;
+    onClose();
+  };
   // Picks that fit this page, read from it on the server; the address alone is the fallback meanwhile.
   const [suggestion, setSuggestion] = useState<{ site: string; lookFor: string; picks: string[] } | null>(null);
   useEffect(() => {
@@ -55,7 +69,7 @@ export function WatchSheet({
     const res = watch
       ? await post("/api/watches", { id: watch.id, action: "edit", lookFor }, "PATCH")
       : await post("/api/watches", { botId: b.id, display, lookFor, site });
-    if (res.ok) onClose();
+    if (res.ok) close();
     else {
       setError(((await res.json()) as { error?: string }).error ?? "Couldn't start watching");
       setBusy(false);
@@ -65,13 +79,14 @@ export function WatchSheet({
     if (!watch) return;
     setBusy(true);
     await post(`/api/watches?id=${encodeURIComponent(watch.id)}`, {}, "DELETE");
-    onClose();
+    close();
   };
 
   return (
     <div
       onClick={(e) => e.stopPropagation()}
-      className="absolute inset-x-3 bottom-3 z-50 mx-auto flex max-w-[460px] cursor-default flex-col gap-3 rounded-2xl bg-white p-4 shadow-[0_0_0_1px_#0000000F,0_24px_50px_-18px_#00000059]"
+      onAnimationEnd={(e) => e.target === e.currentTarget && setSliding(false)}
+      className={`absolute inset-x-3 bottom-3 z-50 mx-auto flex max-w-[460px] cursor-default flex-col gap-3 rounded-2xl bg-white p-4 shadow-[0_0_0_1px_#0000000F,0_24px_50px_-18px_#00000059] ${sliding ? "motion-sheet-in" : ""}`}
     >
       <div className="flex items-start gap-3">
         <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[#F2F2F0]">
@@ -90,7 +105,7 @@ export function WatchSheet({
               : `${b.name} keeps this screen on ${site} and gives you a heads-up in chat when something needs you. Other work uses the other screens.`}
           </span>
         </div>
-        <button onClick={onClose} aria-label="Close" className="flex size-7 shrink-0 items-center justify-center rounded-full hover:bg-[#F2F2F0]">
+        <button onClick={close} aria-label="Close" className="flex size-7 shrink-0 items-center justify-center rounded-full hover:bg-[#F2F2F0]">
           <svg width="10" height="10" viewBox="0 0 12 12">
             <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
           </svg>
@@ -142,7 +157,7 @@ export function WatchSheet({
             Stop watching
           </button>
         ) : (
-          <button onClick={onClose} className="rounded-full px-3.5 py-2 text-[13px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0]">
+          <button onClick={close} className="rounded-full px-3.5 py-2 text-[13px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0]">
             Not now
           </button>
         )}

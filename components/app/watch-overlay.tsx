@@ -17,7 +17,7 @@ export const WATCH = "#7A7AF0";
 export function WatchEye({ size = 12, blink = false, color = "currentColor" }: { size?: number; blink?: boolean; color?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" className="shrink-0 overflow-visible">
-      <g className={blink ? "origin-center animate-[watch-blink_4.5s_ease-in-out_infinite]" : ""}>
+      <g className={blink ? "origin-center animate-[watch-blink_4.5s_ease-in-out_infinite] motion-reduce:animate-none" : ""}>
         <path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" fill="none" stroke={color} strokeWidth="1.4" strokeLinejoin="round" />
         <circle cx="8" cy="8" r="2.1" fill={color} />
       </g>

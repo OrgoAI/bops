@@ -20,7 +20,7 @@ export function VaultTab({ state, onClose }: { state: AppState; onClose: () => v
   const [editing, setEditing] = useState<string | "new" | null>(null);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
+    <div className="motion-fade-in flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
       <div className="flex w-full max-w-[560px] flex-col gap-5">
         <div className="flex items-start gap-3.5">
           <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-ink text-highlighter">
@@ -102,7 +102,7 @@ function LoginRow({ state, login: l, last, onEdit }: { state: AppState; login: V
         ))}
       </span>
       {sure ? (
-        <span className="flex shrink-0 items-center gap-1">
+        <span className="motion-rise-in flex shrink-0 items-center gap-1">
           <button onClick={() => void post("/api/vault", { id: l.id }, "DELETE")} className="rounded-full bg-[#B42318] px-2.5 py-1 text-[12px] font-semibold text-white">
             Delete
           </button>
@@ -173,7 +173,7 @@ function LoginForm({ state, login, onDone }: { state: AppState; login?: VaultLog
         e.preventDefault();
         onDone();
       }}
-      className="flex flex-col gap-3 rounded-2xl bg-white p-4 shadow-[0_0_0_1px_#ECECEA,0_10px_30px_-18px_#00000040]"
+      className="motion-rise-in flex flex-col gap-3 rounded-2xl bg-white p-4 shadow-[0_0_0_1px_#ECECEA,0_10px_30px_-18px_#00000040]"
     >
       <div className="grid grid-cols-2 gap-2.5">
         <label className="flex flex-col gap-1">

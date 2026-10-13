@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type AnimationEvent } from "react";
 import { DISPLAYS, live, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
 import { categoriesOpen } from "@/lib/memory-categories";
@@ -55,6 +55,15 @@ export function Sidebar({
   const q = query?.trim().toLowerCase();
   // The "5m" next to each chat stays current.
   useNow(30_000);
+  // After each paint, every thread and watch in the state is known (in every workspace, whatever a
+  // search hides), so only one that turns up from here on rises in (arrived, below).
+  useEffect(() => {
+    const ids = (known ??= new Set());
+    for (const s of state.sessions) ids.add(s.id);
+    for (const w of state.watches ?? []) ids.add(w.id);
+  }, [state.sessions, state.watches]);
+  // Gone with the sidebar (signing out), so the next sign-in's first paint has nothing new in it either.
+  useEffect(() => () => void (known = null), []);
 
   const lastMessage = (c: Chat) => [...state.messages].reverse().find((m) => m.chatId === c.id);
   const activity = (c: Chat) => lastMessage(c)?.at ?? c.createdAt;
@@ -91,7 +100,7 @@ export function Sidebar({
             // Clicking away from an empty search closes it (not when the click is on the search button, which toggles it).
             onBlur={(e) => !query.trim() && e.relatedTarget?.getAttribute("aria-label") !== "Search" && setQuery(null)}
             placeholder={categoriesOpen(state) ? "Search bots, chats, threads, people" : "Search bots, chats, threads"}
-            className="mr-2 h-[34px] min-w-0 flex-1 rounded-full bg-white px-3.5 text-[13px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98]"
+            className="motion-fade-in mr-2 h-[34px] min-w-0 flex-1 rounded-full bg-white px-3.5 text-[13px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98]"
           />
         )}
         <div className="flex gap-2">
@@ -122,15 +131,7 @@ export function Sidebar({
           <div className="flex flex-col pt-4">
             <div className="px-2.5 pb-1.5 text-[13px] font-medium leading-4 text-[#9A9A98]">Threads</div>
             {threads.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => onOpenThread(s)}
-                className="group/thread flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left hover:bg-black/[0.03]"
-              >
-                <span className={`min-w-0 flex-1 truncate text-[14px] leading-[18px] ${live(s) || needsYou(s) ? "text-ink" : "text-[#6B6B6B]"}`}>{s.title}</span>
-                {(live(s) || needsYou(s)) && <StatusIcon session={s} />}
-                {!live(s) && <DeleteX label={`Delete ${s.title}`} onDelete={() => void post(`/api/sessions/${s.id}`, {}, "DELETE")} className="group-hover/thread:opacity-100" />}
-              </button>
+              <ThreadRow key={s.id} session={s} onClick={() => onOpenThread(s)} />
             ))}
           </div>
         )}
@@ -202,10 +203,11 @@ function YouMenu({ state, onAccount, onSettings, onSetup }: { state: AppState; o
       <button
         onClick={() => setOpen(!open)}
         title={user ? `${user.name ?? user.email ?? "Your account"}: account and settings` : "Account and settings"}
-        className={`flex size-10 items-center justify-center rounded-full text-[13px] font-semibold ${open ? "bg-ink text-highlighter" : "bg-[#EEEEEC] text-[#6B6B6B] hover:bg-[#E6E6E3]"}`}
+        className={`flex size-10 items-center justify-center rounded-full text-[13px] font-semibold transition-colors duration-150 ease-out motion-reduce:transition-none ${open ? "bg-ink text-highlighter" : "bg-[#EEEEEC] text-[#6B6B6B] hover:bg-[#E6E6E3]"}`}
       >
         {initialsOf(state)}
       </button>
+      {/* Pops as it appears: YouMenu stays mounted, so polls don't replay it (at launch it may pop once, as the permissions are first read). */}
       {needsYou && (
         <button
           onClick={() => {
@@ -214,13 +216,13 @@ function YouMenu({ state, onAccount, onSettings, onSetup }: { state: AppState; o
           }}
           title="Something on this Mac needs you"
           aria-label="Something on this Mac needs you"
-          className="absolute -bottom-0.5 -left-0.5 rounded-full shadow-[0_0_0_2px_#F9F9F8]"
+          className="motion-dot-in absolute -bottom-0.5 -left-0.5 rounded-full shadow-[0_0_0_2px_#F9F9F8]"
         >
           <NeedsYouDot />
         </button>
       )}
       {open && (
-        <div className="absolute bottom-[calc(100%+8px)] left-0 z-30 flex w-[248px] flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]">
+        <div className="motion-menu-in absolute bottom-[calc(100%+8px)] left-0 z-30 flex w-[248px] origin-bottom-left flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]">
           <div className="flex flex-col gap-0.5 px-2.5 pb-2 pt-1.5">
             <span className="truncate text-[14px] font-semibold leading-[18px]">{user?.name || state.owner?.name || "You"}</span>
             <span className="truncate text-[12px] leading-4 text-[#9A9A98]">{user ? (user.email ?? "Signed in with Orgo") : "Not signed in"}</span>
@@ -279,6 +281,7 @@ function YouMenu({ state, onAccount, onSettings, onSetup }: { state: AppState; o
 function MainBot({ chat: c, state, selected, onClick, last }: { chat: Chat; state: AppState; selected: boolean; onClick: () => void; last?: AppState["messages"][number] }) {
   const b = state.bots.find((x) => x.id === c.botIds[0])!;
   const unread = !!last && last.role !== "user" && last.at > (c.readAt ?? 0) && !selected;
+  const dot = usePop(unread);
   const mine = new Set(teamOf(state).map((x) => x.id));
   const sessions = state.sessions.filter((s) => mine.has(s.botId));
   const working = new Set(sessions.filter((s) => live(s) && !s.askWhere).map((s) => s.botId)).size;
@@ -297,7 +300,7 @@ function MainBot({ chat: c, state, selected, onClick, last }: { chat: Chat; stat
             <path d="M6 1l1.5 3.1 3.4.5-2.5 2.4.6 3.4L6 8.8 2.9 10.4l.6-3.4L1 4.6l3.5-.5z" fill="#0A0A0A" />
           </svg>
         </span>
-        {unread && <span data-tip="Unread" className="absolute -left-0.5 top-0.5 size-[11px] rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A,0_0_0_3.5px_#F9F9F8]" />}
+        {unread && <span data-tip="Unread" onAnimationEnd={dot.done} className={`absolute -left-0.5 top-0.5 size-[11px] rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A,0_0_0_3.5px_#F9F9F8] ${dot.pop ? "motion-dot-in" : ""}`} />}
       </span>
       <span className="flex flex-col items-center gap-0.5">
         <span className="text-[16px] font-semibold leading-5">{b.name}</span>
@@ -311,6 +314,7 @@ function ChatRow({ chat: c, state, selected, onClick, last }: { chat: Chat; stat
   const members = state.bots.filter((b) => c.botIds.includes(b.id));
   const solo = c.kind === "bot" ? members[0] : undefined;
   const unread = !!last && last.role !== "user" && last.at > (c.readAt ?? 0) && !selected;
+  const dot = usePop(unread);
   const typing = c.typing.length > 0;
   const preview = typing
     ? "typing…"
@@ -342,14 +346,72 @@ function ChatRow({ chat: c, state, selected, onClick, last }: { chat: Chat; stat
         </div>
         <div className="flex items-center gap-2">
           <span className={`min-w-0 flex-1 truncate text-[13px] leading-[17px] ${unread ? "font-medium text-ink" : typing ? "text-[#6B6B6B] italic" : "text-[#6B6B6B]"}`}>{preview}</span>
-          {unread && <span data-tip="Unread" className="size-[9px] shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" />}
+          {unread && <span data-tip="Unread" onAnimationEnd={dot.done} className={`size-[9px] shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A] ${dot.pop ? "motion-dot-in" : ""}`} />}
         </div>
       </div>
     </button>
   );
 }
 
-/** A small × that shows on hover and deletes, without opening what it sits on. */
+/**
+ * Every thread and watch id the sidebar has had in its state (Sidebar records them after each paint):
+ * null until its first paint, so nothing there then is new. A row asks once, as it mounts, so a
+ * workspace switch or a search that brings rows back never replays it, and polls don't remount rows.
+ */
+let known: Set<string> | null = null;
+const arrived = (id: string) => !!known && !known.has(id);
+
+/**
+ * A mark that pops when `value` changes while its row stays mounted: never for what it was at mount
+ * (first paint, a workspace switch, a search bringing the row back). `n` counts the changes (a key that
+ * replays it), `pop` is on until the animation ends (`done`), so a row the list moves later (a re-sort
+ * re-inserts it, which restarts any animation on it) has nothing left to replay.
+ */
+function usePop<T>(value: T) {
+  const [was, setWas] = useState(value);
+  const [n, setN] = useState(0);
+  const [pop, setPop] = useState(false);
+  if (value !== was) {
+    setWas(value);
+    setN(n + 1);
+    setPop(true);
+  }
+  return { n, pop, done: (e: AnimationEvent) => e.target === e.currentTarget && setPop(false) };
+}
+
+/** Rises in once when `fresh`, then drops the class when that's done, so moving the row (a re-sort) doesn't replay it. */
+function useRise(fresh: () => boolean) {
+  const [rise, setRise] = useState(fresh);
+  return { rise, done: (e: AnimationEvent) => e.target === e.currentTarget && setRise(false) };
+}
+
+/** One of the Threads: in ink with its mark while it's working or needs you; × deletes it once it's stopped. */
+function ThreadRow({ session: s, onClick }: { session: Session; onClick: () => void }) {
+  // New since the sidebar opened: rises in, once.
+  const row = useRise(() => arrived(s.id));
+  // Its mark (as StatusIcon draws it) pops when it changes in place, as working turns to needs you.
+  const mark = live(s) && !(s.askWhere && needsYou(s)) ? "working" : needsYou(s) ? "you" : s.status;
+  const pop = usePop(mark);
+  return (
+    <button
+      onClick={onClick}
+      onAnimationEnd={row.done}
+      className={`group/thread flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left hover:bg-black/[0.03] ${row.rise ? "motion-rise-in" : ""}`}
+    >
+      <span className={`min-w-0 flex-1 truncate text-[14px] leading-[18px] ${live(s) || needsYou(s) ? "text-ink" : "text-[#6B6B6B]"}`}>{s.title}</span>
+      {(live(s) || needsYou(s)) && (
+        <span key={pop.n} onAnimationEnd={pop.done} className={`flex shrink-0 ${pop.pop ? "motion-dot-in" : ""}`}>
+          <StatusIcon session={s} />
+        </span>
+      )}
+      {!live(s) && (
+        <DeleteX label={`Delete ${s.title}`} onDelete={() => void post(`/api/sessions/${s.id}`, {}, "DELETE")} className="group-hover/thread:opacity-100 group-focus-visible/thread:opacity-100" />
+      )}
+    </button>
+  );
+}
+
+/** A small × that shows on hover (or keyboard focus) and deletes, without opening what it sits on. */
 export function DeleteX({ label, onDelete, className = "" }: { label: string; onDelete: () => void; className?: string }) {
   return (
     <span
@@ -368,7 +430,7 @@ export function DeleteX({ label, onDelete, className = "" }: { label: string; on
         e.stopPropagation();
         onDelete();
       }}
-      className={`flex size-5 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 hover:bg-black/[0.06] hover:text-[#B42318] ${className}`}
+      className={`flex size-5 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 motion-reduce:transition-none ${className}`}
     >
       <svg width="9" height="9" viewBox="0 0 12 12">
         <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -423,12 +485,12 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
         className="-ml-1.5 flex min-w-0 items-center gap-1.5 rounded-[10px] px-1.5 py-0.5 hover:bg-black/[0.04]"
       >
         <span className="truncate text-[22px] font-semibold leading-7 tracking-[-0.02em]">{current?.name ?? "Main"}</span>
-        <svg width="12" height="12" viewBox="0 0 12 12" className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`}>
+        <svg width="12" height="12" viewBox="0 0 12 12" className={`shrink-0 transition-transform duration-200 ease-out motion-reduce:transition-none ${open ? "rotate-180" : ""}`}>
           <path d="M3 4.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
       {open && (
-        <div className="absolute left-0 top-[calc(100%+6px)] z-30 flex w-[248px] flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]">
+        <div className="motion-menu-in absolute left-0 top-[calc(100%+6px)] z-30 flex w-[248px] origin-top-left flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]">
           <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-medium text-[#9A9A98]">Workspaces</div>
           {workspaces.map((w) =>
             naming?.id === w.id ? (
@@ -458,7 +520,7 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
                   onClick={() => setNaming({ id: w.id, name: w.name })}
                   title={`Rename ${w.name}`}
                   aria-label={`Rename ${w.name}`}
-                  className="mx-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 hover:bg-black/[0.06] hover:text-ink group-hover/ws:opacity-100"
+                  className="mx-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-ink focus-visible:opacity-100 group-hover/ws:opacity-100 group-has-[:focus-visible]/ws:opacity-100 motion-reduce:transition-none"
                 >
                   <svg width="12" height="12" viewBox="0 0 16 16">
                     <path d="M3 13l1-3.5L11 2.5l2.5 2.5L6.5 12 3 13z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
@@ -481,7 +543,7 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
                       onClick={() => setDeleting(w.id)}
                       title={`Delete ${w.name}`}
                       aria-label={`Delete ${w.name}`}
-                      className="mr-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 hover:bg-black/[0.06] hover:text-[#B42318] group-hover/ws:opacity-100"
+                      className="mr-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 group-hover/ws:opacity-100 group-has-[:focus-visible]/ws:opacity-100 motion-reduce:transition-none"
                     >
                       <svg width="9" height="9" viewBox="0 0 12 12">
                         <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -521,32 +583,43 @@ function Watching({ state, onOpen }: { state: AppState; onOpen: (w: Watch) => vo
   return (
     <div className="flex flex-col pt-4">
       <div className="px-2.5 pb-1.5 text-[13px] font-medium leading-4 text-[#9A9A98]">Watching</div>
-      {list.map((w) => {
-        const where = w.mac ? w.mac.app : `${state.bots.find((b) => b.id === w.botId)?.name ?? "Bot"}'s screen ${DISPLAYS.indexOf(w.display) + 1}`;
-        return (
-          <button
-            key={w.id}
-            onClick={() => onOpen(w)}
-            title={`${w.lookFor}${w.away ? " · paused: it isn't showing right now" : ""}`}
-            className="group/watch flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left hover:bg-black/[0.03]"
-          >
-            <span className={w.away ? "text-[#C9C9C6]" : ""} style={w.away ? undefined : { color: WATCH }}>
-              <WatchEye size={14} blink={!w.away && !w.alert} />
-            </span>
-            <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px]">
-              <span className={w.away ? "text-[#6B6B6B]" : "text-ink"}>{watchName(w)}</span>
-              <span className="text-[#9A9A98]"> · {where}</span>
-            </span>
-            {w.alert ? (
-              <span className="shrink-0 rounded-full bg-highlighter px-1.5 py-px text-[11px] font-semibold leading-4 text-ink shadow-[0_0_0_1px_#0000001F]">New</span>
-            ) : (
-              w.away && <span className="shrink-0 text-[12px] text-[#9A9A98] group-hover/watch:hidden">Paused</span>
-            )}
-            <DeleteX label={`Stop watching ${watchName(w)}`} onDelete={() => void post(`/api/watches?id=${encodeURIComponent(w.id)}`, {}, "DELETE")} className="group-hover/watch:opacity-100" />
-          </button>
-        );
-      })}
+      {list.map((w) => (
+        <WatchRow key={w.id} watch={w} state={state} onClick={() => onOpen(w)} />
+      ))}
     </div>
+  );
+}
+
+function WatchRow({ watch: w, state, onClick }: { watch: Watch; state: AppState; onClick: () => void }) {
+  // New since the sidebar opened: rises in, once. Its New mark pops when news comes in while it's shown.
+  const row = useRise(() => arrived(w.id));
+  const pop = usePop(!!w.alert);
+  const where = w.mac ? w.mac.app : `${state.bots.find((b) => b.id === w.botId)?.name ?? "Bot"}'s screen ${DISPLAYS.indexOf(w.display) + 1}`;
+  return (
+    <button
+      onClick={onClick}
+      title={`${w.lookFor}${w.away ? " · paused: it isn't showing right now" : ""}`}
+      onAnimationEnd={row.done}
+      className={`group/watch flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left hover:bg-black/[0.03] ${row.rise ? "motion-rise-in" : ""}`}
+    >
+      <span className={w.away ? "text-[#C9C9C6]" : ""} style={w.away ? undefined : { color: WATCH }}>
+        <WatchEye size={14} blink={!w.away && !w.alert} />
+      </span>
+      <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px]">
+        <span className={w.away ? "text-[#6B6B6B]" : "text-ink"}>{watchName(w)}</span>
+        <span className="text-[#9A9A98]"> · {where}</span>
+      </span>
+      {w.alert ? (
+        <span onAnimationEnd={pop.done} className={`shrink-0 rounded-full bg-highlighter px-1.5 py-px text-[11px] font-semibold leading-4 text-ink shadow-[0_0_0_1px_#0000001F] ${pop.pop ? "motion-dot-in" : ""}`}>New</span>
+      ) : (
+        w.away && <span className="shrink-0 text-[12px] text-[#9A9A98] group-hover/watch:hidden group-focus-visible/watch:hidden group-has-[:focus-visible]/watch:hidden">Paused</span>
+      )}
+      <DeleteX
+        label={`Stop watching ${watchName(w)}`}
+        onDelete={() => void post(`/api/watches?id=${encodeURIComponent(w.id)}`, {}, "DELETE")}
+        className="group-hover/watch:opacity-100 group-focus-visible/watch:opacity-100"
+      />
+    </button>
   );
 }
 
