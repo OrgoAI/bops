@@ -108,7 +108,7 @@ const S = await import(`${root}/lib/server/store.ts`);
 const P = await import(`${root}/lib/server/procedures.ts`);
 const R = await import(`${root}/app/api/procedures/route.ts`);
 const Mem = await import(`${root}/lib/server/memory.ts`);
-const { botChatId, MAX_PROCEDURES, MAX_PROCEDURE_CHARS } = await import(`${root}/lib/types.ts`);
+const { botChatId, MAX_PROCEDURES, MAX_PROCEDURE_CHARS, runningNow } = await import(`${root}/lib/types.ts`);
 
 /* ---------------- Helpers ---------------- */
 
@@ -763,10 +763,14 @@ await part("Two Macs: a state loaded at sign-in keeps its routine runs as they a
   await S.bindSignIn(user);
   try {
     assert.equal(S.getState().messages.length, 40_000, "the other state is in");
-    // Only a server's own state, at its start, has its runs marked failed: these may be going on the other Mac.
-    const last = (id) => S.getState().routines.find((r) => r.id === id).last;
+    // A run's record is never marked failed when a state loads (these may be going on the other Mac): it
+    // stays as it is, and stops counting as running by itself (runningNow), so Run now isn't held.
+    const routine = (id) => S.getState().routines.find((r) => r.id === id);
+    const last = (id) => routine(id).last;
     assert.deepEqual(last("rtn_chat_there"), { at: 1, status: "running" });
     assert.deepEqual(last("rtn_task_there"), { at: 1, status: "running", sessionId: "ses_there", prevError: "The Mac isn't set up" });
+    assert.equal(runningNow(routine("rtn_chat_there"), S.getState().sessions), false, "a chat run that began long ago");
+    assert.equal(runningNow(routine("rtn_task_there"), S.getState().sessions), false, "a thread run whose thread isn't running here");
     // Its marks are known once it's in, and asking is quick: a draft asks about every message in a chat.
     const t0 = performance.now();
     const marked = S.getState().messages.filter((m) => Mem.isSecret(m.id)).map((m) => m.id);

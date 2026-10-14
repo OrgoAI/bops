@@ -2,11 +2,14 @@
 // noise out, such as relative times, stamps, timers and ids; slots, prices, counts and ranks kept), and web
 // page watches (lib/server/watches.ts, app/api/watches): the first read is how the page is; a page that
 // didn't change, or only changed its stamps, costs no model call and writes nothing; lines that were added
-// get exactly one judge call (Jev, or one quick OpenAI call when Jev isn't there) and a heads-up when they
-// match; a line that went comes back as new only after 7 days; a page that fails or comes back empty is
-// read less and less often until it answers again; a paused watch is left alone until it's resumed or
-// checked by hand. Screen watches compare pages the same way (a clock on the screen is not a change), and
-// a page watch doesn't keep a bot from moving computers the way a screen watch does.
+// get exactly one judge call (Jev, or one quick OpenAI call when Jev isn't there; up to 200 lines, the rest
+// judged at the next read) and a heads-up when they match; a line that went and comes back is new again
+// (a status that returns is told again once the user saw the first alert); a page that fails, or a web
+// page that comes back with no text, is read less and less often until it answers again (JSON or text
+// that's empty is just empty); a paused watch is left alone until it's resumed or checked by hand. Screen
+// watches compare pages the same way, with a feed's counts aside too (a clock or a view count on the
+// screen is not a change), and a page watch doesn't keep a bot from moving computers the way a screen
+// watch does.
 //
 // The pages come from a local server here, let through safe-fetch with BOPS_FETCH_ALLOW (the real
 // lib/server/web-page.ts reads them). Jev and OpenAI are fakes; the state lives in a throwaway folder;
@@ -236,6 +239,15 @@ test("normalizeLine: only what's certainly noise goes; everything else is the ju
     ["Next refresh in 45 seconds", "Next refresh"],
     ["Time left: 2h 15m", ""],
     ["Elapsed: 01:23:45", ""],
+    ["Ends in 1 day 04:13:22", "Ends"],
+    ["Sale ends in 2d 04:13:22", "Sale ends"],
+    ["Deal of the day: 04:13:22 left", "Deal of the day"],
+    ["Ends in: 04:13:22", "Ends"],
+    ["Time left: 2d 4h", ""],
+    ["Time left: 2 days", "Time left: 2 days"],
+    ["5 hr. ago", ""],
+    ["1 mo. ago", ""],
+    ["Reply from dana · 3 min. ago", "Reply from dana"],
     ["Ships in 2 days", "Ships in 2 days"],
     ["2 days left to apply", "2 days left to apply"],
     ["Sign in as Tiger", "Sign in as Tiger"],
@@ -260,6 +272,30 @@ test("normalizeLine: only what's certainly noise goes; everything else is the ju
     ["Posted today at 3:45 PM", ""],
     ["Built 2026-10-13 15:45 UTC", ""],
     ["Bitcoin $86,200 · updated 4:40 PM", "Bitcoin $86,200"],
+    ["Fetched at 15:45:10", ""],
+    ["Retrieved 3:45 PM", ""],
+    ["Cached 15:45", ""],
+    ["Time now: 15:45", ""],
+    ["Page loaded 3:45 PM", "Page"],
+    ["Last update: Oct 13, 2026 15:45", ""],
+    ["Generated Mon Oct 13 15:45:10 UTC 2026", ""],
+    ["Updated 10/13 3:45 PM", ""],
+    // A stamp never takes a number that only might be its date: a 4-digit number with a word after it, or a fraction.
+    ["Updated Oct 13, 2026 2024 sold", "2024 sold"],
+    ["Updated Oct 13 2024 sold", "2024 sold"],
+    ["Tickets as of today 1500 remaining", "Tickets 1500 remaining"],
+    ["Last updated 15:45 1023 outages reported", "1023 outages reported"],
+    ["Status as of 15:45 2500 customers affected", "Status 2500 customers affected"],
+    ["As of 3:45 PM, 1500 customers affected", "1500 customers affected"],
+    ["Updated today 1500 seats left", "1500 seats left"],
+    ["Price as of Oct 13 1299 USD", "Price 1299 USD"],
+    ["As of Oct 13 2000 units", "2000 units"],
+    ["Updated: Oct 13, 2026, 1500 seats left", "1500 seats left"],
+    ["Updated 10/13 1350 USD", "Updated 10/13 1350 USD"],
+    ["Updated 10/13/2026 1350 USD", "1350 USD"],
+    ["As of 3/4 cup", "As of 3/4 cup"],
+    ["Checked 3/4 boxes", "Checked 3/4 boxes"],
+    ["Synced 3/5 devices", "Synced 3/5 devices"],
     // A stamp word with no date or time after it stays.
     ["Updated 3 items", "Updated 3 items"],
     ["Posted 12 jobs on Oct 13", "Posted 12 jobs on Oct 13"],
@@ -268,6 +304,10 @@ test("normalizeLine: only what's certainly noise goes; everything else is the ju
     ["2026-10-13T15:45:10Z", ""],
     ["Log 2026-10-13 15:45:10 started", "Log started"],
     ["Mon, 13 Oct 2026 15:45:10 +0000", ""],
+    ["Tue Oct 13 2026 15:45:10 GMT-0700 (Pacific Daylight Time)", ""],
+    ["Loaded Tue Oct 13 2026 15:45:10 GMT+0200", "Loaded"],
+    ["10/13/2026, 3:45:10 PM", ""],
+    ["13.10.2026, 15:45:10", ""],
     // Ids and cache busters.
     ["app.js?v=a1b2c3d4e5f6a7b8c9d0", "app.js?v="],
     ["Request 550e8400-e29b-41d4-a716-446655440000 done", "Request done"],
@@ -313,7 +353,40 @@ test("normalizeLine: only what's certainly noise goes; everything else is the ju
       assert.equal(PD.normalizeLine(line), want);
       assert.equal(PD.normalizeLine(PD.normalizeLine(line)), want, "normalizing twice changes nothing");
     });
-  await check("a title loses every date and time", () => assert.equal(PD.normalizeTitle("Inbox 3:45 PM 10/13/2026"), "Inbox"));
+  await check("a title loses every date and time", () => {
+    assert.equal(PD.normalizeTitle("Inbox 3:45 PM 10/13/2026"), "Inbox");
+    assert.equal(PD.normalizeTitle("Inbox 10/13"), "Inbox");
+  });
+});
+
+test("screenLines: a screen's counts and bare ages are out too, so a feed doesn't cost a read every look", async () => {
+  const table = [
+    ["123 reactions · 45 comments", "reactions · comments"],
+    ["12K views", "views"],
+    ["1.2K watching", "watching"],
+    ["123 points by pg | hide | 45 comments", "points by pg | hide | comments"],
+    ["Likes: 340", "Likes"],
+    ["3,401 followers", "followers"],
+    ["5 online", "online"],
+    ["12 replies · 3 reposts · 1.5M+ shares", "replies · reposts · shares"],
+    ["Alice · 1,234 votes", "Alice · votes"],
+    ["Dana Smith 2h", "Dana Smith"],
+    ["Dana Smith · 2h", "Dana Smith"],
+    ["Posted 5 hr. ago", ""],
+    // What isn't a count stays: a price, a version, a slot, a message.
+    ["Bitcoin $86,200", "Bitcoin $86,200"],
+    ["Version 2.10.15 released", "Version 2.10.15 released"],
+    ["Sat Oct 18 · 8:10 AM · 4 players · Book", "Sat Oct 18 · 8:10 AM · 4 players · Book"],
+    ["Them: are you free at 5?", "Them: are you free at 5?"],
+    ["3. Bops ships monitors", "3. Bops ships monitors"],
+  ];
+  for (const [line, want] of table) await check(JSON.stringify(line), () => assert.deepEqual(PD.screenLines([line]), want ? [want] : []));
+  await check("a feed whose counts ticked looks the same; a new post doesn't", () => {
+    const feed = (v, c) => ["Dana posted a photo", `${v} views · ${c} comments`, "Sam shared an article", `${c + 4} likes`];
+    assert.deepEqual(PD.screenLines(feed(1200, 45)), PD.screenLines(feed(1350, 52)));
+    assert.notDeepEqual(PD.screenLines(feed(1200, 45)), PD.screenLines([...feed(1200, 45), "Jordan posted a video"]));
+  });
+  await check("page watches keep counts", () => assert.equal(PD.normalizeLine("1.2K views"), "1.2K views"));
 });
 
 test("pageLinesOf and newLines", async () => {
@@ -450,7 +523,7 @@ test("the loop: nothing until due; the same page, or only its stamps, costs noth
     assert.equal(calls.length, 1);
     assert.equal(calls[0].state.added, "1,388 watching");
     assert.equal(calls[0].state.before, "1,204 watching");
-    assert.match(calls[0].questions.waiting.instructions, /a count that ticked \(views, likes, points, comments, watching\), an ad or a banner, the same things in a new order, or a cookie, sign in or error page shown instead of the page are not news, unless `look_for` is about them\./);
+    assert.match(calls[0].questions.waiting.instructions, /a count that ticked \(views, likes, points, comments, watching\), an ad or a banner, the same things in a new order, or a cookie, sign in or error page shown instead of the page \(or the page back after one\) are not news, unless `look_for` is about them\./);
     assert.equal(headsUps(id).length, 0);
   });
   jev.waiting = () => 0.9;
@@ -819,7 +892,7 @@ test("every line of a page counts, not just its first ones", async () => {
   jev.waiting = () => 0.9;
 });
 
-test("many new lines: one judge call, the first 80 and a count of the rest, and nothing held back", async () => {
+test("many new lines: one judge call with up to 200 of them and a count of the rest, which come up at the next read", async () => {
   jevOn();
   const id = await pageWatch("/listings", ["Listings", "Filter by city"], { lookFor: "a loft in Brooklyn" });
   const judged = () => jev.calls.filter(isJudge);
@@ -837,20 +910,32 @@ test("many new lines: one judge call, the first 80 and a count of the rest, and 
     assert.equal(calls[0].state.more_added, undefined);
     assert.equal(headsUps(id).at(-1)?.text, "Heads up, something new on Prices: “Loft in Brooklyn, $2,400”");
   });
-  const more = Array.from({ length: 150 }, (_, i) => `Room ${i + 1} in the Bronx, $900`);
-  await check("150 new lines: one call with the first 80 and how many more, and the whole page is kept", async () => {
-    jev.waiting = () => 0.1;
+  const more = Array.from({ length: 250 }, (_, i) => (i === 230 ? "Loft in the Bronx, $1,900" : `Room ${i + 1} in the Bronx, $900`));
+  await check("250 new lines: one call with the first 200 and how many more; those 50 aren't kept", async () => {
+    jev.waiting = (state) => (state.added.includes("Loft") ? 0.95 : 0.1);
+    jev.item = (state) => `l${state.added.split("\n").findIndex((l) => l.includes("Loft"))}`;
     serve("/listings", "Prices", ["Listings", "Filter by city", ...items, ...more]);
     wait(30);
     const before = judged().length;
     assert.equal(await tick(id), "changed");
     const calls = judged().slice(before);
     assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0].state.added.split("\n"), more.slice(0, 80));
-    assert.equal(calls[0].state.more_added, "70 more new lines, not shown");
-    assert.equal(watchOf(id).page.digests.length, 2 + 60 + 150);
+    assert.deepEqual(calls[0].state.added.split("\n"), more.slice(0, 200));
+    assert.equal(calls[0].state.more_added, "50 more new lines, not shown now (they come next read)");
+    assert.equal(watchOf(id).page.digests.length, 2 + 60 + 200);
+    assert.ok(!watchOf(id).page.digests.includes(PD.lineDigest("Loft in the Bronx, $1,900")));
   });
-  await check("the next read has nothing left over: the same page, no call", async () => {
+  await check("the next read judges the 50 left over, and the loft among them is told", async () => {
+    wait(30);
+    const before = judged().length;
+    assert.equal(await tick(id), "told");
+    assert.equal(judged().length, before + 1);
+    assert.deepEqual(judged().at(-1).state.added.split("\n"), more.slice(200));
+    assert.equal(judged().at(-1).state.more_added, undefined);
+    assert.equal(headsUps(id).at(-1)?.text, "Heads up, something new on Prices: “Loft in the Bronx, $1,900”");
+    assert.equal(watchOf(id).page.digests.length, 2 + 60 + 250);
+  });
+  await check("then nothing is left over: the same page, no call", async () => {
     wait(30);
     const before = judged().length;
     assert.equal(await tick(id), "same");
@@ -870,14 +955,34 @@ test("many new lines: one judge call, the first 80 and a count of the rest, and 
     assert.deepEqual(reads, ["told", "same", "same"]);
     assert.equal(headsUps(id).length, told + 1);
   });
-  await check("a sure yes with no line picked quotes the first line the judge was shown", async () => {
+  await check("a sure yes with no line picked says the page changed and what it's watched for, quoting no line", async () => {
     jev.waiting = () => 0.95;
     jev.item = () => "none";
     serve("/listings", "Prices", ["Listings", "Filter by city", "Penthouse in Brooklyn, $9,000", "Studio in Queens, $1,000", ...items]);
     wait(30);
     assert.equal(await tick(id), "told");
-    assert.equal(headsUps(id).at(-1)?.text, "Heads up, something new on Prices: “Penthouse in Brooklyn, $9,000”");
+    assert.equal(headsUps(id).at(-1)?.text, "Heads up, Prices changed. It looks like what you're watching for: a loft in Brooklyn.");
+    assert.equal(watchOf(id).alert.text, "Changed: a loft in Brooklyn");
     spoken.push(headsUps(id).at(-1)?.text);
+  });
+  await check("a long look_for is cut to a few words", async () => {
+    W.editWatch(id, "a loft in Brooklyn or Queens with two bedrooms and a balcony under $3,000.");
+    S.update((s) => (s.watches.find((w) => w.id === id).alert = undefined));
+    serve("/listings", "Prices", ["Listings", "Filter by city", "Duplex in Queens, $2,900"]);
+    wait(30);
+    assert.equal(await tick(id), "told");
+    assert.equal(headsUps(id).at(-1)?.text, "Heads up, Prices changed. It looks like what you're watching for: a loft in Brooklyn or Queens with two…");
+  });
+  await check("no OpenAI line picked (null): the same plain heads-up", async () => {
+    jevOff();
+    openai.answer = () => ({ matches: true, line: null });
+    S.update((s) => (s.watches.find((w) => w.id === id).alert = undefined));
+    serve("/listings", "Prices", ["Listings", "Filter by city", "Loft in Brooklyn, $2,200"]);
+    wait(30);
+    assert.equal(await tick(id), "told");
+    assert.match(headsUps(id).at(-1)?.text, /^Heads up, Prices changed\. It looks like what you're watching for: /);
+    openai.answer = () => ({ matches: true, line: 0 });
+    jevOn();
   });
   jev.waiting = () => 0.9;
   jev.item = () => "l0";
@@ -899,20 +1004,21 @@ test("what comes and goes: counts ticking, a banner rotating, a reorder, a cooki
     assert.equal(judged().at(-1).state.added.split("\n").length, 12);
     assert.equal(headsUps(id).length, 0);
   });
-  await check("a banner that rotates: judged once, then nothing written while it goes and comes back", async () => {
+  await check("a banner that rotates: each one that comes back is new again, one judge call a read, and no heads-up when it doesn't match", async () => {
     serve("/hn", "Prices", [...hn(140), "Banner: free shipping"]);
     wait(30);
     const j1 = judged().length;
     assert.equal(await tick(id), "changed");
     assert.equal(judged().length, j1 + 1);
-    const kept = structuredClone(watchOf(id).page);
-    for (const banner of ["Banner: spring sale", "Banner: free shipping", "Banner: spring sale"]) {
+    for (const banner of ["Banner: spring sale", "Banner: free shipping"]) {
       serve("/hn", "Prices", [...hn(140), banner]);
       wait(15);
-      assert.equal(await tick(id), "same", banner);
+      assert.equal(await tick(id), "changed", banner);
+      assert.equal(judged().at(-1).state.added, banner);
     }
-    assert.equal(judged().length, j1 + 1);
-    assert.deepEqual(watchOf(id).page, kept, "nothing written");
+    assert.equal(judged().length, j1 + 3);
+    assert.equal(headsUps(id).length, 0);
+    assert.equal(watchOf(id).page.seen, undefined, "nothing kept of lines that went");
   });
   await check("the same lines in a new order (no rank on them): nothing new, nothing written", async () => {
     const plain = ["Apples", "Pears", "Plums", "Figs"];
@@ -938,7 +1044,7 @@ test("what comes and goes: counts ticking, a banner rotating, a reorder, a cooki
     jev.waiting = () => 0.1;
     jev.item = () => "l0";
   });
-  await check("a cookie page served instead: one judge call, and the page after it isn't new", async () => {
+  await check("a cookie page served instead: one judge call, and one more when the page is back (the judge is told that isn't news)", async () => {
     serve("/hn", "Prices", ["We use cookies", "Accept all", "Manage settings"]);
     wait(30);
     const j2 = judged().length;
@@ -947,8 +1053,14 @@ test("what comes and goes: counts ticking, a banner rotating, a reorder, a cooki
     assert.equal(watchOf(id).page.error, undefined, "not a failure");
     serve("/hn", "Prices", [...hn(140), "Banner: spring sale"]);
     wait(30);
+    assert.equal(await tick(id), "changed");
+    assert.equal(judged().length, j2 + 2);
+    assert.equal(judged().at(-1).state.before, "We use cookies\nAccept all\nManage settings");
+    assert.match(judged().at(-1).questions.waiting.instructions, /a cookie, sign in or error page shown instead of the page \(or the page back after one\) are not news/);
+    assert.equal(headsUps(id).length, 0);
+    wait(30);
     assert.equal(await tick(id), "same");
-    assert.equal(judged().length, j2 + 1);
+    assert.equal(judged().length, j2 + 2);
   });
   await check("a busy feed whose items all turn over each read: judged every read, never a failure", async () => {
     const chrome = ["Newest posts", "Sort: new", "Filter"];
@@ -970,58 +1082,101 @@ test("what comes and goes: counts ticking, a banner rotating, a reorder, a cooki
   jev.waiting = () => 0.9;
 });
 
-test("a line that went and comes back: not new for 7 days, new after", async () => {
+test("a line that went and comes back is new again: a status or a restock that recurs is told again", async () => {
   jevOn();
   const judged = () => jev.calls.filter(isJudge);
-  const id = await pageWatch("/stock", ["Widget Pro", "Status: In stock", "Ships free"], { lookFor: "back in stock" });
-  jev.waiting = () => 0.1;
-  serve("/stock", "Prices", ["Widget Pro", "Status: Sold out", "Ships free"]);
-  wait(30);
-  await tick(id);
-  await check("back within 7 days (it went lately: a banner, a block that comes and goes): not judged", async () => {
-    serve("/stock", "Prices", ["Widget Pro", "Status: In stock", "Ships free"]);
-    wait(6 * 1440);
-    const j = judged().length;
-    assert.equal(await tick(id), "same");
-    assert.equal(judged().length, j);
-    assert.ok(watchOf(id).page.seen.every((e) => /^[0-9a-z]+@[0-9a-z]+$/.test(e)), "each with when it went");
+  const id = await pageWatch("/status-api", ["Acme status", "API · Operational", "Website · Operational"], { lookFor: "an outage", title: "Status" });
+  jev.waiting = (state) => (state.added.includes("Outage") ? 0.95 : 0.1);
+  jev.item = () => "l0";
+  const read = async (api) => {
+    serve("/status-api", "Status", ["Acme status", `API · ${api}`, "Website · Operational"]);
+    wait(30);
+    return tick(id);
+  };
+  await check("an outage is told", async () => {
+    assert.equal(await read("Major Outage"), "told");
+    assert.equal(headsUps(id).at(-1)?.text, "Heads up, something new on Status: “API · Major Outage”");
   });
-  await check("taken in at the hourly save, so it stays known while it's there", async () => {
-    assert.ok(watchOf(id).page.digests.includes(PD.lineDigest("Status: In stock")));
-    wait(3 * 1440);
+  await check("back to operational: judged (it came back), no heads-up", async () => {
     const j = judged().length;
-    assert.equal(await tick(id), "same");
-    assert.equal(judged().length, j);
-  });
-  await check("back after 7 days: judged like any new line, and told", async () => {
-    // Sold out again, taken in at the hourly save ("In stock" went now).
-    serve("/stock", "Prices", ["Widget Pro", "Status: Sold out", "Ships free"]);
-    wait(61);
-    assert.equal(await tick(id), "same");
-    serve("/stock", "Prices", ["Widget Pro", "Status: In stock", "Ships free"]);
-    wait(8 * 1440);
-    jev.waiting = () => 0.95;
-    jev.item = () => "l0";
-    const j = judged().length;
-    assert.equal(await tick(id), "told");
+    assert.equal(await read("Operational"), "changed");
     assert.equal(judged().length, j + 1);
-    assert.equal(headsUps(id).at(-1)?.text, "Heads up, something new on Prices: “Status: In stock”");
+    assert.equal(judged().at(-1).state.added, "API · Operational");
+    assert.equal(judged().at(-1).state.already_told, undefined, "the judge isn't told to skip what was told before");
   });
-  await check("the same words again with only a stamp moved aren't told twice", async () => {
-    serve("/stock", "Prices", ["Widget Pro", "Status: Sold out", "Ships free"]);
-    wait(61);
-    assert.equal(await tick(id), "same");
-    serve("/stock", "Prices", ["Widget Pro", "Status: In stock · updated 9:15 AM", "Ships free"]);
-    wait(8 * 1440);
+  await check("the same outage again while the first alert still shows: judged, not told twice", async () => {
     const told = headsUps(id).length;
-    assert.equal(await tick(id), "changed");
+    assert.equal(await read("Major Outage"), "changed");
     assert.equal(headsUps(id).length, told);
+    assert.equal(await read("Operational"), "changed");
+  });
+  await check("the user saw the alert: the next outage, two days later, is told again", async () => {
+    W.seenWatch(id);
+    assert.equal(watchOf(id).alert, undefined);
+    const told = headsUps(id).length;
+    wait(2 * 1440);
+    const j = judged().length;
+    assert.equal(await read("Major Outage"), "told");
+    assert.equal(judged().length, j + 1);
+    assert.equal(headsUps(id).length, told + 1);
+    assert.equal(headsUps(id).at(-1)?.text, "Heads up, something new on Status: “API · Major Outage”");
+    assert.deepEqual(watchOf(id).told.slice(-2), ["API · Major Outage", "API · Major Outage"]);
+  });
+  await check("a restock after a sell out is told again (no number in it, so no \"was\")", async () => {
+    const stock = await pageWatch("/stock", ["Widget Pro", "Status: In stock", "Ships free"], { lookFor: "back in stock" });
+    jev.waiting = (state) => (state.added.includes("In stock") ? 0.95 : 0.1);
+    const set = async (status) => {
+      serve("/stock", "Prices", ["Widget Pro", `Status: ${status}`, "Ships free"]);
+      wait(30);
+      return tick(stock);
+    };
+    assert.equal(await set("Sold out"), "changed");
+    assert.equal(await set("In stock"), "told");
+    W.seenWatch(stock);
+    assert.equal(await set("Sold out"), "changed");
+    assert.equal(await set("In stock"), "told");
+    assert.equal(headsUps(stock).length, 2);
+    assert.equal(headsUps(stock).at(-1)?.text, "Heads up, something new on Prices: “Status: In stock”");
+  });
+  await check("a line that blinks out and back between saves is still known: nothing to judge", async () => {
+    const blink = await pageWatch("/blink", ["Widget Pro", "Limited offer", "Ships free"], { lookFor: "a price drop" });
+    serve("/blink", "Prices", ["Widget Pro", "Ships free"]);
+    wait(30);
+    assert.equal(await tick(blink), "same", "nothing added: nothing written");
+    serve("/blink", "Prices", ["Widget Pro", "Limited offer", "Ships free"]);
+    wait(30);
+    const j = judged().length;
+    assert.equal(await tick(blink), "same");
+    assert.equal(judged().length, j);
   });
   jev.waiting = () => 0.9;
   jev.item = () => "l0";
 });
 
-test("a page that comes back empty is a failed read, never a new baseline", async () => {
+test("a long thread whose scores all ticked, with a new reply at the bottom: one call sees every line, and the reply is told", async () => {
+  jevOn();
+  const judged = () => jev.calls.filter(isJudge);
+  const comments = (bump) => Array.from({ length: 100 }, (_, i) => [`Comment ${i + 1}: works on my machine, build ${i + 1}`, `user${i} ${12 + i + bump} points`]).flat();
+  const id = await pageWatch("/scores", ["Thread: the release", ...comments(0)], { lookFor: "a reply from the OP", title: "Thread" });
+  jev.waiting = (state) => (state.added.includes("OP:") ? 0.95 : 0.1);
+  jev.item = (state) => `l${state.added.split("\n").findIndex((l) => l.startsWith("OP:"))}`;
+  serve("/scores", "Thread", ["Thread: the release", ...comments(1), "OP: Shipping the fix tonight"]);
+  wait(30);
+  const j = judged().length;
+  assert.equal(await tick(id), "told");
+  await check("one call, with all 101 new lines and none left over", () => {
+    assert.equal(judged().length, j + 1);
+    const added = judged().at(-1).state.added.split("\n");
+    assert.equal(added.length, 101);
+    assert.equal(added.at(-1), "OP: Shipping the fix tonight");
+    assert.equal(judged().at(-1).state.more_added, undefined);
+  });
+  await check("the reply is told", () => assert.equal(headsUps(id).at(-1)?.text, "Heads up, something new on Thread: “OP: Shipping the fix tonight”"));
+  jev.waiting = () => 0.9;
+  jev.item = () => "l0";
+});
+
+test("a web page that comes back with no text is a failed read, never a new baseline; JSON or text that's empty is just empty", async () => {
   jevOn();
   const judged = () => jev.calls.filter(isJudge);
   const id = await pageWatch("/restock", ["Widget Pro", "Status: sold out"], { lookFor: "back in stock" });
@@ -1062,6 +1217,33 @@ test("a page that comes back empty is a failed read, never a new baseline", asyn
     const j = judged().length;
     assert.notEqual(await tick(id), "failed");
     assert.equal(judged().length, j + 1);
+  });
+  await check("a JSON list that empties is the page as it is, not a failure; the next item in it is judged and told", async () => {
+    pages.set("/issues.json", { type: "application/json", body: JSON.stringify([{ title: "Issue 1 open" }]) });
+    const issues = (await W.startPageWatch("boppy", { url: at("/issues.json"), lookFor: "a new issue" })).id;
+    pages.set("/issues.json", { type: "application/json", body: "[]" });
+    wait(30);
+    assert.notEqual(await tick(issues), "failed");
+    assert.equal(watchOf(issues).page.error, undefined);
+    assert.equal(watchOf(issues).page.failures, undefined);
+    jev.waiting = (state) => (state.added.includes("Issue 2") ? 0.95 : 0.1);
+    pages.set("/issues.json", { type: "application/json", body: JSON.stringify([{ title: "Issue 2 open" }]) });
+    wait(30);
+    assert.equal(await tick(issues), "told");
+    assert.equal(headsUps(issues).at(-1)?.text, `Heads up, something new on 127.0.0.1:${PORT}/issues.json: “"title": "Issue 2 open" (was "title": "Issue 1 open")”`);
+  });
+  await check("an empty JSON list or text file can be watched from the start", async () => {
+    pages.set("/none.json", { type: "application/json", body: "[]" });
+    pages.set("/none.txt", { type: "text/plain", body: "" });
+    const a = await W.startPageWatch("boppy", { url: at("/none.json"), lookFor: "a new issue" });
+    const b = await W.startPageWatch("boppy", { url: at("/none.txt"), lookFor: "anything" });
+    assert.deepEqual(a.page.digests, []);
+    assert.deepEqual(b.page.digests, []);
+    wait(30);
+    assert.equal(await tick(a.id), "same");
+    pages.set("/none.txt", { type: "text/plain", body: "Release 1.0 is out" });
+    jev.waiting = () => 0.95;
+    assert.equal(await tick(b.id), "told");
   });
   await check("a watch from before every line was kept (no digests) is taken in as it is", async () => {
     S.update((s) => Object.assign(s.watches.find((w) => w.id === id).page, { digests: undefined, hash: undefined }));
@@ -1186,20 +1368,25 @@ test("a screen watch: a clock on the page is not a change", async () => {
     assert.equal(await tick("watch_screen"), "same");
     assert.equal(reads(), r0 + 1);
   });
-  await check("a counter that ticked is read (Jev decides, told it isn't news unless asked)", async () => {
+  await check("a counter that ticked is not read either (a feed's counts would cost a read every look)", async () => {
     const r1 = reads();
     screenLines = ["Top stories", "Bops ships monitors", "Updated 4:05 PM", "15 comments", "Posted 22m ago"];
     skew += 31_000;
-    await tick("watch_screen");
-    assert.equal(reads(), r1 + 1);
-    assert.match(jev.calls.filter(isScreenRead).at(-1).questions.waiting.instructions, /a count that ticked/);
+    assert.equal(await tick("watch_screen"), "same");
+    for (const [views, likes] of [["1.2K", 340], ["1.3K", 352], ["2K", 400]]) {
+      screenLines = ["Top stories", "Bops ships monitors", "Updated 4:05 PM", `${views} views · ${likes} likes`, "Posted 22m ago"];
+      skew += 31_000;
+      await tick("watch_screen");
+    }
+    assert.equal(reads(), r1 + 1, "read once, when the views line first showed, then not again");
   });
-  await check("a new story is read", async () => {
+  await check("a new story is read (told a moved count isn't news unless asked)", async () => {
     const r1 = reads();
     screenLines = ["Top stories", "Bops raises a round", "Bops ships monitors", "Updated 4:11 PM"];
     skew += 31_000;
     await tick("watch_screen");
     assert.equal(reads(), r1 + 1);
+    assert.match(jev.calls.filter(isScreenRead).at(-1).questions.waiting.instructions, /a count that ticked/);
   });
   await check("a reply that differs from an earlier one only by its time is read", async () => {
     screenLines = ["Top stories", "Bops raises a round", "Bops ships monitors", "Updated 3:59 PM", "Them: 9:30", "Me: what time tomorrow?"];

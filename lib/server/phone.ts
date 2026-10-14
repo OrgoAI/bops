@@ -657,11 +657,11 @@ async function textIn(b: Bot, line: Line, e: ApEvent, deliveryId: string, verdic
   if (!mine) return;
   // Work it started (its own threads, or a teammate's it handed off) texts its result back too, and so does
   // a routine's thread this text asked for (Run now), unless the routine already texts its results. A
-  // routine's run on its time that happened meanwhile isn't this text's: it goes where the routine sends it
-  // (never twice).
+  // routine's run on its time, or one asked for in the app or by another message, that happened meanwhile
+  // isn't this text's: it goes where the routine sends it (never twice).
   const { ranNow } = await import("./routines");
   const askedFor = (id: string) => {
-    const r = ranNow(id);
+    const r = ranNow(id, mine.id);
     return !!r && r.deliverTo?.kind !== "text";
   };
   const started = getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && (!x.routineId || askedFor(x.id)));

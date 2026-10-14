@@ -470,14 +470,24 @@ await check("a task run: a fresh thread with the routine and procedure, the chip
   assert.deepEqual(end, { suppress: false });
   assert.equal(get(r.id).last.status, "ok");
   assert.equal(get(r.id).last.sessionId, s.id);
-  // Run now once it's done: a new thread, and the chip says so.
+  // Run now once it's done, asked for in a chat message: a new thread, and the chip says so.
   const m = state.messages.length;
-  const now = await R.runRoutine(r.id, { manual: true });
+  const now = await R.runRoutine(r.id, { manual: "msg_ask" });
   assert.equal(now.status, "running");
   assert.ok(msgsSince(m).some((x) => x.text === "Routine · Every day at 5 PM · run now"));
-  // A Run now's thread: a text or a channel message that asked for it gets its result back there (phone.ts, channels.ts).
-  assert.equal(R.ranNow(now.sessionId)?.id, r.id);
+  // A Run now's thread: the text or channel message that asked for it gets its result back there (phone.ts, channels.ts); no other message does.
+  assert.equal(R.ranNow(now.sessionId, "msg_ask")?.id, r.id);
+  assert.equal(R.ranNow(now.sessionId, "msg_other"), undefined, "another message didn't ask for it");
+  assert.equal(R.ranNow(now.sessionId)?.id, r.id, "asked for in a chat");
   state.sessions.find((x) => x.id === now.sessionId).status = "done";
+  // Run now in the Bops app: the chip says so, but no text or channel turn gets its result.
+  const k = state.messages.length;
+  const inApp = await R.runRoutine(r.id, { manual: "app" });
+  assert.equal(inApp.status, "running");
+  assert.ok(msgsSince(k).some((x) => x.text === "Routine · Every day at 5 PM · run now"));
+  assert.equal(R.ranNow(inApp.sessionId, "msg_ask"), undefined);
+  assert.equal(R.ranNow(inApp.sessionId), undefined, "never one from the app");
+  state.sessions.find((x) => x.id === inApp.sessionId).status = "done";
   R.deleteRoutine(r.id);
 });
 
@@ -628,13 +638,17 @@ await check("a chat run: quiet NOTHING posts nothing, an answer posts as the bot
   assert.equal((await R.runRoutine(id, { manual: true })).status, "quiet", "NOTHING as text is quiet too");
   fake.chatAnswer = async () => ({ text: "The blue chair is $40 now, down from $60." });
   const pings = fake.pings.length;
-  const ok = await R.runRoutine(id, { manual: true });
+  const ok = await R.runRoutine(id, { manual: "msg_ask" });
   assert.equal(ok.status, "ok");
   const posted = msgsSince(n).find((m) => m.role === "bot");
   assert.equal(posted.text, "The blue chair is $40 now, down from $60.");
-  // Run now: marked as asked for, so a turn in Slack or by text that asked for it sends it back there (lib/types.ts turnsOwn).
+  // Run now asked for in a chat message: marked so, so a turn in Slack or by text that asked for it sends it back there (lib/types.ts turnsOwn).
   assert.deepEqual(posted.routine, { id, manual: true });
   assert.equal(fake.pings.length, pings + 1, "worth a chime is asked");
+  // Run now in the app: no turn's, so a text or channel turn running meanwhile doesn't send it.
+  const k = state.messages.length;
+  await R.runRoutine(id, { manual: "app" });
+  assert.deepEqual(msgsSince(k).find((m) => m.role === "bot").routine, { id });
   fake.chatAnswer = async () => ({ text: null, error: "Out of AI credit" });
   const bad = await R.runRoutine(id, { manual: true });
   assert.equal(bad.status, "failed");
@@ -662,10 +676,10 @@ await check("a chat run that started a thread: the thread is the run, the turn's
   const n = state.messages.length;
   const texts = fake.texts.length;
   fake.chatAnswer = async (job) => startThread(job, "Checking the shop on my computer now.");
-  const run = await R.runRoutine(quiet.id, { manual: true });
+  const run = await R.runRoutine(quiet.id, { manual: "msg_ask" });
   assert.equal(run.status, "running");
   assert.ok(run.sessionId, "the thread is recorded as the run");
-  assert.equal(R.ranNow(run.sessionId)?.id, quiet.id, "a Run now's thread, from a chat run too");
+  assert.equal(R.ranNow(run.sessionId, "msg_ask")?.id, quiet.id, "a Run now's thread, from a chat run too");
   assert.equal(state.messages.length, n, "a quiet run posts nothing before its thread has something");
   assert.equal(fake.texts.length, texts, "nothing texted");
   // While that thread goes, another run waits, and the thread stays the run's.
@@ -949,33 +963,67 @@ await check("a routine's thread failing the same way again isn't said or sent ag
   R.deleteRoutine(r.id);
 });
 
-await check("a daily run missed while the Mac slept runs once late, even with its next time close, and never skips day after day", async () => {
+await check("a daily run missed while the Mac slept: once late, or at its time when that's within the hour; never skipped twice in a row", async () => {
   const saved = clock;
   clock = at("2026-10-16T22:00:00Z"); // Friday 6 PM in New York
   const r = R.createRoutine("bot_main", "Digest", "", { kind: "daily", time: "09:00" }, { reminder: "Your digest" }).routine;
   eq(r.nextRunAt, at("2026-10-17T13:00:00Z"), "Saturday 9 AM");
   const n = state.messages.length;
   const digests = () => msgsSince(n).filter((m) => m.routine?.id === r.id && m.text === "Your digest").length;
-  // Missed all weekend, opened Monday at 8:50: once now (late, and said), not once a missed day; then 9 AM on time.
+  // Missed all weekend, opened Monday at 8:50: its 9 AM is 10 minutes off, so it waits for that (once, not late and then again).
   clock = at("2026-10-19T12:50:00Z");
   tick();
   await sleep(10);
-  assert.equal(digests(), 1, "once, late");
-  assert.ok(msgsSince(n).some((m) => m.text === "Routine · Every day at 9 AM · late, it was due Oct 17"), msgsSince(n).map((m) => m.text).join(" | "));
+  assert.equal(digests(), 0, "not late, with 9 AM so close");
+  assert.equal(get(r.id).last.status, "skipped");
+  assert.match(get(r.id).last.error, /^Missed while Bops was off or this Mac was asleep \(it was due Oct 17\); runs next today 9 AM$/);
+  noDashes(get(r.id).last.error, "skip reason");
   eq(get(r.id).nextRunAt, at("2026-10-19T13:00:00Z"), "today 9 AM");
   clock = at("2026-10-19T13:00:30Z");
   tick();
   await sleep(10);
-  assert.equal(digests(), 2, "and on time");
-  // A Mac awake only 8:05 to 8:55 each morning: each day's missed 9 AM runs at the next wake, never skipped for good.
-  for (const day of [20, 21, 22, 23]) {
+  assert.equal(digests(), 1, "once, on time");
+  assert.ok(!msgsSince(n).some((m) => m.text.startsWith("Routine · Every day at 9 AM · late")), "nothing late");
+  // Missed one day and opened at 7:30, an hour and a half before its time: it runs now, late, and says so.
+  clock = at("2026-10-21T11:30:00Z");
+  tick();
+  await sleep(10);
+  assert.equal(digests(), 2, "late");
+  assert.ok(msgsSince(n).some((m) => m.text === "Routine · Every day at 9 AM · late, it was due yesterday 9 AM"), msgsSince(n).map((m) => m.text).join(" | "));
+  eq(get(r.id).nextRunAt, at("2026-10-21T13:00:00Z"), "and at 9 AM too");
+  // A Mac awake only 8:05 to 8:55 each morning: a missed 9 AM waits once, then runs late at the next wake; never skipped for good.
+  const before = digests();
+  const status = [];
+  for (const day of [22, 23, 24, 25]) {
     clock = at(`2026-10-${day}T12:05:00Z`);
     tick();
     await sleep(10);
+    status.push(get(r.id).last.status);
   }
-  assert.equal(digests(), 5, "every day it was missed (the 20th's 9 AM came after that wake)");
-  assert.notEqual(get(r.id).last.status, "skipped");
+  assert.deepEqual(status, ["skipped", "ok", "skipped", "ok"], "never skipped twice in a row");
+  assert.equal(digests(), before + 2);
   R.deleteRoutine(r.id);
+  clock = saved;
+});
+
+await check("a weekdays or weekly run missed while the Mac slept waits only when its next time is within the hour", async () => {
+  const saved = clock;
+  clock = at("2026-10-16T12:00:00Z"); // Friday 8 AM in New York
+  const wd = R.createRoutine("bot_main", "Standup", "", { kind: "weekdays", time: "09:00" }, { reminder: "Standup time" }).routine;
+  const wk = R.createRoutine("bot_main", "Weekly plan", "", { kind: "weekly", day: 1, time: "08:30" }, { reminder: "Plan the week" }).routine;
+  const n = state.messages.length;
+  const said = (text) => msgsSince(n).filter((m) => m.text === text).length;
+  // Friday's 9 AM missed; opened Monday at 8:10, 50 minutes before the next: it waits.
+  get(wk.id).nextRunAt = at("2026-10-12T12:30:00Z"); // last Monday 8:30, missed a week ago
+  clock = at("2026-10-19T12:10:00Z");
+  tick();
+  await sleep(10);
+  assert.equal(said("Standup time"), 0, "the weekdays one waits for 9 AM");
+  assert.equal(get(wd.id).last.status, "skipped");
+  // The weekly one: its next time (today 8:30) is 20 minutes off, so it waits too.
+  assert.equal(said("Plan the week"), 0);
+  eq(get(wk.id).nextRunAt, at("2026-10-19T12:30:00Z"));
+  for (const r of [wd, wk]) R.deleteRoutine(r.id);
   clock = saved;
 });
 
@@ -1063,6 +1111,13 @@ await check("the route: create, refuse, run now, edit, pause, delete", async () 
   assert.equal(get(routine.id).enabled, false);
   const unknownRun = await route.PATCH(req("PATCH", { id: "rtn_none", action: "run" }));
   assert.equal(unknownRun.status, 400);
+  // Run now from the app: its thread is no text's or channel message's (ranNow), so its result goes only where the routine sends it.
+  const task = R.createRoutine("bot_main", "Payroll", "Sum up payroll", { kind: "weekly", day: 1, time: "09:00" }).routine;
+  const ranTask = await (await route.PATCH(req("PATCH", { id: task.id, action: "run" }))).json();
+  assert.equal(ranTask.run.status, "running");
+  assert.equal(R.ranNow(ranTask.run.sessionId), undefined);
+  state.sessions.find((x) => x.id === ranTask.run.sessionId).status = "done";
+  R.deleteRoutine(task.id);
   await route.DELETE(req("DELETE", { id: routine.id }));
   assert.equal(get(routine.id), undefined);
   R.deleteRoutine(moved.routine.id);

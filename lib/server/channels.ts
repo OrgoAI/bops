@@ -216,11 +216,12 @@ async function messageIn(linkId: string, m: Incoming, pool?: ChannelLink[]) {
   if (!mine) return;
   // Work it started (its own threads, or a teammate's it handed off) reports back here too, and so does a
   // routine's thread this message asked for (Run now), unless the routine already posts its results on
-  // this link. A routine's run on its time that happened meanwhile isn't this message's: it goes where the
-  // routine sends it, never into this conversation (a shared channel, maybe) or twice.
+  // this link. A routine's run on its time, or one asked for in the app or by another message, that
+  // happened meanwhile isn't this message's: it goes where the routine sends it, never into this
+  // conversation (a shared channel, maybe) or twice.
   const { ranNow } = await import("./routines");
   const askedFor = (id: string) => {
-    const r = ranNow(id);
+    const r = ranNow(id, mine.id);
     return !!r && !(r.deliverTo?.kind === "channel" && r.deliverTo.linkId === l.id);
   };
   const started = getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && (!x.routineId || askedFor(x.id)));

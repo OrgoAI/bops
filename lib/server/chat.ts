@@ -712,6 +712,9 @@ const NOT_FROM_OUTSIDE = new Set(["schedule", "manage_routine", "watch", "stop_w
 /** Lookups whose answers come from outside Bops: the web, email, apps and data. A turn that read one can't save a procedure. */
 const OUTSIDE_READS = new Set(["web_fetch", "check_email", "read_email", "use_app", ...DATA_TOOL_NAMES, ...CRM_TOOL_NAMES, ...ORBIT_TOOL_NAMES]);
 
+/** Work the bot starts or passes on, which may open web addresses in its signed-in browser: checked for them (turn's workRefused). */
+const WORK = new Set(["start_task", "hand_off", "tell_task", "create_bot"]);
+
 const KIND_NAME: Record<ChannelKind, string> = { slack: "Slack", telegram: "Telegram", discord: "Discord" };
 
 /** A lookup that threw, in plain words for the model. */
@@ -857,9 +860,10 @@ function ranWords(r: Routine, run: RoutineRun | null, here: string, since: numbe
  * The manage_routine tool, and what the model is told: run a routine now (and how it went), pause,
  * resume (refused, with why, when its time has passed), delete, or move where its task runs (refused
  * for the Mac when someone else set it up: routines.ts setRoutineWhere). A bot changes its own routines;
- * the main bot, anyone's on its team. Only on the user's own turns (NOT_FROM_OUTSIDE).
+ * the main bot, anyone's on its team. Only on the user's own turns (NOT_FROM_OUTSIDE). A run now is
+ * marked with the message that asked for it (`askedIn`, its id), so its result goes back only there.
  */
-async function manageRoutine(b: Bot, others: Bot[], a: ManageArgs, notes: string[], chatId: string): Promise<string> {
+async function manageRoutine(b: Bot, others: Bot[], a: ManageArgs, notes: string[], chatId: string, askedIn: string): Promise<string> {
   const owner = ownerName();
   const r = getState().routines.find((x) => x.id === a.routine_id);
   if (!r || (r.botId !== b.id && !(b.isMain && others.some((o) => o.id === r.botId)))) return "No such routine. Its id is in the Routines list.";
@@ -892,7 +896,7 @@ async function manageRoutine(b: Bot, others: Bot[], a: ManageArgs, notes: string
     let timer: ReturnType<typeof setTimeout> | undefined;
     const since = Date.now();
     const waited = new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), RUN_NOW_WAIT_MS)));
-    const run = await Promise.race([runRoutine(r.id, { manual: true }), waited]).finally(() => clearTimeout(timer));
+    const run = await Promise.race([runRoutine(r.id, { manual: askedIn }), waited]).finally(() => clearTimeout(timer));
     return ranWords(r, run, chatId, since);
   }
   return "That isn't something manage_routine does.";
@@ -901,43 +905,101 @@ async function manageRoutine(b: Bot, others: Bot[], a: ManageArgs, notes: string
 /* ---------------- Where the bot may go on the web ---------------- */
 
 /**
- * Web addresses and site names in a text: "https://x.example/a?b=1", "acme.com/pricing", "acme.com?ref=1".
- * Parentheses in pairs stay in one (a Wikipedia page); a closing one alone ends it (a markdown link). The
- * host in an email address isn't one.
+ * What ends a web address in a text: white space, quotes (straight and curly), brackets, a backslash (a
+ * line break in JSON, "\n", isn't part of the link before it), and CJK punctuation (。、！…).
  */
-const ADDRESSES =
-  /\bhttps?:\/\/(?:[^\s<>"'`()[\]]|\([^\s<>"'`()]*\))+|(?<![@.-])\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}(?::\d{2,5})?(?:[/?#](?:[^\s<>"'`()[\]]|\([^\s<>"'`()]*\))*)?/gi;
+const ADDRESS_END = "\\s<>\"'`()\\[\\]\\\\“”‘’«»「」『』【】〔〕《》〈〉（）。、，；：！？…";
+const ADDRESS_CHAR = `(?:[^${ADDRESS_END}]|\\([^${ADDRESS_END}]*\\))`;
 
-/** Slack's markup undone, so a link reads as it was written: <https://x.com/a|x.com/a> and <https://x.com/a> as the address, &amp; as &. */
+/**
+ * Web addresses and site names in a text: "https://x.example/a?b=1", "www.acme.com", "acme.com/pricing",
+ * "acme.com?ref=1". Parentheses in pairs stay in one (a Wikipedia page); a closing one alone ends it (a
+ * markdown link). Never part of an email address: not "jane.doe" in jane.doe@acme.example, nor the host
+ * after its "@". Whether a bare name is an address at all is `isAddress`'s to say.
+ */
+const ADDRESSES = new RegExp(
+  `\\bhttps?:\\/\\/${ADDRESS_CHAR}+|(?<![\\w@.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,24}(?![\\w-])(?![\\w.+-]*@)(?::\\d{2,5})?(?:[/?#]${ADDRESS_CHAR}*)?`,
+  "gi",
+);
+
+/** File and code names that look like site names ("Q3.pptx", "report.pdf", "Node.js"): an ending like these isn't a site's. */
+const FILE_ENDINGS = new Set("pdf csv xls xlsx doc docx ppt pptx key txt md json js ts py rb go java png jpg jpeg gif svg zip mp3 mp4 mov html htm".split(" "));
+
+/**
+ * Whether something ADDRESSES found is a web address: it starts with http://, https:// or www., or it's a
+ * name with a path ("bops.bot/pricing"), or a name whose ending isn't a file's ("bops.bot", not "Q3.pptx").
+ */
+function isAddress(raw: string) {
+  if (/^(?:https?:\/\/|www\.)/i.test(raw)) return true;
+  const name = /^[^/?#:]+/.exec(raw)?.[0] ?? "";
+  if (/^(?::\d+)?\//.test(raw.slice(name.length))) return true;
+  return !FILE_ENDINGS.has(name.slice(name.lastIndexOf(".") + 1).toLowerCase());
+}
+
+/** Slack's markup undone, so a link reads as it was written: <https://x.com/a|x.com/a> as the address and the words the user typed, &amp; as &. */
 const unslack = (text: string) =>
   text
-    .replace(/<(https?:\/\/[^|>\s]+)(?:\|[^>]*)?>/g, "$1")
+    .replace(/<(https?:\/\/[^|>\s]+)(?:\|([^>]*))?>/g, (_, url: string, label?: string) => (label ? `${url} ${label}` : url))
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
 
 /**
- * An address as compared: https:// in front when it has no scheme, the scheme and host in lower case, no
- * slash at the end of its path, and no "#" part unless `hash` (a page's own script reads that part, so a
- * task opening the page in a browser gives it away; web_fetch never sends it).
+ * An address as compared: its host in lower case without "www.", its path without a slash at the end, what's
+ * after "?", and no "#" part unless `hash` (a page's own script reads that part, so a task opening the page in
+ * a browser gives it away; web_fetch never sends it). http and https, and www or not, are the same address.
  */
 function addressKey(raw: string, hash = false): string | undefined {
   const t = raw.trim().replace(/[.,;:!?]+$/, "");
   try {
     const u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(t) ? t : `https://${t}`);
     if (u.protocol !== "http:" && u.protocol !== "https:") return undefined;
-    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}${u.search}${hash ? u.hash : ""}`;
+    return `${u.host.replace(/^www\./, "")}${u.pathname.replace(/\/+$/, "")}${u.search}${hash ? u.hash : ""}`;
   } catch {
     return undefined;
   }
 }
 
-/** The addresses in a text, as written and as compared. */
-const addressesIn = (text: string, hash = false) =>
+/** The web addresses in a text: as written, as compared (addressKey) and their host. */
+export const addressesIn = (text: string, hash = false) =>
   [...unslack(text).matchAll(ADDRESSES)].flatMap((m) => {
-    const key = addressKey(m[0], hash);
-    return key ? [{ raw: m[0].replace(/[.,;:!?]+$/, ""), key }] : [];
+    const key = isAddress(m[0]) ? addressKey(m[0], hash) : undefined;
+    return key ? [{ raw: m[0].replace(/[.,;:!?]+$/, ""), key, host: key.split(/[/?#]/)[0] }] : [];
   });
+
+/** Every string in a JSON value (its values, not its keys), in order. */
+const stringsIn = (v: unknown): string[] =>
+  typeof v === "string" ? [v] : Array.isArray(v) ? v.flatMap(stringsIn) : v && typeof v === "object" ? Object.values(v).flatMap(stringsIn) : [];
+
+/** A tool's answer as text to find addresses in: a JSON answer's strings, decoded ("\n" a line break again); any other answer as it is. */
+function answerText(out: string): string {
+  if (!/^\s*[[{]/.test(out)) return out;
+  try {
+    return stringsIn(JSON.parse(out)).join("\n");
+  } catch {
+    return out;
+  }
+}
+
+/**
+ * What came to the bots in a check_email or read_email answer, as text: the emails and messages no bot sent
+ * (not sent_by_you, and not from a bot's own address). An answer Bops can't read as JSON (an error, or a long
+ * thread cut short) brings nothing.
+ */
+function receivedMail(out: string): string {
+  const own = getState().bots.flatMap((x) => (x.email ? [x.email.toLowerCase()] : []));
+  try {
+    const j = JSON.parse(out) as { emails?: unknown[]; messages?: unknown[] };
+    const theirs = [...(j.emails ?? []), ...(j.messages ?? [])].filter((m) => {
+      const e = (m ?? {}) as { sent_by_you?: unknown; from?: unknown };
+      const from = String(e.from ?? "").toLowerCase();
+      return !e.sent_by_you && !own.some((a) => from.includes(a));
+    });
+    return stringsIn(theirs).join("\n");
+  } catch {
+    return "";
+  }
+}
 
 /**
  * The addresses web_search found in a response: its sources, and the citations in what the model wrote.
@@ -953,8 +1015,8 @@ function searchedAddresses(output: unknown[]): string[] {
   return out;
 }
 
-/** The most links a page read for the bot lists under its text. */
-const PAGE_LINKS = 40;
+/** The most links a page read for the bot lists under its text: all the page reader gives (web-page.ts LINKS_MAX, best first). */
+const PAGE_LINKS = 100;
 
 /**
  * A page's links as the bot reads them under its text, so it can follow one (an address on a page it read
@@ -1316,36 +1378,101 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     const tools = not ? all.filter((t) => !("name" in t) || !not.has(t.name)) : all;
     // What this turn was given: a tool it wasn't (a routine's run, someone else's turn) does nothing, whatever the model says.
     const offered = new Set(tools.map((t) => ("name" in t ? t.name : t.type)));
-    // The bot only opens web addresses it has seen written down (web_fetch, a web page watch, a routine's goal):
-    // in the user's own messages, the routine's job (its goal and procedure, on its run), or what a tool gave
-    // this turn (web_search's sources and citations, a page read and its links, an email, an app's or a data
-    // lookup's answer, memory). Never in the bot's own words: an address it makes up on a page's or an email's
-    // say, with the user's data in it, is written down nowhere, so it's never opened. A tool saying back what
-    // the bot gave it doesn't count either, nor a teammate's answer (another bot's own words). Exact addresses only (addressKey), never a whole site. A known limit:
-    // an address written down that leads back into the home (a name like 203.0.113.7.nip.io that points at the
-    // home's own public address, through the router) isn't caught here; safe-fetch refuses only private ones.
+    // Lines for the chat after the reply ("Remembered: …", "Scheduled …", "Didn't start …").
+    const notes: string[] = [];
+    // The bot only opens web addresses it has seen written down. It's checked for web_fetch, a page watch and a
+    // routine's goal, always; for the tasks it starts on a routine's run; and, on the user's own turn once it
+    // read something from outside (below), for the tasks it starts, hands off or passes a message on to, a new
+    // bot's first task, and a watch on its computer's screen. Written down means in:
+    // - the user's own messages, and on a routine's run its job (its goal and procedure);
+    // - web_search's sources and citations, and a page web_fetch read (its text and its links);
+    // - an email that came to the bots (never one a bot sent);
+    // - what an app (use_app) or a data lookup answered.
+    // Never in what the bots wrote themselves and a tool keeps or says back (procedures, memory, the CRM, Orbit,
+    // sent email, a teammate's answer), and never an address the bot itself wrote in a tool's input this turn,
+    // nor the start of one or more after one (madeUp): an address it makes up on a page's or an email's say, with
+    // the user's data in it, is then written down nowhere, so it's never opened. Exact addresses only (addressKey),
+    // never a whole site. A known limit: an address written down that leads back into the home (a name like
+    // 203.0.113.7.nip.io that points at the home's own public address, through the router) isn't caught here;
+    // safe-fetch refuses only private ones.
     const seenKeys = new Set<string>();
-    const see = (text: string, except = "") => {
-      const theirs = new Set(addressesIn(except).map((x) => x.key));
-      for (const x of addressesIn(text)) if (!theirs.has(x.key)) seenKeys.add(x.key);
+    const see = (text: string) => {
+      for (const x of addressesIn(text)) seenKeys.add(x.key);
     };
     for (const m of getState().messages.filter((x) => x.chatId === chatId && fromOwner(x)).slice(-20)) see(m.text);
     const job = bg ? [bg.goal, ...(bg.procedureId ? [findProcedure(b.id, bg.procedureId)].filter((p) => !!p).map((p) => procedureText(p!)) : [])].join("\n") : "";
     see(job);
     // A routine's own pages (the ones its job names): read every run, as the user set it up, so not said each time.
     const jobKeys = new Set(addressesIn(job).map((x) => x.key));
-    const seenFrom = `${owner}'s messages, ${bg ? "the routine's job, " : ""}or what your tools found this turn (search results, a page you read and its links, an email, an app or a lookup)`;
+    /** Addresses the bot wrote itself in a tool's input this turn that weren't written down then. */
+    const madeUp: string[] = [];
+    const wroteItself = (args: string) => {
+      let v: unknown = args;
+      try {
+        v = JSON.parse(args);
+      } catch {}
+      for (const s of stringsIn(v)) for (const x of addressesIn(s)) if (!seenKeys.has(x.key)) madeUp.push(x.key);
+    };
+    /** One of those, the start of one (cut short), or more after one with a path ("…?d=alex" said back as "…?d=alex%20phone"). */
+    const itsOwn = (key: string) => madeUp.some((m) => m === key || m.startsWith(key) || (/[/?#]/.test(m) && key.startsWith(m)));
+    /** What a tool brought in from outside: its addresses are written down, but the bot's own. */
+    const bringIn = (text: string) => {
+      for (const x of addressesIn(text)) if (!itsOwn(x.key)) seenKeys.add(x.key);
+    };
+    const seenFrom = `${owner}'s messages, ${bg ? "the routine's job, " : ""}or what your tools found this turn (search results, a page you read and its links, an email you got, or what an app or a data lookup answered)`;
     const notSeen = `Bops opens only web addresses written down in ${seenFrom}. Use the exact address from there, or ask ${owner} for it.`;
-    /** The first address in a text the bot hasn't seen written down, said for the model (undefined: none). */
+    /** The first address in a text the bot hasn't seen written down (undefined: none). */
+    const unseenIn = (text: string) => addressesIn(text).find((y) => !seenKeys.has(y.key));
+    /** The same, said for the model. */
     const unseen = (text: string) => {
-      const x = addressesIn(text).find((y) => !seenKeys.has(y.key));
+      const x = unseenIn(text);
       return x ? `${x.raw} isn't written down in ${seenFrom}. Use the exact address from there, or ask ${owner} for it.` : undefined;
     };
-    // Whether this turn read something from outside Bops (OUTSIDE_READS, web_search): it can't set how the bot works (save_procedure).
+    // Whether this turn read something from outside Bops (OUTSIDE_READS, web_search): it can't set how the bot
+    // works (save_procedure), and what it starts or passes on is checked for addresses (workRefused).
     let outsideRead = false;
     const sawWeb = (output: unknown[]) => {
       if ((output as { type?: string }[]).some((i) => i.type === "web_search_call")) outsideRead = true;
       for (const url of searchedAddresses(output)) see(url);
+    };
+    // On someone else's turn, every web address in work it starts or passes on must be one they wrote
+    // themselves, exactly (its path, what's after "?" and after "#" too; a site name alone counts): a page a
+    // task opens in the bot's signed-in browser could otherwise carry the user's data out in its address.
+    const strangerSaid = opts.outside ? ([...getState().messages].reverse().find((m) => m.chatId === chatId && (fromOutside(m) || !!m.call))?.text ?? "") : "";
+    const theirs = new Set(addressesIn(strangerSaid, true).map((x) => x.key));
+    /** The host of the first address in a task's words that the stranger didn't write (undefined: none, or the user's own turn). */
+    const notTheirs = (words: string) => (opts.outside ? addressesIn(words, true).find((y) => !theirs.has(y.key))?.host : undefined);
+    const refusals = new Map<string, string | null>();
+    /**
+     * Why a task can't start, a message go on to one, or a bot be made with its first task, as the bot asked
+     * (undefined: it can), said back to the model so it can try again, and noted in the chat. On someone else's
+     * turn: an address they didn't write (notTheirs). On a routine's run, or on the user's turn once it read
+     * something from outside: an address that isn't written down (unseen). Decided once for each call.
+     */
+    const workRefused = (item: { call_id: string; name: string; arguments: string }): string | undefined => {
+      if (!WORK.has(item.name) || !offered.has(item.name)) return undefined;
+      if (!refusals.has(item.call_id)) {
+        let a: { title?: unknown; goal?: unknown; then_on_mac?: unknown; message?: unknown; name?: unknown } = {};
+        try {
+          a = JSON.parse(item.arguments);
+        } catch {}
+        const words = (item.name === "tell_task" ? [a.message] : [a.goal, a.then_on_mac]).filter((x) => typeof x === "string").join("\n");
+        const not = item.name === "tell_task" ? "Not sent" : item.name === "create_bot" ? "Not created" : "Not started";
+        const what = item.name === "tell_task" ? "pass that on" : item.name === "create_bot" ? `create ${String(a.name ?? "the bot")}` : `start "${String(a.title ?? "")}"`;
+        const site = notTheirs(words);
+        const x = !opts.outside && (bg || outsideRead) ? unseenIn(words) : undefined;
+        if (site) notes.push(`Didn't ${what}: it would open an address on ${site} that the message didn't give`);
+        else if (x) notes.push(`Didn't ${what}: it would open an address on ${x.host} that Bops hasn't seen written down`);
+        refusals.set(
+          item.call_id,
+          site
+            ? `${not}: it would open an address on ${site} that ${outsideFrom} didn't give. Use only addresses they wrote, exactly, or none.`
+            : x
+              ? `${not}: ${x.raw} isn't written down in ${seenFrom}. Use the exact address from there, or ask ${owner} for it. Or write it without the address.`
+              : null,
+        );
+      }
+      return refusals.get(item.call_id) ?? undefined;
     };
     // web_search's sources come back with it, so a page it found can be read (seen).
     const include = offered.has("web_search") ? { include: ["web_search_call.action.sources" as const] } : {};
@@ -1414,13 +1541,15 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // App lookups come back to the model before it answers (a few rounds at most). Other tools
     // called along the way (start_task…) are kept and handled with the final answer's.
     const earlier: typeof response.output = [];
-    // Lines for the chat after the reply ("Remembered: …", "Scheduled …").
-    const notes: string[] = [];
     // Teammates asked along the way, shown over the reply.
     const asked: NonNullable<Message["asked"]> = [];
     type Args = Record<string, unknown> & { query?: string; action?: string; arguments?: Record<string, unknown>; fact?: string; question?: string };
-    /** One lookup's answer for the model: what it found, did or couldn't do, in plain words. Every name in LOOKUPS has its branch. */
-    const lookup = async (name: string, a: Args): Promise<string> => {
+    /**
+     * One lookup's answer for the model: what it found, did or couldn't do, in plain words. Every name in LOOKUPS
+     * has its branch. `bring` takes what it brought in from outside (a page read, an email that came, what an app
+     * or a data lookup answered), whose addresses are then written down (bringIn).
+     */
+    const lookup = async (name: string, a: Args, bring: (text: string) => void): Promise<string> => {
       if (name === "remember" && bg) return "Not saved: a routine's run doesn't save to memory.";
       if (!offered.has(name)) return `${name} isn't a tool you have here.`;
       if (name === "remember") return learn(workspaceOf(b), a.fact ?? "", chatId).catch(failed);
@@ -1434,7 +1563,9 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
               if (saidNo(result)) return addMessage({ chatId, role: "system", text: `${b.name} didn't look it up: you said no` });
               addMessage({ chatId, role: "system", text: `${b.name} looked it up`, appResult: { action: String((a as { endpoint_id?: unknown }).endpoint_id ?? "get_data"), ok: !result.startsWith("Failed"), output: result } });
             }),
-        ).catch(failed);
+        )
+          .then((out) => (bring(answerText(out)), out))
+          .catch(failed);
       if (CRM_TOOL_NAMES.has(name)) return runCrmTool(botId, name, a, { chatId }).catch(failed);
       if (ORBIT_TOOL_NAMES.has(name)) return runOrbitTool(botId, name, a).catch(failed);
       if (name === "ask_teammate") return askTeammate(b, String(a.bot_id ?? ""), String(a.question ?? ""), chatId, asked).catch((e: Error) => `Couldn't reach them: ${e.message}`);
@@ -1444,12 +1575,16 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         // (the one its job names, as asked or where it led) is read every run, as the user set it up: not said each time.
         const own = bg && [String(a.url ?? ""), got.url ?? ""].some((x) => jobKeys.has(addressKey(x) ?? ""));
         if (got.url && !own) notes.push(`Read ${got.url}`);
+        if (got.url) bring(got.text);
         return got.text;
       }
       if (name === "watch") {
         const w = a as unknown as Parameters<typeof watchFromChat>[1];
         // A web page is read now and every few minutes: only one the bot has seen written down, like web_fetch.
         if (w.where === "web" && !seenKeys.has(addressKey(String(w.url ?? "")) ?? "")) return `Not set up: ${notSeen}`;
+        // A page on its computer's screen, signed in: the same, once this turn read something from outside.
+        const why = w.where === "computer" && outsideRead ? unseen(String(w.url ?? "")) : undefined;
+        if (why) return `Not set up: ${why}`;
         return watchFromChat(botId, w)
           .then((r) => {
             if ("reply" in r) return `Not set up: ${r.reply}`;
@@ -1469,7 +1604,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       // Where results go by default follows the user's own last ask. Asked by email, it's the email (the last
       // ask may be an older text or channel message).
       if (name === "schedule") return scheduleFor(b, a as ScheduleArgs, { ask: opts.emailBack ? undefined : lastAsk, email: !!opts.emailBack, unseen }, notes);
-      if (name === "manage_routine") return manageRoutine(b, others, a as ManageArgs, notes, chatId).catch(failed);
+      // A Run now is marked with the message that asked for it, so its result goes back only there (channels.ts, phone.ts).
+      if (name === "manage_routine") return manageRoutine(b, others, a as ManageArgs, notes, chatId, opts.answering ?? "chat").catch(failed);
       if (name === "read_procedure") return readProcedure(botId, String(a.name ?? ""));
       if (name === "save_procedure") {
         // A procedure is how the bot works from then on, in every chat and task: saved only on the user's own say,
@@ -1485,8 +1621,9 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         return `${had ? "Updated" : "Saved"} "${r.procedure.name}". ${owner} can see and change it in Autopilot, under Procedures.`;
       }
       if (name === "text_me") return textOwner(botId, String(a.text ?? "")).catch(failed);
-      if (name === "check_email") return checkEmail(botId, (a.query as string | null | undefined) ?? null).catch(failed);
-      if (name === "read_email") return readEmail(botId, String(a.message_id ?? "")).catch(failed);
+      // Only emails that came to the bots bring addresses in, never one a bot sent (receivedMail).
+      if (name === "check_email") return checkEmail(botId, (a.query as string | null | undefined) ?? null).then((out) => (bring(receivedMail(out)), out)).catch(failed);
+      if (name === "read_email") return readEmail(botId, String(a.message_id ?? "")).then((out) => (bring(receivedMail(out)), out)).catch(failed);
       if (name === "send_email" || name === "reply_email") {
         const decided = (ask: Promise<string>) =>
           void ask.then((r) => saidNo(r) && addMessage({ chatId, role: "system", text: `${b.name} didn't send it: you said no` })).catch((e: Error) => addMessage({ chatId, role: "system", text: `${b.name}'s email didn't go: ${e.message}` }));
@@ -1518,40 +1655,49 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
               }),
           (a as { account?: string | null }).account ?? null,
         )
-          .then(fromApp)
+          .then((out) => {
+            // What the app answered (JSON), not Bops' own words about it (an approval to wait for, an unknown action).
+            if (/^\s*[[{]/.test(out)) bring(answerText(out));
+            return fromApp(out);
+          })
           .catch(failed);
       return `${name} isn't a tool you have here.`;
     };
     for (let round = 0; round < 6; round++) {
-      const calls = response.output.filter((o) => o.type === "function_call" && LOOKUPS.has(o.name)) as { call_id: string; name: string; arguments: string }[];
-      if (!calls.length) break;
-      // Set before any runs: a save_procedure in the same round as a page or an email read is refused too.
+      type Call = { call_id: string; name: string; arguments: string };
+      const fcs = response.output.filter((o) => o.type === "function_call") as Call[];
+      const calls = fcs.filter((c) => LOOKUPS.has(c.name));
+      // Set before any runs: a save_procedure in the same round as a page or an email read is refused too, and so
+      // is a task with an address that isn't written down.
       if (calls.some((c) => OUTSIDE_READS.has(c.name))) outsideRead = true;
-      const found: [string, string][] = [];
+      // Every address the bot wrote in this round's tool inputs, before any of them runs: its own words (madeUp).
+      // Not the page web_fetch asks for: one that isn't written down is never fetched, so nothing can say it back.
+      for (const c of fcs) if (c.name !== "web_fetch") wroteItself(c.arguments);
+      // Other tools called in the same round (start_task…) are handled below; here they get "ok", or why not.
+      const rest = fcs.filter((c) => !calls.includes(c));
+      const refused = rest.map(workRefused);
+      if (!calls.length && !refused.some(Boolean)) break;
+      const brought: string[] = [];
       const outputs = await Promise.all(
         calls.map(async (c) => {
           let a: Args = {};
           try {
             a = JSON.parse(c.arguments || "{}") as Args;
           } catch {}
-          const out = await lookup(c.name, a).catch(failed);
-          // What it found is written down for the rest of the turn (from the next round, below): addresses in it can
-          // be opened. Not a teammate's answer: that's another bot's own words, not something written down.
-          if (c.name !== "ask_teammate") found.push([out, JSON.stringify(a)]);
+          const out = await lookup(c.name, a, (text) => brought.push(text)).catch(failed);
           return { type: "function_call_output" as const, call_id: c.call_id, output: out };
         }),
       );
-      for (const [out, given] of found) see(out, given);
-      // Other tools called in the same round (start_task…) are handled below; they just need an output here.
-      const rest = response.output.filter((o) => o.type === "function_call" && !calls.includes(o as never)) as { call_id: string }[];
-      earlier.push(...(rest as never[]));
+      // What the lookups brought in is written down for the rest of the turn, from the next round.
+      for (const text of brought) bringIn(text);
+      earlier.push(...(rest.filter((_, i) => !refused[i]) as never[]));
       stillOurs(ours);
       response = await client.responses.create({
         model: CHAT_MODEL,
         reasoning: CHAT_REASONING,
         instructions,
         previous_response_id: response.id,
-        input: [...outputs, ...rest.map((o) => ({ type: "function_call_output" as const, call_id: o.call_id, output: "ok" }))],
+        input: [...outputs, ...rest.map((o, i) => ({ type: "function_call_output" as const, call_id: o.call_id, output: refused[i] ?? "ok" }))],
         tools,
         ...include,
       }, usageTags("chat", botId));
@@ -1565,16 +1711,6 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     const pics = (answering?.images ?? []).map((i) => uploadPath(i.id)?.path).filter(Boolean) as string[];
     const withImages = (goal: string) =>
       pics.length ? `${goal}\n\n${pics.length === 1 ? "An image" : `${pics.length} images`} attached by ${owner} (files on their Mac; a cloud computer can't open them): ${pics.join(", ")}` : goal;
-    // On someone else's turn, every web address in work it starts or passes on must be one they wrote
-    // themselves, exactly (its path, what's after "?" and after "#" too; a site name alone counts): a page a
-    // task opens in the bot's signed-in browser could otherwise carry the user's data out in its address.
-    const strangerSaid = opts.outside ? ([...getState().messages].reverse().find((m) => m.chatId === chatId && (fromOutside(m) || !!m.call))?.text ?? "") : "";
-    const theirs = new Set(addressesIn(strangerSaid, true).map((x) => x.key));
-    /** The site of the first address in a task's words that the stranger didn't write (undefined: none, or the user's own turn). */
-    const notTheirs = (words: string) => {
-      const x = opts.outside ? addressesIn(words, true).find((y) => !theirs.has(y.key)) : undefined;
-      return x ? new URL(x.key).hostname : undefined;
-    };
     const sessionIds: string[] = [];
     const says: string[] = [];
     let reacted = false;
@@ -1584,6 +1720,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       if (item.type !== "function_call" || LOOKUPS.has(item.name)) continue;
       // A tool this turn doesn't have (a routine's run, someone else's turn) does nothing, whatever the model says.
       if (!offered.has(item.name) || (bg && NOT_IN_BACKGROUND.has(item.name))) continue;
+      // Work with an address it may not open (workRefused, said in the chat): not started, not passed on.
+      if (workRefused(item)) continue;
       // A routine's run is one thread at most: the routine follows that one (its result, a quiet NOTHING, where it's sent).
       if (bg && item.name === "start_task" && sessionIds.length) {
         notes.push(`Started one task for this run; "${(JSON.parse(item.arguments) as { title?: string }).title ?? "another"}" was left out`);
@@ -1612,13 +1750,6 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         continue;
       }
       const args = JSON.parse(item.arguments) as { bot_id?: string; title: string; goal: string; say?: string; where?: "auto" | "cloud" | "mac"; then_on_mac?: string | null; procedure?: string | null; message?: string };
-      if (item.name === "start_task" || item.name === "hand_off" || item.name === "tell_task") {
-        const site = notTheirs(item.name === "tell_task" ? String(args.message ?? "") : String(args.goal ?? ""));
-        if (site) {
-          notes.push(`Didn't ${item.name === "tell_task" ? "pass that on" : `start "${args.title}"`}: it would open an address on ${site} that the message didn't give`);
-          continue;
-        }
-      }
       if ((item.name === "start_task" || item.name === "hand_off" || item.name === "tell_task") && args.say?.trim()) says.push(args.say.trim());
       if (item.name === "tell_task") {
         const a = JSON.parse(item.arguments) as { thread_id: string; message: string; on_mac?: boolean };

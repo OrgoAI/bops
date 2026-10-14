@@ -499,9 +499,10 @@ export const onceDone = (r: Routine, now = Date.now()) => !r.enabled && r.schedu
 
 /**
  * A routine's run going right now, as far as the app can tell: its thread is still running, or a chat
- * run began less than 15 minutes ago (one takes a minute or two). A record a restart left running never
- * locks Run now (store.ts mends those at boot, on the state the server saved itself; a state loaded at
- * sign-in may be another Mac's, still running there, and is left as it is).
+ * run began less than 15 minutes ago (one takes a minute or two). A record a restart or a quit left
+ * "running" is never changed (it may be another Mac's, still running there), and it stops counting as
+ * running by itself: a thread's run once its thread isn't running anymore, a chat run after 15 minutes.
+ * So it never locks Run now for long, and the routine's next run replaces it.
  */
 export const runningNow = (r: Routine, sessions: Session[], now = Date.now()) =>
   r.last?.status === "running" && (r.last.sessionId ? sessions.some((s) => s.id === r.last!.sessionId && live(s)) : now - r.last.at < 15 * 60_000);
@@ -910,7 +911,11 @@ export type Watch = {
    * was held for a "While you were busy" message.
    */
   alert?: { text: string; at: number; level?: "now" | "quiet" | "later" };
-  /** What Bops already told the user about (newest last), so the same DM never pings twice. */
+  /**
+   * What Bops told the user about (newest last, the last 30). A screen or a Mac window never tells the
+   * same words twice (the same DM never pings twice); a web page only skips the words its alert still
+   * shows, so a status that comes back is told again.
+   */
   told?: string[];
   /** When Jev last read the page (it only reads when the page changed). */
   readAt?: number;
@@ -926,12 +931,12 @@ export type Watch = {
   /**
    * A web page watched with no screen (then `display` is 0): Bops fetches `url` every `everyMin` minutes,
    * keeps a fingerprint of every line with what's certainly noise taken out (a "5m ago", an "Updated 3:45
-   * PM": `digests`, in order, and the page's `hash`; cloud/page-diff.ts), lines that went from it lately
-   * (`seen`, each "<digest>@<when it went, in base 36 ms>", forgotten after 7 days, so one that comes back
-   * within them isn't new), and the text of some lines (`lines`, capped: the ones that changed lately
-   * first, so a model can see what a new line replaced), and asks a model only when lines were added.
-   * `error` and `failures`: the last fetches failed, or the page came back empty (it backs off). `odd`:
-   * from older builds (reads that looked nothing like the page); never set now, only cleared.
+   * PM": `digests`, in order, and the page's `hash`; cloud/page-diff.ts) and the text of some lines
+   * (`lines`, capped: the ones that changed lately first, so a model can see what a new line replaced),
+   * and asks a model only when lines were added (a line that went and came back is added too). `error`
+   * and `failures`: the last fetches failed, or a web page came back with no text (it backs off). `seen`
+   * (lines that went lately) and `odd` (reads that looked nothing like the page): from older builds;
+   * never set now, only cleared.
    */
   page?: {
     url: string;

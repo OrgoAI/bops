@@ -90,24 +90,6 @@ function migrate(raw: Record<string, unknown>): AppState {
 }
 
 /**
- * A routine's run that was going when this server stopped (a chat run mid-turn, or a thread migrate
- * has just marked failed) can't finish now: its record says so. Only at boot, on the state this server
- * saved itself: a state loaded at sign-in can be another Mac's, still running its routines there, and is
- * left as it is (a record left running never locks Run now: runningNow). Recorded only, never sent
- * where results go.
- */
-function mendRoutines(state: AppState): AppState {
-  for (const r of state.routines) {
-    if (r.last?.status !== "running") continue;
-    const t = r.last.sessionId ? state.sessions.find((x) => x.id === r.last!.sessionId) : undefined;
-    r.last = t?.status === "done" ? { ...r.last, status: "ok" } : { ...r.last, status: "failed", error: t?.status === "failed" && t.error ? t.error : "Bops restarted while this was running" };
-    // How the run before failed only goes with a running record (RoutineRun.prevError).
-    delete r.last.prevError;
-  }
-  return state;
-}
-
-/**
  * Older builds posted every turn's answer into the chat, plus separate "needs you" lines. Mark the
  * answers as thread results and keep only each thread's latest, so the chat reads as one report per
  * thread. Safe to run repeatedly.
@@ -181,7 +163,7 @@ const access: StateAccess = {
 };
 const store: Persistence = onPostgres() ? pgStore(access) : selfHosted() ? fileStore(access) : cloudStore(access);
 // The version starts somewhere random each boot, so a page that polled before a restart can't mistake a new state for its own.
-g.__bops2 ??= { state: mendRoutines(migrate(store.initial() ?? {})), version: Math.floor(Math.random() * 1e9) };
+g.__bops2 ??= { state: migrate(store.initial() ?? {}), version: Math.floor(Math.random() * 1e9) };
 const box = g.__bops2;
 tidyResults(box.state);
 ownerMarks(box.state);

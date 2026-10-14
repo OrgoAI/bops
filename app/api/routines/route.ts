@@ -57,7 +57,8 @@ export async function PATCH(request: Request) {
   if (!id) return bad("id required");
   if (action === "run") {
     if (!getState().routines.some((r) => r.id === id)) return bad("No such routine.");
-    const started = runRoutine(id, { manual: true }).catch((e: Error) => ({ at: Date.now(), status: "failed" as const, error: e.message }));
+    // Asked for in the app: its result goes where the routine sends it, never to a text or channel turn running meanwhile.
+    const started = runRoutine(id, { manual: "app" }).catch((e: Error) => ({ at: Date.now(), status: "failed" as const, error: e.message }));
     // A reminder is done at once; anything else answers with how it started and goes on.
     const run = await Promise.race([started, new Promise<undefined>((r) => setTimeout(r, 300))]);
     return Response.json({ run: run ?? getState().routines.find((r) => r.id === id)?.last });

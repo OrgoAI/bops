@@ -60,10 +60,17 @@ const TEXT_MAX = 600;
 const KIND_NAME = { slack: "Slack", telegram: "Telegram", discord: "Discord" } as const;
 
 /** Chat runs going right now, so one doesn't start while the last is still going. */
-const g = globalThis as unknown as { __bopsRoutines?: NodeJS.Timeout; __bopsRoutineTick?: typeof tick; __bopsRoutineRuns?: Set<string>; __bopsRunNow?: Map<string, string>; __bopsZoneSeen?: string; __bopsTzSet?: string };
+const g = globalThis as unknown as {
+  __bopsRoutines?: NodeJS.Timeout;
+  __bopsRoutineTick?: typeof tick;
+  __bopsRoutineRuns?: Set<string>;
+  __bopsRanNow?: Map<string, { routineId: string; askedIn: string }>;
+  __bopsZoneSeen?: string;
+  __bopsTzSet?: string;
+};
 const running = (g.__bopsRoutineRuns ??= new Set());
-/** Threads a run someone asked for (Run now) started, by thread: the routine's id. */
-const ranNowThreads = (g.__bopsRunNow ??= new Map());
+/** Threads a run someone asked for (Run now) started, by thread: the routine's id, and where it was asked for (RunOpts.manual). */
+const ranNowThreads = (g.__bopsRanNow ??= new Map());
 
 const routine = (routineId: string) => getState().routines.find((x) => x.id === routineId);
 
@@ -320,7 +327,12 @@ export function deleteRoutine(routineId: string) {
 
 /* ---------------- Running them ---------------- */
 
-type RunOpts = { manual?: boolean; due?: number };
+/**
+ * How a run came: on its time (`due`, when it was due), or asked for now (`manual`, Run now): "app" for the
+ * button in the Bops app, else the id of the chat message that asked for it (manage_routine), so its result
+ * goes back only where that message came from (ranNow).
+ */
+type RunOpts = { manual?: string; due?: number };
 
 /** The timer ran it well after it was due (the Mac was asleep, or Bops closed). */
 const isLate = (opts: RunOpts, at: number) => !opts.manual && opts.due !== undefined && at - opts.due > 2 * 60_000;
@@ -341,7 +353,7 @@ function chipText(r: Routine, opts: RunOpts) {
  *   posted in the bot's chat and delivered, unless the routine is quiet and nothing needed the user.
  * - "task" (or unset): a new thread, unless the last one is still going.
  */
-export function runRoutine(routineId: string, opts: { manual?: boolean } = {}): Promise<RoutineRun> {
+export function runRoutine(routineId: string, opts: { manual?: string } = {}): Promise<RoutineRun> {
   return run(routineId, { manual: opts.manual });
 }
 
@@ -359,18 +371,29 @@ async function run(routineId: string, opts: RunOpts): Promise<RoutineRun> {
 }
 
 /**
- * The routine whose Run now started this thread, or undefined (a run on its time, or another thread). A
- * Run now asked for by text or in Slack, Telegram or Discord brings the thread's result back there
- * (phone.ts and channels.ts give it textBack or channelBack); a run on its time goes only where the
- * routine sends its results (deliverTo).
+ * The routine whose Run now started this thread, when the chat message `askedIn` (its id) asked for it;
+ * else undefined (a run on its time, one asked for in the app or by another message, or another thread).
+ * A Run now asked for by text or in Slack, Telegram or Discord brings the thread's result back there
+ * (phone.ts and channels.ts give it textBack or channelBack); any other run goes only where the routine
+ * sends its results (deliverTo). Without `askedIn`, a Run now asked for by any chat message counts, never
+ * one from the app.
  */
-export function ranNow(sessionId: string): Routine | undefined {
-  const id = ranNowThreads.get(sessionId);
-  return id ? routine(id) : undefined;
+export function ranNow(sessionId: string, askedIn?: string): Routine | undefined {
+  const x = ranNowThreads.get(sessionId);
+  if (!x || x.askedIn === "app" || (askedIn !== undefined && x.askedIn !== askedIn)) return undefined;
+  return routine(x.routineId);
 }
 
-/** What a run posts in the chat carries its routine, and whether someone asked for it (Run now). */
-const tagOf = (r: Routine, opts: RunOpts): NonNullable<Message["routine"]> => ({ id: r.id, ...(opts.manual ? { manual: true as const } : {}) });
+/** A thread a Run now started, kept with where it was asked for (ranNow). */
+const keepRanNow = (sessionId: string, r: Routine, opts: RunOpts) => {
+  if (opts.manual) ranNowThreads.set(sessionId, { routineId: r.id, askedIn: String(opts.manual) });
+};
+
+/**
+ * What a run posts in the chat carries its routine, and whether a chat message asked for it (Run now), so a
+ * turn by text or in a channel sends it back (types.ts turnsOwn). One asked for in the app is no turn's.
+ */
+const tagOf = (r: Routine, opts: RunOpts): NonNullable<Message["routine"]> => ({ id: r.id, ...(opts.manual && opts.manual !== "app" ? { manual: true as const } : {}) });
 
 async function remind(r: Routine, b: Bot, at: number, opts: RunOpts): Promise<RoutineRun> {
   const chatId = botChatId(b.id);
@@ -416,8 +439,10 @@ async function chatRun(r: Routine, b: Bot, at: number, opts: RunOpts): Promise<R
       posted = m.id;
     }
     // The thread is this run; how the run before failed goes with it, so the same failure isn't said again.
-    if (out.sessionId && opts.manual) ranNowThreads.set(out.sessionId, r.id);
-    if (out.sessionId) return record(r.id, { at, status: "running", sessionId: out.sessionId, ...prevError(before) });
+    if (out.sessionId) {
+      keepRanNow(out.sessionId, r, opts);
+      return record(r.id, { at, status: "running", sessionId: out.sessionId, ...prevError(before) });
+    }
     if (!posted) return record(r.id, { at, status: "quiet" });
     record(r.id, { at, status: "ok" });
     recordDelivery(r.id, at, await sendOut(r, text, posted));
@@ -468,7 +493,7 @@ function taskRun(r: Routine, b: Bot, at: number, opts: RunOpts): RoutineRun {
     });
     // Set up by text, before results could go elsewhere: the result is texted back when the thread ends.
     if (r.textTo && !r.deliverTo) patchSession(s.id, { textBack: r.textTo });
-    if (opts.manual) ranNowThreads.set(s.id, r.id);
+    keepRanNow(s.id, r, opts);
     // A quiet routine's chip comes with its result, when there is one (onRoutineTaskEnd).
     if (!r.quiet) addMessage({ chatId, role: "system", text: chipText(r, opts), sessionIds: [s.id] });
     return record(r.id, { at, status: "running", sessionId: s.id, ...prevError(last) });
@@ -639,21 +664,27 @@ function pauseStuck(r: Routine, why: string) {
   addMessage({ chatId: botChatId(r.botId), role: "system", text: `Paused "${r.title}": ${why}`, routine: { id: r.id } });
 }
 
+/** A missed daily, weekdays or weekly run whose next time comes within this waits for that instead of running late. */
+const LATE_NEXT_MS = 60 * 60_000;
+
 /**
- * Whether a run missed while the Mac slept waits for its next time instead of running late: only an
- * "every" run whose next beat on time is less than half its gap away (missed beats of a check every 15
- * minutes aren't made up). Anything else that was missed (daily, weekdays, weekly, once, or an "every"
- * run with its next beat further off) runs once, late, and says so.
+ * Whether a run missed while the Mac slept waits for its next time instead of running late. It waits when
+ * that next time is close: within an hour for a daily, weekdays or weekly run (a 9 AM digest missed over the
+ * weekend, with the Mac opened at 8:50 on Monday, runs once at 9, not twice), and less than half its gap
+ * away for an "every" run (missed beats of a check every 15 minutes aren't made up). But never twice in a
+ * row: when its last run was skipped too, it runs late, so a Mac that sleeps through 9 AM every day still
+ * gets it. A one-off, and anything with its next time further off, runs once, late, and says so.
  */
 function skipLate(r: Routine, due: number, next: number | undefined, now: number) {
-  if (r.schedule.kind !== "every" || next === undefined || now - due <= 2 * 60_000) return false;
-  return next - now < (r.schedule.minutes * 60_000) / 2;
+  if (r.schedule.kind === "once" || next === undefined || now - due <= 2 * 60_000) return false;
+  if (r.last?.status === "skipped") return false;
+  return next - now < (r.schedule.kind === "every" ? (r.schedule.minutes * 60_000) / 2 : LATE_NEXT_MS);
 }
 
 /**
  * Run everything that's due. Called on a timer; waits while there's no account's state to run. A run
- * missed while the Mac slept runs once, late, and says so, unless it waits for its next beat (skipLate),
- * where a thread of the routine's still going stays its run. Each run's next time is set before it
+ * missed while the Mac slept runs once, late, and says so, unless it waits for its next time, which is
+ * close (skipLate), where a thread of the routine's still going stays its run. Each run's next time is set before it
  * starts, so a slow run never runs twice.
  */
 function tick() {

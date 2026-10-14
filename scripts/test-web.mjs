@@ -75,6 +75,21 @@ const LINKS = `<!doctype html><html><head><title>Links</title></head><body><p>Se
   <a href="#top">top</a>, <a href="/links">this page</a>, <a href="/article">again</a>, <a href="/hidden" hidden>secret</a>
   <span style="display:none"><a href="/hidden2">secret two</a></span><a>no address</a></p></body></html>`;
 
+// An index page shaped like Hacker News: a header of short links, then 30 stories, each with a vote arrow
+// (no words), its title, its site, a score with the user's name, its age, hide, and its comments; then a
+// page number. The stories' own links are what a bot follows ("open the 8th story").
+const story = (i) => `<tr><td>${i + 1}.</td><td><a href="vote?id=${i}&amp;how=up&amp;goto=news"><div class="votearrow"></div></a></td><td><a href="https://site${i}.example/post">Story number ${i + 1} about databases</a> (<a href="from?site=site${i}.example">site${i}.example</a>)</td></tr>
+<tr><td></td><td>${100 + i} points by <a href="user?id=user${i}">user${i}</a> <a href="item?id=${i}">3 hours ago</a> | <a href="hide?id=${i}&amp;goto=news">hide</a> | <a href="item?id=${i}">${10 + i}&nbsp;comments</a></td></tr>`;
+const INDEX = `<!doctype html><html><head><title>Index News</title></head><body><table><tr><td><a href="news">Index News</a> <a href="newest">new</a> | <a href="front">past</a> | <a href="newcomments">comments</a> | <a href="ask">ask</a> | <a href="submit">submit</a></td><td><a href="login?goto=news">login</a></td></tr></table>
+<table>${Array.from({ length: 30 }, (_, i) => story(i)).join("\n")}</table><a href="?p=2">More</a> <a href="?p=2">2</a> <a href="?p=3">3</a></body></html>`;
+// A site's menu (in <nav> and <footer>) with words like a title, around the page's own links.
+const MENUS = `<!doctype html><html><head><title>Shop</title></head><body><nav><a href="/deals">Deals of the week for you</a> <a href="/u/dana">dana</a> <a href="/signin">Sign in</a></nav>
+<main><h1>New arrivals</h1><ul><li><a href="/p/1">Blue linen summer shirt</a></li><li><a href="/p/2">Green wool winter coat</a></li><li><a href="/cart">Cart</a></li></ul></main>
+<footer><a href="/about">About our little shop</a> <a href="/@dana">dana</a></footer></body></html>`;
+// A page whose relative links are read against its <base href>, and one whose <base href> isn't a web address.
+const BASED = `<!doctype html><html><head><title>App</title><base href="/app/v2/"></head><body><p><a href="item/7">Item seven of the list</a> <a href="/top">Back to the top page</a> <a href="https://other.example/x">Somewhere else entirely</a></p></body></html>`;
+const BAD_BASE = `<!doctype html><html><head><title>App</title><base href="javascript:alert(1)"></head><body><p><a href="item/7">Item seven of the list</a></p></body></html>`;
+
 const held = new Set();
 let port = 0;
 const server = createServer((req, res) => {
@@ -92,6 +107,10 @@ const server = createServer((req, res) => {
   if (p === "/badjson") return send(200, "application/problem+json", "{ not json");
   if (p === "/feed") return send(200, "application/rss+xml", FEED);
   if (p === "/links") return send(200, "text/html", LINKS);
+  if (p === "/index") return send(200, "text/html", INDEX);
+  if (p === "/menus") return send(200, "text/html", MENUS);
+  if (p === "/app/view") return send(200, "text/html", BASED);
+  if (p === "/app/bad-base") return send(200, "text/html", BAD_BASE);
   if (p === "/echo") return send(200, "application/json", JSON.stringify({ host: req.headers.host, ua: req.headers["user-agent"], accept: req.headers.accept, path: req.url }));
   if (p === "/redirect") return send(Number(url.searchParams.get("status") ?? 302), "text/plain", "moved", { Location: url.searchParams.get("to") });
   // A long article on a shallow page (like a long Wikipedia one): about 20,000 elements, with a menu of links first.
@@ -585,6 +604,44 @@ await part("readPage", async () => {
       { url: "https://other.example/x?y=1", text: "another site" },
     ]);
   });
+  await check("an index page: its stories' links first, in order, with no vote, hide, user, sign in or page number links", async () => {
+    const got = await readPage(at("/index"));
+    assert.ok(got.links.length <= 100, String(got.links.length));
+    assert.deepEqual(
+      got.links.slice(0, 30),
+      Array.from({ length: 30 }, (_, i) => ({ url: `https://site${i}.example/post`, text: `Story number ${i + 1} about databases` })),
+    );
+    assert.deepEqual(got.links[7], { url: "https://site7.example/post", text: "Story number 8 about databases" }, "the 8th story is there to follow");
+    const urls = got.links.map((l) => l.url);
+    assert.ok(!urls.some((u) => /\/(vote|hide|user|login)\b/.test(u)), urls.join("\n"));
+    assert.ok(!got.links.some((l) => /^\d+$/.test(l.text)), "no page numbers");
+    // The rest after them, each once: the header's, a story's site and its comments.
+    assert.ok(urls.includes(at("/newest")) && urls.includes(at("/from?site=site0.example")) && urls.includes(at("/item?id=0")));
+    assert.equal(new Set(urls).size, urls.length, "each once");
+    assert.ok(urls.indexOf(at("/newest")) > 29);
+  });
+  await check("a menu's links (nav, header, footer) come after the page's own, whatever their words", async () => {
+    const got = await readPage(at("/menus"));
+    assert.deepEqual(got.links, [
+      { url: at("/p/1"), text: "Blue linen summer shirt" },
+      { url: at("/p/2"), text: "Green wool winter coat" },
+      { url: at("/deals"), text: "Deals of the week for you" },
+      { url: at("/cart"), text: "Cart" },
+      { url: at("/about"), text: "About our little shop" },
+    ]);
+  });
+  await check("relative links are read against the page's <base href>", async () => {
+    const got = await readPage(at("/app/view"));
+    assert.deepEqual(got.links, [
+      { url: at("/app/v2/item/7"), text: "Item seven of the list" },
+      { url: at("/top"), text: "Back to the top page" },
+      { url: "https://other.example/x", text: "Somewhere else entirely" },
+    ]);
+  });
+  await check("a <base href> that isn't a web address is left aside", async () => {
+    const got = await readPage(at("/app/bad-base"));
+    assert.deepEqual(got.links, [{ url: at("/app/item/7"), text: "Item seven of the list" }]);
+  });
   await check("a page Readability can't read: everything visible", async () => {
     const got = await readPage(at("/listing"));
     assert.equal(got.title, "Widgets");
@@ -627,12 +684,13 @@ await part("readPage", async () => {
     assert.ok(!/Jump to content|Menu link/.test(got.text), got.text.slice(0, 200));
     assert.match(got.text, /^(A long war\n)?Section 0: the army moved north in spring/);
     assert.equal(got.truncated, true);
-    // The article's own links first, not the menu's; at most 200.
+    // The article's own links first, not the menu's; at most 100.
     assert.deepEqual(got.links.slice(0, 2), [
       { url: at("/a0"), text: "army" },
       { url: at("/b0"), text: "plan" },
     ]);
-    assert.equal(got.links.length, 200);
+    assert.equal(got.links.length, 100);
+    assert.ok(got.links.every((l) => /\/[ab]\d+$/.test(l.url)), "all the article's own");
   });
   await check("a page nested thousands deep is read quickly, as its visible text, and the server isn't held up", async () => {
     let beats = 0;
@@ -662,6 +720,12 @@ await part("pageLines", async () => {
     assert.ok(got.lines.includes("Home News Sports"));
     assert.ok(got.lines.includes("Copyright Town News. All rights reserved."));
     assert.ok(got.lines.every((l) => l.length >= 2 && l.length <= 300));
+  });
+  await check("each read says what kind of page it was", async () => {
+    assert.equal((await pageLines(at("/listing"))).kind, "html");
+    assert.equal((await pageLines(at("/json"))).kind, "json");
+    assert.equal((await pageLines(at("/plain"))).kind, "text");
+    assert.equal((await pageLines(at("/feed"))).kind, "xml");
   });
   await check("JSON pretty-printed, line by line", async () => {
     const got = await pageLines(at("/json"));

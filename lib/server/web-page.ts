@@ -10,7 +10,7 @@ import { safeFetch, type Fetched } from "./safe-fetch";
  * - readPage, for a bot's web_fetch in chat: an article's own text when the page is an article
  *   (Readability, the engine behind Firefox's Reader View), else everything visible on the page;
  *   JSON pretty-printed, plain text as it is, a feed (XML) as its lines. At most 12,000 characters,
- *   with a web page's links (so the bot can follow one).
+ *   with a web page's links (so the bot can follow one): at most 100, the ones to read first.
  * - pageLines, for page monitors: everything visible, one line per block (a paragraph, a list item,
  *   a table row, a heading), since what monitors watch (prices, stock, lists, tables) is exactly
  *   what Readability leaves out. Lines are 2 to 300 characters (a longer one is split, never lost),
@@ -34,8 +34,10 @@ const READER_MAX_ELEMENTS = 60_000;
 const MAX_LINES = 1500;
 const MIN_LINE = 2;
 const MAX_LINE = 300;
-/** The most links readPage gives (chat.ts lists the first few dozen of them under the page's text). */
-const LINKS_MAX = 200;
+/** The most links readPage gives (chat.ts lists them under the page's text), the ones to read first. */
+const LINKS_MAX = 100;
+/** The most links read off a page before they're sorted (a long index page has many). */
+const LINKS_READ_MAX = 2000;
 
 /** Elements whose text is never shown on the page (or isn't the page's to show). */
 const DROP = new Set([
@@ -126,18 +128,23 @@ const hidden = (el: Element) => el.hasAttribute("hidden") || /(display\s*:\s*non
 
 /** A link on a page as readPage gives it: where it goes (as written in the page) and its words. */
 export type PageLink = { url: string; text: string };
+/** A link as read off a page, before it's sorted: `menu` when it's in the page's nav, header or footer. */
+type FoundLink = PageLink & { menu?: boolean };
+/** Where a page keeps its menus: links in these come after the page's own. */
+const MENU = new Set(["nav", "header", "footer"]);
 
 /**
  * The text of every block under `root`, in page order, whitespace collapsed, empty ones left out.
  * In `xml` mode every element is a block and nothing is dropped (a feed: titles, links, dates). Walks
  * with its own stack, so a page nested thousands deep can't overflow the call stack. With `links`, the
- * visible links (<a href>) go into it as well, in page order, up to LINKS_MAX.
+ * visible links (<a href>) go into it as well, in page order, up to LINKS_READ_MAX.
  */
-function blocks(root: Node, xml = false, links?: PageLink[]): string[] {
+function blocks(root: Node, xml = false, links?: FoundLink[]): string[] {
   const out: string[] = [];
   let line = "";
   let gap = false;
   let pre = 0;
+  let menu = 0;
   const flush = () => {
     const t = squash(line);
     if (t) out.push(t);
@@ -160,7 +167,9 @@ function blocks(root: Node, xml = false, links?: PageLink[]): string[] {
   while (stack.length) {
     const [node, leaving] = stack.pop()!;
     if (leaving) {
-      if ((node as Element).localName === "pre") pre--;
+      const name = (node as Element).localName;
+      if (name === "pre") pre--;
+      if (MENU.has(name)) menu--;
       flush();
       continue;
     }
@@ -185,14 +194,15 @@ function blocks(root: Node, xml = false, links?: PageLink[]): string[] {
         continue;
       }
       if (CELL.has(tag)) gap = true;
-      if (links && tag === "a" && links.length < LINKS_MAX) {
+      if (links && tag === "a" && links.length < LINKS_READ_MAX) {
         const href = el.getAttribute("href")?.trim();
-        if (href) links.push({ url: href, text: squash(el.textContent ?? "") });
+        if (href) links.push({ url: href, text: squash(el.textContent ?? ""), ...(menu > 0 ? { menu: true } : {}) });
       }
     }
     if (xml || BLOCK.has(tag)) {
       flush();
       if (tag === "pre") pre++;
+      if (!xml && MENU.has(tag)) menu++;
       stack.push([el, true]);
     }
     children(el);
@@ -270,7 +280,7 @@ function pretty(body: string): string {
   }
 }
 
-type Kind = "html" | "json" | "xml" | "text";
+export type Kind = "html" | "json" | "xml" | "text";
 const kindOf = (type: string): Kind =>
   /html/.test(type) ? "html" : /(^application\/json$|\+json$)/.test(type) ? "json" : /xml/.test(type) ? "xml" : "text";
 
@@ -311,13 +321,13 @@ function tooTangled(root: Node): boolean {
 }
 
 /** The article's own text (and links) when the page reads as one (and gives enough), else undefined. Never for a page Readability would take too long on (tooTangled). */
-function article(document: Document): { title: string; text: string; links: PageLink[] } | undefined {
+function article(document: Document): { title: string; text: string; links: FoundLink[] } | undefined {
   try {
     // linkedom builds no implied <body>: a page without one has nothing for Readability to read.
     if (!document.body?.textContent?.trim() || tooTangled(document) || !isProbablyReaderable(document)) return undefined;
     const got = new Readability(document, { maxElemsToParse: READER_MAX_ELEMENTS }).parse();
     if (!got?.content) return undefined;
-    const links: PageLink[] = [];
+    const links: FoundLink[] = [];
     const text = blocks(parse(got.content), false, links).join("\n");
     return text.length >= 300 ? { title: squash(got.title ?? ""), text, links } : undefined;
   } catch {
@@ -333,36 +343,75 @@ function cap(text: string, max: number): { text: string; cut: boolean } {
   return { text: (end > max * 0.8 ? head.slice(0, end) : head).trimEnd(), cut: true };
 }
 
+/** Link words that are a control, not something to read: vote, hide, reply, sign in and the like. */
+const CONTROL = /^(?:vote|up ?vote|down ?vote|hide|un ?hide|reply|log ?in|log ?out|sign ?in|sign ?up|sign ?out|register)$/i;
+/** An address that's a user's page: /user?id=pg, /u/dana, /users/dana, /profile/dana, /@dana. */
+const USER_PAGE = /\/(?:user|users|u|profile|profiles|member|members)(?:\/|$)|\/@[^/]+\/?$/i;
+
 /**
- * A page's links as readPage gives them: made absolute from the page's address, http and https only,
- * without a "#" part, each once, not the page itself, at most LINKS_MAX.
+ * Whether a link is one to read: not a vote (by its words, or an address ending in /vote), hide, reply
+ * or sign in link, not just a number (a page number, a count), and not just a user's name (one word, to
+ * a user's page).
  */
-function absoluteLinks(links: PageLink[], base: string): PageLink[] {
-  const out = new Map<string, PageLink>();
-  const self = new URL(base);
-  self.hash = "";
-  for (const l of links) {
+function readable(text: string, url: URL) {
+  if (CONTROL.test(text) || /\/vote\/?$/i.test(url.pathname)) return false;
+  if (/^[\d,.\s]+$/.test(text)) return false;
+  return !(text && !/\s/.test(text) && USER_PAGE.test(url.pathname));
+}
+
+/** Link words that read like a title: three words or more with letters in them ("5 hours ago" has two). */
+const titled = (text: string) => text.split(/\s+/).filter((w) => /\p{L}/u.test(w)).length >= 3;
+
+/**
+ * A page's links as readPage gives them, the ones to read first: the article's own links (`own`), then
+ * the page's links whose words read like a title and that aren't in its nav, header or footer, then the
+ * rest, each in page order. Made absolute from `base` (the page's address, or its <base href>), http and
+ * https only, without a "#" part, each once, not the page itself (`self`); no vote, hide, reply or sign
+ * in links, none that are just a number or a user's name (readable); at most LINKS_MAX.
+ */
+function absoluteLinks(own: FoundLink[], page: FoundLink[], base: string, self: string): PageLink[] {
+  const me = new URL(self);
+  me.hash = "";
+  const groups: PageLink[][] = [[], [], []];
+  const add = (l: FoundLink, group: number) => {
     let u: URL;
     try {
       u = new URL(l.url, base);
     } catch {
-      continue;
+      return;
     }
-    if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+    if ((u.protocol !== "http:" && u.protocol !== "https:") || !readable(l.text, u)) return;
     u.hash = "";
-    if (u.href === self.href || out.has(u.href)) continue;
-    out.set(u.href, { url: u.href, text: l.text });
+    if (u.href !== me.href) groups[group].push({ url: u.href, text: l.text });
+  };
+  for (const l of own) add(l, 0);
+  for (const l of page) add(l, l.menu || !titled(l.text) ? 2 : 1);
+  const out = new Map<string, PageLink>();
+  for (const l of groups.flat()) {
+    if (!out.has(l.url)) out.set(l.url, l);
     if (out.size >= LINKS_MAX) break;
   }
   return [...out.values()];
 }
 
+/** What a page's relative links are read against: its <base href> when it has one (http or https), else its own address. */
+function baseOf(document: Document, url: string) {
+  const href = document.querySelector("base[href]")?.getAttribute("href")?.trim();
+  if (!href) return url;
+  try {
+    const u = new URL(href, url);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : url;
+  } catch {
+    return url;
+  }
+}
+
 /**
  * A page for a bot to read (web_fetch): its title and text, at most 12,000 characters (`truncated`
- * when there was more, or the page was over 2 MB), and its links (an article's own first, then the
- * rest of the page's; none for JSON, plain text or a feed, whose addresses are in the text). Throws
- * FetchRefused for an address Bops won't open, and a plain Error when the page couldn't be read or
- * answered with an error.
+ * when there was more, or the page was over 2 MB), and its links, at most 100, the ones to read first
+ * (absoluteLinks: an article's own, then the page's own, then its menus and the rest; none for JSON,
+ * plain text or a feed, whose addresses are in the text). Throws FetchRefused for an address Bops won't
+ * open, and a plain Error when the page couldn't be read or answered with an error.
  */
 export async function readPage(url: string): Promise<{ url: string; title: string; text: string; truncated: boolean; links: PageLink[] }> {
   const got = answered(await safeFetch(url));
@@ -373,13 +422,14 @@ export async function readPage(url: string): Promise<{ url: string; title: strin
   if (kind === "html") {
     const document = parse(got.body);
     title = titleOf(document);
-    // The visible text and links first: Readability takes the document apart as it reads.
-    const onPage: PageLink[] = [];
+    // The visible text, links and <base href> first: Readability takes the document apart as it reads.
+    const onPage: FoundLink[] = [];
     const visible = blocks(document, false, onPage).join("\n");
+    const base = baseOf(document, got.url);
     const art = article(document);
     title = art?.title || title;
     text = art?.text ?? visible;
-    links = absoluteLinks([...(art?.links ?? []), ...onPage], got.url);
+    links = absoluteLinks(art?.links ?? [], onPage, base, got.url);
   } else if (kind === "xml") {
     const x = xmlLines(got.body);
     title = x.title;
@@ -392,19 +442,21 @@ export async function readPage(url: string): Promise<{ url: string; title: strin
 /**
  * A page as lines for a monitor: what's visible, one line per block, 2 to 300 characters each, each
  * once, at most 1500 (htmlLines); JSON pretty-printed and plain text taken line by line, tidied the
- * same way. Throws like readPage, so a site that's down or failing is an error, never a change.
+ * same way; and what kind of page it was (a web page with no lines needs a browser, while JSON or text
+ * with none is just empty). Throws like readPage, so a site that's down or failing is an error, never a
+ * change.
  */
-export async function pageLines(url: string): Promise<{ url: string; title: string; lines: string[] }> {
+export async function pageLines(url: string): Promise<{ url: string; title: string; lines: string[]; kind: Kind }> {
   const got = answered(await safeFetch(url));
   const kind = kindOf(got.contentType);
   if (kind === "html") {
     const { title, lines } = htmlLines(got.body);
-    return { url: got.url, title: title || label(got.url), lines };
+    return { url: got.url, title: title || label(got.url), lines, kind };
   }
   if (kind === "xml") {
     const { title, lines } = xmlLines(got.body);
-    return { url: got.url, title: title || label(got.url), lines: tidy(lines) };
+    return { url: got.url, title: title || label(got.url), lines: tidy(lines), kind };
   }
   const text = kind === "json" ? pretty(got.body) : got.body;
-  return { url: got.url, title: label(got.url), lines: tidy(text.split(/\r?\n/)) };
+  return { url: got.url, title: label(got.url), lines: tidy(text.split(/\r?\n/)), kind };
 }
