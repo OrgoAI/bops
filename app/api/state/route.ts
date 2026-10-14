@@ -1,5 +1,5 @@
 import "@/lib/server/routines";
-import "@/lib/server/watches";
+import { watchesForApp } from "@/lib/server/watches";
 import "@/lib/server/mac";
 import { getState, getVersion } from "@/lib/server/store";
 import type { AppState } from "@/lib/types";
@@ -38,10 +38,13 @@ export async function GET(request: Request) {
 /**
  * The state as the app gets it: each bot's key for app actions stays on the server (its computer has
  * it), and so does the usage ledger, which grows to thousands of events and which the account page
- * totals on the server (/api/account). It also says whether the other screens stream through Orgo.
+ * totals on the server (/api/account), and what's kept of each watched web page to compare it (only the
+ * server compares), with when the page was last read even when that wasn't saved (watches.ts
+ * watchesForApp). It also says whether the other screens stream through Orgo.
  */
 function forApp(state: AppState): AppState {
   // Full access is kept on this Mac, not in the state (full-access.ts): shown as part of it.
   const mac = state.mac ? { ...state.mac, fullAccess: fullAccessOn() || undefined } : state.mac;
-  return { ...state, mac, usage: undefined, bots: state.bots.map((b) => ({ ...b, appsKey: undefined })), screenStream: screenStreamWanted(), businessData: tregOn() };
+  const watches = watchesForApp(state.watches);
+  return { ...state, mac, watches, usage: undefined, bots: state.bots.map((b) => ({ ...b, appsKey: undefined })), screenStream: screenStreamWanted(), businessData: tregOn() };
 }

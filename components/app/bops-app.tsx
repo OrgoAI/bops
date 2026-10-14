@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { botChatId, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
+import { botChatId, isScreenWatch, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
 import { Account } from "./account";
+import { AutopilotPage, type AutopilotSection } from "./autopilot";
 import { Members } from "./members";
 import { BotPanel, type Section } from "./bot-panel";
 import { CallBar } from "./call-bar";
@@ -279,7 +280,9 @@ function Bops({ state }: { state: AppState | null }) {
     .map((t) => (t.id === PROFILE_TAB && t.kind === "bot" ? { ...t, botId: chatBotId } : t))
     .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId))
     .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)))
-    .filter((t) => t.kind !== "memory" || (memory && t.ws === currentWorkspace(state)));
+    .filter((t) => t.kind !== "memory" || (memory && t.ws === currentWorkspace(state)))
+    // Autopilot shows its own workspace's bots only: another workspace's tab goes on a switch.
+    .filter((t) => t.kind !== "autopilot" || t.ws === currentWorkspace(state));
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
   if (recent.at(-1) !== active) {
     setRecent([...recent.filter((id) => id !== active), active].slice(-20));
@@ -294,7 +297,14 @@ function Bops({ state }: { state: AppState | null }) {
   if (leadKey !== followed) {
     setFollowed(leadKey);
     const browsing =
-      tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || tab.kind === "memory" || (tab.kind === "computer" && tab.botId !== chatBotId) || (tab.kind === "bot" && tab.id !== PROFILE_TAB));
+      tab &&
+      (tab.kind === "web" ||
+        tab.kind === "vault" ||
+        tab.kind === "crm" ||
+        tab.kind === "memory" ||
+        tab.kind === "autopilot" ||
+        (tab.kind === "computer" && tab.botId !== chatBotId) ||
+        (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
       if (lead.runsOn === "mac") {
         // Your Mac's tab, however it was opened (from a new tab it keeps that tab's id): never a second one.
@@ -382,6 +392,19 @@ function Bops({ state }: { state: AppState | null }) {
       (t) => ({ ...t, category, focus: item, focusAt, query }) as PanelTab,
     );
   };
+  /**
+   * What the bots do on their own (autopilot.tsx): the workspace's one Autopilot tab, switched to the
+   * section asked for, at the row asked for, or opened.
+   */
+  const openAutopilot = (section: AutopilotSection, item?: string) => {
+    const ws = currentWorkspace(state);
+    const focusAt = Date.now();
+    openTab(
+      (t) => t.kind === "autopilot" && t.ws === ws,
+      () => ({ id: tabId(), kind: "autopilot", ws, section, focus: item, focusAt }),
+      (t) => ({ ...t, section, focus: item, focusAt }) as PanelTab,
+    );
+  };
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
   // eslint-disable-next-line react-hooks/refs -- kept current for the storage listener above
   openMacRef.current = openMac;
@@ -422,7 +445,7 @@ function Bops({ state }: { state: AppState | null }) {
   // a search) stays there.
   // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
   escTab.current = (e) => {
-    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm" || tab?.kind === "memory") ? tab : undefined;
+    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot") ? tab : undefined;
     if (!page || e.defaultPrevented || thread || composing || settings || account || setup || members || document.querySelector('[role="dialog"]')) return;
     const el = e.target instanceof HTMLElement ? e.target : null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && !panelRef.current?.contains(el)) return;
@@ -434,9 +457,13 @@ function Bops({ state }: { state: AppState | null }) {
     setPanelOpen(true);
   };
 
-  /** Show a watched thing: its Mac window in Your Mac, or the bot's screen it's on. Seeing it clears its news. */
+  /**
+   * Show a watched thing: its Mac window in Your Mac, the bot's screen it's on, or (a web page, which has
+   * no screen) its row on the Autopilot page. Seeing it clears its news.
+   */
   const showWatch = (w: Watch) => {
-    if (w.mac) openMac();
+    if (w.page) openAutopilot("monitors", w.id);
+    else if (w.mac) openMac();
     else {
       setDisplays((x) => ({ ...x, [w.botId]: w.display }));
       setPinned((p) => ({ ...p, [w.botId]: true }));
@@ -450,11 +477,14 @@ function Bops({ state }: { state: AppState | null }) {
   // eslint-disable-next-line react-hooks/refs -- kept current for the effect that runs it
   bringForward.current = () => {
     const key = (w: Watch) => `${w.id}:${w.alert?.at}`;
-    // Only news Jev judged worth interrupting for (older alerts have no level: they interrupt too).
-    const alerting = (state.watches ?? []).filter((w) => w.alert && (w.alert.level ?? "now") === "now" && team.some((b) => b.id === w.botId));
+    // Only news Jev judged worth interrupting for (older alerts have no level: they interrupt too), on a
+    // screen or a Mac window: a web page has no screen to cut to (its chime and sidebar mark say it).
+    const alerting = (state.watches ?? []).filter(
+      (w) => w.alert && (w.alert.level ?? "now") === "now" && (isScreenWatch(w) || !!w.mac) && team.some((b) => b.id === w.botId),
+    );
     if (cutAlerts === null) return setCutAlerts(new Set(alerting.map(key)));
     const fresh = alerting.find((w) => !cutAlerts.has(key(w)));
-    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault" || tab?.kind === "crm" || tab?.kind === "memory") return;
+    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot") return;
     const el = document.activeElement as HTMLInputElement | null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && (el.value ?? el.textContent ?? "").trim()) return;
     setCutAlerts(new Set([...cutAlerts, key(fresh)]));
@@ -592,6 +622,7 @@ function Bops({ state }: { state: AppState | null }) {
             onMembers={() => setMembers(true)}
             onOpenWatch={showWatch}
             onOpenMemory={openMemory}
+            onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item)}
           />
           {focus && crmFocus && crm ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
@@ -721,6 +752,18 @@ function Bops({ state }: { state: AppState | null }) {
                         // The search asked for is used once: off the tab, so coming back doesn't fill it in again.
                         onQueryUsed={() => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, query: undefined } : t)))}
                         onCategory={(category) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, category, focus: undefined } : t)))}
+                        onClose={() => leaveTab(tab.id)}
+                      />
+                    </div>
+                  ) : tab?.kind === "autopilot" ? (
+                    <div key={tab.id} className="motion-fade-in flex min-h-0 flex-1 flex-col">
+                      <AutopilotPage
+                        state={state}
+                        section={tab.section}
+                        focus={tab.focus}
+                        focusAt={tab.focusAt}
+                        onSection={(section) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "autopilot" ? { ...t, section, focus: undefined } : t)))}
+                        onOpenWatch={showWatch}
                         onClose={() => leaveTab(tab.id)}
                       />
                     </div>

@@ -3,6 +3,7 @@
 import { createContext, createElement, useEffect, useRef, useState } from "react";
 import { categoryOf, type CategoryId } from "@/lib/memory-categories";
 import { live, type AppState } from "@/lib/types";
+import { AutopilotIcon, type AutopilotSection } from "./autopilot";
 import type { Section } from "./bot-panel";
 import { CrmFileIcon } from "./crm";
 import { Mascot } from "./mascot";
@@ -32,7 +33,12 @@ export type PanelTab =
    * taken off once the page has filled it in). `focusAt` is when they were asked for, so asking again
    * for the same one shows it again.
    */
-  | { id: string; kind: "memory"; ws: string; category: CategoryId; focus?: string; focusAt?: number; query?: string };
+  | { id: string; kind: "memory"; ws: string; category: CategoryId; focus?: string; focusAt?: number; query?: string }
+  /**
+   * Autopilot (autopilot.tsx): what the workspace's bots do on their own, a section at a time. One tab per
+   * workspace, at the row asked for (`focus`); `focusAt` is when it was asked for, so asking again shows it again.
+   */
+  | { id: string; kind: "autopilot"; ws: string; section: AutopilotSection; focus?: string; focusAt?: number };
 
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";
@@ -113,7 +119,8 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
     (t.kind === "computer" && state.sessions.some((s) => s.botId === t.botId && live(s) && s.runsOn !== "mac")) ||
     (t.kind === "mac" && state.sessions.some((s) => s.runsOn === "mac" && live(s)));
   const needsYou =
-    t.kind === "computer" && (state.watches?.some((w) => w.botId === t.botId && w.alert) || state.sessions.some((s) => s.botId === t.botId && live(s) && s.blocker));
+    // (A watched web page has no screen there: its news shows on Autopilot instead.)
+    t.kind === "computer" && (state.watches?.some((w) => w.botId === t.botId && !w.page && w.alert) || state.sessions.some((s) => s.botId === t.botId && live(s) && s.blocker));
   const label =
     t.kind === "computer"
       ? `${b?.name ?? "Bot"}'s computer`
@@ -129,7 +136,9 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
                 ? t.file
                 : t.kind === "memory"
                   ? (categoryOf(t.category)?.label ?? "Memory")
-                  : "New tab";
+                  : t.kind === "autopilot"
+                    ? "Autopilot"
+                    : "New tab";
   return (
     <div
       onClick={onPick}
@@ -152,6 +161,8 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
         <CrmFileIcon />
       ) : t.kind === "memory" ? (
         <CategoryIcon id={t.category} />
+      ) : t.kind === "autopilot" ? (
+        <AutopilotIcon />
       ) : (
         <GlobeIcon />
       )}

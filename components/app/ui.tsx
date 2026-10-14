@@ -37,6 +37,9 @@ export function duration(from: number, to = Date.now()) {
 
 export const clockTime = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 
+/** A quiet routine's thread that found nothing (lib/types.ts, shared with the server): lists of threads leave it out. */
+export { quietNothing } from "@/lib/types";
+
 /** A thread needs the user when its screen hit something only they can get past, its bot is waiting on their answer (Jev decides), or it hit a problem they haven't answered. */
 export function needsYou(s: Session) {
   // Dismissed, or a newer thread has the job: it never asks again.

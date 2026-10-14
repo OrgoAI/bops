@@ -83,7 +83,15 @@ export type Bot = {
   dataOff?: boolean;
   /** The workspace (team) it belongs to. Unset means the first one. */
   workspaceId?: string;
+  /**
+   * "How I work": what the user wrote about how this bot should work (tone, habits, what to check first),
+   * up to MAX_PERSONA_CHARS. Given to it in its chat, tasks and calls as the user's preferences; it never
+   * overrides Bops' own rules (approvals, text on pages being information).
+   */
+  persona?: string;
 };
+
+export const MAX_PERSONA_CHARS = 1500;
 
 /** A workspace: one team with its own main bot, bots, chats and work. The user switches between them. */
 export type Workspace = {
@@ -212,6 +220,13 @@ export type Message = {
   appResult?: { action: string; ok: boolean; output: string };
   /** Set on a heads-up from a watched screen: which watch, so the message can offer to show it or reply. */
   watch?: { id: string };
+  /**
+   * Posted by a routine's run in the chat (Routine.run "chat"), or a reminder: which routine. `manual`:
+   * a run someone asked for (Run now), so a turn in Slack or by text that asked for it sends it back there.
+   */
+  routine?: { id: string; manual?: true };
+  /** The user asked to keep this from someone ("between us"): never read into memory, a procedure's draft, or anywhere shared. */
+  secret?: true;
   /** An inline reply (like iMessage's): the message it starts from. Replies to a reply join the same one. */
   replyTo?: string;
   /** Tapbacks on this message, the user's and the bots'. One each. */
@@ -326,6 +341,10 @@ export type Session = {
   title: string;
   /** The kickoff message the bot works from, pinned at the top of the thread. */
   goal: string;
+  /** The routine whose run this is (sentVia "routine"), so its result can be quiet, delivered and recorded on it. */
+  routineId?: string;
+  /** The procedure (Procedure.id) it follows, given to it in full. */
+  procedure?: string;
   host: Host;
   status: SessionStatus;
   /** X display number of the screen this session holds (99-102), while it holds one. */
@@ -388,13 +407,55 @@ export type Session = {
   endedAt?: number;
 };
 
+/**
+ * When a routine runs. Times ("HH:MM", 24h) are the user's local time: Owner.timeZone when set, else the
+ * Mac's. The math lives in cloud/schedule.ts, so Bops Cloud can run the same schedules later.
+ */
 export type Schedule =
   | { kind: "daily"; time: string }
   | { kind: "weekdays"; time: string }
   | { kind: "weekly"; day: number; time: string }
-  | { kind: "once"; at: number };
+  | { kind: "once"; at: number }
+  /**
+   * Every `minutes` (MIN_EVERY_MINUTES at least). `hours`: only between these local times ("08:00" to
+   * "22:00"; a run that falls outside waits for the next start); `days` (0 Sunday to 6): only on these.
+   * A check-in is a quiet routine on this kind.
+   */
+  | { kind: "every"; minutes: number; hours?: { from: string; to: string }; days?: number[] };
 
-/** A routine or one-off scheduled ask. When it fires it becomes a thread in the bot's chat. */
+/** The shortest gap an "every" routine may have, in minutes. */
+export const MIN_EVERY_MINUTES = 15;
+
+/**
+ * Where a routine's result goes besides the bot's chat in Bops (which always gets it): a text to the
+ * user from the bot's number, an email to the user from the bot's inbox, or a Slack, Telegram or Discord
+ * place the bot was added to (a ChannelLink; `chat` is the channel or DM there, unset is the DM with the
+ * person paired).
+ */
+export type Delivery = { kind: "text" } | { kind: "email" } | { kind: "channel"; linkId: string; chat?: string };
+
+/** How a routine's last run went. Running and delivering are told apart: a run can go well and its text not arrive. */
+export type RoutineRun = {
+  at: number;
+  /**
+   * running: still going (a task); ok: it ran and said something; quiet: it ran and had nothing for the
+   * user (a quiet routine), so nothing was posted; failed: the run itself failed; skipped: it didn't run
+   * (the last run was still going, or the bot or its computer wasn't there).
+   */
+  status: "running" | "ok" | "quiet" | "failed" | "skipped";
+  error?: string;
+  /** The task it started, when it ran on a computer. */
+  sessionId?: string;
+  /**
+   * On a running record: how the run before this one failed, if it did. A thread that fails the same
+   * way again is recorded but not said or sent again (routines.ts onRoutineTaskEnd), like a chat run.
+   */
+  prevError?: string;
+  /** Whether the result reached `deliverTo`; unset when there was nothing to send or nowhere besides the chat. */
+  delivery?: { status: "sent" | "failed"; to: string; error?: string; at: number };
+};
+
+/** A routine or one-off scheduled ask. When it fires it becomes a reminder, a turn in the bot's chat, or a thread. */
 export type Routine = {
   id: string;
   botId: BotId;
@@ -410,7 +471,85 @@ export type Routine = {
   reminder?: string;
   /** Set up by text from the user's phone: the reminder, or the task's result, is texted to them too. */
   textTo?: { botId: string; to: string };
+  /**
+   * How a run that isn't a reminder works: "chat" is a turn in the bot's chat with its tools (web search,
+   * reading pages, email, apps, memory) and no computer, cheap and quick; "task" (also when unset, as
+   * routines from before are) starts a thread on a computer.
+   */
+  run?: "chat" | "task";
+  /** Quiet: a run that finds nothing that needs the user posts nothing and sends nothing (the bot answers NOTHING). */
+  quiet?: boolean;
+  /** Where each run's result goes besides the chat. */
+  deliverTo?: Delivery;
+  /** A procedure (Procedure.id) each run follows. */
+  procedure?: string;
+  /** How the last run went. */
+  last?: RoutineRun;
+  /**
+   * Set up on a turn someone else started (an email, a text or a call from outside Bops): who it came
+   * from ("an email from desk@hotel.example"). Such a routine runs as a task in the cloud, marked as from
+   * outside (Session.fromOutside), never as a chat run with the user's data; its reminder is a note, not
+   * the bot's own words; and the user sees who set it up.
+   */
+  fromOutside?: string;
 };
+
+/** A one-off whose time has passed: done. Run now before then doesn't finish it (it can still be paused and resumed). */
+export const onceDone = (r: Routine, now = Date.now()) => !r.enabled && r.schedule.kind === "once" && r.schedule.at <= now;
+
+/**
+ * A routine's run going right now, as far as the app can tell: its thread is still running, or a chat
+ * run began less than 15 minutes ago (one takes a minute or two). A record a restart left running
+ * (store.ts mends those as the state loads) never locks Run now.
+ */
+export const runningNow = (r: Routine, sessions: Session[], now = Date.now()) =>
+  r.last?.status === "running" && (r.last.sessionId ? sessions.some((s) => s.id === r.last!.sessionId && live(s)) : now - r.last.at < 15 * 60_000);
+
+/**
+ * A procedure: how a bot does one kind of job, saved so it does it the same way next time (the user's
+ * "skills"). Written by the bot from a chat ("Save as procedure") or when the user asks it to remember
+ * how; read in full only when a job matches (lib/server/procedures.ts). Private to the bot, never shared.
+ */
+export type Procedure = {
+  id: string;
+  botId: BotId;
+  /** A short name for the kind of job: "Weekly invoice summary". */
+  name: string;
+  /** When it applies, in one line: "When the user sends an invoice CSV and asks for a summary". */
+  whenToUse: string;
+  /** What to do, in order, as plain numbered lines. */
+  steps: string;
+  /** What went wrong before or is easy to get wrong, as plain lines. Empty when nothing yet. */
+  pitfalls?: string;
+  createdAt: number;
+  updatedAt: number;
+  /** The chat (and threads) it was learned from. */
+  from?: { chatId: string; sessionIds?: string[] };
+  /** How many times a bot read it for a job, and when it last did. */
+  uses?: number;
+  usedAt?: number;
+};
+
+/** At most this many procedures per bot, and this many characters in one (name, when, steps and pitfalls together). */
+export const MAX_PROCEDURES = 40;
+export const MAX_PROCEDURE_CHARS = 6000;
+/** The longest a procedure's name and its "when to use it" line can be (the server, the save dialog and the editor). */
+export const PROCEDURE_NAME_MAX = 80;
+export const PROCEDURE_WHEN_MAX = 300;
+
+/** A procedure's name as compared: case, spacing and dashes (a bot writes them as commas) don't count. */
+export const procedureKey = (s: string) =>
+  s
+    .replace(/[ \t]*[—–][ \t]*/g, ", ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+/** One of these procedures: by id, then by its exact name, then by name as compared (procedureKey). */
+export function procedureNamed<P extends { id: string; name: string }>(list: P[], nameOrId: string): P | undefined {
+  const want = nameOrId.trim().replace(/^["“']|["”']$/g, "");
+  return list.find((p) => p.id === want) ?? list.find((p) => p.name === want) ?? list.find((p) => procedureKey(p.name) === procedureKey(want));
+}
 
 /**
  * You've taken control of a bot's screen (`display`), or of the Chrome a task of the bot's has of its
@@ -463,7 +602,12 @@ export type ScreenRead = {
 };
 
 /** The person this install of Bops works for: what the bots call them, and what they should know about them (Settings → You). */
-export type Owner = { name: string; about?: string };
+export type Owner = {
+  name: string;
+  about?: string;
+  /** Their IANA time zone ("America/New_York"), kept by the Mac app, so routines run at their local times wherever they run. */
+  timeZone?: string;
+};
 
 export type AppState = {
   /** Who the bots work for. Empty until set in Settings. */
@@ -473,6 +617,8 @@ export type AppState = {
   messages: Message[];
   sessions: Session[];
   routines: Routine[];
+  /** How each bot does the kinds of jobs it was shown (Procedure). Unset on states from before. */
+  procedures?: Procedure[];
   host: Host;
   takeover?: Takeover;
   /** Latest read of each watched screen, keyed `${botId}:${display}`. */
@@ -776,7 +922,52 @@ export type Watch = {
   target?: string;
   /** The screen shows something else right now (another conversation, page or view): no alerts until it's back. */
   away?: boolean;
+  /**
+   * A web page watched with no screen (then `display` is 0): Bops fetches `url` every `everyMin` minutes,
+   * keeps a fingerprint of every line with times and counters taken out (`digests`, in order, and the
+   * page's `hash`; cloud/page-diff.ts), lines that were there lately and went (`seen`, so one that comes
+   * back isn't new), and the text of some lines (`lines`, capped: the ones that changed lately first, so a
+   * model can see what a new line replaced), and asks a model only when lines were added. `error` and
+   * `failures`: the last fetches failed (it backs off). `odd`: reads in a row that looked nothing like the
+   * page (a consent wall), kept out until the page has looked that way three times.
+   */
+  page?: {
+    url: string;
+    everyMin: number;
+    checkedAt?: number;
+    changedAt?: number;
+    hash?: string;
+    digests?: string[];
+    seen?: string[];
+    lines?: string[];
+    error?: string;
+    failures?: number;
+    odd?: number;
+  };
+  /** Paused by the user: not looked at until resumed. */
+  paused?: boolean;
 };
+
+/**
+ * Whether a bot message posted while a turn that came by text or from Slack, Telegram or Discord ran is
+ * that turn's own, to send back there: its words, or the result of a thread it started (`started`). A
+ * routine's run that happened meanwhile isn't (it goes where the routine sends it, never into that
+ * conversation or twice), unless that turn asked for it (Run now); nor is an older thread's result.
+ */
+export const turnsOwn = (m: Message, started: { id: string }[]) => (!m.routine || !!m.routine.manual) && (!m.resultOf || started.some((s) => s.id === m.resultOf));
+
+/**
+ * A routine's thread that finished with NOTHING: a quiet run that found nothing for the user, so it posted
+ * nothing (lib/server/routines.ts isNothing). Lists of threads leave it out, in the app and on the server.
+ */
+export const quietNothing = (s: Session) => !!s.routineId && s.status === "done" && /^\s*NOTHING\.?\s*$/i.test(s.answer ?? "");
+
+/** A watch on a bot's screen (not a window on the user's Mac, not a web page with no screen). */
+export const isScreenWatch = (w: Watch) => !w.mac && !w.page;
+
+/** How often a web page watch is fetched, in minutes: the default, and the least. */
+export const PAGE_WATCH_DEFAULT_MIN = 30;
+export const PAGE_WATCH_MIN_MIN = 5;
 
 export const MAX_SCREENS = 4;
 /** Created screens first; the boot screen (with Orgo's own desktop) last. */

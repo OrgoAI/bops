@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { BLOCKER_LABEL, computerAsleep, computerCheckMs, computerInUse, DISPLAYS, live, streamsLive, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
+import { BLOCKER_LABEL, computerAsleep, computerCheckMs, computerInUse, DISPLAYS, isScreenWatch, live, streamsLive, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
 import { freeComputerOpen, setupShort } from "@/lib/orgo-plans";
 import { BotCursor } from "./bot-cursor";
 import { LiveDesktop, Waking } from "./live-desktop";
@@ -198,7 +198,7 @@ export function ComputerView({
   const lastAct = (d: number) => Math.max(acted[d] ?? 0, stepOn(d)?.at ?? 0);
   /** A screen showing something only the user can do: a sign-in, a payment, a draft to approve. */
   /** A screen kept on one site that Jev watches for the user (see lib/server/watches.ts). */
-  const watchOn = (d: number) => state.watches?.find((w) => here(w.botId) && !w.mac && w.display === d);
+  const watchOn = (d: number) => state.watches?.find((w) => here(w.botId) && isScreenWatch(w) && w.display === d);
   const needsYouOn = (d: number) => {
     const r = readOn(d);
     return !!(r?.blocker || (r?.kind === "email_compose" && r.email) || (holding.get(d)?.blocker && holding.get(d)?.display === d) || (!holding.has(d) && watchOn(d)?.alert));
@@ -1222,7 +1222,8 @@ export function ComputerSummary({ state, bot: b, className = "", onOpen }: { sta
 /** With the right panel collapsed: a round button, like the call button, that reopens the bot's computer. */
 export function ComputerPeek({ state, bot: b, onOpen }: { state: AppState; bot: Bot; onOpen: () => void }) {
   const running = state.sessions.filter((s: Session) => s.botId === b.id && live(s));
-  const needsYou = running.some((s) => s.blocker) || !!state.watches?.some((w) => w.botId === b.id && w.alert);
+  // A page watch's news lives on the Autopilot page, not on a screen (as panel-tabs.tsx counts it).
+  const needsYou = running.some((s) => s.blocker) || !!state.watches?.some((w) => w.botId === b.id && !w.page && w.alert);
   const label = `${b.name}'s computer · ${needsYou ? "needs you" : running.length ? `working on ${running.length} thing${running.length === 1 ? "" : "s"}` : "nothing running"}`;
   return (
     <button

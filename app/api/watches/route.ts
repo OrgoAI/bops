@@ -1,4 +1,4 @@
-import { draftReply, editWatch, seenWatch, startMacWatch, startWatch, stopWatch, suggestWatch } from "@/lib/server/watches";
+import { checkNow, draftReply, editWatch, seenWatch, setWatchPaused, startMacWatch, startPageWatch, startWatch, stopWatch, suggestWatch } from "@/lib/server/watches";
 import { notReady } from "@/lib/server/ready";
 
 export const dynamic = "force-dynamic";
@@ -12,16 +12,21 @@ export async function GET(request: Request) {
   return Response.json(await suggestWatch(botId, display));
 }
 
-/** Keep a bot's screen on the site it's showing and watch it for the user. */
+/**
+ * Watch something for the user: a bot's screen on the site it's showing, a window on their Mac (`mac`),
+ * or a public web page with no screen (`page`: its address, and how often to read it in minutes). A page
+ * is read once now: when that fails, the error says why and nothing is set up.
+ */
 export async function POST(request: Request) {
   const unready = notReady();
   if (unready) return unready;
-  const { botId, display, lookFor, site, mac } = (await request.json()) as {
+  const { botId, display, lookFor, site, mac, page } = (await request.json()) as {
     botId?: string;
     display?: number;
     lookFor?: string;
     site?: string;
     mac?: { app: string; windowId: number; title: string };
+    page?: { url?: string; everyMin?: number };
   };
   // A window on the user's Mac.
   if (mac)
@@ -30,6 +35,17 @@ export async function POST(request: Request) {
     } catch (e) {
       return Response.json({ error: (e as Error).message }, { status: 409 });
     }
+  // A web page, read with no screen.
+  if (page) {
+    if (!botId) return Response.json({ error: "which bot?" }, { status: 400 });
+    if (typeof page.url !== "string" || !page.url.trim()) return Response.json({ error: "which page?" }, { status: 400 });
+    if (page.everyMin !== undefined && typeof page.everyMin !== "number") return Response.json({ error: "how often, in minutes?" }, { status: 400 });
+    try {
+      return Response.json({ watch: await startPageWatch(botId, { url: page.url, everyMin: page.everyMin, lookFor, site }) });
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: 409 });
+    }
+  }
   if (!botId || display === undefined) return Response.json({ error: "which screen?" }, { status: 400 });
   try {
     return Response.json({ watch: await startWatch(botId, display, lookFor, site) });
@@ -38,18 +54,29 @@ export async function POST(request: Request) {
   }
 }
 
-/** The user looked at what a watched screen flagged, wants a reply drafted there, or changed what it's watched for. */
+/**
+ * The user looked at what a watch flagged, wants a reply drafted there, changed what it's watched for
+ * (and a page's minutes between reads, `everyMin`), asked it to look now (`check`: the watch after, and
+ * what it found), or paused or resumed it.
+ */
 export async function PATCH(request: Request) {
   const unready = notReady();
   if (unready) return unready;
-  const { id, action, lookFor } = (await request.json()) as { id?: string; action?: "seen" | "draft" | "edit"; lookFor?: string };
+  const { id, action, lookFor, everyMin } = (await request.json()) as {
+    id?: string;
+    action?: "seen" | "draft" | "edit" | "check" | "pause" | "resume";
+    lookFor?: string;
+    everyMin?: number;
+  };
   if (!id) return Response.json({ error: "which watch?" }, { status: 400 });
   try {
     if (action === "draft") return Response.json({ session: draftReply(id) });
     if (action === "edit") {
-      editWatch(id, lookFor ?? "");
+      editWatch(id, typeof lookFor === "string" ? lookFor : "", typeof everyMin === "number" ? everyMin : undefined);
       return Response.json({ ok: true });
     }
+    if (action === "check") return Response.json(await checkNow(id));
+    if (action === "pause" || action === "resume") return Response.json({ watch: setWatchPaused(id, action === "pause") });
     seenWatch(id);
     return Response.json({ ok: true });
   } catch (e) {
@@ -57,7 +84,7 @@ export async function PATCH(request: Request) {
   }
 }
 
-/** Stop watching a screen; it goes back to being one any work can use. */
+/** Stop watching: a screen goes back to being one any work can use. */
 export async function DELETE(request: Request) {
   const unready = notReady();
   if (unready) return unready;

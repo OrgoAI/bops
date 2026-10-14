@@ -6,7 +6,8 @@ import type { LiveTransportIncomingWebhookEvent } from "openai/resources/webhook
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { CallerVerdict, CloudCallPayload } from "@/cloud/protocol";
-import { botChatId, live, TAPBACKS, workspaceOf, type Bot, type Tapback, type WorkspaceLine } from "@/lib/types";
+import { plainLinks } from "@/cloud/style";
+import { botChatId, live, TAPBACKS, turnsOwn, workspaceOf, type Bot, type Tapback, type WorkspaceLine } from "@/lib/types";
 import { callEnded, callStarted } from "./attention";
 import { delegate, endCall, rememberVoices, voiceFor, voicePrompt } from "./call";
 import { appHeaders } from "./app-version";
@@ -536,13 +537,15 @@ export async function textOwner(botId: string, body: string) {
 
 /**
  * A thread started from the user's text finished (or failed): its result goes back to them from the same
- * number, from the coordinator, naming the bot that did it when it wasn't the coordinator.
+ * number, from the coordinator, naming the bot that did it when it wasn't the coordinator. Markdown
+ * links read as words and an address, as a text shows them typed.
  */
 export function textResult(s: { textBack?: { botId: string; to: string }; botId: string }, text: string) {
   // Only to a number that's still the user's (verified; it may have been removed since they texted).
   if (!s.textBack || !isOwner(s.textBack.to)) return;
   const by = s.botId !== s.textBack.botId ? bot(s.botId)?.name : undefined;
-  void sendText(s.textBack.botId, s.textBack.to, by ? `${by}: ${text}` : text).catch((err: Error) =>
+  const words = plainLinks(text);
+  void sendText(s.textBack.botId, s.textBack.to, by ? `${by}: ${words}` : words).catch((err: Error) =>
     addMessage({ chatId: botChatId(s.textBack!.botId), role: "system", text: `Couldn't text this result back to you: ${err.message}` }),
   );
 }
@@ -652,11 +655,13 @@ async function textIn(b: Bot, line: Line, e: ApEvent, deliveryId: string, verdic
     stopTyping();
   }
   if (!mine) return;
-  // Work it started (its own threads, or a teammate's it handed off) texts its result back too.
-  for (const t of getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && !x.textBack)) patchSession(t.id, { textBack: { botId: b.id, to: from } });
+  // Work it started (its own threads, or a teammate's it handed off) texts its result back too. A routine's
+  // run that happened meanwhile isn't this text's: it goes where the routine sends it (never twice).
+  const started = getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && !x.routineId);
+  for (const t of started.filter((x) => !x.textBack)) patchSession(t.id, { textBack: { botId: b.id, to: from } });
   // The bot's answer, as it gave it in Bops: each message its own bubble, threaded where it was an
   // inline reply, and a tapback as a tapback (never a filler text in its place).
-  const replies = getState().messages.filter((m) => m.chatId === chatId && m.role === "bot" && m.botId === b.id && m.at >= mine.at);
+  const replies = getState().messages.filter((m) => m.chatId === chatId && m.role === "bot" && m.botId === b.id && m.at >= mine.at && turnsOwn(m, started));
   const failed = (err: Error) =>
     addMessage({ chatId, role: "system", text: `Couldn't text this back to you: ${/regist/i.test(err.message) ? "texting from this number waits on carrier approval" : err.message}` });
   for (const r of replies) {

@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { botChatId, live, MAIN_WORKSPACE, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Routine, type Session } from "@/lib/types";
+import { botChatId, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, onceDone, runningNow, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Routine, type Session } from "@/lib/types";
+import { describeSchedule, whenText } from "@/cloud/schedule";
 import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
@@ -14,6 +15,7 @@ import { LineLink } from "./line-link";
 import { botWash, CloseButton, post } from "./ui";
 import { accountTitle, AppLogo, botApps } from "./apps";
 import { WhereToFind } from "./channels";
+import { undash } from "./side-group";
 import { BOOK_A_CALL } from "@/lib/links";
 
 /** The parts of a bot's profile. Its computer has a tab of its own (see panel-tabs.tsx). */
@@ -270,6 +272,9 @@ function Details({
         </div>
       )}
 
+      {/* Keyed by bot: another bot's profile in this tab starts from that bot's own words. */}
+      <HowIWork key={b.id} bot={b} className={glass} />
+
       {(!b.isMain || sharesComputer(b)) && state.host !== "mac" && <ComputerChoice state={state} bot={b} className={glass} onUpgrade={onUpgrade} />}
 
       <div className={`flex w-full flex-col rounded-2xl ${glass}`}>
@@ -282,7 +287,7 @@ function Details({
             Nothing scheduled. Try texting {b.name}: &ldquo;every weekday at 9, {b.isMain ? "send me a summary of what the team did" : "check on anything waiting"}.&rdquo;
           </div>
         ) : (
-          routines.map((r, i) => <RoutineRow key={r.id} routine={r} last={i === routines.length - 1} />)
+          routines.map((r, i) => <RoutineRow key={r.id} routine={r} sessions={state.sessions} tz={state.owner?.timeZone} last={i === routines.length - 1} />)
         )}
       </div>
 
@@ -765,45 +770,151 @@ function Field({ label, value, empty }: { label: string; value?: string; empty: 
   );
 }
 
-function RoutineRow({ routine: r, last }: { routine: Routine; last: boolean }) {
+/**
+ * "How I work": what the user wants this bot to keep in mind as it works (Bot.persona), in their own
+ * words. It gets it in its chat, tasks and calls as their preferences, under Bops' own rules. Saving it
+ * empty clears it. Esc with unsaved words puts back what's saved.
+ */
+function HowIWork({ bot: b, className }: { bot: Bot; className: string }) {
+  const [text, setText] = useState(b.persona ?? "");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const changed = text.trim() !== (b.persona ?? "");
+  const left = MAX_PERSONA_CHARS - text.length;
+  const save = async () => {
+    if (!changed || busy) return;
+    setBusy(true);
+    setError(null);
+    // What was sent: words typed while it saves stay (only the sent text is tidied).
+    const sent = text;
+    try {
+      const res = await post("/api/bots", { botId: b.id, persona: sent }, "PATCH");
+      const r = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok || r.error) return setError(r.error ? undash(r.error) : "That didn't save. Try again.");
+      setText((now) => (now === sent ? sent.trim() : now));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+    } catch {
+      setError("Couldn't reach Bops. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className={`flex w-full flex-col gap-2 rounded-2xl px-4 py-3 ${className}`}>
+      <div className="flex flex-col">
+        <span className="text-[13px] font-semibold leading-4">How I work</span>
+        <span className="text-[12px] leading-4 text-[#6B6B6B]">{b.name} keeps this in mind in chats, tasks and calls</span>
+      </div>
+      <textarea
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          setSaved(false);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            void save();
+          } else if (e.key === "Escape" && changed) {
+            // Puts back what's saved, and keeps the profile open (the app's Esc would leave it).
+            e.preventDefault();
+            setText(b.persona ?? "");
+            setError(null);
+          }
+        }}
+        rows={3}
+        maxLength={MAX_PERSONA_CHARS}
+        aria-label={`How ${b.name} works`}
+        placeholder={`How should ${b.name} work? For example: keep replies short, check my calendar before suggesting times, never email clients before 9 AM.`}
+        className="w-full resize-none rounded-[12px] bg-white/70 px-3 py-2 text-[13px] leading-[18px] outline-none shadow-[0_0_0_1px_#E6E6E3] placeholder:text-[#9A9A98] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+      />
+      <div className="flex items-center gap-2">
+        <button disabled={!changed || busy} onClick={() => void save()} className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-40">
+          {busy ? "Saving…" : "Save"}
+        </button>
+        {saved && <span className="motion-fade-in text-[12px] leading-4 text-[#6B6B6B]">Saved</span>}
+        {error && (
+          <span role="alert" className="min-w-0 text-[12px] leading-4 text-[#B42318]">
+            {error}
+          </span>
+        )}
+        {left <= MAX_PERSONA_CHARS / 10 && <span className="ml-auto shrink-0 text-[12px] tabular-nums leading-4 text-[#9A9A98]">{left === 1 ? "1 character left" : `${left} characters left`}</span>}
+      </div>
+    </div>
+  );
+}
+
+/** A one-time routine whose time has passed: it's done, not paused (Run now before its time doesn't finish it). */
+const finished = (r: Routine) => onceDone(r);
+
+/** "today 3 PM" inside a sentence; a weekday or a date reads as it is. */
+const inSentence = (when: string) => when.replace(/^(Today|Tomorrow|Yesterday)\b/, (w) => w.toLowerCase());
+
+/** " · next tomorrow 9 AM" for a routine that's on; nothing for one that's off or done. */
+const nextRun = (r: Routine, tz?: string) => (r.enabled && r.nextRunAt ? ` · next ${inSentence(whenText(r.nextRunAt, Date.now(), tz))}` : "");
+
+/**
+ * How a routine's last run went, in a few words: in red when the run failed or its result didn't reach
+ * where it goes, with why. A quiet run that found nothing says so.
+ */
+function lastRun(r: Routine, sessions: Session[], tz?: string): { text: string; bad: boolean } | null {
+  const l = r.last;
+  if (!l) return null;
+  const when = inSentence(whenText(l.at, Date.now(), tz));
+  if (l.status === "failed") return { text: `The last run failed${l.error ? `: ${undash(l.error)}` : ""}`, bad: true };
+  if (l.delivery?.status === "failed") return { text: `Couldn't send it to ${l.delivery.to}${l.delivery.error ? `: ${undash(l.delivery.error)}` : ""}`, bad: true };
+  // Running for real (runningNow): a record a restart left behind doesn't say so.
+  if (l.status === "running") return runningNow(r, sessions) ? { text: "Running now", bad: false } : { text: `Started ${when}`, bad: false };
+  if (l.status === "quiet") return { text: `Nothing to report · ${when}`, bad: false };
+  if (l.status === "skipped") return { text: `Skipped ${when}${l.error ? `: ${undash(l.error)}` : ""}`, bad: false };
+  return { text: `Ran ${when}${l.delivery?.status === "sent" ? ` · sent to ${l.delivery.to}` : ""}`, bad: false };
+}
+
+/** A routine on its bot's profile: when it runs and next, how its last run went; Delete on hover, and on or off. */
+function RoutineRow({ routine: r, sessions, tz, last }: { routine: Routine; sessions: Session[]; tz?: string; last: boolean }) {
+  const [error, setError] = useState<string | null>(null);
+  const ran = lastRun(r, sessions, tz);
+  const toggle = async () => {
+    setError(null);
+    const res = await post("/api/routines", { id: r.id, enabled: !r.enabled }, "PATCH").catch(() => null);
+    const out = res ? ((await res.json().catch(() => ({}))) as { error?: string }) : { error: "Couldn't reach Bops. Try again." };
+    if (!res?.ok || out.error) setError(undash(out.error ?? "That didn't work. Try again."));
+  };
   return (
     <div className={`group flex items-center gap-2.5 px-4 py-[9px] ${last ? "" : "border-b border-black/[0.05]"}`}>
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-[14px] leading-[18px]">{r.title}</span>
         <span className="text-[12px] leading-4 text-[#6B6B6B]">
-          {describe(r)}
-          {r.nextRunAt && r.enabled ? ` · next ${new Date(r.nextRunAt).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}` : ""}
+          {describeSchedule(r.schedule, tz)}
+          {nextRun(r, tz)}
+          {r.quiet ? " · quiet" : ""}
         </span>
+        {ran && <span className={`text-[12px] leading-4 ${ran.bad ? "text-[#B42318]" : "text-[#9A9A98]"}`}>{ran.text}</span>}
+        {r.fromOutside && <span className="truncate text-[12px] leading-4 text-[#9A9A98]">Set up by {undash(r.fromOutside)}</span>}
+        {error && (
+          <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+            {error}
+          </span>
+        )}
       </div>
       <button onClick={() => void post("/api/routines", { id: r.id }, "DELETE")} className="hidden text-[12px] text-[#9A9A98] hover:text-[#B42318] group-hover:block">
         Delete
       </button>
-      {r.schedule.kind === "once" && !r.enabled ? (
+      {finished(r) ? (
         <span className="rounded-full bg-[#F2F2F0] px-2.5 py-0.5 text-[12px] leading-4 text-[#3A3A38]">Done</span>
       ) : (
         <button
-          onClick={() => void post("/api/routines", { id: r.id, enabled: !r.enabled }, "PATCH")}
+          onClick={() => void toggle()}
           aria-label={r.enabled ? "Turn off" : "Turn on"}
-          className={`flex h-[22px] w-[38px] items-center rounded-full p-0.5 ${r.enabled ? "justify-end bg-ink" : "justify-start bg-[#D9D9D6]"}`}
+          className={`flex h-[22px] w-[38px] shrink-0 items-center rounded-full p-0.5 ${r.enabled ? "justify-end bg-ink" : "justify-start bg-[#D9D9D6]"}`}
         >
           <span className={`size-[18px] rounded-full ${r.enabled ? "bg-highlighter" : "bg-white"}`} />
         </button>
       )}
     </div>
   );
-}
-
-const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-function describe(r: Routine) {
-  const s = r.schedule;
-  const clock = (t: string) => {
-    const [h, m] = t.split(":").map(Number);
-    return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
-  };
-  if (s.kind === "daily") return `Every day ${clock(s.time)}`;
-  if (s.kind === "weekdays") return `Weekdays ${clock(s.time)}`;
-  if (s.kind === "weekly") return `${DAYS[s.day]}s ${clock(s.time)}`;
-  return `Once · ${new Date(s.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`;
 }
 
 /* ---------------- What the bot uses, and where to find it ---------------- */

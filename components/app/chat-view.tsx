@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BLOCKER_ASK, live, pairChatId, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
@@ -12,6 +12,8 @@ import { AttachmentTray, MessageImages, useAttachments } from "./attachments";
 import { ComposerInput } from "./composer-input";
 import { MicButton } from "./mic-button";
 import { Fold } from "./fold";
+import { SaveProcedureDialog } from "./procedure-dialog";
+import { undash } from "./side-group";
 import { ChatAvatar, chatName, clockTime, needsYou, post, StatusIcon, teamOf, useNow } from "./ui";
 
 /** Light markdown for bot text: **bold** and [links](url). */
@@ -247,6 +249,10 @@ export function ChatView({
   };
   // Two bots' conversation, open over the chat ("Asked ● Sam").
   const [pair, setPair] = useState<{ id: string; focus?: string } | null>(null);
+  // "Save as procedure" from the chat's menu: the bot rereads this chat and drafts one (procedure-dialog.tsx).
+  const [saving, setSaving] = useState<{ botId: string; chatId: string } | null>(null);
+  // Stable, so the dialog's own timers aren't reset by every state poll.
+  const closeSaving = useCallback(() => setSaving(null), []);
   const rowProps = (m: Message) => ({
     replyCount: replyCount.get(m.id) ?? 0,
     root: m.replyTo ? messages.find((x) => x.id === m.replyTo) : undefined,
@@ -371,7 +377,17 @@ export function ChatView({
         </div>
       )}
       {pair && <PairSheet state={state} pairId={pair.id} focusId={pair.focus} onClose={() => setPair(null)} />}
+      {saving && <SaveProcedureDialog botId={saving.botId} chatId={saving.chatId} onClose={closeSaving} />}
       <div className="absolute right-5 top-[18px] z-10 flex items-center gap-2">
+        {/* The chat's own menu (a bot's chat, like Call): Save as procedure rereads this chat for how the bot did a job. */}
+        {solo && !call && (
+          <MoreMenu
+            key={c.id}
+            label="More"
+            size="chat"
+            items={[{ label: "Save as procedure", icon: <ProcedureIcon />, onClick: () => setSaving({ botId: solo.id, chatId: c.id }) }]}
+          />
+        )}
         {solo && !call && (
           <button
             onClick={() => onCall(solo.id)}
@@ -720,6 +736,84 @@ function RepliesView({
   );
 }
 
+/** A row of a small menu (the message menu, and the "⋯" ones). */
+const MENU_ITEM = "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-4 hover:bg-[#F2F2F0]";
+
+/**
+ * A round "⋯" button and the small menu it opens under it, out of its right corner: the chat's (next to
+ * Call) and a thread's (next to Stop). A click outside or Esc closes it; Esc closes only it, not the
+ * sheet or page under it.
+ */
+function MoreMenu({ label, size, items }: { label: string; size: "chat" | "sheet"; items: { label: string; icon: React.ReactNode; onClick: () => void }[] }) {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+    };
+    window.addEventListener("keydown", esc, true);
+    return () => window.removeEventListener("keydown", esc, true);
+  }, [open]);
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        aria-label={label}
+        title={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={
+          size === "chat"
+            ? "flex size-11 items-center justify-center rounded-full bg-white shadow-[0_0_0_1px_#E6E6E3,0_8px_20px_-10px_#00000040] hover:shadow-[0_0_0_1px_#C9C9C6,0_8px_20px_-10px_#00000040]"
+            : "flex size-[34px] items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]"
+        }
+      >
+        <svg width={size === "chat" ? 18 : 14} height={size === "chat" ? 18 : 14} viewBox="0 0 16 16" aria-hidden>
+          <circle cx="3.2" cy="8" r="1.35" fill="#0A0A0A" />
+          <circle cx="8" cy="8" r="1.35" fill="#0A0A0A" />
+          <circle cx="12.8" cy="8" r="1.35" fill="#0A0A0A" />
+        </svg>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} onContextMenu={(e) => (e.preventDefault(), setOpen(false))} />
+          <div role="menu" className="motion-menu-in absolute right-0 top-[calc(100%+6px)] z-40 flex w-[184px] origin-top-right flex-col rounded-xl bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040]">
+            {items.map((x) => (
+              <button
+                key={x.label}
+                role="menuitem"
+                onClick={() => {
+                  setOpen(false);
+                  x.onClick();
+                }}
+                className={MENU_ITEM}
+              >
+                {x.icon}
+                {x.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** "Save as procedure": steps in a list, with a mark for keeping them. */
+function ProcedureIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" className="shrink-0 text-[#6B6B6B]" aria-hidden>
+      <path d="M6 4h7.5M6 8h7.5M6 12h5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <circle cx="2.8" cy="4" r="1" fill="currentColor" />
+      <circle cx="2.8" cy="8" r="1" fill="currentColor" />
+      <circle cx="2.8" cy="12" r="1" fill="currentColor" />
+    </svg>
+  );
+}
+
 function ReplyArrow() {
   return (
     <svg width="13" height="13" viewBox="0 0 16 16" className="shrink-0 text-[#6B6B6B]">
@@ -813,6 +907,8 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   const [askingAtMount] = useState(() => new Set(chipIds.filter((sid) => { const s = sessionById(sid); return !!s && needsYou(s); })));
   const [picking, setPicking] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Links open as a tab on the right (a watched web page's "Open page" too).
+  const openLink = useContext(OpenLink);
   // Right-click or long-press opens the message's menu: tapbacks above, Reply / Copy / Delete below.
   const [menu, setMenu] = useState(false);
   const press = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -898,7 +994,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     setPicking(false);
     setMenu(false);
   };
-  const menuItem = "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-4 hover:bg-[#F2F2F0]";
+  const menuItem = MENU_ITEM;
   // Both open out of the bubble's corner they hang from: right for yours, left for the bot's.
   const actionMenu = menu && (
     <div className={`motion-menu-in absolute top-[calc(100%+6px)] z-40 flex w-[168px] flex-col rounded-xl bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040] ${outgoing ? "right-0 origin-top-right" : "left-0 origin-top-left"}`}>
@@ -979,10 +1075,33 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   // A thread a newer one took over shows as that newer one (its id was moved over), so skip leftovers.
   const chips = (chipIds.map(sessionById).filter(Boolean) as Session[]).filter((s) => !s.replacedBy);
   // A heads-up from a watched screen offers to show it, or to have the bot draft a reply right there.
+  // A web page watched with no screen offers the page itself (as a tab here, like a link; ⌘-click: the
+  // browser), and to stop watching it.
   // Only the latest heads-up about a screen keeps its buttons; older ones are just history.
   const latest = m.watch && lasts(state.messages).byWatch.get(m.watch.id) === m.id;
   const watch = latest ? state.watches?.find((w) => w.id === m.watch!.id) : undefined;
-  const watchActions = watch && (
+  const page = watch?.page;
+  const watchActions = watch && page ? (
+    <div className="flex gap-1.5 pl-0.5">
+      <button
+        onClick={(e) => {
+          if (openLink && !(e.metaKey || e.ctrlKey || e.shiftKey)) openLink(page.url);
+          else window.open(page.url, "_blank", "noreferrer");
+          if (watch.alert) void post("/api/watches", { id: watch.id, action: "seen" }, "PATCH");
+        }}
+        title={page.url}
+        className="rounded-full bg-white px-3 py-1 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]"
+      >
+        Open page
+      </button>
+      <button
+        onClick={() => void post(`/api/watches?id=${encodeURIComponent(watch.id)}`, {}, "DELETE")}
+        className="rounded-full bg-white px-3 py-1 text-[12.5px] font-medium leading-4 text-[#6B6B6B] shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#FEF3F2] hover:text-[#B42318]"
+      >
+        Stop watching
+      </button>
+    </div>
+  ) : watch && (
     <div className="flex gap-1.5 pl-0.5">
       <button
         onClick={() => {
@@ -1151,11 +1270,14 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     );
 
   const b = state.bots.find((x) => x.id === m.botId);
+  // Posted by a routine (a reminder, or a run in the chat): which one, by its name while it's there.
+  const fromRoutine = m.routine && state.routines.find((r) => r.id === m.routine!.id);
   return (
     <div className={`group/msg flex max-w-[86%] items-end gap-2 self-start ${enterClass}`}>
       {showSender && (b && !continued ? <Mascot botId={b.id} color={b.color} size={24} /> : <span className="w-6 shrink-0" />)}
       <div className="flex min-w-0 flex-col gap-1">
         {showSender && b && !continued && <div className="pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{b.name}</div>}
+        {m.routine && <div className="truncate pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{fromRoutine ? `From a routine · ${undash(fromRoutine.title)}` : "From a routine"}</div>}
         {!!m.asked?.length && <AskedLine state={state} asked={m.asked} by={m.botId} />}
         {quote}
         <div className={`flex min-w-0 max-w-full items-center gap-1 self-start transition-[margin] duration-200 ease-out motion-reduce:transition-none ${m.reactions?.length ? "mt-3.5" : ""}`}>
@@ -1587,9 +1709,14 @@ export function ThreadSheet({ state, session: s, onClose: close, onShowComputer 
   const [draft, setDraft] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [openSteps, setOpenSteps] = useState<number[]>([]);
+  // "Save as procedure" for this thread alone (procedure-dialog.tsx), by the thread it's for.
+  const [saving, setSaving] = useState<string | null>(null);
+  const closeSaving = useCallback(() => setSaving(null), []);
   const end = useRef<HTMLDivElement>(null);
   const b = state.bots.find((x) => x.id === s.botId)!;
   const via = s.sentVia === "routine" ? undefined : s.sentVia === "you" ? b : state.bots.find((x) => x.id === s.sentVia);
+  // The routine whose run this is, while it's there (Session.routineId).
+  const routine = s.routineId ? state.routines.find((r) => r.id === s.routineId) : undefined;
   const lines = timeline(s);
   const toolCount = s.steps.filter((x) => x.tool !== "note" && x.tool !== "setup").length;
   const started = s.startedAt ?? s.createdAt;
@@ -1610,6 +1737,8 @@ export function ThreadSheet({ state, session: s, onClose: close, onShowComputer 
     // (its blur stays as it is) and the sheet comes up from below.
     <div onClick={onClose} className={`absolute inset-0 z-20 flex flex-col bg-white/70 px-3 pb-3 pt-[52px] backdrop-blur-[2px] ${opening ? "motion-fade-in" : ""}`}>
       <div onClick={(e) => e.stopPropagation()} className={`flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000038] ${opening ? "motion-sheet-in" : ""}`}>
+        {/* Portalled over everything; inside the card, so its clicks never reach the scrim and close the sheet. */}
+        {saving === s.id && <SaveProcedureDialog botId={s.botId} chatId={s.chatId} sessionId={s.id} onClose={closeSaving} />}
         <div className="flex items-center gap-2.5 border-b border-[#F0F0EE] py-3.5 pl-4 pr-3.5">
           <Mascot botId={b.id} color={b.color} size={32} />
           <div className="flex min-w-0 flex-1 flex-col gap-px">
@@ -1644,6 +1773,8 @@ export function ThreadSheet({ state, session: s, onClose: close, onShowComputer 
               Delete
             </button>
           )}
+          {/* Save as procedure: the bot rereads this thread for how it did the job. Keyed by thread, so another one's sheet starts it shut. */}
+          <MoreMenu key={s.id} label="More" size="sheet" items={[{ label: "Save as procedure", icon: <ProcedureIcon />, onClick: () => setSaving(s.id) }]} />
           <button onClick={onClose} aria-label="Close thread" className="flex size-[34px] items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
             <svg width="12" height="12" viewBox="0 0 12 12">
               <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
@@ -1655,7 +1786,7 @@ export function ThreadSheet({ state, session: s, onClose: close, onShowComputer 
           <div className="flex w-[86%] flex-col items-end gap-1.5 self-end">
             <div className="flex items-center gap-1.5 text-[12px] leading-4 text-[#6B6B6B]">
               {via && <Mascot botId={via.id} color={via.color} size={16} antenna={false} />}
-              {s.sentVia === "routine" ? "Sent by a routine" : `Sent via ${via?.name ?? "the main bot"}`}
+              {s.sentVia === "routine" ? (routine ? `Sent by a routine · ${undash(routine.title)}` : "Sent by a routine") : `Sent via ${via?.name ?? "the main bot"}`}
             </div>
             <div className="flex flex-col gap-2 rounded-[18px] bg-[#FBFFE0] px-[15px] pb-2.5 pt-[11px] shadow-[0_0_0_1px_#EEF7A8]">
               <div className={`whitespace-pre-wrap text-[14px] leading-[21px] ${expanded ? "" : "line-clamp-3"}`}>{s.goal}</div>

@@ -1,7 +1,7 @@
 import { createBot, renameBot, setComputer } from "@/lib/server/bots";
 import { deleteBot } from "@/lib/server/remove";
 import { requestInbox } from "@/lib/server/mail";
-import type { AppLevel, Effort } from "@/lib/types";
+import { MAX_PERSONA_CHARS, type AppLevel, type Effort } from "@/lib/types";
 import { bot, update } from "@/lib/server/store";
 import { notReady } from "@/lib/server/ready";
 import { fromBopsWindow } from "@/lib/server/ui-token";
@@ -27,7 +27,11 @@ export async function POST(request: Request) {
   return Response.json(made);
 }
 
-/** Give or take access to an account (a null level takes it away), rename the bot, set how hard it thinks, where it works, whether it asks first and whether it has business data, or get it an email. */
+/**
+ * Give or take access to an account (a null level takes it away), rename the bot, set how hard it thinks,
+ * where it works, whether it asks first, whether it has business data and how it should work (persona),
+ * or get it an email.
+ */
 export async function PATCH(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
   if (unready) return unready;
@@ -47,6 +51,8 @@ export async function PATCH(request: Request) {
     computer?: "shared" | "own";
     /** Get this bot an email (Max: up to 5; see requestInbox). */
     email?: true;
+    /** "How I work" (Bot.persona): trimmed, cut to MAX_PERSONA_CHARS; empty clears it. */
+    persona?: string;
   };
   const b = body.botId ? bot(body.botId) : undefined;
   if (!b) return Response.json({ error: "no such bot" }, { status: 404 });
@@ -71,6 +77,7 @@ export async function PATCH(request: Request) {
     if (body.runsOn && ["auto", "cloud", "mac"].includes(body.runsOn)) b.runsOn = body.runsOn;
     if (typeof body.autoApprove === "boolean") b.autoApprove = body.autoApprove || undefined;
     if (typeof body.dataOff === "boolean") b.dataOff = body.dataOff || undefined;
+    if (typeof body.persona === "string") b.persona = body.persona.trim().slice(0, MAX_PERSONA_CHARS).trim() || undefined;
   });
   return Response.json({ ok: true });
 }

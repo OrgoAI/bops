@@ -6,7 +6,8 @@ import { Fold } from "./fold";
 import { CATEGORIES, categoriesOpen, categoryOf, GROUP_NAME, settled, upcoming, whenLabel, type CategoryId, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
 import type { AppState } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
-import { ago, clockTime, CloseButton, currentWorkspace, useNow } from "./ui";
+import { Chevron, Count, FIRST, InlineConfirm, OpenIcon, readGroupOpen, readSectionOpen, since, small, undash, writeGroupOpen, writeSectionOpen } from "./side-group";
+import { clockTime, CloseButton, currentWorkspace, useNow } from "./ui";
 
 /*
  * What Bops knows, sorted into categories that fill themselves from the workspace's memory
@@ -276,9 +277,6 @@ export function groupsOf(category: CategoryId, items: MemoryItem[]): ItemGroup[]
 /** Whether an item matches a search (lowercased): its name, its line, or who it's with. */
 const matches = (i: MemoryItem, q: string) => !q || [i.title, i.detail, i.who].some((s) => !!s && s.toLowerCase().includes(q));
 
-/** Memory's own words without dashes (the app never shows them): a range reads "3 to 5", any other dash a comma. */
-const undash = (s: string) => s.replace(/(\d)\s*[–—]\s*(\d)/g, "$1 to $2").replace(/\s*[—–]\s*/g, ", ");
-
 const pad = (n: number) => String(n).padStart(2, "0");
 /** A day from today (0 today, 1 tomorrow), written as items write dates ("2026-10-12"). */
 const dayFromToday = (shift: number) => {
@@ -306,16 +304,6 @@ function pressing(i: MemoryItem) {
 
 /** Behind the user, shown in grey: a done to-do or promise, one in Older, an event that's past. */
 const greyed = (i: MemoryItem) => !!i.done || settled(i) || (i.category === "events" && !!i.when && !upcoming(i));
-
-/** When, for a line: "just now", "5m ago", "3h ago", then the day ("Fri"), then the date ("Sep 28"). */
-function since(t: number) {
-  const s = (Date.now() - t) / 1000;
-  if (s < 60) return "just now";
-  if (s < 86_400) return `${ago(t)} ago`;
-  if (s < 6 * 86_400) return ago(t);
-  const d = new Date(t);
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(d.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) });
-}
 
 /** "Updated 5m ago", "Updated on Fri". */
 function updated(t: number) {
@@ -401,34 +389,6 @@ function CheckIcon({ size = 12, color = "#9A9A98" }: { size?: number; color?: st
   );
 }
 
-/**
- * A section's count: drops into place when it goes up (something new was sorted in), not on the first
- * copy, not while a search changes it or as one ends (`quiet` now or just before), and not on a switch to
- * another workspace (`scope`). Nothing at zero, but still mounted, so 0 to 1 ticks too.
- */
-function Count({ n, quiet, scope, className }: { n: number; quiet: boolean; scope: string; className: string }) {
-  const [was, setWas] = useState({ n, quiet, scope });
-  const [ticks, setTicks] = useState(0);
-  if (n !== was.n || quiet !== was.quiet || scope !== was.scope) {
-    setWas({ n, quiet, scope });
-    if (n > was.n && !quiet && !was.quiet && scope === was.scope) setTicks(ticks + 1);
-  }
-  if (!n) return null;
-  return (
-    <span key={ticks} className={`${className} ${ticks ? "motion-tick" : ""}`}>
-      {n}
-    </span>
-  );
-}
-
-function Chevron({ open }: { open: boolean }) {
-  return (
-    <svg width="10" height="10" viewBox="0 0 12 12" className={`shrink-0 transition-transform duration-200 ease-out motion-reduce:transition-none ${open ? "rotate-90" : ""}`} aria-hidden>
-      <path d="M4.5 3l3 3-3 3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 function SearchIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" className="shrink-0" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden>
@@ -447,56 +407,8 @@ function When({ item }: { item: MemoryItem }) {
 
 /* ---------------- The sidebar ---------------- */
 
-/** Items a section shows before "Show all". */
-const FIRST = 5;
-
-/** Where this Mac keeps whether a section is open: per Orgo account and workspace. */
-const openKey = (user: string, ws: string, c: CategoryId) => `bops.memory.open.${user}.${ws}.${c}`;
-
-/** Whether a section is open, as the user left it on this Mac (folded until opened). */
-function readOpen(user: string, ws: string, c: CategoryId) {
-  try {
-    return localStorage.getItem(openKey(user, ws, c)) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeOpen(user: string, ws: string, c: CategoryId, open: boolean) {
-  try {
-    localStorage.setItem(openKey(user, ws, c), open ? "1" : "0");
-  } catch {
-    /* kept until Bops reloads */
-  }
-}
-
-/** Where this Mac keeps whether the whole group is open (open until folded). */
-const groupKey = (user: string, ws: string) => `bops.memory.group.${user}.${ws}`;
-
-function readGroupOpen(user: string, ws: string) {
-  try {
-    return localStorage.getItem(groupKey(user, ws)) !== "0";
-  } catch {
-    return true;
-  }
-}
-
-function writeGroupOpen(user: string, ws: string, open: boolean) {
-  try {
-    localStorage.setItem(groupKey(user, ws), open ? "1" : "0");
-  } catch {
-    /* kept until Bops reloads */
-  }
-}
-
-/** The group's mark for opening its page: an arrow out. */
-function OpenIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 12 12" className="shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M4.5 3h4.5v4.5M9 3L3.5 8.5" />
-    </svg>
-  );
-}
+/** Where this Mac keeps what's folded in Orbit (side-group.tsx): each section folded until opened, the group open until folded. */
+const FOLDS = "memory";
 
 /**
  * What Bops knows, in the sidebar, under its name (GROUP_NAME, Orbit): a section per category from the
@@ -561,7 +473,7 @@ export function SidebarSections({
     CATEGORIES.find((c) => snap.items.some((i) => i.category === c.id)) ?? CATEGORIES.find((c) => snap.hidden?.some((h) => h.category === c.id)) ?? CATEGORIES[0];
   const gk = `${user}.${ws}`;
   // While searching, the group stays open.
-  const shown = !!q || (groupToggled[gk] ?? readGroupOpen(user, ws));
+  const shown = !!q || (groupToggled[gk] ?? readGroupOpen(FOLDS, user, ws));
   return (
     <div className="flex flex-col pt-4">
       <div className="group/orbit mb-1.5 flex items-center pr-1">
@@ -569,7 +481,7 @@ export function SidebarSections({
           onClick={() => {
             if (q) return;
             setGroupToggled({ ...groupToggled, [gk]: !shown });
-            writeGroupOpen(user, ws, !shown);
+            writeGroupOpen(FOLDS, user, ws, !shown);
           }}
           aria-expanded={shown}
           className="flex items-center gap-1.5 rounded-[6px] px-2.5 text-left text-[13px] font-medium leading-4 text-[#9A9A98] outline-none hover:text-[#6B6B6B] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
@@ -597,7 +509,7 @@ export function SidebarSections({
         )}
         {sections.map(({ c, total, items }) => {
           const key = `${user}.${ws}.${c.id}`;
-          const open = !!q || (toggled[key] ?? readOpen(user, ws, c.id));
+          const open = !!q || (toggled[key] ?? readSectionOpen(FOLDS, user, ws, c.id));
           return (
             <div key={c.id} className="flex flex-col">
               <button
@@ -605,7 +517,7 @@ export function SidebarSections({
                   // While searching, every section stays open.
                   if (q) return;
                   setToggled({ ...toggled, [key]: !open });
-                  writeOpen(user, ws, c.id, !open);
+                  writeSectionOpen(FOLDS, user, ws, c.id, !open);
                 }}
                 aria-expanded={open}
                 className="flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
@@ -1047,9 +959,6 @@ const INDENT: Record<CategoryId, string> = {
   preferences: "pl-3.5",
 };
 
-const small = (tone: "plain" | "red") =>
-  `rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 disabled:opacity-40 ${tone === "red" ? "text-[#B42318] hover:bg-[#FEF3F2]" : "text-[#3A3A38] hover:bg-[#F2F2F0]"}`;
-
 /**
  * An item on the page: a row that opens in place to say where it was learned (what was said, what
  * memory worked out, a line of the user's card), with Done, Edit, Hide and Forget.
@@ -1248,50 +1157,9 @@ export function Sources({ sources }: { sources: ItemSource[] }) {
   );
 }
 
-/**
- * Forget an item, asked once more in place. Cancel, the safe choice, has focus, so Enter, Space and Esc
- * all cancel; Esc cancels and only that (preventDefault keeps the page open), even while it forgets.
- */
+/** Forget an item, asked once more in place (InlineConfirm, side-group.tsx): Cancel has focus, and Esc cancels only that. */
 export function ForgetConfirm({ busy, onForget, onCancel }: { busy: boolean; onForget: () => void; onCancel: () => void }) {
-  const box = useRef<HTMLDivElement>(null);
-  const cancel = useRef<HTMLButtonElement>(null);
-  const was = useRef(busy);
-  // While it forgets both buttons are off, and Chrome drops focus from a button that turns off (Esc would
-  // then close the page, and a failure's error with it): the box has focus. If it failed, Cancel again.
-  useEffect(() => {
-    if (busy) box.current?.focus();
-    else if (was.current) cancel.current?.focus();
-    was.current = busy;
-  }, [busy]);
-  return (
-    <div
-      ref={box}
-      // Focusable, so a click on its words keeps Esc here too.
-      tabIndex={-1}
-      onKeyDown={(e) => {
-        if (e.key !== "Escape") return;
-        e.preventDefault();
-        if (!busy) onCancel();
-      }}
-      className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl bg-[#FEF3F2] px-3 py-2 outline-none"
-    >
-      <span className="min-w-0 flex-1 text-[12.5px] leading-[17px] text-[#3A3A38]">Forget this? Bops forgets what it learned only about it.</span>
-      <span className="flex shrink-0 items-center gap-1">
-        <button onClick={onForget} disabled={busy} className="rounded-full bg-[#B42318] px-3 py-1 text-[12px] font-semibold leading-4 text-white disabled:opacity-60">
-          {busy ? "Forgetting…" : "Forget"}
-        </button>
-        <button
-          ref={cancel}
-          autoFocus
-          onClick={onCancel}
-          disabled={busy}
-          className="rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-white focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-40"
-        >
-          Cancel
-        </button>
-      </span>
-    </div>
-  );
+  return <InlineConfirm text="Forget this? Bops forgets what it learned only about it." action="Forget" doing="Forgetting…" busy={busy} onConfirm={onForget} onCancel={onCancel} />;
 }
 
 /** An item's name and line, changed in place: Enter saves, Esc cancels (not while saving). Only what changed is sent. */

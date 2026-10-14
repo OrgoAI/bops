@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState, type AnimationEvent } from "react";
-import { DISPLAYS, live, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
+import { useEffect, useRef, useState } from "react";
+import { live, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
+import { AutopilotSections, type AutopilotOpen } from "./autopilot";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
@@ -10,9 +11,9 @@ import { Mascot } from "./mascot";
 import { MemorySections, type MemoryOpen } from "./memory-categories";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
 import { useSetupNeedsYou } from "./setup";
+import { arrived, DeleteX, forgetShown, rememberShown, usePop, useRise } from "./side-group";
 import { UpdateNotice } from "./update-notice";
-import { WATCH, WatchEye, watchName } from "./watch-overlay";
-import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, NeedsYouDot, post, RoundButton, StatusIcon, teamOf, useNow } from "./ui";
+import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, NeedsYouDot, post, quietNothing, RoundButton, StatusIcon, teamOf, useNow } from "./ui";
 
 /**
  * The sidebar for one workspace (switch at the top). The list: one row per conversation (Sam pinned, then by latest activity), each with its
@@ -33,6 +34,7 @@ export function Sidebar({
   onMembers,
   onOpenWatch,
   onOpenMemory,
+  onOpenAutopilot,
 }: {
   state: AppState;
   chatId: string;
@@ -46,24 +48,27 @@ export function Sidebar({
   onVault: () => void;
   /** The People sheet: who can see the bots' computers on Orgo (members.tsx). */
   onMembers: () => void;
-  /** Show a watched screen or Mac window. */
+  /** Show a watched screen or Mac window (a watched page: its row on the Autopilot page). */
   onOpenWatch: (watch: Watch) => void;
   /** Open a category of what Bops knows on the right, at one of its items (memory-categories.tsx). */
   onOpenMemory: (open: MemoryOpen) => void;
+  /** Open Autopilot on the right, at a section and one of its rows (autopilot.tsx). */
+  onOpenAutopilot: (open: AutopilotOpen) => void;
 }) {
   const [query, setQuery] = useState<string | null>(null);
   const q = query?.trim().toLowerCase();
   // The "5m" next to each chat stays current.
   useNow(30_000);
-  // After each paint, every thread and watch in the state is known (in every workspace, whatever a
-  // search hides), so only one that turns up from here on rises in (arrived, below).
+  // After each paint, every thread, watch, schedule and procedure in the state is known (in every
+  // workspace, whatever a search hides), so only one that turns up from here on rises in (side-group.tsx).
   useEffect(() => {
-    const ids = (known ??= new Set());
-    for (const s of state.sessions) ids.add(s.id);
-    for (const w of state.watches ?? []) ids.add(w.id);
-  }, [state.sessions, state.watches]);
+    rememberShown(state.sessions.map((s) => s.id));
+    rememberShown((state.watches ?? []).map((w) => w.id));
+    rememberShown(state.routines.map((r) => r.id));
+    rememberShown((state.procedures ?? []).map((p) => p.id));
+  }, [state.sessions, state.watches, state.routines, state.procedures]);
   // Gone with the sidebar (signing out), so the next sign-in's first paint has nothing new in it either.
-  useEffect(() => () => void (known = null), []);
+  useEffect(() => forgetShown, []);
 
   const lastMessage = (c: Chat) => [...state.messages].reverse().find((m) => m.chatId === c.id);
   const activity = (c: Chat) => lastMessage(c)?.at ?? c.createdAt;
@@ -80,8 +85,9 @@ export function Sidebar({
   const mainBot = team.find((b) => b.isMain);
   const mainChat = mainBot ? state.chats.find((c) => c.kind === "bot" && c.botIds[0] === mainBot.id) : undefined;
 
+  // A quiet routine's run that found nothing for the user posted nothing, so it isn't listed either.
   const threads = [...state.sessions]
-    .filter((s) => workspaceOf(state.bots.find((b) => b.id === s.botId)) === ws && state.bots.some((b) => b.id === s.botId) && !s.replacedBy)
+    .filter((s) => workspaceOf(state.bots.find((b) => b.id === s.botId)) === ws && state.bots.some((b) => b.id === s.botId) && !s.replacedBy && !quietNothing(s))
     .filter((s) => !q || s.title.toLowerCase().includes(q))
     .sort((a, b) => Number(live(b) || needsYou(b)) - Number(live(a) || needsYou(a)) || (b.endedAt ?? b.createdAt) - (a.endedAt ?? a.createdAt))
     .slice(0, 6);
@@ -125,8 +131,6 @@ export function Sidebar({
             ))}
         </div>
 
-        {!q && <Watching state={state} onOpen={onOpenWatch} />}
-
         {threads.length > 0 && (
           <div className="flex flex-col pt-4">
             <div className="px-2.5 pb-1.5 text-[13px] font-medium leading-4 text-[#9A9A98]">Threads</div>
@@ -137,12 +141,16 @@ export function Sidebar({
         )}
       </div>
 
-      {/* What Bops knows, pinned under the chats: Orbit, categories that fill themselves from memory, each a page on the right. Half the sidebar at most, scrolling on its own. Every signed-in account (lib/memory-categories.ts). */}
-      {categoriesOpen(state) && (
-        <div className="-mx-2.5 max-h-[50%] shrink-0 overflow-y-auto border-t border-[#ECECEA] px-2.5 empty:hidden">
-          <MemorySections state={state} query={query ?? ""} onOpen={onOpenMemory} />
-        </div>
-      )}
+      {/*
+        Pinned under the chats, together: Autopilot (what the bots do on their own: schedules, monitors,
+        procedures; every account) and below it Orbit (what Bops knows, categories that fill themselves from
+        memory; every signed-in account, lib/memory-categories.ts), each with a page on the right. Half the
+        sidebar at most between them, scrolling on its own; gone while a search matches nothing in either.
+      */}
+      <div className="-mx-2.5 max-h-[50%] shrink-0 overflow-y-auto border-t border-[#ECECEA] px-2.5 empty:hidden">
+        <AutopilotSections state={state} query={query ?? ""} onOpen={onOpenAutopilot} onOpenWatch={onOpenWatch} />
+        {categoriesOpen(state) && <MemorySections state={state} query={query ?? ""} onOpen={onOpenMemory} />}
+      </div>
 
       {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
       <UpdateNotice />
@@ -353,38 +361,6 @@ function ChatRow({ chat: c, state, selected, onClick, last }: { chat: Chat; stat
   );
 }
 
-/**
- * Every thread and watch id the sidebar has had in its state (Sidebar records them after each paint):
- * null until its first paint, so nothing there then is new. A row asks once, as it mounts, so a
- * workspace switch or a search that brings rows back never replays it, and polls don't remount rows.
- */
-let known: Set<string> | null = null;
-const arrived = (id: string) => !!known && !known.has(id);
-
-/**
- * A mark that pops when `value` changes while its row stays mounted: never for what it was at mount
- * (first paint, a workspace switch, a search bringing the row back). `n` counts the changes (a key that
- * replays it), `pop` is on until the animation ends (`done`), so a row the list moves later (a re-sort
- * re-inserts it, which restarts any animation on it) has nothing left to replay.
- */
-function usePop<T>(value: T) {
-  const [was, setWas] = useState(value);
-  const [n, setN] = useState(0);
-  const [pop, setPop] = useState(false);
-  if (value !== was) {
-    setWas(value);
-    setN(n + 1);
-    setPop(true);
-  }
-  return { n, pop, done: (e: AnimationEvent) => e.target === e.currentTarget && setPop(false) };
-}
-
-/** Rises in once when `fresh`, then drops the class when that's done, so moving the row (a re-sort) doesn't replay it. */
-function useRise(fresh: () => boolean) {
-  const [rise, setRise] = useState(fresh);
-  return { rise, done: (e: AnimationEvent) => e.target === e.currentTarget && setRise(false) };
-}
-
 /** One of the Threads: in ink with its mark while it's working or needs you; × deletes it once it's stopped. */
 function ThreadRow({ session: s, onClick }: { session: Session; onClick: () => void }) {
   // New since the sidebar opened: rises in, once.
@@ -411,33 +387,8 @@ function ThreadRow({ session: s, onClick }: { session: Session; onClick: () => v
   );
 }
 
-/** A small × that shows on hover (or keyboard focus) and deletes, without opening what it sits on. */
-export function DeleteX({ label, onDelete, className = "" }: { label: string; onDelete: () => void; className?: string }) {
-  return (
-    <span
-      role="button"
-      tabIndex={0}
-      aria-label={label}
-      title={label}
-      onClick={(e) => {
-        e.stopPropagation();
-        onDelete();
-      }}
-      // It's a button to the keyboard too: Enter or Space.
-      onKeyDown={(e) => {
-        if (e.key !== "Enter" && e.key !== " ") return;
-        e.preventDefault();
-        e.stopPropagation();
-        onDelete();
-      }}
-      className={`flex size-5 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 motion-reduce:transition-none ${className}`}
-    >
-      <svg width="9" height="9" viewBox="0 0 12 12">
-        <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-      </svg>
-    </span>
-  );
-}
+/** The small × that deletes from a row (side-group.tsx), as the CRM's rows import it from here. */
+export { DeleteX };
 
 /**
  * The workspace name, in place of a "Messages" title. Click it to switch workspaces, rename this
@@ -569,57 +520,6 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
         </div>
       )}
     </div>
-  );
-}
-
-/**
- * Everything the team is watching, in one place: what (a conversation, a mailbox, a site), and
- * whether it's live, paused (not showing right now) or has news. Click to see it; × stops it.
- */
-function Watching({ state, onOpen }: { state: AppState; onOpen: (w: Watch) => void }) {
-  const team = new Set(teamOf(state).map((b) => b.id));
-  const list = (state.watches ?? []).filter((w) => team.has(w.botId)).sort((a, b) => Number(!!b.alert) - Number(!!a.alert) || b.since - a.since);
-  if (!list.length) return null;
-  return (
-    <div className="flex flex-col pt-4">
-      <div className="px-2.5 pb-1.5 text-[13px] font-medium leading-4 text-[#9A9A98]">Watching</div>
-      {list.map((w) => (
-        <WatchRow key={w.id} watch={w} state={state} onClick={() => onOpen(w)} />
-      ))}
-    </div>
-  );
-}
-
-function WatchRow({ watch: w, state, onClick }: { watch: Watch; state: AppState; onClick: () => void }) {
-  // New since the sidebar opened: rises in, once. Its New mark pops when news comes in while it's shown.
-  const row = useRise(() => arrived(w.id));
-  const pop = usePop(!!w.alert);
-  const where = w.mac ? w.mac.app : `${state.bots.find((b) => b.id === w.botId)?.name ?? "Bot"}'s screen ${DISPLAYS.indexOf(w.display) + 1}`;
-  return (
-    <button
-      onClick={onClick}
-      title={`${w.lookFor}${w.away ? " · paused: it isn't showing right now" : ""}`}
-      onAnimationEnd={row.done}
-      className={`group/watch flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left hover:bg-black/[0.03] ${row.rise ? "motion-rise-in" : ""}`}
-    >
-      <span className={w.away ? "text-[#C9C9C6]" : ""} style={w.away ? undefined : { color: WATCH }}>
-        <WatchEye size={14} blink={!w.away && !w.alert} />
-      </span>
-      <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px]">
-        <span className={w.away ? "text-[#6B6B6B]" : "text-ink"}>{watchName(w)}</span>
-        <span className="text-[#9A9A98]"> · {where}</span>
-      </span>
-      {w.alert ? (
-        <span onAnimationEnd={pop.done} className={`shrink-0 rounded-full bg-highlighter px-1.5 py-px text-[11px] font-semibold leading-4 text-ink shadow-[0_0_0_1px_#0000001F] ${pop.pop ? "motion-dot-in" : ""}`}>New</span>
-      ) : (
-        w.away && <span className="shrink-0 text-[12px] text-[#9A9A98] group-hover/watch:hidden group-focus-visible/watch:hidden group-has-[:focus-visible]/watch:hidden">Paused</span>
-      )}
-      <DeleteX
-        label={`Stop watching ${watchName(w)}`}
-        onDelete={() => void post(`/api/watches?id=${encodeURIComponent(w.id)}`, {}, "DELETE")}
-        className="group-hover/watch:opacity-100 group-focus-visible/watch:opacity-100"
-      />
-    </button>
   );
 }
 

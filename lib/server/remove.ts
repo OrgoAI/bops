@@ -28,7 +28,7 @@ export function deleteThread(sessionId: string) {
 
 /**
  * Delete a bot: stop its work, stop watching its screens, delete its own computer if it has one
- * (only ever one in the Bops workspace; a bot that shares the main bot's leaves that one alone), then remove it with its chat, threads and routines. Group chats keep their
+ * (only ever one in the Bops workspace; a bot that shares the main bot's leaves that one alone), then remove it with its chat, threads, routines and procedures. Group chats keep their
  * history without it, unless only one bot is left in them. The main bot can't be deleted.
  */
 export async function deleteBot(botId: string, withWorkspace = false) {
@@ -55,6 +55,7 @@ export async function deleteBot(botId: string, withWorkspace = false) {
     state.messages = state.messages.filter((m) => chats.has(m.chatId));
     state.sessions = state.sessions.filter((s) => s.botId !== botId);
     state.routines = state.routines.filter((r) => r.botId !== botId);
+    state.procedures = state.procedures?.filter((p) => p.botId !== botId);
     for (const key of Object.keys(state.screens ?? {})) if (key.startsWith(`${botId}:`)) delete state.screens![key];
     if (state.takeover?.botId === botId) state.takeover = undefined;
   });

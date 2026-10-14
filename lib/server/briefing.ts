@@ -1,5 +1,5 @@
 import "server-only";
-import { BLOCKER_LABEL, DISPLAYS, live, workspaceOf, type Session } from "@/lib/types";
+import { BLOCKER_LABEL, DISPLAYS, isScreenWatch, live, workspaceOf, type Session } from "@/lib/types";
 import { fullAccessOn } from "./full-access";
 import { sameComputer, screenPages, workComputer } from "./screens";
 import { bot, getState, ownerName } from "./store";
@@ -63,7 +63,7 @@ export async function computerBriefing(botId: string, opts: { thread?: string } 
     }
     const other = mates.find((s) => s.display === d || s.helperScreens?.includes(d));
     if (other) return `Screen ${n}: ${bot(other.botId)?.name ?? "another bot"} is working there on "${other.title}"; it's not yours, don't touch it.`;
-    const w = state.watches?.find((x) => !x.mac && sameComputer(x.botId, botId) && x.display === d);
+    const w = state.watches?.find((x) => isScreenWatch(x) && sameComputer(x.botId, botId) && x.display === d);
     if (w)
       return `Screen ${n}: watched for ${owner} · ${w.site}, for ${w.lookFor}${w.away ? " · paused: it shows something else right now" : ""}${w.alert ? ` · waiting for ${owner}: "${w.alert.text}"` : ""}. Leave it on ${w.site}; don't use it for other work.`;
     return `Screen ${n}: free · ${pageText(i)} is open.`;

@@ -71,6 +71,18 @@ function migrate(raw: Record<string, unknown>): AppState {
   }
   state.sessions ??= [];
   state.routines ??= [];
+  // A routine's run going when the server stopped (a chat run mid-turn, or a thread just marked failed
+  // above) can't finish now: its record says so, or the routine would show Running with Run now off for
+  // good (a one-off, a paused one) or until its next run. Recorded only, never sent where results go.
+  for (const r of state.routines) {
+    if (r.last?.status !== "running") continue;
+    const t = r.last.sessionId ? state.sessions.find((x) => x.id === r.last!.sessionId) : undefined;
+    if (t && (t.status === "queued" || t.status === "starting" || t.status === "running")) continue;
+    r.last = t?.status === "done" ? { ...r.last, status: "ok" } : { ...r.last, status: "failed", error: t?.status === "failed" && t.error ? t.error : "Bops restarted while this was running" };
+    delete r.last.prevError;
+  }
+  // Each bot's procedures (lib/server/procedures.ts): none on a state from before them.
+  state.procedures ??= [];
   state.host ??= "orgo";
   state.owner ??= { name: "" };
   state.takeover = undefined;
@@ -275,6 +287,11 @@ export function update(fn: (state: AppState) => void) {
   changed();
 }
 
+/** Something the app shows changed that isn't saved (a page watch's last read, kept in memory): polls get the state again; nothing is written. */
+export function touchState() {
+  box.version++;
+}
+
 /** A change the app doesn't show (the usage ledger): saved like any other, but polls aren't sent the state again for it. */
 export function updateUnseen(fn: (state: AppState) => void) {
   fn(box.state);
@@ -344,7 +361,8 @@ export async function resetState() {
   // Starting over isn't signing out: who's signed in stays (their key stays in the Keychain), and
   // the bots call them by their Orgo name again, as on a first sign-in. What Bops has cost so far
   // stays too, and so do this Mac's routing switch and the user's other Macs' own settings.
-  // The user's usage data switch stays as they set it.
+  // The user's usage data switch stays as they set it. Everything else goes: the bots with their
+  // chats, threads, routines and procedures.
   const { host, account, usage, relay, macs, analyticsOff } = box.state;
   const name = account?.user.name?.slice(0, 80);
   box.state = migrate({ host, account, usage, relay, macs, analyticsOff, owner: name ? { name } : undefined });

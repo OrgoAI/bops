@@ -1,5 +1,5 @@
 import "server-only";
-import { botChatId, live, sharesComputer, workspaceOf, type Bot } from "@/lib/types";
+import { botChatId, isScreenWatch, live, sharesComputer, workspaceOf, type Bot } from "@/lib/types";
 import { bot, getState, update } from "./store";
 import { ensureInbox } from "./mail";
 import { noMainComputer, noOwnComputer } from "./plan";
@@ -117,7 +117,8 @@ export async function setComputer(botId: string, mode: "shared" | "own"): Promis
   const busy = (id: string) => moving.find((x) => x.id === id)?.name;
   const working = st.sessions.find((s) => busy(s.botId) && live(s) && s.runsOn !== "mac");
   if (working) return { error: `${busy(working.botId)} is working in the cloud right now. Pause it first.` };
-  const watching = st.watches?.find((w) => busy(w.botId) && !w.mac);
+  // A screen watch keeps a screen on the computer it leaves; a Mac window or a web page has none.
+  const watching = st.watches?.find((w) => busy(w.botId) && isScreenWatch(w));
   if (watching) return { error: `${busy(watching.botId)} is watching a screen. Stop watching it first.` };
   if (st.takeover && busy(st.takeover.botId)) return { error: `You're driving one of ${busy(st.takeover.botId)}'s screens. Hand it back first.` };
   const noRoom = mode !== "own" ? null : b.isMain ? await noMainComputer(b) : await noOwnComputer(workspaceOf(b));

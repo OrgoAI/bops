@@ -316,9 +316,20 @@ const openai = openaiClient();
 /** Asking to keep something from someone ("don't tell Sam yet", "keep this between us"): caught at once, before Jev. */
 const SECRET = /\b(don'?t|do not|never) (tell|share|mention|let)\b|\bkeep (it|this|that)? ?(from|between|private|quiet)|\bbetween (us|you and me)\b|\b(this is|it's|that's) private\b|\boff the record\b/i;
 
-/** Messages the user asked to keep from someone: never sent to the shared memory, nor the bot's reply to them. */
+/**
+ * Messages the user asked to keep from someone: never sent to the shared memory, nor the bot's reply to
+ * them, nor into a procedure's draft. Marked on the message itself (Message.secret), so the mark outlasts
+ * a restart and is there with memory off; the set is the same marks, for this process.
+ */
 const secrets = new Set<string>();
-export const isSecret = (messageId: string | undefined) => !!messageId && secrets.has(messageId);
+export const isSecret = (messageId: string | undefined) => !!messageId && (secrets.has(messageId) || !!getState().messages.find((m) => m.id === messageId)?.secret);
+function markSecret(messageId: string) {
+  secrets.add(messageId);
+  update((s) => {
+    const m = s.messages.find((x) => x.id === messageId);
+    if (m) m.secret = true;
+  });
+}
 
 /**
  * The user's message, into the workspace's memory (which all its bots share), with two checks first
@@ -328,11 +339,13 @@ export const isSecret = (messageId: string | undefined) => !!messageId && secret
  * it; learn() checks it against what's known). Fire and forget.
  */
 export function rememberMessage(ws: string, chatId: string, messageId: string, said: string, metadata: Record<string, unknown> = {}) {
-  if (!on() || !said.trim()) return;
+  if (!said.trim()) return;
+  // Marked with memory off too: a procedure's draft reads the chat whether or not there's a memory.
   if (SECRET.test(said)) {
-    secrets.add(messageId);
+    markSecret(messageId);
     return;
   }
+  if (!on()) return;
   // The account whose message this is: a sign-out or another account's sign-in meanwhile, and nothing of it goes into the new one's memory.
   const ours = sameState();
   const epoch = stateEpoch();
@@ -350,7 +363,7 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
       },
     );
     if ((yes(a?.secret) ?? 0) >= 0.4) {
-      secrets.add(messageId);
+      if (ours()) markSecret(messageId);
       return;
     }
     if (!ours()) return;

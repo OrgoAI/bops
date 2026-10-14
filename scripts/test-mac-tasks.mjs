@@ -1238,6 +1238,29 @@ said.output = [];
 web.answer = undefined;
 Cl.cloudSessionNow().typesafe = false;
 
+// A bot's procedures go in a Mac task's skills folder as SKILL.md files, fresh each run (procedures.ts
+// writeSkillFiles, from local.ts startExecutor): its agent session's capability directory finds them.
+{
+  const P = await import(`${root}/lib/server/procedures.ts`);
+  const saved = P.saveProcedure(main.id, { name: "Weekly invoice summary", whenToUse: "When asked for the week's invoices", steps: "1. Open the Invoices folder\n2. Sum the totals", pitfalls: "Skip drafts" });
+  assert.ok(saved.procedure, saved.error);
+  const id = "ses_skills";
+  const child = await L.startExecutor(id, "env_skills", "wss://env.test/skills", 9, undefined, false, main.id);
+  const skills = join(L.taskWorkspace(id), "capabilities", "skills");
+  assert.deepEqual(readdirSync(skills), ["weekly-invoice-summary"]);
+  const skill = readFileSync(join(skills, "weekly-invoice-summary", "SKILL.md"), "utf8");
+  assert.match(skill, /^---\nname: weekly-invoice-summary\ndescription: "When asked for the week's invoices"\n---\n/);
+  assert.match(skill, /Open the Invoices folder/);
+  L.stopExecutor(id, child);
+  await until(() => !existsSync(L.taskDir(id)), "its folder to go");
+  // No procedures: an empty skills folder.
+  P.deleteProcedure(saved.procedure.id);
+  const bare = await L.startExecutor(id, "env_skills", "wss://env.test/skills", 9, undefined, false, main.id);
+  assert.deepEqual(readdirSync(join(L.taskWorkspace(id), "capabilities", "skills")), []);
+  L.stopExecutor(id, bare);
+  await until(() => !existsSync(L.taskDir(id)), "its folder to go");
+}
+
 // The task's messages and state went to the user's Bops Cloud, not to a file on this Mac.
 assert.equal(await S.flushState(10_000), true);
 assert.ok(cloudState.messages.size > 0 && cloudState.blob, "the state is in the user's Bops Cloud");
