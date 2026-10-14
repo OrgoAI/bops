@@ -715,15 +715,70 @@ await part("Draft: the bot's answer to a secret stays out too, and the mark outl
   assert.ok(input.chat.includes("Sending it to HR."), "the rest of the chat is read");
 });
 
-await part("Two Macs: a procedure edited on one and read on the other keeps both changes", async () => {
+await part("Two Macs: a thing changed on one side is that side's; changed on both, this Mac's whole copy", async () => {
   const M = await import(`${root}/lib/server/state-merge.ts`);
   const base = { procedures: [{ id: "p1", name: "Close", steps: "1. Old", uses: 1, usedAt: 1, updatedAt: 1 }] };
   const mine = { procedures: [{ id: "p1", name: "Close", steps: "1. Old", uses: 2, usedAt: 5, updatedAt: 1 }] };
   const theirs = { procedures: [{ id: "p1", name: "Close", steps: "1. New steps", uses: 1, usedAt: 1, updatedAt: 9 }] };
-  assert.deepEqual(M.merge3(base, mine, theirs).procedures, [{ id: "p1", name: "Close", steps: "1. New steps", uses: 2, usedAt: 5, updatedAt: 9 }]);
-  // Both changed the same field: this Mac's.
-  const both = { procedures: [{ id: "p1", name: "Close", steps: "1. Mine", uses: 1, usedAt: 1, updatedAt: 3 }] };
-  assert.equal(M.merge3(base, both, theirs).procedures[0].steps, "1. Mine");
+  // Edited there only: theirs. Used here only: mine.
+  assert.deepEqual(M.merge3(base, base, theirs).procedures, theirs.procedures);
+  assert.deepEqual(M.merge3(base, mine, base).procedures, mine.procedures);
+  // Both: this Mac's copy as it is, never one put together from fields of each.
+  assert.deepEqual(M.merge3(base, mine, theirs).procedures, mine.procedures);
+  // A thread still running here (a step added), marked failed by another Mac's sign-in: this Mac's
+  // running copy stands, its screen and all, and goes back up as it is.
+  const was = { id: "ses_1", status: "running", display: 99, steps: [1] };
+  const here = { ...was, steps: [1, 2] };
+  const there = { id: "ses_1", status: "failed", error: "Bops restarted while this was running", steps: [1] };
+  assert.deepEqual(M.merge3({ sessions: [was] }, { sessions: [here] }, { sessions: [there] }).sessions, [here]);
+  // A watch's alert and what it was told go together: the old alert cleared here while a new one came
+  // there keeps this Mac's told too, so the new one isn't marked told with no alert, and is found again.
+  const w = { id: "w1", alert: { text: "Y" }, told: ["Y"] };
+  const cleared = { id: "w1", told: ["Y"] };
+  const told = { id: "w1", alert: { text: "X" }, told: ["Y", "X"] };
+  assert.deepEqual(M.merge3({ watches: [w] }, { watches: [cleared] }, { watches: [told] }).watches, [cleared]);
+});
+
+await part("Two Macs: a state loaded at sign-in keeps its routine runs as they are, and its secret marks are known at a glance", async () => {
+  const { userDataDir } = await import(`${root}/lib/server/user-paths.ts`);
+  const user = "u_two_macs";
+  mkdirSync(userDataDir(user), { recursive: true });
+  // Another Mac's state, mid-run there: a chat run and a thread run going, and a long chat with ten secrets.
+  const C = "chat_long";
+  const messages = Array.from({ length: 40_000 }, (_, i) => ({ id: `m_long_${i}`, chatId: C, role: "user", text: `Line ${i}`, at: i, ...(i % 4000 === 0 ? { secret: true } : {}) }));
+  writeFileSync(
+    join(userDataDir(user), "state.json"),
+    JSON.stringify({
+      chats: [{ id: C, kind: "group", botIds: ["boppy"], createdAt: 0, typing: [] }],
+      routines: [
+        { id: "rtn_chat_there", botId: "boppy", title: "Chat run", goal: "x", schedule: { kind: "once", at: 1 }, enabled: false, last: { at: 1, status: "running" } },
+        { id: "rtn_task_there", botId: "boppy", title: "Task run", goal: "x", schedule: { kind: "once", at: 1 }, enabled: false, last: { at: 1, status: "running", sessionId: "ses_there", prevError: "The Mac isn't set up" } },
+      ],
+      sessions: [{ id: "ses_there", botId: "boppy", chatId: C, sentVia: "routine", routineId: "rtn_task_there", title: "Task run", goal: "x", host: "orgo", status: "running", display: 3, steps: [], replies: [], createdAt: 1 }],
+      messages,
+    }),
+  );
+  const ours = JSON.stringify(S.getState().procedures);
+  assert.equal(Mem.isSecret("m_long_0"), false, "not in this state");
+  await S.bindSignIn(user);
+  try {
+    assert.equal(S.getState().messages.length, 40_000, "the other state is in");
+    // Only a server's own state, at its start, has its runs marked failed: these may be going on the other Mac.
+    const last = (id) => S.getState().routines.find((r) => r.id === id).last;
+    assert.deepEqual(last("rtn_chat_there"), { at: 1, status: "running" });
+    assert.deepEqual(last("rtn_task_there"), { at: 1, status: "running", sessionId: "ses_there", prevError: "The Mac isn't set up" });
+    // Its marks are known once it's in, and asking is quick: a draft asks about every message in a chat.
+    const t0 = performance.now();
+    const marked = S.getState().messages.filter((m) => Mem.isSecret(m.id)).map((m) => m.id);
+    const took = performance.now() - t0;
+    assert.deepEqual(marked, Array.from({ length: 10 }, (_, i) => `m_long_${i * 4000}`));
+    assert.ok(took < 300, `40,000 messages asked about in ${Math.round(took)} ms`);
+  } finally {
+    await S.releaseSignOut();
+  }
+  // This state again, as it was: its own mark (made here, before) still known.
+  assert.equal(JSON.stringify(S.getState().procedures), ours);
+  assert.equal(Mem.isSecret(secret.id), true);
 });
 
 /* ---------------- The route ---------------- */

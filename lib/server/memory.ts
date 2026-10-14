@@ -7,7 +7,7 @@ import { MAIN_WORKSPACE, workspaceOf, type MemoryGroup } from "@/lib/types";
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudProxy, cloudSessionNow } from "./cloud";
 import { chose, decide, yes, type Question } from "./decide";
-import { addMessage, bot, getState, ownerName, sameState, stateEpoch, update, userDir } from "./store";
+import { addMessage, bot, getState, ownerName, sameState, stateArrivals, stateEpoch, update, userDir } from "./store";
 import { recordTokens, usageTags } from "./usage";
 
 /**
@@ -319,10 +319,21 @@ const SECRET = /\b(don'?t|do not|never) (tell|share|mention|let)\b|\bkeep (it|th
 /**
  * Messages the user asked to keep from someone: never sent to the shared memory, nor the bot's reply to
  * them, nor into a procedure's draft. Marked on the message itself (Message.secret), so the mark outlasts
- * a restart and is there with memory off; the set is the same marks, for this process.
+ * a restart, is there with memory off and reaches the user's other Macs. The set is those marks, quick to
+ * ask (a draft asks about every message in a chat): this server's own as they're made, and the others read
+ * from the messages once each time messages come in from elsewhere (stateArrivals: a sign-in, another
+ * Mac's changes).
  */
 const secrets = new Set<string>();
-export const isSecret = (messageId: string | undefined) => !!messageId && (secrets.has(messageId) || !!getState().messages.find((m) => m.id === messageId)?.secret);
+let secretsRead = -1;
+export function isSecret(messageId: string | undefined) {
+  if (!messageId) return false;
+  if (secretsRead !== stateArrivals()) {
+    secretsRead = stateArrivals();
+    for (const m of getState().messages) if (m.secret) secrets.add(m.id);
+  }
+  return secrets.has(messageId);
+}
 function markSecret(messageId: string) {
   secrets.add(messageId);
   update((s) => {

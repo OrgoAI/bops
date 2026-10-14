@@ -214,10 +214,16 @@ async function messageIn(linkId: string, m: Incoming, pool?: ChannelLink[]) {
     stopTyping();
   }
   if (!mine) return;
-  // Work it started (its own threads, or a teammate's it handed off) reports back here too. A routine's run
-  // that happened meanwhile isn't this message's: it goes where the routine sends it, never into this
-  // conversation (a shared channel, maybe) or twice.
-  const started = getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && !x.routineId);
+  // Work it started (its own threads, or a teammate's it handed off) reports back here too, and so does a
+  // routine's thread this message asked for (Run now), unless the routine already posts its results on
+  // this link. A routine's run on its time that happened meanwhile isn't this message's: it goes where the
+  // routine sends it, never into this conversation (a shared channel, maybe) or twice.
+  const { ranNow } = await import("./routines");
+  const askedFor = (id: string) => {
+    const r = ranNow(id);
+    return !!r && !(r.deliverTo?.kind === "channel" && r.deliverTo.linkId === l.id);
+  };
+  const started = getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && (!x.routineId || askedFor(x.id)));
   for (const t of started.filter((x) => !x.channelBack && !x.textBack)) patchSession(t.id, { channelBack: place });
   const replies = getState().messages.filter((x) => x.chatId === chatId && x.role === "bot" && x.botId === b.id && x.at >= mine.at && turnsOwn(x, started));
   const failed = (err: Error) => addMessage({ chatId, role: "system", text: `Couldn't send this back to ${KIND_NAME[l.kind]}: ${err.message}` });

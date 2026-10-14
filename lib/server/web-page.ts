@@ -9,11 +9,12 @@ import { safeFetch, type Fetched } from "./safe-fetch";
  *
  * - readPage, for a bot's web_fetch in chat: an article's own text when the page is an article
  *   (Readability, the engine behind Firefox's Reader View), else everything visible on the page;
- *   JSON pretty-printed, plain text as it is, a feed (XML) as its lines. At most 12,000 characters.
+ *   JSON pretty-printed, plain text as it is, a feed (XML) as its lines. At most 12,000 characters,
+ *   with a web page's links (so the bot can follow one).
  * - pageLines, for page monitors: everything visible, one line per block (a paragraph, a list item,
  *   a table row, a heading), since what monitors watch (prices, stock, lists, tables) is exactly
  *   what Readability leaves out. Lines are 2 to 300 characters (a longer one is split, never lost),
- *   each one once, in page order, at most 400.
+ *   each one once, in page order, at most 1500 (a long thread's newest reply, at the bottom, counts).
  *
  * Neither runs the page's scripts, so a page that draws itself in the browser shows little here.
  * HTML is parsed with linkedom, which is light and never fetches anything the page refers to.
@@ -23,14 +24,18 @@ import { safeFetch, type Fetched } from "./safe-fetch";
 export const READ_PAGE_MAX_CHARS = 12_000;
 /**
  * Readability takes time that grows with the square of how deeply a page nests (a page of 10,000 nested
- * blocks, under 1 MB, held the whole server for 25 seconds), so a page nested deeper than this, or with
- * more elements, is read as its visible text instead.
+ * blocks, under 1 MB, held the whole server for 25 seconds), so a page nested deeper than this is read as
+ * its visible text instead. A shallow page is quick however big (a long Wikipedia article, about 17,000
+ * elements, in a quarter second; the 2 MB body cap bounds it), so the cap on elements is only far out.
  */
 const READER_MAX_DEPTH = 300;
-const READER_MAX_ELEMENTS = 15_000;
-const MAX_LINES = 400;
+const READER_MAX_ELEMENTS = 60_000;
+/** The most lines a monitor reads of a page (a watch keeps a fingerprint of each, about 13 characters). */
+const MAX_LINES = 1500;
 const MIN_LINE = 2;
 const MAX_LINE = 300;
+/** The most links readPage gives (chat.ts lists the first few dozen of them under the page's text). */
+const LINKS_MAX = 200;
 
 /** Elements whose text is never shown on the page (or isn't the page's to show). */
 const DROP = new Set([
@@ -119,12 +124,16 @@ const squash = (s: string) =>
 
 const hidden = (el: Element) => el.hasAttribute("hidden") || /(display\s*:\s*none|visibility\s*:\s*hidden)/i.test(el.getAttribute("style") ?? "");
 
+/** A link on a page as readPage gives it: where it goes (as written in the page) and its words. */
+export type PageLink = { url: string; text: string };
+
 /**
  * The text of every block under `root`, in page order, whitespace collapsed, empty ones left out.
  * In `xml` mode every element is a block and nothing is dropped (a feed: titles, links, dates). Walks
- * with its own stack, so a page nested thousands deep can't overflow the call stack.
+ * with its own stack, so a page nested thousands deep can't overflow the call stack. With `links`, the
+ * visible links (<a href>) go into it as well, in page order, up to LINKS_MAX.
  */
-function blocks(root: Node, xml = false): string[] {
+function blocks(root: Node, xml = false, links?: PageLink[]): string[] {
   const out: string[] = [];
   let line = "";
   let gap = false;
@@ -176,6 +185,10 @@ function blocks(root: Node, xml = false): string[] {
         continue;
       }
       if (CELL.has(tag)) gap = true;
+      if (links && tag === "a" && links.length < LINKS_MAX) {
+        const href = el.getAttribute("href")?.trim();
+        if (href) links.push({ url: href, text: squash(el.textContent ?? "") });
+      }
     }
     if (xml || BLOCK.has(tag)) {
       flush();
@@ -204,7 +217,7 @@ function fit(line: string): string[] {
   return out;
 }
 
-/** Monitor lines: collapsed, split to fit, 2 to 300 characters, each once in order, at most 400. */
+/** Monitor lines: collapsed, split to fit, 2 to 300 characters, each once in order, at most MAX_LINES. */
 function tidy(raw: Iterable<string>): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -234,7 +247,7 @@ function titleOf(document: Document): string {
 /**
  * The visible text of an HTML page as lines: script, style, noscript, svg, template (and other
  * things never shown) dropped; one line per block element, table cells joined on their row's line;
- * then tidied as monitors need (2 to 300 characters, each once, at most 400). Pure: no fetching.
+ * then tidied as monitors need (2 to 300 characters, each once, at most 1500). Pure: no fetching.
  */
 export function htmlLines(html: string): { title: string; lines: string[] } {
   const document = parse(html);
@@ -297,15 +310,16 @@ function tooTangled(root: Node): boolean {
   return false;
 }
 
-/** The article's own text when the page reads as one (and gives enough), else undefined. Never for a page Readability would take too long on (tooTangled). */
-function article(document: Document): { title: string; text: string } | undefined {
+/** The article's own text (and links) when the page reads as one (and gives enough), else undefined. Never for a page Readability would take too long on (tooTangled). */
+function article(document: Document): { title: string; text: string; links: PageLink[] } | undefined {
   try {
     // linkedom builds no implied <body>: a page without one has nothing for Readability to read.
     if (!document.body?.textContent?.trim() || tooTangled(document) || !isProbablyReaderable(document)) return undefined;
     const got = new Readability(document, { maxElemsToParse: READER_MAX_ELEMENTS }).parse();
     if (!got?.content) return undefined;
-    const text = blocks(parse(got.content)).join("\n");
-    return text.length >= 300 ? { title: squash(got.title ?? ""), text } : undefined;
+    const links: PageLink[] = [];
+    const text = blocks(parse(got.content), false, links).join("\n");
+    return text.length >= 300 ? { title: squash(got.title ?? ""), text, links } : undefined;
   } catch {
     return undefined;
   }
@@ -320,35 +334,64 @@ function cap(text: string, max: number): { text: string; cut: boolean } {
 }
 
 /**
- * A page for a bot to read (web_fetch): its title and text, at most 12,000 characters (`truncated`
- * when there was more, or the page was over 2 MB). Throws FetchRefused for an address Bops won't
- * open, and a plain Error when the page couldn't be read or answered with an error.
+ * A page's links as readPage gives them: made absolute from the page's address, http and https only,
+ * without a "#" part, each once, not the page itself, at most LINKS_MAX.
  */
-export async function readPage(url: string): Promise<{ url: string; title: string; text: string; truncated: boolean }> {
+function absoluteLinks(links: PageLink[], base: string): PageLink[] {
+  const out = new Map<string, PageLink>();
+  const self = new URL(base);
+  self.hash = "";
+  for (const l of links) {
+    let u: URL;
+    try {
+      u = new URL(l.url, base);
+    } catch {
+      continue;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+    u.hash = "";
+    if (u.href === self.href || out.has(u.href)) continue;
+    out.set(u.href, { url: u.href, text: l.text });
+    if (out.size >= LINKS_MAX) break;
+  }
+  return [...out.values()];
+}
+
+/**
+ * A page for a bot to read (web_fetch): its title and text, at most 12,000 characters (`truncated`
+ * when there was more, or the page was over 2 MB), and its links (an article's own first, then the
+ * rest of the page's; none for JSON, plain text or a feed, whose addresses are in the text). Throws
+ * FetchRefused for an address Bops won't open, and a plain Error when the page couldn't be read or
+ * answered with an error.
+ */
+export async function readPage(url: string): Promise<{ url: string; title: string; text: string; truncated: boolean; links: PageLink[] }> {
   const got = answered(await safeFetch(url));
   const kind = kindOf(got.contentType);
   let title = "";
   let text: string;
+  let links: PageLink[] = [];
   if (kind === "html") {
     const document = parse(got.body);
     title = titleOf(document);
-    // The visible text first: Readability takes the document apart as it reads.
-    const visible = blocks(document).join("\n");
+    // The visible text and links first: Readability takes the document apart as it reads.
+    const onPage: PageLink[] = [];
+    const visible = blocks(document, false, onPage).join("\n");
     const art = article(document);
     title = art?.title || title;
     text = art?.text ?? visible;
+    links = absoluteLinks([...(art?.links ?? []), ...onPage], got.url);
   } else if (kind === "xml") {
     const x = xmlLines(got.body);
     title = x.title;
     text = x.lines.join("\n");
   } else text = (kind === "json" ? pretty(got.body) : got.body).replace(/\r\n?/g, "\n").trim();
   const out = cap(text, READ_PAGE_MAX_CHARS);
-  return { url: got.url, title: title || label(got.url), text: out.text, truncated: out.cut || got.truncated };
+  return { url: got.url, title: title || label(got.url), text: out.text, truncated: out.cut || got.truncated, links };
 }
 
 /**
  * A page as lines for a monitor: what's visible, one line per block, 2 to 300 characters each, each
- * once, at most 400 (htmlLines); JSON pretty-printed and plain text taken line by line, tidied the
+ * once, at most 1500 (htmlLines); JSON pretty-printed and plain text taken line by line, tidied the
  * same way. Throws like readPage, so a site that's down or failing is an error, never a change.
  */
 export async function pageLines(url: string): Promise<{ url: string; title: string; lines: string[] }> {

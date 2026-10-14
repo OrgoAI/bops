@@ -499,8 +499,9 @@ export const onceDone = (r: Routine, now = Date.now()) => !r.enabled && r.schedu
 
 /**
  * A routine's run going right now, as far as the app can tell: its thread is still running, or a chat
- * run began less than 15 minutes ago (one takes a minute or two). A record a restart left running
- * (store.ts mends those as the state loads) never locks Run now.
+ * run began less than 15 minutes ago (one takes a minute or two). A record a restart left running never
+ * locks Run now (store.ts mends those at boot, on the state the server saved itself; a state loaded at
+ * sign-in may be another Mac's, still running there, and is left as it is).
  */
 export const runningNow = (r: Routine, sessions: Session[], now = Date.now()) =>
   r.last?.status === "running" && (r.last.sessionId ? sessions.some((s) => s.id === r.last!.sessionId && live(s)) : now - r.last.at < 15 * 60_000);
@@ -924,12 +925,13 @@ export type Watch = {
   away?: boolean;
   /**
    * A web page watched with no screen (then `display` is 0): Bops fetches `url` every `everyMin` minutes,
-   * keeps a fingerprint of every line with times and counters taken out (`digests`, in order, and the
-   * page's `hash`; cloud/page-diff.ts), lines that were there lately and went (`seen`, so one that comes
-   * back isn't new), and the text of some lines (`lines`, capped: the ones that changed lately first, so a
-   * model can see what a new line replaced), and asks a model only when lines were added. `error` and
-   * `failures`: the last fetches failed (it backs off). `odd`: reads in a row that looked nothing like the
-   * page (a consent wall), kept out until the page has looked that way three times.
+   * keeps a fingerprint of every line with what's certainly noise taken out (a "5m ago", an "Updated 3:45
+   * PM": `digests`, in order, and the page's `hash`; cloud/page-diff.ts), lines that went from it lately
+   * (`seen`, each "<digest>@<when it went, in base 36 ms>", forgotten after 7 days, so one that comes back
+   * within them isn't new), and the text of some lines (`lines`, capped: the ones that changed lately
+   * first, so a model can see what a new line replaced), and asks a model only when lines were added.
+   * `error` and `failures`: the last fetches failed, or the page came back empty (it backs off). `odd`:
+   * from older builds (reads that looked nothing like the page); never set now, only cleared.
    */
   page?: {
     url: string;

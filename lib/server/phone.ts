@@ -655,9 +655,16 @@ async function textIn(b: Bot, line: Line, e: ApEvent, deliveryId: string, verdic
     stopTyping();
   }
   if (!mine) return;
-  // Work it started (its own threads, or a teammate's it handed off) texts its result back too. A routine's
-  // run that happened meanwhile isn't this text's: it goes where the routine sends it (never twice).
-  const started = getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && !x.routineId);
+  // Work it started (its own threads, or a teammate's it handed off) texts its result back too, and so does
+  // a routine's thread this text asked for (Run now), unless the routine already texts its results. A
+  // routine's run on its time that happened meanwhile isn't this text's: it goes where the routine sends it
+  // (never twice).
+  const { ranNow } = await import("./routines");
+  const askedFor = (id: string) => {
+    const r = ranNow(id);
+    return !!r && r.deliverTo?.kind !== "text";
+  };
+  const started = getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && (!x.routineId || askedFor(x.id)));
   for (const t of started.filter((x) => !x.textBack)) patchSession(t.id, { textBack: { botId: b.id, to: from } });
   // The bot's answer, as it gave it in Bops: each message its own bubble, threaded where it was an
   // inline reply, and a tapback as a tapback (never a filler text in its place).

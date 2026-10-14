@@ -1,193 +1,119 @@
 /**
- * What changed on a watched page, worked out from its lines of text. A page that shows a clock, "5
- * minutes ago", a view count or a cache buster changes on every read without anything new on it, so
- * each line is first put in a steady form (normalizeLine): those parts taken out, prices and other
- * numbers kept ("Bitcoin 86,200" and "$49" stay as they are, since a watch may be for them). Dates and
- * times are taken out only where they stamp the page ("Updated 3:45 PM", a line that's only a time), never
- * where they are what's on it ("Next available: 11/30/2026 9:00 AM", "Departs 16:30", a score "28:25").
- * Two reads of a page are then compared line by line, and only the lines that are new (addedLines,
- * pageDiff) are worth a model's look. Used for web page watches and screen watches on the Mac
- * (lib/server/watches.ts), and by Bops Cloud when it runs monitors later: so it stays erasable
- * TypeScript with no imports.
+ * What changed on a watched page, worked out from its lines of text. Two reads of a page are compared
+ * line by line, each line first put in a steady form (normalizeLine), and only the lines that are new
+ * are worth a model's look (the judge, lib/server/watches.ts).
+ *
+ * The rule for the steady form: take out only what is certainly noise, and let the judge decide
+ * everything else. Certainly noise is what moves on every read of a page that has nothing new:
+ * - relative times: "5 minutes ago", "2h ago", "just now", "yesterday", "in 3 hours", "@jordan · 2h";
+ * - countdowns and timers: "ends in 02:14:33", "3 hours left", "Time left: 2h 15m", "Elapsed: 01:23:45";
+ * - a date or time right after a word that says it stamps the page: "Updated 3:45 PM", "Last updated:
+ *   Mon, 13 Oct 2026 15:45:10 GMT", "Data as of Oct 13, 2026", "Generated on ...", "Server time 15:45";
+ * - a full timestamp with seconds, as machines write them: "2026-10-13T15:45:10Z", "Mon, 13 Oct 2026
+ *   15:45:10 +0000" (a feed's build date);
+ * - ids and tokens: UUIDs, and runs of over 16 letters and digits mixed (cache busters, nonces).
+ * Everything else stays as the page has it: a time or a date on its own or in a table cell (a booking
+ * slot, a departure, "Today 3:00 PM"), prices, scores, counts (views, likes, points, stars, votes), a
+ * rank in front ("3. "). Taking out too much hides what the user waits for, and nothing tells them; a
+ * page whose counter ticks costs one cheap judge call a read, and the judge is told that a moved stamp,
+ * counter, ad or order isn't news unless the watch is for it.
+ *
+ * Used for web page watches and screen watches on the Mac (lib/server/watches.ts), and by Bops Cloud
+ * when it runs monitors later: so it stays erasable TypeScript with no imports.
  */
 
-/** "updated", "posted"… in front of a relative time ("Updated 3 days ago"): taken out with it. */
-const VERB = String.raw`(?:\b(?:last\s+)?(?:updated|edited|posted|published|modified|refreshed|active|seen|online)\s+)?`;
 /** How many of a unit: "5", "an", "a few". */
 const COUNT = String.raw`(?:\d+(?:\.\d+)?|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|(?:a\s+)?few|several)`;
 /** Units of time, long names before the short ones they start with ("minutes" before "m"). */
 const UNIT = String.raw`(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|wks?|months?|mos?|years?|yrs?|s|m|h|d|w|y)`;
-/** A countdown's units that tick while it's watched: seconds, minutes, hours. "Ships in 2 days" is news when it moves. */
-const TICKING_UNIT = String.raw`(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)`;
+/** "updated", "posted"… in front of a relative time ("Updated 3 days ago"): taken out with it. */
+const VERB = String.raw`(?:\b(?:last\s+)?(?:updated|edited|posted|published|modified|refreshed|active|seen|online)\s+)?`;
+/**
+ * A span a countdown ticks in while it's watched: "3 hours", "2h 15m", "3 hrs 12 mins", "a few minutes".
+ * Days aren't in it: "ships in 2 days" moves once a day, and may be news.
+ */
+const TICK = String.raw`(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)`;
+const SPAN = String.raw`(?:\d+\s*${TICK}|\d+[smh]|(?:an?|one|a\s+few|few|several)\s+${TICK})(?:[\s,]+(?:and\s+)?(?:\d+\s*${TICK}|\d+[smh]))*\b`;
+/** A timer's digits: "02:14:33", "4:59" (never "3:00 PM", a time of day). */
+const TIMER = String.raw`\d{1,3}:\d{2}(?::\d{2})?(?![:\d])(?!\s*[ap]\.?m\b)`;
 
-/** Relative times and countdowns: always the page's clock moving on, never what's on it. */
-const RELATIVE: RegExp[] = [
-  // "5 minutes ago", "2h ago", "updated 3 days ago", "about an hour ago".
+/** A time zone after a clock time: "UTC", "ET", "PDT", "+0000", "+02:00". */
+const ZONE = String.raw`(?:\s*(?:utc|gmt|z|[ecmp][sd]?t|bst|cest|cet|ist|jst)\b|\s*[+-]\d{2}:?\d{2}\b)`;
+/** A clock time: "3:45", "3:45 PM", "15:45:10", "9:05 a.m. EST". */
+const CLOCK = String.raw`\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?(?:\s*[ap]\.?m\b\.?)?${ZONE}?`;
+const MONTH = String.raw`(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?`;
+const WEEKDAY = String.raw`(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\.?`;
+const MDAY = String.raw`\d{1,2}(?:st|nd|rd|th)?`;
+/** A date: ISO (maybe with a time), in numbers (10/13/2026, 10/13, 13.10.2026), or with the month's name ("Oct 13", "13 October", "Oct 2026"). */
+const DATE = String.raw`\d{4}-\d{2}-\d{2}(?:[t\s]${CLOCK})?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\d{1,2}\.\d{1,2}\.\d{4}\b|\d{4}\/\d{1,2}\/\d{1,2}\b|${MONTH}\s+${MDAY}\b|${MDAY}\s+${MONTH}(?!\w)|${MONTH}\s+\d{4}\b`;
+/** A date or a time, and what may follow it: "Mon, 13 Oct 2026 15:45:10 GMT", "October 13, 2026 at 3:45 PM", "today at 9:00". */
+const MOMENT = String.raw`(?:${DATE}|${CLOCK}|today|yesterday|tonight)`;
+const WHEN = String.raw`(?:${WEEKDAY},?\s+)?${MOMENT}(?:(?:\s*,\s*|\s+)(?:(?:at|on)\s+)?(?:${MOMENT}|\d{4}\b))*`;
+/** Words that say a date or time just after them is when the page was made or read, not what's on it. */
+const STAMP_WORD = String.raw`(?:last\s+)?(?:updated|modified|edited|refreshed|refresh|synced|sync|checked|generated|rendered|built|published|posted)|as\s+of|server\s+time|current\s+time|local\s+time`;
+
+/** What's taken out of a line, in this order. A pattern with a group keeps what the group caught. */
+const NOISE: RegExp[] = [
+  // Relative times: "5 minutes ago", "2h ago", "updated 3 days ago", "about an hour ago", "just now".
   new RegExp(String.raw`${VERB}(?:about\s+|over\s+|almost\s+|nearly\s+|less\s+than\s+|under\s+)?\b${COUNT}\s*${UNIT}\s+ago\b`, "gi"),
   new RegExp(String.raw`${VERB}\b(?:just\s+now|(?:a\s+)?moments?\s+ago)\b`, "gi"),
-  new RegExp(String.raw`${VERB}\b(?:yesterday|today)\b(?!['’])(?:\s+at\b)?`, "gi"),
-  // Countdowns that tick: "in 5 minutes", "3 hours left".
-  new RegExp(String.raw`\bin\s+(?:about\s+)?${COUNT}\s*${TICKING_UNIT}\b`, "gi"),
-  new RegExp(String.raw`\b${COUNT}\s*${TICKING_UNIT}\s+(?:left|remaining)\b`, "gi"),
+  // "Yesterday", and its time: always a stamp ("today" may be a slot: "Today 3:00 PM").
+  new RegExp(String.raw`${VERB}\byesterday\b(?:,?\s+(?:at\s+)?${CLOCK})?`, "gi"),
   // A bare age between separators, as feeds show it: "@jordan · 2h".
-  /(^|[·•|])\s*\d{1,2}\s?[smhdw](?=\s*(?:[·•|]|$))/gi,
+  /(^|[·•|])\s*\d{1,2}[smhdw](?=\s*(?:[·•|]|$))/gi,
+  // Countdowns and timers: "in 5 minutes", "ends in 02:14:33", "within 3 hrs 12 mins", "3 hours left", "Elapsed: 01:23:45".
+  new RegExp(String.raw`\b(?:in|within)\s+(?:about\s+|under\s+|less\s+than\s+)?(?:${SPAN}|${TIMER})`, "gi"),
+  new RegExp(String.raw`\b${SPAN}\s+(?:left|remaining|to\s+go)\b`, "gi"),
+  new RegExp(String.raw`\b(?:time\s+)?(?:left|remaining|elapsed)\s*:\s*(?:${SPAN}|${TIMER})`, "gi"),
+  // Full timestamps with seconds, as machines write them.
+  new RegExp(String.raw`\b\d{4}-\d{2}-\d{2}[t\s]\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?${ZONE}?`, "gi"),
+  new RegExp(String.raw`\b(?:${WEEKDAY},?\s+)?\d{1,2}\s+${MONTH}\s+\d{4}\s+\d{1,2}:\d{2}:\d{2}${ZONE}?`, "gi"),
+  // A date or time that stamps the page, with the word that says so: "Updated 3:45 PM", "as of Oct 13".
+  new RegExp(String.raw`\b(?:${STAMP_WORD})\b[\s:,]*(?:(?:on|at)\s+)?${WHEN}`, "gi"),
+  // Ids: UUIDs, long hex.
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+  /\b[0-9a-f]{17,}\b/gi,
 ];
-
-/** Ids and cache busters: UUIDs, long hex. */
-const IDS: RegExp[] = [/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, /\b[0-9a-f]{17,}\b/gi];
 
 /** Long letter and digit runs: an id or a token only when it mixes both ("internationalization" stays). */
 const TOKEN = /[A-Za-z0-9_]{17,}/g;
 
-/** A clock time: "3:45", "3:45 PM", "15:45:10", "9:05 a.m. EST". */
-const CLOCK = String.raw`\b\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[ap]\.?m\b\.?)?(?:\s*(?:UTC|GMT|[A-Z]{1,2}[SD]T)\b)?`;
-/** A date in numbers (10/13/2026, 13.10.2026, 2026/10/13; not versions like 2.10.15), maybe with a time after it. */
-const NUM_DATE = String.raw`\b(?:\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})|\d{1,2}\.\d{1,2}\.\d{4}|\d{4}\/\d{1,2}\/\d{1,2})\b(?:,?\s+(?:at\s+)?${CLOCK})?`;
-/** An ISO date, maybe with a time and a zone: 2026-10-13, 2026-10-13T15:45:10.123Z, 2026-10-13 15:45 +02:00. */
-const ISO = String.raw`\b\d{4}-\d{2}-\d{2}(?:[T\s]\d{1,2}:\d{2}(?::\d{2}(?:[.,]\d+)?)?)?(?:\s?(?:Z|[+-]\d{2}:?\d{2}|UTC|GMT)(?![A-Za-z]))?`;
-/** Any of them, the longest form first. */
-const STAMP = new RegExp(`${ISO}|${NUM_DATE}|${CLOCK}`, "gi");
-/** An ISO time with seconds (or parts of one): a machine's timestamp, never something to watch. */
-const MACHINE_TIME = /\d{4}-\d{2}-\d{2}[T\s]\d{1,2}:\d{2}:\d{2}/;
-/** Words that say a date or time just after them is when the page was made or read, not what's on it. */
-const NOISE_BEFORE =
-  /(?:^|[^\p{L}])(?:(?:last\s+)?(?:updated|edited|posted|published|modified|refreshed|generated|built|checked|synced|fetched|retrieved|crawled|cached|seen|active|online)|as\s+of|server\s+time|current\s+time|local\s+time|time\s+now|page\s+(?:loaded|rendered))\s*[:,]?\s*(?:on\s+|at\s+)?$/iu;
-/** Separators feeds and tables put between parts of a line. */
-const SEP = /[·•|]/;
-
 /**
- * Counts that tick with no news, next to the word they count ("1.2K views", "Likes: 340"): the word stays,
- * the number goes. Counts people do watch for (followers, stars, points, votes) are taken out only in a
- * feed's line about a post (one with an age or a separator: "123 points by pg 2 hours ago | 45 comments"),
- * and kept on a line of their own ("10,002 followers", "Dow down 500 points").
- */
-const TICKING = String.raw`(?:views?|likes?|comments?|watching|viewers?|watchers?|replies|reply|reposts?|retweets?|reactions?|upvotes?|downvotes?|plays?|reads|listeners?|online|sold|bought|reviews?|ratings?)`;
-const WATCHED = String.raw`(?:followers?|following|subscribers?|stars?|points?|votes?|members?|connections?|fans?|backers?)`;
-const counterBefore = (words: string) => new RegExp(String.raw`\b\d[\d,.]*\s?[kmb]?\+?\s*((?:people\s+|users\s+)?${words})\b`, "gi");
-const counterAfter = (words: string) => new RegExp(String.raw`\b(${words})\s*:\s*\d[\d,.]*\s?[kmb]?\+?(?![\w])`, "gi");
-const TICKING_BEFORE = counterBefore(TICKING);
-const TICKING_AFTER = counterAfter(TICKING);
-const WATCHED_BEFORE = counterBefore(WATCHED);
-const WATCHED_AFTER = counterAfter(WATCHED);
-/** "Viewed 1,204 times", "played 3K times". */
-const TIMES = /\b(viewed|read|played|downloaded|watched|shared)\s+\d[\d,.]*\s?[kmb]?\+?\s+times\b/gi;
-/** A rank in front ("3. "), which moves as a list reorders. */
-const RANK = /^\d{1,3}\.\s+(?=\S)/;
-
-/** The part of `s` between the separators around `at` (or its ends). */
-function segment(s: string, start: number, end: number) {
-  let a = start;
-  while (a > 0 && !SEP.test(s[a - 1])) a--;
-  let b = end;
-  while (b < s.length && !SEP.test(s[b])) b++;
-  return { before: s.slice(a, start), after: s.slice(end, b) };
-}
-
-/**
- * Dates and times that stamp the page, out: after words like "Updated" or "as of", a machine's ISO time,
- * or one that is all there is in its part of the line ("3:45 PM", "Bulletin · 10/13/2026" keeps
- * "Bulletin"). One with words on both sides ("Departs 16:30 from Gate 4", "Kiel 28:25 Flensburg") stays.
- */
-function stripStamps(s: string): string {
-  return s.replace(STAMP, (m: string, at: number) => {
-    const { before, after } = segment(s, at, at + m.length);
-    if (NOISE_BEFORE.test(s.slice(0, at))) return " ";
-    if (MACHINE_TIME.test(m)) return " ";
-    if (/^[\s,]*(?:(?:at|on)\s*)?$/i.test(before) && /^[\s.,;:!?)]*$/.test(after)) return " ";
-    return m;
-  });
-}
-
-/**
- * One line of a page in a steady form for comparing: relative times ("yesterday", "5m ago"), ticking
- * countdowns, dates and times that stamp the page (stripStamps), ids and cache busters, ticking counters,
- * and a rank in front taken out; whitespace collapsed. Every other number stays, and so do dates and
- * times that are what's on the page. "" when nothing is left (a line that was only a time).
+ * One line of a page in a steady form for comparing: what's certainly noise taken out (NOISE, TOKEN),
+ * whitespace collapsed, separators left at the ends gone. Everything else stays as the page has it.
+ * "" when nothing is left (a line that was only a stamp).
  */
 export function normalizeLine(line: string): string {
   let s = String(line ?? "").replace(/\s+/g, " ");
-  // A feed's line about a post: its counts are all ticking (decided before anything is taken out).
-  const meta = SEP.test(s) || /\bago\b|\bjust now\b/i.test(s);
-  for (const p of RELATIVE) s = s.replace(p, (_m: string, lead?: unknown) => (typeof lead === "string" ? lead : " "));
-  s = stripStamps(s);
-  for (const p of IDS) s = s.replace(p, " ");
-  s = s.replace(TOKEN, (m) => (/\d/.test(m) && /[A-Za-z]/.test(m) ? " " : m));
-  s = s.replace(TICKING_BEFORE, " $1").replace(TICKING_AFTER, "$1").replace(TIMES, "$1");
-  if (meta) s = s.replace(WATCHED_BEFORE, " $1").replace(WATCHED_AFTER, "$1");
+  for (const p of NOISE) s = s.replace(p, (_m: string, lead?: unknown) => (typeof lead === "string" ? lead : " "));
   s = s
+    .replace(TOKEN, (m) => (/\d/.test(m) && /[A-Za-z]/.test(m) ? " " : m))
     .replace(/\(\s*\)|\[\s*\]/g, " ")
     .replace(/([·•|])(?:\s*[·•|])+/g, "$1")
     .replace(/\s+/g, " ")
     // Separators left at the ends go too; a minus in front of a number ("-2.3%") stays.
-    .replace(/^(?:[\s·•|,;:/–—]|-(?!\d))+|[\s·•|,;:/–—-]+$/g, "")
-    .replace(RANK, "");
+    .replace(/^(?:[\s·•|,;:/–—]|-(?!\d))+|[\s·•|,;:/–—-]+$/g, "");
   return /[\p{L}\p{N}]/u.test(s) ? s : "";
 }
 
+/** Every date and time, for a title (where a tab shows a clock or an unread stamp). */
+const ANY_TIME = new RegExp(String.raw`\b(?:${DATE}|${CLOCK})`, "gi");
+
 /**
  * A page's title in its steady form for telling whether a screen moved on: like a line, with every date
- * and time out too (a title is where a tab shows a clock or an unread stamp; what's news is in the lines).
+ * and time out too (what's news is in the lines).
  */
 export function normalizeTitle(title: string): string {
-  const s = normalizeLine(title).replace(STAMP, " ").replace(/\s+/g, " ").trim();
+  const s = normalizeLine(title).replace(ANY_TIME, " ").replace(/\s+/g, " ").trim();
   return /[\p{L}\p{N}]/u.test(s) ? s : "";
 }
 
 /** Whitespace collapsed: a line as the page has it, for telling two lines apart. */
 const rawOf = (line: string) => String(line ?? "").replace(/\s+/g, " ").trim();
 
-/**
- * A page's lines in their steady form: empty ones dropped, in page order. Lines are told apart as the
- * page has them (two that differ only by a stamp both stay), so an item that differs from another only
- * by its date isn't lost.
- */
+/** A page's lines in their steady form: empty ones dropped, each line once as the page has it, in page order. */
 export function normalizeLines(lines: string[]): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const line of lines) {
-    const raw = rawOf(line);
-    if (seen.has(raw)) continue;
-    seen.add(raw);
-    const n = normalizeLine(raw);
-    if (n) out.push(n);
-  }
-  return out;
-}
-
-/**
- * The lines of `after` that are new since `before`, compared in their steady form, in page order and
- * each once. They come back as `after` has them (whitespace collapsed), so whoever reads them sees the
- * page's own words. `before` is raw lines, or (`normalized`) lines already in their steady form, which
- * are taken as they are: normalizing twice can take out more ("Episode 12 views" loses its 12).
- */
-export function addedLines(before: string[], after: string[], opts: { normalized?: boolean } = {}): string[] {
-  const seen = new Set(opts.normalized ? before : normalizeLines(before));
-  const out: string[] = [];
-  for (const line of after) {
-    const n = normalizeLine(line);
-    if (!n || seen.has(n)) continue;
-    seen.add(n);
-    out.push(rawOf(line));
-  }
-  return out;
-}
-
-/**
- * A page's first lines in their steady form, up to `maxLines` lines and `maxChars` characters in all,
- * told apart as the page has them; `raw` is the same lines as the page has them. For a bounded copy of a
- * page's text: a watch compares every line of a page (pageLinesOf, snapshotOf, pageDiff), not just these.
- */
-export function snapshotLines(lines: string[], maxLines = 200, maxChars = 16_000): { lines: string[]; raw: string[] } {
-  const kept: string[] = [];
-  const raw: string[] = [];
-  let size = 0;
-  for (const l of pageLinesOf(lines)) {
-    if (kept.length >= maxLines || size + l.line.length + 1 > maxChars) break;
-    kept.push(l.line);
-    raw.push(l.raw);
-    size += l.line.length + 1;
-  }
-  return { lines: kept, raw };
+  return pageLinesOf(lines).map((l) => l.line);
 }
 
 /**
@@ -210,7 +136,10 @@ export function lineDigest(normalized: string): string {
 /** One line of a page as a watch reads it: as the page has it, in its steady form, and that form's digest. */
 export type PageLine = { raw: string; line: string; digest: string };
 
-/** A page's lines as a watch reads them (every one, in page order, each line once as the page has it; empty ones dropped). */
+/**
+ * A page's lines as a watch reads them: every one, in page order, each once as the page has it (two that
+ * differ only by a stamp both stay, so an item isn't lost), empty ones dropped.
+ */
 export function pageLinesOf(lines: string[]): PageLine[] {
   const out: PageLine[] = [];
   const seen = new Set<string>();
@@ -227,32 +156,20 @@ export function pageLinesOf(lines: string[]): PageLine[] {
 /** A page's fingerprint: the digests of its lines, in order (a line moved, added or gone changes it). */
 export const pageHash = (digests: string[]) => lineDigest(digests.join(","));
 
-/**
- * What a watch keeps of a page between reads (about 13 characters a line): every line's digest (`digests`,
- * in order, each once), and the page's fingerprint (`hash`). Lines added below whatever it shows first
- * count like any other.
- */
+/** What a watch keeps of a page between reads (about 13 characters a line): every line's digest, in order and each once, and the page's fingerprint. */
 export function snapshotOf(lines: PageLine[]): { digests: string[]; hash: string } {
   const digests = [...new Set(lines.map((l) => l.digest))];
   return { digests, hash: pageHash(digests) };
 }
 
-/**
- * What's new on a page since the watch last kept it (`kept`: the digests it kept; `recent`: digests of
- * lines that were on it lately and went, so a banner that rotates or a block that comes back isn't new):
- * the added lines in page order, each once, and how much of the kept page is still there (`stillThere`,
- * 0 to 1: a consent wall or a "please enable JavaScript" page shares almost nothing with it).
- */
-export function pageDiff(kept: string[], recent: string[], now: PageLine[]): { added: PageLine[]; stillThere: number } {
-  const known = new Set([...kept, ...recent]);
-  const present = new Set(now.map((l) => l.digest));
-  const added: PageLine[] = [];
-  const once = new Set<string>();
+/** The lines of a page whose digest isn't `known` (the page as kept, and lines on it lately), in page order and each once. */
+export function newLines(known: Iterable<string>, now: PageLine[]): PageLine[] {
+  const had = new Set(known);
+  const out: PageLine[] = [];
   for (const l of now) {
-    if (known.has(l.digest) || once.has(l.digest)) continue;
-    once.add(l.digest);
-    added.push(l);
+    if (had.has(l.digest)) continue;
+    had.add(l.digest);
+    out.push(l);
   }
-  const stillThere = kept.length ? kept.filter((d) => present.has(d)).length / kept.length : 1;
-  return { added, stillThere };
+  return out;
 }

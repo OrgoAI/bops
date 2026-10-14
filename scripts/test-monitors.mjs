@@ -1,11 +1,12 @@
-// Tests for monitors: the steady form pages are compared in (cloud/page-diff.ts: times, relative dates,
-// ids and counters out; prices and other numbers kept), and web page watches (lib/server/watches.ts,
-// app/api/watches): the first read is how the page is; a page that didn't change, or only changed its
-// times, costs no model call; lines that were added get exactly one judge call (Jev, or one quick OpenAI
-// call when Jev isn't there) and a heads-up when they match; a page that fails is read less and less
-// often until it answers again; a paused watch is left alone until it's resumed or checked by hand.
-// Screen watches compare pages the same way (a clock on the screen is not a change), and a page watch
-// doesn't keep a bot from moving computers the way a screen watch does.
+// Tests for monitors: the steady form pages are compared in (cloud/page-diff.ts: only what's certainly
+// noise out, such as relative times, stamps, timers and ids; slots, prices, counts and ranks kept), and web
+// page watches (lib/server/watches.ts, app/api/watches): the first read is how the page is; a page that
+// didn't change, or only changed its stamps, costs no model call and writes nothing; lines that were added
+// get exactly one judge call (Jev, or one quick OpenAI call when Jev isn't there) and a heads-up when they
+// match; a line that went comes back as new only after 7 days; a page that fails or comes back empty is
+// read less and less often until it answers again; a paused watch is left alone until it's resumed or
+// checked by hand. Screen watches compare pages the same way (a clock on the screen is not a change), and
+// a page watch doesn't keep a bot from moving computers the way a screen watch does.
 //
 // The pages come from a local server here, let through safe-fetch with BOPS_FETCH_ALLOW (the real
 // lib/server/web-page.ts reads them). Jev and OpenAI are fakes; the state lives in a throwaway folder;
@@ -212,65 +213,94 @@ assert.ok(S.getState().bots.some((b) => b.id === "boppy"), "a fresh state has Bo
 
 /* ---------------- The steady form (cloud/page-diff.ts) ---------------- */
 
-test("normalizeLine: times, dates, ids and counters out; prices and numbers kept", async () => {
+test("normalizeLine: only what's certainly noise goes; everything else is the judge's", async () => {
   const table = [
-    // Clock times.
-    ["Updated 3:45 PM", "Updated"],
-    ["Last updated: 15:45:10", "Last updated"],
-    // A time that's what's on the page (a meeting, a departure, a score) stays; one that stamps it goes.
-    ["Meet at 9:05 a.m. EST", "Meet at 9:05 a.m. EST"],
-    ["Departs 16:30", "Departs 16:30"],
-    ["Kiel 28:25 Flensburg", "Kiel 28:25 Flensburg"],
-    ["As of 3:45 PM", "As of"],
-    ["Prices · 3:45 PM", "Prices"],
-    ["3:45", ""],
-    // Relative times.
+    // Relative times, and their stamp word with them.
     ["Posted 5 minutes ago", ""],
     ["2h ago", ""],
     ["just now", ""],
     ["about an hour ago", ""],
-    ["Updated yesterday at 3:45 PM", ""],
     ["updated 3 days ago", ""],
+    ["Updated yesterday at 3:45 PM", ""],
+    ["yesterday", ""],
     ["Comment from Dana, 12 min ago", "Comment from Dana"],
     ["@jordan · 2h", "@jordan"],
+    // Countdowns and timers that tick ("in 2 days" moves once a day, and may be news).
     ["Sale ends in 3 hours", "Sale ends"],
-    // ISO and numeric dates, timestamps.
-    ["2026-10-13T15:45:10Z", ""],
-    ["Built 2026-10-13 15:45 UTC", "Built"],
-    ["Ships 10/14/2026", "Ships 10/14/2026"],
-    ["Next available: 11/30/2026 9:00 AM", "Next available: 11/30/2026 9:00 AM"],
-    ["Appointment 2026-11-30", "Appointment 2026-11-30"],
-    ["Bulletin · 10/13/2026", "Bulletin"],
-    ["10/13/2026", ""],
-    ["Log 2026-10-13 15:45:10 started", "Log started"],
+    ["in 3 hours", ""],
+    ["Sale ends in 02:15:33", "Sale ends"],
+    ["Auction ends in 1:23:45", "Auction ends"],
+    ["Market closes in 2:14:59", "Market closes"],
+    ["Order within 3 hrs 12 mins", "Order"],
+    ["Ends in 3h 12m", "Ends"],
+    ["Next refresh in 45 seconds", "Next refresh"],
+    ["Time left: 2h 15m", ""],
+    ["Elapsed: 01:23:45", ""],
     ["Ships in 2 days", "Ships in 2 days"],
     ["2 days left to apply", "2 days left to apply"],
+    ["Sign in as Tiger", "Sign in as Tiger"],
+    // A date or time after a word that says it stamps the page, in the forms pages use.
+    ["Updated 3:45 PM", ""],
+    ["Last updated: 15:45:10", ""],
+    ["As of 3:45 PM", ""],
+    ["Last updated: October 13, 2026 at 3:45 PM", ""],
+    ["Last updated: Mon, 13 Oct 2026 15:45:10 GMT", "Last updated"],
+    ["Updated: 13 Oct 2026, 15:45", ""],
+    ["Updated Oct 13, 2026, 3:45 PM", ""],
+    ["Updated 3:45 PM ET, Oct 13", ""],
+    ["Last updated on 13 Oct at 15:45", ""],
+    ["Generated on Mon Oct 13 15:45:10 UTC 2026", ""],
+    ["Data as of Oct 13, 2026 3:45 PM ET", "Data"],
+    ["Prices as of 3:45 PM ET on Oct 13", "Prices"],
+    ["Last sync: 3:45 PM", ""],
+    ["Last refresh 3:45:10 PM", ""],
+    ["Refreshed at 3:45:10 PM", ""],
+    ["Current time: Mon 15:45", ""],
+    ["Last checked 3:45 PM by the system", "by the system"],
+    ["Posted today at 3:45 PM", ""],
+    ["Built 2026-10-13 15:45 UTC", ""],
+    ["Bitcoin $86,200 · updated 4:40 PM", "Bitcoin $86,200"],
+    // A stamp word with no date or time after it stays.
+    ["Updated 3 items", "Updated 3 items"],
+    ["Posted 12 jobs on Oct 13", "Posted 12 jobs on Oct 13"],
+    ["Updated: may require a restart", "Updated: may require a restart"],
+    // Full timestamps with seconds, as machines write them.
+    ["2026-10-13T15:45:10Z", ""],
+    ["Log 2026-10-13 15:45:10 started", "Log started"],
+    ["Mon, 13 Oct 2026 15:45:10 +0000", ""],
     // Ids and cache busters.
     ["app.js?v=a1b2c3d4e5f6a7b8c9d0", "app.js?v="],
     ["Request 550e8400-e29b-41d4-a716-446655440000 done", "Request done"],
     ["Session 9fJ2kq8ZLmP3xT7vQa1B", "Session"],
-    // Counters next to their word.
-    ["1.2K views", "views"],
-    ["Likes: 340", "Likes"],
-    ["1,204 watching", "watching"],
-    ["about an hour ago · 12 comments", "comments"],
-    // Counts people watch for stay on a line of their own, and go in a feed's line about a post.
+    // Times and dates that are what's on the page stay: alone on a line, in a table cell, between words.
+    ["9:00 AM", "9:00 AM"],
+    ["3:45", "3:45"],
+    ["Today 3:00 PM", "Today 3:00 PM"],
+    ["Prices · 3:45 PM", "Prices · 3:45 PM"],
+    ["Sat Oct 18 · 8:10 AM · 4 players · Book", "Sat Oct 18 · 8:10 AM · 4 players · Book"],
+    ["UA 123 · Chicago · 16:30", "UA 123 · Chicago · 16:30"],
+    ["Kiel · 28:25 · Flensburg", "Kiel · 28:25 · Flensburg"],
+    ["Meet at 9:05 a.m. EST", "Meet at 9:05 a.m. EST"],
+    ["Departs 16:30", "Departs 16:30"],
+    ["Ships 10/14/2026", "Ships 10/14/2026"],
+    ["Next available: 11/30/2026 9:00 AM", "Next available: 11/30/2026 9:00 AM"],
+    ["Appointment 2026-11-30", "Appointment 2026-11-30"],
+    ["Bulletin · 10/13/2026", "Bulletin · 10/13/2026"],
+    ["10/13/2026", "10/13/2026"],
+    // Counts and ranks stay (a watch may be for them; the judge is told when they aren't news).
+    ["1.2K views", "1.2K views"],
+    ["Likes: 340", "Likes: 340"],
+    ["1,204 watching", "1,204 watching"],
     ["3,401 followers", "3,401 followers"],
-    ["12,345 stars", "12,345 stars"],
-    ["123 points by pg 2 hours ago | hide | 45 comments", "points by pg | hide | comments"],
-    ["@dana · 1,204 followers", "@dana · followers"],
-    ["Viewed 1,204 times", "Viewed"],
-    ["1,234 users online", "users online"],
-    ["4.5 stars", "4.5 stars"],
-    // A rank in front moves as the list reorders.
-    ["3. Bops ships monitors", "Bops ships monitors"],
+    ["Alice · 1,234 votes", "Alice · 1,234 votes"],
+    ["123 points by pg 2 hours ago | hide | 45 comments", "123 points by pg | hide | 45 comments"],
+    ["3. Bops ships monitors", "3. Bops ships monitors"],
     // Kept as they are.
     ["Bitcoin 86,200", "Bitcoin 86,200"],
     ["$49 / month", "$49 / month"],
     ["Bitcoin $86,200.15 (+2.3%)", "Bitcoin $86,200.15 (+2.3%)"],
-    ["-2.3% today", "-2.3%"],
+    ["-2.3% today", "-2.3% today"],
     ["Dow down 500 points", "Dow down 500 points"],
-    ["3 new replies", "3 new replies"],
     ["Version 2.10.15 released", "Version 2.10.15 released"],
     ["internationalization", "internationalization"],
     ["16:9 screen", "16:9 screen"],
@@ -283,45 +313,48 @@ test("normalizeLine: times, dates, ids and counters out; prices and numbers kept
       assert.equal(PD.normalizeLine(line), want);
       assert.equal(PD.normalizeLine(PD.normalizeLine(line)), want, "normalizing twice changes nothing");
     });
+  await check("a title loses every date and time", () => assert.equal(PD.normalizeTitle("Inbox 3:45 PM 10/13/2026"), "Inbox"));
 });
 
-test("normalizeLines and addedLines", async () => {
-  await check("empties dropped, each line once, in order", () =>
-    assert.deepEqual(PD.normalizeLines(["B 1", "3:45 PM", "A", "B 1", "Updated 2m ago", "A  "]), ["B 1", "A"]));
+test("pageLinesOf and newLines", async () => {
+  const lines = (raw) => PD.pageLinesOf(raw);
+  const added = (before, after) => PD.newLines(PD.snapshotOf(lines(before)).digests, lines(after)).map((l) => l.raw);
+  await check("empties dropped, each line once as the page has it, in order", () =>
+    assert.deepEqual(PD.normalizeLines(["B 1", "Updated 3:45 PM", "A", "B 1", "Updated 2m ago", "A  "]), ["B 1", "A"]));
   await check("only the lines new since before, as the page has them", () =>
-    assert.deepEqual(PD.addedLines(["Bitcoin $85,100", "Updated 3:45 PM", "5 min ago"], ["Updated 3:52 PM", "Bitcoin  $86,200", "Bitcoin $85,100", "6 min ago", "Bitcoin  $86,200"]), ["Bitcoin $86,200"]));
-  await check("before may already be in the steady form", () =>
-    assert.deepEqual(PD.addedLines(PD.normalizeLines(["Hi 1,204 watching", "x"]), ["Hi 1,300 watching", "x", "y"], { normalized: true }), ["y"]));
-  await check("lines already in the steady form aren't normalized again (that would take more out)", () => {
-    const kept = PD.snapshotLines(["Episode 12 1.2K views", "Other"]).lines;
-    assert.deepEqual(kept, ["Episode 12 views", "Other"]);
-    assert.deepEqual(PD.addedLines(kept, ["Episode 12 1.3K views", "Other2"], { normalized: true }), ["Other2"]);
-  });
+    assert.deepEqual(added(["Bitcoin $85,100", "Updated 3:45 PM", "5 min ago"], ["Updated 3:52 PM", "Bitcoin  $86,200", "Bitcoin $85,100", "6 min ago", "Bitcoin  $86,200"]), ["Bitcoin $86,200"]));
   await check("two lines that differ only by a date both stay", () => {
     assert.deepEqual(PD.normalizeLines(["Bulletin 10/14/2026", "Bulletin 10/13/2026"]), ["Bulletin 10/14/2026", "Bulletin 10/13/2026"]);
-    const kept = PD.snapshotOf(PD.pageLinesOf(["Bulletin 10/13/2026"]));
-    const now = PD.snapshotOf(PD.pageLinesOf(["Bulletin 10/14/2026", "Bulletin 10/13/2026"]));
-    assert.notEqual(now.hash, kept.hash, "a new bulletin changes the page");
-    assert.deepEqual(PD.pageDiff(kept.digests, [], PD.pageLinesOf(["Bulletin 10/14/2026", "Bulletin 10/13/2026"])).added.map((l) => l.raw), ["Bulletin 10/14/2026"]);
+    assert.notEqual(PD.snapshotOf(lines(["Bulletin 10/14/2026", "Bulletin 10/13/2026"])).hash, PD.snapshotOf(lines(["Bulletin 10/13/2026"])).hash);
+    assert.deepEqual(added(["Bulletin 10/13/2026"], ["Bulletin 10/14/2026", "Bulletin 10/13/2026"]), ["Bulletin 10/14/2026"]);
   });
-  await check("a new slot, a new departure time, a new score are changes", () => {
+  await check("a new slot, a new departure time, a new score, a count that moved are changes", () => {
     for (const [a, b] of [
+      ["9:00 AM", "2:00 PM"],
+      ["Sat Oct 18 · 8:10 AM · 4 players · Book", "Sat Oct 18 · 1:30 PM · 4 players · Book"],
+      ["UA 123 · Chicago · 16:30", "UA 123 · Chicago · 17:05"],
+      ["Kiel · 28:25 · Flensburg", "Kiel · 29:25 · Flensburg"],
       ["Next available: 11/30/2026 9:00 AM", "Next available: 10/21/2026 10:30 AM"],
       ["Departs 16:30", "Departs 17:45"],
-      ["Kiel 28:25 Flensburg", "Kiel 29:25 Flensburg"],
       ["Ships in 2 days", "Ships in 5 days"],
       ["9,998 followers", "10,002 followers"],
+      ["Alice · 1,234 votes", "Alice · 1,300 votes"],
       ["Them: 9:30", "Them: 10:15"],
       ["Are you free at 3:00?", "Are you free at 5:00?"],
+      ["1. Alpha", "1. Bravo"],
     ])
       assert.notEqual(PD.normalizeLine(a), PD.normalizeLine(b), `${a} / ${b}`);
   });
-  await check("nothing added when only times moved", () => assert.deepEqual(PD.addedLines(BASE, BASE.map((l) => l.replace("3:45", "3:52").replace("5 minutes", "6 minutes"))), []));
-  await check("snapshotLines keeps the first lines that fit, and the raw lines with them", () => {
-    const s = PD.snapshotLines(["a 1", "b 2", "3:45", "c 3", "d 4"], 3, 100);
-    assert.deepEqual(s.lines, ["a 1", "b 2", "c 3"]);
-    assert.deepEqual(s.raw, ["a 1", "b 2", "c 3"]);
-    assert.deepEqual(PD.snapshotLines(["aaaa", "bbbb", "cccc"], 10, 10).lines, ["aaaa", "bbbb"], "and stops at the size cap");
+  await check("nothing added when only stamps, ages and timers moved", () => {
+    const at = (t, m, left) => ["Bitcoin $85,100", `Updated ${t} PM`, `Posted ${m} minutes ago`, `Last updated: Mon, 13 Oct 2026 ${t}:10 GMT`, `Sale ends in ${left}`, "Prices refresh every minute"];
+    assert.deepEqual(added(at("3:45", 5, "02:15:33"), at("3:52", 12, "02:08:01")), []);
+  });
+  await check("a reordered ranked list has new lines (a rank is what's on the page)", () =>
+    assert.deepEqual(added(["1. Alpha", "2. Bravo"], ["1. Bravo", "2. Alpha"]), ["1. Bravo", "2. Alpha"]));
+  await check("a line's digest is short and the same each time", () => {
+    assert.equal(PD.lineDigest("Bitcoin $86,200"), PD.lineDigest("Bitcoin $86,200"));
+    assert.notEqual(PD.lineDigest("Bitcoin $86,200"), PD.lineDigest("Bitcoin $86,201"));
+    assert.ok(PD.lineDigest("x".repeat(300)).length <= 12);
   });
 });
 
@@ -342,7 +375,8 @@ test("starting a page watch: the first read is the baseline, and refusals say wh
     assert.equal(hitsOf("/start"), 1);
     assert.ok(w.page.hash && w.page.checkedAt);
     assert.ok(w.page.lines.includes("Bitcoin $85,100"));
-    assert.ok(w.page.lines.includes("Updated"), "the time is out");
+    assert.ok(!w.page.lines.some((l) => /3:45|minutes ago/.test(l)), "the stamp and the age are out");
+    assert.ok(w.page.lines.includes("1,204 watching"), "a count stays");
     assert.ok(!w.page.lines.some((l) => /Date\.now/.test(l)), "no script text");
   });
   await check("no model call to set it up", () => {
@@ -381,11 +415,11 @@ test("starting a page watch: the first read is the baseline, and refusals say wh
   });
 });
 
-test("the loop: nothing until due; the same page, or only its times, costs nothing", async () => {
+test("the loop: nothing until due; the same page, or only its stamps, costs nothing", async () => {
   jevOn();
   const id = await pageWatch("/loop", BASE);
-  const judged = () => jev.calls.filter(isJudge).length;
-  const j0 = judged();
+  const judged = () => jev.calls.filter(isJudge);
+  const j0 = judged().length;
   await check("not read again before its minutes are up", async () => {
     wait(29);
     await tick(id);
@@ -395,24 +429,38 @@ test("the loop: nothing until due; the same page, or only its times, costs nothi
     wait(1);
     assert.equal(await tick(id), "same");
     assert.equal(hitsOf("/loop"), 2);
-    assert.equal(judged(), j0);
+    assert.equal(judged().length, j0);
   });
-  await check("only times, ages and counters changed: the same page, no model call", async () => {
-    serve("/loop", "Prices", ["Bitcoin $85,100", "Ethereum $3,050", "Updated 4:15 PM", "Posted 35 minutes ago", "1,388 watching", "Prices refresh every minute"]);
+  await check("only stamps and ages moved: the same page, no model call", async () => {
+    serve("/loop", "Prices", ["Bitcoin $85,100", "Ethereum $3,050", "Updated 4:15 PM", "Posted 35 minutes ago", "1,204 watching", "Prices refresh every minute"]);
     wait(30);
     const hash = watchOf(id).page.hash;
     assert.equal(await tick(id), "same");
     assert.equal(hitsOf("/loop"), 3);
     assert.equal(watchOf(id).page.hash, hash);
-    assert.equal(judged(), j0);
+    assert.equal(judged().length, j0);
     assert.equal(headsUps(id).length, 0);
   });
-  await check("a line went away, nothing added: kept, no model call", async () => {
-    serve("/loop", "Prices", ["Bitcoin $85,100", "Updated 4:45 PM"]);
+  await check("a counter that ticked is the judge's: one call, told what isn't news, no heads-up when it says no", async () => {
+    jev.waiting = () => 0.1;
+    serve("/loop", "Prices", ["Bitcoin $85,100", "Ethereum $3,050", "Updated 4:45 PM", "Posted 65 minutes ago", "1,388 watching", "Prices refresh every minute"]);
     wait(30);
     assert.equal(await tick(id), "changed");
-    assert.equal(judged(), j0);
-    assert.ok(!watchOf(id).page.lines.includes("Ethereum $3,050"));
+    const calls = judged().slice(j0);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].state.added, "1,388 watching");
+    assert.equal(calls[0].state.before, "1,204 watching");
+    assert.match(calls[0].questions.waiting.instructions, /a count that ticked \(views, likes, points, comments, watching\), an ad or a banner, the same things in a new order, or a cookie, sign in or error page shown instead of the page are not news, unless `look_for` is about them\./);
+    assert.equal(headsUps(id).length, 0);
+  });
+  jev.waiting = () => 0.9;
+  await check("a line went away, nothing added: nothing written, no model call", async () => {
+    const kept = structuredClone(watchOf(id).page);
+    serve("/loop", "Prices", ["Bitcoin $85,100", "Updated 5:15 PM", "1,388 watching"]);
+    wait(30);
+    assert.equal(await tick(id), "same");
+    assert.equal(judged().length, j0 + 1);
+    assert.deepEqual(watchOf(id).page, kept);
   });
 });
 
@@ -441,12 +489,12 @@ test("a real change: exactly one judge call, and a heads-up when it matches", as
     const m = headsUps(id);
     assert.equal(m.length, 1);
     assert.equal(m[0].chatId, botChatId("boppy"));
-    // A page on a bare address is named by its title (lib/watch-sites.ts siteOf).
-    assert.equal(m[0].text, "Heads up, something new on Prices: “Bitcoin $86,200”");
+    // A page on a bare address is named by its title (lib/watch-sites.ts siteOf); the line it replaced is said with it.
+    assert.equal(m[0].text, "Heads up, something new on Prices: “Bitcoin $86,200 (was Bitcoin $85,100)”");
     spoken.push(m[0].text);
     const w = watchOf(id);
-    assert.equal(w.alert.text, "Bitcoin $86,200");
-    assert.deepEqual(w.told, ["Bitcoin $86,200"]);
+    assert.equal(w.alert.text, "Bitcoin $86,200 (was Bitcoin $85,100)");
+    assert.deepEqual(w.told, ["Bitcoin $86,200 (was Bitcoin $85,100)"]);
     assert.ok(w.page.lines.includes("Bitcoin $86,200"), "the new page is kept");
   });
   await check("read again unchanged: nothing", async () => {
@@ -464,13 +512,14 @@ test("a real change: exactly one judge call, and a heads-up when it matches", as
     assert.equal(headsUps(id).length, 1);
     assert.ok(watchOf(id).alert, "a page's badge stays until the user sees it");
   });
-  await check("the same thing again, in other times: not told twice", async () => {
+  await check("the same line again with a new stamp: nothing new, not told twice", async () => {
     jev.waiting = () => 0.95;
     jev.item = () => "l0";
-    // (A time as its own part of the line stamps it; "at 4:40 PM" between words would be what's on the page.)
-    serve("/change", "Prices", ["Bitcoin $86,200 · 4:40 PM", "Ethereum $3,100"]);
+    const calls = judged().length;
+    serve("/change", "Prices", ["Bitcoin $86,200 · updated 4:40 PM", "Ethereum $3,100"]);
     wait(30);
-    assert.equal(await tick(id), "changed");
+    assert.equal(await tick(id), "same");
+    assert.equal(judged().length, calls);
     assert.equal(headsUps(id).length, 1);
   });
   jev.waiting = () => 0.9;
@@ -491,8 +540,9 @@ test("no Jev: one quick OpenAI call judges instead, counted", async () => {
     assert.equal(openai.calls.length, 1);
     assert.equal(openai.calls[0].body.reasoning.effort, "low");
     assert.equal(openai.calls[0].body.model, "gpt-test-monitors");
-    // The line as the page has it ("today" is only taken out to compare).
+    // The line as the page has it.
     assert.deepEqual(openai.calls[0].input.added, ["0: Solana listed today"]);
+    assert.equal(openai.calls[0].input.more_added, undefined, "no count of more when all are shown");
     assert.deepEqual(openai.calls[0].input.before, [], "nothing went from the page");
     assert.match(openai.calls[0].body.instructions, /`before` are lines that were on it then and are gone now/);
     assert.equal(jev.calls.length, jevCalls);
@@ -598,14 +648,30 @@ test("pause, resume and check now", async () => {
     assert.equal(hitsOf("/pause"), 2);
     assert.equal(r.watch.id, id);
   });
+  await check("check now that finds nothing new shows at once: saved, and the window told, whatever the loop did lately", async () => {
+    wait(10);
+    // The loop told the window it moved on a moment ago (for another watch): that doesn't hold this back.
+    globalThis.__bopsPageShown = Date.now();
+    const version = S.getVersion();
+    const asked = Date.now();
+    const r = await W.checkNow(id);
+    assert.equal(r.result, "same");
+    assert.ok(S.getVersion() > version, "the window is told");
+    assert.ok(watchOf(id).page.checkedAt >= asked, "when it was checked is saved");
+    assert.equal(r.watch.page.checkedAt, watchOf(id).page.checkedAt);
+    assert.equal(r.watch.page.digests, undefined, "what's kept to compare stays on the server");
+    assert.equal(r.watch.page.seen, undefined);
+    assert.equal(r.watch.page.lines, undefined);
+  });
   await check("resumed: it reads at once, and what changed while paused is judged", async () => {
     const judged = jev.calls.filter(isJudge).length;
+    const hit = hitsOf("/pause");
     serve("/pause", "Prices", [...BASE, "Bitcoin $86,500"]);
     W.setWatchPaused(id, false);
     assert.equal(watchOf(id).paused, undefined);
-    for (let i = 0; i < 100 && hitsOf("/pause") < 3; i++) await sleep(20);
+    for (let i = 0; i < 100 && hitsOf("/pause") <= hit; i++) await sleep(20);
     await sleep(50);
-    assert.equal(hitsOf("/pause"), 3);
+    assert.equal(hitsOf("/pause"), hit + 1);
     assert.equal(jev.calls.filter(isJudge).length, judged + 1);
   });
   await check("check now on a watch that's gone says so", async () => {
@@ -732,13 +798,28 @@ test("every line of a page counts, not just its first ones", async () => {
     const p = watchOf(id).page;
     assert.equal(p.digests.length, 241);
     assert.ok(JSON.stringify(p.digests).length < 241 * 16, `digests ${JSON.stringify(p.digests).length}`);
-    assert.ok(p.lines.join("\n").length <= 8_000);
+    assert.ok(p.lines.join("\n").length <= 30_000);
     assert.ok(p.lines.includes("Comment 181 from Dana: the build is out"), "the line just added is kept as text");
+  });
+  await check("a reply at the bottom of a thread of 1,400 lines (past the 400 a page used to be read as) is found", async () => {
+    const long = Array.from({ length: 1400 }, (_, i) => `Reply ${i + 1}: works for me on build ${i + 1}`);
+    const thread = await pageWatch("/long-thread", long, { lookFor: "a reply from the maintainer" });
+    jev.waiting = (state) => (state.added.includes("maintainer") ? 0.95 : 0.1);
+    serve("/long-thread", "Prices", [...long, "maintainer: fixed in v2"]);
+    wait(30);
+    const calls = judged().length;
+    assert.equal(await tick(thread), "told");
+    assert.deepEqual(judged().at(-1).state.added.split("\n"), ["maintainer: fixed in v2"]);
+    assert.equal(judged().length, calls + 1);
+    const p = watchOf(thread).page;
+    assert.equal(p.digests.length, 1401);
+    assert.ok(JSON.stringify(p.digests).length < 1401 * 16, `digests ${JSON.stringify(p.digests).length}`);
+    assert.ok(p.lines.join("\n").length <= 30_000);
   });
   jev.waiting = () => 0.9;
 });
 
-test("more new lines than one judge call takes: judged in turn, none lost", async () => {
+test("many new lines: one judge call, the first 80 and a count of the rest, and nothing held back", async () => {
   jevOn();
   const id = await pageWatch("/listings", ["Listings", "Filter by city"], { lookFor: "a loft in Brooklyn" });
   const judged = () => jev.calls.filter(isJudge);
@@ -748,82 +829,298 @@ test("more new lines than one judge call takes: judged in turn, none lost", asyn
   jev.item = (state) => `l${state.added.split("\n").findIndex((l) => l.includes("Brooklyn"))}`;
   serve("/listings", "Prices", ["Listings", "Filter by city", ...items]);
   wait(30);
-  await check("the match at line 50 is judged in the second call and told", async () => {
+  await check("60 new lines: one call with all of them, and the match at line 50 is told", async () => {
     assert.equal(await tick(id), "told");
     const calls = judged().slice(j0);
-    assert.equal(calls.length, 2);
-    assert.equal(calls[0].state.added.split("\n").length, 40);
-    assert.equal(calls[1].state.added.split("\n").length, 20);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].state.added.split("\n").length, 60);
+    assert.equal(calls[0].state.more_added, undefined);
     assert.equal(headsUps(id).at(-1)?.text, "Heads up, something new on Prices: “Loft in Brooklyn, $2,400”");
   });
-  await check("past three calls, the rest waits for the next read (not taken in unjudged)", async () => {
-    const more = Array.from({ length: 150 }, (_, i) => `Room ${i + 1} in the Bronx, $900`);
+  const more = Array.from({ length: 150 }, (_, i) => `Room ${i + 1} in the Bronx, $900`);
+  await check("150 new lines: one call with the first 80 and how many more, and the whole page is kept", async () => {
     jev.waiting = () => 0.1;
     serve("/listings", "Prices", ["Listings", "Filter by city", ...items, ...more]);
     wait(30);
     const before = judged().length;
     assert.equal(await tick(id), "changed");
-    assert.equal(judged().length - before, 3, "three calls, 120 lines");
+    const calls = judged().slice(before);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].state.added.split("\n"), more.slice(0, 80));
+    assert.equal(calls[0].state.more_added, "70 more new lines, not shown");
+    assert.equal(watchOf(id).page.digests.length, 2 + 60 + 150);
+  });
+  await check("the next read has nothing left over: the same page, no call", async () => {
     wait(30);
-    const next = judged().length;
-    assert.equal(await tick(id), "changed");
-    const left = judged().slice(next);
-    assert.equal(left.length, 1);
-    assert.deepEqual(left[0].state.added.split("\n"), more.slice(120), "the 30 left over");
+    const before = judged().length;
+    assert.equal(await tick(id), "same");
+    assert.equal(judged().length, before);
+  });
+  await check("one big update is told once, not once a read", async () => {
+    jev.waiting = () => 0.95;
+    jev.item = () => "l3";
+    const posts = Array.from({ length: 100 }, (_, i) => `Post ${i + 1}: something new`);
+    serve("/listings", "Prices", ["Listings", "Filter by city", ...posts, ...items, ...more]);
+    const told = headsUps(id).length;
+    const reads = [];
+    for (let i = 0; i < 3; i++) {
+      wait(30);
+      reads.push(await tick(id));
+    }
+    assert.deepEqual(reads, ["told", "same", "same"]);
+    assert.equal(headsUps(id).length, told + 1);
+  });
+  await check("a sure yes with no line picked quotes the first line the judge was shown", async () => {
+    jev.waiting = () => 0.95;
+    jev.item = () => "none";
+    serve("/listings", "Prices", ["Listings", "Filter by city", "Penthouse in Brooklyn, $9,000", "Studio in Queens, $1,000", ...items]);
+    wait(30);
+    assert.equal(await tick(id), "told");
+    assert.equal(headsUps(id).at(-1)?.text, "Heads up, something new on Prices: “Penthouse in Brooklyn, $9,000”");
+    spoken.push(headsUps(id).at(-1)?.text);
   });
   jev.waiting = () => 0.9;
   jev.item = () => "l0";
 });
 
-test("what comes and goes isn't news: points ticking, a banner coming back, a cookie page", async () => {
+test("what comes and goes: counts ticking, a banner rotating, a reorder, a cookie page, a feed that turns over", async () => {
   jevOn();
-  const judged = () => jev.calls.filter(isJudge).length;
+  const judged = () => jev.calls.filter(isJudge);
   const stories = Array.from({ length: 12 }, (_, i) => `Story ${i + 1} about databases`);
   const hn = (points) => stories.flatMap((t, i) => [`${i + 1}. ${t}`, `${points + i} points by user${i} 2 hours ago | hide | ${10 + i} comments`]);
-  const id = await pageWatch("/hn", [...hn(100), "Banner: spring sale"], { lookFor: "a story about Bops" });
-  const j0 = judged();
-  await check("only points and comment counts moved: the same page, no judge call", async () => {
+  const id = await pageWatch("/hn", [...hn(100), "Banner: spring sale"], { lookFor: "a story about Bops", everyMin: 15 });
+  jev.waiting = () => 0.1;
+  await check("points and comment counts moved: one judge call over those lines, no heads-up", async () => {
     serve("/hn", "Prices", [...hn(140), "Banner: spring sale"]);
     wait(30);
-    assert.equal(await tick(id), "same");
-    assert.equal(judged(), j0);
+    const j0 = judged().length;
+    assert.equal(await tick(id), "changed");
+    assert.equal(judged().length, j0 + 1);
+    assert.equal(judged().at(-1).state.added.split("\n").length, 12);
+    assert.equal(headsUps(id).length, 0);
   });
-  await check("a banner that goes and comes back isn't new", async () => {
+  await check("a banner that rotates: judged once, then nothing written while it goes and comes back", async () => {
     serve("/hn", "Prices", [...hn(140), "Banner: free shipping"]);
     wait(30);
-    await tick(id);
-    const j1 = judged();
-    serve("/hn", "Prices", [...hn(140), "Banner: spring sale"]);
-    wait(30);
+    const j1 = judged().length;
     assert.equal(await tick(id), "changed");
-    assert.equal(judged(), j1, "no judge call for the banner that came back");
+    assert.equal(judged().length, j1 + 1);
+    const kept = structuredClone(watchOf(id).page);
+    for (const banner of ["Banner: spring sale", "Banner: free shipping", "Banner: spring sale"]) {
+      serve("/hn", "Prices", [...hn(140), banner]);
+      wait(15);
+      assert.equal(await tick(id), "same", banner);
+    }
+    assert.equal(judged().length, j1 + 1);
+    assert.deepEqual(watchOf(id).page, kept, "nothing written");
   });
-  await check("a cookie page served instead is kept out, and the page after it isn't all new", async () => {
-    const kept = watchOf(id).page.hash;
+  await check("the same lines in a new order (no rank on them): nothing new, nothing written", async () => {
+    const plain = ["Apples", "Pears", "Plums", "Figs"];
+    const fruit = await pageWatch("/fruit", plain, { lookFor: "a new fruit" });
+    const kept = structuredClone(watchOf(fruit).page);
+    serve("/fruit", "Prices", [...plain].reverse());
+    wait(30);
+    const j = judged().length;
+    assert.equal(await tick(fruit), "same");
+    assert.equal(judged().length, j);
+    assert.deepEqual(watchOf(fruit).page, kept);
+  });
+  await check("a ranked list reordered: the moved ranks are new lines, for the judge", async () => {
+    const ranks = await pageWatch("/ranks", ["1. Alpha", "2. Bravo", "3. Charlie"], { lookFor: "Bravo reaches number 1" });
+    jev.waiting = (state) => (state.added.includes("1. Bravo") ? 0.95 : 0.1);
+    jev.item = (state) => `l${state.added.split("\n").indexOf("1. Bravo")}`;
+    serve("/ranks", "Prices", ["1. Bravo", "2. Alpha", "3. Charlie"]);
+    wait(30);
+    assert.equal(await tick(ranks), "told");
+    assert.deepEqual(judged().at(-1).state.added.split("\n"), ["1. Bravo", "2. Alpha"]);
+    // The line it's a new version of: the same words with another number.
+    assert.equal(headsUps(ranks).at(-1)?.text, "Heads up, something new on Prices: “1. Bravo (was 2. Bravo)”");
+    jev.waiting = () => 0.1;
+    jev.item = () => "l0";
+  });
+  await check("a cookie page served instead: one judge call, and the page after it isn't new", async () => {
     serve("/hn", "Prices", ["We use cookies", "Accept all", "Manage settings"]);
     wait(30);
-    assert.equal(await tick(id), "failed");
-    assert.equal(watchOf(id).page.hash, kept);
-    assert.match(watchOf(id).page.error, /looked like something else/);
-    spoken.push(watchOf(id).page.error);
-    serve("/hn", "Prices", [...hn(150), "Banner: spring sale"]);
-    wait(60);
-    const j2 = judged();
+    const j2 = judged().length;
+    assert.equal(await tick(id), "changed");
+    assert.equal(judged().length, j2 + 1);
+    assert.equal(watchOf(id).page.error, undefined, "not a failure");
+    serve("/hn", "Prices", [...hn(140), "Banner: spring sale"]);
+    wait(30);
     assert.equal(await tick(id), "same");
-    assert.equal(judged(), j2);
-    assert.equal(watchOf(id).page.error, undefined);
+    assert.equal(judged().length, j2 + 1);
   });
-  await check("a page that really changed is taken in after a few reads", async () => {
-    const other = Array.from({ length: 12 }, (_, i) => `Totally new layout line ${i + 1}`);
-    serve("/hn", "Prices", other);
-    for (let i = 0; i < 2; i++) {
-      wait(240);
-      assert.equal(await tick(id), "failed");
+  await check("a busy feed whose items all turn over each read: judged every read, never a failure", async () => {
+    const chrome = ["Newest posts", "Sort: new", "Filter"];
+    const batch = (n) => Array.from({ length: 20 }, (_, i) => [`Post ${n * 20 + i}: a thing happened`, `by user${n * 20 + i}`]).flat();
+    const feed = await pageWatch("/feed", [...chrome, ...batch(0)], { lookFor: "a post about Bops" });
+    const results = [];
+    for (let n = 1; n <= 4; n++) {
+      serve("/feed", "Prices", [...chrome, ...batch(n)]);
+      wait(30);
+      const j = judged().length;
+      results.push(await tick(feed));
+      assert.equal(judged().length, j + 1, `read ${n}: one call`);
+      assert.equal(judged().at(-1).state.added.split("\n").length, 40, `read ${n}: every new post judged`);
     }
-    wait(480);
-    assert.notEqual(await tick(id), "failed");
-    assert.equal(watchOf(id).page.odd, undefined);
+    assert.deepEqual(results, ["changed", "changed", "changed", "changed"]);
+    assert.equal(watchOf(feed).page.failures, undefined);
+    assert.equal(watchOf(feed).page.error, undefined);
   });
+  jev.waiting = () => 0.9;
+});
+
+test("a line that went and comes back: not new for 7 days, new after", async () => {
+  jevOn();
+  const judged = () => jev.calls.filter(isJudge);
+  const id = await pageWatch("/stock", ["Widget Pro", "Status: In stock", "Ships free"], { lookFor: "back in stock" });
+  jev.waiting = () => 0.1;
+  serve("/stock", "Prices", ["Widget Pro", "Status: Sold out", "Ships free"]);
+  wait(30);
+  await tick(id);
+  await check("back within 7 days (it went lately: a banner, a block that comes and goes): not judged", async () => {
+    serve("/stock", "Prices", ["Widget Pro", "Status: In stock", "Ships free"]);
+    wait(6 * 1440);
+    const j = judged().length;
+    assert.equal(await tick(id), "same");
+    assert.equal(judged().length, j);
+    assert.ok(watchOf(id).page.seen.every((e) => /^[0-9a-z]+@[0-9a-z]+$/.test(e)), "each with when it went");
+  });
+  await check("taken in at the hourly save, so it stays known while it's there", async () => {
+    assert.ok(watchOf(id).page.digests.includes(PD.lineDigest("Status: In stock")));
+    wait(3 * 1440);
+    const j = judged().length;
+    assert.equal(await tick(id), "same");
+    assert.equal(judged().length, j);
+  });
+  await check("back after 7 days: judged like any new line, and told", async () => {
+    // Sold out again, taken in at the hourly save ("In stock" went now).
+    serve("/stock", "Prices", ["Widget Pro", "Status: Sold out", "Ships free"]);
+    wait(61);
+    assert.equal(await tick(id), "same");
+    serve("/stock", "Prices", ["Widget Pro", "Status: In stock", "Ships free"]);
+    wait(8 * 1440);
+    jev.waiting = () => 0.95;
+    jev.item = () => "l0";
+    const j = judged().length;
+    assert.equal(await tick(id), "told");
+    assert.equal(judged().length, j + 1);
+    assert.equal(headsUps(id).at(-1)?.text, "Heads up, something new on Prices: “Status: In stock”");
+  });
+  await check("the same words again with only a stamp moved aren't told twice", async () => {
+    serve("/stock", "Prices", ["Widget Pro", "Status: Sold out", "Ships free"]);
+    wait(61);
+    assert.equal(await tick(id), "same");
+    serve("/stock", "Prices", ["Widget Pro", "Status: In stock · updated 9:15 AM", "Ships free"]);
+    wait(8 * 1440);
+    const told = headsUps(id).length;
+    assert.equal(await tick(id), "changed");
+    assert.equal(headsUps(id).length, told);
+  });
+  jev.waiting = () => 0.9;
+  jev.item = () => "l0";
+});
+
+test("a page that comes back empty is a failed read, never a new baseline", async () => {
+  jevOn();
+  const judged = () => jev.calls.filter(isJudge);
+  const id = await pageWatch("/restock", ["Widget Pro", "Status: sold out"], { lookFor: "back in stock" });
+  const kept = structuredClone(watchOf(id).page);
+  await check("an empty answer: failed, said plainly, the page kept as it was", async () => {
+    pages.set("/restock", { body: "" });
+    wait(30);
+    assert.equal(await tick(id), "failed");
+    const p = watchOf(id).page;
+    assert.equal(p.error, "The page came back empty.");
+    spoken.push(p.error);
+    assert.equal(p.failures, 1);
+    assert.deepEqual(p.digests, kept.digests);
+    assert.equal(p.hash, kept.hash);
+  });
+  await check("a shell that draws itself in the browser: the same", async () => {
+    pages.set("/restock", { body: "<html><body><div id=root></div><script>render()</script></body></html>" });
+    wait(60);
+    assert.equal(await tick(id), "failed");
+    assert.equal(watchOf(id).page.failures, 2);
+  });
+  await check("the next real read is judged against the page as it was: the restock is told", async () => {
+    jev.waiting = (state) => (state.added.includes("in stock") ? 0.95 : 0.1);
+    jev.item = () => "l0";
+    serve("/restock", "Prices", ["Widget Pro", "Status: in stock, ships today"]);
+    wait(120);
+    const j = judged().length;
+    assert.equal(await tick(id), "told");
+    assert.equal(judged().length, j + 1);
+    assert.equal(judged().at(-1).state.before, "Status: sold out");
+    assert.equal(watchOf(id).page.error, undefined);
+    assert.equal(watchOf(id).page.failures, undefined);
+  });
+  await check("a watch kept with no lines at all (digests []) judges its next read, it isn't a baseline", async () => {
+    S.update((s) => Object.assign(s.watches.find((w) => w.id === id).page, { digests: [], hash: PD.pageHash([]), seen: undefined }));
+    serve("/restock", "Prices", ["Widget Pro", "Status: in stock, 3 left"]);
+    wait(30);
+    const j = judged().length;
+    assert.notEqual(await tick(id), "failed");
+    assert.equal(judged().length, j + 1);
+  });
+  await check("a watch from before every line was kept (no digests) is taken in as it is", async () => {
+    S.update((s) => Object.assign(s.watches.find((w) => w.id === id).page, { digests: undefined, hash: undefined }));
+    wait(30);
+    const j = judged().length;
+    assert.equal(await tick(id), "changed");
+    assert.equal(judged().length, j);
+    assert.ok(watchOf(id).page.digests.length > 0);
+  });
+  jev.waiting = () => 0.9;
+});
+
+test("slots and departures: a time on its own, or in a table cell, is what's on the page", async () => {
+  jevOn();
+  const judged = () => jev.calls.filter(isJudge);
+  const slots = (times) => `<!doctype html><html><head><title>Clinic</title></head><body><h1>Book a visit</h1><p>Pick a time below.</p><h2>Saturday, October 18</h2><ul>${times.map((t) => `<li><button>${t}</button></li>`).join("")}</ul><footer>Example clinic</footer></body></html>`;
+  const table = (rows) => `<!doctype html><html><head><title>Tee times</title></head><body><table><tr><th>Day</th><th>Time</th><th>Players</th><th></th></tr>${rows.map((r) => `<tr><td>Sat Oct 18</td><td>${r}</td><td>4 players</td><td>Book</td></tr>`).join("")}</table></body></html>`;
+  jev.waiting = (state) => (/2:00 PM|1:30 PM|17:05/.test(state.added) ? 0.95 : 0.1);
+  jev.item = () => "l0";
+  await check("a new slot button is judged and told", async () => {
+    pages.set("/slots", { body: slots(["9:00 AM"]) });
+    const w = await W.startPageWatch("boppy", { url: at("/slots"), lookFor: "an afternoon slot opens" });
+    assert.ok(w.page.lines.includes("9:00 AM"), "the slot is kept");
+    pages.set("/slots", { body: slots(["9:00 AM", "2:00 PM"]) });
+    wait(30);
+    assert.equal(await tick(w.id), "told");
+    assert.equal(judged().at(-1).state.added, "2:00 PM");
+    assert.equal(headsUps(w.id).at(-1)?.text, "Heads up, something new on Clinic: “2:00 PM”");
+  });
+  await check("a new row in a table, different only by its time, is judged and told", async () => {
+    pages.set("/tee", { body: table(["8:10 AM"]) });
+    const w = await W.startPageWatch("boppy", { url: at("/tee"), lookFor: "an afternoon tee time" });
+    pages.set("/tee", { body: table(["8:10 AM", "1:30 PM"]) });
+    wait(30);
+    assert.equal(await tick(w.id), "told");
+    assert.equal(judged().at(-1).state.added, "Sat Oct 18 · 1:30 PM · 4 players · Book");
+  });
+  await check("a departure that moved is judged, with the time it had", async () => {
+    serve("/departures", "Departures", ["Departures", "UA 123 · Chicago · 16:30 · On time"]);
+    const w = await W.startPageWatch("boppy", { url: at("/departures"), lookFor: "my flight is delayed" });
+    serve("/departures", "Departures", ["Departures", "UA 123 · Chicago · 17:05 · Delayed"]);
+    wait(30);
+    assert.equal(await tick(w.id), "told");
+    assert.equal(judged().at(-1).state.before, "UA 123 · Chicago · 16:30 · On time");
+  });
+  await check("a status page whose stamp moves every read (in the forms sites use) costs nothing", async () => {
+    const status = (t, left) => ["All systems operational", `Last updated: Mon, 13 Oct 2026 ${t}:10 GMT`, `Last updated: October 13, 2026 at ${t} PM`, `Next refresh in ${left} seconds`, "API · Operational"];
+    serve("/status", "Status", status("3:45", 45));
+    const w = await W.startPageWatch("boppy", { url: at("/status") });
+    const j = judged().length;
+    for (const [t, left] of [["4:15", 12], ["4:45", 30], ["5:15", 5]]) {
+      serve("/status", "Status", status(t, left));
+      wait(30);
+      assert.equal(await tick(w.id), "same");
+    }
+    assert.equal(judged().length, j);
+  });
+  jev.waiting = () => 0.9;
+  jev.item = () => "l0";
 });
 
 test("an unchanged read writes nothing, and the window still sees it was checked", async () => {
@@ -882,18 +1179,27 @@ test("a screen watch: a clock on the page is not a change", async () => {
     await tick("watch_screen");
     assert.equal(reads(), r0 + 1);
   });
-  await check("only the clock and a counter moved: no Jev read", async () => {
-    screenLines = ["Top stories", "Bops ships monitors", "Updated 3:52 PM", "15 comments"];
+  await check("only the clock and an age moved: no Jev read", async () => {
+    screenLines = ["Top stories", "Bops ships monitors", "Updated 3:52 PM", "12 comments", "Posted 9m ago"];
     globalThis.__testScreen = async () => ({ url: "https://news.example/", title: "News 3:52", lines: screenLines });
     skew += 31_000;
     assert.equal(await tick("watch_screen"), "same");
     assert.equal(reads(), r0 + 1);
   });
-  await check("a new story is read", async () => {
-    screenLines = ["Top stories", "Bops raises a round", "Bops ships monitors", "Updated 3:59 PM"];
+  await check("a counter that ticked is read (Jev decides, told it isn't news unless asked)", async () => {
+    const r1 = reads();
+    screenLines = ["Top stories", "Bops ships monitors", "Updated 4:05 PM", "15 comments", "Posted 22m ago"];
     skew += 31_000;
     await tick("watch_screen");
-    assert.equal(reads(), r0 + 2);
+    assert.equal(reads(), r1 + 1);
+    assert.match(jev.calls.filter(isScreenRead).at(-1).questions.waiting.instructions, /a count that ticked/);
+  });
+  await check("a new story is read", async () => {
+    const r1 = reads();
+    screenLines = ["Top stories", "Bops raises a round", "Bops ships monitors", "Updated 4:11 PM"];
+    skew += 31_000;
+    await tick("watch_screen");
+    assert.equal(reads(), r1 + 1);
   });
   await check("a reply that differs from an earlier one only by its time is read", async () => {
     screenLines = ["Top stories", "Bops raises a round", "Bops ships monitors", "Updated 3:59 PM", "Them: 9:30", "Me: what time tomorrow?"];

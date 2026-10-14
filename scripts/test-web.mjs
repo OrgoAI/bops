@@ -62,9 +62,18 @@ const LISTING = `<!doctype html><html><head><title>Widgets</title></head><body>
 <header>Widget Store</header>
 <table><tr><th>Item</th><th>Price</th><th>Stock</th></tr><tr><td>Widget Pro</td><td>$19.99</td><td>In stock</td></tr><tr><td>Widget Mini</td><td></td><td>Sold out</td></tr></table>
 <ul><li>Free shipping</li><li>30 day returns</li></ul><button>Add to cart</button></body></html>`;
+const BIG_ARTICLE = `<!doctype html><html><head><title>A long war | Encyclopedia</title></head><body>
+<nav><p>Jump to content</p><ul>${Array.from({ length: 300 }, (_, i) => `<li><a href="/m${i}">Menu link ${i}</a></li>`).join("")}</ul></nav>
+<main><article><h1>A long war</h1>${Array.from({ length: 2000 }, (_, i) => `<p>Section ${i}: the <a href="/a${i}">army</a> moved <b>north</b> in <i>spring</i>, and <span>the <em>council</em> met</span> to <a href="/b${i}">plan</a> the <span>winter</span> ahead.</p>`).join("\n")}</article></main></body></html>`;
 const FEED = `<?xml version="1.0"?><rss version="2.0"><channel><title>Town feed</title><link>https://town.example/</link>
 <item><title>Library &amp; parks</title><description><![CDATA[<p>Open <b>late</b> all winter</p>]]></description><pubDate>Mon, 13 Oct 2026 09:00:00 GMT</pubDate></item>
 <item><title>Roads</title><description>&lt;p&gt;Main St closed&lt;/p&gt;</description></item></channel></rss>`;
+
+// Links of every kind: one to read, one elsewhere, ones that aren't web pages, ones back to this page, hidden ones.
+const LINKS = `<!doctype html><html><head><title>Links</title></head><body><p>See <a href="/article#top">the
+  story</a>, <a href="https://other.example/x?y=1">another site</a>, <a href="mailto:a@b.example">mail</a>, <a href="javascript:void(0)">js</a>,
+  <a href="#top">top</a>, <a href="/links">this page</a>, <a href="/article">again</a>, <a href="/hidden" hidden>secret</a>
+  <span style="display:none"><a href="/hidden2">secret two</a></span><a>no address</a></p></body></html>`;
 
 const held = new Set();
 let port = 0;
@@ -82,8 +91,11 @@ const server = createServer((req, res) => {
   if (p === "/json") return send(200, "application/json", JSON.stringify({ name: "Widget Pro", price: 19.99, tags: ["new", "hot"] }));
   if (p === "/badjson") return send(200, "application/problem+json", "{ not json");
   if (p === "/feed") return send(200, "application/rss+xml", FEED);
+  if (p === "/links") return send(200, "text/html", LINKS);
   if (p === "/echo") return send(200, "application/json", JSON.stringify({ host: req.headers.host, ua: req.headers["user-agent"], accept: req.headers.accept, path: req.url }));
   if (p === "/redirect") return send(Number(url.searchParams.get("status") ?? 302), "text/plain", "moved", { Location: url.searchParams.get("to") });
+  // A long article on a shallow page (like a long Wikipedia one): about 20,000 elements, with a menu of links first.
+  if (p === "/big-article") return send(200, "text/html", BIG_ARTICLE);
   // Nested 10,000 deep in under half a megabyte: Readability alone would take many seconds on it.
   if (p === "/deep") return send(200, "text/html", `<!doctype html><html><head><title>Deep</title></head><body>${'<div><a href="/x">link</a> some text here '.repeat(10_000)}${"</div>".repeat(10_000)}</body></html>`);
   if (p.startsWith("/chain/")) {
@@ -524,11 +536,12 @@ code line 2</pre><select><option>Option text</option></select><button>Buy now</b
     assert.deepEqual(pieces.map((l) => l.length), [300, 300, 100]);
     assert.equal(pieces.join(""), word);
   });
-  await check("at most 400 lines, each once", () => {
-    const many = htmlLines(Array.from({ length: 900 }, (_, i) => `<p>Row ${i % 600}</p>`).join("")).lines;
-    assert.equal(many.length, 400);
-    assert.equal(new Set(many).size, 400);
+  await check("at most 1500 lines, each once", () => {
+    const many = htmlLines(Array.from({ length: 3000 }, (_, i) => `<p>Row ${i % 2000}</p>`).join("")).lines;
+    assert.equal(many.length, 1500);
+    assert.equal(new Set(many).size, 1500);
     assert.equal(many[0], "Row 0");
+    assert.equal(many.at(-1), "Row 1499");
   });
   await check("a page with no html, head or body tags", () => {
     const got = htmlLines("<!doctype html><title>Bare</title><h1>Heading</h1><p>Body text</p>");
@@ -558,16 +571,31 @@ await part("readPage", async () => {
     assert.ok(!/Sports|Copyright|tracker|color: red/.test(got.text), got.text);
     assert.equal(got.text.split("\n").filter((l) => l.startsWith("Paragraph")).length, 8, "one line a paragraph");
     assert.equal(got.truncated, false);
+    // The menu's links are still given (the article has none of its own), made absolute.
+    assert.deepEqual(got.links, [
+      { url: at("/"), text: "Home" },
+      { url: at("/news"), text: "News" },
+      { url: at("/sports"), text: "Sports" },
+    ]);
+  });
+  await check("a page's links: absolute, web pages only, no # part, each once, not the page itself, none hidden", async () => {
+    const got = await readPage(at("/links"));
+    assert.deepEqual(got.links, [
+      { url: at("/article"), text: "the story" },
+      { url: "https://other.example/x?y=1", text: "another site" },
+    ]);
   });
   await check("a page Readability can't read: everything visible", async () => {
     const got = await readPage(at("/listing"));
     assert.equal(got.title, "Widgets");
+    assert.deepEqual(got.links, []);
     assert.equal(got.text, ["Widget Store", "Item · Price · Stock", "Widget Pro · $19.99 · In stock", "Widget Mini · Sold out", "Free shipping", "30 day returns", "Add to cart"].join("\n"));
   });
   await check("JSON is pretty-printed", async () => {
     const got = await readPage(at("/json"));
     assert.equal(got.text, JSON.stringify({ name: "Widget Pro", price: 19.99, tags: ["new", "hot"] }, null, 2));
     assert.equal(got.title, `127.0.0.1:${port}/json`);
+    assert.deepEqual(got.links, [], "JSON has no links of its own: its addresses are in its text");
   });
   await check("JSON that doesn't parse comes as it is", async () => assert.equal((await readPage(at("/badjson"))).text, "{ not json"));
   await check("plain text as it is", async () => assert.equal((await readPage(at("/plain"))).text, "line one\nline two\n\n  indented three"));
@@ -577,6 +605,7 @@ await part("readPage", async () => {
     const lines = got.text.split("\n");
     for (const l of ["Library & parks", "Open late all winter", "Roads", "Main St closed", "Mon, 13 Oct 2026 09:00:00 GMT"]) assert.ok(lines.includes(l), `${l} in ${JSON.stringify(lines)}`);
     assert.ok(!/<p>|<b>/.test(got.text));
+    assert.deepEqual(got.links, [], "a feed's addresses are in its text");
   });
   await check(`at most ${READ_PAGE_MAX_CHARS} characters, said to be cut`, async () => {
     const got = await readPage(at("/long"));
@@ -589,6 +618,22 @@ await part("readPage", async () => {
     assert.equal(e.status, 404);
   });
   await check("a refused address stays refused", () => refused(() => readPage("http://localhost/")));
+  await check("a long article on a shallow page (about 20,000 elements) is still read as an article, not its menu", async () => {
+    const started = performance.now();
+    const got = await readPage(at("/big-article"));
+    const took = performance.now() - started;
+    assert.ok(took < 5_000, `took ${Math.round(took)} ms`);
+    assert.match(got.title, /A long war/);
+    assert.ok(!/Jump to content|Menu link/.test(got.text), got.text.slice(0, 200));
+    assert.match(got.text, /^(A long war\n)?Section 0: the army moved north in spring/);
+    assert.equal(got.truncated, true);
+    // The article's own links first, not the menu's; at most 200.
+    assert.deepEqual(got.links.slice(0, 2), [
+      { url: at("/a0"), text: "army" },
+      { url: at("/b0"), text: "plan" },
+    ]);
+    assert.equal(got.links.length, 200);
+  });
   await check("a page nested thousands deep is read quickly, as its visible text, and the server isn't held up", async () => {
     let beats = 0;
     const beat = setInterval(() => beats++, 10);
@@ -599,6 +644,7 @@ await part("readPage", async () => {
     assert.ok(took < 2_000, `took ${Math.round(took)} ms`);
     assert.match(got.text, /^link some text here/);
     assert.equal(got.truncated, true);
+    assert.deepEqual(got.links, [{ url: at("/x"), text: "link" }], "each link once");
     assert.ok(beats > 0 || took < 200, "the event loop kept beating");
   });
 });

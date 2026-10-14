@@ -458,6 +458,7 @@ await check("a task run: a fresh thread with the routine and procedure, the chip
   assert.equal(chip?.text, "Routine · Every day at 5 PM");
   assert.deepEqual(chip.sessionIds, [r.last.sessionId]);
   eq(r.nextRunAt, at("2026-10-14T21:00:00Z"), "tomorrow 5 PM");
+  assert.equal(R.ranNow(r.last.sessionId), undefined, "a run on its time isn't a Run now: its result goes only where the routine sends it");
   // Run now while it's still going: skipped.
   const again = await R.runRoutine(r.id, { manual: true });
   assert.equal(again.status, "skipped");
@@ -474,6 +475,8 @@ await check("a task run: a fresh thread with the routine and procedure, the chip
   const now = await R.runRoutine(r.id, { manual: true });
   assert.equal(now.status, "running");
   assert.ok(msgsSince(m).some((x) => x.text === "Routine · Every day at 5 PM · run now"));
+  // A Run now's thread: a text or a channel message that asked for it gets its result back there (phone.ts, channels.ts).
+  assert.equal(R.ranNow(now.sessionId)?.id, r.id);
   state.sessions.find((x) => x.id === now.sessionId).status = "done";
   R.deleteRoutine(r.id);
 });
@@ -662,6 +665,7 @@ await check("a chat run that started a thread: the thread is the run, the turn's
   const run = await R.runRoutine(quiet.id, { manual: true });
   assert.equal(run.status, "running");
   assert.ok(run.sessionId, "the thread is recorded as the run");
+  assert.equal(R.ranNow(run.sessionId)?.id, quiet.id, "a Run now's thread, from a chat run too");
   assert.equal(state.messages.length, n, "a quiet run posts nothing before its thread has something");
   assert.equal(fake.texts.length, texts, "nothing texted");
   // While that thread goes, another run waits, and the thread stays the run's.
@@ -766,26 +770,26 @@ await check("results by text or in a channel read links as words and an address;
   for (const x of [t, c, e]) R.deleteRoutine(x.id);
 });
 
-await check("missed while asleep: every waits for its next beat after 6 hours, runs once late before; daily runs late and says so", async () => {
+await check("missed while asleep: every skips a beat only when the next is under half its gap away, else runs once late; daily runs late and says so", async () => {
   clock = at("2026-10-13T21:00:00Z");
-  // Every hour, due 7 hours ago: skipped forward, on the beat.
+  // Every hour, due 7 hours ago, its next beat 20 minutes off (under half an hour): skipped forward, on the beat.
   const a = R.createRoutine("bot_main", "Hourly", "Hourly check", { kind: "every", minutes: 60 }).routine;
-  const due = clock - 7 * H - 10 * 60_000;
+  const due = clock - 7 * H + 20 * 60_000;
   get(a.id).nextRunAt = due;
   const started = fake.started.length;
   tick();
   assert.equal(fake.started.length, started, "not run");
   assert.equal(get(a.id).last.status, "skipped");
-  assert.ok(get(a.id).nextRunAt > clock);
+  eq(get(a.id).nextRunAt, clock + 20 * 60_000, "the next beat");
   assert.equal((get(a.id).nextRunAt - due) % H, 0, "on the beat");
   noDashes(get(a.id).last.error, "skip reason");
-  // Due 2 hours ago: runs once, now, then the next beat after now.
+  // Due 7 hours ago too, but its next beat 50 minutes off: runs once, now, then the next beat after now.
   const b = R.createRoutine("bot_main", "Hourly 2", "Hourly check two", { kind: "every", minutes: 60 }).routine;
-  const due2 = clock - 2 * H - 10 * 60_000;
+  const due2 = clock - 7 * H - 10 * 60_000;
   get(b.id).nextRunAt = due2;
   tick();
   assert.equal(fake.started.length, started + 1, "ran once");
-  eq(get(b.id).nextRunAt, due2 + 3 * H, "the next beat after now");
+  eq(get(b.id).nextRunAt, due2 + 8 * H, "the next beat after now");
   // Daily, due 3 hours ago: runs, and the chip says late.
   const c = R.createRoutine("bot_main", "Daily", "Daily check", { kind: "daily", time: "14:00" }).routine;
   get(c.id).nextRunAt = at("2026-10-13T18:00:00Z");
@@ -888,6 +892,14 @@ await check("someone else's routine: at most daily, never quiet, results only in
   assert.equal(t.where, "cloud");
   assert.equal(t.fromOutside, from);
   assert.match(R.editRoutine(t.id, { run: "chat" }).error, /^It was set up by an email from desk@hotel\.example, so it runs as a task in the cloud\./);
+  // Never on Sam's Mac (its thread is marked as theirs, which stays in the cloud): said, not done.
+  const onMac = "It was set up by an email from desk@hotel.example, so it runs in the cloud. Make a new routine to run it on Sam's Mac.";
+  assert.deepEqual(R.setRoutineWhere(t.id, "mac"), { error: onMac });
+  assert.deepEqual(R.editRoutine(t.id, { where: "mac" }), { error: onMac });
+  assert.equal(get(t.id).where, "cloud");
+  assert.deepEqual(R.setRoutineWhere(t.id, "auto"), {});
+  assert.equal(get(t.id).where, "auto");
+  R.setRoutineWhere(t.id, "cloud");
   // Even with run "chat" on it (a state from before), it runs as a task, marked as theirs.
   get(t.id).run = "chat";
   const jobs = fake.jobs.length;
@@ -937,35 +949,32 @@ await check("a routine's thread failing the same way again isn't said or sent ag
   R.deleteRoutine(r.id);
 });
 
-await check("a daily run missed over a weekend, with its next time close, runs once on time, not twice", async () => {
+await check("a daily run missed while the Mac slept runs once late, even with its next time close, and never skips day after day", async () => {
   const saved = clock;
   clock = at("2026-10-16T22:00:00Z"); // Friday 6 PM in New York
   const r = R.createRoutine("bot_main", "Digest", "", { kind: "daily", time: "09:00" }, { reminder: "Your digest" }).routine;
   eq(r.nextRunAt, at("2026-10-17T13:00:00Z"), "Saturday 9 AM");
   const n = state.messages.length;
-  const mine = () => msgsSince(n).filter((m) => m.routine?.id === r.id);
-  clock = at("2026-10-19T12:50:00Z"); // Monday 8:50 AM
+  const digests = () => msgsSince(n).filter((m) => m.routine?.id === r.id && m.text === "Your digest").length;
+  // Missed all weekend, opened Monday at 8:50: once now (late, and said), not once a missed day; then 9 AM on time.
+  clock = at("2026-10-19T12:50:00Z");
   tick();
   await sleep(10);
-  assert.equal(mine().length, 0, "not run late at 8:50");
-  assert.equal(get(r.id).last.status, "skipped");
-  assert.match(get(r.id).last.error, /^Missed while Bops was off or this Mac was asleep \(it was due .+\); runs next today 9 AM$/);
-  noDashes(get(r.id).last.error, "skip reason");
-  eq(get(r.id).nextRunAt, at("2026-10-19T13:00:00Z"));
+  assert.equal(digests(), 1, "once, late");
+  assert.ok(msgsSince(n).some((m) => m.text === "Routine · Every day at 9 AM · late, it was due Oct 17"), msgsSince(n).map((m) => m.text).join(" | "));
+  eq(get(r.id).nextRunAt, at("2026-10-19T13:00:00Z"), "today 9 AM");
   clock = at("2026-10-19T13:00:30Z");
   tick();
   await sleep(10);
-  assert.deepEqual(
-    mine().map((m) => m.text),
-    ["Your digest"],
-    "once, on time",
-  );
-  // Missed by a little more than a day, its next time a day off: it runs late, once, and says so.
-  clock = at("2026-10-21T15:00:00Z"); // Wednesday 11 AM: Tuesday's 9 AM missed
-  get(r.id).nextRunAt = at("2026-10-20T13:00:00Z");
-  tick();
-  await sleep(10);
-  assert.equal(mine().filter((m) => m.text === "Your digest").length, 2);
+  assert.equal(digests(), 2, "and on time");
+  // A Mac awake only 8:05 to 8:55 each morning: each day's missed 9 AM runs at the next wake, never skipped for good.
+  for (const day of [20, 21, 22, 23]) {
+    clock = at(`2026-10-${day}T12:05:00Z`);
+    tick();
+    await sleep(10);
+  }
+  assert.equal(digests(), 5, "every day it was missed (the 20th's 9 AM came after that wake)");
+  assert.notEqual(get(r.id).last.status, "skipped");
   R.deleteRoutine(r.id);
   clock = saved;
 });
@@ -973,7 +982,7 @@ await check("a daily run missed over a weekend, with its next time close, runs o
 await check("a run skipped after a long sleep keeps the thread that's still going as the routine's run", async () => {
   const r = R.createRoutine("bot_main", "Hourly look", "Check it", { kind: "every", minutes: 60 }, { quiet: true }).routine;
   const run = await R.runRoutine(r.id, { manual: true });
-  get(r.id).nextRunAt = clock - 7 * H;
+  get(r.id).nextRunAt = clock - 7 * H + 20 * 60_000;
   const started = fake.started.length;
   tick();
   assert.equal(get(r.id).last.status, "skipped");

@@ -1,7 +1,7 @@
 import "server-only";
 import { trackServerEvent } from "./analytics";
 import { botChatId, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, PAGE_WATCH_DEFAULT_MIN, PAGE_WATCH_MIN_MIN, workspaceOf, type Watch } from "@/lib/types";
-import { lineDigest, normalizeLine, normalizeLines, normalizeTitle, pageDiff, pageHash, pageLinesOf, snapshotOf, type PageLine } from "@/cloud/page-diff";
+import { lineDigest, normalizeLine, normalizeLines, normalizeTitle, newLines, pageLinesOf, snapshotOf, type PageLine } from "@/cloud/page-diff";
 import { decide, chose, yes } from "./decide";
 import { holdForLater, urgency } from "./attention";
 import { currentPage, navigate, pageLines } from "./local";
@@ -26,10 +26,10 @@ import { knownSite, siteOf } from "@/lib/watch-sites";
  * and the main bot of the workspace gives the heads-up.
  *
  * A public web page (a price, a status page, a listing) can be watched with no screen at all (Watch.page):
- * Bops fetches it every few minutes, keeps a fingerprint of every line with times and counters taken out
- * (cloud/page-diff.ts), and a model reads only the lines that were added, only when there are some, with
- * the lines they replaced. Every kind of watch compares pages that way, so a clock or a "5m ago" ticking
- * on is never a change.
+ * Bops fetches it every few minutes, keeps a fingerprint of every line with what's certainly noise taken
+ * out (a "5m ago", an "Updated 3:45 PM", a cache buster: cloud/page-diff.ts), and a model reads only the
+ * lines that were added, only when there are some, with the lines they replaced. Every kind of watch
+ * compares pages that way; anything else that moved (a counter, an ad) is the model's to call.
  */
 
 /** How often each watched page is checked for changes (a cheap read over the tailnet, no model). */
@@ -42,23 +42,15 @@ const SURE = 0.7;
 const PAGE_BACKOFF_MAX_MS = 6 * 3600_000;
 /**
  * What a page watch keeps of a page between fetches: every line's fingerprint (Watch.page.digests, about
- * 13 characters a line, up to the 400 lines a page is read as), lines that were on it lately and went
- * (PAGE_SEEN_MAX of them), and the text of lines up to PAGE_TEXT_CHARS (the ones that changed lately
- * first), so the judge sees what a new line replaced.
+ * 13 characters a line, up to the 1500 lines a page is read as), lines that went from it in the last
+ * PAGE_SEEN_MS (Watch.page.seen, at most PAGE_SEEN_MAX), and the text of lines up to PAGE_TEXT_CHARS (the
+ * ones that changed lately first), so the judge sees what a new line replaced.
  */
 const PAGE_SEEN_MAX = 800;
-const PAGE_TEXT_CHARS = 8_000;
-/** New lines of a page are judged this many at once (pages put their newest first), in at most this many calls a read. */
-const PAGE_JUDGE_LINES = 40;
-const PAGE_JUDGE_CALLS = 3;
-/**
- * A read that shares less than this much of the kept page (one of at least PAGE_ODD_MIN_LINES lines) isn't
- * taken for it: a consent wall, a "turn on JavaScript" shell, a maintenance page served as a page. It's
- * kept out as a failed read, until the page has looked that way PAGE_ODD_TRIES times in a row.
- */
-const PAGE_ODD_SHARE = 0.2;
-const PAGE_ODD_MIN_LINES = 10;
-const PAGE_ODD_TRIES = 3;
+const PAGE_SEEN_MS = 7 * 24 * 3600_000;
+const PAGE_TEXT_CHARS = 30_000;
+/** A read's new lines are judged in one call: the first this many (pages put their newest first), and a count of the rest. */
+const PAGE_JUDGE_LINES = 80;
 /** A page read and found the same is saved at most this often; the window still sees when it was checked (watchesForApp). */
 const CHECKED_SAVE_MS = 60 * 60_000;
 /** ...and is told the state moved on at most this often, so its "Checked" stays fresh without a save. */
@@ -263,7 +255,8 @@ function pageGap(p: NonNullable<Watch["page"]>) {
 /**
  * When each page watch last read its page and found it the same: kept here, not saved on every read (an
  * idle Mac with ten watches would otherwise save its whole state, to the cloud too, thousands of times a
- * day). Saved with the next change, or once an hour. After a restart, a watch missing here reads once early.
+ * day). Saved with the next change, once an hour, or when the user checks it. After a restart, a watch
+ * missing here reads once early.
  */
 const g0 = globalThis as typeof globalThis & { __bopsPageChecked?: Map<string, number>; __bopsPageShown?: number };
 const checkedSame = (g0.__bopsPageChecked ??= new Map<string, number>());
@@ -294,6 +287,48 @@ function keptText(now: PageLine[], first: Set<string>, before: Set<string>): str
   const out: string[] = [];
   for (const l of now) if (pick.delete(l.digest)) out.push(l.line);
   return out;
+}
+
+/**
+ * Lines that went from a page lately, as Watch.page.seen keeps them ("<digest>@<when it went, in base 36
+ * ms>"), by digest: those that went in the last PAGE_SEEN_MS. One of them that comes back isn't new (a
+ * banner that rotates, a block that comes and goes); after that it is, like any line. An entry with no
+ * time (kept before times were) counts as old.
+ */
+function lately(seen: string[] | undefined, at: number) {
+  const out = new Map<string, string>();
+  for (const entry of seen ?? []) {
+    const [digest, when] = entry.split("@");
+    if (when && at - parseInt(when, 36) < PAGE_SEEN_MS) out.set(digest, entry);
+  }
+  return out;
+}
+
+/**
+ * A page as a watch keeps it from now on: every line's digest and the page's hash, the lines that went
+ * (lately, and those on the kept page that aren't on it now, as of `at`), and the text of its lines (those
+ * in `first` first).
+ */
+function keepPage(kept: NonNullable<Watch["page"]>, lines: PageLine[], at: number, first: Set<string>) {
+  const snap = snapshotOf(lines);
+  const present = new Set(snap.digests);
+  const went = new Map([...lately(kept.seen, at)].filter(([d]) => !present.has(d)));
+  for (const d of kept.digests ?? []) if (!present.has(d)) went.set(d, `${d}@${at.toString(36)}`);
+  return { ...snap, seen: [...went.values()].slice(-PAGE_SEEN_MAX), lines: keptText(lines, first, new Set(kept.lines ?? [])) };
+}
+
+/** Numbers aside: "Bitcoin $#" for "Bitcoin $86,200". */
+const shape = (line: string) => normalizeLine(line).replace(/\d[\d,.]*/g, "#");
+
+/**
+ * What a heads-up quotes: the line (bullets in front aside), and the line that went that it's a new
+ * version of, when there is one (the same words with other numbers): "Bitcoin $86,200 (was Bitcoin $85,100)".
+ */
+function quoteOf(line: string, before: string[]) {
+  const quote = (s: string, max: number) => s.replace(/^[•·*\-\s]+/, "").slice(0, max).trim();
+  const s = shape(line);
+  const old = s.includes("#") ? before.find((b) => shape(b) === s && normalizeLine(b) !== normalizeLine(line)) : undefined;
+  return old ? `${quote(line, 120)} (was ${quote(old, 80)})` : quote(line, 120);
 }
 
 /** Why a fetch failed, in a line the user can read. */
@@ -375,14 +410,14 @@ function pageLookFor(url: string) {
 export type CheckResult = "same" | "changed" | "told" | "failed";
 
 /**
- * Fetch a watched page when it's due (`now`: at once, due or not, paused or not). The page is compared
- * with what was kept of it, every line in its steady form (times, relative dates and counters aside):
- * the same page costs nothing and writes nothing (pageChecked), and when lines were added only those are
- * judged, with the lines they replaced, up to PAGE_JUDGE_CALLS calls of PAGE_JUDGE_LINES lines; lines
- * left unjudged aren't kept, so they're judged at the next fetch. A line that was there lately (a banner
- * that rotates) isn't new. A read that looks nothing like the page is kept out a few times (a consent
- * wall). A failed fetch is kept on the watch (error, failures) and the next waits longer; one that works
- * clears it.
+ * Fetch a watched page when it's due (`now`: the user asked, so at once, due or not, paused or not). The
+ * page is compared with what was kept of it, every line in its steady form (what's certainly noise aside:
+ * cloud/page-diff.ts). Lines not on the kept page, nor on it lately (`seen`: a banner that rotates), are
+ * new. With none, nothing is written (pageChecked), but for an hourly save that takes in what went or
+ * moved, or a check the user asked for. With some, the first PAGE_JUDGE_LINES of them are judged in one
+ * call, with a count of the rest and the lines they replaced, and the whole page is kept as it is now
+ * (nothing is held back to judge again). A failed fetch, or a page that comes back empty, is kept on the
+ * watch (error, failures) with the page as it was, and the next waits longer; one that works clears it.
  */
 async function checkPage(watchId: string, now = false): Promise<CheckResult | undefined> {
   const w = watchById(watchId);
@@ -391,77 +426,58 @@ async function checkPage(watchId: string, now = false): Promise<CheckResult | un
   const epoch = stateEpoch();
   looking.add(watchId);
   try {
+    const failed = (error: string) => {
+      const kept = watchById(watchId)?.page;
+      if (epoch === stateEpoch() && kept) patchPage(watchId, { checkedAt: Date.now(), error, failures: (kept.failures ?? 0) + 1 });
+      return "failed" as const;
+    };
     let page: { url: string; title: string; lines: string[] };
     try {
       page = await webPage(w.page.url);
     } catch (e) {
-      const failed = watchById(watchId)?.page;
-      if (epoch === stateEpoch() && failed) patchPage(watchId, { checkedAt: Date.now(), error: fetchError(e), failures: (failed.failures ?? 0) + 1 });
-      return "failed";
+      return failed(fetchError(e));
     }
     const was = watchById(watchId);
     if (epoch !== stateEpoch() || !was?.page) return;
     const kept = was.page;
     const lines = pageLinesOf(page.lines);
-    const snap = snapshotOf(lines);
+    if (!lines.length) return failed("The page came back empty.");
     const at = Date.now();
     const ok = { checkedAt: at, error: undefined, failures: undefined, odd: undefined };
-    // Kept before every line was (or nothing kept yet): the page is taken in as it is.
-    if (!kept.digests?.length) {
-      patchPage(watchId, { ...ok, changedAt: at, ...snap, seen: undefined, lines: keptText(lines, new Set(), new Set()) });
+    // Kept before every line's fingerprint was: the page is taken in as it is.
+    if (!kept.digests) {
+      patchPage(watchId, { ...ok, changedAt: at, ...snapshotOf(lines), seen: undefined, lines: keptText(lines, new Set(), new Set()) });
       return "changed";
     }
-    if (snap.hash === kept.hash) {
+    const known = new Set([...kept.digests, ...lately(kept.seen, at).keys()]);
+    const added = snapshotOf(lines).hash === kept.hash ? [] : newLines(known, lines);
+    if (!added.length) {
       checkedSame.set(watchId, at);
-      // Written only with something to clear, or once an hour; the window is told it moved on now and then.
-      if (kept.error || kept.failures || kept.odd || at - (kept.checkedAt ?? 0) >= CHECKED_SAVE_MS) patchPage(watchId, ok);
+      // Nothing new (the same page, or lines that went, moved or came back). Written only with something
+      // to clear, once an hour (taking in the page as it is), or when the user asked (so the window shows
+      // it at once); else the window is told it moved on now and then.
+      if (now || kept.error || kept.failures || kept.odd || at - (kept.checkedAt ?? 0) >= CHECKED_SAVE_MS) patchPage(watchId, { ...ok, ...keepPage(kept, lines, at, new Set()) });
       else if (at - (g0.__bopsPageShown ?? 0) >= CHECKED_SHOW_MS) {
         g0.__bopsPageShown = at;
         touchState();
       }
       return "same";
     }
-    const { added, stillThere } = pageDiff(kept.digests, kept.seen ?? [], lines);
-    const odd = (kept.odd ?? 0) + 1;
-    if (kept.digests.length >= PAGE_ODD_MIN_LINES && stillThere < PAGE_ODD_SHARE && odd < PAGE_ODD_TRIES) {
-      patchPage(watchId, { checkedAt: at, odd, failures: (kept.failures ?? 0) + 1, error: "The page looked like something else this time (maybe a sign in or cookie page), so the last one is kept." });
-      return "failed";
-    }
     // What went from the page (its lines that are gone, those Bops kept the text of): what new lines may have replaced.
-    const present = new Set(snap.digests);
+    const present = new Set(lines.map((l) => l.digest));
     const before = (kept.lines ?? []).filter((l) => !present.has(lineDigest(l))).slice(0, PAGE_JUDGE_LINES).map((l) => l.slice(0, 300));
-    // Lines that were there and went are remembered a while: one that comes back isn't new.
-    const gone = [...new Set([...(kept.seen ?? []), ...kept.digests])].filter((d) => !present.has(d)).slice(-PAGE_SEEN_MAX);
-    const keep = (skip: Set<string>, first: Set<string>) => {
-      const digests = snap.digests.filter((d) => !skip.has(d));
-      return { ...ok, changedAt: at, digests, hash: pageHash(digests), seen: gone, lines: keptText(lines.filter((l) => !skip.has(l.digest)), first, new Set(kept.lines ?? [])) };
-    };
-    if (!added.length) {
-      patchPage(watchId, keep(new Set(), new Set()));
-      return "changed";
-    }
-    // Judged a few dozen lines at a time, newest first, until one has news.
-    let judged: { yes: number; line?: string } | null = null;
-    let upTo = 0;
-    for (let call = 0; call < PAGE_JUDGE_CALLS && upTo < added.length; call++) {
-      const chunk = added.slice(upTo, upTo + PAGE_JUDGE_LINES).map((l) => l.raw.slice(0, 300));
-      const j = await judgePage(was, page, chunk, before, epoch);
-      if (epoch !== stateEpoch() || !watchById(watchId)) return;
-      // No model answered: what's left unjudged waits for the next fetch.
-      if (!j) break;
-      upTo += chunk.length;
-      if (!judged || j.yes > judged.yes) judged = j;
-      if (j.yes >= SURE) break;
-    }
-    // Nothing judged: the page stays as it was kept, so these lines are judged at the next fetch.
-    if (!judged) {
+    const shown = added.slice(0, PAGE_JUDGE_LINES).map((l) => l.raw.slice(0, 300));
+    const j = await judgePage(was, page, shown, added.length - shown.length, before, epoch);
+    if (epoch !== stateEpoch() || !watchById(watchId)) return;
+    // No model answered: the page stays as it was kept, so these lines are judged at the next fetch.
+    if (!j) {
       patchPage(watchId, ok);
       return "changed";
     }
-    patchPage(watchId, keep(new Set(added.slice(upTo).map((l) => l.digest)), new Set(added.slice(0, upTo).map((l) => l.digest))));
-    if (judged.yes < SURE) return "changed";
-    const text = (judged.line ?? added[0].raw).replace(/^[•·*\-\s]+/, "").slice(0, 120);
-    return (await tell(watchId, text, epoch)) ? "told" : "changed";
+    patchPage(watchId, { ...ok, changedAt: at, ...keepPage(kept, lines, at, new Set(added.map((l) => l.digest))) });
+    if (j.yes < SURE) return "changed";
+    // The line the judge picked; else the first it was shown (the read's newest).
+    return (await tell(watchId, quoteOf(j.line ?? shown[0], before), epoch)) ? "told" : "changed";
   } catch (e) {
     console.warn(`[watch] ${watchId}: ${(e as Error).message}`);
     return "failed";
@@ -471,19 +487,27 @@ async function checkPage(watchId: string, now = false): Promise<CheckResult | un
 }
 
 /**
+ * What changes on a page with nothing new, for a judge: the steady form takes out only what is certainly
+ * noise (cloud/page-diff.ts), so the rest is the judge's to tell apart.
+ */
+const NOT_NEWS =
+  "A stamp or a clock that moved on (when the page was updated, the time now), a count that ticked (views, likes, points, comments, watching), an ad or a banner, the same things in a new order, or a cookie, sign in or error page shown instead of the page are not news, unless `look_for` is about them.";
+
+/**
  * Whether any line new on a watched page is what the user asked to hear about, and which is the newest
  * that is: one Jev call when Jev is there; else one quick, low-effort OpenAI call that answers the same
  * question. `before` is what went from the page (what the new lines may have replaced), so a price
  * crossing a line, or one that moved, can be judged, and a condition that was already true isn't news.
- * `yes` is how sure (0 to 1); null when neither answered.
+ * `more`: how many new lines there were past `lines`. `yes` is how sure (0 to 1); null when neither answered.
  */
-async function judgePage(w: Watch, page: { url: string; title: string }, lines: string[], before: string[], epoch: number): Promise<{ yes: number; line?: string } | null> {
+async function judgePage(w: Watch, page: { url: string; title: string }, lines: string[], more: number, before: string[], epoch: number): Promise<{ yes: number; line?: string } | null> {
   const owner = ownerName();
   const told = Array.isArray(w.told) ? w.told : w.told ? [w.told] : [];
   const was = before.length ? before.join("\n") : "(nothing went from the page)";
-  const rule = `\`added\` are the lines that are new on the page since it was last read (times and counters aside); \`before\` are lines that were on it then and are gone now (what the new ones may have replaced). Something already true in \`before\` (the same item, or the same condition, such as a price already above the line) is not news. For a crossing or a move, compare the line in \`added\` with its old value in \`before\`.`;
+  const rest = more > 0 ? { more_added: `${more} more new lines, not shown` } : {};
+  const rule = `\`added\` are the lines that are new on the page since it was last read (the first ones, when \`more_added\` says there are more); \`before\` are lines that were on it then and are gone now (what the new ones may have replaced). Something already true in \`before\` (the same item, or the same condition, such as a price already above the line) is not news. For a crossing or a move, compare the line in \`added\` with its old value in \`before\`. ${NOT_NEWS}`;
   const a = await decide(
-    { look_for: w.lookFor, watching: watchTarget(w), page: { site: w.site, url: page.url, title: page.title }, added: lines.join("\n"), before: was, already_told: told },
+    { look_for: w.lookFor, watching: watchTarget(w), page: { site: w.site, url: page.url, title: page.title }, added: lines.join("\n"), ...rest, before: was, already_told: told },
     {
       waiting: {
         type: "noul",
@@ -512,7 +536,7 @@ async function judgePage(w: Watch, page: { url: string; title: string }, lines: 
         model: SUGGEST_MODEL,
         reasoning: { effort: "low" },
         instructions: `${owner} is watching a web page (\`watching\`) and told their bot exactly what to tell them about: \`look_for\`. ${rule} \`added\` is numbered from 0. Does any line in \`added\` match \`look_for\` as ${owner} worded it, as news to them? A new line that doesn't match does not count, however new it is, and neither does something in \`already_told\`. Answer matches (true or false) and line: the number of the newest line that matches, or null.`,
-        input: JSON.stringify({ look_for: w.lookFor, watching: watchTarget(w), page: { url: page.url, title: page.title }, added: lines.map((l, i) => `${i}: ${l}`), before, already_told: told }),
+        input: JSON.stringify({ look_for: w.lookFor, watching: watchTarget(w), page: { url: page.url, title: page.title }, added: lines.map((l, i) => `${i}: ${l}`), ...rest, before, already_told: told }),
         text: {
           format: {
             type: "json_schema",
@@ -587,7 +611,8 @@ export function setWatchPaused(watchId: string, paused: boolean) {
 
 /**
  * Look at a watch now, as the user asked (Check now): a web page is fetched at once, due or not, paused
- * or not; a screen or a Mac window is read at once. The watch as it is after, and what the look found.
+ * or not, and when it was checked is saved, so the window shows it at once; a screen or a Mac window is
+ * read at once. The watch as it is after (as the window gets it), and what the look found.
  */
 export async function checkNow(watchId: string): Promise<{ watch: Watch; result: CheckResult }> {
   const w = watchById(watchId);
@@ -596,7 +621,8 @@ export async function checkNow(watchId: string): Promise<{ watch: Watch; result:
   // A look already under way (the loop's): let it end, then look again.
   for (let i = 0; i < 80 && looking.has(watchId); i++) await new Promise((r) => setTimeout(r, 250));
   const result = (await look(watchId, true)) ?? "failed";
-  return { watch: watchById(watchId) ?? w, result };
+  // As the window gets it (watchesForApp): what's kept to compare stays on the server.
+  return { watch: watchesForApp([watchById(watchId) ?? w])![0], result };
 }
 
 /** The user looked at what the screen flagged; clear the badge. */
@@ -647,7 +673,7 @@ async function look(watchId: string, now = false): Promise<CheckResult | undefin
   try {
     const page = w.mac ? await macPage(w).catch(() => null) : await pageLines(endpoint!).catch(() => null);
     if (!page?.url) return "failed";
-    // In its steady form: a clock, a "5m ago" or a view count moving on is not a change (cloud/page-diff.ts).
+    // In its steady form: a clock, a "5m ago" or an "Updated 3:45 PM" moving on is not a change (cloud/page-diff.ts).
     const fingerprint = `${page.url}|${normalizeTitle(page.title)}|${normalizeLines(page.lines).join("\n")}`;
     if (fingerprint === lastSeen.get(watchId)) return "same";
     if (!now && Date.now() - (lastRead.get(watchId) ?? 0) < READ_MS) return; // a later look picks it up
@@ -682,7 +708,7 @@ async function look(watchId: string, now = false): Promise<CheckResult | undefin
         waiting: {
           type: "noul",
           instructions:
-            `${owner} is watching \`watching\` and told their bot exactly what to tell them about: \`look_for\`. That is the only test. Does \`page\` now show something new since \`before\` that matches \`look_for\` as ${owner} worded it, about \`watching\`? Something new or unread that doesn't match \`look_for\` does not count, however new it is. Lines starting "Me:" are messages ${owner} sent (never news to ${owner}); "Them:" lines are from the other person.`,
+            `${owner} is watching \`watching\` and told their bot exactly what to tell them about: \`look_for\`. That is the only test. Does \`page\` now show something new since \`before\` that matches \`look_for\` as ${owner} worded it, about \`watching\`? Something new or unread that doesn't match \`look_for\` does not count, however new it is. ${NOT_NEWS} Lines starting "Me:" are messages ${owner} sent (never news to ${owner}); "Them:" lines are from the other person.`,
           criteria: {
             true: `Yes: something on the page matches \`look_for\`, as ${owner} worded it, and it's news to them`,
             false: "No: nothing matches `look_for` (other new or unread things don't count), or it was already like this before",

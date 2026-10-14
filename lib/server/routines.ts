@@ -54,16 +54,16 @@ export const isNothing = (text: string) => /^\s*NOTHING\.?\s*$/i.test(text);
  */
 export const NO_CREDIT_FOR_ROUTINES = "Out of AI credit. Upgrade in Settings to keep routines running.";
 
-/** A run missed by more than this (the Mac asleep, Bops closed) isn't run late: an "every" routine waits for its next time. */
-const LATE_SKIP_MS = 6 * 60 * 60_000;
 /** A text is kept to this many characters; the rest is in Bops. */
 const TEXT_MAX = 600;
 
 const KIND_NAME = { slack: "Slack", telegram: "Telegram", discord: "Discord" } as const;
 
 /** Chat runs going right now, so one doesn't start while the last is still going. */
-const g = globalThis as unknown as { __bopsRoutines?: NodeJS.Timeout; __bopsRoutineTick?: typeof tick; __bopsRoutineRuns?: Set<string>; __bopsZoneSeen?: string; __bopsTzSet?: string };
+const g = globalThis as unknown as { __bopsRoutines?: NodeJS.Timeout; __bopsRoutineTick?: typeof tick; __bopsRoutineRuns?: Set<string>; __bopsRunNow?: Map<string, string>; __bopsZoneSeen?: string; __bopsTzSet?: string };
 const running = (g.__bopsRoutineRuns ??= new Set());
+/** Threads a run someone asked for (Run now) started, by thread: the routine's id. */
+const ranNowThreads = (g.__bopsRunNow ??= new Map());
 
 const routine = (routineId: string) => getState().routines.find((x) => x.id === routineId);
 
@@ -164,7 +164,9 @@ type RoutineOpts = {
  *
  * Set up on someone else's say (`fromOutside`): a reminder, or a task in the cloud, at most once a day,
  * never quiet and never sent anywhere but the chat. A stranger can't set up silent work through the day,
- * a chat run with the user's data and the web, or messages to the user's phone or inbox.
+ * a chat run with the user's data and the web, or messages to the user's phone or inbox. (A turn someone
+ * else started no longer sets up routines at all: chat.ts NOT_FROM_OUTSIDE. Ones from before keep these
+ * limits when they run.)
  */
 export function createRoutine(botId: string, title: string, goal: string, schedule: Schedule, opts: RoutineOpts = {}): { routine?: Routine; error?: string; moved?: boolean } {
   if (!bot(botId)) return { error: "No such bot." };
@@ -227,6 +229,8 @@ export function editRoutine(
   if (!r) return { error: "No such routine." };
   // Someone else's routine stays a task in the cloud: a chat run would have the user's data and the web on a stranger's say.
   if (r.fromOutside && patch.run === "chat") return { error: `It was set up by ${r.fromOutside}, so it runs as a task in the cloud. Make a new routine to run it as a chat.` };
+  // And in the cloud: its thread is marked as theirs, which never runs on the user's Mac (sessions.ts StartOptions.outside).
+  if (r.fromOutside && patch.where === "mac") return { error: outsideStaysInCloud(r) };
   const tz = routineZone();
   const now = Date.now();
   let schedule: Schedule | undefined;
@@ -298,12 +302,16 @@ export function setRoutineEnabled(routineId: string, enabled: boolean): { error?
   return {};
 }
 
-/** Where a routine's task runs from now on: the user's Mac, the cloud, or decided each time (auto). */
-export function setRoutineWhere(routineId: string, where: "auto" | "cloud" | "mac") {
-  update((s) => {
-    const r = s.routines.find((x) => x.id === routineId);
-    if (r) r.where = where;
-  });
+/** Why a routine can't run on the user's Mac: someone else set it up (Routine.fromOutside), so its runs stay in the cloud. */
+const outsideStaysInCloud = (r: Routine) => `It was set up by ${r.fromOutside}, so it runs in the cloud. Make a new routine to run it on ${ownerName()}'s Mac.`;
+
+/** Where a routine's task runs from now on: the user's Mac (not for someone else's routine), the cloud, or decided each time (auto). */
+export function setRoutineWhere(routineId: string, where: "auto" | "cloud" | "mac"): { error?: string } {
+  const r = routine(routineId);
+  if (!r) return { error: "No such routine." };
+  if (r.fromOutside && where === "mac") return { error: outsideStaysInCloud(r) };
+  update(() => (r.where = where));
+  return {};
 }
 
 export function deleteRoutine(routineId: string) {
@@ -348,6 +356,17 @@ async function run(routineId: string, opts: RunOpts): Promise<RoutineRun> {
   // Someone else's routine is never a chat run (createRoutine, editRoutine), whatever its state says.
   if (r.run === "chat" && !r.fromOutside) return chatRun(r, b, at, opts);
   return taskRun(r, b, at, opts);
+}
+
+/**
+ * The routine whose Run now started this thread, or undefined (a run on its time, or another thread). A
+ * Run now asked for by text or in Slack, Telegram or Discord brings the thread's result back there
+ * (phone.ts and channels.ts give it textBack or channelBack); a run on its time goes only where the
+ * routine sends its results (deliverTo).
+ */
+export function ranNow(sessionId: string): Routine | undefined {
+  const id = ranNowThreads.get(sessionId);
+  return id ? routine(id) : undefined;
 }
 
 /** What a run posts in the chat carries its routine, and whether someone asked for it (Run now). */
@@ -397,6 +416,7 @@ async function chatRun(r: Routine, b: Bot, at: number, opts: RunOpts): Promise<R
       posted = m.id;
     }
     // The thread is this run; how the run before failed goes with it, so the same failure isn't said again.
+    if (out.sessionId && opts.manual) ranNowThreads.set(out.sessionId, r.id);
     if (out.sessionId) return record(r.id, { at, status: "running", sessionId: out.sessionId, ...prevError(before) });
     if (!posted) return record(r.id, { at, status: "quiet" });
     record(r.id, { at, status: "ok" });
@@ -448,6 +468,7 @@ function taskRun(r: Routine, b: Bot, at: number, opts: RunOpts): RoutineRun {
     });
     // Set up by text, before results could go elsewhere: the result is texted back when the thread ends.
     if (r.textTo && !r.deliverTo) patchSession(s.id, { textBack: r.textTo });
+    if (opts.manual) ranNowThreads.set(s.id, r.id);
     // A quiet routine's chip comes with its result, when there is one (onRoutineTaskEnd).
     if (!r.quiet) addMessage({ chatId, role: "system", text: chipText(r, opts), sessionIds: [s.id] });
     return record(r.id, { at, status: "running", sessionId: s.id, ...prevError(last) });
@@ -618,27 +639,22 @@ function pauseStuck(r: Routine, why: string) {
   addMessage({ chatId: botChatId(r.botId), role: "system", text: `Paused "${r.title}": ${why}`, routine: { id: r.id } });
 }
 
-/** A late run whose next time on time comes within this (or within half its gap) waits for that instead. */
-const LATE_NEXT_MS = 60 * 60_000;
-
 /**
- * Whether a run missed while the Mac slept waits for its next time instead of running late: an "every"
- * run missed by more than 6 hours, or any late run whose next time on time is close (a daily 9 AM digest
- * missed over the weekend, with the Mac opened at 8:50 on Monday, runs once at 9, not twice).
+ * Whether a run missed while the Mac slept waits for its next time instead of running late: only an
+ * "every" run whose next beat on time is less than half its gap away (missed beats of a check every 15
+ * minutes aren't made up). Anything else that was missed (daily, weekdays, weekly, once, or an "every"
+ * run with its next beat further off) runs once, late, and says so.
  */
 function skipLate(r: Routine, due: number, next: number | undefined, now: number) {
-  if (r.schedule.kind === "once" || now - due <= 2 * 60_000) return false;
-  if (r.schedule.kind === "every" && now - due > LATE_SKIP_MS) return true;
-  if (next === undefined) return false;
-  const gap = r.schedule.kind === "every" ? r.schedule.minutes * 60_000 : next - due;
-  return next - now < Math.min(LATE_NEXT_MS, gap / 2);
+  if (r.schedule.kind !== "every" || next === undefined || now - due <= 2 * 60_000) return false;
+  return next - now < (r.schedule.minutes * 60_000) / 2;
 }
 
 /**
  * Run everything that's due. Called on a timer; waits while there's no account's state to run. A run
- * missed by a little (the Mac slept) runs once, late, and says so. One missed by more (skipLate) waits
- * for its next time instead, and a thread of the routine's still going stays its run. Each run's next
- * time is set before it starts, so a slow run never runs twice.
+ * missed while the Mac slept runs once, late, and says so, unless it waits for its next beat (skipLate),
+ * where a thread of the routine's still going stays its run. Each run's next time is set before it
+ * starts, so a slow run never runs twice.
  */
 function tick() {
   if (!stateReady()) return;
@@ -654,12 +670,7 @@ function tick() {
     }
     if (r.nextRunAt > now) continue;
     const due = r.nextRunAt;
-    const every = r.schedule.kind === "every";
-    const next = r.schedule.kind === "once" ? undefined : nextRun(r.schedule, now, tz, every ? due : undefined);
-    if (every && next === undefined && now - due > LATE_SKIP_MS) {
-      pauseStuck(r, "its schedule never comes due.");
-      continue;
-    }
+    const next = r.schedule.kind === "once" ? undefined : nextRun(r.schedule, now, tz, r.schedule.kind === "every" ? due : undefined);
     if (skipLate(r, due, next, now)) {
       update(() => (r.nextRunAt = next));
       // A thread of the routine's still going (a login it waits on) stays its run: the next run waits for it, and its end is the routine's.

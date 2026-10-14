@@ -71,16 +71,6 @@ function migrate(raw: Record<string, unknown>): AppState {
   }
   state.sessions ??= [];
   state.routines ??= [];
-  // A routine's run going when the server stopped (a chat run mid-turn, or a thread just marked failed
-  // above) can't finish now: its record says so, or the routine would show Running with Run now off for
-  // good (a one-off, a paused one) or until its next run. Recorded only, never sent where results go.
-  for (const r of state.routines) {
-    if (r.last?.status !== "running") continue;
-    const t = r.last.sessionId ? state.sessions.find((x) => x.id === r.last!.sessionId) : undefined;
-    if (t && (t.status === "queued" || t.status === "starting" || t.status === "running")) continue;
-    r.last = t?.status === "done" ? { ...r.last, status: "ok" } : { ...r.last, status: "failed", error: t?.status === "failed" && t.error ? t.error : "Bops restarted while this was running" };
-    delete r.last.prevError;
-  }
   // Each bot's procedures (lib/server/procedures.ts): none on a state from before them.
   state.procedures ??= [];
   state.host ??= "orgo";
@@ -96,6 +86,24 @@ function migrate(raw: Record<string, unknown>): AppState {
   if (state.relay?.deviceId && !state.relay.on) state.relay.turnedOff ??= true;
   // Accounts and each bot's access, from the one-account-per-app shape (any saved state, a backup too).
   appAccounts(state);
+  return state;
+}
+
+/**
+ * A routine's run that was going when this server stopped (a chat run mid-turn, or a thread migrate
+ * has just marked failed) can't finish now: its record says so. Only at boot, on the state this server
+ * saved itself: a state loaded at sign-in can be another Mac's, still running its routines there, and is
+ * left as it is (a record left running never locks Run now: runningNow). Recorded only, never sent
+ * where results go.
+ */
+function mendRoutines(state: AppState): AppState {
+  for (const r of state.routines) {
+    if (r.last?.status !== "running") continue;
+    const t = r.last.sessionId ? state.sessions.find((x) => x.id === r.last!.sessionId) : undefined;
+    r.last = t?.status === "done" ? { ...r.last, status: "ok" } : { ...r.last, status: "failed", error: t?.status === "failed" && t.error ? t.error : "Bops restarted while this was running" };
+    // How the run before failed only goes with a running record (RoutineRun.prevError).
+    delete r.last.prevError;
+  }
   return state;
 }
 
@@ -155,23 +163,25 @@ function appAccounts(state: AppState) {
   }
 }
 
-const g = globalThis as unknown as { __bops2?: { state: AppState; version: number; swaps?: number }; __bopsWatchers?: Map<string, () => void> };
+const g = globalThis as unknown as { __bops2?: { state: AppState; version: number; swaps?: number; arrivals?: number }; __bopsWatchers?: Map<string, () => void> };
 const access: StateAccess = {
   get: () => box.state,
   replace(raw) {
     box.state = migrate(raw ?? {});
     box.swaps = (box.swaps ?? 0) + 1;
+    box.arrivals = (box.arrivals ?? 0) + 1;
     tidyResults(box.state);
     ownerMarks(box.state);
     box.version++;
   },
   touch() {
+    box.arrivals = (box.arrivals ?? 0) + 1;
     box.version++;
   },
 };
 const store: Persistence = onPostgres() ? pgStore(access) : selfHosted() ? fileStore(access) : cloudStore(access);
 // The version starts somewhere random each boot, so a page that polled before a restart can't mistake a new state for its own.
-g.__bops2 ??= { state: migrate(store.initial() ?? {}), version: Math.floor(Math.random() * 1e9) };
+g.__bops2 ??= { state: mendRoutines(migrate(store.initial() ?? {})), version: Math.floor(Math.random() * 1e9) };
 const box = g.__bops2;
 tidyResults(box.state);
 ownerMarks(box.state);
@@ -232,6 +242,12 @@ export const getState = () => box.state;
  * if it changed, so they never land in someone else's state.
  */
 export const stateEpoch = () => box.swaps ?? 0;
+/**
+ * How many times the state took in things from elsewhere: loaded whole (a sign-in, another server's
+ * row) or another Mac's changes merged in. Changes made here don't count. What's kept beside the state
+ * for quick asking (memory.ts's secret marks) reads the state again when this moves.
+ */
+export const stateArrivals = () => box.arrivals ?? 0;
 /**
  * For work that waits on something (a bot's turn on the model, an email's attachments): whether the
  * state in memory is still the one it started on. On the Mac app a sign-out lets the user's state go

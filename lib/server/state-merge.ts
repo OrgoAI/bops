@@ -65,9 +65,9 @@ export function fromShared(blob: Blob, device: string): Blob {
  * Mac synced; null when it has none). A key changed on one side only takes that side. Where both
  * changed it:
  * - lists of things with ids (bots, chats, sessions, routines, watches, workspaces, accounts, vault…)
- *   go thing by thing: one changed on one side takes that side's copy, one changed on both goes field
- *   by field (mergeFields), one removed on either side (and not changed on the other) goes, one added
- *   on either side stays; this Mac's order, the others' new ones after;
+ *   go thing by thing: one changed here keeps this Mac's copy, one removed on either side (and not
+ *   changed on the other) goes, one added on either side stays; this Mac's order, the others' new
+ *   ones after;
  * - usage is both ledgers together; macs, and any other object, key by key;
  * - anything else is this Mac's.
  */
@@ -96,21 +96,6 @@ function mergeValue(key: string, b: unknown, m: unknown, t: unknown, top: boolea
   return m;
 }
 
-/**
- * One thing (a procedure, a routine) both Macs changed: field by field, so a change to one field on each
- * side keeps both (a procedure's steps edited there, its use counted here). A field both changed is
- * this Mac's, whole.
- */
-function mergeFields(base: Blob, mine: Blob, theirs: Blob): Blob {
-  const out: Blob = {};
-  for (const k of new Set([...Object.keys(mine), ...Object.keys(theirs), ...Object.keys(base)])) {
-    const [b, m, t] = [base[k], mine[k], theirs[k]];
-    const v = same(m, t) || !same(m, b) ? m : t;
-    if (v !== undefined) out[k] = v;
-  }
-  return out;
-}
-
 function mergeById(base: { id: string }[], mine: { id: string }[], theirs: { id: string }[]) {
   const b = new Map(base.map((x) => [x.id, x]));
   const t = new Map(theirs.map((x) => [x.id, x]));
@@ -119,7 +104,7 @@ function mergeById(base: { id: string }[], mine: { id: string }[], theirs: { id:
   for (const x of mine) {
     const was = b.get(x.id);
     const other = t.get(x.id);
-    if (other) out.push(!was ? x : same(x, was) ? other : same(other, was) ? x : (mergeFields(was as Blob, x as Blob, other as Blob) as { id: string }));
+    if (other) out.push(was && same(x, was) ? other : x);
     // Gone on their side: gone here too, unless this Mac changed it since (or added it).
     else if (!was || !same(x, was)) out.push(x);
   }
