@@ -176,7 +176,9 @@ export type RouteTier = "quick" | "standard" | "deep" | "max";
 export type TaskRoute = {
   model: string;
   effort: TaskEffort;
-  by: "setting" | "rule" | "router";
+  by: "setting" | "rule" | "router" | "forced";
+  /** Forced (a benchmark run, POST /api/sessions): its speed too, whoever's waiting. */
+  speed?: "default" | "fast" | "ultrafast";
   tier?: RouteTier;
   router?: { model: string; effort: TaskEffort; tier: RouteTier; why: string };
   bumps?: number;
