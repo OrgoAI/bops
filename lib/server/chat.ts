@@ -1275,7 +1275,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         ? []
         : [
             { type: "web_search" as const },
-            fn("web_fetch", `Read one web page (an article, docs, a product, price or status page) and get its text. For pages that need no sign in; find pages with web_search. A page that needs ${owner}'s sign in, or clicking through, is a task.`, {
+            fn("web_fetch", `Read one web page (an article, docs, a product, price or status page, a web app) and get its text. Pages that draw themselves with JavaScript or show a "checking your browser" wall are read in a browser for you, so try this first for any page that needs no sign in; find pages with web_search. Only a page that needs ${owner}'s sign in, or clicking through, is a task.`, {
               url: { type: "string", description: "The page's address, e.g. \"https://example.com/pricing\"." },
             }),
           ]),
