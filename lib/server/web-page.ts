@@ -1,7 +1,8 @@
 import "server-only";
 import { isProbablyReaderable, Readability } from "@mozilla/readability";
 import { DOMParser, parseHTML } from "linkedom";
-import { safeFetch, type Fetched } from "./safe-fetch";
+import { checkUrl, safeFetch, type Fetched } from "./safe-fetch";
+import { browserAvailable, needsBrowser, rememberSite, renderPage, siteNeedsBrowser, type Rendered } from "./web-render";
 
 /**
  * A public web page as text, fetched through safeFetch (no private addresses, 10 s, 2 MB). Two
@@ -16,8 +17,11 @@ import { safeFetch, type Fetched } from "./safe-fetch";
  *   what Readability leaves out. Lines are 2 to 300 characters (a longer one is split, never lost),
  *   each one once, in page order, at most 1500 (a long thread's newest reply, at the bottom, counts).
  *
- * Neither runs the page's scripts, so a page that draws itself in the browser shows little here.
- * HTML is parsed with linkedom, which is light and never fetches anything the page refers to.
+ * Neither runs the page's scripts: HTML is parsed with linkedom, which is light and never fetches
+ * anything the page refers to. A page that draws itself with JavaScript, or one behind a "checking your
+ * browser" wall, is read in a browser instead when the Mac app is there (lib/server/web-render.ts): its
+ * visible text, title and links go through the same lines and links as a fetched page's, and the result
+ * says so (`via: "browser"`). Never an address safeFetch refuses.
  */
 
 /** The most text readPage gives a bot. */
@@ -291,7 +295,7 @@ const label = (url: string) => {
 };
 
 /** A page that answered with an error is an error here, said plainly (with `status` on it). */
-function answered(got: Fetched): Fetched {
+function answered<T extends Pick<Fetched, "status">>(got: T): T {
   const s = got.status;
   if (s >= 200 && s < 300) return got;
   const why =
@@ -407,14 +411,54 @@ function baseOf(document: Document, url: string) {
 }
 
 /**
+ * A page as read: fetched (`got`), or rendered in the browser (`rendered`) when the fetch showed it needs
+ * one (web-render.ts needsBrowser), or its site did lately (siteNeedsBrowser, straight to the browser).
+ * An address checkUrl refuses throws before anything, so it never reaches the browser; a browser that
+ * isn't there, is busy, fails or never gets past a wall leaves the fetched page as it was. A site is
+ * remembered only when a fetch showed it needed the browser and the browser read it (with text, and not
+ * an error), so after 7 days without that, a fetch tries it again.
+ */
+async function fetchPage(url: string): Promise<{ got: Fetched; rendered?: undefined } | { rendered: Rendered; got?: undefined }> {
+  const u = checkUrl(url);
+  const host = u.hostname;
+  const usable = (r: Rendered) => (!r.type || /html/.test(r.type)) && (r.status === 0 || (r.status >= 200 && r.status < 300)) && !!r.text.trim();
+  let tried = false;
+  if (browserAvailable() && siteNeedsBrowser(host)) {
+    tried = true;
+    const r = await renderPage(u.href).catch(() => null);
+    if (r && usable(r)) return { rendered: r };
+  }
+  const got = await safeFetch(url);
+  if (tried || !browserAvailable() || !needsBrowser(got)) return { got };
+  const r = await renderPage(u.href).catch(() => null);
+  if (!r || !usable(r)) return { got };
+  rememberSite(host);
+  return { rendered: r };
+}
+
+/** A rendered page's text as lines: table cells (tabs, in a browser's text) joined as htmlLines joins them, whitespace collapsed, empty lines gone. */
+const renderedLines = (r: Rendered) =>
+  r.text
+    .split(/\r?\n/)
+    .map((line) => squash(line.trim().replace(/\t+/g, CELL_GAP)))
+    .filter(Boolean);
+
+/**
  * A page for a bot to read (web_fetch): its title and text, at most 12,000 characters (`truncated`
  * when there was more, or the page was over 2 MB), and its links, at most 100, the ones to read first
  * (absoluteLinks: an article's own, then the page's own, then its menus and the rest; none for JSON,
- * plain text or a feed, whose addresses are in the text). Throws FetchRefused for an address Bops won't
- * open, and a plain Error when the page couldn't be read or answered with an error.
+ * plain text or a feed, whose addresses are in the text). A page read in the browser (fetchPage) gives
+ * its visible text as lines and its links the same way, with `via: "browser"`. Throws FetchRefused for an
+ * address Bops won't open, and a plain Error when the page couldn't be read or answered with an error.
  */
-export async function readPage(url: string): Promise<{ url: string; title: string; text: string; truncated: boolean; links: PageLink[] }> {
-  const got = answered(await safeFetch(url));
+export async function readPage(url: string): Promise<{ url: string; title: string; text: string; truncated: boolean; links: PageLink[]; via?: "browser" }> {
+  const read = await fetchPage(url);
+  if (read.rendered) {
+    const r = read.rendered;
+    const out = cap(renderedLines(r).join("\n"), READ_PAGE_MAX_CHARS);
+    return { url: r.url, title: squash(r.title).slice(0, MAX_LINE) || label(r.url), text: out.text, truncated: out.cut, links: absoluteLinks([], r.links, r.url, r.url), via: "browser" };
+  }
+  const got = answered(read.got);
   const kind = kindOf(got.contentType);
   let title = "";
   let text: string;
@@ -443,11 +487,17 @@ export async function readPage(url: string): Promise<{ url: string; title: strin
  * A page as lines for a monitor: what's visible, one line per block, 2 to 300 characters each, each
  * once, at most 1500 (htmlLines); JSON pretty-printed and plain text taken line by line, tidied the
  * same way; and what kind of page it was (a web page with no lines needs a browser, while JSON or text
- * with none is just empty). Throws like readPage, so a site that's down or failing is an error, never a
- * change.
+ * with none is just empty). A page read in the browser (fetchPage) gives its visible text tidied the same
+ * way, as "html", with `via: "browser"`. Throws like readPage, so a site that's down or failing is an
+ * error, never a change.
  */
-export async function pageLines(url: string): Promise<{ url: string; title: string; lines: string[]; kind: Kind }> {
-  const got = answered(await safeFetch(url));
+export async function pageLines(url: string): Promise<{ url: string; title: string; lines: string[]; kind: Kind; via?: "browser" }> {
+  const read = await fetchPage(url);
+  if (read.rendered) {
+    const r = read.rendered;
+    return { url: r.url, title: squash(r.title).slice(0, MAX_LINE) || label(r.url), lines: tidy(renderedLines(r)), kind: "html", via: "browser" };
+  }
+  const got = answered(read.got);
   const kind = kindOf(got.contentType);
   if (kind === "html") {
     const { title, lines } = htmlLines(got.body);

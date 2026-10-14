@@ -30,6 +30,9 @@ import { appVersion } from "./app-version";
  * - 10 seconds for everything, at most 2 MB of page read (cut there, not refused), and only text
  *   that reads as a page: HTML, plain text, JSON or XML.
  *
+ * The same checks guard a page read in a browser (lib/server/web-render.ts): every request it makes goes
+ * through lib/server/render-guard.ts, which asks guardAddresses below.
+ *
  * It uses node:http and node:https rather than fetch, because Next patches the global fetch and
  * fetch has no way to pin the address. Errors are plain English, ready to show: FetchRefused for an
  * address Bops won't open at all (or a file that isn't a page), a plain Error when the site couldn't
@@ -248,6 +251,22 @@ async function addressesOf(u: URL, signal: AbortSignal): Promise<LookupAddress[]
   const nets = localNetworks();
   if (!allowedForTests(u) && found.some((a) => isBlockedAddress(a.address) || onThisNetwork(a.address, nets))) throw new FetchRefused(`${host} points to this Mac or a private network, so Bops won't open it.`);
   return found;
+}
+
+/**
+ * Where a browser rendering a page may connect, for one address it asks for (lib/server/render-guard.ts,
+ * the guard every request of a rendered page goes through): checkUrl's checks, then every address the
+ * name has, checked as safeFetch checks them. A bare address only when it's one `reached` already has (one
+ * a name on this page had, or the page's own), as safeFetch's redirects; the addresses found are added to
+ * it. Throws FetchRefused, or a plain Error when the name isn't found or `signal` fires.
+ */
+export async function guardAddresses(raw: string | URL, reached: Set<string>, signal: AbortSignal): Promise<{ url: URL; addresses: LookupAddress[] }> {
+  const u = checkUrl(raw);
+  const host = bare(u.hostname);
+  if (isIP(host) && !reached.has(host) && !allowedForTests(u)) throw new FetchRefused("That page asked for a bare network address, so Bops won't open it.");
+  const addresses = await addressesOf(u, signal);
+  for (const a of addresses) reached.add(a.address);
+  return { url: u, addresses };
 }
 
 /** A `lookup` that answers with the addresses already checked, never asking DNS again. */

@@ -873,6 +873,7 @@ function MonitorRow({ watch: w, state, last, open, onToggle, onShow }: { watch: 
           ["How often", page ? everyWords(page.everyMin) : ""],
           ["Checked", checked ? since(checked) : page ? "Not yet" : ""],
           ["Changed", page?.changedAt ? since(page.changedAt) : ""],
+          ["Read", page?.via === "browser" ? "In a browser, since the page needs one" : ""],
           ["Paused", w.paused ? "Yes, until you resume it" : w.away ? "It isn't showing right now" : ""],
           [
             "News",

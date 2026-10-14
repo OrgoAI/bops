@@ -8,8 +8,10 @@ const { execFile, execFileSync, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { startRenderService } = require("./render.cjs");
 
 const PORT = 3210;
 const URL = `http://localhost:${PORT}`;
@@ -43,6 +45,17 @@ function windowToken() {
   fs.writeFileSync(file, token, { mode: 0o600 });
   return token;
 }
+/**
+ * Where the server asks this app to read a page in a browser (desktop/render.cjs): a socket in Bops'
+ * Application Support folder, readable by this user only, the same each start (so a server found running
+ * from an earlier start reaches it too). A path too long for a socket goes in this user's own temp folder.
+ */
+function renderSocket() {
+  const file = path.join(app.getPath("userData"), "render.sock");
+  return Buffer.byteLength(file) < 100 ? file : path.join(os.tmpdir(), "bops-render.sock");
+}
+let renderService;
+
 /** The window's session carries it to the server on every request, as a cookie no page script can read. */
 const giveWindowToken = () => session.defaultSession.cookies.set({ url: URL, name: "bops_window", value: windowToken(), httpOnly: true, sameSite: "strict" });
 const REPO = (() => {
@@ -358,6 +371,7 @@ async function spawnServer() {
           NEXT_MANUAL_SIG_HANDLE: "true",
           PORT: String(PORT),
           BOPS_UI_TOKEN: windowToken(),
+          BOPS_RENDER_SOCKET: renderSocket(),
           // Only this Mac can reach the bundled server, unless its settings say BOPS_LISTEN_ALL=1:
           // bot computers' app calls and phone webhooks reach Bops over the tailnet, so they need
           // it (proxy.ts then lets other addresses reach only those paths).
@@ -368,7 +382,7 @@ async function spawnServer() {
       })
     : spawn("npx", ["next", "dev", "--port", String(PORT)], {
         cwd: REPO,
-        env: { ...process.env, PATH, BOPS_UI_TOKEN: windowToken() },
+        env: { ...process.env, PATH, BOPS_UI_TOKEN: windowToken(), BOPS_RENDER_SOCKET: renderSocket() },
         stdio: "ignore",
         detached: true,
       });
@@ -755,7 +769,8 @@ ipcMain.handle("mac-screens", async () => {
     primary: d.id === screen.getPrimaryDisplay().id,
   }));
   // The display Bops is on: showing it shows Bops inside Bops, so the tab prefers another.
-  const win = BrowserWindow.getAllWindows()[0];
+  // The Bops window itself (a page being read in a hidden window is a window too).
+  const win = mainWin && !mainWin.isDestroyed() ? mainWin : BrowserWindow.getAllWindows().find((w) => w.isVisible());
   const bopsOn = win ? String(screen.getDisplayMatching(win.getBounds()).id) : undefined;
   if (access !== "granted") return { access, displays, sources: [], bopsOn };
   const list = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 0, height: 0 } });
@@ -1180,6 +1195,12 @@ app.whenReady().then(() => {
     void checkForUpdate();
     setInterval(() => void checkForUpdate(), 60 * 60_000);
   }
+  // Pages the server can't read with a plain fetch (one that draws itself, one that checks for a human), read in a hidden window.
+  try {
+    renderService = startRenderService({ socketPath: renderSocket(), token: windowToken(), log: mainLog });
+  } catch (e) {
+    mainLog(`render service didn't start: ${e?.message ?? e}`);
+  }
   void createWindow();
   app.on("activate", () => showMain());
 });
@@ -1207,6 +1228,7 @@ function stopServer() {
 
 app.on("will-quit", () => {
   leaving = true;
+  renderService?.close();
   if (lettingGo)
     try {
       process.kill(-lettingGo, "SIGKILL");

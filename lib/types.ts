@@ -950,6 +950,8 @@ export type Watch = {
     error?: string;
     failures?: number;
     odd?: number;
+    /** Read in a browser at the last look, since the page draws itself or checks for a human (lib/server/web-render.ts). */
+    via?: "browser";
   };
   /** Paused by the user: not looked at until resumed. */
   paused?: boolean;

@@ -333,6 +333,14 @@ type WebPage = Awaited<ReturnType<typeof webPage>>;
  */
 const noText = (page: WebPage) => page.kind === "html" && !page.lines.length;
 
+/** Why a page with no text can't be watched with no screen: it needs a sign in, or (with no browser to read it in) JavaScript. */
+async function noTextWhy(host: string) {
+  const { browserAvailable } = await import("./web-render");
+  return browserAvailable()
+    ? `${host} shows no text Bops can read, even in a browser (it may need a sign in). Watch it on a computer instead.`
+    : `${host} shows no text Bops can read without a browser (it may need a sign in or JavaScript). Watch it on a computer instead.`;
+}
+
 const patchPage = (watchId: string, patch: Partial<NonNullable<Watch["page"]>>) =>
   update((state) => {
     const w = state.watches?.find((x) => x.id === watchId);
@@ -364,7 +372,7 @@ export async function startPageWatch(botId: string, a: { url: string; lookFor?: 
   } catch (e) {
     throw new Error(`Couldn't read ${host}: ${fetchError(e)}`);
   }
-  if (noText(page)) throw new Error(`${host} shows no text Bops can read without a browser (it may need a sign in or JavaScript). Watch it on a computer instead.`);
+  if (noText(page)) throw new Error(await noTextWhy(host));
   const lines = pageLinesOf(page.lines);
   // Signed out, or another account in, meanwhile: no watch is made in their state.
   if (epoch !== stateEpoch()) throw new Error("Bops was signed out meanwhile.");
@@ -382,7 +390,7 @@ export async function startPageWatch(botId: string, a: { url: string; lookFor?: 
     lookFor: a.lookFor?.trim().slice(0, 300) || pageLookFor(url),
     since: now,
     target: `${site}: ${page.title || url} (${url})`,
-    page: { url, everyMin: everyOf(a.everyMin), checkedAt: now, ...snapshotOf(lines), lines: keptText(lines, new Set(), new Set()) },
+    page: { url, everyMin: everyOf(a.everyMin), checkedAt: now, ...snapshotOf(lines), lines: keptText(lines, new Set(), new Set()), ...(page.via ? { via: page.via } : {}) },
   };
   update((state) => (state.watches ??= []).push(w));
   trackServerEvent("bops_watch_created", { kind: "site" });
@@ -438,7 +446,7 @@ async function checkPage(watchId: string, now = false): Promise<CheckResult | un
     if (noText(page)) return failed("The page came back empty.");
     const lines = pageLinesOf(page.lines);
     const at = Date.now();
-    const ok = { checkedAt: at, error: undefined, failures: undefined, odd: undefined };
+    const ok = { checkedAt: at, error: undefined, failures: undefined, odd: undefined, via: page.via };
     // Kept before every line's fingerprint was: the page is taken in as it is.
     if (!kept.digests) {
       patchPage(watchId, { ...ok, changedAt: at, ...snapshotOf(lines), seen: undefined, lines: keptText(lines, new Set(), new Set()) });
@@ -450,7 +458,7 @@ async function checkPage(watchId: string, now = false): Promise<CheckResult | un
       // Nothing new (the same page, or lines that went, moved or came back). Written only with something
       // to clear, once an hour (taking in the page as it is), or when the user asked (so the window shows
       // it at once); else the window is told it moved on now and then.
-      if (now || kept.error || kept.failures || kept.odd || at - (kept.checkedAt ?? 0) >= CHECKED_SAVE_MS) patchPage(watchId, { ...ok, ...keepPage(kept, lines, new Set()) });
+      if (now || kept.error || kept.failures || kept.odd || kept.via !== page.via || at - (kept.checkedAt ?? 0) >= CHECKED_SAVE_MS) patchPage(watchId, { ...ok, ...keepPage(kept, lines, new Set()) });
       else if (at - (g0.__bopsPageShown ?? 0) >= CHECKED_SHOW_MS) {
         g0.__bopsPageShown = at;
         touchState();
