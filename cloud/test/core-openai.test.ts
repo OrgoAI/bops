@@ -4,7 +4,7 @@ import { request } from "node:http";
 import { after, before, test } from "node:test";
 import OpenAI, { toFile } from "openai";
 import { SidebandWS } from "openai/resources/live/sideband/ws";
-import { WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import { closeDb, objectOwner, ownObject, query } from "../db.ts";
 import { dropUsers, fakeOrgo, fakeProvider, gate, keyOf, newUserId, prepareDb, rawCall, seedUser, sse, startCloud, until, type Listening } from "./core-fakes.ts";
 
@@ -22,6 +22,8 @@ let n = 0;
 let streamHold: Promise<void> = Promise.resolve();
 /** What the fake sideband saw: the Authorization of each connection. */
 const sidebandAuth: string[] = [];
+/** What the fake Responses socket got: each event the cloud sent on. */
+const wsCreates: { type: string; input?: unknown; service_tier?: string; tools?: unknown }[] = [];
 
 const sdk = (userId: string) => new OpenAI({ apiKey: keyOf(userId), baseURL: `${cloud.url}/proxy/openai/v1`, maxRetries: 0 });
 /** A response's or turn's token row: its tokens, and what it cost (pricing.ts; "gpt-test" has no price there, so it's priced as gpt-6-astra). */
@@ -76,6 +78,17 @@ before(async () => {
   const sidebands = new WebSocketServer({ noServer: true });
   openai.server.on("upgrade", (req, socket, head) => {
     sidebandAuth.push(String(req.headers.authorization));
+    // Responses over a WebSocket: each response.create it gets, answered as created then completed, on the tier asked for.
+    if (req.url === "/v1/responses")
+      return sidebands.handleUpgrade(req, socket, head, (ws) => {
+        ws.on("message", (data) => {
+          const e = JSON.parse(String(data)) as { type: string; input?: unknown; service_tier?: string };
+          wsCreates.push(e);
+          const id = `resp_ws_${tag}_${wsCreates.length}`;
+          ws.send(JSON.stringify({ type: "response.created", response: { id, object: "response", status: "in_progress" } }));
+          ws.send(JSON.stringify({ type: "response.completed", response: { id, object: "response", model: "gpt-6.1-sol", status: "completed", service_tier: e.service_tier ?? "default", output: [], usage: { input_tokens: 1000, output_tokens: 100, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } } } }));
+        });
+      });
     if (!/^\/v1\/live\/sessions\/[^/]+\/attach/.test(req.url ?? "")) return socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
     sidebands.handleUpgrade(req, socket, head, (ws) => {
       ws.send(JSON.stringify({ type: "session.started" }));
@@ -346,6 +359,43 @@ test("paths are taken as written: dot segments, encoded slashes and empty segmen
   ];
   for (const path of tricks) assert.equal((await rawCall(cloud.url, "GET", path, keyOf(alice))).status, 400, path);
   assert.equal((await rawCall(cloud.url, "GET", `/proxy/openai/v1/agents/sessions/${mine.id}/items`, keyOf(alice))).status, 200);
+});
+
+test("Responses over a WebSocket: each response.create checked as a POST is, a refusal an error event, each response the user's and counted at its tier", async () => {
+  const url = `${cloud.url.replace(/^http/, "ws")}/proxy/openai/v1/responses`;
+  const ws = new WebSocket(url, { headers: { authorization: `Bearer ${keyOf(alice)}`, "x-bops-bot": "iris", "x-bops-source": "session" } });
+  const got: { type: string; status?: number; error?: { code?: string | null; message?: string }; response?: { id: string } }[] = [];
+  ws.on("message", (data) => got.push(JSON.parse(String(data))));
+  await new Promise((resolve, reject) => (ws.once("open", resolve), ws.once("error", reject)));
+  const sent = wsCreates.length;
+  // A step: sent on with the cloud's key, answered, the user's, and counted for the bot, at the tier it ran on (Ultrafast, 6x).
+  ws.send(JSON.stringify({ type: "response.create", model: "gpt-6.1-sol", input: "hello", service_tier: "ultrafast", tools: [{ type: "function", name: "f", parameters: {} }] }));
+  const done = await until(() => got.find((e) => e.type === "response.completed"), "the answer");
+  assert.equal(sidebandAuth.at(-1), "Bearer sk-test-main", "with the cloud's key, never the caller's");
+  assert.deepEqual(wsCreates.slice(sent).map((e) => [e.type, e.input, e.service_tier]), [["response.create", "hello", "ultrafast"]]);
+  assert.equal(await objectOwner("openai", done.response!.id), alice);
+  const row = await until(async () => (await query("SELECT units::float8 AS units, cost_micros::float8 AS cost, detail FROM bops.cloud_usage WHERE kind = 'openai.tokens' AND detail->>'ref' = $1", [done.response!.id])).rows[0], "the count");
+  assert.deepEqual([row.units, row.detail.botId, row.detail.source, row.detail.tier, row.cost], [1100, "iris", "session", "ultrafast", (1000 * 2 + 100 * 10) * 6]);
+  // A tool the cloud doesn't pass on, or another user's response to go on from: an error event, and nothing sent.
+  ws.send(JSON.stringify({ type: "response.create", model: "gpt-6.1-sol", input: "x", tools: [{ type: "code_interpreter" }] }));
+  const refused = await until(() => got.find((e) => e.type === "error"), "the refusal");
+  assert.equal(refused.status, 403);
+  assert.match(refused.error!.message!, /doesn't pass the code_interpreter tool through/);
+  const bobs = `resp_bob_${tag}`;
+  await ownObject(bob, "openai", "response", bobs);
+  ws.send(JSON.stringify({ type: "response.create", model: "gpt-6.1-sol", input: "x", previous_response_id: bobs }));
+  await until(() => got.filter((e) => e.type === "error").length === 2, "the second refusal");
+  // Anything but response.create is refused too.
+  ws.send(JSON.stringify({ type: "session.update" }));
+  await until(() => got.filter((e) => e.type === "error").length === 3, "the third refusal");
+  assert.match(got.filter((e) => e.type === "error")[2].error!.message!, /only passes response\.create/);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(wsCreates.length, sent + 1, "none of them went on");
+  ws.close();
+  // No key, no socket.
+  const anon = new WebSocket(url);
+  const status = await new Promise<number>((resolve) => anon.once("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0)));
+  assert.equal(status, 401);
 });
 
 test("live sessions: accept, reject, hang up and attach only to the user's own", async () => {
