@@ -6,7 +6,8 @@ import { Fold } from "./fold";
 import { CATEGORIES, categoriesOpen, categoryOf, GROUP_NAME, settled, upcoming, whenLabel, type CategoryId, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
 import type { AppState } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
-import { Chevron, Count, FIRST, InlineConfirm, OpenIcon, readGroupOpen, readSectionOpen, since, small, undash, writeGroupOpen, writeSectionOpen } from "./side-group";
+import { IssueSideRow, IssuesIcon, IssuesPage, isOpen, issueMatches, issueOrder, issuesSoon, useIssues, type Issue } from "./orbit-issues";
+import { Chevron, Count, FIRST, OpenIcon, readGroupOpen, readSectionOpen, since, small, undash, writeGroupOpen, writeSectionOpen } from "./side-group";
 import { clockTime, CloseButton, currentWorkspace, useNow } from "./ui";
 
 /*
@@ -17,11 +18,21 @@ import { clockTime, CloseButton, currentWorkspace, useNow } from "./ui";
  * it was learned, and can be marked done, renamed, hidden or forgotten. Both show the same copy of a
  * workspace's categories, read from /api/memory/categories once for both: when the first of them
  * opens, when Bops comes back in sight, every minute while it's in sight (every 5 seconds while new
- * things are being sorted), and with the answer to every change asked from either.
+ * things are being sorted), and with the answer to every change asked from either. Everything in
+ * Orbit lives in the workspace's memory (Honcho) and is the current workspace's only.
+ *
+ * Forget is at once: the items go from every list, and the request waits 5 seconds for Undo before
+ * it's sent (memory then deletes what it learned about them, for good). Delete everywhere first asks
+ * the server which chats in memory it would delete, lists them, then asks once more.
+ *
+ * Issues (orbit-issues.tsx) are Orbit's first section, with a page of their own in the same tab.
  */
 
-/** Open a category on the right (bops-app.tsx): at one of its items, or with a search filled in (Show all, from the sidebar's search). */
-export type MemoryOpen = { category: CategoryId; focus?: string; query?: string };
+/** A section of Orbit: Issues, or one of the categories. */
+export type OrbitSection = CategoryId | "issues";
+
+/** Open a section on the right (bops-app.tsx): at one of its items, or with a search filled in (Show all, from the sidebar's search). */
+export type MemoryOpen = { category: OrbitSection; focus?: string; query?: string };
 
 /** What can be asked of the categories (app/api/memory/categories). */
 export type MemoryAction =
@@ -29,8 +40,12 @@ export type MemoryAction =
   | { action: "sort-older" }
   | { action: "tidy-up" }
   | { action: "edit"; id: string; title?: string; detail?: string; done?: boolean; hidden?: boolean }
-  | { action: "forget"; id: string }
+  /** `sessions`: the chats the user was shown in the preview, the only ones deleted. */
+  | { action: "deleteEverywhere"; id: string; sessions?: string[] }
   | { action: "add"; text: string };
+
+/** A chat or call in memory that Delete everywhere would delete, and the other items it also taught Orbit (named, so nothing goes unsaid). */
+export type DeleteSession = { id: string; name: string; at?: number; alsoFor: string[] };
 
 /** Asks for a change and answers what went wrong, if anything (null: done, and the categories show it; `note`: done, with something to say). */
 export type MemoryAct = (body: MemoryAction) => Promise<string | { note: string } | null>;
@@ -60,7 +75,19 @@ type Shared = {
   /** Items in the copies shown so far (none: nothing shown yet), and when each one not in the first copy came. */
   known?: Set<string>;
   arrived: Map<string, number>;
+  /**
+   * Items forgotten here and kept out of every list: waiting out their 5 seconds of Undo, on their way,
+   * or sent (by when) and not yet missing from an answer. `view` is the copy shown: `snap` without them.
+   */
+  hide: Set<string>;
+  sent: Map<string, number>;
+  view: MemorySnapshot | null;
+  /** The Forget that can still be undone, and what went wrong with the last one sent (one object, replaced on a change). */
+  forgetting: Forgetting;
 };
+
+/** The Forget still waiting to be sent (`undo`: what it says, and its items), and what went wrong with one that was sent. */
+export type Forgetting = { undo: { label: string; ids: string[] } | null; error: string | null };
 
 const shared = new Map<string, Shared>();
 const keyOf = (user: string, ws: string) => `${user}:${ws}`;
@@ -69,9 +96,23 @@ let current = "";
 
 function sharedOf(user: string, ws: string) {
   let s = shared.get(keyOf(user, ws));
-  if (!s) shared.set(keyOf(user, ws), (s = { user, ws, snap: null, users: new Set(), asked: 0, shown: 0, reading: 0, readAt: 0, arrived: new Map() }));
+  if (!s)
+    shared.set(
+      keyOf(user, ws),
+      (s = { user, ws, snap: null, users: new Set(), asked: 0, shown: 0, reading: 0, readAt: 0, arrived: new Map(), hide: new Set(), sent: new Map(), view: null, forgetting: { undo: null, error: null } }),
+    );
   return s;
 }
+
+/** The copy shown: what's forgotten here left out. */
+function reView(s: Shared) {
+  s.view = s.snap && s.hide.size ? { ...s.snap, items: s.snap.items.filter((i) => !s.hide.has(i.id)) } : s.snap;
+}
+
+/** Everyone showing the categories, told of a change. */
+const tell = (s: Shared) => {
+  for (const changed of s.users) changed();
+};
 
 /**
  * Whether an item just came (Orbit learned it in the last few seconds, after it was first shown): a row
@@ -97,7 +138,15 @@ function show(s: Shared, snap: MemorySnapshot, asked = ++s.asked) {
         s.known.add(i.id);
         s.arrived.set(i.id, Date.now());
       }
-  for (const changed of s.users) changed();
+  // A forgotten item that's sent and no longer in memory's answer (or sent 2 minutes ago) needs no hiding.
+  const there = new Set(snap.items.map((i) => i.id));
+  for (const [id, at] of s.sent)
+    if (!there.has(id) || Date.now() - at > 120_000) {
+      s.sent.delete(id);
+      s.hide.delete(id);
+    }
+  reView(s);
+  tell(s);
   plan(s);
 }
 
@@ -201,17 +250,152 @@ async function change(user: string, ws: string, body: MemoryAction): Promise<str
   }
 }
 
+/* ---------------- Forget, with 5 seconds to undo ---------------- */
+
+const UNDO_MS = 5_000;
+/** The timer of each Forget still waiting, by its Shared. */
+const waiting = new Map<Shared, { ids: string[]; timer: ReturnType<typeof setTimeout> }>();
+
+const setForgetting = (s: Shared, f: Partial<Forgetting>) => {
+  s.forgetting = { ...s.forgetting, ...f };
+  tell(s);
+};
+
+/** Sends a Forget: memory deletes what it learned about these items. `keepalive`: Bops is closing, the answer won't be read. */
+async function sendForget(s: Shared, ids: string[], keepalive = false) {
+  const now = Date.now();
+  try {
+    const r = await fetch("/api/memory/categories", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "forget", ids, ws: s.ws }),
+      keepalive,
+    });
+    const j: unknown = await r.json().catch(() => null);
+    if (r.ok && isSnapshot(j)) {
+      for (const id of ids) s.sent.set(id, now);
+      show(s, j);
+      return;
+    }
+    const said = (j as { error?: unknown } | null)?.error;
+    failForget(s, ids, typeof said === "string" && said ? said : "Couldn't forget that. Try again.");
+  } catch {
+    failForget(s, ids, "Couldn't reach Bops, so nothing was forgotten. Try again.");
+  }
+}
+
+/** It didn't go: the items are back where they were, and the page says why. */
+function failForget(s: Shared, ids: string[], error: string) {
+  for (const id of ids) s.hide.delete(id);
+  reView(s);
+  setForgetting(s, { error });
+  read(s);
+}
+
+/** Sends the Forget still waiting now (another one came, or Bops is closing). */
+function flushForget(s: Shared, keepalive = false) {
+  const w = waiting.get(s);
+  if (!w) return;
+  clearTimeout(w.timer);
+  waiting.delete(s);
+  s.forgetting = { ...s.forgetting, undo: null };
+  void sendForget(s, w.ids, keepalive);
+}
+
+/** Forgets items: gone from every list now, sent in 5 seconds unless undone. One waits at a time: a new one sends the one before. */
+function forget(user: string, ws: string, items: Pick<MemoryItem, "id" | "title">[]) {
+  if (!items.length) return;
+  const s = sharedOf(user, ws);
+  flushForget(s);
+  const ids = items.map((i) => i.id);
+  for (const id of ids) s.hide.add(id);
+  reView(s);
+  const timer = setTimeout(() => {
+    if (waiting.get(s)?.timer !== timer) return;
+    waiting.delete(s);
+    s.forgetting = { ...s.forgetting, undo: null };
+    tell(s);
+    void sendForget(s, ids);
+  }, UNDO_MS);
+  waiting.set(s, { ids, timer });
+  setForgetting(s, { undo: { label: items.length === 1 ? `Forgot ${undash(items[0].title)}` : `Forgot ${items.length} items`, ids }, error: null });
+}
+
+/** Undo: the Forget still waiting is never sent, and its items are back. */
+function undoForget(user: string, ws: string) {
+  const s = shared.get(keyOf(user, ws));
+  const w = s && waiting.get(s);
+  if (!s || !w) return;
+  clearTimeout(w.timer);
+  waiting.delete(s);
+  for (const id of w.ids) s.hide.delete(id);
+  reView(s);
+  setForgetting(s, { undo: null });
+}
+
+// Bops closing (or reloading) with a Forget still waiting: it's sent as it closes, as the user asked.
+if (typeof window !== "undefined") window.addEventListener("pagehide", () => [...waiting.keys()].forEach((s) => flushForget(s, true)));
+
+/** Which chats in memory Delete everywhere would delete for an item (the server looks, nothing is deleted), or what went wrong. */
+async function previewDelete(ws: string, id: string): Promise<DeleteSession[] | string> {
+  try {
+    const r = await fetch("/api/memory/categories", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "deleteEverywhere", id, preview: true, ws }) });
+    const j = (await r.json().catch(() => null)) as { sessions?: unknown; error?: unknown } | null;
+    if (!r.ok || !Array.isArray(j?.sessions)) return typeof j?.error === "string" && j.error ? j.error : "Couldn't look that up. Try again.";
+    const names = (v: unknown) => (Array.isArray(v) ? v.map((x) => (typeof x === "string" ? x : (x as { title?: unknown })?.title)).filter((x): x is string => typeof x === "string" && !!x) : []);
+    return j.sessions
+      .map((x) => x as { id?: unknown; name?: unknown; title?: unknown; from?: unknown; at?: unknown; alsoFor?: unknown; sharedWith?: unknown })
+      .filter((x) => typeof x.id === "string")
+      .map((x) => ({
+        id: x.id as string,
+        name: [x.name, x.title, x.from].find((n): n is string => typeof n === "string" && !!n) ?? "A chat",
+        at: typeof x.at === "number" ? x.at : undefined,
+        alsoFor: names(x.alsoFor ?? x.sharedWith),
+      }));
+  } catch {
+    return "Couldn't reach Bops. Try again.";
+  }
+}
+
 /**
  * A workspace's categories as the signed-in account (`user`: state.account.user.id) sees them, null
- * until they're in: the same copy wherever they show. `act` asks for a change, and every list shows
- * the categories as they are after it.
+ * until they're in: the same copy wherever they show (what's forgotten here left out). `act` asks for
+ * a change, and every list shows the categories as they are after it.
  */
 export function useMemoryCategories(ws: string, user = "") {
   const subscribe = useCallback((changed: () => void) => watch(user, ws, changed), [user, ws]);
-  const snap = useSyncExternalStore(subscribe, () => shared.get(keyOf(user, ws))?.snap ?? null, () => null);
+  const snap = useSyncExternalStore(subscribe, () => shared.get(keyOf(user, ws))?.view ?? null, () => null);
   const act = useCallback<MemoryAct>((body) => change(user, ws, body), [user, ws]);
   return { snap, act };
 }
+
+const NOT_FORGETTING: Forgetting = { undo: null, error: null };
+
+/** The store without React, for scripts/test-orbit-ui.mjs: watch a workspace, forget and undo, and what's shown. */
+export const orbitStore = {
+  watch,
+  forget,
+  undo: undoForget,
+  view: (user: string, ws: string) => shared.get(keyOf(user, ws))?.view ?? null,
+  forgetting: (user: string, ws: string) => shared.get(keyOf(user, ws))?.forgetting ?? NOT_FORGETTING,
+  preview: previewDelete,
+};
+
+/** Forget for a page: what can be undone, what went wrong, and the calls. */
+export function useForget(ws: string, user = "") {
+  const subscribe = useCallback((changed: () => void) => watch(user, ws, changed), [user, ws]);
+  const state = useSyncExternalStore(subscribe, () => shared.get(keyOf(user, ws))?.forgetting ?? NOT_FORGETTING, () => NOT_FORGETTING);
+  const forgetItems = useCallback((items: Pick<MemoryItem, "id" | "title">[]) => forget(user, ws, items), [user, ws]);
+  const undo = useCallback(() => undoForget(user, ws), [user, ws]);
+  const dismiss = useCallback(() => {
+    const s = shared.get(keyOf(user, ws));
+    if (s?.forgetting.error) setForgetting(s, { error: null });
+  }, [user, ws]);
+  const preview = useCallback((id: string) => previewDelete(ws, id), [ws]);
+  return { ...state, forget: forgetItems, undoForget: undo, dismiss, preview };
+}
+
+export type ForgetCalls = ReturnType<typeof useForget>;
 
 /* ---------------- Order and words ---------------- */
 
@@ -354,8 +538,9 @@ const GLYPHS: Record<CategoryId, React.ReactNode> = {
   preferences: <path d="M8 13.3S2.6 10.1 2.6 6.2C2.6 4.4 3.9 3 5.6 3c1.1 0 1.9.6 2.4 1.4C8.5 3.6 9.3 3 10.4 3c1.7 0 3 1.4 3 3.2 0 3.9-5.4 7.1-5.4 7.1z" />,
 };
 
-/** A category's mark, drawn by hand like the app's other icons: in its tab, and on its page. */
-export function CategoryIcon({ id, size = 14 }: { id: CategoryId; size?: number }) {
+/** A section's mark, drawn by hand like the app's other icons: in its tab, and on its page. */
+export function CategoryIcon({ id, size = 14 }: { id: OrbitSection; size?: number }) {
+  if (id === "issues") return <IssuesIcon size={size} />;
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" className="shrink-0" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       {GLYPHS[id] ?? GLYPHS.people}
@@ -429,14 +614,16 @@ export function MemorySections({ state, query, onOpen }: { state: AppState; quer
 
 function LiveSections({ user, ws, last, query, onOpen }: { user: string; ws: string; last?: string; query?: string; onOpen: (open: MemoryOpen) => void }) {
   const { snap } = useMemoryCategories(ws, user);
-  // A new message (a bot's answer may have changed Orbit): read it again soon, not at the next minute.
+  const { list } = useIssues(ws, user);
+  // A new message (a bot's answer may have changed Orbit, or opened an issue): read them again soon, not at the next minute.
   const seen = useRef(last);
   useEffect(() => {
     if (last === seen.current) return;
     seen.current = last;
     soon(user, ws);
+    issuesSoon(user, ws);
   }, [last, user, ws]);
-  return <SidebarSections user={user} ws={ws} snap={snap} query={query} onOpen={onOpen} />;
+  return <SidebarSections user={user} ws={ws} snap={snap} issues={list?.issues ?? null} query={query} onOpen={onOpen} />;
 }
 
 /**
@@ -447,12 +634,15 @@ export function SidebarSections({
   user = "",
   ws,
   snap,
+  issues = null,
   query = "",
   onOpen,
 }: {
   user?: string;
   ws: string;
   snap: MemorySnapshot | null;
+  /** The workspace's issues (orbit-issues.tsx), null until they're in. */
+  issues?: Issue[] | null;
   query?: string;
   onOpen: (open: MemoryOpen) => void;
 }) {
@@ -467,11 +657,40 @@ export function SidebarSections({
     const mine = all.flatMap((g) => g.items);
     return { c, total: mine.length, items: q ? mine.filter((i) => matches(i, q)) : all.filter((g) => g.now).flatMap((g) => g.items) };
   }).filter((s) => !q || s.items.length);
-  if (q && !sections.length) return null;
-  // The arrow opens the page at the first category with something in it (or something hidden), so the page is always a click away.
-  const first =
-    CATEGORIES.find((c) => snap.items.some((i) => i.category === c.id)) ?? CATEGORIES.find((c) => snap.hidden?.some((h) => h.category === c.id)) ?? CATEGORIES[0];
+  // Issues, first: what's not done (every match, while searching).
+  const allIssues = issues ?? [];
+  const issueRows = (q ? allIssues.filter((i) => issueMatches(i, q)) : allIssues.filter(isOpen)).sort(issueOrder);
+  const showIssues = !q || issueRows.length > 0;
+  if (q && !sections.length && !showIssues) return null;
+  // The arrow opens the page at Issues when one is open, else at the first category with something in it (or something hidden), so the page is always a click away.
+  const first: OrbitSection = allIssues.some(isOpen)
+    ? "issues"
+    : (CATEGORIES.find((c) => snap.items.some((i) => i.category === c.id)) ?? CATEGORIES.find((c) => snap.hidden?.some((h) => h.category === c.id)) ?? CATEGORIES[0]).id;
   const gk = `${user}.${ws}`;
+  const toggle = (id: string, open: boolean) => {
+    // While searching, every section stays open.
+    if (q) return;
+    setToggled({ ...toggled, [`${user}.${ws}.${id}`]: !open });
+    writeSectionOpen(FOLDS, user, ws, id, !open);
+  };
+  const isShown = (id: string) => !!q || (toggled[`${user}.${ws}.${id}`] ?? readSectionOpen(FOLDS, user, ws, id));
+  const head = (id: OrbitSection, label: string, n: number, open: boolean) => (
+    <button
+      onClick={() => toggle(id, open)}
+      aria-expanded={open}
+      className="flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
+    >
+      <span className="text-[#6B6B6B]">
+        <CategoryIcon id={id} />
+      </span>
+      <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-ink">{label}</span>
+      <Count n={n} quiet={!!q} scope={`${user}.${ws}`} className="shrink-0 text-[12px] tabular-nums text-[#9A9A98]" />
+      <span className="text-[#B0B0AD]">
+        <Chevron open={open} />
+      </span>
+    </button>
+  );
+  const issuesOpen = isShown("issues");
   // While searching, the group stays open.
   const shown = !!q || (groupToggled[gk] ?? readGroupOpen(FOLDS, user, ws));
   return (
@@ -491,7 +710,7 @@ export function SidebarSections({
         </button>
         <span className="flex-1" />
         <button
-          onClick={() => onOpen({ category: first.id })}
+          onClick={() => onOpen({ category: first })}
           aria-label={`Open ${GROUP_NAME}`}
           title={`Open ${GROUP_NAME}`}
           className="flex size-6 items-center justify-center rounded-[6px] text-[#9A9A98] opacity-0 outline-none transition-opacity duration-150 ease-out hover:bg-black/[0.04] hover:text-[#6B6B6B] focus-visible:opacity-100 focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] group-hover/orbit:opacity-100 motion-reduce:transition-none"
@@ -501,36 +720,40 @@ export function SidebarSections({
       </div>
       {/* The whole group folds under its name, and each section under its own: animated (fold.tsx), kept mounted, out of reach while shut. */}
       <Fold open={shown}>
-        {!q && !snap.items.length && (
+        {!q && !snap.items.length && !allIssues.length && (
           <div className="mb-1 flex items-center gap-2 px-2.5 text-[13px] leading-[18px] text-[#9A9A98]">
             {snap.syncing && <Spinner size={11} color="#9A9A98" />}
             {snap.hidden?.length ? "Everything Bops learned is hidden." : "Fills in as you chat"}
           </div>
         )}
+        {showIssues && (
+          <div className="flex flex-col">
+            {head("issues", "Issues", issueRows.length, issuesOpen)}
+            <Fold open={issuesOpen}>
+              <div className="flex flex-col">
+                {!issueRows.length && !allIssues.length && (
+                  <div className="flex min-h-[30px] shrink-0 items-center py-1.5 pl-8 pr-2.5 text-[13px] leading-[18px] text-[#9A9A98]">Issues show up here when a routine or a bot opens one</div>
+                )}
+                {issueRows.slice(0, FIRST).map((i) => (
+                  <IssueSideRow key={i.id} issue={i} onClick={() => onOpen({ category: "issues", focus: i.id })} />
+                ))}
+                {(issueRows.length > FIRST || (!issueRows.length && allIssues.length > 0)) && (
+                  <button
+                    onClick={() => onOpen({ category: "issues" })}
+                    className="flex h-[30px] shrink-0 items-center rounded-[10px] pl-8 pr-2.5 text-left text-[13px] leading-[18px] text-[#6B6B6B] outline-none hover:bg-black/[0.03] hover:text-ink focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
+                  >
+                    {issueRows.length ? `Show all ${issueRows.length}` : `${allIssues.length} done`}
+                  </button>
+                )}
+              </div>
+            </Fold>
+          </div>
+        )}
         {sections.map(({ c, total, items }) => {
-          const key = `${user}.${ws}.${c.id}`;
-          const open = !!q || (toggled[key] ?? readSectionOpen(FOLDS, user, ws, c.id));
+          const open = isShown(c.id);
           return (
             <div key={c.id} className="flex flex-col">
-              <button
-                onClick={() => {
-                  // While searching, every section stays open.
-                  if (q) return;
-                  setToggled({ ...toggled, [key]: !open });
-                  writeSectionOpen(FOLDS, user, ws, c.id, !open);
-                }}
-                aria-expanded={open}
-                className="flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
-              >
-                <span className="text-[#6B6B6B]">
-                  <CategoryIcon id={c.id} />
-                </span>
-                <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-ink">{c.label}</span>
-                <Count n={items.length} quiet={!!q} scope={`${user}.${ws}`} className="shrink-0 text-[12px] tabular-nums text-[#9A9A98]" />
-                <span className="text-[#B0B0AD]">
-                  <Chevron open={open} />
-                </span>
-              </button>
+              {head(c.id, c.label, items.length, open)}
               <Fold open={open}>
                 <div className="flex flex-col">
                   {!items.length && !total && <div className="flex h-[30px] shrink-0 items-center pl-8 pr-2.5 text-[13px] leading-[18px] text-[#9A9A98]">Fills in as you chat</div>}
@@ -598,25 +821,45 @@ export function MemoryView({
   focus,
   focusAt,
   query,
+  tags,
   onQueryUsed,
   onCategory,
   onClose,
 }: {
   user?: string;
   ws: string;
-  category: CategoryId;
+  category: OrbitSection;
   focus?: string;
   focusAt?: number;
   query?: string;
+  /** The workspace's tags (lib/routine-catalog.ts tagsOf), offered for an issue. */
+  tags?: string[];
   onQueryUsed?: () => void;
-  onCategory: (category: CategoryId) => void;
+  onCategory: (category: OrbitSection) => void;
   onClose: () => void;
 }) {
   const { snap, act } = useMemoryCategories(ws, user);
+  const { list } = useIssues(ws, user);
+  const forgetting = useForget(ws, user);
+  const openIssues = list ? list.issues.filter(isOpen).length : undefined;
+  if (category === "issues")
+    return (
+      <IssuesPage
+        user={user}
+        ws={ws}
+        focus={focus}
+        focusAt={focusAt}
+        tags={tags}
+        nav={<OrbitNav on="issues" snap={snap} issues={openIssues} count={(id) => (snap?.items ?? []).filter((i) => i.category === id).length} onPick={onCategory} />}
+        onClose={onClose}
+      />
+    );
   return (
     <MemoryPage
       snap={snap}
       act={act}
+      forgetting={forgetting}
+      issues={openIssues}
       category={category}
       focus={focus}
       focusAt={focusAt}
@@ -642,10 +885,41 @@ const EXAMPLE: Record<CategoryId, string> = {
   preferences: "I prefer aisle seats",
 };
 
+/**
+ * Orbit's sections as a row of chips at the top of its page: Issues (`issues`: how many are open, once
+ * known), then each category with its count (`count`). Only once memory is on are the counts there.
+ */
+function OrbitNav({ on, snap, issues, count, onPick }: { on: OrbitSection; snap: MemorySnapshot | null; issues?: number; count: (id: CategoryId) => number; onPick: (s: OrbitSection) => void }) {
+  const chips: { id: OrbitSection; label: string; n?: number }[] = [
+    { id: "issues", label: "Issues", n: issues },
+    ...CATEGORIES.map((x) => ({ id: x.id as OrbitSection, label: x.label, n: snap?.on ? count(x.id) : undefined })),
+  ];
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {chips.map((x) => {
+        const here = x.id === on;
+        return (
+          <button
+            key={x.id}
+            onClick={() => !here && onPick(x.id)}
+            aria-pressed={here}
+            className={`flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 transition-colors duration-150 ease-out motion-reduce:transition-none ${here ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}
+          >
+            {x.label}
+            {x.n !== undefined && <span className={`tabular-nums ${here ? "text-white/60" : "text-[#9A9A98]"}`}>{x.n}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** The page for a snapshot of the categories (MemoryView, without the fetching). */
 export function MemoryPage({
   snap,
   act,
+  forgetting,
+  issues,
   category,
   focus,
   focusAt,
@@ -656,12 +930,16 @@ export function MemoryPage({
 }: {
   snap: MemorySnapshot | null;
   act: MemoryAct;
+  /** Forget, with Undo (useForget). */
+  forgetting: ForgetCalls;
+  /** How many issues are open (Orbit's first chip), once known. */
+  issues?: number;
   category: CategoryId;
   focus?: string;
   focusAt?: number;
   query?: string;
   onQueryUsed?: () => void;
-  onCategory: (category: CategoryId) => void;
+  onCategory: (category: OrbitSection) => void;
   onClose: () => void;
 }) {
   // "Updated 5m ago", and when Tidy up can run again, stay current.
@@ -719,6 +997,13 @@ export function MemoryPage({
     const t = setTimeout(() => setNote(null), 8000);
     return () => clearTimeout(t);
   }, [note]);
+  // What went wrong with a Forget goes after 8 seconds too.
+  const { error: forgetError, dismiss } = forgetting;
+  useEffect(() => {
+    if (!forgetError) return;
+    const t = setTimeout(dismiss, 8000);
+    return () => clearTimeout(t);
+  }, [forgetError, dismiss]);
 
   const run = async (action: "refresh" | "sort-older" | "tidy-up") => {
     setBusy(action);
@@ -738,10 +1023,36 @@ export function MemoryPage({
   const readyAt = snap?.dreamReadyAt;
   const canTidy = reached(readyAt) && !busy;
   const tidyTip = reached(readyAt) || !readyAt ? TIDY : `Memory tidied up${snap?.dreamAt ? ` at ${clockTime(snap.dreamAt)}` : ""}. It can again at ${clockTime(readyAt)}.`;
-  const said = note ?? (snap?.error ? { text: snap.error, bad: true } : null);
+  const said = note ?? (forgetting.error ? { text: forgetting.error, bad: true } : snap?.error ? { text: snap.error, bad: true } : null);
+  // Picking items to forget together, in this category (another category starts with none picked).
+  const [picking, setPicking] = useState<{ category: CategoryId; ids: Set<string> } | null>(null);
+  const picked = picking?.category === c.id ? picking.ids : null;
+  // Only what's still listed counts (one may have gone since it was picked).
+  const pickedItems = picked ? items.filter((i) => i.category === c.id && picked.has(i.id)) : [];
+  const pick = (id: string) => {
+    if (!picked) return;
+    const ids = new Set(picked);
+    if (!ids.delete(id)) ids.add(id);
+    setPicking({ category: c.id, ids });
+  };
+  const forgetPicked = () => {
+    forgetting.forget(pickedItems);
+    setPicking(null);
+  };
+  // Esc stops picking (not while a field has it: the search clears itself first).
+  useEffect(() => {
+    if (!picked) return;
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || (e.target as HTMLElement | null)?.closest("input, textarea")) return;
+      e.preventDefault();
+      setPicking(null);
+    };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [picked]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
+    <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pt-7">
       <div className="flex w-full max-w-[560px] flex-col gap-5">
         <div className="flex items-start gap-3.5">
           <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-ink text-highlighter">
@@ -754,22 +1065,7 @@ export function MemoryPage({
           <CloseButton onClick={onClose} className="mt-1.5" />
         </div>
 
-        <div className="flex flex-wrap gap-1.5">
-          {CATEGORIES.map((x) => {
-            const on = x.id === c.id;
-            return (
-              <button
-                key={x.id}
-                onClick={() => !on && onCategory(x.id)}
-                aria-pressed={on}
-                className={`flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 transition-colors duration-150 ease-out motion-reduce:transition-none ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}
-              >
-                {x.label}
-                {snap?.on && <span className={`tabular-nums ${on ? "text-white/60" : "text-[#9A9A98]"}`}>{count(x.id)}</span>}
-              </button>
-            );
-          })}
-        </div>
+        <OrbitNav on={c.id} snap={snap} issues={issues} count={count} onPick={onCategory} />
 
         {snap?.on && (
           <div className="flex flex-col gap-2.5">
@@ -822,6 +1118,16 @@ export function MemoryPage({
                   {busy === "sort-older" ? "Sorting older things" : sorting ? "Sorting new things" : snap.syncedAt ? updated(snap.syncedAt) : "Not updated yet"}
                 </span>
               </span>
+              {all.length > 0 && (
+                <button
+                  onClick={() => setPicking(picked ? null : { category: c.id, ids: new Set() })}
+                  aria-pressed={!!picked}
+                  title={picked ? "Stop picking" : `Pick ${c.label.toLowerCase()} to forget together`}
+                  className={picked ? "rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white" : BUTTON}
+                >
+                  {picked ? "Done" : "Select"}
+                </button>
+              )}
               <button onClick={() => void run("refresh")} disabled={!!busy} title="Look for new things in memory and sort them now" className={BUTTON}>
                 Refresh
               </button>
@@ -890,7 +1196,17 @@ export function MemoryPage({
                 )}
                 <div className="flex flex-col overflow-hidden rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
                   {g.items.map((i, n) => (
-                    <ItemRow key={i.id} item={i} last={n === g.items.length - 1} open={openId === i.id} onToggle={() => setOpenId(openId === i.id ? null : i.id)} act={act} />
+                    <ItemRow
+                      key={i.id}
+                      item={i}
+                      last={n === g.items.length - 1}
+                      open={!picked && openId === i.id}
+                      onToggle={() => setOpenId(openId === i.id ? null : i.id)}
+                      act={act}
+                      forgetting={forgetting}
+                      picked={picked ? picked.has(i.id) : undefined}
+                      onPick={() => pick(i.id)}
+                    />
                   ))}
                 </div>
               </div>
@@ -898,6 +1214,27 @@ export function MemoryPage({
           )}
         </div>
         {snap?.on && <HiddenList hidden={(snap.hidden ?? []).filter((h) => h.category === c.id)} act={act} />}
+      </div>
+      {/* At the foot of the page, over what scrolls: Forget N while picking, else Undo for 5 seconds after a Forget. */}
+      <div className="pointer-events-none sticky bottom-0 mt-auto flex w-full max-w-[560px] justify-center pb-5 pt-6">
+        {picked ? (
+          <div className="motion-rise-in pointer-events-auto flex items-center gap-1 rounded-full bg-ink py-1 pl-4 pr-1 text-[13px] leading-4 text-white shadow-[0_12px_30px_-10px_#00000066]">
+            <span className="pr-2 tabular-nums text-white/70">{pickedItems.length ? `${pickedItems.length} picked` : "Pick what to forget"}</span>
+            <button onClick={forgetPicked} disabled={!pickedItems.length} className="rounded-full bg-[#B42318] px-3 py-1.5 text-[12.5px] font-semibold leading-4 text-white disabled:opacity-40">
+              Forget{pickedItems.length ? ` ${pickedItems.length}` : ""}
+            </button>
+            <button onClick={() => setPicking(null)} className="rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white/80 hover:bg-white/10 hover:text-white">
+              Cancel
+            </button>
+          </div>
+        ) : forgetting.undo ? (
+          <div key={forgetting.undo.ids.join()} role="status" className="motion-rise-in pointer-events-auto flex max-w-full items-center gap-1 rounded-full bg-ink py-1 pl-4 pr-1 text-[13px] leading-4 text-white shadow-[0_12px_30px_-10px_#00000066]">
+            <span className="min-w-0 truncate pr-2">{forgetting.undo.label}</span>
+            <button onClick={() => forgetting.undoForget()} className="shrink-0 rounded-full bg-white/15 px-3 py-1.5 text-[12.5px] font-semibold leading-4 text-white hover:bg-white/25">
+              Undo
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -961,14 +1298,38 @@ const INDENT: Record<CategoryId, string> = {
 
 /**
  * An item on the page: a row that opens in place to say where it was learned (what was said, what
- * memory worked out, a line of the user's card), with Done, Edit, Hide and Forget.
+ * memory worked out, a line of the user's card), with Done, Edit, Hide, Forget (at once, with 5 seconds
+ * to undo) and, in its menu, Delete everywhere. While the page picks items to forget (`picked` set), the
+ * row is a checkbox: a click picks it, and nothing opens.
  */
-export function ItemRow({ item, last, open, onToggle, act }: { item: MemoryItem; last: boolean; open: boolean; onToggle: () => void; act: MemoryAct }) {
+export function ItemRow({
+  item,
+  last,
+  open,
+  onToggle,
+  act,
+  forgetting,
+  picked,
+  onPick,
+}: {
+  item: MemoryItem;
+  last: boolean;
+  open: boolean;
+  onToggle: () => void;
+  act: MemoryAct;
+  forgetting: ForgetCalls;
+  /** Whether it's picked, while the page picks items (undefined otherwise). */
+  picked?: boolean;
+  onPick?: () => void;
+}) {
   const [editing, setEditing] = useState(false);
-  const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const forgetButton = useRef<HTMLButtonElement>(null);
+  const [menu, setMenu] = useState(false);
+  // Delete everywhere: looking up which chats would go, then those chats, asked once more.
+  const [wipe, setWipe] = useState<null | "looking" | DeleteSession[]>(null);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const picking = picked !== undefined;
   const checkable = item.category === "todos" || item.category === "promises";
   const line = [item.detail, item.who]
     .filter((s): s is string => !!s)
@@ -985,15 +1346,51 @@ export function ItemRow({ item, last, open, onToggle, act }: { item: MemoryItem;
   const toggleDone = () => void run({ action: "edit", id: item.id, done: !item.done });
   const errorLine = error && !editing && <span className={`pr-3.5 text-[12.5px] leading-4 text-[#B42318] ${INDENT[item.category] ?? "pl-3.5"}`}>{error}</span>;
   const [fresh, setFresh] = useState(() => justArrived(item.id));
-  // Shut, the row drops its Forget question: reopened, it shows the actions again (kept mounted, its autoFocus wouldn't run again).
-  if (!open && sure) setSure(false);
+  // Shut, the row drops its Delete everywhere question and its menu: reopened, it shows the actions again.
+  if (!open && (wipe || menu)) {
+    setWipe(null);
+    setMenu(false);
+  }
+  const lookUp = async () => {
+    setMenu(false);
+    setError(null);
+    setWipe("looking");
+    const found = await forgetting.preview(item.id);
+    if (typeof found === "string") {
+      setWipe(null);
+      setError(found);
+    } else setWipe(found);
+  };
+  const cancelWipe = () => {
+    // Back where it was asked: focus returns to the menu's button (it's back on screen once this renders).
+    flushSync(() => setWipe(null));
+    moreButton.current?.focus();
+  };
 
   return (
     <div
       data-item={item.id}
       onAnimationEnd={(e) => e.target === e.currentTarget && e.animationName === "wash" && setFresh(false)}
       className={`flex flex-col ${last ? "" : "border-b border-[#F0F0EE]"} ${fresh ? "motion-new-item" : ""}`}>
-      {editing ? (
+      {picking ? (
+        <button onClick={onPick} role="checkbox" aria-checked={picked} className={`flex items-start gap-3 px-3.5 py-3 text-left ${picked ? "bg-[#F7F7F6]" : "hover:bg-[#FAFAF9]"}`}>
+          <span
+            className={`mt-px flex size-[18px] shrink-0 items-center justify-center rounded-[6px] ${picked ? "bg-ink" : "shadow-[inset_0_0_0_1.5px_#C9C9C6]"}`}
+            aria-hidden
+          >
+            {picked && <CheckIcon size={11} color="#FFFFFF" />}
+          </span>
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className={`truncate text-[14px] font-medium leading-[18px] ${greyed(item) ? "text-[#9A9A98]" : "text-ink"}`}>{undash(item.title)}</span>
+            {line && <span className="truncate text-[12.5px] leading-[17px] text-[#6B6B6B]">{line}</span>}
+          </span>
+          {item.when && (
+            <span className="shrink-0 pt-px text-[12px] leading-4 text-[#9A9A98]">
+              <When item={item} />
+            </span>
+          )}
+        </button>
+      ) : editing ? (
         <div className="px-3.5 py-3">
           <EditForm
             item={item}
@@ -1042,7 +1439,7 @@ export function ItemRow({ item, last, open, onToggle, act }: { item: MemoryItem;
         </div>
       )}
       {/* Where it was learned, and what can be done with it: folds open in place (rendered once first opened). */}
-      <Fold open={open && !editing} lazy>
+      <Fold open={open && !editing && !picking} lazy>
         <div className={`flex flex-col gap-3 pb-3.5 pr-3.5 ${INDENT[item.category] ?? "pl-3.5"}`}>
           <Sources sources={item.sources} />
           {item.private && (
@@ -1051,15 +1448,17 @@ export function ItemRow({ item, last, open, onToggle, act }: { item: MemoryItem;
               Kept out of your bots&rsquo; prompts
             </span>
           )}
-          {sure ? (
-            <ForgetConfirm
+          {wipe === "looking" ? (
+            <span className="flex items-center gap-1.5 text-[12.5px] leading-4 text-[#6B6B6B]">
+              <Spinner size={11} color="#6B6B6B" />
+              Looking up the chats it came from
+            </span>
+          ) : wipe ? (
+            <DeleteEverywhere
+              sessions={wipe}
               busy={busy}
-              onForget={() => void run({ action: "forget", id: item.id })}
-              onCancel={() => {
-                // Back where it was asked: focus returns to Forget (it's back on screen once this renders).
-                flushSync(() => setSure(false));
-                forgetButton.current?.focus();
-              }}
+              onConfirm={() => void run({ action: "deleteEverywhere", id: item.id, sessions: wipe.map((x) => x.id) }).then((ok) => ok || setWipe(null))}
+              onCancel={cancelWipe}
             />
           ) : (
             <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
@@ -1081,9 +1480,52 @@ export function ItemRow({ item, last, open, onToggle, act }: { item: MemoryItem;
               <button onClick={() => void run({ action: "edit", id: item.id, hidden: true })} disabled={busy} title="Hide it from this list. Memory keeps what it learned." className={small("plain")}>
                 Hide
               </button>
-              <button ref={forgetButton} onClick={() => setSure(true)} disabled={busy} className={small("red")}>
+              <button onClick={() => forgetting.forget([item])} disabled={busy} title="Memory deletes what it learned about it. You can undo for 5 seconds." className={small("red")}>
                 Forget
               </button>
+              <div className="relative">
+                <button
+                  ref={moreButton}
+                  onClick={() => setMenu(!menu)}
+                  disabled={busy}
+                  aria-label="More"
+                  title="More"
+                  aria-haspopup="menu"
+                  aria-expanded={menu}
+                  className="flex size-6 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0] hover:text-ink disabled:opacity-40"
+                >
+                  <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
+                    <circle cx="3.2" cy="8" r="1.3" fill="currentColor" />
+                    <circle cx="8" cy="8" r="1.3" fill="currentColor" />
+                    <circle cx="12.8" cy="8" r="1.3" fill="currentColor" />
+                  </svg>
+                </button>
+                {menu && (
+                  <>
+                    <div className="fixed inset-0 z-30" onClick={() => setMenu(false)} />
+                    <div
+                      role="menu"
+                      onKeyDown={(e) => {
+                        if (e.key !== "Escape") return;
+                        e.preventDefault();
+                        setMenu(false);
+                        moreButton.current?.focus();
+                      }}
+                      className="motion-menu-in absolute left-0 top-[calc(100%+6px)] z-40 flex w-[200px] origin-top-left flex-col rounded-xl bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040]"
+                    >
+                      <button
+                        role="menuitem"
+                        autoFocus
+                        onClick={() => void lookUp()}
+                        className="flex w-full flex-col items-start gap-0.5 rounded-lg px-2.5 py-1.5 text-left outline-none hover:bg-[#FEF3F2] focus-visible:bg-[#FEF3F2]"
+                      >
+                        <span className="text-[13px] font-medium leading-4 text-[#B42318]">Delete everywhere</span>
+                        <span className="text-[11.5px] leading-[15px] text-[#6B6B6B]">Forgets it and deletes the memory copy of the chats it came from</span>
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           )}
           {errorLine}
@@ -1157,9 +1599,63 @@ export function Sources({ sources }: { sources: ItemSource[] }) {
   );
 }
 
-/** Forget an item, asked once more in place (InlineConfirm, side-group.tsx): Cancel has focus, and Esc cancels only that. */
-export function ForgetConfirm({ busy, onForget, onCancel }: { busy: boolean; onForget: () => void; onCancel: () => void }) {
-  return <InlineConfirm text="Forget this? Bops forgets what it learned only about it." action="Forget" doing="Forgetting…" busy={busy} onConfirm={onForget} onCancel={onCancel} />;
+/**
+ * Delete everywhere, asked once more in place: the chats and calls in memory it deletes, by name, each
+ * with what else Orbit learned from it (so a chat other items still need is never deleted unsaid).
+ * Cancel has focus, and Esc cancels only that (InlineConfirm's manners, side-group.tsx).
+ */
+function DeleteEverywhere({ sessions, busy, onConfirm, onCancel }: { sessions: DeleteSession[]; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (busy) box.current?.focus();
+  }, [busy]);
+  return (
+    <div
+      ref={box}
+      tabIndex={-1}
+      onKeyDown={(e) => {
+        if (e.key !== "Escape") return;
+        e.preventDefault();
+        if (!busy) onCancel();
+      }}
+      className="flex flex-col gap-2 rounded-xl bg-[#FEF3F2] px-3 py-2.5 outline-none"
+    >
+      <span className="text-[12.5px] font-medium leading-[17px] text-[#3A3A38]">
+        {sessions.length
+          ? `Delete everywhere? Bops forgets this and deletes ${sessions.length === 1 ? "this chat" : `these ${sessions.length} chats`} from memory:`
+          : "Delete everywhere? No chat in memory came only from this, so Bops forgets it and deletes no chats."}
+      </span>
+      {sessions.length > 0 && (
+        <ul className="flex flex-col gap-1">
+          {sessions.map((x) => (
+            <li key={x.id} className="flex flex-col rounded-lg bg-white px-2.5 py-1.5 shadow-[0_0_0_1px_#F4D9D6]">
+              <span className="text-[12.5px] leading-[17px] text-ink [overflow-wrap:anywhere]">
+                {undash(x.name)}
+                {x.at ? <span className="text-[#9A9A98]">{` · ${since(x.at)}`}</span> : null}
+              </span>
+              {x.alsoFor.length > 0 && (
+                <span className="text-[11.5px] leading-4 text-[#9A5B00] [overflow-wrap:anywhere]">Orbit also learned {x.alsoFor.map(undash).join(", ")} from it</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {sessions.length > 0 && <span className="text-[11.5px] leading-4 text-[#6B6B6B]">These chats stay in your Bops chat history; their memory copy is deleted</span>}
+      <span className="flex items-center gap-1">
+        <button onClick={onConfirm} disabled={busy} className="rounded-full bg-[#B42318] px-3 py-1 text-[12px] font-semibold leading-4 text-white disabled:opacity-60">
+          {busy ? "Deleting…" : "Delete everywhere"}
+        </button>
+        <button
+          autoFocus
+          onClick={onCancel}
+          disabled={busy}
+          className="rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-white focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-40"
+        >
+          Cancel
+        </button>
+      </span>
+    </div>
+  );
 }
 
 /** An item's name and line, changed in place: Enter saves, Esc cancels (not while saving). Only what changed is sent. */
