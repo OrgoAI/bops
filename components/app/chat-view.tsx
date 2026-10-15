@@ -1,5 +1,6 @@
 "use client";
 
+import { screenMap, screenNo } from "@/lib/screens";
 import { createContext, Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BLOCKER_ASK, live, pairChatId, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
@@ -1429,6 +1430,12 @@ function SessionChip({ session: s, state, onClick }: { session: Session; state: 
         <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">· where?</span>
       ) : null}
       {waiting && <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">· {s.blocker ? `needs ${BLOCKER_ASK[s.blocker]}` : "needs you"}</span>}
+      {/* Which screen it's on, live: the number on the panel's tiles. */}
+      {live(s) && s.runsOn !== "mac" && s.display !== undefined && (
+        <span title={`On screen ${screenNo(s.display)} of ${b?.name ?? "its bot"}'s computer`} className="shrink-0 rounded-full bg-[#F2F2F0] px-1.5 py-px text-[11px] tabular-nums leading-[14px] text-[#3A3A38]">
+          Screen {screenNo(s.display)}
+        </span>
+      )}
       {b && s.sentVia !== "you" && s.chatId !== `bot:${b.id}` && <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">· {b.name}</span>}
     </button>
   );
@@ -1496,6 +1503,8 @@ export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { st
             <button onClick={onShowComputer} className="flex items-center gap-1.5 text-left text-[12px] leading-4 text-[#6B6B6B] hover:text-ink">
               {b.name} · {s.runsOn === "mac" ? "on your Mac · " : ""}
               {s.askWhere && live(s) ? "waiting for you" : live(s) ? "working" : s.status === "done" ? "finished" : "stopped"} · {toolCount} steps
+              {/* Its screen, by the number the panel and the bots use. */}
+              {s.runsOn !== "mac" && (live(s) && s.display !== undefined ? ` · screen ${screenNo(s.display)}` : !live(s) && s.lastDisplay !== undefined ? ` · left off on screen ${screenNo(s.lastDisplay)}` : "")}
             </button>
           </div>
           {s.runsOn !== "mac" && state.mac?.ready && (s.blocker || s.status === "failed" || (s.offerMac && live(s))) && (
@@ -1574,6 +1583,7 @@ export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { st
                   ? ` · with ${s.helperScreens.length} helper${s.helperScreens.length === 1 ? "" : "s"}`
                   : ""}
             </span>
+            <LeftOff state={state} session={s} onShow={onShowComputer} />
             <div className="h-px bg-[#ECECEA]" />
           </div>
 
@@ -1991,6 +2001,30 @@ function OutOfCredit({ onUpgrade }: { onUpgrade?: () => void }) {
           Upgrade
         </button>
       )}
+    </div>
+  );
+}
+
+/**
+ * Where a finished thread left off: its last frame (the screen as it let go: /api/frames), the page it
+ * was on, and its screen's number. If another task has that screen now, it says so: the panel would show
+ * that task, not this one's work.
+ */
+function LeftOff({ state, session: s, onShow }: { state: AppState; session: Session; onShow: () => void }) {
+  if (live(s) || s.runsOn === "mac" || s.lastDisplay === undefined || !s.lastFrameAt) return null;
+  const now = screenMap(state, s.botId).find((x) => x.display === s.lastDisplay);
+  const taken = now && now.sessionId !== s.id && now.kind !== "free" ? state.bots.find((x) => x.id === now.botId)?.name ?? "Another task" : null;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[12px] font-medium leading-4 text-[#6B6B6B]">Where it left off · screen {screenNo(s.lastDisplay)}</span>
+      <button onClick={onShow} title={taken ? `${taken} is using screen ${screenNo(s.lastDisplay)} now` : "Show its screen"} className="overflow-hidden rounded-xl shadow-[0_0_0_1px_#E6E6E3] hover:shadow-[0_0_0_1px_#C9C9C6]">
+        {/* eslint-disable-next-line @next/next/no-img-element -- a local frame from this Mac, not a remote image */}
+        <img src={`/api/frames?session=${s.id}&t=${s.lastFrameAt}`} alt={`The screen as ${s.title} left it`} className="block w-full" />
+      </button>
+      <span className="truncate text-[12px] leading-4 text-[#9A9A98]">
+        {s.lastPage ? (s.lastPage.title ?? s.lastPage.url) : ""}
+        {taken ? `${s.lastPage ? " · " : ""}screen ${screenNo(s.lastDisplay)} is in use by ${taken} now` : ""}
+      </span>
     </div>
   );
 }

@@ -2,7 +2,7 @@
 
 import { screenNo as screenNumber } from "@/lib/screens";
 import { useEffect, useRef, useState } from "react";
-import { DISPLAYS, live, MAIN_WORKSPACE, workspaceOf, type AppState, type Bot, type Chat, type Logo, type Session } from "@/lib/types";
+import { live, MAIN_WORKSPACE, workspaceOf, type AppState, type Bot, type Chat, type Logo, type Session } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 export { botBezel, botOnInk, botWash, DESKTOP_BG } from "@/lib/look";
 
