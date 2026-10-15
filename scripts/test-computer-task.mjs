@@ -83,7 +83,9 @@ const answers = [];
  * The computer as orgo-web keeps Free's: its status, and when Bops last said it's in use (null: never, so it's
  * never put to sleep for want of use). Every call to Orgo, as "METHOD /path".
  */
-const pc = { status: "running", activeAt: null, shot409: false };
+const pc = { status: "running", activeAt: null, shot409: false, shotDelay: 0, actFail: null };
+/** Each screenshot asked of Orgo, as "screen format", in the order Orgo got them. */
+const shotLog = [];
 const idleAsleep = () => pc.status === "suspended" && pc.activeAt !== null && Date.now() - pc.activeAt > 15 * 60_000;
 const orgoCalls = [];
 /** Every command Bops ran on the computer, and what a run_command answers (a function of the command, run when it's called). */
@@ -141,6 +143,8 @@ globalThis.fetch = async (input, init) => {
       return json({ screens: [100, 101, 102].map((d) => listed(d, true)) });
     }
     if (path === `/computers/${COMPUTER}/screenshot`) {
+      shotLog.push(`${url.searchParams.get("screen")} ${url.searchParams.get("format")}`);
+      if (pc.shotDelay) await sleep(pc.shotDelay);
       // Orgo left it asleep for a look (the heartbeat lapsed mid-task, say): once, then it's woken by an action.
       if (pc.shot409) {
         pc.shot409 = false;
@@ -154,7 +158,14 @@ globalThis.fetch = async (input, init) => {
       if (pc.status === "suspended") pc.status = "running";
       const { command } = JSON.parse(body);
       bash.push(command);
-      if (command.includes("cd /workspace && export DISPLAY")) return json(await onCommand(command));
+      // A command that hangs (Orgo not answering) ends when Bops gives up on it, as a real fetch does.
+      if (command.includes("cd /workspace && export DISPLAY"))
+        return json(await Promise.race([onCommand(command), new Promise((_, no) => req.signal.addEventListener("abort", () => no(req.signal.reason)))]));
+      if (command.includes("@@bops-act@@") && pc.actFail) {
+        const output = pc.actFail;
+        pc.actFail = null;
+        return json({ output, exit_code: 0 });
+      }
       if (command.includes("/opt/bops/pw/page-script.cjs ")) return json(await onPage(command));
       return json({ output: command.includes("echo ok") ? "ok" : "", exit_code: 0 });
     }
@@ -270,15 +281,15 @@ assert.ok(xdo.every((x) => x.display === `:${display}`));
 assert.deepEqual(
   xdo.map((x) => x.args),
   [
-    ["mousemove", "10", "21"],
+    ["mousemove", "--sync", "10", "21"],
     ["keydown", "ctrl"],
     ["click", "1"],
     ["keyup", "ctrl"],
     ["key", "--", "ctrl+plus"],
     ["key", "--", "'; touch PWNED; echo '"],
     ["key", "--", "$(touch PWNED2)"],
-    ["type", "--delay", "12", "--", "two lines\nend\n"],
-    ["mousemove", "5", "6"],
+    ["type", "--delay", "25", "--", "two lines\nend\n"],
+    ["mousemove", "--sync", "5", "6"],
     ["mousedown", "1"],
     ["mouseup", "1"],
     ["mousemove", "1", "2"],
@@ -534,6 +545,83 @@ assert.match(movedTurn, /Now book the cheapest one/);
 assert.notEqual(S.session("ses_moveq").lastDisplay, 101, "it moved");
 assert.equal(S.session("ses_moveq").screenMoved, undefined, "said once");
 S.update((st) => (st.sessions = st.sessions.filter((x) => !["ses_busyq", "ses_moveq"].includes(x.id))));
+
+/* ---------------- A screen action that fails stops the rest, and the model's told which ---------------- */
+
+// On the computer: the script stops at the failing action, lets go of held keys, and says which failed.
+answers.push(
+  () =>
+    response("resp_f1", [
+      { id: "cu_f1", type: "computer_call", call_id: "call_f1", status: "completed", actions: [{ type: "click", x: 1, y: 2, button: "left" }, { type: "keypress", keys: ["Foo"] }, { type: "type", text: "hi" }] },
+    ]),
+  () => response("resp_f2", [said("Pressed it.")]),
+);
+pc.actFail = "\n@@bops-act@@1 xdotool: Invalid key sequence 'Foo'\n";
+const askedF = asked.length;
+const bashF = bash.length;
+await task("Press a key", "Key");
+const toldFail = asked[askedF + 1];
+assert.equal(toldFail.input[0].type, "computer_call_output", "the screen goes back first");
+assert.equal(userText(toldFail), "(From Bops: Action 2 of 3 (pressed Foo) failed: xdotool: Invalid key sequence 'Foo'. The one after it wasn't done. The screenshot shows the screen now.)");
+const failScript = bash.slice(bashF).find((c) => c.includes("@@bops-act@@"));
+writeFileSync(join(bin, "xdotool"), `#!/bin/sh\nnode -e 'require("fs").appendFileSync(process.argv[1], JSON.stringify({ args: process.argv.slice(2) }) + "\\n")' ${JSON.stringify(log)} "$@"\n[ "$1" = key ] && { echo "Invalid key sequence '$3'" >&2; exit 1; }\nexit 0\n`, { mode: 0o755 });
+writeFileSync(log, "");
+const ran = execFileSync("/bin/bash", ["-c", failScript.replace(/^sleep [\d.]+$/m, "true")], { cwd: run, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdio: ["ignore", "pipe", "ignore"] }).toString();
+const failedXdo = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l).args);
+assert.deepEqual(failedXdo, [["mousemove", "--sync", "1", "2"], ["click", "1"], ["key", "--", "Foo"], ["keyup", "ctrl", "alt", "shift", "super"]], "nothing after the failed one, and keys let go");
+assert.equal(ran.trim(), "@@bops-act@@1 Invalid key sequence 'Foo'");
+
+// Long text, and text a US keyboard can't type, is pasted from the screen's clipboard.
+const LONG = "word ".repeat(60).trim();
+answers.push(
+  () => response("resp_t1", [{ id: "cu_t1", type: "computer_call", call_id: "call_t1", status: "completed", actions: [{ type: "type", text: LONG }, { type: "type", text: "Café ✓" }, { type: "type", text: "plain" }] }]),
+  () => response("resp_t2", [said("Typed.")]),
+);
+const bashT = bash.length;
+await task("Write it out", "Typing");
+const typeScript = bash.slice(bashT).find((c) => c.includes("@@bops-act@@"));
+const clipped = join(scratch, "clipboard.log");
+writeFileSync(join(bin, "xclip"), `#!/bin/sh\ncat >> ${JSON.stringify(clipped)}; echo "|" >> ${JSON.stringify(clipped)}\n`, { mode: 0o755 });
+writeFileSync(join(bin, "xdotool"), `#!/bin/sh\nnode -e 'require("fs").appendFileSync(process.argv[1], JSON.stringify({ args: process.argv.slice(2) }) + "\\n")' ${JSON.stringify(log)} "$@"\n`, { mode: 0o755 });
+writeFileSync(log, "");
+assert.equal(execFileSync("/bin/bash", ["-c", typeScript.replace(/^sleep [\d.]+$/m, "true")], { cwd: run, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdio: ["ignore", "pipe", "ignore"] }).toString().trim(), "@@bops-act@@");
+assert.equal(readFileSync(clipped, "utf8"), `${LONG}|\nCafé ✓|\n`, "pasted as written");
+assert.deepEqual(
+  readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l).args),
+  [["key", "--clearmodifiers", "ctrl+v"], ["key", "--clearmodifiers", "ctrl+v"], ["type", "--delay", "25", "--", "plain"]],
+);
+
+/* ---------------- One computer's screenshots: a task's go first, and the app's views don't pile up ---------------- */
+
+const O = await import(`${root}/lib/server/orgo.ts`);
+pc.shotDelay = 40;
+shotLog.length = 0;
+const looks = [
+  O.orgo.screenshot(COMPUTER, "screen-100", 0.3),
+  O.orgo.screenshot(COMPUTER, "screen-101", 0.3),
+  O.orgo.screenshot(COMPUTER, "screen-101", 0.3),
+  O.orgo.screenshot(COMPUTER, "screen-102", 1, "png", { task: true }),
+];
+await Promise.all(looks);
+pc.shotDelay = 0;
+assert.deepEqual(shotLog, ["screen-100 jpeg", "screen-102 png", "screen-101 jpeg"], "the task's ahead of the views waiting, and one view asked twice is asked once");
+
+/* ---------------- A command Orgo never answers: Stop doesn't wait for it ---------------- */
+
+answers.push(() => response("resp_h1", [{ id: "fc_h1", type: "function_call", call_id: "call_h1", name: "run_command", arguments: JSON.stringify({ command: "sleep-forever", timeout_seconds: 300 }) }]));
+let hung;
+onCommand = () => {
+  setTimeout(() => X.stopSession(hung), 50);
+  return new Promise(() => {});
+};
+const startedH = X.startSession({ botId: main.id, goal: "Wait on it", title: "Hung", where: "cloud", fresh: true });
+hung = startedH.id;
+const tH = Date.now();
+s = await ended(hung);
+assert.equal(s.error, "Stopped by you");
+assert.ok(Date.now() - tH < 10_000, "it stopped at once");
+assert.deepEqual(s.owed, [{ id: "call_h1", type: "function", output: "Stopped by the user before the computer answered, so it may or may not have run." }]);
+onCommand = () => ({ output: "", exit_code: 0 });
 
 /* ---------------- AI credit used up ---------------- */
 

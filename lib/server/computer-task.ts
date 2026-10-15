@@ -3,7 +3,8 @@ import { tierParam, withSpeed, type Speed } from "./routing";
 import { ResponsesSocket, responsesSocketOn, TransportError } from "./responses-ws";
 import { APIConnectionTimeoutError } from "openai";
 import { openaiClient } from "./openai-client";
-import { computerAsleepError, computerWakingError, orgo, screenId } from "./orgo";
+import { sleptSince } from "./awake";
+import { computerAsleepError, computerWakingError, orgo, OrgoTimeout, screenId } from "./orgo";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
@@ -134,9 +135,14 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
       });
     };
     // Fast while someone's waiting on it, falling back a tier when OpenAI's busy (routing.ts withSpeed).
-    const r = (await withSpeed(t.speed?.(calls) ?? "default", (tier, last) => (tier !== "default" && responsesSocketOn() ? overSocket(tier, last) : overHttp(tier, last))).catch((e: Error) => {
-      throw e instanceof APIConnectionTimeoutError ? new Error(`Stuck: nothing happened for ${Math.round(t.idleMs / 60_000)} minutes`) : e;
-    })) as unknown as { id: string; model: string; usage: Usage; output: OutputItem[] };
+    const ask = () => withSpeed(t.speed?.(calls) ?? "default", (tier, last) => (tier !== "default" && responsesSocketOn() ? overSocket(tier, last) : overHttp(tier, last)));
+    const asked = Date.now();
+    const r = (await ask()
+      // The Mac slept while it waited (awake.ts): that's not the task stalling, so it's asked again now the Mac's back.
+      .catch((e: unknown) => (e instanceof APIConnectionTimeoutError && sleptSince(asked) && !t.signal.aborted ? ask() : Promise.reject(e)))
+      .catch((e: Error) => {
+        throw e instanceof APIConnectionTimeoutError ? new Error(`Stuck: nothing happened for ${Math.round(t.idleMs / 60_000)} minutes`) : e;
+      })) as unknown as { id: string; model: string; usage: Usage; output: OutputItem[] };
     said?.sent();
     recordTokens("session", r.model, r.usage, b.id, epoch);
     prev = r.id;
@@ -158,10 +164,15 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
       return `Before my next step I need your OK. OpenAI flagged it: ${flagged.join("; ")}. Reply "go on" and I'll do it, or tell me what to do instead.`;
     }
     input = [];
+    // What a screenshot can't say (an action that failed), after the calls' outputs.
+    const notes: string[] = [];
     for (const o of asks) {
       if (t.signal.aborted) throw new Error("Stopped");
-      if (o.type === "computer_call") input.push(await act(t, o));
-      else {
+      if (o.type === "computer_call") {
+        const done = await act(t, o);
+        input.push(done.out);
+        if (done.note) notes.push(done.note);
+      } else {
         const answered = await runFunction(t, o);
         input.push(answered);
         // Kept with the call, so a turn stopped before sending it answers with what really happened (settle).
@@ -171,6 +182,7 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
         });
       }
     }
+    if (notes.length) input.push({ role: "user", content: [{ type: "input_text", text: `(From Bops: ${notes.join(" ")})` }] });
   }
 }
 
@@ -223,27 +235,57 @@ function record(t: ComputerTurn, o: OutputItem, more: boolean) {
  * while it does), and the screenshot is taken again, once.
  */
 async function screen(t: ComputerTurn) {
-  const shot = () => orgo.screenshot(t.computerId, screenId(t.display), 1, "png");
+  const shot = () => orgo.screenshot(t.computerId, screenId(t.display), 1, "png", { task: true, signal: t.signal });
   const png = await shot().catch(async (e: unknown) => {
     if (!computerAsleepError(e) && !computerWakingError(e)) throw e;
-    await orgo.bash(t.computerId, "true", 30);
+    await orgo.bash(t.computerId, "true", 30, { signal: t.signal });
     return shot();
   });
   return { type: "computer_screenshot", image_url: `data:image/png;base64,${Buffer.from(png).toString("base64")}`, detail: "original" };
 }
 
-/** Do a computer call's actions on the screen, then send the screen back. */
-async function act(t: ComputerTurn, o: OutputItem) {
+/** The line the action script says how it went after: empty, or the action that failed and what xdotool said. */
+const ACT_MARK = "@@bops-act@@";
+
+/**
+ * Do a computer call's actions on the screen, in order, then send the screen back. One that fails stops
+ * the rest (as Anthropic's and OpenAI's reference loops do), and `note` tells the model which, since a
+ * screenshot alone can't; so does Orgo not answering, when they may or may not have happened.
+ */
+async function act(t: ComputerTurn, o: OutputItem): Promise<{ out: unknown; note?: string }> {
   const actions = o.actions ?? (o.action ? [o.action] : []);
   const doing = actions.filter((a) => a.type !== "screenshot");
   for (const a of actions) t.step(STEP_TOOL[a.type] ?? a.type, describeAction(a));
+  let note: string | undefined;
   if (doing.length) {
     const X = `DISPLAY=:${t.display} xdotool`;
-    const script = [...doing.map((a) => xdo(X, a)), `mkdir -p /root/.bops/activity && echo "$(date +%s.%N) ${STEP_TOOL[doing.at(-1)!.type] ?? "act"}" > /root/.bops/activity/${t.display}`, `sleep ${SETTLE_S}`];
-    const r = await orgo.bash(t.computerId, script.join("\n"), 60);
-    if (r.exit_code !== 0) console.warn(`[computer] ${t.sessionId}: ${r.output.slice(0, 160)}`);
+    const script = [
+      "F=",
+      // Each stops at its first error (xdo joins with &&), with what it said kept for the model.
+      ...doing.map((a, i) => `[ -z "$F" ] && { E="$( { ${xdo(X, a)} ; } 2>&1 )" || F="${i} $(printf %s "$E" | tr '\\n' ' ' | head -c 300)"; }`),
+      // Keys held down for a failed one come back up.
+      `[ -n "$F" ] && ${X} keyup ctrl alt shift super >/dev/null 2>&1`,
+      `mkdir -p /root/.bops/activity && echo "$(date +%s.%N) ${STEP_TOOL[doing.at(-1)!.type] ?? "act"}" > /root/.bops/activity/${t.display}`,
+      `sleep ${SETTLE_S}`,
+      `echo "${ACT_MARK}$F"`,
+    ];
+    try {
+      const r = await orgo.bash(t.computerId, script.join("\n"), 60, { signal: t.signal });
+      const at = r.output.lastIndexOf(ACT_MARK);
+      const failed = at < 0 ? null : r.output.slice(at + ACT_MARK.length).trim().match(/^(\d+)\s*([\s\S]*)$/);
+      if (failed) {
+        const i = Number(failed[1]);
+        const a = doing[i];
+        const left = doing.length - i - 1;
+        console.warn(`[computer] ${t.sessionId}: ${a?.type} failed: ${failed[2].slice(0, 160)}`);
+        note = `Action ${i + 1} of ${doing.length} (${a ? describeAction(a) : "?"}) failed${failed[2] ? `: ${failed[2].trim()}` : ""}.${left ? ` The ${left === 1 ? "one" : `${left}`} after it ${left === 1 ? "wasn't" : "weren't"} done.` : ""} The screenshot shows the screen now.`;
+      }
+    } catch (e) {
+      if (t.signal.aborted) throw e;
+      note = `Orgo didn't answer while doing these actions (${(e as Error).message}), so they may or may not have happened. The screenshot shows the screen now; check it before doing them again.`;
+    }
   }
-  return { type: "computer_call_output", call_id: o.call_id, output: await screen(t) };
+  return { out: { type: "computer_call_output", call_id: o.call_id, output: await screen(t) }, note };
 }
 
 const KEYS: Record<string, string> = {
@@ -267,26 +309,40 @@ const key = (k: string) => {
 const sh = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 const n = (v: unknown) => Math.round(Number(v) || 0);
 
+/** Text longer than this, or with characters a US keyboard doesn't have, is pasted rather than typed. */
+const PASTE_OVER = 200;
+
+/**
+ * One action as shell, its xdotool commands joined with && so the first that fails is the action's
+ * failure (act stops there). Typing goes at 25 ms a key (12 drops keys in Chrome on Xvfb); long text, and
+ * text a US layout can't type, is pasted from the screen's clipboard instead, when the computer has xclip.
+ */
 function xdo(X: string, a: Action): string {
   const held = (a.keys ?? []).map((k) => sh(key(k)));
-  const down = held.length ? `${X} keydown ${held.join(" ")}; ` : "";
-  const up = held.length ? `; ${X} keyup ${held.join(" ")}` : "";
+  const down = held.length ? `${X} keydown ${held.join(" ")} && ` : "";
+  const up = held.length ? ` && ${X} keyup ${held.join(" ")}` : "";
   const button = { left: 1, wheel: 2, middle: 2, right: 3, back: 8, forward: 9 }[a.button ?? "left"] ?? 1;
   switch (a.type) {
     case "click":
-      return `${X} mousemove ${n(a.x)} ${n(a.y)}; ${down}${X} click ${button}${up}`;
+      return `${X} mousemove --sync ${n(a.x)} ${n(a.y)} && ${down}${X} click ${button}${up}`;
     case "double_click":
-      return `${X} mousemove ${n(a.x)} ${n(a.y)}; ${down}${X} click --repeat 2 1${up}`;
+      return `${X} mousemove --sync ${n(a.x)} ${n(a.y)} && ${down}${X} click --repeat 2 1${up}`;
     case "move":
       return `${X} mousemove ${n(a.x)} ${n(a.y)}`;
     case "drag": {
       const [first, ...rest] = a.path ?? [];
       if (!first) return "true";
-      return [`${X} mousemove ${n(first.x)} ${n(first.y)}`, `${down}${X} mousedown 1`, ...rest.map((p) => `${X} mousemove --sync ${n(p.x)} ${n(p.y)}`), `${X} mouseup 1${up}`].join("; ");
+      return [`${X} mousemove --sync ${n(first.x)} ${n(first.y)}`, `${down}${X} mousedown 1`, ...rest.map((p) => `${X} mousemove --sync ${n(p.x)} ${n(p.y)}`), `${X} mouseup 1${up}`].join(" && ");
     }
-    case "type":
+    case "type": {
       // Base64, decoded on the computer, so the text needs no quoting; the "." keeps a newline at its end, which $(…) would drop.
-      return `T="$(echo ${Buffer.from(a.text ?? "").toString("base64")} | base64 -d; echo .)"; ${X} type --delay 12 -- "\${T%.}"`;
+      const text = a.text ?? "";
+      const T = `T="$(echo ${Buffer.from(text).toString("base64")} | base64 -d; echo .)"`;
+      const typed = `${X} type --delay 25 -- "\${T%.}"`;
+      if (text.length <= PASTE_OVER && /^[\x20-\x7e\n\t]*$/.test(text)) return `${T} && ${typed}`;
+      const clip = X.replace(/xdotool$/, "xclip");
+      return `${T} && if command -v xclip >/dev/null; then printf %s "\${T%.}" | ${clip} -selection clipboard -i >/dev/null 2>&1 && ${X} key --clearmodifiers ctrl+v; else ${typed}; fi`;
+    }
     case "keypress":
       return `${X} key -- ${sh((a.keys ?? []).map(key).join("+"))}`;
     case "scroll": {
@@ -295,7 +351,7 @@ function xdo(X: string, a: Action): string {
       const v = clicks(a.scroll_y), h = clicks(a.scroll_x);
       return [`${X} mousemove ${n(a.x)} ${n(a.y)}`, v && `${down}${X} click --repeat ${v} ${(a.scroll_y ?? 0) < 0 ? 4 : 5}${up}`, h && `${X} click --repeat ${h} ${(a.scroll_x ?? 0) < 0 ? 6 : 7}`]
         .filter(Boolean)
-        .join("; ");
+        .join(" && ");
     }
     case "wait":
       return "sleep 2";
@@ -399,6 +455,7 @@ async function pageScript(t: ComputerTurn, script: string, seconds: number) {
       `node ${PAGE_RUNNER} ${9200 + t.display} ${limit} ${file}; rm -f ${file}`,
     ].join("\n"),
     limit + 30,
+    { signal: t.signal },
   );
   const at = r.output.lastIndexOf(PAGE_MARK);
   if (at < 0) return `Failed: ${clip(r.output.trim() || `exit code ${r.exit_code}`, 2000)}`;
@@ -426,7 +483,7 @@ async function runFunction(t: ComputerTurn, o: OutputItem) {
       const command = String(args.command ?? "");
       t.step("command", `ran ${command.slice(0, 100)}`);
       const timeout = Math.min(300, Math.max(5, Number(args.timeout_seconds) || 60));
-      const r = await orgo.bash(t.computerId, `mkdir -p /workspace && cd /workspace && export DISPLAY=:${t.display}\n${command}`, timeout);
+      const r = await orgo.bash(t.computerId, `mkdir -p /workspace && cd /workspace && export DISPLAY=:${t.display}\n${command}`, timeout, { signal: t.signal });
       output = `exit code ${r.exit_code}\n${clip(r.output)}`;
     } else if (o.name === "page_script") {
       t.step("page", String(args.what ?? "").trim().slice(0, 100) || "used the page");
@@ -448,7 +505,15 @@ async function runFunction(t: ComputerTurn, o: OutputItem) {
       output = await runCrmTool(s.botId, o.name, args, { sessionId: t.sessionId });
     } else output = `Unknown tool ${o.name}.`;
   } catch (e) {
-    output = `Failed: ${(e as Error).message}`;
+    // Stopped, or Orgo not answering, mid-command: it may have run on the computer all the same, and the
+    // model's told so (kept with the call when it was stopped, for when the task picks up: settle).
+    const unsure = o.name === "run_command" || o.name === "page_script";
+    output =
+      t.signal.aborted && unsure
+        ? "Stopped by the user before the computer answered, so it may or may not have run."
+        : e instanceof OrgoTimeout && unsure
+          ? `Failed: ${e.message}, so it may or may not have run. Check (a quick command, or the screen) before doing it again.`
+          : `Failed: ${(e as Error).message}`;
   }
   return { type: "function_call_output", call_id: o.call_id, output };
 }

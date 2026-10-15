@@ -1,4 +1,5 @@
 import "server-only";
+import { holdAwake } from "./awake";
 import { setting } from "./models";
 import { trackServerEvent } from "./analytics";
 import type { BopsEventProps } from "@/cloud/analytics-rules";
@@ -1660,6 +1661,8 @@ async function run(sessionId: string) {
   const onComputerTool = !mac && (s.runner === "computer" || (!s.agentSessionId && computerToolOn()));
   // Until its cleanup is done (a thread moved to the Mac waits for that: waitsForCloud).
   runs.add(sessionId);
+  // This Mac runs the task, wherever its screen is: it doesn't idle to sleep till it's done.
+  const letSleep = holdAwake();
   try {
     if (mac) folder = taskDir(sessionId);
     const workspace = folder ? join(folder, "workspace") : "/workspace";
@@ -1925,6 +1928,7 @@ async function run(sessionId: string) {
       }
     } finally {
       runs.delete(sessionId);
+      letSleep();
     }
   }
 }
