@@ -50,6 +50,8 @@ export type Issue = {
   openedAt: number;
   updatedAt: number;
   closedAt?: number;
+  /** When the newest message on its thread or ticket came in, as the bot read it there: a repeat open with nothing newer changes nothing. */
+  lastMessageAt?: number;
   /** Oldest first, with an issue's own answer. */
   history?: IssueEvent[];
 };
@@ -69,6 +71,8 @@ export type IssueOpen = {
   url?: string;
   customer?: string;
   note?: string;
+  /** When the newest message on the thread or ticket came in (ms). */
+  lastMessageAt?: number;
 };
 
 export const isIssueId = (id: unknown): id is string => typeof id === "string" && /^issue-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id);

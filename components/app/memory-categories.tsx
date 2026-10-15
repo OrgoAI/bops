@@ -1623,7 +1623,7 @@ function DeleteEverywhere({ sessions, busy, onConfirm, onCancel }: { sessions: D
       <span className="text-[12.5px] font-medium leading-[17px] text-[#3A3A38]">
         {sessions.length
           ? `Delete everywhere? Bops forgets this and deletes ${sessions.length === 1 ? "this chat" : `these ${sessions.length} chats`} from memory:`
-          : "Delete everywhere? No chat in memory came only from this, so Bops forgets it and deletes no chats."}
+          : "Delete everywhere? No Bops chat in memory taught Orbit this, so Bops only forgets it."}
       </span>
       {sessions.length > 0 && (
         <ul className="flex flex-col gap-1">

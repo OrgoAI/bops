@@ -189,6 +189,7 @@ function issueOf(ws: string, s: { id: string; metadata?: Record<string, unknown>
     openedAt: num(m.openedAt) ?? 0,
     updatedAt: num(m.updatedAt) ?? num(m.openedAt) ?? 0,
     ...(num(m.closedAt) ? { closedAt: num(m.closedAt) } : {}),
+    ...(num(m.lastMessageAt) ? { lastMessageAt: num(m.lastMessageAt) } : {}),
   };
 }
 
@@ -287,7 +288,8 @@ export async function getIssue(ws: string, id: string): Promise<Issue | null> {
 /**
  * Open an issue, or, when one is open (or was) for the same thread or ticket (sourceApp and externalId) in
  * this workspace, update that one: what's given replaces what it said, its tags are added to, and a done
- * one opens again. Answers the issue and whether it's new.
+ * one opens again, when the thread has something newer than the issue last saw (lastMessageAt). Nothing
+ * changed, nothing is written. Answers the issue and whether it's new.
  */
 export function openIssue(ws: string, input: IssueOpen, by: IssueBy = {}): Promise<{ issue: Issue; created: boolean }> {
   bankOrThrow(ws);
@@ -309,25 +311,34 @@ export function openIssue(ws: string, input: IssueOpen, by: IssueBy = {}): Promi
       const [had] = await findSessions(ws, { sourceApp, externalId });
       const was = had ? issueOf(ws, had) : null;
       if (had && was) {
+        // Something new on the thread (a newer message than the issue last saw, or a bot that doesn't say
+        // when): its status is the bot's, and a done one opens again. A repeat with nothing newer (a
+        // routine that runs while the customer waits) keeps what the issue says and its status, the user's included.
+        const last = input.lastMessageAt && Number.isFinite(input.lastMessageAt) ? input.lastMessageAt : undefined;
+        const fresh = !last || !was.lastMessageAt || last > was.lastMessageAt;
         const next: Issue = {
           ...was,
-          title,
-          summary: summary || was.summary,
+          title: fresh ? title : was.title,
+          summary: fresh ? summary || was.summary : was.summary,
           tags: [...new Set([...was.tags, ...tags])].slice(0, MAX_TAGS),
           ...(priority ? { priority } : {}),
           ...(url ? { url } : {}),
           ...(customer ? { customer } : {}),
-          status: status ?? (was.status === "done" ? "open" : was.status),
+          ...(last && fresh ? { lastMessageAt: last } : {}),
+          status: fresh ? (status ?? (was.status === "done" ? "open" : was.status)) : was.status,
           updatedAt: now,
         };
         if (next.status !== "done") delete next.closedAt;
         else next.closedAt ??= now;
-        await had.setMetadata(metadataOf(next));
         const lines: [IssueEvent["kind"], string][] = [];
         if (was.status === "done" && next.status !== "done") lines.push(["status", "Opened again"]);
         else if (next.status !== was.status) lines.push(["status", `Status changed to ${statusLabel(next.status)}`]);
-        lines.push(["updated", `Updated: ${title}${summary ? `. ${summary}` : ""}`]);
+        if (next.title !== was.title || next.summary !== was.summary) lines.push(["updated", `Updated: ${next.title}${next.summary ? `. ${next.summary}` : ""}`]);
         if (input.note) lines.push(["note", text(input.note, 2000)]);
+        const same = (k: keyof Issue) => JSON.stringify(next[k]) === JSON.stringify(was[k]);
+        // Nothing changed: nothing written, no line in its history.
+        if (!lines.length && (["tags", "priority", "url", "customer", "lastMessageAt"] as const).every(same)) return { issue: was, created: false };
+        await had.setMetadata(metadataOf(next));
         for (const [kind, line] of lines) await say(ws, had, by, kind, line);
         cachePut(ws, next, next.id, ours);
         return { issue: next, created: false };
@@ -343,6 +354,7 @@ export function openIssue(ws: string, input: IssueOpen, by: IssueBy = {}): Promi
       summary,
       ...(sourceApp ? { sourceApp } : {}),
       ...(externalId ? { externalId } : {}),
+      ...(input.lastMessageAt && Number.isFinite(input.lastMessageAt) ? { lastMessageAt: input.lastMessageAt } : {}),
       ...(url ? { url } : {}),
       ...(customer ? { customer } : {}),
       ...(by.botId ? { botId: by.botId } : {}),

@@ -96,6 +96,7 @@ function issueTools(b: Bot) {
         url: NULLABLE("string", "A link to it in that app, or null."),
         customer: NULLABLE("string", "Who it's for (a person or company), or null."),
         note: NULLABLE("string", "A note for its history, or null."),
+        last_message_at: NULLABLE("string", "When the newest message on the thread or ticket came in (ISO 8601, from the app), or null. Called again with nothing newer, the issue keeps its status."),
       },
     ),
     tool(
@@ -173,6 +174,7 @@ async function runIssueTool(b: Bot, name: string, args: Record<string, unknown>,
         url: str(args.url),
         customer: str(args.customer),
         note: str(args.note),
+        lastMessageAt: Number.isFinite(Date.parse(String(args.last_message_at ?? ""))) ? Date.parse(String(args.last_message_at)) : undefined,
       },
       by,
     );

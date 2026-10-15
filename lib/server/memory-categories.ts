@@ -1,11 +1,11 @@
 import "server-only";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CATEGORIES, CATEGORY_IDS, categoriesOpen, type CategoryId, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
 import { creditsOut, noteOutOfCredit } from "./cloud";
 import { MAIN_WORKSPACE } from "@/lib/types";
-import { bankOf, bankOwner, cardOf, dream as askToDream, existingFacts, factSource, factsByIds, memoryOn, privateLines, purgeMemory, scanFacts, sessionWorkspace, type FactRow } from "./memory";
+import { bankOf, bankOwner, bindingOf, cardOf, dream as askToDream, existingFacts, factSource, factsByIds, memoryOn, privateLines, purgeMemory, saidSince, scanFacts, sessionWorkspace, type FactRow } from "./memory";
 import { openaiClient } from "./openai-client";
 import { onPostgres } from "./persist";
 import { getState, ownerName, sameState, stateEpoch, userDir } from "./store";
@@ -43,7 +43,8 @@ import { currentWorkspaceId } from "./workspaces";
  * memory no longer has them (tried again until it doesn't). What's kept of a forgotten item is hashes
  * only, never its text: of its key, and of its key with each fact's words, so that a fact memory works
  * out again from the old chats is deleted when it comes in, and the item stays gone. Delete everywhere
- * also deletes the chats and calls in memory its facts came from.
+ * also deletes the memory copy of the chats and calls in Bops its facts came from (never a session
+ * Bops has no copy of: the user's other agents', a chat deleted from Bops).
  */
 
 /** A sweep reads this many of the newest facts; anything sorted that isn't among them is checked with memory by id. */
@@ -84,6 +85,8 @@ type Index = {
   /** The workspace whose Orbit this is, and the bank (Honcho workspace) its memory is in. */
   ws?: string;
   bank: string;
+  /** The user's peer in that bank: what's still to delete there can be, after the workspace moved to another bank. */
+  peer?: string;
   /** The categories it was sorted into: when they change, items in one that's gone go, and facts that made nothing are sorted again. */
   cats?: string;
   /**
@@ -93,8 +96,8 @@ type Index = {
   facts: Record<string, Fact>;
   items: Record<string, Item>;
   /**
-   * What the user forgot, as hashes only (and when). items: an item's key (only something said in a chat
-   * brings it back). facts: an item's key with a fact's words (memory working that fact out again: it's
+   * What the user forgot, as hashes only (and when). items: an item's key (only something the user says in
+   * a chat after the forget, or a fact saved after it, brings it back: bringsBack). facts: an item's key with a fact's words (memory working that fact out again: it's
    * deleted as it comes in), or a fact's id (a fact worked out from it goes too).
    */
   tomb: { items: Record<string, number>; facts: Record<string, number> };
@@ -175,6 +178,11 @@ const fileOf = (ws: string) => {
   const dir = dirOf();
   return dir ? join(/*turbopackIgnore: true*/ dir, `ws-${safe(ws)}.json`) : null;
 };
+/** A workspace's index for a bank it used before: kept when it moves to another bank, and back when it returns. */
+const stashOf = (ws: string, bank: string) => {
+  const dir = dirOf();
+  return dir ? join(/*turbopackIgnore: true*/ dir, `ws-${safe(ws)}@${safe(bank)}.json`) : null;
+};
 /** Where a bank's index was kept before Orbit was per workspace. */
 const legacyFileOf = (bank: string) => {
   const dir = dirOf();
@@ -217,7 +225,9 @@ function readIndex(file: string | null, what: string): Index | null {
 /**
  * The workspace's index for the account signed in, from its file once. The first time, the index kept per
  * bank before moves to the workspace whose bank it is, and is swept soon (what other workspaces sharing
- * the bank taught it goes). A workspace now on another bank starts over.
+ * the bank taught it goes); its forgotten list, hashed, goes to every workspace on the bank, and the
+ * old file keeps only that. A workspace now on another bank starts over, or from the index it had there:
+ * the one for the bank it leaves is kept (its forgotten list, and what's still to delete there).
  */
 function load(ws: string): Index {
   const b = space(ws);
@@ -227,19 +237,31 @@ function load(ws: string): Index {
   let index = empty(ws, bank);
   let read = readIndex(file, ws);
   let moved: string | null = null;
-  if (!read && file && !existsSync(/*turbopackIgnore: true*/ file) && bankOwner(bank) === ws) {
-    const old = legacyFileOf(bank);
-    read = readIndex(old, bank);
-    if (read) moved = old;
+  let restored: string | null = null;
+  let legacyTomb: Index | null = null;
+  if (read && read.bank !== bank) {
+    keep(stashOf(ws, read.bank), read);
+    read = null;
+    void drainStashes(ws);
   }
-  if (read && read.bank !== bank) read = null;
+  if (!read) {
+    const st = stashOf(ws, bank);
+    read = readIndex(st, ws);
+    if (read?.bank === bank) restored = st;
+    else read = null;
+  }
+  if (!read && file && !existsSync(/*turbopackIgnore: true*/ file)) {
+    const old = legacyFileOf(bank);
+    const legacy = readIndex(old, bank);
+    if (legacy?.bank === bank && bankOwner(bank) === ws) {
+      read = legacy;
+      moved = old;
+    } else if (legacy?.bank === bank) legacyTomb = legacy;
+  }
   if (read) {
     index = { ...empty(ws, bank), ...read, ws };
     index.tomb ??= { items: {}, facts: {} };
-    // Forgotten keys kept in plain text before: hashed, and the text dropped.
-    const was = Array.isArray(index.forgotten) ? Object.fromEntries((index.forgotten as unknown as string[]).map((k) => [k, Date.now()])) : (index.forgotten ?? {});
-    for (const [k, at] of Object.entries(was)) index.tomb.items[itemTomb(k)] = at;
-    delete index.forgotten;
+    hashForgotten(index);
     // Moved from the bank's index: swept at the window's next poll.
     if (moved) index.sweptAt = index.syncedAt = index.triedAt = undefined;
     // Sorted into other categories: items in one that's gone go with it, and what made nothing may fit
@@ -257,15 +279,74 @@ function load(ws: string): Index {
     }
     index.cats = CATS;
   }
+  // Another workspace on the bank: what was forgotten in the bank's index stays forgotten here too.
+  if (legacyTomb) {
+    hashForgotten(legacyTomb);
+    Object.assign(index.tomb.items, legacyTomb.tomb?.items);
+    Object.assign(index.tomb.facts, legacyTomb.tomb?.facts);
+  }
+  index.peer = bindingOf(ws).peer;
   b.index = index;
   b.file = file ?? undefined;
   b.rows = undefined;
   b.rev++;
-  if (moved) {
-    save(ws, index);
-    rmSync(/*turbopackIgnore: true*/ moved, { force: true });
+  if (moved || restored || legacyTomb) save(ws, index);
+  // The bank's old file keeps only the hashes of what was forgotten, for the other workspaces on it.
+  if (moved) keep(moved, { ...empty("", bank), ws: undefined, tomb: index.tomb });
+  if (restored) {
+    rmSync(/*turbopackIgnore: true*/ restored, { force: true });
+    // What was still to delete there: on with it.
+    if (index.purge) void purge(ws);
   }
   return index;
+}
+
+/** Forgotten keys kept in plain text before: hashed, and the text dropped. */
+function hashForgotten(index: Index) {
+  index.tomb ??= { items: {}, facts: {} };
+  const was = Array.isArray(index.forgotten) ? Object.fromEntries((index.forgotten as unknown as string[]).map((k) => [k, Date.now()])) : (index.forgotten ?? {});
+  for (const [k, at] of Object.entries(was)) index.tomb.items[itemTomb(k)] = at;
+  delete index.forgotten;
+}
+
+/** An index written whole to a file other than the workspace's own (a bank's kept index), readable by this user only. */
+function keep(file: string | null, index: Index) {
+  if (!file) return;
+  mkdirSync(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ file, ".."), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
+  try {
+    writeFileSync(/*turbopackIgnore: true*/ tmp, JSON.stringify(index), { mode: 0o600 });
+    renameSync(/*turbopackIgnore: true*/ tmp, file);
+  } catch (e) {
+    rmSync(/*turbopackIgnore: true*/ tmp, { force: true });
+    console.warn(`[categories] keeping an index: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * What's still to delete in a bank the workspace no longer uses (forgotten there, then it moved): deleted
+ * there, with that bank's peer, at the move and at every sweep, until nothing is left.
+ */
+async function drainStashes(ws: string) {
+  const dir = dirOf();
+  if (!dir || !existsSync(/*turbopackIgnore: true*/ dir)) return;
+  const ours = sameState();
+  const mine = readdirSync(/*turbopackIgnore: true*/ dir).filter((n) => n.startsWith(`ws-${safe(ws)}@`) && n.endsWith(".json"));
+  for (const name of mine) {
+    const file = join(/*turbopackIgnore: true*/ dir, name);
+    const kept = readIndex(file, ws);
+    const p = kept?.purge;
+    if (!kept || !p || !kept.peer || kept.bank === bankOf(ws) || (!p.facts.length && !p.cards.length && !p.sessions.length)) continue;
+    const cards = new Set(p.cards);
+    const left = await purgeMemory(ws, { facts: p.facts, cardLine: cards.size ? (l) => cards.has(wordsHash(l)) : undefined, sessions: p.sessions }, { bank: kept.bank, peer: kept.peer }).catch(() => null);
+    // Back on that bank meanwhile (the file is the workspace's own again), or another account: left as it is.
+    if (!left || !ours() || !existsSync(/*turbopackIgnore: true*/ file)) continue;
+    p.facts = left.facts;
+    p.sessions = left.sessions;
+    if (!left.card) p.cards = [];
+    if (!p.facts.length && !p.cards.length && !p.sessions.length && !Object.keys(p.need).length) kept.purge = undefined;
+    keep(file, kept);
+  }
 }
 
 /**
@@ -368,26 +449,33 @@ function keyOfRaw(raw: Raw) {
 
 /**
  * A fact memory worked out again from what was forgotten: sorted as nothing, and deleted from memory (a
- * card line comes off the card).
+ * card line comes off the card: kept as the hash of its words only, never as "card:<line>").
  */
 function bury(index: Index, f: { id: string; text: string; at: number; session: string | null }) {
   const words = wordsHash(f.text);
+  if (index.failures?.[f.id]) delete index.failures[f.id];
+  if (f.id.startsWith(CARD)) return toPurge(index, { cards: [words] });
   index.facts[f.id] = { items: [], at: f.at || Date.now(), s: f.session, h: words };
-  toPurge(index, f.id.startsWith(CARD) ? { cards: [words] } : { facts: [f.id] });
+  toPurge(index, { facts: [f.id] });
 }
+
+/**
+ * A fact about a forgotten item that may bring it back: something the user said in that chat after the
+ * forget (their messages, by this Mac's clock: not when memory worked the fact out, which can be minutes
+ * after the chat), or a fact saved after it (by hand or a bot's remember). Never a card line, what memory
+ * works out, or a fact from a task or another agent.
+ */
+const bringsBack = (f: { at: number; session: string | null; how: ItemSource["how"] }, forgotAt: number) =>
+  f.how === "said" ? saidSince(f.session, forgotAt) : f.how === "saved" && (!f.session || f.session.startsWith("bops-notes-")) && (f.at || 0) > forgotAt;
 
 function upsert(index: Index, byKey: Map<string, string>, raw: Raw, src: ItemSource): { id: string; said: Said } | null {
   const key = keyOfRaw(raw);
   if (!key) return null;
   const category = raw.category as CategoryId;
   const title = clip(raw.title, 90);
-  // Forgotten: only something new said in a chat brings it back (a fact memory works out again from the old
-  // chats never gets here: apply deletes it), never a card line, what memory works out, or a fact saved.
+  // Forgotten, and brought back by something new (bringsBack: apply buries everything else about it).
   const forgot = itemTomb(key);
-  if (Object.hasOwn(index.tomb.items, forgot)) {
-    if (src.how !== "said") return null;
-    delete index.tomb.items[forgot];
-  }
+  if (Object.hasOwn(index.tomb.items, forgot)) delete index.tomb.items[forgot];
   const known = byKey.get(key);
   let item = known && Object.hasOwn(index.items, known) ? index.items[known] : undefined;
   if (!item) {
@@ -742,13 +830,14 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
     }
     index.sweptAt = Date.now();
     b.rows = undefined;
+    void drainStashes(ws);
   }
 
   // New: card lines first (who the user is, their people), then the newest facts not sorted yet. A fact
   // that failed waits longer each time (30 minutes, then an hour) before it's tried again.
   const inScope = (r: FactRow) => !index.floorAt || r.at >= index.floorAt;
   const fresh: Fresh[] = [
-    ...(lines ?? []).filter((l) => !Object.hasOwn(index.facts, `card:${l}`) && !failing(`card:${l}`)).map((l) => ({ id: `card:${l}`, text: l, at: Date.now(), session: null, level: "card", how: "card" as const })),
+    ...(lines ?? []).filter((l) => !Object.hasOwn(index.facts, `card:${l}`) && !failing(`card:${l}`) && !index.purge?.cards.includes(wordsHash(l))).map((l) => ({ id: `card:${l}`, text: l, at: Date.now(), session: null, level: "card", how: "card" as const })),
     ...rows.filter((r) => !Object.hasOwn(index.facts, r.id) && inScope(r) && !failing(r.id)).map((r) => ({ ...r, how: howOf(r.level, r.session) })),
   ];
   // Worked out by memory from a fact that was forgotten: deleted, without asking the model.
@@ -831,17 +920,17 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
     batch.forEach((f, j) => {
       const raws = got.get(j) ?? [];
       const words = wordsHash(f.text);
-      // About something forgotten, and memory had it from before (worked out again from the old chats, in
-      // the same words or learned before the forget): deleted, and its item stays gone.
+      // About something forgotten, in a forgotten fact's words, or not brought back by something new (worked
+      // out again from the old chats, a card line, what memory works out): deleted, and its item stays gone.
+      // Kept and hidden instead, it would still reach the bots with nothing in Orbit to forget again.
       const buried = raws.some((raw) => {
         const key = keyOfRaw(raw);
         if (!key) return false;
         const ih = itemTomb(key);
-        return Object.hasOwn(index.tomb.facts, factTomb(ih, words)) || (Object.hasOwn(index.tomb.items, ih) && f.how !== "card" && (f.at || 0) <= index.tomb.items[ih]);
+        return Object.hasOwn(index.tomb.facts, factTomb(ih, words)) || (Object.hasOwn(index.tomb.items, ih) && !bringsBack(f, index.tomb.items[ih]));
       });
       if (buried) {
         bury(index, f);
-        if (index.failures?.[f.id]) delete index.failures[f.id];
         if (!b.purging && !b.timers.has("purge")) void purge(ws);
         return;
       }
@@ -1170,8 +1259,8 @@ export function purge(ws: string): Promise<void> {
 export type DeleteSession = { id: string; name: string; at: number; facts: number; alsoFor: string[] };
 
 /**
- * What Delete everywhere would delete with an item: the sessions in memory its facts came from (a chat's
- * or a call's copy there, every message in it), each with the other items in this Orbit learned from it
+ * What Delete everywhere would delete with an item: the sessions in memory its facts came from that Bops
+ * still has the chat or task of (its copy there, every message in it), each with the other items in this Orbit learned from it
  * too, so none goes unsaid. Where a fact was learned is asked of memory for facts sorted before that was kept.
  */
 export async function deletePreview(ws: string, id: string): Promise<DeleteSession[]> {
@@ -1192,8 +1281,10 @@ export async function deletePreview(ws: string, id: string): Promise<DeleteSessi
   if (unknown.length) save(ws, index);
   const out = new Map<string, DeleteSession>();
   for (const f of Object.values(index.facts)) {
-    // A chat, a call or a task in Bops, or the user's other agents' session: not an issue, not a workspace's saved facts.
-    if (!f.items.includes(id) || !f.s || f.s.startsWith("issue-") || f.s.startsWith("bops-notes-")) continue;
+    // Only a chat, a call or a task still in Bops (its copy in memory goes, the chat stays): never the
+    // user's other agents' sessions or a chat deleted from Bops, whose only copy is memory's. Not an issue,
+    // not a workspace's saved facts.
+    if (!f.items.includes(id) || !f.s || !(f.s.startsWith("bops-chat-") || f.s.startsWith("bops-task-")) || !sessionWorkspace(f.s)) continue;
     const x = out.get(f.s) ?? { id: f.s, name: factSource(f.s), at: 0, facts: 0, alsoFor: [] };
     x.at = Math.max(x.at, f.at);
     x.facts++;
@@ -1212,7 +1303,7 @@ export async function deletePreview(ws: string, id: string): Promise<DeleteSessi
 
 /**
  * Delete everywhere: Forget, and delete from memory the sessions its facts came from (deletePreview, all
- * of them, or of `only` those the user was shown). The chats stay in Bops; their copy in memory goes.
+ * of them, or of `only` those the user was shown: never one deletePreview leaves out). The chats stay in Bops; their copy in memory goes.
  * Answers what was deleted.
  */
 export async function deleteEverywhere(ws: string, id: string, only?: string[]) {

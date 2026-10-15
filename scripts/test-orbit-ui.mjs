@@ -204,6 +204,10 @@ answer = (url, method, body) => {
     issues = issues.map((i) => (i.id === decodeURIComponent(m[1]) ? { ...i, ...body, ws: "w1", history: [{ at: 1, who: "Max", text: "Opened" }] } : i));
     return { status: 200, body: { issue: issues.find((i) => i.id === decodeURIComponent(m[1])) } };
   }
+  if (m && method === "GET") {
+    const found = issues.find((i) => i.id === decodeURIComponent(m[1]));
+    return found ? { status: 200, body: { issue: { ...found, history: [{ at: 2, who: "Plain support queue", text: "Reply drafted: Hi Acme", kind: "draft" }] } } } : { status: 404, body: { error: "That issue is gone." } };
+  }
   if (m && method === "DELETE") {
     issues = issues.filter((i) => i.id !== decodeURIComponent(m[1]));
     return { status: 200, body: { ok: true } };
@@ -220,6 +224,14 @@ await test("issues are read for the workspace, in order: open first, urgent firs
   assert.deepEqual([...list.issues].sort(issueOrder).map((i) => i.id), ["issue-1", "issue-3", "issue-2"]);
   assert.equal(list.issues.filter(isOpen).length, 2);
   assert.ok(firstIssueRead, "read with the workspace");
+});
+
+await test("an issue opened from the list gets its history from its own answer", async () => {
+  assert.equal(issueStore.list("u1", "w1").issues.find((i) => i.id === "issue-3").history, undefined, "the list carries none");
+  await issueStore.loadHistory("u1", "w1", "issue-3");
+  assert.equal(calls.at(-1).url, "/api/orbit/issues/issue-3?ws=w1");
+  assert.equal(calls.at(-1).method, "GET");
+  assert.equal(issueStore.list("u1", "w1").issues.find((i) => i.id === "issue-3").history?.[0]?.text, "Reply drafted: Hi Acme");
 });
 
 await test("a status change shows at once and then as the server has it (with history)", async () => {

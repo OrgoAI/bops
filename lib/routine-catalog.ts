@@ -67,7 +67,7 @@ const CHAT_NEVER = (app: string) => [`Post or reply in ${app}`, "React to or edi
 const SORT = "Sort with the tags listed with your routines (the workspace's own tags too).";
 /** How a support starter keeps track: one issue in Orbit per thread or ticket, opened or updated by its id there. */
 const ISSUE = (app: string, what: string, id: string) =>
-  `Keep each one as an issue in Orbit: orbit_issue_open with source_app "${app}" and external_id ${id}, with the title, a short summary, the tags, the customer and a link, for ${what}. It updates the issue already open for that ${id.startsWith("the ticket") ? "ticket" : "thread"} instead of making another, so call it for every new message on it; when one is answered or fixed, orbit_issue_update its status.`;
+  `Keep each one as an issue in Orbit: orbit_issue_open with source_app "${app}" and external_id ${id}, with the title, a short summary, the tags, the customer, a link and last_message_at (when its newest message came in), for ${what}. It updates the issue already open for that ${id.startsWith("the ticket") ? "ticket" : "thread"} instead of making another, so call it when there's a new message on it, not again while it only waits; when one is answered or fixed, orbit_issue_update its status.`;
 
 /** Slack and Discord work the same way: one pair of starters each. */
 const chatApp = (app: "slack" | "discord", name: string): RoutineTemplate[] => [
@@ -266,7 +266,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
       "With call_api on the Plain key, read the support queue with a GraphQL query (POST /graphql/v1 with a query, never a mutation):",
       "threads with status TODO, newest first, with their customer, title and when they came in.",
       "Tell me about threads that are new since the last run, or waiting more than 2 hours, tagged Customer, Bug or Outage, with a short draft answer for each.",
-      ISSUE("plain", "each of those threads, its status Waiting on us while the customer waits", "the ticket's thread id in Plain"),
+      ISSUE("plain", "each thread that is new or has a new message since the last run, its status Waiting on us while the customer waits", "the ticket's thread id in Plain"),
       `Read only in Plain: never assign, reply to, or change a thread. ${READS_ONLY}`,
       "If nothing new or waiting, answer NOTHING.",
     ].join(" "),

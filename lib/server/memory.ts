@@ -82,6 +82,14 @@ export function sessionWorkspace(sessionId: string | null): string | null {
   return null;
 }
 
+/** The user said something in this Bops chat after `at` (this Mac's clock): what a forgotten item needs to come back. */
+export function saidSince(sessionId: string | null, at: number): boolean {
+  if (!sessionId?.startsWith("bops-chat-")) return false;
+  const st = getState();
+  const c = st.chats.find((x) => sessionId === `bops-chat-${clean(x.id)}`);
+  return !!c && st.messages.some((m) => m.chatId === c.id && m.role === "user" && m.at > at);
+}
+
 /** The workspace a bot's memory comes from. */
 export const wsOf = (botId: string) => workspaceOf(bot(botId));
 
@@ -910,8 +918,13 @@ const notFound = (e: unknown) => (e as { status?: number }).status === 404;
  * with learn and the other forgets; the card written once. Then checked with memory itself: what's still
  * there (a delete that failed, or one memory didn't apply) is returned, to be tried again. Gone already is fine.
  */
-export function purgeMemory(ws: string, what: { facts: string[]; cardLine?: (line: string) => boolean; sessions: string[] }): Promise<{ facts: string[]; card: boolean; sessions: string[] }> {
-  const b = bindingOf(ws);
+export function purgeMemory(
+  ws: string,
+  what: { facts: string[]; cardLine?: (line: string) => boolean; sessions: string[] },
+  /** Another bank than the workspace's now (one it used before: what was still to delete there). */
+  on?: Binding,
+): Promise<{ facts: string[]; card: boolean; sessions: string[] }> {
+  const b = on ?? bindingOf(ws);
   const x = bankFor(b);
   const run = x.queue.then(async () => {
     const p = await peer(b);
@@ -948,7 +961,14 @@ export function purgeMemory(ws: string, what: { facts: string[]; cardLine?: (lin
     const still = asked.length ? await p.conclusions.getMany(asked).catch(() => asked.map((id) => ({ id }))) : [];
     for (const c of still) failed.facts.add(c.id);
     if (what.cardLine && !failed.card) failed.card = ((await p.getCard().catch(() => null)) ?? []).some(what.cardLine);
-    categoriesDropped(b.bank, what.facts.filter((id) => !failed.facts.has(id)));
+    const gone = new Set(what.facts.filter((id) => !failed.facts.has(id)));
+    categoriesDropped(b.bank, [...gone]);
+    // Nothing keeps their words: the memory review's flags go too.
+    if (gone.size && reviews()[b.bank])
+      setReview(b.bank, (r) => {
+        r.flagged = r.flagged.filter((f) => !gone.has(f.id));
+        r.kept = r.kept.filter((id) => !gone.has(id));
+      });
     return { facts: [...failed.facts], card: failed.card, sessions: [...failed.sessions] };
   });
   x.queue = run.catch(() => {});

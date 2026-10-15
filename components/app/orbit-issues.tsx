@@ -258,6 +258,18 @@ async function update(user: string, ws: string, id: string, patch: IssuePatch): 
   }
 }
 
+/** An issue's history, read when it's opened (the list comes without it): into the copy here. */
+function loadHistory(user: string, ws: string, id: string) {
+  const s = sharedOf(user, ws);
+  return fetch(url(ws, id), { cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j: unknown) => {
+      const got = issueOf((j as { issue?: unknown } | null)?.issue ?? j);
+      if (got?.history) patchHere(s, (all) => all.map((i) => (i.id === id ? { ...i, history: got.history } : i)));
+    })
+    .catch(() => {});
+}
+
 /** Deletes an issue and its history from memory. Gone from the lists once the server says so. */
 async function remove(user: string, ws: string, id: string): Promise<string | null> {
   const s = sharedOf(user, ws);
@@ -272,9 +284,9 @@ async function remove(user: string, ws: string, id: string): Promise<string | nu
 }
 
 /** The store without React, for scripts/test-orbit-ui.mjs. */
-export const issueStore = { watch, update, remove, list: (user: string, ws: string) => shared.get(keyOf(user, ws))?.list ?? null };
+export const issueStore = { watch, update, remove, loadHistory, list: (user: string, ws: string) => shared.get(keyOf(user, ws))?.list ?? null };
 
-export type IssueActs = { update: (id: string, patch: IssuePatch) => Promise<string | null>; remove: (id: string) => Promise<string | null> };
+export type IssueActs = { update: (id: string, patch: IssuePatch) => Promise<string | null>; remove: (id: string) => Promise<string | null>; history: (id: string) => void };
 
 /** A workspace's issues as the signed-in account sees them (null until they're in), and how to change them. */
 export function useIssues(ws: string, user = "") {
@@ -282,7 +294,8 @@ export function useIssues(ws: string, user = "") {
   const list = useSyncExternalStore(subscribe, () => shared.get(keyOf(user, ws))?.list ?? null, () => null);
   const updateOne = useCallback((id: string, patch: IssuePatch) => update(user, ws, id, patch), [user, ws]);
   const removeOne = useCallback((id: string) => remove(user, ws, id), [user, ws]);
-  return { list, acts: { update: updateOne, remove: removeOne } as IssueActs };
+  const historyOf = useCallback((id: string) => void loadHistory(user, ws, id), [user, ws]);
+  return { list, acts: { update: updateOne, remove: removeOne, history: historyOf } as IssueActs };
 }
 
 /* ---------------- Marks ---------------- */
@@ -498,6 +511,9 @@ function IssueView({ issue, acts, tags, onBack, onClose }: { issue: Issue; acts:
     if (e) setError(e);
     return !e;
   };
+  // Its history, which the list doesn't carry: read on opening.
+  const { history: readHistory } = acts;
+  useEffect(() => readHistory(issue.id), [readHistory, issue.id]);
   // Esc goes back to the list (not while a field or the Delete question has it: they handle Esc themselves).
   useEffect(() => {
     const esc = (e: KeyboardEvent) => {

@@ -470,7 +470,7 @@ const WORKSPACES = [
   ...["ws_big", "ws_window", "ws_scan", "ws_switch", "ws_tidy", "ws_tidy2", "ws_tidy3", "ws_tidy4", "ws_tz", "ws_budget", "ws_retry", "ws_split", "ws_range", "ws_more", "ws_serial"],
   ...["ws_hide", "ws_card", "ws_card2", "ws_older", "ws_names", "ws_keys", "ws_ranges", "ws_known", "ws_ids"],
   ...["ws_outage", "ws_lock", "ws_oldidx", "ws_behind", "ws_more2", "ws_more3", "ws_prune", "ws_rows", "ws_cardnow", "ws_wait2", "ws_learn", "ws_rev", "ws_setting"],
-  ...["ws_you", "ws_chat", "ws_add", "ws_multi", "ws_everywhere", "ws_shareA", "ws_shareB", "ws_moved", "ws_movedB"],
+  ...["ws_you", "ws_chat", "ws_add", "ws_multi", "ws_everywhere", "ws_shareA", "ws_shareB", "ws_moved", "ws_movedB", "ws_rebank", "ws_rebankTo", "ws_review"],
 ];
 S.update((s) => {
   s.owner = { name: "Tiger" };
@@ -1068,15 +1068,19 @@ await section("Forgetting an item: memory deletes every fact and card line it wa
     // Memory worked out more from the chat before the forget, not sorted yet (it waits for more to sort together).
     const before = addFact(bb, "Tiger told Max that Priya Nair likes early meetings.", { at: Date.now() - 60_000, session: MAX_CHAT });
     SORTS.set(before.text, P());
+    const savedBefore = addFact(bb, "Priya Nair's office is in Soho.", { at: Date.now() - 60_000 });
+    SORTS.set(savedBefore.text, P());
     assert.equal((await post({ action: "forget", ws: wb, ids: [was.id] })).status, 200);
     await MC.purge(wb);
     assert.ok(!factIds(bb).includes(B.p1.id));
-    // Not from a card line memory wrote again, what memory worked out, or a fact saved with no chat: those are sorted as nothing.
+    // Not from a card line memory wrote again, what memory worked out, or what memory works out from the old
+    // chat minutes later (after the forget, in new words, with nothing new said there): deleted from memory too,
+    // or the bots would still get them with nothing in Orbit to forget again.
     const line = "Tiger's investor is Priya Nair, from Orbit Capital.";
     SORTS.set(line, P());
     await Mem.pinFact(wb, line);
     const figured = newFact(wb, "Priya Nair probably invests in fintech.", P(), { level: "deductive", session: MAX_CHAT });
-    const saved = newFact(wb, "Priya Nair's office is in Soho.", P());
+    const lagged = newFact(wb, "Tiger mentioned Priya Nair is based in London.", P(), { session: MAX_CHAT });
     // Memory working out again what it had from the old chat, in the same words (a new id): deleted as it comes in.
     const again = newFact(wb, "Tiger's investor, Priya Nair, joined the board", P(), { session: MAX_CHAT });
     // Worked out from a forgotten fact: deleted too, without asking the model.
@@ -1085,18 +1089,35 @@ await section("Forgetting an item: memory deletes every fact and card line it wa
     let back = await refresh(wb);
     await MC.purge(wb);
     assert.ok(!back.items.some((i) => i.title === "Priya Nair"), "still forgotten");
-    for (const [what, id] of [["the card line", `card:${line}`], ["what memory worked out", figured.id], ["a fact saved with no chat", saved.id]])
-      assert.deepEqual(indexOf(bb).facts[id]?.items, [], `${what}: sorted as nothing`);
-    for (const [what, fact] of [["what memory had from before the forget", before], ["the same words again", again], ["what was worked out from a forgotten fact", derived]])
-      assert.ok(!factIds(bb).includes(fact.id), `${what}: deleted from memory`);
+    const facts = [
+      ["what memory had from before the forget", before],
+      ["a fact saved before the forget", savedBefore],
+      ["the same words again", again],
+      ["what was worked out from a forgotten fact", derived],
+      ["what memory worked out", figured],
+      ["a chat's fact worked out after the forget, with nothing new said", lagged],
+    ];
+    for (const [what, fact] of facts) assert.ok(!factIds(bb).includes(fact.id), `${what}: deleted from memory`);
+    assert.ok(!(hbank(bb).cards.get("user") ?? []).includes(line), "the card line comes off the card");
+    assert.ok(!readFileSync(fileFor(bb), "utf8").includes("Orbit Capital"), "and its words aren't kept here");
     assert.ok(!openai.calls.some((c) => c.texts.includes(derived.text)), "a fact worked out from a forgotten one isn't sent to the model");
     assert.ok(!back.items.some((i) => i.title === "Board change"));
     // Said in a chat after the forget, in new words: she's back, at once (no waiting for memory to settle).
+    S.update((s) => void s.messages.push({ id: "m_priya_back", chatId: botChatId("max"), role: "user", text: "Priya leads the next round.", at: Date.now() }));
     const said = newFact(wb, "Tiger said Priya Nair leads the next round.", P("Leads your next round"), { session: MAX_CHAT });
     back = await refresh(wb);
     const again2 = one(back.items, "people", "Priya Nair");
     assert.notEqual(again2.id, was.id, "a new item");
     assert.deepEqual([again2.detail, again2.sources.map((s) => s.fact)], ["Leads your next round", [said.id]]);
+    await check("A fact saved by hand after the forget brings a forgotten item back, where the user can see it and forget it again", async () => {
+      const O = (d) => [item("people", "Omar Haddad", { key: "omar haddad", detail: d })];
+      seed(wb, [["o1", 5, "Tiger's lawyer is Omar Haddad.", O("Your lawyer")]]);
+      const omar = one((await refresh(wb)).items, "people", "Omar Haddad");
+      assert.equal((await post({ action: "forget", ws: wb, ids: [omar.id] })).status, 200);
+      await MC.purge(wb);
+      newFact(wb, "Omar Haddad's new office is on Pine Street.", O("Office on Pine Street"));
+      assert.equal(one((await refresh(wb)).items, "people", "Omar Haddad").detail, "Office on Pine Street");
+    });
     await check("Once a forgotten item is back, what memory works out about it and a new card line are its own again", async () => {
       const later = newFact(wb, "Priya Nair tends to back seed rounds.", P(), { level: "deductive" });
       const line2 = "Tiger's lead investor is Priya Nair.";
@@ -1213,14 +1234,21 @@ await section("Delete everywhere: the chats in memory an item came from are list
   const bank = Mem.bankOf(ws);
   const CHAT_A = "bops-chat-everywhere-a";
   const CALL = "bops-chat-everywhere-call";
+  // The chats Bops has (the ones a Delete everywhere may delete the memory copy of).
+  S.update((s) => {
+    for (const id of ["everywhere-a", "everywhere-call", "elsewhere", "notary-1", "notary-2", "florist"]) s.chats.push({ id, kind: "bot", botIds: ["max"], createdAt: 0, typing: [] });
+  });
   const P = (name, detail) => item("people", name, { key: name.toLowerCase(), detail });
   const E = seed(ws, [
     ["e1", 30, "Tiger's accountant is Hana Kim.", [P("Hana Kim", "Your accountant")], { session: CHAT_A }],
     ["e2", 20, "Hana Kim and Leo Park did Tiger's taxes.", [P("Hana Kim", "Your accountant"), P("Leo Park", "Helps with your taxes")], { session: CALL }],
     ["e3", 10, "Hana Kim prefers email.", [P("Hana Kim", "Your accountant")]],
     ["e4", 5, "Leo Park moved to Austin.", [P("Leo Park", "Helps with your taxes")], { session: "bops-chat-elsewhere" }],
+    // From the user's other agent, and from a chat deleted from Bops: memory has the only copy, never deleted here.
+    ["e5", 4, "Hana Kim works from Busan.", [P("Hana Kim", "Your accountant")], { session: "hermes-7" }],
+    ["e6", 3, "Hana Kim bills quarterly.", [P("Hana Kim", "Your accountant")], { session: "bops-chat-gone-1" }],
   ]);
-  for (const [id, peers] of [[CHAT_A, 2], [CALL, 2], ["bops-chat-elsewhere", 1]]) hbank(bank).sessions.set(id, { id, metadata: { app: "bops" }, configuration: {}, peers: {}, messages: Array.from({ length: peers }, (_, k) => ({ id: `${id}-${k}`, content: "x" })) });
+  for (const [id, peers] of [[CHAT_A, 2], [CALL, 2], ["bops-chat-elsewhere", 1], ["hermes-7", 1], ["bops-chat-gone-1", 1]]) hbank(bank).sessions.set(id, { id, metadata: { app: "bops" }, configuration: {}, peers: {}, messages: Array.from({ length: peers }, (_, k) => ({ id: `${id}-${k}`, content: "x" })) });
   const items = (await refresh(ws)).items;
   const hana = one(items, "people", "Hana Kim");
   // An index from before kept no session per fact: memory is asked.
@@ -1250,6 +1278,10 @@ await section("Delete everywhere: the chats in memory an item came from are list
   await MC.purge(ws);
   assert.ok(!hbank(bank).sessions.has(CHAT_A) && !hbank(bank).sessions.has(CALL), "both sessions deleted in memory, with their messages");
   assert.ok(hbank(bank).sessions.has("bops-chat-elsewhere"), "a chat she wasn't learned from stays");
+  assert.ok(hbank(bank).sessions.has("hermes-7") && hbank(bank).sessions.has("bops-chat-gone-1"), "another agent's session and a chat no longer in Bops stay");
+  const forged = await post({ action: "deleteEverywhere", ws, id: "0123456789", sessions: ["hermes-7"] });
+  assert.equal(forged.status, 400);
+  assert.ok(hbank(bank).sessions.has("hermes-7"), "a session asked for by name that the preview leaves out stays");
   assert.deepEqual(factIds(bank), [E.e4.id], "and every fact she was learned from");
   assert.deepEqual((await get(ws)).body.items.map((i) => i.title), ["Leo Park"], "Leo stays, from his own fact");
   await check("Only the sessions the user was shown are deleted; one not listed stays", async () => {
@@ -1370,7 +1402,11 @@ await section("An index kept per bank before moves to the workspace whose bank i
   const n = openai.calls.length;
   const first = await get(ws);
   assert.deepEqual(first.body.items.map((i) => i.title).sort(), ["Lou", "Zed"], "moved as it was");
-  assert.ok(!existsSync(old), "the old file is gone");
+  const kept = JSON.parse(readFileSync(old, "utf8"));
+  assert.deepEqual([kept.items, kept.facts, kept.forgotten], [{}, {}, undefined], "the old file keeps only what was forgotten");
+  assert.ok(!readFileSync(old, "utf8").includes("old flame") && !readFileSync(old, "utf8").includes("Lou"), "as hashes");
+  const otherIdx = JSON.parse(readFileSync(join(work, ".data", "memory-categories", `ws-${other}.json`), "utf8"));
+  assert.ok(otherIdx.tomb.items[createHash("sha256").update("item|people:old flame").digest("hex")] === at, "the other workspace on the bank keeps it forgotten too");
   const idx = indexOf(bank);
   assert.equal(idx.ws, ws);
   assert.equal(idx.forgotten, undefined, "forgotten keys in plain text become hashes");
@@ -1380,6 +1416,45 @@ await section("An index kept per bank before moves to the workspace whose bank i
   assert.deepEqual(r.items.map((i) => i.title), ["Lou"], "the next look is a sweep: what the other workspace's chat taught goes");
   assert.equal(openai.calls.length, n, "with nothing sorted again");
   Mem.shareMemory(other, null);
+});
+
+await section("A workspace moved to another bank keeps its forgotten list and what's still to delete for the bank it left", async () => {
+  const ws = "ws_rebank";
+  const bank = Mem.bankOf(ws);
+  const S1 = seed(ws, [["k1", 10, "Tiger's tailor is Ines.", [item("people", "Ines", { key: "ines", detail: "Your tailor" })]]]);
+  const ines = one((await refresh(ws)).items, "people", "Ines");
+  honcho.fail = (c) => (c.method === "DELETE" ? json({ detail: "busy" }, 503) : null);
+  assert.equal((await post({ action: "forget", ws, ids: [ines.id] })).status, 200);
+  await MC.purge(ws);
+  clearTimers(bank);
+  assert.ok(factIds(bank).includes(S1.k1.id), "not deleted yet");
+  honcho.fail = null;
+  Mem.shareMemory(ws, "ws_rebankTo");
+  await get(ws);
+  await until(() => !factIds(bank).includes(S1.k1.id), "deleted in the bank it left");
+  Mem.shareMemory(ws, null);
+  await get(ws);
+  await MC.purge(ws);
+  const idx = JSON.parse(readFileSync(join(work, ".data", "memory-categories", `ws-${ws}.json`), "utf8"));
+  assert.equal(idx.bank, bank);
+  assert.ok(idx.tomb.items[createHash("sha256").update("item|people:ines").digest("hex")], "back on it, Ines is still forgotten");
+  assert.equal(idx.purge, undefined, "with nothing left to delete");
+});
+
+await section("Forget takes a fact out of the memory review too: its words aren't kept in memory-reviews.json", async () => {
+  const ws = "ws_review";
+  const bank = Mem.bankOf(ws);
+  const F = seed(ws, [["v1", 10, "Tiger's dentist is Dr. Vale.", [item("people", "Dr. Vale", { key: "dr vale" })]]]);
+  const file = join(work, ".data", "memory-reviews.json");
+  const was = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+  writeFileSync(file, JSON.stringify({ ...was, [bank]: { at: 1, checked: 1, flagged: [{ id: F.v1.id, text: F.v1.text, group: "passing", sure: 0.9 }], kept: [F.v1.id] } }));
+  globalThis.bopsReviews = undefined;
+  const vale = one((await refresh(ws)).items, "people", "Dr. Vale");
+  assert.equal((await post({ action: "forget", ws, ids: [vale.id] })).status, 200);
+  await MC.purge(ws);
+  const r = JSON.parse(readFileSync(file, "utf8"))[bank];
+  assert.deepEqual([r.flagged, r.kept], [[], []]);
+  assert.ok(!readFileSync(file, "utf8").includes("Dr. Vale"));
 });
 
 /* ---------------- What goes wrong ---------------- */

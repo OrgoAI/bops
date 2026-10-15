@@ -497,6 +497,27 @@ await check("the starters that watch support keep issues, by the thread or ticke
   assert.match(C.templateById("slack-support-watch").goal, /external_id the thread's id in Slack/);
 });
 
+await check("a routine opening the same thread again with nothing newer: no line in its history, and the status the user set stays", async () => {
+  const at = Date.parse("2026-10-15T09:00:00Z");
+  const one = await open(MAIN, { title: "Plain: Beta can't export", summary: "Waiting on us.", status: "waiting_us", sourceApp: "plain", externalId: "th_wait", lastMessageAt: at });
+  assert.equal(one.body.created, true);
+  const s = () => issueSessions(BANK).find((x) => x.metadata.externalId === "th_wait");
+  await patch(MAIN, one.body.issue.id, { status: "done" });
+  const lines = s().messages.length;
+  const meta = JSON.stringify(s().metadata);
+  // The next runs while the customer still waits: the same message, reworded.
+  for (const summary of ["Still waiting on us.", "Waiting more than 2 hours."]) {
+    const again = await open(MAIN, { title: "Plain: Beta can't export", summary, status: "waiting_us", sourceApp: "plain", externalId: "th_wait", lastMessageAt: at });
+    assert.deepEqual([again.body.created, again.body.issue.status], [false, "done"]);
+  }
+  assert.equal(s().messages.length, lines, "no line added");
+  assert.equal(JSON.stringify(s().metadata), meta, "nothing written");
+  // The customer writes again: that's new, so it's the bot's status again.
+  const newer = await open(MAIN, { title: "Plain: Beta can't export", summary: "They wrote again.", status: "waiting_us", sourceApp: "plain", externalId: "th_wait", lastMessageAt: at + 60_000 });
+  assert.deepEqual([newer.body.issue.status, newer.body.issue.summary], ["waiting_us", "They wrote again."]);
+  assert.ok(s().messages.some((m) => m.content === "Opened again"));
+});
+
 await check("memory off, or signed out: no issues, and the routes say so", async () => {
   delete process.env.HONCHO_API_KEY;
   try {

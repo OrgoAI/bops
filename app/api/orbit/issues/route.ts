@@ -45,6 +45,7 @@ export async function POST(request: Request) {
       url: str(b.url),
       customer: str(b.customer) ?? str((b.customer as unknown as { name?: unknown } | undefined)?.name),
       note: str(b.note),
+      lastMessageAt: typeof b.lastMessageAt === "number" && Number.isFinite(b.lastMessageAt) ? b.lastMessageAt : undefined,
     });
     return Response.json(out, { status: out.created ? 201 : 200 });
   } catch (e) {
