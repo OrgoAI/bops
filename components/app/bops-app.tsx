@@ -904,15 +904,15 @@ function TitleBar({
   const desktop = typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
   return (
     <div className={`grid h-11 shrink-0 border-b border-[#ECECEA] bg-[#F7F7F6] [-webkit-app-region:drag] ${columns}`}>
-      <div className="flex items-center gap-2 px-3.5">
-        {desktop && <div className="w-[52px] shrink-0" />}
+      <div className="flex items-center gap-3 px-3.5">
+        {desktop && <div className="w-[56px] shrink-0" />}
         {/* The sidebar hidden: the toggle that brings it back sits here, by the window's buttons (shown, it's in the sidebar's header). */}
         {!sidebarOpen && (
           <button
             onClick={onToggleSidebar}
             title="Show the sidebar (⌘\)"
             aria-label="Show the sidebar"
-            className="flex size-7 shrink-0 items-center justify-center rounded-lg shadow-[0_0_0_1px_#E2E2DF] [-webkit-app-region:no-drag]"
+            className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.06] [-webkit-app-region:no-drag]"
           >
             <SideToggleIcon side="left" open={false} />
           </button>
