@@ -79,6 +79,39 @@ function retryAfterMs(res: Response, json: { retry_after?: unknown }) {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** How long a call to Orgo may take before it counts as lost: a dropped connection otherwise waits out Node's 5 minutes. */
+const CALL_MS = 60_000;
+/** A screenshot, and the user's click, typing or key on a screen. */
+const SHOT_MS = 20_000;
+const INPUT_MS = 20_000;
+/** Making a computer (create, fork, clone) or growing its disk, which Orgo answers once it's done. */
+const MAKE_MS = 180_000;
+
+/** Orgo didn't answer in time (the connection dropped, or it hung): the call may or may not have been done. */
+export class OrgoTimeout extends Error {}
+
+/**
+ * One request to Orgo with the signed-in key, read with `read`, within `timeoutMs` (OrgoTimeout after) or
+ * until `signal` (a task stopped), which ends it as the signal says. A network error comes as Node gave it.
+ */
+async function answered<R>(url: string, init: RequestInit, timeoutMs: number, signal: AbortSignal | undefined, read: (res: Response) => Promise<R>) {
+  if (signal?.aborted) throw signal.reason ?? new Error("Stopped");
+  const timer = AbortSignal.timeout(timeoutMs);
+  try {
+    const res = await fetch(url, {
+      ...init,
+      headers: { ...orgoHeaders(), ...(init.headers as Record<string, string>), Authorization: `Bearer ${await apiKey()}` },
+      cache: "no-store",
+      signal: signal ? AbortSignal.any([timer, signal]) : timer,
+    });
+    return { res, text: await read(res) };
+  } catch (e) {
+    if (signal?.aborted) throw signal.reason ?? new Error("Stopped");
+    if (timer.aborted) throw new OrgoTimeout(`Orgo didn't answer within ${Math.round(timeoutMs / 1000)} seconds`);
+    throw e;
+  }
+}
+
 /**
  * One call to Orgo's API, saying which Bops it is (orgoHeaders). `wait`: an action on a computer that's
  * waking (WAKE_CODES) is made again once it can be, for up to wakeWaitMs; on by default for POST and
@@ -86,16 +119,22 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * once, for the caller to wake it with an action (computerAsleepError); a delete is the user's, and
  * answers at once with Orgo's words.
  */
-async function call<T>(method: string, path: string, body?: unknown, { wait = method === "POST" || method === "PATCH" }: { wait?: boolean } = {}): Promise<T> {
+async function call<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  { wait = method === "POST" || method === "PATCH", timeoutMs = CALL_MS, signal }: { wait?: boolean; timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<T> {
   const until = Date.now() + wakeWaitMs();
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(`${base()}${path}`, {
-      method,
-      headers: { ...orgoHeaders(), Authorization: `Bearer ${await apiKey()}`, "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: "no-store",
-    });
-    const text = await res.text();
+    let res: Response, text: string;
+    try {
+      ({ res, text } = await answered(`${base()}${path}`, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs, signal, async (r) => r.text()));
+    } catch (e) {
+      // A read that didn't get through is safe to make again, once; an action may have happened, so it says so instead.
+      if (method === "GET" && attempt === 0 && !signal?.aborted) continue;
+      throw e;
+    }
     let json: { error?: string; code?: unknown; retry_after?: unknown } = {};
     try {
       json = text ? JSON.parse(text) : {};
@@ -151,12 +190,36 @@ export async function callOrgo<T>(
   }
 }
 
-const lanes = new Map<string, Promise<unknown>>();
-/** Run calls for one computer one at a time. */
-function inLane<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const next = (lanes.get(key) ?? Promise.resolve()).catch(() => {}).then(fn);
-  lanes.set(key, next);
-  return next;
+/** A call waiting its turn on a computer: a task's comes before the app's views. */
+type LaneJob = { fn: () => Promise<unknown>; first: boolean; key?: string; done: Promise<unknown>; resolve: (v: unknown) => void; reject: (e: unknown) => void };
+const lanes = new Map<string, { busy: boolean; queue: LaneJob[] }>();
+/**
+ * Run calls for one computer one at a time (Orgo fails overlapping screenshots of one computer). `first`:
+ * a task's, which goes ahead of every view's waiting. `key`: a view's call that's the same as one already
+ * waiting shares its answer instead of queueing again, so the app's tiles can't pile up in front of a task.
+ */
+function inLane<T>(computerId: string, fn: () => Promise<T>, { first = false, key }: { first?: boolean; key?: string } = {}): Promise<T> {
+  const lane = lanes.get(computerId) ?? { busy: false, queue: [] };
+  lanes.set(computerId, lane);
+  const same = key && lane.queue.find((j) => j.key === key);
+  if (same) return same.done as Promise<T>;
+  let resolve!: (v: unknown) => void, reject!: (e: unknown) => void;
+  const done = new Promise((res, rej) => ((resolve = res), (reject = rej)));
+  const job: LaneJob = { fn, first, key, done, resolve, reject };
+  const at = first ? lane.queue.findIndex((j) => !j.first) : -1;
+  if (at < 0) lane.queue.push(job);
+  else lane.queue.splice(at, 0, job);
+  void drain(computerId);
+  return done as Promise<T>;
+}
+
+async function drain(computerId: string) {
+  const lane = lanes.get(computerId);
+  if (!lane || lane.busy) return;
+  lane.busy = true;
+  for (let job = lane.queue.shift(); job; job = lane.queue.shift()) await job.fn().then(job.resolve, job.reject);
+  lane.busy = false;
+  lanes.delete(computerId);
 }
 
 /** A screen as Orgo lists it. `vnc_port`/`ws_port`: null in a list orgo-web answered from its record (a computer asleep). */
@@ -368,7 +431,7 @@ export const orgo = {
           template_ref: BOPS_TEMPLATE,
           ...(opts.free ? { bops_free: true } : opts.ram ? { ram: opts.ram } : {}),
         },
-        { wait: false },
+        { wait: false, timeoutMs: MAKE_MS },
       ),
     );
     changed();
@@ -384,7 +447,7 @@ export const orgo = {
     if (grown.has(computerId)) return;
     const d = await call<{ current_disk_gb: number; max_disk_gb: number }>("GET", `/computers/${computerId}/resize`);
     const want = Math.min(BOPS_DISK_GB, d.max_disk_gb);
-    if (d.current_disk_gb < want) await call("PATCH", `/computers/${computerId}/resize`, { disk_size_gb: want });
+    if (d.current_disk_gb < want) await call("PATCH", `/computers/${computerId}/resize`, { disk_size_gb: want }, { timeoutMs: MAKE_MS });
     grown.add(computerId);
   },
 
@@ -474,7 +537,7 @@ export const orgo = {
     const epoch = stateEpoch();
     const c = await call<{ instance_details?: { id?: string } }>("GET", `/computers/${computerId}`);
     if (!c.instance_details?.id) throw new Error("this computer can't be forked (no instance id)");
-    const forked = made(await call<{ id: string; name: string; status: string }>("POST", `/computers/${c.instance_details.id}/fork`, undefined, { wait: false }));
+    const forked = made(await call<{ id: string; name: string; status: string }>("POST", `/computers/${c.instance_details.id}/fork`, undefined, { wait: false, timeoutMs: MAKE_MS }));
     changed();
     recordUsage("computer.create", {}, epoch);
     return forked;
@@ -482,7 +545,7 @@ export const orgo = {
 
   clone: async (computerId: string, name: string) => {
     const epoch = stateEpoch();
-    const cloned = made(await call<{ id: string; name: string; status: string }>("POST", `/computers/${computerId}/clone`, { name }, { wait: false }));
+    const cloned = made(await call<{ id: string; name: string; status: string }>("POST", `/computers/${computerId}/clone`, { name }, { wait: false, timeoutMs: MAKE_MS }));
     changed();
     recordUsage("computer.create", {}, epoch);
     return cloned;
@@ -499,38 +562,56 @@ export const orgo = {
 
   destroyScreen: (computerId: string, screenId: string) => call("DELETE", `/computers/${computerId}/screens/${screenId}`),
 
-  bash: async (computerId: string, command: string, timeout = 60) =>
-    (await call<{ output: string; exit_code: number }>("POST", `/computers/${computerId}/bash`, { command, timeout })),
+  /**
+   * A command on the computer, for up to `timeout` seconds; Orgo gets 20 more to answer before it counts
+   * as lost (OrgoTimeout: it may or may not have run). `signal`: the task's, so stopping it doesn't wait.
+   */
+  bash: async (computerId: string, command: string, timeout = 60, { signal }: { signal?: AbortSignal } = {}) =>
+    await call<{ output: string; exit_code: number }>("POST", `/computers/${computerId}/bash`, { command, timeout }, { timeoutMs: (timeout + 20) * 1000, signal }),
 
   /** Input on one screen, for when the user takes over. Queued with screenshots so they don't collide. */
   click: (computerId: string, screen: string, x: number, y: number, double = false) =>
-    inLane(computerId, () => call("POST", `/computers/${computerId}/click?screen=${screen}`, { x: Math.round(x), y: Math.round(y), double })),
+    inLane(computerId, () => call("POST", `/computers/${computerId}/click?screen=${screen}`, { x: Math.round(x), y: Math.round(y), double }, { timeoutMs: INPUT_MS }), { first: true }),
   type: (computerId: string, screen: string, text: string) =>
-    inLane(computerId, () => call("POST", `/computers/${computerId}/type?screen=${screen}`, { text })),
+    inLane(computerId, () => call("POST", `/computers/${computerId}/type?screen=${screen}`, { text }, { timeoutMs: INPUT_MS }), { first: true }),
   key: (computerId: string, screen: string, key: string) =>
-    inLane(computerId, () => call("POST", `/computers/${computerId}/key?screen=${screen}`, { key })),
+    inLane(computerId, () => call("POST", `/computers/${computerId}/key?screen=${screen}`, { key }, { timeoutMs: INPUT_MS }), { first: true }),
 
   /**
-   * Raw screenshot bytes for one screen. Orgo fails overlapping screenshots of one computer,
-   * and the app watches several screens at once, so they queue per computer and retry once.
-   * JPEG for the app's views; PNG at full size for the computer tool (computer-task.ts).
+   * Raw screenshot bytes for one screen. Orgo fails overlapping screenshots of one computer, and the app
+   * watches several screens at once, so they queue per computer and retry once (also when Orgo didn't
+   * answer within SHOT_MS). JPEG for the app's views; PNG at full size for the computer tool
+   * (computer-task.ts), whose `task` screenshots go ahead of the views' and stop with the task (`signal`).
    */
-  screenshot: (computerId: string, screen: string, scale = 0.75, format: "jpeg" | "png" = "jpeg") =>
-    inLane(computerId, async () => {
-      for (let attempt = 0; ; attempt++) {
-        const res = await fetch(
-          `${base()}/computers/${computerId}/screenshot?screen=${screen}&response_format=binary&format=${format}&scale=${scale}`,
-          { headers: { ...orgoHeaders(), Authorization: `Bearer ${await apiKey()}` }, cache: "no-store" },
-        );
-        if (res.ok) return new Uint8Array(await res.arrayBuffer());
-        // With its status (and Orgo's code when it sent one), so a computer that's gone is told apart from
-        // one that's asleep (see healIfGone in sessions.ts, and computerAsleepError).
-        if (attempt === 1 || res.status < 500) {
-          const said = await res.json().catch(() => null);
-          throw new OrgoError(`screenshot ${res.status}`, res.status, typeof said?.code === "string" ? said.code : undefined, typeof said?.error === "string" ? said.error : undefined);
+  screenshot: (computerId: string, screen: string, scale = 0.75, format: "jpeg" | "png" = "jpeg", { task = false, signal }: { task?: boolean; signal?: AbortSignal } = {}) =>
+    inLane(
+      computerId,
+      async () => {
+        for (let attempt = 0; ; attempt++) {
+          let res: Response, bytes: ArrayBuffer;
+          try {
+            ({ res, text: bytes } = await answered(
+              `${base()}/computers/${computerId}/screenshot?screen=${screen}&response_format=binary&format=${format}&scale=${scale}`,
+              {},
+              SHOT_MS,
+              signal,
+              (r) => (r.ok ? r.arrayBuffer() : Promise.resolve(new ArrayBuffer(0))),
+            ));
+          } catch (e) {
+            if (attempt === 0 && !signal?.aborted) continue;
+            throw e;
+          }
+          if (res.ok) return new Uint8Array(bytes);
+          // With its status (and Orgo's code when it sent one), so a computer that's gone is told apart from
+          // one that's asleep (see healIfGone in sessions.ts, and computerAsleepError).
+          if (attempt === 1 || res.status < 500) {
+            const said = await res.json().catch(() => null);
+            throw new OrgoError(`screenshot ${res.status}`, res.status, typeof said?.code === "string" ? said.code : undefined, typeof said?.error === "string" ? said.error : undefined);
+          }
         }
-      }
-    }),
+      },
+      task ? { first: true } : { key: `${screen}:${scale}:${format}` },
+    ),
 
   /**
    * Wake a computer that's asleep (suspended), for the user who just took over one of its screens:

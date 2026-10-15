@@ -1,7 +1,9 @@
 "use client";
 
+import { screenNo as screenNumber } from "@/lib/screens";
+import { needsYou } from "@/lib/asks";
 import { useEffect, useRef, useState } from "react";
-import { DISPLAYS, live, MAIN_WORKSPACE, workspaceOf, type AppState, type Bot, type Chat, type Logo, type Session } from "@/lib/types";
+import { live, MAIN_WORKSPACE, workspaceOf, type AppState, type Bot, type Chat, type Logo, type Session } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 export { botBezel, botOnInk, botWash, DESKTOP_BG } from "@/lib/look";
 
@@ -18,7 +20,7 @@ export const post = async (url: string, body: unknown = {}, method = "POST") => 
   return res;
 };
 
-export const screenNo = (display?: number) => (display === undefined ? undefined : DISPLAYS.indexOf(display) + 1);
+export const screenNo = (display?: number) => (display === undefined ? undefined : screenNumber(display));
 
 export function ago(t: number) {
   const s = Math.max(0, Math.round((Date.now() - t) / 1000));
@@ -37,19 +39,7 @@ export function duration(from: number, to = Date.now()) {
 
 export const clockTime = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 
-/** A thread needs the user when its screen hit something only they can get past, its bot is waiting on their answer (Jev decides), or it hit a problem they haven't answered. */
-export function needsYou(s: Session) {
-  // Dismissed, or a newer thread has the job: it never asks again.
-  if (s.dismissed || s.replacedBy) return false;
-  // It can't start until the user says where (their Mac or the cloud), whatever they've said since.
-  if (s.askWhere && live(s)) return true;
-  const lastUser = [...s.replies].reverse().find((r) => r.role === "user");
-  const lastBot = [...s.replies].reverse().find((r) => r.role === "bot");
-  if (lastUser && (!lastBot || lastUser.at > lastBot.at)) return false;
-  if (live(s)) return !!s.blocker;
-  if (s.status === "done") return !!s.blocker || (s.waitingOnYou ?? (s.answer ?? "").trim().endsWith("?"));
-  return s.status === "failed" && !!s.error && !/stopped by you|paused/i.test(s.error);
-}
+export { needsYou };
 
 export function useAppState() {
   const [state, setState] = useState<AppState | null>(null);

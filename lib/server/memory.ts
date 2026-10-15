@@ -739,8 +739,10 @@ export async function memoryFor(botId: string, opts: { q?: string; mine?: boolea
 }
 
 /** Ask memory a question, with what it's based on: the closest facts and where each was learned. */
-export async function askMemory(botId: string, question: string) {
-  const ws = wsOf(botId);
+export const askMemory = (botId: string, question: string) => askWorkspace(wsOf(botId), question);
+
+/** The same for a workspace's memory (the Knowledge page). */
+export async function askWorkspace(ws: string, question: string) {
   const b = bindingOf(ws);
   const [answer, near] = await Promise.all([recall(ws, question), (async () => (await peer(b)).conclusions.query(question.slice(0, 300), 8))().catch(() => [])]);
   // Only facts that are about what was asked (the nearest ones can still be off topic).

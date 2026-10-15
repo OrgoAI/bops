@@ -240,6 +240,8 @@ export type Message = {
   options?: string[];
   /** Worth interrupting the user for (a finished task they're waiting on): a chime, and a notification if Bops is behind. */
   ping?: boolean;
+  /** A thread's result that asked the user something (lib/asks.ts): kept in the chat when the thread moves on, with how it was answered. */
+  needed?: boolean;
   /** An email the bot got (in) or sent (out); `text` is its new text, without the quoted history. */
   email?: EmailInfo;
   /** A bot reply that also went to the user by email (they emailed the bot): the address it went to. */
@@ -352,6 +354,12 @@ export type Session = {
   display?: number;
   /** The screen it last held, so a finished session can still show where it left off. */
   lastDisplay?: number;
+  /** The page it was on when it last let go of its screen (lib/screens.ts): where it left off, for it and for the user. */
+  lastPage?: { url: string; title?: string };
+  /** When its last frame was kept (the screen as it let go: /api/frames?session=<id>), so a finished thread can show where it stopped. */
+  lastFrameAt?: number;
+  /** Picked up again on another screen than it left (its own was busy): the next turn tells it, with the page it was on. Then cleared. */
+  screenMoved?: { from: number; to: number };
   agentSessionId?: string;
   /** "computer": it runs on the Responses API's computer tool (lib/server/computer-task.ts), not an Agents API session. */
   runner?: "computer";
@@ -402,6 +410,16 @@ export type Session = {
   activity?: string;
   /** Jev's read of the last answer: is the bot waiting on the user to answer, decide or act? */
   waitingOnYou?: boolean;
+  /**
+   * One of several tasks started together for one request, each on a screen of its own (parallel work):
+   * the group they show under in the chat. `partOf`: the thread that split it off (split_task), if one did.
+   */
+  group?: { id: string; title: string };
+  partOf?: string;
+  /** Jev's read too: what it waits on is the user approving something on another device (a sign-in prompt on their phone). */
+  approveElsewhere?: boolean;
+  /** The answer Bops texted the user about, after it waited unanswered (sessions.ts textIfUnanswered): once per question. */
+  askTexted?: string;
   /** Something on its screen only the user can get past (a sign-in, a code, a captcha). */
   blocker?: Blocker;
   error?: string;
@@ -464,6 +482,9 @@ export const BLOCKER_ASK: Record<Blocker, string> = {
 };
 
 /** What's on a bot's screen, as read from the mirror: where it is, what stands in the way, and whether it's private. */
+/** A thread letting go of a screen: who, on what, and the page it left there. */
+export type ScreenLeft = { sessionId: string; botId: string; title: string; page?: { url: string; title?: string }; at: number };
+
 export type ScreenRead = {
   url: string;
   title: string;
@@ -499,6 +520,11 @@ export type AppState = {
   takeover?: Takeover;
   /** Latest read of each watched screen, keyed `${botId}:${display}`. */
   screens?: Record<string, ScreenRead>;
+  /**
+   * Who last let go of each screen, keyed `${computer bot id}:${display}`: the thread, its bot, and the
+   * page it left there (lib/screens.ts screenMap shows it as "left by …" for half an hour).
+   */
+  screenLog?: Record<string, ScreenLeft>;
   /** Screens a bot keeps open on a site and keeps an eye on for the user (an X inbox, LinkedIn messages). */
   watches?: Watch[];
   /** Logins bots can sign in with. Only what's safe to show is here; secrets live in the Keychain. */
