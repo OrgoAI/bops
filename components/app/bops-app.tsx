@@ -706,6 +706,7 @@ function Bops({ state }: { state: AppState | null }) {
                       onOpenVault={() => openVault()}
                       onOpenComputer={openComputer}
                       onOpenKeys={(keysFor) => openVault(keysFor)}
+                      onOpenAutopilot={openAutopilot}
                       onUpgrade={() => {
                         trackEvent("bops_upgrade_clicked", { surface: "bot_panel" });
                         setAccount(true);

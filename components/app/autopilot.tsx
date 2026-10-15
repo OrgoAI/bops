@@ -58,10 +58,10 @@ const done = (r: Routine) => onceDone(r);
 /**
  * The workspace's schedules, monitors and procedures (its own bots' only), in the order both lists show
  * them. Schedules: the ones on first, the soonest run first, then the rest, the latest run first.
- * Monitors: news first, then the newest. Procedures: by name.
+ * Monitors: news first, then the newest. Procedures: by name. With `botId`, that bot's only (its Skills, bot-skills.tsx).
  */
-export function autopilotOf(state: AppState) {
-  const team = new Set(teamOf(state).map((b) => b.id));
+export function autopilotOf(state: AppState, botId?: string) {
+  const team = new Set(botId ? [botId] : teamOf(state).map((b) => b.id));
   const schedules = state.routines
     .filter((r) => team.has(r.botId))
     .sort((a, b) => Number(b.enabled) - Number(a.enabled) || (a.enabled ? (a.nextRunAt ?? Infinity) - (b.nextRunAt ?? Infinity) : (b.lastRunAt ?? 0) - (a.lastRunAt ?? 0)) || a.title.localeCompare(b.title));
@@ -79,7 +79,7 @@ const matchProcedure = (p: Procedure, q: string) => has(q, p.name, p.whenToUse);
 /* ---------------- Words ---------------- */
 
 /** When a schedule runs next ("Tomorrow 9 AM"), or that it's running now (really: runningNow), paused, or done. */
-function nextWords(r: Routine, sessions: Session[], tz?: string) {
+export function nextWords(r: Routine, sessions: Session[], tz?: string) {
   if (runningNow(r, sessions)) return "Running now";
   if (done(r)) return "Done";
   if (!r.enabled) return "Paused";
@@ -90,7 +90,7 @@ function nextWords(r: Routine, sessions: Session[], tz?: string) {
 const nextRunText = (r: Routine, tz?: string) => (r.enabled && r.nextRunAt ? whenText(r.nextRunAt, Date.now(), tz) : null);
 
 /** What went wrong last time, if anything: the run failed, or its result didn't reach where it goes. */
-function trouble(r: Routine) {
+export function trouble(r: Routine) {
   const last = r.last;
   if (last?.status === "failed") return `The last run failed${last.error ? `: ${undash(last.error)}` : ""}`;
   if (last?.delivery?.status === "failed") return `Couldn't send it to ${last.delivery.to}${last.delivery.error ? `: ${undash(last.delivery.error)}` : ""}`;
@@ -119,7 +119,7 @@ function destinations(r: Routine, state: AppState) {
   return to.join(", ");
 }
 
-const RAN: Record<RoutineRun["status"], string> = {
+export const RAN: Record<RoutineRun["status"], string> = {
   running: "Running now",
   ok: "Ran",
   quiet: "Ran, nothing for you",

@@ -7,6 +7,8 @@ import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
 import { BotMemory } from "./bot-memory";
+import { BotSkills } from "./bot-skills";
+import type { AutopilotSection } from "./autopilot";
 import { BotKeys } from "./keys";
 import { ComputerSummary } from "./computer";
 import { Mascot } from "./mascot";
@@ -20,8 +22,8 @@ import { undash } from "./side-group";
 import { BOOK_A_CALL } from "@/lib/links";
 
 /** The parts of a bot's profile. Its computer has a tab of its own (see panel-tabs.tsx). */
-export type Section = "details" | "memory" | "phone";
-const SECTIONS: Section[] = ["details", "memory", "phone"];
+export type Section = "details" | "skills" | "memory" | "phone";
+const SECTIONS: Section[] = ["details", "skills", "memory", "phone"];
 
 export function BotPanel({
   state,
@@ -33,6 +35,7 @@ export function BotPanel({
   onOpenVault,
   onOpenComputer,
   onOpenKeys,
+  onOpenAutopilot,
   onUpgrade,
   onClose,
 }: {
@@ -47,6 +50,8 @@ export function BotPanel({
   onOpenComputer: (botId: string) => void;
   /** Open Settings at Keys, to add a key for this bot. */
   onOpenKeys: (botId: string) => void;
+  /** Open the Autopilot page at a section, and at one of its rows (a procedure, schedule or monitor). */
+  onOpenAutopilot: (section: AutopilotSection, item?: string) => void;
   /** Open the plans (Account), where Pro and Max are bought. */
   onUpgrade: () => void;
   /** Leave the profile, back to where you were (its X; Esc does it too, see bops-app.tsx). */
@@ -85,6 +90,7 @@ export function BotPanel({
         </div>
         {tabs}
       </div>
+      {tab === "skills" && <BotSkills state={state} bot={b} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenKeys={onOpenKeys} onOpenAutopilot={onOpenAutopilot} />}
       {tab === "memory" && <BotMemory state={state} bot={b} onOpenThread={onOpenThread} />}
       {tab === "phone" && <Phone bot={b} />}
     </section>
