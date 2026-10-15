@@ -245,7 +245,10 @@ assert.match(asked[0].instructions, /Bops CRM: .* save them with crm_save_rows a
 assert.match(asked[0].instructions, /call sign_in_from_vault: Bops fills/, "told to use it (no helpers' screens here)");
 // The fastest tool first and the screen last: web search, the shell, a page script, then the computer; look-ups never need the screen.
 const ladder = asked[0].instructions;
-assert.match(ladder, /use the first tool in this list that can do it\. Go further down the list only when the tools before it can't: \(1\) web_search .*\(2\) run_command .*fetch a page or an API \(curl\).*\(3\) page_script to read a website and use it by its elements .*\(4\) The computer, for what a page script can't do/);
+assert.match(ladder, /Your tools, quickest first\. For each step, use the quickest one that fits it: \(1\) web_search .*\(2\) run_command .*fetch a page or an API \(curl\).*\(3\) page_script to read a website, and to fill in or click things you can name .*\(4\) The screen: you see it/);
+// The screen for what needs seeing, and after two scripts that missed; never "pixels last".
+assert.match(ladder, /Use the screen when you need to see: menus, pop-ups, account and channel switchers, .*When two page scripts haven't got a step done, do that step on the screen\./);
+assert.ok(!/not pixels|Go further down the list only/.test(ladder + asked[0].tools.find((t) => t.name === "page_script").description), "the screen isn't the last resort");
 assert.match(ladder, /To look things up or read, don't use the screen: search, and read pages as text\./);
 assert.ok(!/in the open|the way a capable person/.test(ladder), "nothing tells it to do everything on the screen");
 assert.match(asked[0].tools.find((t) => t.name === "run_command").description, /and to fetch a page or an API \(curl\)\. Don't use it to sign in to or act on websites or apps/);
@@ -328,8 +331,14 @@ assert.match(pageRuns[1], / 60 \/tmp\/bops-page-/, "60 seconds when it didn't sa
 // What came back: the value and the page it ended on; a failure as the runner said it; no marker, what the computer said.
 const pageOut = (call) => asked.find((b) => b.input?.some((i) => i.call_id === call)).input.find((i) => i.call_id === call).output;
 assert.equal(pageOut("call_p1"), '[\n "Basic $8"\n]\n\n(Now on https://example.com/pricing)');
-assert.equal(pageOut("call_p2"), "Failed: locator.click: Timeout 30000ms exceeded.\n\n(Now on https://example.com/pricing)");
-assert.equal(pageOut("call_p3"), "Failed: node: not found");
+// A script that failed comes back with the screen, at full size, as OpenAI's code-execution harness sends it;
+// a second miss in a row says to do it on the screen.
+const SCREEN = { type: "input_image", image_url: `data:image/png;base64,${PNG.toString("base64")}`, detail: "original" };
+assert.deepEqual(pageOut("call_p2"), [{ type: "input_text", text: "Failed: locator.click: Timeout 30000ms exceeded.\n\n(Now on https://example.com/pricing)" }, SCREEN]);
+assert.deepEqual(pageOut("call_p3"), [
+  { type: "input_text", text: "Failed: node: not found\n\nThat's two page scripts in a row that didn't do it. Do this part on the screen instead: the screenshot below is what's there now." },
+  SCREEN,
+]);
 // Past its first steps, with nobody looking at it, a step runs at standard speed.
 const callOf = (call) => asked.find((b) => b.input?.some((i) => i.call_id === call));
 assert.deepEqual([callOf("call_p1").service_tier, callOf("call_p2").service_tier, callOf("call_p3").service_tier], ["ultrafast", "ultrafast", undefined]);
@@ -622,6 +631,32 @@ assert.equal(s.error, "Stopped by you");
 assert.ok(Date.now() - tH < 10_000, "it stopped at once");
 assert.deepEqual(s.owed, [{ id: "call_h1", type: "function", output: "Stopped by the user before the computer answered, so it may or may not have run." }]);
 onCommand = () => ({ output: "", exit_code: 0 });
+
+/* ---------------- The page-script loop guard: when the model gets the screen ---------------- */
+
+const CT = await import(`${root}/lib/server/computer-task.ts`);
+const pageRan = (o) => ({ text: (o.ok ?? true) ? (o.value ?? "") : `Failed: ${o.error}`, run: { ok: true, changed: false, ...o } });
+let g = CT.newPageGuard();
+// Reads that answer something don't need a look, until the third in a row: then a glance, to check.
+assert.deepEqual(CT.pageLook(g, "return await page.title()", pageRan({ value: "Studio" })), { look: false, note: undefined });
+assert.deepEqual(CT.pageLook(g, "return await page.innerText('nav')", pageRan({ value: "Home Videos" })), { look: false, note: undefined });
+assert.deepEqual(CT.pageLook(g, "return await page.locator('a').allInnerTexts()", pageRan({ value: "a b" })), { look: true, note: "The screen as it is now, so you can check it's what you expect:" });
+// A click that changed nothing comes back with the screen; a second miss says to use the screen.
+g = CT.newPageGuard();
+assert.deepEqual(CT.pageLook(g, "await page.getByRole('button', { name: 'Account' }).click(); return 'ok'", pageRan({ value: "ok" })), { look: true, note: "That changed nothing on the page. The screenshot below is what's there now." });
+assert.equal(CT.pageLook(g, "await page.locator('#avatar').click(); return 'ok'", pageRan({ value: "ok" })).note, "That's two page scripts in a row that didn't do it. Do this part on the screen instead: the screenshot below is what's there now.");
+// One that changed the page resets it.
+assert.deepEqual(CT.pageLook(g, "await page.goto('https://studio.youtube.com'); return 'ok'", pageRan({ value: "ok", changed: true })), { look: false, note: undefined });
+// The same answer a third time: the page isn't doing what it expects.
+g = CT.newPageGuard();
+CT.pageLook(g, "return 1", pageRan({ value: "Agent Operators Podcast" }));
+g.since = 0;
+CT.pageLook(g, "return 2", pageRan({ value: "Agent Operators Podcast" }));
+g.since = 0;
+assert.deepEqual(CT.pageLook(g, "return 3", pageRan({ value: "Agent Operators Podcast" })), { look: true, note: "That's the same answer a third time: the page isn't doing what you expect. Look at the screenshot below and use the screen." });
+// Asked for (screenshot()): the screen, with no note.
+g = CT.newPageGuard();
+assert.deepEqual(CT.pageLook(g, "screenshot(); return 'x'", pageRan({ value: "x", look: true })), { look: true, note: undefined });
 
 /* ---------------- AI credit used up ---------------- */
 

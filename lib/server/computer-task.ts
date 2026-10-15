@@ -23,9 +23,10 @@ import type { Session } from "@/lib/types";
  * than the Agents API with the screen MCP, at the same success rate (.context/bench, 2026-10-06): it
  * does several actions per model call, and carries no harness prompt.
  *
- * Pages by their elements, not pixels: page_script runs a short Playwright script on the screen's own
- * Chrome (vm/page-script.cjs, over CDP on the computer), the code-execution way OpenAI recommends for
- * GPT-6 Astra. What it doesn't have (the Agents API thread does): the browser tools as MCP, and helpers.
+ * Pages by their elements, and the screen where that's quicker: page_script runs a short Playwright script
+ * on the screen's own Chrome (vm/page-script.cjs, over CDP on the computer), the code-execution way OpenAI
+ * recommends for GPT-6 Astra, and its answer comes with the screen when the model should look (pageLook).
+ * What it doesn't have (the Agents API thread does): the browser tools as MCP, and helpers.
  */
 
 export const computerToolOn = () => process.env.BOPS_COMPUTER_TOOL !== "0";
@@ -110,6 +111,7 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   // A turn that was stopped mid-step owes OpenAI the outputs of the calls it was answering.
   let input: unknown[] = [...(await settle(t, s.owed ?? [])), { role: "user", content: [{ type: "input_text", text: t.input }] }];
   let prev = s.responseId;
+  const guard = newPageGuard();
 
   for (let calls = 0; ; calls++) {
     if (t.signal.aborted) throw new Error("Stopped");
@@ -172,13 +174,15 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
         const done = await act(t, o);
         input.push(done.out);
         if (done.note) notes.push(done.note);
+        guard.since = 0;
       } else {
-        const answered = await runFunction(t, o);
+        const answered = await runFunction(t, o, guard);
         input.push(answered);
-        // Kept with the call, so a turn stopped before sending it answers with what really happened (settle).
+        // Kept with the call, so a turn stopped before sending it answers with what really happened (settle); its words, not the screen it came with.
+        const kept = typeof answered.output === "string" ? answered.output : (answered.output.find((c) => c.type === "input_text")?.text ?? "");
         patchSession(t.sessionId, (x) => {
           const owed = x.owed?.find((w) => w.id === o.call_id);
-          if (owed) owed.output = answered.output;
+          if (owed) owed.output = kept;
         });
       }
     }
@@ -411,7 +415,7 @@ const PAGE_TOOL = {
   type: "function",
   name: "page_script",
   description:
-    "Run a short Playwright script on the Chrome on your screen and get what it returns: the fastest, surest way to read a website and to use it by its elements, not pixels. `page` is the tab in front of your screen and `context` its browser context. The script is the body of an async function: use await, and end with return (text, or anything JSON can hold; long answers are cut). Read: page.title(), page.innerText('main'), page.locator(...).allInnerTexts(). Act: page.goto(url), page.getByLabel('Email').fill(...), page.getByRole('button', { name: 'Save' }).click(), page.waitForLoadState(). The user sees the page change, and a page it opens comes to the front. Use the screen for what a script can't do (a canvas, a native dialog, an app other than Chrome), and to check how a page looks. Never type a password: sign_in_from_vault does that. Up to 120 seconds.",
+    "Run a short Playwright script on the Chrome on your screen and get what it returns, with a receipt of what it changed: the quick way to read a website and to fill in or click things you can name (a field by its label, a button by its text). `page` is the tab in front of your screen and `context` its browser context. The script is the body of an async function: use await, and end with return (text, or anything JSON can hold; long answers are cut). Read: page.title(), page.innerText('main'), page.locator(...).allInnerTexts(). Act: page.goto(url), page.getByLabel('Email').fill(...), page.getByRole('button', { name: 'Save' }).click(), page.waitForLoadState(). Call screenshot() in it to see the screen with its answer; when it fails or changes nothing, the screen comes back anyway. The user sees the page change, and a page it opens comes to the front. Menus, pop-ups, account switchers, hover menus, drag and drop and canvases are quicker on the screen. Never type a password: sign_in_from_vault does that. Up to 120 seconds.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -437,14 +441,18 @@ const VAULT_TOOL = {
 
 const clip = (s: string, max = 12_000) => (s.length > max ? `${s.slice(0, max / 2)}\n… (cut) …\n${s.slice(-max / 2)}` : s);
 
+/** What a page script's runner sends back (vm/page-script.cjs): its answer, the page it ended on, and its receipt. */
+type PageRun = { ok?: boolean; value?: string; error?: string; url?: string; changed?: boolean; dialogs?: string[]; downloads?: string[]; opened?: number; look?: boolean };
+
 /**
  * A page script, run on the computer by its runner against the Chrome of the task's screen (its CDP
  * port is 9200 + the display, vm/bin/bops-chrome). The script goes as base64, so it needs no quoting.
  * The screen counts as busy while it runs, as it does for a click (the screen ledger reads that).
+ * Its answer as the model reads it, with its receipt (what changed), or why it failed (`run` undefined).
  */
-async function pageScript(t: ComputerTurn, script: string, seconds: number) {
-  if (!script.trim()) return "Failed: the script is empty.";
-  if (!(await t.pages?.().catch(() => false))) return "Failed: the page tools aren't on this computer yet. Do this step on the screen.";
+async function pageScript(t: ComputerTurn, script: string, seconds: number): Promise<{ text: string; run?: PageRun }> {
+  if (!script.trim()) return { text: "Failed: the script is empty." };
+  if (!(await t.pages?.().catch(() => false))) return { text: "Failed: the page tools aren't on this computer yet. Do this step on the screen." };
   const limit = Math.min(120, Math.max(5, seconds));
   const file = `/tmp/bops-page-${t.display}-${Date.now()}.js`;
   const r = await orgo.bash(
@@ -458,18 +466,64 @@ async function pageScript(t: ComputerTurn, script: string, seconds: number) {
     { signal: t.signal },
   );
   const at = r.output.lastIndexOf(PAGE_MARK);
-  if (at < 0) return `Failed: ${clip(r.output.trim() || `exit code ${r.exit_code}`, 2000)}`;
-  let out: { ok?: boolean; value?: string; error?: string; url?: string };
+  if (at < 0) return { text: `Failed: ${clip(r.output.trim() || `exit code ${r.exit_code}`, 2000)}` };
+  let out: PageRun;
   try {
     out = JSON.parse(r.output.slice(at + PAGE_MARK.length).trim().split("\n")[0]);
   } catch {
-    return `Failed: ${clip(r.output.slice(at + PAGE_MARK.length).trim(), 2000)}`;
+    return { text: `Failed: ${clip(r.output.slice(at + PAGE_MARK.length).trim(), 2000)}` };
   }
+  const receipt = [
+    ...(out.dialogs ?? []).map((d) => `The page showed a dialog (${d}); it was dismissed. To answer it, handle it in the script before the step that opens it: page.once("dialog", (d) => d.accept()).`),
+    ...(out.downloads ?? []).map((f) => `Downloaded ${f}.`),
+    ...(out.opened ? [`It opened ${out.opened === 1 ? "a new tab" : `${out.opened} new tabs`}, now in front.`] : []),
+  ];
   const on = out.url ? `\n\n(Now on ${out.url.slice(0, 300)})` : "";
-  return out.ok ? `${clip(out.value ?? "")}${on}` : `Failed: ${out.error ?? "the script stopped"}${on}`;
+  const said = out.ok ? clip(out.value ?? "") : `Failed: ${out.error ?? "the script stopped"}`;
+  return { text: `${said}${receipt.length ? `\n\n${receipt.join(" ")}` : ""}${on}`, run: out };
 }
 
-async function runFunction(t: ComputerTurn, o: OutputItem) {
+/** A script that acts on the page (not only reads it): it should change something. */
+const ACTS = /\.(click|dblclick|fill|press|type|check|uncheck|selectOption|setInputFiles|hover|tap|dragTo|goto|goBack|reload)\(|\b(keyboard|mouse)\./;
+
+/**
+ * Page scripts in a turn, so one that keeps missing gets the screen (the loop guard): `since`, scripts
+ * since the model last saw the screen; `misses`, failed or no-effect ones in a row; `answers`, the last
+ * few answers of scripts that changed nothing, to tell the same one coming back.
+ */
+type PageGuard = { since: number; misses: number; answers: string[] };
+export const newPageGuard = (): PageGuard => ({ since: 0, misses: 0, answers: [] });
+
+/**
+ * Whether the model should see the screen with a page script's answer, and what to tell it. A script
+ * sends the screen back when it asked to (screenshot()), when it failed or acted and changed nothing,
+ * when the same answer came back a third time, and every third script with no look in between: a menu,
+ * pop-up or switcher that a script can't make out is plain on the screen. Two misses in a row say so.
+ */
+export function pageLook(g: PageGuard, script: string, r: { text: string; run?: PageRun }): { look: boolean; note?: string } {
+  const miss = !r.run?.ok || (ACTS.test(script) && r.run.changed === false);
+  g.misses = miss ? g.misses + 1 : 0;
+  g.since++;
+  // The same answer from scripts that changed nothing ("ok" from one that did is progress): a page that isn't moving.
+  const answer = r.text.slice(0, 2000);
+  const again = !r.run?.changed && g.answers.filter((x) => x === answer).length >= 2;
+  g.answers = r.run?.changed ? [] : [...g.answers, answer].slice(-6);
+  const look = !!r.run?.look || miss || again || g.since >= 3;
+  if (look) g.since = 0;
+  const note =
+    g.misses >= 2
+      ? "That's two page scripts in a row that didn't do it. Do this part on the screen instead: the screenshot below is what's there now."
+      : again
+        ? "That's the same answer a third time: the page isn't doing what you expect. Look at the screenshot below and use the screen."
+        : r.run?.ok && miss
+          ? "That changed nothing on the page. The screenshot below is what's there now."
+          : look && !r.run?.look && !miss
+            ? "The screen as it is now, so you can check it's what you expect:"
+            : undefined;
+  return { look, note };
+}
+
+async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard()) {
   const s = session(t.sessionId)!;
   let args: Record<string, unknown> = {};
   try {
@@ -487,7 +541,15 @@ async function runFunction(t: ComputerTurn, o: OutputItem) {
       output = `exit code ${r.exit_code}\n${clip(r.output)}`;
     } else if (o.name === "page_script") {
       t.step("page", String(args.what ?? "").trim().slice(0, 100) || "used the page");
-      output = await pageScript(t, String(args.script ?? ""), Number(args.timeout_seconds) || 60);
+      const script = String(args.script ?? "");
+      const r = await pageScript(t, script, Number(args.timeout_seconds) || 60);
+      const { look, note } = pageLook(guard, script, r);
+      output = note ? `${r.text}\n\n${note}` : r.text;
+      // The screen with it, as OpenAI's code-execution harness returns one: the model's coordinates are the screen's.
+      if (look) {
+        const shot = await screen(t).catch(() => undefined);
+        if (shot) return { type: "function_call_output", call_id: o.call_id, output: [{ type: "input_text", text: output }, { type: "input_image", image_url: shot.image_url, detail: "original" }] };
+      }
     } else if (o.name === "sign_in_from_vault") {
       t.step("vault", "signing in from your vault");
       output = await (await import("./vault")).vaultSignIn(s.botId, t.display, t.sessionId);

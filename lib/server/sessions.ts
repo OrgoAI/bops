@@ -1302,8 +1302,8 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
     ...(apps ? [`${owner}'s apps (find_app_actions, then use_app; see "Your apps" below) for their email, calendar, documents, CRM and anything else they connected.`] : []),
     "web_search to look things up and read pages as text quickly (search, open a page, find in a page).",
     "run_command for files, data and code: download, fetch a page or an API (curl), parse, calculate, and write documents in /workspace.",
-    `page_script to read a website and use it by its elements (a field by its label, a button by its text): faster and surer than the screen. It runs on the Chrome on your screen, so ${owner} sees the page change.`,
-    `The computer, for what a page script can't do (a canvas, a native dialog, an app other than Chrome) and to check how a page looks: you see your screen and use its mouse and keyboard, so ${owner} sees it happen. Go straight to URLs you know (ctrl+l, type it, Enter).`,
+    `page_script to read a website, and to fill in or click things you can name (a field by its label, a button by its text). It runs on the Chrome on your screen, so ${owner} sees the page change.`,
+    `The screen: you see it and use its mouse and keyboard, so ${owner} sees it happen. Go straight to URLs you know (ctrl+l, type it, Enter).`,
   ].map((t, i) => `(${i + 1}) ${t}`);
   return [
     `You are ${botName}, the ${role} bot in Bops.`,
@@ -1338,8 +1338,13 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
           sharedWith
             ? `You work on ${screenLabel(display)} of the Linux computer you share with ${sharedWith}, where Chrome is open. ${sharedWith} and other bots may be working on its other screens: never touch a screen that isn't yours. ${owner} can watch your screen live.`
             : `You work on ${screenLabel(display)} of your own Linux computer, where Chrome is open. ${owner} can watch that screen live.`,
-          "For each step, use the first tool in this list that can do it. Go further down the list only when the tools before it can't:",
-          ...(computer ? computerTools : tools),
+          ...(computer
+            ? [
+                "Your tools, quickest first. For each step, use the quickest one that fits it:",
+                ...computerTools,
+                "Use the screen when you need to see: menus, pop-ups, account and channel switchers, hover menus, drag and drop, a canvas, a native dialog, an app other than Chrome; when you're not sure what a page is showing; and to check that a result looks right. When two page scripts haven't got a step done, do that step on the screen.",
+              ]
+            : ["For each step, use the first tool in this list that can do it. Go further down the list only when the tools before it can't:", ...tools]),
           `Do what ${owner} should see happen or check (signing in, filling a form, writing a post or a draft) in the Chrome on your screen. To look things up or read, don't use the screen: search, and read pages as text.`,
           `This task runs in the cloud and can't reach ${owner}'s Mac: no tool or setting here switches to it. If you're asked to carry on on their Mac, don't look for a way: say in one sentence that it has to be moved there (when ${owner} asks for their Mac, Bops moves it, with a record of what you did here), and stop.`,
           "Bops gives a task the screen that already has its site open, when one does: if yours shows the site you need, carry on from that page rather than opening it again in a new tab.",
