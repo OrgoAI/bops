@@ -14,7 +14,7 @@ import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
 import { useSetupNeedsYou } from "./setup";
 import { UpdateNotice } from "./update-notice";
 import { WATCH, WatchEye, watchName } from "./watch-overlay";
-import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, NeedsYouDot, post, RoundButton, StatusIcon, teamOf, useNow } from "./ui";
+import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, NeedsYouDot, post, RoundButton, SideToggleIcon, StatusIcon, teamOf, useNow } from "./ui";
 
 /**
  * The sidebar for one workspace (switch at the top). The list: one row per conversation (Sam pinned, then by latest activity), each with its
@@ -36,6 +36,7 @@ export function Sidebar({
   onOpenWatch,
   onOpenMemory,
   menuActions,
+  onCollapse,
 }: {
   state: AppState;
   chatId: string;
@@ -55,6 +56,8 @@ export function Sidebar({
   onOpenMemory: (open: MemoryOpen) => void;
   /** What a bot's right-click menu does (bot-menu.tsx). */
   menuActions?: BotMenuActions;
+  /** Hide the sidebar (bops-app.tsx brings it back from the title bar). */
+  onCollapse?: () => void;
 }) {
   const [query, setQuery] = useState<string | null>(null);
   const q = query?.trim().toLowerCase();
@@ -107,7 +110,17 @@ export function Sidebar({
             className="mr-2 h-[34px] min-w-0 flex-1 rounded-full bg-white px-3.5 text-[13px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98]"
           />
         )}
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {onCollapse && (
+            <button
+              onClick={onCollapse}
+              title="Hide the sidebar (⌘\)"
+              aria-label="Hide the sidebar"
+              className="flex size-[34px] shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05]"
+            >
+              <SideToggleIcon side="left" open />
+            </button>
+          )}
           <RoundButton label="Search" active={query !== null} onClick={() => setQuery(query === null ? "" : null)}>
             <circle cx="7" cy="7" r="4.5" fill="none" stroke="#0A0A0A" strokeWidth="1.5" />
             <path d="M10.5 10.5L14 14" fill="none" stroke="#0A0A0A" strokeWidth="1.5" strokeLinecap="round" />
