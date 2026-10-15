@@ -20,6 +20,8 @@ import { pathToFileURL } from "node:url";
 
 for (const k of Object.keys(process.env)) if (/^(BOPS|OPENAI|AGENTPHONE|AGENTMAIL|HONCHO|COMPOSIO|TYPESAFE|TWILIO|ORGO|CODEX|TAILSCALE)_/.test(k)) delete process.env[k];
 process.env.BOPS_DEVICE_SEED = "test-computer-task";
+// Fast steps go over a WebSocket (lib/server/responses-ws.ts), tested in test-responses-ws.mjs; here they go over HTTP, to the fakes.
+process.env.BOPS_RESPONSES_WS = "0";
 // The CRM's tools are off for bots now (lib/server/crm.ts crmForBots); this test still checks them.
 process.env.BOPS_CRM_TOOLS = "1";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
