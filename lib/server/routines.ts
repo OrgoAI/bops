@@ -4,7 +4,7 @@ import { trackServerEvent } from "./analytics";
 import { botChatId, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
 import { appNameFor, tagsOf } from "@/lib/routine-catalog";
 import { describeSchedule as describe, EVENT_CHECK_MINUTES, eventWindow, nextRun, normalizeSchedule, resolveOnce, validTimeZone, whenText } from "@/cloud/schedule";
-import { routineChanged, routineRan, syncRoutinesOnStart } from "./routine-sync";
+import { cleanText, routineChanged, routineRan, syncRoutinesOnStart } from "./routine-sync";
 import { plainLinks } from "@/cloud/style";
 import { pingIfWorthIt } from "./attention";
 import { onPostgres } from "./persist";
@@ -92,7 +92,11 @@ const inSentence = (when: string) => when.replace(/^(Today|Tomorrow|Yesterday)\b
 function record(routineId: string, run: RoutineRun): RoutineRun {
   update((s) => {
     const r = s.routines.find((x) => x.id === routineId);
-    if (r) r.last = run;
+    if (!r) return;
+    r.last = run;
+    // A meeting routine's run that finished handled its window: the next one starts where it ended.
+    const w = run.status === "ok" || run.status === "quiet" ? eventWindow(r.schedule, run.at) : undefined;
+    if (w) r.eventsThrough = Math.max(r.eventsThrough ?? 0, w.to);
   });
   routineRan(routineId, run);
   return run;
@@ -200,7 +204,7 @@ export function createRoutine(botId: string, title: string, goal: string, schedu
   const r: Routine = {
     id: id("rtn"),
     botId,
-    title: title.trim() || goal.trim().slice(0, 40),
+    title: title.trim() || cleanText(goal.trim(), 40),
     goal,
     schedule: s,
     ...(zone.timeZone ? { timeZone: zone.timeZone } : {}),
@@ -381,6 +385,9 @@ async function run(routineId: string, opts: RunOpts): Promise<RoutineRun> {
   if (!b) return record(r.id, { at, status: "skipped", error: "Its bot isn't there anymore." });
   if (opts.manual) update(() => (r.lastRunAt = at));
   if (r.reminder) return remind(r, b, at, opts);
+  // A meeting routine with no meetings left to handle (the runs before it got further, or it's outside its hours): nothing to ask.
+  const w = eventWindow(r.schedule, at, r.eventsThrough, zoneOf(r));
+  if (w && w.from >= w.to) return record(r.id, { at, status: "quiet" });
   // Someone else's routine is never a chat run (createRoutine, editRoutine), whatever its state says.
   if (r.run === "chat" && !r.fromOutside) return chatRun(r, b, at, opts);
   return taskRun(r, b, at, opts);
@@ -472,11 +479,11 @@ async function chatRun(r: Routine, b: Bot, at: number, opts: RunOpts): Promise<R
 
 /**
  * What a run is asked to do: the routine's goal, and for a meeting routine (before_event) the meetings
- * this run handles: those starting in its window (cloud/schedule.ts eventWindow), with the clock times in
- * the routine's zone, so runs 15 minutes apart handle every meeting once.
+ * this run handles: those starting in its window (cloud/schedule.ts eventWindow, from where the runs
+ * before it got to), with the clock times in the routine's zone, so every meeting is handled once.
  */
 export function goalFor(r: Routine, at: number): string {
-  const w = eventWindow(r.schedule, at);
+  const w = eventWindow(r.schedule, at, r.eventsThrough, zoneOf(r));
   if (!w) return r.goal;
   const tz = zoneOf(r);
   const clock = (ms: number) => new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" }).format(new Date(ms));

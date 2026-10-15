@@ -196,7 +196,7 @@ await check("the payload: the workspace's own routines, in orgo-web's shape", as
     delivery: { kind: "channel", linkId: "ch_1", chat: "C1" },
     nextRunAt: "2026-10-14T12:00:00.000Z",
     lastRunAt: "2026-10-13T12:00:00.000Z",
-    lastStatus: "quiet",
+    lastStatus: "ok",
   });
   const b = body.routines[1];
   assert.equal(b.kind, "schedule");
@@ -364,6 +364,120 @@ await check("never in the way: Orgo down, signed out, a broken state, a fetch th
     console.warn = warn;
   }
   reset();
+});
+
+await check("text Postgres can store: no NUL, no half an emoji, cut by code point; statuses in Orgo's words; a meeting routine's cursor", async () => {
+  reset();
+  const emoji = "\u{1F600}";
+  assert.equal(Sync.cleanText(`${"a".repeat(39)}${emoji}`, 40), `${"a".repeat(39)}${emoji}`, "an emoji across the cut stays whole");
+  assert.equal(Sync.cleanText(`${"a".repeat(40)}${emoji}`, 40), "a".repeat(40));
+  assert.equal(Sync.cleanText("a\u0000b\uD83Dc\uDE00d", 10), "abcd", "NUL and lone halves go");
+  state.routines = [
+    routine({ id: "rtn_t", title: `${"t".repeat(199)}${emoji}`, goal: `From an email\u0000 ${"g".repeat(7990)}${emoji}`, tags: ["\uD83D"], last: { at: Date.parse("2026-10-13T12:00:00Z"), status: "running" }, lastRunAt: Date.parse("2026-10-13T11:59:59Z") }),
+    routine({ id: "rtn_e", schedule: { kind: "before_event", minutes: 30, source: "googlecalendar" }, eventsThrough: Date.parse("2026-10-13T13:00:00Z") }),
+    routine({ id: "rtn_d", eventsThrough: Date.parse("2026-10-13T13:00:00Z") }),
+  ];
+  Sync.routineChanged("bot_main");
+  await T.flushAll();
+  const [t, e, d] = calls[0].body.routines;
+  for (const x of [t.title, t.goal]) {
+    assert.ok(!/\u0000/.test(x), "no NUL");
+    assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(x), "no lone half");
+  }
+  assert.ok(Array.from(t.title).length <= 200 && Array.from(t.goal).length <= 8000);
+  assert.ok(!("tags" in t), "a tag that was only half an emoji goes");
+  assert.equal(t.lastStatus, "waiting", "running is waiting");
+  assert.equal(t.lastRunAt, "2026-10-13T12:00:00.000Z", "the last run's start, as its run POST says");
+  assert.equal(e.eventsThrough, "2026-10-13T13:00:00.000Z");
+  assert.ok(!("eventsThrough" in d), "only a meeting routine's");
+});
+
+await check("a batch Orgo didn't take (down, 5xx) goes again with its deleteMissing and runs; a 400 doesn't", async () => {
+  reset();
+  assert.equal(Sync.RETRY_MS, 60_000);
+  state.routines = [routine({ id: "rtn_r" })];
+  answer = () => ({ status: 503, json: {} });
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    Sync.routineChanged("bot_main", { deleted: true });
+    Sync.routineRan("rtn_r", { at: Date.now(), status: "ok" });
+    await T.flushAll();
+    assert.equal(T.pendingCount(), 1, "back in the queue");
+    answer = ORGO;
+    calls.length = 0;
+    await T.flushAll();
+    assert.equal(calls[0].body.deleteMissing, true, "the delete still goes");
+    assert.deepEqual(calls.map((c) => c.method), ["PUT", "POST"], "and the run");
+    assert.equal(T.pendingCount(), 0);
+    reset();
+    state.routines = [routine({ id: "rtn_r" })];
+    answer = () => ({ status: 400, json: {} });
+    Sync.routineChanged("bot_main");
+    await T.flushAll();
+    assert.equal(T.pendingCount(), 0, "a refusal isn't sent again as it is");
+  } finally {
+    console.warn = warn;
+  }
+});
+
+await check("one flush per workspace at a time: a change during a slow PUT goes after it, newer", async () => {
+  reset();
+  state.routines = [routine({ id: "rtn_s0" })];
+  let release;
+  const gate = new Promise((r) => (release = r));
+  answer = async (m, path, body) => {
+    if (body?.deleteMissing) await gate;
+    return ORGO(m, path, body);
+  };
+  Sync.syncRoutinesOnStart();
+  const first = T.start("ws_main");
+  await sleep(10);
+  state.routines = [...state.routines, routine({ id: "rtn_new" })];
+  Sync.routineChanged("bot_main");
+  const second = T.start("ws_main");
+  await sleep(10);
+  assert.equal(calls.filter((c) => c.path === `/api/projects/${PID}/routines`).length, 1, "the second waits for the first");
+  release();
+  await first;
+  await second;
+  await T.flushAll();
+  const puts = calls.filter((c) => c.path === `/api/projects/${PID}/routines`);
+  assert.equal(puts.length, 2);
+  assert.equal(puts[0].body.deleteMissing, true);
+  assert.deepEqual(puts[1].body.routines.map((r) => r.bopsId), ["rtn_s0", "rtn_new"], "the newer state goes last");
+});
+
+await check("more than 500 routines: the first 500 go, without deleteMissing; ones that can't go don't count", async () => {
+  reset();
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    state.routines = [routine({ id: "rtn_bad0", schedule: { kind: "daily", time: "nope" } }), ...Array.from({ length: 500 }, (_, i) => routine({ id: `rtn_${i}` }))];
+    Sync.routineChanged("bot_main", { deleted: true });
+    await T.flushAll();
+    assert.equal(calls[0].body.routines.length, 500);
+    assert.equal(calls[0].body.deleteMissing, true, "500 that can go: a full sync");
+    reset();
+    state.routines = Array.from({ length: 501 }, (_, i) => routine({ id: `rtn_${i}` }));
+    Sync.routineChanged("bot_main", { deleted: true });
+    await T.flushAll();
+    assert.equal(calls[0].body.routines.length, 500);
+    assert.equal(calls[0].body.deleteMissing, undefined, "never deletes the ones past 500");
+  } finally {
+    console.warn = warn;
+  }
+});
+
+await check("a deleted bot's routines: its workspace goes with deleteMissing", async () => {
+  reset();
+  state.routines = [routine({ id: "rtn_stay", botId: "bot_acme" })];
+  Sync.routinesRemovedInWorkspace("ws_acme");
+  Sync.routinesRemovedInWorkspace("ws_local");
+  await T.flushAll();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, `/api/projects/${PID2}/routines`);
+  assert.equal(calls[0].body.deleteMissing, true);
 });
 
 console.log(`routine sync: ${passed} passed, ${failures} failed`);

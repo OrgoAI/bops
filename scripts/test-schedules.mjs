@@ -324,15 +324,34 @@ await check("before_event: a check every 15 minutes inside its hours and days, a
   eq(S.nextRun(prep, Z("2026-10-13T14:00:00Z"), NY), Z("2026-10-13T14:15:00Z"), "15 minutes on, whatever the lead");
   eq(S.nextRun(prep, Z("2026-10-13T14:20:00Z"), NY, Z("2026-10-13T14:15:00Z")), Z("2026-10-13T14:30:00Z"), "on the beat");
   const day = { ...prep, hours: { from: "08:00", to: "20:00" }, days: [1, 2, 3, 4, 5] };
-  eq(S.nextRun(day, Z("2026-10-16T23:55:00Z"), NY), Z("2026-10-19T12:00:00Z"), "Friday after 8 PM: Monday 8 AM");
-  eq(S.nextRun({ ...prep, hours: { from: "08:00", to: "18:00" } }, Z("2026-10-24T17:00:00Z"), LDN), Z("2026-10-25T08:00:00Z"), "London: past 6 PM BST, 8 AM GMT after the change");
-  // Windows: 30 to 45 minutes ahead of each run; runs 15 minutes apart cover back to back windows, so each meeting falls in one.
+  // The hours and days are the meetings': the first check is the lead before them, so an 8 AM meeting gets its 30 minutes.
+  eq(S.nextRun(day, Z("2026-10-16T23:55:00Z"), NY), Z("2026-10-19T11:30:00Z"), "Friday after 8 PM: Monday 7:30 AM, for the 8 AM meetings");
+  eq(S.nextRun({ ...prep, hours: { from: "08:00", to: "18:00" } }, Z("2026-10-24T17:00:00Z"), LDN), Z("2026-10-25T07:30:00Z"), "London: past 6 PM BST, 7:30 AM GMT after the change");
+  eq(S.nextRun(day, Z("2026-10-19T23:20:00Z"), NY, Z("2026-10-19T23:15:00Z")), Z("2026-10-19T23:30:00Z"), "7:30 PM still checks, for the 8 PM meetings");
+  eq(S.nextRun(day, Z("2026-10-19T23:35:00Z"), NY, Z("2026-10-19T23:30:00Z")), Z("2026-10-20T11:30:00Z"), "7:45 PM doesn't: the next morning");
+  // Windows: up to 45 minutes ahead of each run, from where the runs before got to.
   const a = S.eventWindow(prep, Z("2026-10-13T14:00:00Z"));
-  assert.deepEqual(a, { from: Z("2026-10-13T14:30:00Z"), to: Z("2026-10-13T14:45:00Z") });
-  const b = S.eventWindow(prep, Z("2026-10-13T14:15:00Z"));
-  assert.equal(b.from, a.to, "back to back");
+  assert.deepEqual(a, { from: Z("2026-10-13T14:00:00Z"), to: Z("2026-10-13T14:45:00Z") }, "the first run: every meeting still ahead");
+  const b = S.eventWindow(prep, Z("2026-10-13T14:15:00Z"), a.to);
+  assert.deepEqual(b, { from: a.to, to: Z("2026-10-13T15:00:00Z") }, "back to back");
+  // A tick 19 seconds late, then 2 seconds late: still back to back, no gap and no overlap.
+  const l1 = S.eventWindow(prep, Z("2026-10-13T14:30:19Z"), b.to);
+  const l2 = S.eventWindow(prep, Z("2026-10-13T14:45:02Z"), l1.to);
+  assert.equal(l1.from, b.to);
+  assert.equal(l2.from, l1.to, "lag never overlaps");
+  // Asleep through two checks: the run on waking takes up every meeting still ahead, from where the last got to or now.
+  const woke = S.eventWindow(prep, Z("2026-10-13T15:40:00Z"), l2.to);
+  assert.deepEqual(woke, { from: Z("2026-10-13T15:40:00Z"), to: Z("2026-10-13T16:25:00Z") }, "nothing still ahead is dropped");
+  assert.deepEqual(S.eventWindow(prep, Z("2026-10-13T15:40:00Z"), Z("2026-10-13T15:50:00Z")).from, Z("2026-10-13T15:50:00Z"));
+  // Run now just after a check covers only what that check didn't; the next check starts after it.
+  const now1 = S.eventWindow(prep, Z("2026-10-13T14:16:00Z"), b.to);
+  assert.deepEqual(now1, { from: b.to, to: Z("2026-10-13T15:01:00Z") });
+  // Hours: the 7:30 AM check handles meetings from 8 AM, not 7:30 to 8; outside them, nothing.
+  assert.deepEqual(S.eventWindow(day, Z("2026-10-19T11:30:00Z"), undefined, NY), { from: Z("2026-10-19T12:00:00Z"), to: Z("2026-10-19T12:15:00Z") });
+  const sat = S.eventWindow(day, Z("2026-10-17T15:00:00Z"), undefined, NY);
+  assert.ok(sat.from >= sat.to, "a Saturday: empty");
   // Across the change in New York the window is real minutes too.
-  const c = S.eventWindow({ ...prep, minutes: 15 }, Z("2026-11-01T05:50:00Z"));
+  const c = S.eventWindow({ ...prep, minutes: 15 }, Z("2026-11-01T05:50:00Z"), Z("2026-11-01T06:05:00Z"));
   assert.deepEqual(c, { from: Z("2026-11-01T06:05:00Z"), to: Z("2026-11-01T06:20:00Z") });
   assert.equal(S.eventWindow({ kind: "daily", time: "09:00" }, Z("2026-10-13T14:00:00Z")), undefined, "only meeting routines have one");
 });
@@ -1352,12 +1371,32 @@ await check("a meeting routine: checks every 15 minutes, each run told only its 
     await until(() => get(r.id).last?.status === "quiet", "a quiet check");
     const job = fake.jobs[jobs];
     assert.equal(job.routineId, r.id);
-    assert.match(job.goal, /^Prep me for my meetings\.\n\nThis run handles only the meetings in Sam's Google Calendar that start from 5:15 PM up to but not including 5:30 PM \(America\/New_York; 2026-10-13T21:15:05\.000Z to 2026-10-13T21:30:05\.000Z\)\. Earlier and later ones are handled by other runs\.\n\nIf no meeting starts then, answer exactly NOTHING and nothing else\.$/);
+    assert.match(job.goal, /^Prep me for my meetings\.\n\nThis run handles only the meetings in Sam's Google Calendar that start from 4:45 PM up to but not including 5:30 PM \(America\/New_York; 2026-10-13T20:45:05\.000Z to 2026-10-13T21:30:05\.000Z\)\. Earlier and later ones are handled by other runs\.\n\nIf no meeting starts then, answer exactly NOTHING and nothing else\.$/);
     noDashes(job.goal, "meeting goal");
     eq(get(r.id).nextRunAt, Z("2026-10-13T21:00:00Z"), "the next check, on the beat");
+    eq(get(r.id).eventsThrough, Z("2026-10-13T21:30:05Z"), "the run that finished handled up to its window's end");
+    // The next check, 12 seconds late, starts where that one ended.
+    clock = Z("2026-10-13T21:00:12Z");
+    tick();
+    await until(() => fake.jobs.length > jobs + 1 && get(r.id).last?.at === clock && get(r.id).last?.status === "quiet", "the next check");
+    assert.match(fake.jobs[jobs + 1].goal, /2026-10-13T21:30:05\.000Z to 2026-10-13T21:45:12\.000Z/);
+    // A failed run leaves it where it was: the next run takes those meetings up.
+    const through = get(r.id).eventsThrough;
+    fake.chatAnswer = async () => ({ error: "Google Calendar isn't connected." });
+    await R.runRoutine(r.id, { manual: "app" });
+    eq(get(r.id).eventsThrough, through, "a failed run moves nothing");
+    // Nothing left to handle (Run now right where the last run got to): quiet, without asking the bot.
+    fake.chatAnswer = async () => ({ text: "NOTHING" });
+    const before = fake.jobs.length;
+    const saw = clock;
+    clock = through - 45 * 60_000;
+    const run = await R.runRoutine(r.id, { manual: "app" });
+    assert.equal(run.status, "quiet");
+    assert.equal(fake.jobs.length, before, "the bot isn't asked");
+    clock = saw;
     // In London's zone, the window reads in London's clock.
     R.editRoutine(r.id, { timeZone: "Europe/London" });
-    assert.match(R.goalFor(get(r.id), Z("2026-10-13T20:45:00Z")), /start from 10:15 PM up to but not including 10:30 PM \(Europe\/London;/);
+    assert.match(R.goalFor({ ...get(r.id), eventsThrough: Z("2026-10-13T21:15:00Z") }, Z("2026-10-13T20:45:00Z")), /start from 10:15 PM up to but not including 10:30 PM \(Europe\/London;/);
     assert.equal(R.goalFor({ ...get(r.id), schedule: { kind: "daily", time: "09:00" } }, clock), "Prep me for my meetings.", "other kinds: the goal alone");
     R.deleteRoutine(r.id);
   } finally {

@@ -13,8 +13,10 @@ import { bot, getState } from "./store";
  * (POST /api/projects/{id}/routines/{orgoId}/runs, the Orgo id the PUT answered for its routine).
  *
  * Never in the way: nothing here is awaited by a routine, every failure is a warning in the log, and a
- * routine runs the same whether Orgo answered or not. An Orgo without the routes (404 or 405) is asked
- * again at most once every 6 hours. On the first tick after start (routines.ts), each workspace sends a
+ * routine runs the same whether Orgo answered or not. A batch Orgo didn't take (no answer, or 5xx) goes
+ * back in the queue with its deleteMissing and runs, sent again after a backoff (RETRY_MS, doubling).
+ * One flush per workspace at a time, so a slow PUT is never overtaken by a newer one. An Orgo without
+ * the routes (404 or 405) is asked again at most once every 6 hours. On the first tick after start (routines.ts), each workspace sends a
  * full copy with deleteMissing, so a routine deleted while Orgo couldn't be reached goes there too.
  * Runs on the signed-in Orgo key (orgo.ts apiKey); signed out, nothing is sent.
  */
@@ -26,18 +28,36 @@ export const MISSING_RETRY_MS = 6 * 60 * 60_000;
 /** The most routines one call sends (orgo-web's cap). */
 const MAX_ROUTINES = 500;
 const TIMEOUT_MS = 15_000;
+/** After Orgo didn't answer (or answered 5xx), how long until the batch is sent again; it doubles up to RETRY_MAX_MS. */
+export const RETRY_MS = 60_000;
+const RETRY_MAX_MS = 30 * 60_000;
+/** The most finished runs kept waiting for one workspace (the newest). */
+const MAX_RUNS_WAITING = 200;
 
-type Pending = { timer?: ReturnType<typeof setTimeout>; deleteMissing: boolean; runs: { bopsId: string; run: RoutineRun; finishedAt: number }[] };
+type Pending = { timer?: ReturnType<typeof setTimeout>; deleteMissing: boolean; runs: { bopsId: string; run: RoutineRun; finishedAt: number }[]; tries?: number };
 
 const g = globalThis as unknown as {
   __bopsRoutineSync?: Map<string, Pending>;
   __bopsRoutineSyncMissing?: Map<string, number>;
   __bopsRoutineSyncStarted?: boolean;
+  __bopsRoutineSyncInFlight?: Map<string, Promise<void>>;
 };
 /** What's waiting to go, by workspace. */
 const pending = (g.__bopsRoutineSync ??= new Map());
 /** Orgo projects whose Orgo answered 404 or 405, and when it may be asked again. */
 const missing = (g.__bopsRoutineSyncMissing ??= new Map());
+/** The flush going for a workspace: one at a time, so each PUT carries state at least as new as the one before. */
+const inFlight = (g.__bopsRoutineSyncInFlight ??= new Map());
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+/**
+ * Text Postgres can store (it refuses a NUL and half an emoji), cut to `max` characters by code point, so
+ * a cut never splits an emoji. One routine with either would have Orgo refuse the workspace's whole list.
+ */
+export function cleanText(s: string, max: number): string {
+  const t = s.replace(/\u0000/g, "").replace(LONE_SURROGATE, "");
+  return t.length <= max ? t : Array.from(t).slice(0, max).join("");
+}
 
 /** The workspace a routine's bot is in, and its Orgo project; undefined without one. */
 function projectOfBot(botId: string): { wsId: string; projectId: string } | undefined {
@@ -48,6 +68,9 @@ function projectOfBot(botId: string): { wsId: string; projectId: string } | unde
 
 const iso = (ms: number | undefined) => (ms !== undefined && Number.isFinite(ms) ? new Date(ms).toISOString() : undefined);
 
+/** A run's status in Orgo's words (ok, failed, skipped, waiting): quiet went fine, running is waiting on its thread. */
+const orgoStatus = (status: RoutineRun["status"]) => (status === "quiet" ? "ok" : status === "running" ? "waiting" : status);
+
 /**
  * A routine as orgo-web takes it (app/api/projects/[id]/routines), or undefined for one whose schedule
  * isn't one (orgo-web would refuse the whole list for it). The schedule goes as Bops keeps it now
@@ -57,22 +80,27 @@ export function routinePayload(r: Routine) {
   const s = normalizeSchedule(r.schedule);
   if ("error" in s) return undefined;
   const kind = r.source ? templateById(r.source.template)?.kind : undefined;
+  const d = r.deliverTo;
+  const tags = r.tags?.map((t) => cleanText(t, 64)).filter(Boolean);
+  // The last run as its run POST says it (its start and status), so the PUT and the runs agree.
+  const lastRunAt = iso(r.last?.at ?? r.lastRunAt);
   return {
     bopsId: r.id,
     botId: r.botId,
     kind: kind === "monitor" ? "monitor" : "schedule",
-    title: (r.title.trim() || r.goal.trim() || "Routine").slice(0, 200),
-    goal: r.goal.slice(0, 8000),
+    title: cleanText(r.title.trim(), 200).trim() || cleanText(r.goal.trim(), 200).trim() || "Routine",
+    goal: cleanText(r.goal, 8000),
     enabled: r.enabled,
     quiet: !!r.quiet,
     schedule: s.schedule,
     ...(r.timeZone ? { timeZone: r.timeZone } : {}),
-    ...(r.source ? { source: { app: r.source.app, template: r.source.template } } : {}),
-    ...(r.tags?.length ? { tags: r.tags } : {}),
-    ...(r.deliverTo ? { delivery: r.deliverTo } : {}),
+    ...(r.source ? { source: { app: cleanText(r.source.app, 128), template: cleanText(r.source.template, 128) } } : {}),
+    ...(tags?.length ? { tags } : {}),
+    ...(d ? { delivery: d.kind === "channel" ? { kind: d.kind, linkId: cleanText(d.linkId, 200), ...(d.chat ? { chat: cleanText(d.chat, 200) } : {}) } : d } : {}),
     ...(iso(r.nextRunAt) ? { nextRunAt: iso(r.nextRunAt) } : {}),
-    ...(iso(r.lastRunAt) ? { lastRunAt: iso(r.lastRunAt) } : {}),
-    ...(r.last ? { lastStatus: r.last.status } : {}),
+    ...(lastRunAt ? { lastRunAt } : {}),
+    ...(r.last ? { lastStatus: orgoStatus(r.last.status) } : {}),
+    ...(s.schedule.kind === "before_event" && iso(r.eventsThrough) ? { eventsThrough: iso(r.eventsThrough) } : {}),
   };
 }
 
@@ -85,7 +113,7 @@ export function runPayload(run: RoutineRun, finishedAt: number) {
     status,
     ms: Math.max(0, Math.round(finishedAt - run.at)),
     ...(run.status === "quiet" ? { summary: "Nothing needed the user." } : {}),
-    ...(run.error ? { error: run.error.slice(0, 2000) } : {}),
+    ...(run.error && cleanText(run.error, 2000) ? { error: cleanText(run.error, 2000) } : {}),
   };
 }
 
@@ -108,20 +136,42 @@ function orgoIds(json: unknown): Map<string, string> {
 /** Whether Orgo is being left alone for this project (it hasn't the routes), as of `now`. */
 const routesMissing = (projectId: string, now = Date.now()) => (missing.get(projectId) ?? 0) > now;
 
+/** Orgo didn't answer, or answered 5xx: worth sending again. */
+const retryable = (status: number | null) => status === null || status >= 500;
+
+/** A batch that didn't get through goes back in the queue (its deleteMissing and runs too), sent again after a backoff. */
+function requeue(wsId: string, p: Pending, runs = p.runs, deleteMissing = p.deleteMissing) {
+  const tries = (p.tries ?? 0) + 1;
+  const wait = Math.min(RETRY_MS * 2 ** (tries - 1), RETRY_MAX_MS);
+  queue(
+    wsId,
+    (q) => {
+      q.deleteMissing ||= deleteMissing;
+      q.runs = [...runs, ...q.runs].slice(-MAX_RUNS_WAITING);
+      q.tries = Math.max(q.tries ?? 0, tries);
+    },
+    wait,
+  );
+}
+
 /** Send what's waiting for a workspace: its routines, then its finished runs. */
 async function flush(wsId: string): Promise<void> {
   const p = pending.get(wsId);
   if (!p) return;
+  if (p.timer) clearTimeout(p.timer);
   pending.delete(wsId);
   const projectId = getState().workspaces?.find((w) => w.id === wsId)?.orgoProjectId;
   if (!projectId || routesMissing(projectId)) return;
   const base = `/api/projects/${encodeURIComponent(projectId)}/routines`;
-  const routines = getState()
+  const all = getState()
     .routines.filter((r) => workspaceOf(bot(r.botId)) === wsId)
-    .slice(0, MAX_ROUTINES)
     .map(routinePayload)
     .filter((x) => x !== undefined);
-  const res = await send("PUT", base, { routines, ...(p.deleteMissing ? { deleteMissing: true } : {}) });
+  // More than Orgo takes in one call: the first MAX_ROUTINES go, and nothing is deleted (the rest aren't missing).
+  const over = all.length > MAX_ROUTINES;
+  if (over) console.warn(`[routine-sync] ${wsId}: ${all.length} routines, Orgo takes ${MAX_ROUTINES}; the rest aren't mirrored`);
+  const routines = all.slice(0, MAX_ROUTINES);
+  const res = await send("PUT", base, { routines, ...(p.deleteMissing && !over ? { deleteMissing: true } : {}) });
   const status = res?.status ?? null;
   if (status === 404 || status === 405) {
     missing.set(projectId, Date.now() + MISSING_RETRY_MS);
@@ -129,25 +179,51 @@ async function flush(wsId: string): Promise<void> {
   }
   if (status === null || status >= 300) {
     if (status !== null) console.warn(`[routine-sync] ${wsId}: Orgo answered ${status} to the routines`);
+    if (retryable(status)) requeue(wsId, p);
     return;
   }
   missing.delete(projectId);
   const ids = orgoIds(res?.json);
+  const again: Pending["runs"] = [];
   for (const x of p.runs) {
     const orgoId = ids.get(x.bopsId);
     // Not in Orgo's copy (deleted meanwhile, or its schedule couldn't go): nothing to record it on.
     if (!orgoId) continue;
     const s = await send("POST", `${base}/${encodeURIComponent(orgoId)}/runs`, runPayload(x.run, x.finishedAt));
+    if (retryable(s?.status ?? null)) again.push(x);
     if (s && s.status >= 300 && s.status !== 404) console.warn(`[routine-sync] ${wsId}: Orgo answered ${s.status} to a run`);
   }
+  if (again.length) requeue(wsId, p, again, false);
 }
 
-/** Gather a change for a workspace and send it all SYNC_DEBOUNCE_MS after the last one. */
-function queue(wsId: string, add: (p: Pending) => void) {
-  const p = pending.get(wsId) ?? { deleteMissing: false, runs: [] };
+/**
+ * Flush a workspace, one flush at a time: while one is going, what's queued waits for it and goes right
+ * after, so a slow PUT is never overtaken by a newer one (which a stale deleteMissing would then undo).
+ */
+function start(wsId: string): Promise<void> {
+  const going = inFlight.get(wsId);
+  if (going) return going;
+  const done = flush(wsId)
+    .catch((e: Error) => console.warn(`[routine-sync] ${wsId}: ${e.message}`))
+    .finally(() => {
+      inFlight.delete(wsId);
+      const next = pending.get(wsId);
+      // Queued meanwhile and its wait is over: it goes now.
+      if (next && !next.timer) void start(wsId);
+    });
+  inFlight.set(wsId, done);
+  return done;
+}
+
+/** Gather a change for a workspace and send it all `wait` (SYNC_DEBOUNCE_MS) after the last one. */
+function queue(wsId: string, add: (p: Pending) => void, wait = SYNC_DEBOUNCE_MS) {
+  const p: Pending = pending.get(wsId) ?? { deleteMissing: false, runs: [] };
   add(p);
   if (p.timer) clearTimeout(p.timer);
-  p.timer = setTimeout(() => void flush(wsId).catch((e: Error) => console.warn(`[routine-sync] ${wsId}: ${e.message}`)), SYNC_DEBOUNCE_MS);
+  p.timer = setTimeout(() => {
+    p.timer = undefined;
+    void start(wsId);
+  }, wait);
   p.timer.unref?.();
   pending.set(wsId, p);
 }
@@ -166,6 +242,20 @@ export function routineChanged(botId: string, opts: { deleted?: boolean } = {}) 
   }
 }
 
+/**
+ * Routines of this workspace went without routineChanged (their bot was deleted, remove.ts): its routines
+ * go to Orgo shortly with deleteMissing, so theirs go there too. The workspace is passed, as the bot is gone.
+ */
+export function routinesRemovedInWorkspace(wsId: string) {
+  try {
+    const projectId = getState().workspaces?.find((w) => w.id === wsId)?.orgoProjectId;
+    if (!projectId || routesMissing(projectId)) return;
+    queue(wsId, (p) => (p.deleteMissing = true));
+  } catch (e) {
+    console.warn(`[routine-sync] ${(e as Error).message}`);
+  }
+}
+
 /** A routine's run was recorded (routines.ts record): once it's finished, it goes to Orgo with the routine. */
 export function routineRan(routineId: string, run: RoutineRun) {
   try {
@@ -173,7 +263,10 @@ export function routineRan(routineId: string, run: RoutineRun) {
     const r = getState().routines.find((x) => x.id === routineId);
     const at = r && projectOfBot(r.botId);
     if (!at || routesMissing(at.projectId)) return;
-    queue(at.wsId, (p) => p.runs.push({ bopsId: routineId, run: { ...run }, finishedAt: Date.now() }));
+    queue(at.wsId, (p) => {
+      p.runs.push({ bopsId: routineId, run: { ...run }, finishedAt: Date.now() });
+      if (p.runs.length > MAX_RUNS_WAITING) p.runs.splice(0, p.runs.length - MAX_RUNS_WAITING);
+    });
   } catch (e) {
     console.warn(`[routine-sync] ${(e as Error).message}`);
   }
@@ -193,16 +286,17 @@ export function syncRoutinesOnStart() {
 /** Tests: send what's waiting now, without the wait, and forget what was learned. */
 export const routineSyncForTests = {
   flushAll: async () => {
-    for (const [wsId, p] of [...pending]) {
-      if (p.timer) clearTimeout(p.timer);
-      await flush(wsId);
-    }
+    for (const wsId of [...inFlight.keys()]) await inFlight.get(wsId);
+    for (const wsId of [...pending.keys()]) await flush(wsId);
   },
+  /** Send a workspace's batch the way its timer does (one flush at a time). */
+  start: (wsId: string) => start(wsId),
   pendingCount: () => pending.size,
   reset: () => {
     for (const p of pending.values()) if (p.timer) clearTimeout(p.timer);
     pending.clear();
     missing.clear();
+    inFlight.clear();
     g.__bopsRoutineSyncStarted = false;
   },
 };

@@ -804,7 +804,8 @@ function whenContext(r: Routine, state: AppState) {
   };
 }
 
-type WhenEdit = { schedule?: Routine["schedule"]; timeZone?: string };
+/** `timeZone` null: back on the owner's zone (the routine stops having its own). */
+type WhenEdit = { schedule?: Routine["schedule"]; timeZone?: string | null };
 
 /** When it runs, as picked: what changed from the routine's own (nothing when nothing did). */
 function useWhen(r: Routine, tz?: string) {
@@ -813,7 +814,8 @@ function useWhen(r: Routine, tz?: string) {
   const [zone, setZone] = useState(was);
   const edit: WhenEdit = {
     ...(!sameCadence(schedule, asCadence(r.schedule)) ? { schedule: asSchedule(tidy(schedule)) } : {}),
-    ...(zone && zone !== was ? { timeZone: zone } : {}),
+    // The owner's own zone picked for a routine that had its own: it follows the owner again (wherever they travel), not pinned to it.
+    ...(zone && zone !== was ? { timeZone: zone === tz && r.timeZone ? null : zone } : {}),
   };
   return { schedule, setSchedule, zone, setZone, edit };
 }

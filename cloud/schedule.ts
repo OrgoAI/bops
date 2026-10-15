@@ -19,9 +19,9 @@
  * when set, `time` is times[0] and `day` is days[0], so code that reads only those still works.
  * - monthly: `dayOfMonth` 1 to 31, or -1 for the last day. A day the month doesn't have (the 31st in
  *   April) runs on its last day.
- * - before_event: a check every 15 minutes (inside `hours` and `days` when set) for meetings in the
- *   user's Google Calendar starting `minutes` (5 to 240) ahead; each run is told its window (eventWindow),
- *   so every meeting is handled once.
+ * - before_event: a check every 15 minutes for meetings in the user's Google Calendar starting `minutes`
+ *   (5 to 240) ahead (meetings inside `hours` and `days` when set); each run is told its window
+ *   (eventWindow), which starts where the runs before it got to, so every meeting is handled once.
  */
 export type ScheduleLike =
   | { kind: "daily"; time: string; times?: string[] }
@@ -193,7 +193,7 @@ const isDayOfMonth = (d: unknown): d is number => typeof d === "number" && Numbe
  * cross midnight ("22:00" to "06:00"): then the hours belong to the day they start on (with weekdays
  * only, Friday 10 PM to Saturday 6 AM counts, Sunday night doesn't). Both ends count: "8 AM to 10 PM"
  * every 2 hours runs at 8 AM and at 10 PM. The same from and to means all day. A before_event schedule is
- * an "every 15 minutes" one with the same hours and days.
+ * an "every 15 minutes" one whose hours and days are the meetings': its checks run `minutes` earlier.
  */
 export function nextRun(s: ScheduleLike, from: number, tz?: string, lastRunAt?: number): number | undefined {
   if (!Number.isFinite(from) || !s || typeof s !== "object") return undefined;
@@ -238,8 +238,15 @@ function nextEvery(s: Windowed, from: number, tz?: string, last?: number): numbe
     // Behind (the Mac slept, or it was paused): the next beat after now, not every beat missed.
     if (t <= from) t = last + (Math.floor((from - last) / step) + 1) * step;
   }
-  return allowedFrom(t, s, tz);
+  if (s.kind !== "before_event") return allowedFrom(t, s, tz);
+  // A meeting routine's hours and days are the meetings': it checks `minutes` ahead of them, so a 9 AM meeting gets its lead too.
+  const ahead = leadOf(s);
+  const at = allowedFrom(t + ahead, s, tz);
+  return at === undefined ? undefined : at - ahead;
 }
+
+/** A before_event schedule's lead, in ms. */
+const leadOf = (s: { minutes: number }) => Math.round(Number(s.minutes)) * MINUTE;
 
 /** The first moment at or after `t` inside the schedule's hours and days. */
 function allowedFrom(t: number, s: Windowed, tz?: string): number | undefined {
@@ -283,14 +290,18 @@ export function resolveOnce(at: number, now: number, tz?: string): { at: number;
 }
 
 /**
- * The meetings a before_event run handles: those starting from `from` up to (not including) `to`, which
- * is `minutes` to `minutes` + 15 after the run. Runs 15 minutes apart cover back to back windows, so each
- * meeting falls in exactly one. Undefined for any other kind.
+ * The meetings a before_event run at `at` handles: those starting from `from` up to (not including) `to`.
+ * `to` is `minutes` + 15 after the run. `from` is where the runs before it got to (`through`,
+ * Routine.eventsThrough, set as each run finishes), so back to back runs never handle a meeting twice
+ * whenever they start, and after a missed, skipped or failed run the next one takes up every meeting
+ * still ahead; never before the run itself, nor before its hours and days (they're the meetings' own).
+ * Empty (`from` at or after `to`) when there's nothing left to handle. Undefined for any other kind.
  */
-export function eventWindow(s: ScheduleLike, at: number): { from: number; to: number } | undefined {
+export function eventWindow(s: ScheduleLike, at: number, through?: number, tz?: string): { from: number; to: number } | undefined {
   if (!s || s.kind !== "before_event" || !Number.isFinite(at)) return undefined;
-  const ahead = Math.round(Number(s.minutes)) * MINUTE;
-  return { from: at + ahead, to: at + ahead + EVENT_CHECK_MINUTES * MINUTE };
+  const to = at + leadOf(s) + EVENT_CHECK_MINUTES * MINUTE;
+  const from = Math.max(at, through !== undefined && Number.isFinite(through) ? through : at, allowedFrom(at, s, tz) ?? to);
+  return { from, to };
 }
 
 /** Whether this runtime knows the IANA zone ("America/New_York"). */

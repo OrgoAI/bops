@@ -509,9 +509,10 @@ export type Schedule =
    */
   | { kind: "every"; minutes: number; hours?: { from: string; to: string }; days?: number[] }
   /**
-   * `minutes` (5 to 240) before each meeting in the user's Google Calendar: a check every 15 minutes
-   * (inside `hours` and `days` when set), each run told the meetings that start in its window
-   * (cloud/schedule.ts eventWindow), so every meeting is handled once.
+   * `minutes` (5 to 240) before each meeting in the user's Google Calendar (meetings inside `hours` and
+   * `days` when set): a check every 15 minutes, each run told the meetings that start in its window
+   * (cloud/schedule.ts eventWindow), which starts where the runs before it got to (Routine.eventsThrough),
+   * so every meeting is handled once.
    */
   | { kind: "before_event"; minutes: number; source: "googlecalendar"; hours?: { from: string; to: string }; days?: number[] };
 
@@ -579,6 +580,11 @@ export type Routine = {
   procedure?: string;
   /** How the last run went. */
   last?: RoutineRun;
+  /**
+   * A meeting routine (before_event): the meetings starting before this moment (epoch ms) were handled
+   * by a run that finished. The next run starts its window here (cloud/schedule.ts eventWindow).
+   */
+  eventsThrough?: number;
   /**
    * Set up on a turn someone else started (an email, a text or a call from outside Bops): who it came
    * from ("an email from desk@hotel.example"). Such a routine runs as a task in the cloud, marked as from

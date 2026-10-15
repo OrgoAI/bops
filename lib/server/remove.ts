@@ -5,6 +5,7 @@ import { bot, getState, session, update } from "./store";
 import { stopWatch } from "./watches";
 import { deleteInboxes } from "./mail";
 import { dropBotFromSkills } from "./workspace-skills";
+import { routinesRemovedInWorkspace } from "./routine-sync";
 import { deleteOrgoProject } from "./workspaces";
 
 /** Delete one message from a chat. */
@@ -47,6 +48,8 @@ export async function deleteBot(botId: string, withWorkspace = false) {
   // Its email inboxes go too (they count against the AgentMail plan).
   await deleteInboxes(b);
   const chatId = botChatId(botId);
+  const wsId = workspaceOf(b);
+  const hadRoutines = getState().routines.some((r) => r.botId === botId);
   dropBotFromSkills(botId, workspaceOf(b));
   update((state) => {
     state.bots = state.bots.filter((x) => x.id !== botId);
@@ -63,6 +66,8 @@ export async function deleteBot(botId: string, withWorkspace = false) {
     for (const key of Object.keys(state.screens ?? {})) if (key.startsWith(`${botId}:`)) delete state.screens![key];
     if (state.takeover?.botId === botId) state.takeover = undefined;
   });
+  // Its routines go from the workspace's Orgo copy too (the bot is gone, so by its workspace).
+  if (hadRoutines) routinesRemovedInWorkspace(wsId);
 }
 
 /**
