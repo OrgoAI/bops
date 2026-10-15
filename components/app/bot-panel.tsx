@@ -7,6 +7,7 @@ import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
 import { BotMemory } from "./bot-memory";
+import { BotKeys } from "./keys";
 import { ComputerSummary } from "./computer";
 import { Mascot } from "./mascot";
 import { PlanNote, usePlan } from "./plan-note";
@@ -31,6 +32,7 @@ export function BotPanel({
   onOpenThread,
   onOpenVault,
   onOpenComputer,
+  onOpenKeys,
   onUpgrade,
   onClose,
 }: {
@@ -43,6 +45,8 @@ export function BotPanel({
   onOpenVault: () => void;
   /** Open this bot's computer tab. */
   onOpenComputer: (botId: string) => void;
+  /** Open Settings at Keys, to add a key for this bot. */
+  onOpenKeys: (botId: string) => void;
   /** Open the plans (Account), where Pro and Max are bought. */
   onUpgrade: () => void;
   /** Leave the profile, back to where you were (its X; Esc does it too, see bops-app.tsx). */
@@ -68,7 +72,7 @@ export function BotPanel({
   );
 
   // Each part fades in as it opens (motion-fade-in, opacity only); another bot's profile in the same tab just changes in place.
-  if (tab === "details") return <Details state={state} bot={b} tabs={tabs} close={close} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenComputer={onOpenComputer} onUpgrade={onUpgrade} />;
+  if (tab === "details") return <Details state={state} bot={b} tabs={tabs} close={close} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenComputer={onOpenComputer} onOpenKeys={onOpenKeys} onUpgrade={onUpgrade} />;
 
   return (
     <section className="motion-fade-in relative flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto bg-white px-5 py-4">
@@ -104,6 +108,7 @@ function Details({
   onOpenChat,
   onOpenVault,
   onOpenComputer,
+  onOpenKeys,
   onUpgrade,
 }: {
   state: AppState;
@@ -113,6 +118,7 @@ function Details({
   onOpenChat: (chatId: string) => void;
   onOpenVault: () => void;
   onOpenComputer: (botId: string) => void;
+  onOpenKeys: (botId: string) => void;
   onUpgrade: () => void;
 }) {
   const plan = usePhonePlan();
@@ -191,6 +197,7 @@ function Details({
 
       <ComputerSummary state={state} bot={b} className={`w-full ${glass}`} onOpen={() => onOpenComputer(b.id)} />
       <Uses state={state} bot={b} onOpenVault={onOpenVault} className={glass} />
+      <BotKeys bot={b} onAdd={() => onOpenKeys(b.id)} className={glass} />
 
       <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
         <div className="flex min-w-0 flex-1 flex-col">

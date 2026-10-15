@@ -14,6 +14,7 @@ import { MicButton } from "./mic-button";
 import { Fold } from "./fold";
 import { SaveProcedureDialog } from "./procedure-dialog";
 import { undash } from "./side-group";
+import { ApiAsk, apiAskOf, apiCallOf, ApiNote } from "./keys";
 import { ChatAvatar, chatName, clockTime, needsYou, post, StatusIcon, teamOf, useNow } from "./ui";
 
 /** Light markdown for bot text: **bold** and [links](url). */
@@ -1261,10 +1262,12 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
       )
     ) : null;
 
+  // A call a bot made with one of your keys (keys.tsx): the service, the method and the path.
+  const api = apiCallOf(m);
   if (m.role === "system")
     return (
       <div className={`flex w-full flex-col items-center gap-1.5 self-center py-0.5 ${enterClass}`}>
-        <SystemNote text={m.text} />
+        {api ? <ApiNote call={api} /> : <SystemNote text={m.text} />}
         {chipList}
       </div>
     );
@@ -2195,6 +2198,8 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
   const [busy, setBusy] = useState(false);
   const b = state.bots.find((x) => x.id === a.botId);
   const s = state.sessions.find((x) => x.id === a.sessionId);
+  // A call to an API with one of your keys (keys.tsx): which service, and the method and path in full.
+  const api = apiAskOf(a);
   const decide = async (yes: boolean) => {
     setBusy(true);
     await post("/api/apps/approvals", { id: a.id, yes });
@@ -2206,12 +2211,13 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
         {b && <Mascot botId={b.id} color={b.color} size={26} />}
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="text-[13.5px] font-semibold leading-[18px]">
-            {b?.name ?? "A bot"} wants to: {a.title}
+            {api ? `${b?.name ?? "A bot"} wants to call ${api.label}` : `${b?.name ?? "A bot"} wants to: ${a.title}`}
           </span>
           {s && <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">For &ldquo;{s.title}&rdquo;</span>}
         </div>
       </div>
-      {a.detail && <pre className={`${a.app === "email" ? "max-h-[280px]" : "max-h-[180px]"} overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#F7F7F6] px-3 py-2 font-sans text-[12.5px] leading-[18px] text-[#3A3A38] [overflow-wrap:anywhere]`}>{a.detail}</pre>}
+      {api && <ApiAsk ask={api} detail={a.detail} botName={b?.name ?? "The bot"} />}
+      {a.detail && !api && <pre className={`${a.app === "email" ? "max-h-[280px]" : "max-h-[180px]"} overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#F7F7F6] px-3 py-2 font-sans text-[12.5px] leading-[18px] text-[#3A3A38] [overflow-wrap:anywhere]`}>{a.detail}</pre>}
       <div className="flex gap-1.5">
         <button disabled={busy} onClick={() => void decide(true)} className={`${btn} bg-ink text-white`}>
           {a.app === "email" ? "Send" : "Do it"}
