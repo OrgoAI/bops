@@ -229,6 +229,23 @@ export const sharesComputer = (b: Pick<Bot, "isMain" | "computer" | "computerId"
 export const freeComputerBot = (bots: Bot[], except?: string) => bots.find((x) => x.isMain && x.freeComputer && x.computerId && x.id !== except);
 
 /**
+ * The free Bops computer when the workspace `wsId` is deleted: null when no bot of it holds it. It sits in
+ * the default's "bops" project, so Orgo's preview of the workspace never lists it, and main bots of other
+ * workspaces may work on it (computer "shared", lib/server/plan.ts shareFree) or have it on record too. Then
+ * it stays (`kept`): `heir` is the main bot of another workspace that takes it up, none when another bot
+ * has it already. Otherwise it is deleted with the workspace, and the confirm says so.
+ */
+export function freeComputerOnDelete(bots: Bot[], wsId: string): { id: string; holder: Bot; kept: boolean; heir?: Bot } | null {
+  const holder = bots.find((x) => x.isMain && x.freeComputer && x.computerId && workspaceOf(x) === wsId);
+  if (!holder) return null;
+  const id = holder.computerId!;
+  const others = bots.filter((x) => workspaceOf(x) !== wsId);
+  if (others.some((x) => x.computerId === id)) return { id, holder, kept: true };
+  const heir = others.find((x) => x.isMain && sharesComputer(x));
+  return heir ? { id, holder, kept: true, heir } : { id, holder, kept: false };
+}
+
+/**
  * The bot whose Orgo computer `b` works on: itself, or its main bot when it shares (and that main
  * bot's own host, when it shares the free Bops computer). Anything about the machine (its id, status,
  * tailnet address, screens) comes from this bot; the work stays `b`'s.

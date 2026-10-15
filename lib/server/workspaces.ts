@@ -1,5 +1,5 @@
 import "server-only";
-import { botChatId, MAIN_WORKSPACE, sharesComputer, workspaceOf, type Bot, type OrgoMigration, type Workspace } from "@/lib/types";
+import { botChatId, freeComputerOnDelete, MAIN_WORKSPACE, sharesComputer, workspaceOf, type Bot, type OrgoMigration, type Workspace } from "@/lib/types";
 import { freeBotId } from "./bots";
 import { getState, id, stateEpoch, update } from "./store";
 import { ensureInbox } from "./mail";
@@ -260,7 +260,12 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
   if (!w) throw new WorkspaceError("No such workspace.", 404);
   if (workspaceId === MAIN_WORKSPACE) throw new WorkspaceError(DEFAULT_UNDELETABLE);
   const team = getState().bots.filter((b) => workspaceOf(b) === workspaceId);
-  const computers = team.filter((b) => b.computerId && !sharesComputer(b)).map((b) => ({ id: b.computerId!, name: `${b.name}'s computer` }));
+  // The free Bops computer stays when another workspace's bots work on it (it passes to one of them), and
+  // is said by its name when it goes.
+  const free = freeComputerOnDelete(getState().bots, workspaceId);
+  const computers = team
+    .filter((b) => b.computerId && !sharesComputer(b) && !(free?.kept && b.computerId === free.id))
+    .map((b) => ({ id: b.computerId!, name: free && b.computerId === free.id ? "Your free Bops computer" : `${b.name}'s computer` }));
   const keys: string[] = [];
   const skills = refsOf(workspaceId, "skill").map((r) => r.name);
   const apps = refsOf(workspaceId, "app").map((r) => r.name);
@@ -273,9 +278,17 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
       throw new WorkspaceError(`Orgo didn't say what's in ${w.name}, so nothing was deleted. Try again.${e instanceof OrgoError && e.said ? ` (${e.said})` : ""}`, 502);
     }
     for (const c of there.computers) if (!computers.some((x) => x.id === c.id)) computers.push(c);
+    // The free computer made in this workspace's project goes with it, whoever else works on it.
+    for (const c of computers) if (free && c.id === free.id) c.name = "Your free Bops computer";
     keys.push(...there.keys);
     skills.push(...there.skills);
     apps.push(...there.apps);
+    // An orgo-web that only counts them: more there than are named here are still said, never left off.
+    const more = (n: number | undefined, named: string[], one: string, many: string) => {
+      if (n && n > named.length) named.push(`${n} ${n === 1 ? one : many} on Orgo`);
+    };
+    more(there.skillCount, skills, "skill", "skills");
+    more(there.appCount, apps, "app", "apps");
     // This workspace's keys as this app last listed them (the vault scopes them to its project).
     const { listKeys } = await import("./keys");
     for (const k of await listKeys().catch(() => [])) if (k.workspaceId === w.orgoProjectId) keys.push(k.name);

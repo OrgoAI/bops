@@ -372,7 +372,8 @@ export function bindProject(wsId: string, projectId: string, orgoName?: string, 
 }
 
 /** Orgo said that name is taken (it refuses a second workspace with the same name, any case). */
-export const nameTaken = (e: unknown) => e instanceof OrgoError && e.status === 400 && /already exists|name.*taken/i.test(e.said ?? e.message);
+export const nameTaken = (e: unknown) =>
+  e instanceof OrgoError && e.status === 400 && (e.code === "WORKSPACE_NAME_TAKEN" || /already exists|name.*taken/i.test(e.said ?? e.message));
 
 /** The names tried for a Bops workspace whose name the user's Orgo already has: "orgo (Bops)", then "orgo (Bops 2)", and so on. */
 export const collisionNames = (name: string) => [name, `${name} (Bops)`, ...Array.from({ length: 8 }, (_, i) => `${name} (Bops ${i + 2})`)];
@@ -397,6 +398,9 @@ export async function ensureProject(wsId: string, opts: { interactive?: boolean;
   const name = wsId === MAIN_WORKSPACE && /^main$/i.test(local) ? WORKSPACE : local;
   const tries = opts.interactive ? [name] : collisionNames(name);
   const taken = new Set(owned.map((x) => x.name.trim().toLowerCase()));
+  // "bops" is the default's name for the apps before WORKSPACE_APPS_SINCE, even renamed away from it: they
+  // take the first project by that name (orgo-web refuses it for any other).
+  if (wsId !== MAIN_WORKSPACE) taken.add(WORKSPACE.toLowerCase());
   for (const n of tries) {
     if (!opts.interactive && taken.has(n.toLowerCase())) continue;
     try {
@@ -812,17 +816,28 @@ export const renameProject = (projectId: string, name: string) =>
 export const deleteProject = (projectId: string) => call<{ success?: boolean }>("POST", `/projects/${encodeURIComponent(projectId)}/delete`, undefined, { wait: false });
 
 /** What deleting an Orgo workspace takes with it, as orgo-web lists it (GET /api/workspaces/{id}/delete-preview). */
-export type OrgoDeletePreview = { computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[] };
+export type OrgoDeletePreview = {
+  computers: { id: string; name: string }[];
+  keys: string[];
+  skills: string[];
+  apps: string[];
+  /** An orgo-web that counted skills and apps (563ed1cf6) instead of naming them: how many it has, names unknown. */
+  skillCount?: number;
+  appCount?: number;
+};
 
 /**
  * What orgo-web says goes with a workspace when it's deleted: its computers, its keys (vault secrets scoped
  * to it), its skills and its apps. Each list may come as names, or as rows with a name (an id for a
- * computer). Throws when Orgo doesn't answer it: nothing is deleted without the user seeing this first.
+ * computer); orgo-web sends skills and apps as [{ name, slug }]. One that sends a count for them instead
+ * (the first build) says so in skillCount and appCount, so the confirm never reads it as none. Throws when
+ * Orgo doesn't answer it: nothing is deleted without the user seeing this first.
  */
 export async function deletePreview(projectId: string): Promise<OrgoDeletePreview> {
   const j = await call<Record<string, unknown>>("GET", `/workspaces/${encodeURIComponent(projectId)}/delete-preview`);
   const rows = (x: unknown) => (Array.isArray(x) ? x : []).map((r) => (typeof r === "string" ? { name: r } : r && typeof r === "object" ? (r as Record<string, unknown>) : {}));
   const names = (x: unknown) => rows(x).map((r) => String(r.name ?? r.slug ?? r.title ?? "")).filter(Boolean);
+  const count = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x > 0 ? Math.floor(x) : undefined);
   return {
     computers: rows(j.computers ?? j.desktops)
       .map((r) => ({ id: String(r.id ?? r.name ?? ""), name: String(r.name ?? r.id ?? "") }))
@@ -830,6 +845,8 @@ export async function deletePreview(projectId: string): Promise<OrgoDeletePrevie
     keys: names(j.keys ?? j.secrets),
     skills: names(j.skills),
     apps: names(j.apps),
+    ...(count(j.skills) !== undefined && { skillCount: count(j.skills) }),
+    ...(count(j.apps) !== undefined && { appCount: count(j.apps) }),
   };
 }
 
