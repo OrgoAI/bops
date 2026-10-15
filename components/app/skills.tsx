@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } fr
 import { workspaceOf, type AppState, type Bot, type SkillKind, type SkillRef } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { CloseButton, currentWorkspace, post, teamOf } from "./ui";
+import { SIDE_HEAD } from "./autopilot";
 
 /*
  * Skills: a workspace's ways of doing a kind of job (skills) and the tools Bops built that bots run (apps),
@@ -49,13 +50,16 @@ export function SkillsIcon({ size = 14 }: { size?: number }) {
 export function SkillsSideRow({ state, onOpen }: { state: AppState; onOpen: () => void }) {
   const { skills, apps } = skillsIn(state);
   const drafts = [...skills, ...apps].filter((r) => r.status === "draft").length;
+  const n = skills.length + apps.length;
   return (
-    <div className="pb-2 pt-3">
-      <button onClick={onOpen} className="flex h-8 w-full items-center gap-2 rounded-[10px] px-2.5 text-left text-[13px] font-medium leading-4 text-[#3A3A38] hover:bg-black/[0.04]">
-        <SkillsIcon />
+    <div className="pb-2 pt-1">
+      <button onClick={onOpen} className={SIDE_HEAD}>
+        <span className="text-[#6B6B6B]">
+          <SkillsIcon />
+        </span>
         <span className="flex-1">Skills</span>
         {drafts > 0 && <span className="rounded-full bg-[#F2F2F0] px-1.5 text-[11px] font-normal leading-4 text-[#6B6B6B]">{drafts} draft{drafts === 1 ? "" : "s"}</span>}
-        <span className="tabular-nums font-normal text-[#9A9A98]">{skills.length + apps.length}</span>
+        {n > 0 && <span className="tabular-nums font-normal text-[#9A9A98]">{n}</span>}
       </button>
     </div>
   );

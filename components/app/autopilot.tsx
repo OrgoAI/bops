@@ -10,19 +10,13 @@ import { Mascot } from "./mascot";
 import {
   arrived,
   Chevron,
-  Count,
   DeleteX,
   FIRST,
   InlineConfirm,
-  OpenIcon,
-  readGroupOpen,
-  readSectionOpen,
   since,
   small,
   undash,
   usePop,
-  writeGroupOpen,
-  writeSectionOpen,
 } from "./side-group";
 import { watchName } from "./watch-overlay";
 import { AppLogo, botApps } from "./apps";
@@ -46,8 +40,6 @@ export type AutopilotSection = "schedules" | "monitors";
 export type AutopilotOpen = { section: AutopilotSection; focus?: string };
 
 export const GROUP_NAME = "Routines";
-/** Where this Mac keeps what's folded here (side-group.tsx): each section open until folded, like the group. */
-const FOLDS = "autopilot";
 
 const SECTIONS: { id: AutopilotSection; label: string; empty: string; how: string }[] = [
   { id: "schedules", label: "Schedules", empty: "Ask a bot to do something on a schedule", how: "Try: every weekday at 8:30, summarize my inbox" },
@@ -268,138 +260,69 @@ function useFresh(id: string) {
 /* ---------------- The sidebar ---------------- */
 
 /**
- * Autopilot in the sidebar, pinned above Orbit: a section each for Schedules and Monitors,
- * from the start (blank ones say how to get one). The name folds the whole group and an arrow beside it
- * opens the page; each section counts what it has and lists its first five, open until the user folds
- * it (this Mac remembers both). Monitors keep the old Watching list's ways: the New mark (also on the
- * section, and on the group, while folded), Paused, and × to stop. While the sidebar searches, only
- * sections with a match, every one open (as Orbit does); none, and the group is gone.
+ * Routines in the sidebar, above Skills and Orbit: one row with its count (and New while a monitor has
+ * news) that opens the page, and under it the next three: monitors with news, the soonest schedules,
+ * the other monitors. Nothing under it while there are none. While the sidebar searches, the matches
+ * (up to five); none, and the row is gone.
  */
 export function AutopilotSections({ state, query = "", onOpen, onOpenWatch }: { state: AppState; query?: string; onOpen: (open: AutopilotOpen) => void; onOpenWatch: (w: Watch) => void }) {
   const user = state.account?.user.id ?? "";
   const ws = currentWorkspace(state);
   // Keyed by account and workspace: a switch shows the other's sections as they are, nothing folding or ticking.
-  return <SidebarGroup key={`${user}:${ws}`} state={state} user={user} ws={ws} query={query} onOpen={onOpen} onOpenWatch={onOpenWatch} />;
+  return <SidebarGroup key={`${user}:${ws}`} state={state} query={query} onOpen={onOpen} onOpenWatch={onOpenWatch} />;
 }
 
 function SidebarGroup({
   state,
-  user,
-  ws,
   query,
   onOpen,
   onOpenWatch,
 }: {
   state: AppState;
-  user: string;
-  ws: string;
   query: string;
   onOpen: (open: AutopilotOpen) => void;
   onOpenWatch: (w: Watch) => void;
 }) {
-  // The group, and each section, folded or opened since Bops opened, over what this Mac remembers.
-  const [groupToggled, setGroupToggled] = useState<boolean | null>(null);
-  const [toggled, setToggled] = useState<Partial<Record<AutopilotSection, boolean>>>({});
   const q = query.trim().toLowerCase();
   const tz = state.owner?.timeZone;
   const lists = autopilotOf(state);
   const schedules = lists.schedules.filter((r) => matchSchedule(r, q));
   const monitors = lists.monitors.filter((w) => matchMonitor(w, q));
   const news = monitors.filter((w) => w.alert).length;
-  const sections = [
-    {
-      ...SECTIONS[0],
-      n: schedules.length,
-      rows: schedules.slice(0, FIRST).map((r) => <ScheduleLine key={r.id} routine={r} sessions={state.sessions} tz={tz} onClick={() => onOpen({ section: "schedules", focus: r.id })} />),
-    },
-    {
-      ...SECTIONS[1],
-      n: monitors.length,
-      // A screen or a Mac window shows as it always has (bops-app.tsx showWatch); a page opens here on the right.
-      rows: monitors.slice(0, FIRST).map((w) => <MonitorLine key={w.id} watch={w} onClick={() => onOpenWatch(w)} />),
-    },
-  ].filter((s) => !q || s.n);
-  if (q && !sections.length) return null;
-  // While searching, the group stays open.
-  const shown = !!q || (groupToggled ?? readGroupOpen(FOLDS, user, ws));
-  // The arrow opens the page at the first section with something in it.
+  const total = schedules.length + monitors.length;
+  if (q && !total) return null;
+  // One row, like Skills under it, and what comes next under it: monitors with news, then the soonest
+  // schedules, then the other monitors. Nothing under it while there are none (the page says how).
+  const next = [
+    ...monitors.filter((w) => w.alert).map((w) => <MonitorLine key={w.id} watch={w} onClick={() => onOpenWatch(w)} />),
+    ...schedules.map((r) => <ScheduleLine key={r.id} routine={r} sessions={state.sessions} tz={tz} onClick={() => onOpen({ section: "schedules", focus: r.id })} />),
+    ...monitors.filter((w) => !w.alert).map((w) => <MonitorLine key={w.id} watch={w} onClick={() => onOpenWatch(w)} />),
+  ];
+  const max = q ? FIRST : 3;
   const first = SECTIONS.find((s) => lists[s.id].length)?.id ?? "schedules";
   return (
-    <div className="flex flex-col pt-4">
-      <div className="group/autopilot mb-1.5 flex items-center gap-1.5 pr-1">
-        <button
-          onClick={() => {
-            if (q) return;
-            setGroupToggled(!shown);
-            writeGroupOpen(FOLDS, user, ws, !shown);
-          }}
-          aria-expanded={shown}
-          className="flex items-center gap-1.5 rounded-[6px] px-2.5 text-left text-[13px] font-medium leading-4 text-[#9A9A98] outline-none hover:text-[#6B6B6B] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
-        >
-          {GROUP_NAME}
-          <Chevron open={shown} />
+    <div className="flex flex-col pt-3">
+      <button onClick={() => onOpen({ section: first })} className={SIDE_HEAD}>
+        <span className="text-[#6B6B6B]">
+          <AutopilotIcon id="schedules" />
+        </span>
+        <span className="flex-1">{GROUP_NAME}</span>
+        {news > 0 && <NewPill />}
+        {total > 0 && <span className="tabular-nums font-normal text-[#9A9A98]">{total}</span>}
+      </button>
+      {next.slice(0, max)}
+      {next.length > max && (
+        <button onClick={() => onOpen({ section: first })} className={`${SIDE_ROW} text-[13px] leading-[18px] text-[#6B6B6B] hover:text-ink`}>
+          Show all {next.length}
         </button>
-        {/* News on a monitor stays in sight with the group folded. */}
-        {!shown && news > 0 && <NewPill />}
-        <span className="flex-1" />
-        <button
-          onClick={() => onOpen({ section: first })}
-          aria-label={`Open ${GROUP_NAME}`}
-          title={`Open ${GROUP_NAME}`}
-          className="flex size-6 items-center justify-center rounded-[6px] text-[#9A9A98] opacity-0 outline-none transition-opacity duration-150 ease-out hover:bg-black/[0.04] hover:text-[#6B6B6B] focus-visible:opacity-100 focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] group-hover/autopilot:opacity-100 motion-reduce:transition-none"
-        >
-          <OpenIcon />
-        </button>
-      </div>
-      {/* The group folds under its name, and each section under its own (fold.tsx). */}
-      <Fold open={shown}>
-        {sections.map((s) => {
-          // Folded until opened, like Orbit's: the group shares the pinned box with Orbit, which stays in view.
-          const open = !!q || (toggled[s.id] ?? readSectionOpen(FOLDS, user, ws, s.id, false));
-          return (
-            <div key={s.id} className="flex flex-col">
-              <button
-                onClick={() => {
-                  // While searching, every section stays open.
-                  if (q) return;
-                  setToggled({ ...toggled, [s.id]: !open });
-                  writeSectionOpen(FOLDS, user, ws, s.id, !open);
-                }}
-                aria-expanded={open}
-                className="flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
-              >
-                <span className="text-[#6B6B6B]">
-                  <AutopilotIcon id={s.id} />
-                </span>
-                <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-ink">{s.label}</span>
-                {/* Folded, the section still says when a monitor has news. */}
-                {s.id === "monitors" && !open && news > 0 && <NewPill />}
-                <Count n={s.n} quiet={!!q} scope={`${user}.${ws}`} className="shrink-0 text-[12px] tabular-nums text-[#9A9A98]" />
-                <span className="text-[#B0B0AD]">
-                  <Chevron open={open} />
-                </span>
-              </button>
-              <Fold open={open}>
-                <div className="flex flex-col">
-                  {!s.n && <div className="flex h-[30px] shrink-0 items-center pl-8 pr-2.5 text-[13px] leading-[18px] text-[#9A9A98]">{s.empty}</div>}
-                  {s.rows}
-                  {s.n > FIRST && (
-                    <button
-                      onClick={() => onOpen({ section: s.id })}
-                      className="flex h-[30px] shrink-0 items-center rounded-[10px] pl-8 pr-2.5 text-left text-[13px] leading-[18px] text-[#6B6B6B] outline-none hover:bg-black/[0.03] hover:text-ink focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
-                    >
-                      Show all {s.n}
-                    </button>
-                  )}
-                </div>
-              </Fold>
-            </div>
-          );
-        })}
-      </Fold>
+      )}
     </div>
   );
 }
+
+/** A row in the sidebar's pinned box: Routines here, Skills (skills.tsx) the same. */
+export const SIDE_HEAD =
+  "flex h-8 w-full items-center gap-2 rounded-[10px] px-2.5 text-left text-[13px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-black/[0.04] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]";
 
 const SIDE_ROW =
   "flex h-[30px] shrink-0 items-center gap-2 rounded-[10px] pl-8 pr-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]";
