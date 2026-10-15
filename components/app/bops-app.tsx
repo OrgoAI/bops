@@ -18,7 +18,7 @@ import { tagsOf } from "@/lib/routine-catalog";
 import { CrmView, OpenCrm } from "./crm";
 import { BoppyLoading, BusyBots, Mascot } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
-import { CHAT_TAB, forgetTab, hostOf, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
+import { CHAT_TAB, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
 
 /** Your Mac's tab, and the chat's bot's profile (it follows the chat, like the computer tab); both open on demand. */
 const MAC_TAB = "tab_mac";
@@ -390,7 +390,7 @@ function Bops({ state }: { state: AppState | null }) {
   const askKey = ask ? `${ask.id}:${ask.endedAt ?? ""}:${ask.blocker ?? ""}` : "";
   if (shownAsk !== askKey) {
     setShownAsk(askKey);
-    const reading = tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || tab.kind === "memory" || tab.kind === "bot");
+    const reading = isReading(tab);
     const d = ask && (ask.display ?? ask.lastDisplay);
     if (shownAsk !== undefined && ask && d !== undefined && ask.runsOn !== "mac" && ask.host !== "mac" && !reading && !focus) {
       // As showScreen does, with the tab named for the ask (rendering can't make a new id).
@@ -428,7 +428,7 @@ function Bops({ state }: { state: AppState | null }) {
     openTab(
       (t) => t.kind === "memory" && t.ws === ws,
       () => ({ id: tabId(), kind: "memory", ws, category: category ?? "all", focus: item, focusAt, query }),
-      (t) => ({ ...t, ...(category ? { category } : {}), focus: item, focusAt, query }) as PanelTab,
+      (t) => (t.kind === "memory" ? memoryAgain(t, { category, focus: item, query }, focusAt) : t),
     );
   };
   /**
@@ -802,6 +802,7 @@ function Bops({ state }: { state: AppState | null }) {
                         focus={tab.focus}
                         focusAt={tab.focusAt}
                         query={tab.query}
+                        last={state.messages[state.messages.length - 1]?.id}
                         tags={tagsOf(state.workspaces?.find((w) => w.id === tab.ws)).map((t) => t.name)}
                         // The search asked for is used once: off the tab, so coming back doesn't fill it in again.
                         onQueryUsed={() => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, query: undefined } : t)))}

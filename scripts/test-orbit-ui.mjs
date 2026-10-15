@@ -304,6 +304,36 @@ await test("Routines in the footer: a round button, with how many monitors have 
   assert.match(html, /title="Routines: a monitor has news"/);
 });
 
+await test("Routines in the footer opens at the monitor with news", async () => {
+  const { AutopilotButton } = await import(pathToFileURL(`${root}/components/app/autopilot.tsx`).href);
+  const watch = (id, alert, since) => ({ id, botId: "boppy", site: "acme.example", lookFor: "a price drop", alert, since, page: { url: "https://acme.example" } });
+  const state = { bots: [{ id: "boppy", name: "Boppy", isMain: true }], routines: [], sessions: [], messages: [], watches: [watch("w1", undefined, 3), watch("w2", { at: 1, text: "Down 10%" }, 1)] };
+  const opened = [];
+  AutopilotButton({ state, onOpen: (o) => opened.push(o) }).props.onClick();
+  assert.deepEqual(opened, [{ section: "monitors", focus: "w2" }]);
+  opened.length = 0;
+  AutopilotButton({ state: { ...state, watches: [watch("w1", undefined, 3)] }, onOpen: (o) => opened.push(o) }).props.onClick();
+  assert.deepEqual(opened, [{ section: "monitors", focus: undefined }], "no news: no row to go to");
+});
+
+await test("a new Needs you leaves Routines, Skills and the other pages you're reading", async () => {
+  const { isReading } = await import(pathToFileURL(`${root}/components/app/panel-tabs.tsx`).href);
+  for (const kind of ["web", "vault", "crm", "memory", "bot", "autopilot", "skills"]) assert.equal(isReading({ id: "t", kind }), true, kind);
+  for (const kind of ["computer", "new", "mac"]) assert.equal(isReading({ id: "t", kind }), false, kind);
+  assert.equal(isReading(undefined), false);
+});
+
+await test("Knowledge opened again: a search on Issues goes to All", async () => {
+  const { memoryAgain } = await import(pathToFileURL(`${root}/components/app/panel-tabs.tsx`).href);
+  const tab = (category) => ({ id: "t", kind: "memory", ws: "w1", category });
+  assert.equal(memoryAgain(tab("issues"), { query: "Priya" }, 1).category, "all", "Issues doesn't search");
+  assert.equal(memoryAgain(tab("issues"), { query: "Priya" }, 1).query, "Priya");
+  assert.equal(memoryAgain(tab("people"), { query: "Priya" }, 1).category, "people", "a kind that searches stays");
+  assert.equal(memoryAgain(tab("issues"), {}, 1).category, "issues", "opened again with nothing asked: where it was");
+  assert.equal(memoryAgain(tab("all"), { category: "issues", focus: "i1" }, 2).category, "issues");
+  assert.equal(memoryAgain(tab("issues"), { category: "todos", query: "x" }, 2).category, "todos", "the kind asked for wins");
+});
+
 await test("groupsOf still orders a category", async () => {
   const g = groupsOf("todos", [item("aaaaaaaaaa", "todos", "A", { done: true }), item("bbbbbbbbbb", "todos", "B")]);
   assert.deepEqual(g.map((x) => x.label), ["Open", "Done"]);

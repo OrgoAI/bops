@@ -47,6 +47,19 @@ export type PanelTab =
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";
 
+/** A tab you're reading (a page, the Vault, a CRM file, Knowledge, a profile, Routines, Skills): a new "Needs you" doesn't take the panel from it. */
+export const isReading = (t?: PanelTab) =>
+  !!t && (t.kind === "web" || t.kind === "vault" || t.kind === "crm" || t.kind === "memory" || t.kind === "bot" || t.kind === "autopilot" || t.kind === "skills");
+
+/**
+ * The Knowledge tab, opened again for a kind, an item or a search: on the kind asked for, else where it
+ * was, except that a search asked for on Issues (whose page doesn't search) goes to All.
+ */
+export function memoryAgain(t: Extract<PanelTab, { kind: "memory" }>, { category, focus, query }: { category?: OrbitSection; focus?: string; query?: string }, focusAt: number): PanelTab {
+  const to = category ?? (query && t.category === "issues" ? "all" : t.category);
+  return { ...t, category: to, focus, focusAt, query };
+}
+
 /** Open a link as a tab on the right; null outside the app (links then open in the browser). */
 export const OpenLink = createContext<((url: string, title?: string) => void) | null>(null);
 

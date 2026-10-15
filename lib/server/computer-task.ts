@@ -115,7 +115,8 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   // call_api with the user's keys (keys.ts) reads only (GET): anything that changes something is asked for in the chat.
   // Not for a task someone outside Bops started, like the CRM. Not bank, payroll or compliance keys (chatOnly):
   // the task's browser and shell can reach any site, so a page could have it type what they answer anywhere.
-  const keyed = s.fromOutside ? [] : (await usableKeys(b)).filter((k) => !k.chatOnly);
+  const outside = outsideTask(t.sessionId);
+  const keyed = outside ? [] : (await usableKeys(b)).filter((k) => !k.chatOnly);
   const tools = [
     { type: "computer" },
     { type: "web_search" },
@@ -126,7 +127,7 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
     ...(skillsFor(b.id).length ? [READ_SKILL_TOOL] : []),
     ...(t.apps ? APP_TOOLS(b) : []),
     ...DATA_TOOLS(b),
-    ...(s.fromOutside ? [] : CRM_TOOLS(b)),
+    ...(outside ? [] : CRM_TOOLS(b)),
     ...(keyed.length ? [callApiTool(keyed, { getOnly: true })] : []),
   ];
   // A turn that was stopped mid-step owes OpenAI the outputs of the calls it was answering.
@@ -578,8 +579,15 @@ export function pageLook(g: PageGuard, script: string, r: { text: string; run?: 
   return { look, note };
 }
 
+/** A task someone outside Bops started (Session.fromOutside), or a part of one (split_task: Session.partOf), whether or not the part was marked so. */
+function outsideTask(id: string) {
+  const s = session(id);
+  return !!s?.fromOutside || (!!s?.partOf && !!session(s.partOf)?.fromOutside);
+}
+
 async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard()) {
   const s = session(t.sessionId)!;
+  const outside = outsideTask(t.sessionId);
   let args: Record<string, unknown> = {};
   try {
     args = JSON.parse(o.arguments || "{}");
@@ -626,14 +634,14 @@ async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = ne
     } else if (o.name === "use_app") {
       t.step("use_app", `used ${String(args.action ?? "an app")}`);
       output = await runAppAction(s.botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId: t.sessionId }, undefined, (args.account as string | null) ?? null);
-    } else if (o.name === "call_api" && !s.fromOutside) {
+    } else if (o.name === "call_api" && !outside) {
       const r = await callApi(s.botId, args, { sessionId: t.sessionId });
       t.step("call_api", r.did ?? `tried to call ${String(args.key ?? "an API")}`);
       output = r.text;
     } else if (o.name && DATA_TOOL_NAMES.has(o.name)) {
       t.step(o.name, o.name === "business_search" ? `looked up ${String(args.job ?? "business data")}` : o.name === "find_data" ? `looked for "${String(args.query ?? "").slice(0, 60)}" in business data` : `got ${String(args.endpoint_id ?? "data")}`);
       output = await runDataTool(s.botId, o.name, args, { sessionId: t.sessionId });
-    } else if (o.name && CRM_TOOL_NAMES.has(o.name) && !s.fromOutside) {
+    } else if (o.name && CRM_TOOL_NAMES.has(o.name) && !outside) {
       t.step(o.name, crmStep(o.name, args));
       output = await runCrmTool(s.botId, o.name, args, { sessionId: t.sessionId });
     } else output = `Unknown tool ${o.name}.`;

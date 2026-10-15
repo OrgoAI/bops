@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import { flushSync } from "react-dom";
 import { CATEGORIES, categoryOf, GROUP_NAME, settled, upcoming, whenLabel, type CategoryId, type KnowledgeFilter, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
 import { Mascot, Spinner } from "./mascot";
-import { IssuesIcon, IssuesPage, isOpen, useIssues } from "./orbit-issues";
+import { IssuesIcon, IssuesPage, isOpen, issuesSoon, useIssues } from "./orbit-issues";
 import { Fold } from "./fold";
 import { Chevron, since, small, undash } from "./side-group";
 import { clockTime, CloseButton, useNow } from "./ui";
@@ -616,6 +616,7 @@ export function MemoryView({
   focus,
   focusAt,
   query,
+  last,
   tags,
   onQueryUsed,
   onCategory,
@@ -627,6 +628,8 @@ export function MemoryView({
   focus?: string;
   focusAt?: number;
   query?: string;
+  /** The newest chat message's id: a new one (a bot just answered) reads the kinds and the issues again soon. */
+  last?: string;
   /** The workspace's tags (lib/routine-catalog.ts tagsOf), offered for an issue. */
   tags?: string[];
   onQueryUsed?: () => void;
@@ -637,6 +640,14 @@ export function MemoryView({
   const { list } = useIssues(ws, user);
   const forgetting = useForget(ws, user);
   const openIssues = list ? list.issues.filter(isOpen).length : undefined;
+  // A bot may have just opened an issue or remembered something: read both again soon, not in a minute.
+  const seen = useRef(last);
+  useEffect(() => {
+    if (seen.current === last) return;
+    seen.current = last;
+    soon(user ?? "", ws);
+    issuesSoon(user ?? "", ws);
+  }, [last, user, ws]);
   const ask = useCallback(async (question: string): Promise<Answer | string> => {
     const r = await fetch("/api/memory", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "ask", ws, question }) })
       .then((x) => x.json() as Promise<Answer & { error?: string }>)

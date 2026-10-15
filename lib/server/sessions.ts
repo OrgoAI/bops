@@ -595,7 +595,10 @@ function splitTask(sessionId: string, parts: { title: string; goal: string }[]):
   const made = parts
     .filter((p) => p.goal?.trim())
     .slice(0, MOST_PARTS)
-    .map((p) => startSession({ botId: s.botId, goal: p.goal, title: p.title, chatId: s.chatId, sentVia: s.botId, where: "cloud", fresh: true, group, partOf: sessionId }));
+    .map((p) =>
+      // A part of a task someone outside Bops started is theirs too (StartOptions.outside): no CRM, no call_api with the user's keys.
+      startSession({ botId: s.botId, goal: p.goal, title: p.title, chatId: s.chatId, sentVia: s.botId, where: "cloud", fresh: true, group, partOf: sessionId, ...(s.fromOutside ? { outside: true } : {}) }),
+    );
   if (!made.length) return "No parts to start: each needs a goal.";
   addMessage({ chatId: s.chatId, role: "system", text: `${bot(s.botId)?.name ?? "The bot"} split ${s.title} into ${made.length + 1} parts`, sessionIds: [sessionId, ...made.map((m) => m.id)] });
   return `Started ${made.length} part${made.length === 1 ? "" : "s"} (${made.map((m) => `"${m.title}"`).join(", ")}), each a thread on a screen of its own (one waits when no screen is free). Do your own part now, if you have one, then call check_parts with wait true for their results.`;
@@ -1442,7 +1445,7 @@ function macChromeNote(owner: string) {
  * `onMacChrome`: it works in a Chrome of its own on the Mac, which Bops doesn't watch for sign-ins. `vaultTool`: it has sign_in_from_vault.
  * `ui`: with Full access, it has the Mac tools (Cua Driver, local.ts MAC_UI_TOOLS) for the user's own apps and browsers.
  */
-function instructions(botName: string, role: string, mac: boolean, display: number, sharedWith?: string, apps = false, auto = false, full = false, computer = false, onMacChrome = false, vaultTool = false, ui = false) {
+function instructions(botName: string, role: string, mac: boolean, display: number, sharedWith?: string, apps = false, auto = false, full = false, computer = false, onMacChrome = false, vaultTool = false, ui = false, parts = true) {
   const owner = ownerName();
   const appsLine = `For ${owner}'s email, calendar, documents, CRM and anything else they connected, use their apps (find_app_actions, then use_app; see "Your apps" below) before a website.`;
   // The fastest tool first: each one only for what the ones before it can't do. The screen is last.
@@ -1505,7 +1508,7 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
           "Bops gives a task the screen that already has its site open, when one does: if yours shows the site you need, carry on from that page rather than opening it again in a new tab.",
           ...(computer
             ? [
-                `When the task splits into parts that can run side by side, each needing a browser of its own (something on each screen, several sites, several companies or people), call split_task with those parts: each runs as a thread of its own on another screen of your computer, at the same time. Do your own part meanwhile, then call check_parts with wait true and put their results together in your answer. Keep quick steps, and steps that depend on each other, yourself.`,
+                ...(parts ? [`When the task splits into parts that can run side by side, each needing a browser of its own (something on each screen, several sites, several companies or people), call split_task with those parts: each runs as a thread of its own on another screen of your computer, at the same time. Do your own part meanwhile, then call check_parts with wait true and put their results together in your answer. Keep quick steps, and steps that depend on each other, yourself.`] : []),
                 `When you talk to ${owner}, say what you're doing, never which screen it's on.`,
                 `Each message ends with a briefing of your computer: what every screen is doing right now. Yours is the one you see; never touch the others. The briefing is for you: don't repeat it or report screen status in your answer unless ${owner} asks.`,
               ]
@@ -1639,12 +1642,15 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
   // Its apps are tools in this process (composio.ts), so it has them wherever its computer is.
   const apps = composioOn() && accountsOf(b).length > 0;
   const memory = await memoryBlock(wsOf(s.botId), s.goal, 3000);
+  const splits = !routineOf(s);
+  const outside = s.fromOutside || (!!s.partOf && !!session(s.partOf)?.fromOutside);
   const text = [
-    instructions(b.name, b.role, false, at.display, at.sharedWith, apps, !!b.autoApprove, false, true, false, true),
+    // A routine's thread splits into no parts: each would post, chime and remember on its own, so a quiet routine wouldn't be.
+    instructions(b.name, b.role, false, at.display, at.sharedWith, apps, !!b.autoApprove, false, true, false, true, false, splits),
     personaNote(b),
     appsNote(b, "task", { tools: apps }),
     dataNote(b, "task"),
-    s.fromOutside ? "" : crmNote(b, "task"),
+    outside ? "" : crmNote(b, "task"),
     placesNote(b, "task"),
     // Its skills by name (read_skill reads one: computer-task.ts), and the one it follows in full.
     skillsNote(b.id),
@@ -1674,7 +1680,7 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         step: (tool, detail) => step(sessionId, tool, detail),
         speed: (calls) => now.route?.speed ?? speedFor(config.model, waitingOn(sessionId, calls)),
         pages: () => ensureBrowserTool(at.computerId),
-        parts: { start: (parts) => splitTask(sessionId, parts), check: (wait, signal) => checkParts(sessionId, wait, signal) },
+        parts: splits ? { start: (parts) => splitTask(sessionId, parts), check: (wait, signal) => checkParts(sessionId, wait, signal) } : undefined,
         steer: () => {
           const pending = unsent(sessionId);
           if (!pending.length || stopped.has(sessionId)) return undefined;

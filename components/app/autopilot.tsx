@@ -268,9 +268,11 @@ export function AutopilotButton({ state, onOpen }: { state: AppState; onOpen: (o
   const news = lists.monitors.filter((w) => w.alert).length;
   // The page opens on monitors while one has news, else on the first section with something in it.
   const section: AutopilotSection = news ? "monitors" : (SECTIONS.find((s) => lists[s.id].length)?.id ?? "schedules");
+  // At the monitor with news (the list puts them first), as a monitor's own row opens it.
+  const fresh = news ? lists.monitors.find((w) => w.alert) : undefined;
   return (
     <button
-      onClick={() => onOpen({ section })}
+      onClick={() => onOpen({ section, focus: fresh?.id })}
       title={news ? `${GROUP_NAME}: ${news === 1 ? "a monitor has" : `${news} monitors have`} news` : `${GROUP_NAME}: what your bots do on their own`}
       aria-label={news ? `${GROUP_NAME}, ${news} with news` : GROUP_NAME}
       className="relative flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"

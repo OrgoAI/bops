@@ -639,6 +639,9 @@ assert.deepEqual(S.getState().messages.slice(since).map((m) => m.text), [], "not
 assert.equal(routineOf(quiet.routine.id).last.sessionId, s.id);
 assert.equal(routineOf(quiet.routine.id).last.delivery, undefined, "nothing sent");
 assert.ok(!S.session(s.id).waitingOnYou, "waiting on no one");
+// A routine's thread splits into no parts (each would post, chime and remember on its own): no split_task, and not told of it.
+assert.ok(!asked.at(-1).tools.some((t) => t.name === "split_task" || t.name === "check_parts"), "no split_task for a routine's thread");
+assert.doesNotMatch(asked.at(-1).instructions, /call split_task/, "and not told it can split");
 
 // Quiet, with something: its chip, then the result, then one text.
 answers.push(() => response("resp_r2", [said("An urgent email from the bank came in.")]));
@@ -918,6 +921,29 @@ assert.equal(screensUsed.size, 3, "each on a screen of its own");
 assert.equal(parent.answer, 'All parts in. "Generative art": done: Art is on screen. "Snake game": done: Snake is running.');
 assert.ok(S.getState().messages.some((m) => m.text === "Boppy split Screen showcase into 3 parts" && m.sessionIds?.length === 3), "the chat shows the parts together");
 assert.equal(answers.length, 0);
+
+// Split off a task someone outside Bops started: its parts are theirs too (no CRM, no call_api with the
+// user's keys), marked so, and a part whose parent is from outside is treated so even when it isn't marked.
+const outsideFrom = asked.length;
+answers.push(splitAnswer, splitAnswer, splitAnswer, splitAnswer, splitAnswer);
+const outsideSplit = X.startSession({ botId: main.id, goal: "Do something unique on each screen for them", title: "Their showcase", where: "cloud", fresh: true, outside: "an email from desk@hotel.example" });
+await ended(outsideSplit.id);
+const outsideParts = S.getState().sessions.filter((x) => x.partOf === outsideSplit.id);
+assert.equal(outsideParts.length, 2, "two parts");
+assert.ok(outsideParts.every((x) => x.fromOutside === true), "each part marked as from outside");
+const partAsks = asked.slice(outsideFrom).filter((b) => /Draw generative art|Start a snake game/.test(userText(b)));
+assert.ok(partAsks.length >= 2, "each part asked the model");
+for (const b of partAsks) {
+  const names = b.tools.map((t) => t.name ?? t.type);
+  assert.ok(!names.some((n) => n.startsWith("crm_") || n === "call_api"), `a part from outside has no CRM or call_api: ${names}`);
+  assert.doesNotMatch(b.instructions, /Bops CRM:/, "and no CRM note");
+}
+assert.equal(answers.length, 0);
+answers.push(() => response("resp_po", [{ ...said("Done."), phase: "final_answer" }]));
+const unmarked = X.startSession({ botId: main.id, goal: "Check the hotel's page", title: "Unmarked part", where: "cloud", fresh: true, partOf: outsideSplit.id });
+await ended(unmarked.id);
+assert.ok(!S.session(unmarked.id).fromOutside, "not marked");
+assert.deepEqual(asked.at(-1).tools.map((t) => t.name ?? t.type).filter((n) => n.startsWith("crm_") || n === "call_api"), [], "a part of an outside task gets no CRM or call_api all the same");
 
 // Parts of one request are never folded into each other as "the same job".
 const research = { id: "grp_test", title: "Research" };
