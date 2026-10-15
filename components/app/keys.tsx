@@ -10,8 +10,9 @@ import { post, teamOf } from "./ui";
 /*
  * Keys (lib/server/keys.ts): the user's API keys their bots may call services with. They're kept in the
  * user's Orgo vault, the same one as Orgo's Settings, Secrets (account scope, "All workspaces" there), by
- * the vault's own names (STRIPE_SECRET_KEY). Bops never has one to show: a value goes to Orgo once, on
- * Save, and only which bots may use which key (Bot.keys) is kept here, in the state.
+ * the vault's own names (STRIPE_SECRET_KEY). A value goes to Orgo on Save, and comes back only when the
+ * user asks to see or copy it (KeyValue): it lives in that row while it's shown and nowhere else. Only which
+ * bots may use which key (Bot.keys) is kept, in the state.
  */
 
 type Provider = { name: string; label: string; where: string; tip: string; readOnly: boolean };
@@ -50,6 +51,102 @@ function useKeys() {
 const setOn = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : null);
 
 const btn = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
+
+/* ---------------- Seeing and copying a key ---------------- */
+
+/** How long a shown key stays on screen, and a copied one in the clipboard. */
+const SHOW_MS = 30_000;
+const CLIPBOARD_MS = 60_000;
+
+/** POST /api/keys/reveal: a key's value from the Orgo vault, or words for why not. Not cached, and not kept. */
+async function reveal(name: string): Promise<{ value: string } | { error: string }> {
+  try {
+    const res = await fetch("/api/keys/reveal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }), cache: "no-store" });
+    const j = (await res.json().catch(() => ({}))) as { value?: unknown; error?: string };
+    return res.ok && typeof j.value === "string" ? { value: j.value } : { error: undash(j.error ?? "Couldn't get the key. Try again.") };
+  } catch {
+    return { error: "Couldn't reach Bops. Try again." };
+  }
+}
+
+/**
+ * After a while, empty the clipboard if it still holds `value` (the user may have copied something else since).
+ * The timer outlives the row. When reading the clipboard isn't allowed, it's left alone.
+ */
+function clearClipboardLater(value: string) {
+  setTimeout(() => {
+    void navigator.clipboard
+      .readText()
+      .then((now) => (now === value ? navigator.clipboard.writeText("") : undefined))
+      .catch(() => {});
+  }, CLIPBOARD_MS);
+}
+
+const iconBtn = "flex h-7 shrink-0 items-center justify-center gap-1 rounded-full text-[12px] font-medium leading-4 transition-colors disabled:opacity-50";
+
+function EyeIcon({ off }: { off?: boolean }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden>
+      <path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      {off && <path d="M2.5 2.5l11 11" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />}
+    </svg>
+  );
+}
+
+/**
+ * A key's Show and Copy buttons, and the key itself while it's shown. Shown, it hides again after SHOW_MS,
+ * when the window loses focus, and when the row goes. Copied, the clipboard is emptied after CLIPBOARD_MS if
+ * it still holds it. The value is fetched from the vault each time and kept only in this row while it shows.
+ */
+function useKeyValue(name: string, onError: (e: string | null) => void) {
+  const [shown, setShown] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const hide = useCallback(() => {
+    clearTimeout(timer.current);
+    setShown(null);
+  }, []);
+  useEffect(() => {
+    if (shown === null) return;
+    window.addEventListener("blur", hide);
+    return () => window.removeEventListener("blur", hide);
+  }, [shown, hide]);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const fetchValue = async () => {
+    setBusy(true);
+    onError(null);
+    const r = await reveal(name);
+    setBusy(false);
+    if ("error" in r) {
+      onError(r.error);
+      return null;
+    }
+    return r.value;
+  };
+  const toggle = async () => {
+    if (shown !== null) return hide();
+    const v = await fetchValue();
+    if (v === null) return;
+    setShown(v);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(hide, SHOW_MS);
+  };
+  const copy = async () => {
+    const v = shown ?? (await fetchValue());
+    if (v === null) return;
+    try {
+      await navigator.clipboard.writeText(v);
+    } catch {
+      return onError("Couldn't copy it. Click the window and try again.");
+    }
+    clearClipboardLater(v);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return { shown, busy, copied, toggle, copy };
+}
 
 /** A bot that may use a key, or may not: tap to change it. */
 function BotChip({ bot: b, on, disabled, tip, onClick }: { bot: Bot; on: boolean; disabled?: boolean; tip: string; onClick: () => void }) {
@@ -175,6 +272,7 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const v = useKeyValue(k.name, setError);
   const toggle = async (b: Bot, allowed: boolean) => {
     setBusy(true);
     setError(await grant(k.name, b.id, allowed));
@@ -221,7 +319,40 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
             {when && <span className="shrink-0">Updated {when}</span>}
           </span>
         </div>
-        <div className="flex shrink-0 gap-1">
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            disabled={busy || v.busy}
+            onClick={() => void v.toggle()}
+            aria-label={v.shown !== null ? "Hide key" : "Show key"}
+            aria-pressed={v.shown !== null}
+            data-tip={v.shown !== null ? "Hide key" : "Show key"}
+            className={`${iconBtn} w-7 ${v.shown !== null ? "bg-[#F2F2F0] text-ink" : "text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink"}`}
+          >
+            <EyeIcon off={v.shown !== null} />
+          </button>
+          <button
+            type="button"
+            disabled={busy || v.busy}
+            onClick={() => void v.copy()}
+            aria-label={v.copied ? "Copied" : "Copy key"}
+            data-tip={v.copied ? undefined : "Copy key"}
+            className={`${iconBtn} ${v.copied ? "bg-[#2BB673]/15 px-2.5 text-[#1E8A55]" : "w-7 text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink"}`}
+          >
+            {v.copied ? (
+              <>
+                <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
+                  <path d="M3 8.5l3 3L13 4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                Copied
+              </>
+            ) : (
+              <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
+                <rect x="5" y="5" width="8.5" height="8.5" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.4" />
+                <path d="M10.5 3.2A1.6 1.6 0 0 0 9 2.5H4.1A1.6 1.6 0 0 0 2.5 4.1V9a1.6 1.6 0 0 0 .7 1.4" fill="none" stroke="currentColor" strokeWidth="1.4" />
+              </svg>
+            )}
+          </button>
           <button disabled={busy} onClick={onReplace} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
             Replace
           </button>
@@ -230,6 +361,14 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
           </button>
         </div>
       </div>
+      {v.shown !== null && (
+        <div className="motion-fade-in flex flex-col gap-1">
+          <span aria-label={`${k.label} key`} className="select-text break-all rounded-[10px] bg-[#F7F7F6] px-3 py-2 font-mono text-[12px] leading-[17px] text-ink shadow-[0_0_0_1px_#ECECEA]">
+            {v.shown}
+          </span>
+          <span className="text-[11.5px] leading-4 text-[#9A9A98]">Hides in 30 seconds, or when you leave the window.</span>
+        </div>
+      )}
       {!!team.length && (
         <div className="flex flex-wrap items-center gap-1.5">
           {team.map((b) => {
@@ -263,7 +402,7 @@ const ORGO_USES: Record<string, string> = { ANTHROPIC_API_KEY: "Anthropic", OPEN
 
 /**
  * Add a key: a service from the list Bops can call (by its vault name, as in Orgo's Secrets), the key pasted into a password field, and the bots that may use it. `replace`: a new value for a saved key,
- * which keeps who may use it. The value is cleared once Orgo has it, and is never shown.
+ * which keeps who may use it. The value is cleared once Orgo has it.
  */
 function AddKey({
   info,

@@ -6,7 +6,8 @@
 // to a bot with a key it may use that's set in the vault; it refuses a key the bot may not use; GET runs at
 // once and its answer comes back as information, cut short when it's long, with its web addresses written
 // down; anything else waits for the user's yes every time ("Just do it" or not), and a read-only service
-// takes only GET. A task's call_api reads only. Every line and tool text is checked for dashes.
+// takes only GET. A task's call_api reads only. A saved key's value comes back to the window only (reveal), and
+// never lands in the state, a file, a log or a bot's tools. Every line and tool text is checked for dashes.
 //
 // orgo-web is a fake (a local server with /api/secrets and its broker), OpenAI is a fake (/v1/responses
 // answers what each test queues), the Keychain is never there, and the state lives in a throwaway folder:
@@ -83,6 +84,8 @@ const vault = new Map([
   ["SOME_TEMPLATE_SECRET", "fake_template"],
 ]);
 const orgoCalls = [];
+/** Orgo's reveal answers 429 while this is set: its rate limit. */
+let revealLimited = false;
 /** What the broker answers next for a path, else a small JSON answer. */
 const brokerAnswers = new Map();
 const PAGE = "<!doctype html><html><head><title>Receipt</title></head><body><main><h1>Receipt</h1>" + "<p>Paid in full, thank you for your order. The receipt lists every line.</p>".repeat(4) + "</main></body></html>";
@@ -117,6 +120,12 @@ const server = createServer(async (req, res) => {
   if (del && req.method === "DELETE") {
     vault.delete(del[1]);
     return send(200, { ok: true });
+  }
+  if (url.pathname === "/api/secrets/reveal" && req.method === "POST") {
+    if (revealLimited) return send(429, { error: "Too many requests", code: "rate_limited" });
+    if (!vault.has(body.name)) return send(404, { error: "Secret not set", code: "not_set" });
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify({ name: body.name, value: vault.get(body.name) }));
   }
   if (url.pathname === "/api/secrets/call" && req.method === "POST") {
     if (!vault.has(body.name)) return send(404, { error: "Secret not set" });
@@ -178,6 +187,7 @@ const Chat = await import(`${root}/lib/server/chat.ts`);
 const { answerApp } = await import(`${root}/lib/server/composio.ts`);
 const KeysRoute = await import(`${root}/app/api/keys/route.ts`);
 const KeyRoute = await import(pathToFileURL(`${root}/app/api/keys/[name]/route.ts`).href);
+const RevealRoute = await import(`${root}/app/api/keys/reveal/route.ts`);
 clearInterval(globalThis.__bopsRoutines);
 
 const chatId = botChatId("boppy");
@@ -291,6 +301,83 @@ await check("a page in a bot's Chrome can't list, add, change or remove keys", a
     assert.equal(res.status, 403);
   assert.equal(orgoCalls.length, n, "Orgo wasn't asked anything");
   assert.equal(S.bot("boppy").keys.includes("GITHUB_TOKEN"), false);
+});
+
+await check("reveal is the window's only: a page in a bot's Chrome gets 403 and Orgo isn't asked", async () => {
+  const n = orgoCalls.length;
+  const res = await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "STRIPE_SECRET_KEY" }, false));
+  assert.equal(res.status, 403);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.ok(!(await res.text()).includes("sk_test_fake_stripe"));
+  assert.equal(orgoCalls.length, n, "Orgo wasn't asked anything");
+});
+
+await check("reveal gives the window the value from Orgo, not cached, and it lands nowhere else", async () => {
+  const VALUE = "sk_test_fake_stripe";
+  const res = await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "stripe-secret-key" }));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await res.json(), { name: "STRIPE_SECRET_KEY", value: VALUE });
+  const sent = orgoCalls.findLast((c) => c.path === "/api/secrets/reveal");
+  assert.deepEqual(sent.body, { name: "STRIPE_SECRET_KEY" }, "account scope, the vault's name");
+  assert.equal(sent.auth, `Bearer ${ORGO_KEY}`);
+  // Asked again, Orgo is asked again: nothing kept here.
+  await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "STRIPE_SECRET_KEY" }));
+  assert.equal(orgoCalls.filter((c) => c.path === "/api/secrets/reveal").length, 2);
+  await S.flushState(5000);
+  assert.ok(!JSON.stringify(S.getState()).includes(VALUE), "not in the state");
+  const walk = (d) => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : [join(d, f)]));
+  for (const f of walk(scratch)) assert.ok(!readFileSync(f).includes(VALUE), `not in ${f}`);
+  assert.ok(!logged.join("\n").includes(VALUE), "not in a log");
+  assert.ok(!JSON.stringify(Keys.keyGrants()).includes(VALUE));
+});
+
+await check("reveal says plainly why not: a name Bops can't call, a key not set, Orgo's limit, signed out", async () => {
+  let n = orgoCalls.length;
+  let res = await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "SOME_TEMPLATE_SECRET" }));
+  assert.equal(res.status, 404, "only Bops' own keys, not every secret in the vault");
+  assert.ok(!(await res.text()).includes("fake_template"));
+  assert.equal(orgoCalls.length, n, "Orgo wasn't asked");
+  assert.equal((await RevealRoute.POST(req("POST", "/api/keys/reveal", {}))).status, 400);
+  res = await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "OPENAI_API_KEY" }));
+  assert.equal(res.status, 404);
+  const gone = (await res.json()).error;
+  assert.match(gone, /isn't in your Orgo vault anymore/);
+  revealLimited = true;
+  try {
+    res = await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "STRIPE_SECRET_KEY" }));
+    assert.equal(res.status, 429);
+    const limited = (await res.json()).error;
+    assert.match(limited, /Try again later/);
+    for (const e of [gone, limited]) noDashes(e, "an error");
+  } finally {
+    revealLimited = false;
+  }
+  globalThis.bopsOrgoKey = null;
+  globalThis.bopsOrgoKeyMissAt = Date.now();
+  try {
+    n = orgoCalls.length;
+    res = await RevealRoute.POST(req("POST", "/api/keys/reveal", { name: "STRIPE_SECRET_KEY" }));
+    assert.equal(res.status, 401);
+    assert.equal(orgoCalls.length, n);
+  } finally {
+    globalThis.bopsOrgoKey = ORGO_KEY;
+  }
+});
+
+await check("no bot or model can reach reveal: only its route calls it, and no tool is named for it", () => {
+  for (const f of ["lib/server/chat.ts", "lib/server/computer-task.ts", "lib/server/composio.ts"]) assert.ok(!readFileSync(join(root, f), "utf8").includes("revealKey"), `${f} doesn't call revealKey`);
+  const users = [];
+  const walk = (d) => {
+    for (const f of readdirSync(d)) {
+      if (f === "node_modules" || f.startsWith(".")) continue;
+      const p = join(d, f);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (/\.(ts|tsx)$/.test(f) && readFileSync(p, "utf8").includes("revealKey")) users.push(p.slice(root.length + 1));
+    }
+  };
+  for (const d of ["app", "lib", "components"]) walk(join(root, d));
+  assert.deepEqual(users.sort(), ["app/api/keys/reveal/route.ts", "lib/server/keys.ts"]);
 });
 
 await check("a delete takes the key out of the vault and from every bot", async () => {
@@ -528,8 +615,9 @@ await check("no dashes in anything Bops said or told the model", () => {
   for (const line of [...spoken, ...messages().map((m) => m.text)]) noDashes(line, "a line");
 });
 
-await check("no key value in any log", () => {
+await check("no key value in any log, or anything the model was sent", () => {
   for (const v of [...vault.values(), "sk_test_fake123"]) assert.ok(!logged.join("\n").includes(v), "a value was logged");
+  for (const body of asked) for (const v of vault.values()) assert.ok(!JSON.stringify(body).includes(v), "a value went to the model");
 });
 
 server.close();

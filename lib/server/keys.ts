@@ -9,8 +9,9 @@ import { bot, getState, ownerName, update } from "./store";
 /**
  * Keys: the user's own API keys (Stripe, GitHub, Linear…) that their bots may call. The keys live in the
  * user's Orgo vault (orgo-web's /api/secrets, account scope), never in Bops: not in the state, on disk or
- * in a log. A key's value passes through this server once, on its way to Orgo when it's saved. Bops keeps
- * only which bots may use which key (Bot.keys). A bot's call goes to Orgo's broker (/api/secrets/call),
+ * in a log. A key's value passes through this server on its way to Orgo when it's saved, and back from Orgo
+ * when the user asks to see or copy it in the Vault (revealKey, the window only). Bops keeps only which bots
+ * may use which key (Bot.keys). A bot's call goes to Orgo's broker (/api/secrets/call),
  * which adds the key and sends it on to the provider's own address, so neither Bops nor the model ever sees it.
  */
 
@@ -160,6 +161,29 @@ export async function removeKey(name: string) {
       b.keys = rest.length ? rest : undefined;
     }
   });
+}
+
+/**
+ * A saved key's value, for the user to see or copy in the Vault (app/api/keys/reveal, the window only).
+ * Orgo limits how often and logs each one (POST /api/secrets/reveal). The value goes straight back to the
+ * window: it isn't cached, kept in the state, logged, or offered to a bot or a model.
+ */
+export async function revealKey(name: string): Promise<{ name: string; value: string }> {
+  const n = keyName(name);
+  if (!keyProvider(n)) throw new KeysError("No such key.", 404);
+  try {
+    const { json } = await vault<{ value?: unknown }>("POST", "/api/secrets/reveal", { name: n });
+    if (typeof json.value !== "string") throw new KeysError("Orgo didn't send the key. Try again.", 502);
+    return { name: n, value: json.value };
+  } catch (e) {
+    if (!(e instanceof KeysError)) throw e;
+    if (e.status === 404) {
+      forget();
+      throw new KeysError("That key isn't in your Orgo vault anymore.", 404);
+    }
+    if (e.status === 429) throw new KeysError("You've looked at a lot of keys this hour. Try again later.", 429);
+    throw e;
+  }
 }
 
 /** Let a bot use a key, or stop it (Bot.keys). */
