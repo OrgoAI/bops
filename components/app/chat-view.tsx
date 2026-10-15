@@ -948,12 +948,31 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   const runningHere = chips.filter((s) => live(s) && !s.askWhere);
   const chipList = chips.length > 0 && (
     <div className="flex flex-col items-start gap-1.5 pt-0.5">
-      {chips.map((s) => (
-        <Fragment key={s.id}>
-          {/* What it waits on is pinned over the composer (NeedsYouCard), so it can't scroll away. */}
-          <SessionChip session={s} state={state} onClick={() => onOpenThread(s)} />
-        </Fragment>
-      ))}
+      {chips.map((s, i) => {
+        // Parts of one request (Session.group) show under its name, with how many are still going.
+        const parts = s.group ? chips.filter((x) => x.group?.id === s.group!.id) : [];
+        const grouped = parts.length > 1;
+        return (
+          <Fragment key={s.id}>
+            {grouped && parts[0] === s && (
+              <span className={`flex items-center gap-1.5 pl-1 text-[12px] font-medium leading-4 text-[#6B6B6B] ${i ? "pt-1" : ""}`}>
+                <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="shrink-0">
+                  <rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+                  <rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+                  <rect x="1.5" y="9" width="5.5" height="5.5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+                  <rect x="9" y="9" width="5.5" height="5.5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+                </svg>
+                {s.group!.title} · {parts.length} parts
+                {parts.some(live) ? ` · ${parts.filter(live).length} going` : ""}
+              </span>
+            )}
+            {/* What it waits on is pinned over the composer (NeedsYouCard), so it can't scroll away. */}
+            <div className={grouped ? "pl-3" : ""}>
+              <SessionChip session={s} state={state} onClick={() => onOpenThread(s)} />
+            </div>
+          </Fragment>
+        );
+      })}
       {runningHere.length > 1 && (
         <button
           onClick={() => runningHere.forEach((s) => void post("/api/sessions", { sessionId: s.id }, "DELETE"))}

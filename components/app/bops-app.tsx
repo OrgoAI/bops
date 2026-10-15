@@ -299,8 +299,10 @@ function Bops({ state }: { state: AppState | null }) {
     const browsing =
       tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || tab.kind === "memory" || (tab.kind === "computer" && tab.botId !== chatBotId) || (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
-      // Its screen comes up with it, even with the side panel hidden.
+      // Its screen comes up with it, even with the side panel hidden, and the panel follows the action
+      // again (several at once show side by side), even if you'd picked a screen before.
       setPanelOpen(true);
+      if (lead.runsOn !== "mac") setPinned((p) => ({ ...p, [lead.botId]: false }));
       if (lead.runsOn === "mac") {
         // Your Mac's tab, however it was opened (from a new tab it keeps that tab's id): never a second one.
         const mac = openTabs.find((t) => t.kind === "mac");
