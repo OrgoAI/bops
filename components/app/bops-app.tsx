@@ -24,6 +24,7 @@ import { CHAT_TAB, forgetTab, hostOf, NewTab, OpenLink, TabBar, WebTab, type Pan
 const MAC_TAB = "tab_mac";
 const PROFILE_TAB = "tab_profile";
 import { Sidebar } from "./sidebar";
+import { footerPageOf } from "./sidebar-footer";
 import { CloudUnreachable, SignIn, useAuthStatus } from "./sign-in";
 import { Setup, ThisMacSettings } from "./setup";
 import { TooltipLayer } from "./tooltip";
@@ -673,6 +674,8 @@ function Bops({ state }: { state: AppState | null }) {
             onOpenMemory={openMemory}
             onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item)}
             onOpenSkills={() => openSkills()}
+            // The footer's pill: People while its sheet is open, else the page in sight on the right.
+            footer={footerPageOf({ people: members, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory })}
           />
           {focus && crmFocus && crm ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">

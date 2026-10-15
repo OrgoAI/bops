@@ -22,6 +22,7 @@ import { watchName } from "./watch-overlay";
 import { AppLogo, botApps } from "./apps";
 import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
 import { CloseButton, currentWorkspace, needsYou, post, teamOf, useNow } from "./ui";
+import { FooterButton } from "./sidebar-footer";
 
 /*
  * Routines: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
@@ -261,27 +262,30 @@ function useFresh(id: string) {
 
 /**
  * Routines in the sidebar's footer, beside Knowledge: a round button that opens the page (one tab per
- * workspace), with how many monitors have news on it while some do (it pops in when news comes).
+ * workspace), with how many monitors have news on it while some do (it pops in when news comes). The
+ * pill, with its name, while the page is open (sidebar-footer.tsx).
  */
-export function AutopilotButton({ state, onOpen }: { state: AppState; onOpen: (open: AutopilotOpen) => void }) {
+export function AutopilotButton({ state, expanded = false, onOpen }: { state: AppState; expanded?: boolean; onOpen: (open: AutopilotOpen) => void }) {
   const lists = autopilotOf(state);
   const news = lists.monitors.filter((w) => w.alert).length;
   // The page opens on monitors while one has news, else on the first section with something in it.
   const section: AutopilotSection = news ? "monitors" : (SECTIONS.find((s) => lists[s.id].length)?.id ?? "schedules");
   return (
-    <button
+    <FooterButton
+      expanded={expanded}
+      label={GROUP_NAME}
+      tip={news ? `${GROUP_NAME}: ${news === 1 ? "a monitor has" : `${news} monitors have`} news` : `${GROUP_NAME}: what your bots do on their own`}
+      ariaLabel={news ? `${GROUP_NAME}, ${news} with news` : GROUP_NAME}
       onClick={() => onOpen({ section })}
-      title={news ? `${GROUP_NAME}: ${news === 1 ? "a monitor has" : `${news} monitors have`} news` : `${GROUP_NAME}: what your bots do on their own`}
-      aria-label={news ? `${GROUP_NAME}, ${news} with news` : GROUP_NAME}
-      className="relative flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
-    >
-      <AutopilotIcon size={16} />
-      {news > 0 && (
-        <span key={news} className="motion-dot-in absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-highlighter px-1 text-[11px] font-semibold leading-none tabular-nums text-ink shadow-[0_0_0_2px_#F9F9F8]">
-          {news}
-        </span>
-      )}
-    </button>
+      icon={<AutopilotIcon size={16} />}
+      badge={
+        news > 0 && (
+          <span key={news} className="motion-dot-in pointer-events-none absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-highlighter px-1 text-[11px] font-semibold leading-none tabular-nums text-ink shadow-[0_0_0_2px_#F9F9F8]">
+            {news}
+          </span>
+        )
+      }
+    />
   );
 }
 
