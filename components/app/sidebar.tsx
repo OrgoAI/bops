@@ -152,13 +152,13 @@ export function Sidebar({
       {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
       <UpdateNotice />
       {/* You, your apps and logins (the Vault, with the apps you've connected), and Knowledge. New bots are the + at the top. */}
-      <div className="flex items-center gap-2 p-1 pt-3">
+      <div className="flex items-center gap-1.5 p-1 pt-3">
         <YouMenu state={state} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />
         <MembersButton state={state} onClick={onMembers} />
         <button
           onClick={onVault}
           title="Your apps and logins, and which bots can use them"
-          className="flex h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-full bg-white px-3 text-[14px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
+          className="flex h-10 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full bg-white px-2.5 text-[13.5px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
         >
           <span className="truncate">Apps &amp; logins</span>
           <AppStack state={state} />
@@ -185,8 +185,8 @@ function AppStack({ state }: { state: AppState }) {
   return (
     <span className="flex shrink-0 items-center">
       {apps.map((a, i) => (
-        <span key={a.app} className={`flex rounded-[6px] bg-white shadow-[0_0_0_1.5px_#FFFFFF] ${i ? "-ml-1.5" : ""}`}>
-          <AppLogo app={a.app} name={a.appName} size={20} />
+        <span key={a.app} className={`flex rounded-[5px] bg-white shadow-[0_0_0_1.5px_#FFFFFF] ${i ? "-ml-2" : ""}`}>
+          <AppLogo app={a.app} name={a.appName} size={18} />
         </span>
       ))}
     </span>
