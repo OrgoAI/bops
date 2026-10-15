@@ -114,8 +114,17 @@ await test("none open: Apps & logins is the pill, the key until apps are connect
   assert.ok(!/<img/.test(html));
   html = render({ ...base, accounts: [{ app: "gmail", appName: "Gmail", status: "active" }] }, "vault");
   assert.match(html, /Gmail/, "a connected app's logo in the pill");
+  // Both ends are there so they fade with the label: the logos shown only on the pill, the key only round.
+  const ends = (html) => {
+    const logos = html.match(/<span aria-hidden="true" class="motion-footer-label flex min-w-0 overflow-hidden[^"]*"/)?.[0] ?? "";
+    const key = html.match(/<span aria-hidden="true" class="motion-footer-label pointer-events-none absolute[^"]*"/)?.[0] ?? "";
+    return { logos: /max-w-\[48px\] opacity-100/.test(logos), key: /opacity-100/.test(key) };
+  };
+  assert.deepEqual(ends(html), { logos: true, key: false });
   html = render({ ...base, accounts: [{ app: "gmail", appName: "Gmail", status: "active" }] }, "routines");
-  assert.ok(!/Gmail/.test(html), "round, it's the key");
+  assert.deepEqual(ends(html), { logos: false, key: true }, "round, it's the key");
+  // The pill's padding is main's.
+  assert.match(html, /rounded-full bg-white px-2\.5 /);
 });
 
 await test("the label is there in both shapes, shown only on the pill; the avatar stays first", () => {

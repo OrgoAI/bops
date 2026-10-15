@@ -207,7 +207,7 @@ export function SidebarFooter({
         label="Apps & logins"
         tip="Your apps and logins, and which bots can use them"
         onClick={onVault}
-        trail={page === "vault" ? <AppStack state={state} /> : <KeyIcon />}
+        trail={<AppsTrail state={state} expanded={page === "vault"} />}
       />
       <AutopilotButton state={state} expanded={page === "routines"} onOpen={onOpenAutopilot} />
       {knowledge && (
@@ -220,6 +220,24 @@ export function SidebarFooter({
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Apps & logins' end: as the pill, the apps you've connected; round, the Vault's key. Both are there
+ * and fade with the label (globals.css .motion-footer-label), so the logos don't pop in or out as it
+ * grows or shrinks; the key sits over the middle of the round button.
+ */
+function AppsTrail({ state, expanded }: { state: AppState; expanded: boolean }) {
+  return (
+    <span className="relative flex items-center">
+      <span aria-hidden className={`motion-footer-label flex min-w-0 overflow-hidden py-0.5 ${expanded ? "max-w-[48px] opacity-100" : "max-w-0 opacity-0"}`}>
+        <AppStack state={state} />
+      </span>
+      <span aria-hidden className={`motion-footer-label pointer-events-none absolute inset-0 flex items-center justify-center ${expanded ? "opacity-0" : "opacity-100"}`}>
+        <KeyIcon />
+      </span>
+    </span>
   );
 }
 

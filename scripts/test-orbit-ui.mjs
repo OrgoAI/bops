@@ -311,11 +311,20 @@ await test("Skills, a kind in Knowledge: its chip after Issues with its count, i
   const html = renderToStaticMarkup(h(MemoryView, { state, user: "u1", ws: "w1", category: "skills", onCategory: noop, onClose: noop }));
   t = text(html);
   assert.match(t, /^ ?Skills How this workspace/);
-  assert.match(t, /All Issues Skills 2/);
+  assert.match(t, /All Issues Skills 2 · 1 draft/, "the drafts waiting to be published, as the old sidebar row said");
   assert.match(html, /aria-pressed="true"[^>]*>Skills/);
   assert.match(t, /Standup post/);
   assert.match(t, /Invoice total/);
   assert.match(t, /Draft/);
+  // No drafts: only the count.
+  const published = { ...state, workspaces: [{ ...state.workspaces[0], skills: [ref("skill", "standup-post", "Standup post")] }] };
+  t = text(renderToStaticMarkup(h(MemoryView, { state: published, user: "u1", ws: "w1", category: "skills", onCategory: noop, onClose: noop })));
+  assert.match(t, /Skills 2 People/);
+  assert.ok(!/draft/.test(t));
+  // No account (self-hosted, or signed out): Skills still opens, without Knowledge's other kinds.
+  t = text(renderToStaticMarkup(h(MemoryView, { state: { ...state, account: undefined }, ws: "w1", category: "skills", onCategory: noop, onClose: noop })));
+  assert.match(t, /Standup post/);
+  assert.ok(!/Issues/.test(t), "no chips without an account");
 });
 
 await test("Routines in the footer: a round button, with how many monitors have news", async () => {

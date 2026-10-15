@@ -290,10 +290,13 @@ function Bops({ state }: { state: AppState | null }) {
     .map((t) => (t.id === PROFILE_TAB && t.kind === "bot" ? { ...t, botId: chatBotId } : t))
     .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId))
     .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)))
-    .filter((t) => t.kind !== "memory" || (memory && t.ws === currentWorkspace(state)))
+    // Skills are this Mac's folders and need no account, so a Knowledge tab on Skills stays without one.
+    .filter((t) => t.kind !== "memory" || (t.ws === currentWorkspace(state) && (memory || t.category === "skills")))
     // Routines shows its own workspace's bots only: another workspace's tab goes on a switch.
     .filter((t) => t.kind !== "autopilot" || t.ws === currentWorkspace(state));
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
+  // The footer's pill: People while its sheet is open, else the page in sight on the right.
+  const footer = footerPageOf({ people: members, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory });
   if (recent.at(-1) !== active) {
     setRecent([...recent.filter((id) => id !== active), active].slice(-20));
     // Gone on to another tab: leaving that one later shouldn't hide the panel this one opened.
@@ -424,10 +427,12 @@ function Bops({ state }: { state: AppState | null }) {
   const openMemory = ({ category, focus: item, query }: MemoryOpen = {}) => {
     const ws = currentWorkspace(state);
     const focusAt = Date.now();
+    // A search with no kind goes to All: left on Skills or Issues, the tab would show a page that has no search.
+    const cat = category ?? (query !== undefined ? "all" : undefined);
     openTab(
       (t) => t.kind === "memory" && t.ws === ws,
-      () => ({ id: tabId(), kind: "memory", ws, category: category ?? "all", focus: item, focusAt, query }),
-      (t) => ({ ...t, ...(category ? { category } : {}), focus: item, focusAt, query }) as PanelTab,
+      () => ({ id: tabId(), kind: "memory", ws, category: cat ?? "all", focus: item, focusAt, query }),
+      (t) => ({ ...t, ...(cat ? { category: cat } : {}), focus: item, focusAt, query }) as PanelTab,
     );
   };
   /**
@@ -663,8 +668,7 @@ function Bops({ state }: { state: AppState | null }) {
             onOpenWatch={showWatch}
             onOpenMemory={openMemory}
             onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item)}
-            // The footer's pill: People while its sheet is open, else the page in sight on the right.
-            footer={footerPageOf({ people: members, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory })}
+            footer={footer}
           />
           {focus && crmFocus && crm ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
