@@ -1,5 +1,5 @@
 import { input, macTaskPort, navigate, viewport } from "@/lib/server/local";
-import { screenEndpoint, screensOf, workComputer } from "@/lib/server/screens";
+import { sameComputer, screenEndpoint, screensOf, workComputer } from "@/lib/server/screens";
 import { orgo, screenId } from "@/lib/server/orgo";
 import { bot, getState } from "@/lib/server/store";
 import { notReady } from "@/lib/server/ready";
@@ -16,8 +16,9 @@ export async function POST(request: Request) {
   const b = bot(body.botId);
   if (!b) return Response.json({ error: "no such bot" }, { status: 404 });
   const t = state.takeover;
-  if (t?.botId !== b.id || (body.macScreen !== undefined ? t.macScreen !== body.macScreen : body.display === undefined || t.display !== body.display))
-    return Response.json({ error: "take over this screen first" }, { status: 409 });
+  // A Mac Chrome is one bot's own; a computer's screen is every sharing bot's, so input comes from any of their views.
+  const driving = !!t && (body.macScreen !== undefined ? t.botId === b.id && t.macScreen === body.macScreen : body.display !== undefined && t.display === body.display && sameComputer(t.botId, b.id));
+  if (!driving) return Response.json({ error: "take over this screen first" }, { status: 409 });
   try {
     // Straight to the screen's Chrome when we can reach it (a Mac task's own, the Mac, or Orgo over the tailnet); else through Orgo's API.
     const port = t.macScreen !== undefined ? macTaskPort(state.bots.indexOf(b), t.macScreen) : screenEndpoint(b, t.display);

@@ -1,5 +1,6 @@
 "use client";
 
+import { screenMap } from "@/lib/screens";
 import { useEffect, useRef, useState } from "react";
 import { botChatId, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
 import { Account } from "./account";
@@ -323,7 +324,6 @@ function Bops({ state }: { state: AppState | null }) {
   if (showingMac && !macWasShown) setMacWasShown(true);
   const macHeld = macWasShown && !showingMac && macHeldAt === 1;
   const heldBot = showingComputer ? bot : held ? state.bots.find((b) => b.id === held.botId) : undefined;
-  const takeOver = (d: number) => void post("/api/takeover", { botId: bot.id, display: d });
   // Full screen, when asked for explicitly (taking control happens in place, in the panel).
   const clickIn = () => {
     setMacFocus(false);
@@ -350,6 +350,12 @@ function Bops({ state }: { state: AppState | null }) {
       setPanelOpen(true);
       setFocus(false);
     } else openTab((t) => t.kind === "computer" && t.botId === id, () => ({ id: tabId(), kind: "computer", botId: id }));
+  };
+  /** A screen up close: that bot's computer (its tab, or the chat's own panel), pinned to the screen. The chat stays where it is. */
+  const showScreen = (id: string, d: number) => {
+    setDisplays((x) => ({ ...x, [id]: d }));
+    setPinned((p) => ({ ...p, [id]: true }));
+    openComputer(id);
   };
   const openProfile = (id: string, section: Section = "details") =>
     openTab(
@@ -481,7 +487,10 @@ function Bops({ state }: { state: AppState | null }) {
       setActive(mac?.id ?? MAC_TAB);
     } else setActive(CHAT_TAB);
     const screen = s.display ?? s.lastDisplay;
-    if (screen !== undefined) {
+    // A finished thread's screen is shown only while no other task has it: else the panel would show that
+    // task's work as this one's (its sheet shows where it left off instead: its last frame).
+    const elsewhere = !live(s) && screen !== undefined && screenMap(state, s.botId).some((x) => x.display === screen && !!x.sessionId && x.sessionId !== s.id && x.kind !== "free");
+    if (screen !== undefined && !elsewhere) {
       setDisplays({ ...displays, [s.botId]: screen });
       setPinned((p) => ({ ...p, [s.botId]: true }));
     }
@@ -508,11 +517,7 @@ function Bops({ state }: { state: AppState | null }) {
         onOpenThread={openThread}
         onShowBot={(id) => openProfile(id)}
         onShowMac={openMac}
-        onShowScreen={(id, d) => {
-          setDisplays((x) => ({ ...x, [id]: d }));
-          setPinned((p) => ({ ...p, [id]: true }));
-          openComputer(id);
-        }}
+        onShowScreen={showScreen}
         onUpgrade={() => {
           trackEvent("bops_upgrade_clicked", { surface: "chat" });
           setAccount(true);
@@ -618,10 +623,9 @@ function Bops({ state }: { state: AppState | null }) {
                 state={state}
                 bot={bot}
                 display={display}
-                onDisplay={(d) => {
-                  setDisplay(d);
-                  takeOver(d);
-                }}
+                // Picking a screen only shows it: taking control is its own button, never a side effect of looking.
+                onDisplay={setDisplay}
+                onShowScreen={showScreen}
                 mode="focus"
                 onBack={() => setFocus(false)}
               />
@@ -745,6 +749,7 @@ function Bops({ state }: { state: AppState | null }) {
                         follow={showingComputer ? follow : undefined}
                         mode="panel"
                         onFocus={clickIn}
+                        onShowScreen={showScreen}
                         hidden={!showingComputer}
                       />
                     </div>
