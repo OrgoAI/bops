@@ -35,7 +35,8 @@ import { crmNote } from "./crm";
 import { memoryBlock, saveToMemory, wsOf } from "./memory";
 import { pingIfWorthIt } from "./attention";
 import { emailResult } from "./mail";
-import { textResult } from "./phone";
+import { textOwner, textResult } from "./phone";
+import { askTiming, needsYou } from "@/lib/asks";
 import { channelResult } from "./channels";
 import { asksForMac, chooseWhere } from "./where";
 import { addMessage, bot, getState, id, ownerLine, ownerName, patchSession, session, stateEpoch, stateReady, update } from "./store";
@@ -124,6 +125,9 @@ type StartOptions = {
   movedFrom?: string;
   /** What it runs on, set here rather than routed (a benchmark run: app/api/sessions). */
   route?: TaskRoute;
+  /** One of several parts of one request, run side by side (Session.group), and the thread that split it off. */
+  group?: Session["group"];
+  partOf?: string;
 };
 
 const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -156,7 +160,10 @@ function repoint(from: string, to: string) {
 
 /** A thread the bot is already running (or that waits on the user) for the same job as `s`, by Jev. */
 async function sameJobByMeaning(s: Session) {
-  const open = getState().sessions.filter((x) => x.id !== s.id && x.botId === s.botId && !x.dismissed && !x.replacedBy && (doing(x) || waiting(x)) && x.createdAt < s.createdAt).slice(-5);
+  // Its siblings (parts of the same request) are other jobs by design.
+  const open = getState()
+    .sessions.filter((x) => x.id !== s.id && x.botId === s.botId && !x.dismissed && !x.replacedBy && (doing(x) || waiting(x)) && x.createdAt < s.createdAt && !(s.group && x.group?.id === s.group.id) && x.id !== s.partOf)
+    .slice(-5);
   if (!open.length) return undefined;
   const brief = (g: string) => (g.length > 240 ? `${g.slice(0, 240)}…` : g);
   const a = await decide(
@@ -192,9 +199,10 @@ function foldInto(s: Session, goal: string, where: "mac" | "cloud" | "auto", opt
   return s;
 }
 
-export function startSession({ botId, goal, title, chatId, sentVia = "you", onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom, route: forced }: StartOptions): Session {
+export function startSession({ botId, goal, title, chatId, sentVia = "you", onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom, route: forced, group, partOf }: StartOptions): Session {
   // Someone else's words (an email or a text from outside) never put work on the user's Mac (StartOptions.outside).
-  const where = outside && asked === "mac" ? "auto" : asked;
+  // Parts of one request run side by side on the bot's screens, in the cloud, unless the bot said where.
+  const where = outside && asked === "mac" ? "auto" : group && asked === "auto" ? "cloud" : asked;
   // One job, one thread: asking for a job that's already running (or waiting on the user) adds to it.
   const same = !fresh && !onWatch ? sameJob(botId, title?.trim() || goal.slice(0, 48)) : undefined;
   if (same) return foldInto(same, goal, where, { outside, ownerAsked });
@@ -217,6 +225,8 @@ export function startSession({ botId, goal, title, chatId, sentVia = "you", onWa
     ...(outside ? { fromOutside: true as const } : {}),
     ...(movedFrom ? { movedFrom } : {}),
     ...(forced ? { route: forced, effort: forced.effort } : {}),
+    ...(group ? { group } : {}),
+    ...(partOf ? { partOf } : {}),
   };
   update((state) => state.sessions.push(s));
   trackServerEvent("bops_task_started", { task_id: s.id, sent_via: sentVia === "you" || sentVia === "routine" ? sentVia : "bot", on_watch: !!onWatch, where_asked: where });
@@ -471,6 +481,59 @@ export function stopSession(sessionId: string, reason = "Stopped by you") {
   }
   if (s.status === "running" && s.agentSessionId) void cancelTurn(s.agentSessionId);
   interrupts.get(sessionId)?.();
+  // The parts it split off (split_task) stop with it.
+  for (const p of getState().sessions.filter((x) => x.partOf === sessionId && live(x))) stopSession(p.id, reason);
+}
+
+/* ---------------- Parts: a thread's work split across the bot's screens ---------------- */
+
+/** How long one check_parts waits for the parts before it says where they are. */
+export const partsTiming = { waitMs: 10 * 60_000, pollMs: 2000 };
+/** The most parts a thread splits off at once (the bot has four screens; more wait for one). */
+const MOST_PARTS = 6;
+
+/**
+ * Split off parts of a thread's task (computer-task.ts split_task): each a thread of its own, in the
+ * same chat and group, on another screen of the bot's computer, so they run at once. Returns what the
+ * model is told.
+ */
+function splitTask(sessionId: string, parts: { title: string; goal: string }[]): string {
+  const s = session(sessionId);
+  if (!s) return "This task isn't running anymore.";
+  const group = s.group ?? { id: id("grp"), title: s.title };
+  if (!s.group) patchSession(sessionId, { group });
+  const made = parts
+    .filter((p) => p.goal?.trim())
+    .slice(0, MOST_PARTS)
+    .map((p) => startSession({ botId: s.botId, goal: p.goal, title: p.title, chatId: s.chatId, sentVia: s.botId, where: "cloud", fresh: true, group, partOf: sessionId }));
+  if (!made.length) return "No parts to start: each needs a goal.";
+  addMessage({ chatId: s.chatId, role: "system", text: `${bot(s.botId)?.name ?? "The bot"} split ${s.title} into ${made.length + 1} parts`, sessionIds: [sessionId, ...made.map((m) => m.id)] });
+  return `Started ${made.length} part${made.length === 1 ? "" : "s"} (${made.map((m) => `"${m.title}"`).join(", ")}), each a thread on a screen of its own (one waits when no screen is free). Do your own part now, if you have one, then call check_parts with wait true for their results.`;
+}
+
+/** Where a thread's parts are (check_parts): with `wait`, once none is still working (or partsTiming.waitMs went by, or it was stopped). */
+async function checkParts(sessionId: string, wait: boolean, signal: AbortSignal): Promise<string> {
+  const working = () => getState().sessions.filter((x) => x.partOf === sessionId && live(x) && !needsYou(x));
+  const end = Date.now() + partsTiming.waitMs;
+  while (wait && !signal.aborted && Date.now() < end && working().length)
+    await new Promise<void>((r) => {
+      const t = setTimeout(r, partsTiming.pollMs);
+      signal.addEventListener("abort", () => (clearTimeout(t), r()), { once: true });
+    });
+  const parts = getState().sessions.filter((x) => x.partOf === sessionId);
+  if (!parts.length) return "No parts yet: call split_task first.";
+  return parts
+    .map((x) => {
+      const said = live(x)
+        ? needsYou(x)
+          ? `waiting on ${ownerName()} (${x.blocker ?? "a question"})`
+          : `still working${x.activity ? `: ${x.activity}` : ""}`
+        : x.status === "done"
+          ? `${needsYou(x) ? "asked" : "done"}: ${x.answer ?? ""}`
+          : `failed: ${x.error ?? ""}`;
+      return `"${x.title}": ${said}`;
+    })
+    .join("\n\n");
 }
 
 /** Stop every task that's queued or running (a reset, or a hosted server about to swap in another user's state). */
@@ -1350,6 +1413,7 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
           "Bops gives a task the screen that already has its site open, when one does: if yours shows the site you need, carry on from that page rather than opening it again in a new tab.",
           ...(computer
             ? [
+                `When the task splits into parts that can run side by side, each needing a browser of its own (something on each screen, several sites, several companies or people), call split_task with those parts: each runs as a thread of its own on another screen of your computer, at the same time. Do your own part meanwhile, then call check_parts with wait true and put their results together in your answer. Keep quick steps, and steps that depend on each other, yourself.`,
                 `When you talk to ${owner}, say what you're doing, never which screen it's on.`,
                 `Each message ends with a briefing of your computer: what every screen is doing right now. Yours is the one you see; never touch the others. The briefing is for you: don't repeat it or report screen status in your answer unless ${owner} asks.`,
               ]
@@ -1456,6 +1520,7 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         step: (tool, detail) => step(sessionId, tool, detail),
         speed: (calls) => now.route?.speed ?? speedFor(config.model, waitingOn(sessionId, calls)),
         pages: () => ensureBrowserTool(at.computerId),
+        parts: { start: (parts) => splitTask(sessionId, parts), check: (wait, signal) => checkParts(sessionId, wait, signal) },
         steer: () => {
           const pending = unsent(sessionId);
           if (!pending.length || stopped.has(sessionId)) return undefined;
@@ -1500,12 +1565,48 @@ async function judgeWaiting(sessionId: string, answer: string) {
           false: `The bot delivered a result or a status update and needs nothing from ${owner}`,
         },
       },
+      elsewhere: {
+        type: "noul",
+        instructions: `Is \`bot_reply\` waiting for ${owner} to approve something on their phone or another device (a sign-in prompt, a push notification, an authenticator)?`,
+        criteria: { true: "It waits on an approval on another device", false: "Anything else, or nothing" },
+      },
     },
     { botId: session(sessionId)?.botId },
   );
   const p = yes(a?.waiting);
-  if (p !== undefined) patchSession(sessionId, { waitingOnYou: p >= 0.5 });
-  if (p !== undefined && p >= 0.5) await suggestFor(sessionId);
+  const elsewhere = yes(a?.elsewhere);
+  if (p !== undefined) patchSession(sessionId, { waitingOnYou: p >= 0.5, approveElsewhere: p >= 0.5 && elsewhere !== undefined && elsewhere >= 0.5 });
+  if (p !== undefined && p >= 0.5) {
+    markNeeded(sessionId);
+    await suggestFor(sessionId);
+  }
+}
+
+/**
+ * The thread's result in the chat asks the user something: it stays in the chat when the thread moves
+ * on (store.ts addMessage), chimes, and if nobody answers within askTiming.textAfterMs, Bops texts them.
+ * Called when the result is posted and when Jev says it's waiting, whichever comes second finds both.
+ */
+function markNeeded(sessionId: string) {
+  const s = session(sessionId);
+  if (!s || !needsYou(s)) return;
+  const m = [...getState().messages].reverse().find((x) => x.resultOf === sessionId);
+  if (!m || m.needed || m.text !== (s.answer ?? m.text)) return;
+  update((st) => {
+    const x = st.messages.find((y) => y.id === m.id);
+    if (x) Object.assign(x, { needed: true, ping: true });
+  });
+  const asked = s.answer;
+  setTimeout(() => void textIfUnanswered(sessionId, asked).catch((e: Error) => console.warn(`[asks] ${sessionId}: ${e.message}`)), askTiming.textAfterMs).unref?.();
+}
+
+/** Still waiting on the same question: a text to the user, once, unless it came by text (its answer went back that way). */
+async function textIfUnanswered(sessionId: string, asked: string | undefined) {
+  const s = session(sessionId);
+  if (!s || !needsYou(s) || s.answer !== asked || s.askTexted === asked || s.textBack) return;
+  patchSession(sessionId, { askTexted: asked });
+  const words = (asked ?? "").replace(/\*\*|\[|\]\([^)]*\)/g, "").trim();
+  await textOwner(s.botId, `${s.title} needs you: ${words.length > 300 ? `${words.slice(0, 297)}…` : words}`);
 }
 
 /** A question with no ready answers leaves the user guessing what to say: suggest some. */
@@ -1867,6 +1968,8 @@ async function run(sessionId: string) {
     patchSession(sessionId, { status: "done", endedAt: Date.now(), activity: undefined, offerMac: undefined });
     taskEnded(done, "done", startedAt, who);
     const result = addMessage({ chatId: done.chatId, role: "bot", botId: b.id, text: done.answer ?? "Done.", sessionIds: [sessionId], resultOf: sessionId });
+    // Asking the user something (Jev may have said so already: judgeWaiting runs alongside; else a question mark).
+    markNeeded(sessionId);
     // Worth a chime? Only what the user is waiting on, or needs them (Jev, given what they're doing).
     pingIfWorthIt(result.id, done.title, done.answer ?? "Done.");
     emailResult(done, result.id, done.answer ?? "Done.");

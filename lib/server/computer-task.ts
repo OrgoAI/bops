@@ -85,6 +85,8 @@ export type ComputerTurn = {
   steer?: () => { text: string; sent: () => void } | undefined;
   /** The page-script runner on the computer, put there with the browser tools (sessions.ts ensureBrowserTool): true once it's there. */
   pages?: () => Promise<boolean>;
+  /** Parts of the task run side by side, each a thread on another screen (split_task, check_parts; sessions.ts splitTask). */
+  parts?: { start: (parts: { title: string; goal: string }[]) => string; check: (wait: boolean, signal: AbortSignal) => Promise<string> };
   /** How fast its `calls`th model call of this turn runs (routing.ts speedFor): fast while someone's waiting on it. */
   speed?: (calls: number) => Speed;
 };
@@ -107,7 +109,7 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   const started = Date.now();
   // Business data and the user's CRM run in this process (treg.ts, crm.ts), so the task has them wherever its computer is.
   // Not the CRM for a task someone outside Bops started (Session.fromOutside), as for a chat turn of theirs.
-  const tools = [{ type: "computer" }, { type: "web_search" }, SHELL_TOOL, PAGE_TOOL, VAULT_TOOL, ...(t.apps ? APP_TOOLS(b) : []), ...DATA_TOOLS(b), ...(s.fromOutside ? [] : CRM_TOOLS(b))];
+  const tools = [{ type: "computer" }, { type: "web_search" }, SHELL_TOOL, PAGE_TOOL, VAULT_TOOL, ...(t.parts ? PART_TOOLS : []), ...(t.apps ? APP_TOOLS(b) : []), ...DATA_TOOLS(b), ...(s.fromOutside ? [] : CRM_TOOLS(b))];
   // A turn that was stopped mid-step owes OpenAI the outputs of the calls it was answering.
   let input: unknown[] = [...(await settle(t, s.owed ?? [])), { role: "user", content: [{ type: "input_text", text: t.input }] }];
   let prev = s.responseId;
@@ -429,6 +431,41 @@ const PAGE_TOOL = {
   strict: true,
 };
 
+/** Parts of a task run at once, each a thread on another screen of the computer (sessions.ts splitTask, checkParts). */
+const PART_TOOLS = [
+  {
+    type: "function",
+    name: "split_task",
+    description:
+      "Hand parts of this task that can run side by side to threads of their own, each on another screen of your computer, so they run at the same time (the user sees each on its screen). Each part's goal must stand alone: its thread sees only that. Returns at once; then do your own part, if any, and call check_parts.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["parts"],
+      properties: {
+        parts: {
+          type: "array",
+          description: "Up to 6 parts; the computer has 4 screens, so more wait for one.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["title", "goal"],
+            properties: { title: { type: "string", description: "A 2-5 word label." }, goal: { type: "string", description: "A complete, standalone instruction for that part." } },
+          },
+        },
+      },
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    name: "check_parts",
+    description: "Where the parts you split off are, and their results once done. wait true waits until none is still working (up to 10 minutes).",
+    parameters: { type: "object", additionalProperties: false, required: ["wait"], properties: { wait: { type: "boolean" } } },
+    strict: true,
+  },
+];
+
 /** Signing in from the user's vault on the task's screen (vault.ts vaultSignIn): the bot never sees the secret. */
 const VAULT_TOOL = {
   type: "function",
@@ -550,6 +587,13 @@ async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = ne
         const shot = await screen(t).catch(() => undefined);
         if (shot) return { type: "function_call_output", call_id: o.call_id, output: [{ type: "input_text", text: output }, { type: "input_image", image_url: shot.image_url, detail: "original" }] };
       }
+    } else if (o.name === "split_task" && t.parts) {
+      const parts = Array.isArray(args.parts) ? (args.parts as { title: string; goal: string }[]) : [];
+      t.step("parts", `split into ${parts.length + 1} parts`);
+      output = t.parts.start(parts);
+    } else if (o.name === "check_parts" && t.parts) {
+      t.step("parts", args.wait ? "waiting for its parts" : "checked on its parts");
+      output = await t.parts.check(args.wait === true, t.signal);
     } else if (o.name === "sign_in_from_vault") {
       t.step("vault", "signing in from your vault");
       output = await (await import("./vault")).vaultSignIn(s.botId, t.display, t.sessionId);

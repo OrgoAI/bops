@@ -240,7 +240,8 @@ assert.equal(s.agentSessionId, undefined, "no Agents API session");
 assert.equal(s.owed, undefined, "nothing owed after an answer");
 assert.equal(asked.length, 3);
 // What the model is given: the screen, web search, a shell, signing in from the vault, the user's CRM (crm.ts), its instructions; each call follows the last.
-assert.deepEqual(asked[0].tools.map((t) => t.name ?? t.type), ["computer", "web_search", "run_command", "page_script", "sign_in_from_vault", "crm_files", "crm_read", "crm_save_rows", "crm_create_file"]);
+assert.deepEqual(asked[0].tools.map((t) => t.name ?? t.type), ["computer", "web_search", "run_command", "page_script", "sign_in_from_vault", "split_task", "check_parts", "crm_files", "crm_read", "crm_save_rows", "crm_create_file"]);
+assert.match(asked[0].instructions, /call split_task with those parts: each runs as a thread of its own on another screen of your computer, at the same time/, "told it can split");
 assert.match(asked[0].instructions, /Bops CRM: .* save them with crm_save_rows as you go/, "told about the CRM, as a task");
 assert.match(asked[0].instructions, /call sign_in_from_vault: Bops fills/, "told to use it (no helpers' screens here)");
 // The fastest tool first and the screen last: web search, the shell, a page script, then the computer; look-ups never need the screen.
@@ -657,6 +658,73 @@ assert.deepEqual(CT.pageLook(g, "return 3", pageRan({ value: "Agent Operators Po
 // Asked for (screenshot()): the screen, with no note.
 g = CT.newPageGuard();
 assert.deepEqual(CT.pageLook(g, "screenshot(); return 'x'", pageRan({ value: "x", look: true })), { look: true, note: undefined });
+
+/* ---------------- A thread that asks you something: kept in the chat, a chime, a text if nobody answers ---------------- */
+
+const AS = await import(`${root}/lib/asks.ts`);
+AS.askTiming.textAfterMs = 150;
+const QUESTION = "Which of the two hotels should I book?";
+answers.push(() => response("resp_q1", [{ ...said(QUESTION), phase: "final_answer" }]));
+const askedId = await task("Book a hotel in Spokane", "Hotel");
+const results = () => S.getState().messages.filter((m) => m.resultOf === askedId);
+await until(() => results()[0]?.needed, "the question to be marked as one");
+assert.equal(results()[0].ping, true, "it chimes");
+await until(() => S.session(askedId).askTexted, "a text once it waited unanswered");
+assert.equal(S.session(askedId).askTexted, QUESTION, "once, for this question");
+// Answered: the thread picks up, and the question stays in the chat above its next result.
+answers.push(() => response("resp_q2", [{ ...said("Booked the Davenport."), phase: "final_answer" }]));
+X.replyToSession(askedId, "The Davenport");
+await until(() => S.session(askedId).status === "done" && results().length === 2, "the next result");
+assert.deepEqual(
+  results().map((m) => [m.text, !!m.needed]),
+  [
+    [QUESTION, true],
+    ["Booked the Davenport.", false],
+  ],
+);
+assert.ok(!AS.needsYou(S.session(askedId)), "answered");
+
+/* ---------------- Split across screens: parts run at once, each a thread on its own screen ---------------- */
+
+X.partsTiming.pollMs = 50;
+const callFor = (b, name) => b.input?.find?.((i) => i.type === "function_call_output" && i.call_id === name);
+const splitAnswer = (b) => {
+  const text = userText(b);
+  if (callFor(b, "call_split")) return response("resp_sp2", [{ id: "fc_ck", type: "function_call", call_id: "call_check", name: "check_parts", arguments: JSON.stringify({ wait: true }) }]);
+  if (callFor(b, "call_check")) return response("resp_sp3", [{ ...said(`All parts in. ${callFor(b, "call_check").output.replace(/\n+/g, " ")}`), phase: "final_answer" }]);
+  if (/Draw generative art/.test(text)) return response("resp_pa", [{ ...said("Art is on screen."), phase: "final_answer" }]);
+  if (/Start a snake game/.test(text)) return response("resp_pb", [{ ...said("Snake is running."), phase: "final_answer" }]);
+  return response("resp_sp1", [
+    {
+      id: "fc_sp",
+      type: "function_call",
+      call_id: "call_split",
+      name: "split_task",
+      arguments: JSON.stringify({ parts: [{ title: "Generative art", goal: "Draw generative art in Chrome." }, { title: "Snake game", goal: "Start a snake game in Chrome." }] }),
+    },
+  ]);
+};
+answers.push(splitAnswer, splitAnswer, splitAnswer, splitAnswer, splitAnswer);
+const splitId = await task("Do something unique on each screen", "Screen showcase");
+const parent = S.session(splitId);
+assert.equal(parent.status, "done", `it finished (${parent.error ?? ""})`);
+const partsMade = S.getState().sessions.filter((x) => x.partOf === splitId);
+assert.deepEqual(partsMade.map((x) => [x.title, x.status, x.answer]), [["Generative art", "done", "Art is on screen."], ["Snake game", "done", "Snake is running."]]);
+assert.ok(partsMade.every((x) => x.group?.id === parent.group?.id && x.group?.title === "Screen showcase" && x.chatId === parent.chatId), "one group, in the same chat");
+const screensUsed = new Set([parent.lastDisplay, ...partsMade.map((x) => x.lastDisplay)]);
+assert.equal(screensUsed.size, 3, "each on a screen of its own");
+assert.equal(parent.answer, 'All parts in. "Generative art": done: Art is on screen. "Snake game": done: Snake is running.');
+assert.ok(S.getState().messages.some((m) => m.text === "Boppy split Screen showcase into 3 parts" && m.sessionIds?.length === 3), "the chat shows the parts together");
+assert.equal(answers.length, 0);
+
+// Parts of one request are never folded into each other as "the same job".
+const research = { id: "grp_test", title: "Research" };
+const p1 = X.startSession({ botId: main.id, goal: "Research Acme", title: "Research company", where: "cloud", group: research });
+const p2 = X.startSession({ botId: main.id, goal: "Research Globex", title: "Research company 2", where: "cloud", group: research });
+assert.notEqual(p1.id, p2.id);
+X.stopSession(p1.id);
+X.stopSession(p2.id);
+await until(() => !["queued", "running", "starting"].includes(S.session(p1.id).status) && !["queued", "running", "starting"].includes(S.session(p2.id).status), "both to stop");
 
 /* ---------------- AI credit used up ---------------- */
 

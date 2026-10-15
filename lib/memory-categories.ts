@@ -82,8 +82,11 @@ export const CATEGORIES: Category[] = [
   },
 ];
 
-/** What the categories are called together, in the sidebar (everything in the user's orbit: never "CRM"). */
-export const GROUP_NAME = "Orbit";
+/** What the categories are called together: the Knowledge page (lib/server/orbit.ts keeps the bots' tool names; never "CRM"). */
+export const GROUP_NAME = "Knowledge";
+
+/** What the Knowledge page shows: one kind of thing, or all of them. */
+export type KnowledgeFilter = CategoryId | "all";
 
 export const CATEGORY_IDS = CATEGORIES.map((c) => c.id);
 export const categoryOf = (id: string) => CATEGORIES.find((c) => c.id === id);

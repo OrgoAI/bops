@@ -1,6 +1,7 @@
 "use client";
 
 import { screenMap } from "@/lib/screens";
+import { chatAsks } from "@/lib/asks";
 import { useEffect, useRef, useState } from "react";
 import { botChatId, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
 import { Account } from "./account";
@@ -87,6 +88,9 @@ export function BopsApp() {
   return <Bops state={auth ? state : null} />;
 }
 
+/** A new tab's id, made when a tab opens (in a handler, never while rendering). */
+const tabId = () => `tab_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
 function Bops({ state }: { state: AppState | null }) {
   // Empty until a chat is picked: the workspace's main bot's chat shows (see `chat` below).
   const [chatId, setChatId] = useState("");
@@ -104,6 +108,8 @@ function Bops({ state }: { state: AppState | null }) {
   // The work the panel last followed ("thread:where"), so it switches between your Mac and the bot's
   // computer only when that changes, and a tab you picked stays until it does.
   const [followed, setFollowed] = useState("");
+  // The newest thing waiting on you in this chat that the panel last went to (lib/asks.ts chatAsks): undefined until the first look, so what was already waiting doesn't jump.
+  const [shownAsk, setShownAsk] = useState<string | undefined>(undefined);
   // The popped-out Mac previews ask for the Your Mac tab by bumping a key in local storage.
   const openMacRef = useRef<() => void>(() => {});
   useEffect(() => {
@@ -293,6 +299,10 @@ function Bops({ state }: { state: AppState | null }) {
     const browsing =
       tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || tab.kind === "memory" || (tab.kind === "computer" && tab.botId !== chatBotId) || (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
+      // Its screen comes up with it, even with the side panel hidden, and the panel follows the action
+      // again (several at once show side by side), even if you'd picked a screen before.
+      setPanelOpen(true);
+      if (lead.runsOn !== "mac") setPinned((p) => ({ ...p, [lead.botId]: false }));
       if (lead.runsOn === "mac") {
         // Your Mac's tab, however it was opened (from a new tab it keeps that tab's id): never a second one.
         const mac = openTabs.find((t) => t.kind === "mac");
@@ -343,7 +353,6 @@ function Bops({ state }: { state: AppState | null }) {
     setPanelOpen(true);
     setFocus(false);
   };
-  const tabId = () => `tab_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const openComputer = (id: string) => {
     if (id === chatBotId) {
       setActive(CHAT_TAB);
@@ -357,6 +366,25 @@ function Bops({ state }: { state: AppState | null }) {
     setPinned((p) => ({ ...p, [id]: true }));
     openComputer(id);
   };
+  // Something new waiting on you here (in the main bot's chat, from any bot): the panel shows its screen,
+  // with its card, unless you're reading something (a page, the Vault) or have a computer full width.
+  const [ask] = chatAsks(state, chat.id);
+  const askKey = ask ? `${ask.id}:${ask.endedAt ?? ""}:${ask.blocker ?? ""}` : "";
+  if (shownAsk !== askKey) {
+    setShownAsk(askKey);
+    const reading = tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || tab.kind === "memory" || tab.kind === "bot");
+    const d = ask && (ask.display ?? ask.lastDisplay);
+    if (shownAsk !== undefined && ask && d !== undefined && ask.runsOn !== "mac" && ask.host !== "mac" && !reading && !focus) {
+      // As showScreen does, with the tab named for the ask (rendering can't make a new id).
+      setDisplays((x) => ({ ...x, [ask.botId]: d }));
+      setPinned((p) => ({ ...p, [ask.botId]: true }));
+      if (ask.botId === chatBotId) {
+        setActive(CHAT_TAB);
+        setPanelOpen(true);
+        setFocus(false);
+      } else openTab((t) => t.kind === "computer" && t.botId === ask.botId, () => ({ id: `tab_ask_${ask.id}`, kind: "computer", botId: ask.botId }));
+    }
+  }
   const openProfile = (id: string, section: Section = "details") =>
     openTab(
       (t) => t.kind === "bot" && t.botId === id && (t.id === PROFILE_TAB) === (id === chatBotId),
@@ -372,16 +400,16 @@ function Bops({ state }: { state: AppState | null }) {
       (t) => ({ ...t, file }) as PanelTab,
     );
   /**
-   * What Bops knows, one category at a time (memory-categories.tsx): the workspace's one memory tab,
-   * switched to the category asked for, at the item asked for or with the search asked for, or opened.
+   * Knowledge, what Bops knows (memory-categories.tsx): the workspace's one Knowledge tab, on the kind
+   * asked for (all of them when none is), at the item asked for or with the search asked for, or opened.
    */
-  const openMemory = ({ category, focus: item, query }: MemoryOpen) => {
+  const openMemory = ({ category, focus: item, query }: MemoryOpen = {}) => {
     const ws = currentWorkspace(state);
     const focusAt = Date.now();
     openTab(
       (t) => t.kind === "memory" && t.ws === ws,
-      () => ({ id: tabId(), kind: "memory", ws, category, focus: item, focusAt, query }),
-      (t) => ({ ...t, category, focus: item, focusAt, query }) as PanelTab,
+      () => ({ id: tabId(), kind: "memory", ws, category: category ?? "all", focus: item, focusAt, query }),
+      (t) => ({ ...t, ...(category ? { category } : {}), focus: item, focusAt, query }) as PanelTab,
     );
   };
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
