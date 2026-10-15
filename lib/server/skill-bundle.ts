@@ -29,6 +29,8 @@ export const BUNDLE_LIMITS = {
 export const RISKS = ["read", "write", "destructive"] as const;
 export const RUNS_ON = ["local", "remote-host", "container"] as const;
 export const SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+/** A version such as 1.2.0 (the only shape a version folder's name may have). */
+export const isVersion = (v: unknown): v is string => typeof v === "string" && v.length <= 64 && SEMVER_RE.test(v);
 const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 const VAULT_NAME_RE = /^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/;
 
@@ -69,6 +71,8 @@ export function junkReason(path: string): string | null {
   if (/\.bak([-._~\d]|$)/i.test(name) || /~$/.test(name)) return "junk: backup file";
   if (/\.pyc$/i.test(name)) return "junk: .pyc";
   if (/\.log(\.\d+)?$/i.test(name)) return "junk: log file";
+  // Files that hold credentials the secret scan can't always tell (a short password, .netrc's "password x"): never kept.
+  if (/^\.env($|\.)/i.test(name) || /^\.(netrc|pgpass|npmrc|pypirc)$/i.test(name) || /^id_[a-z0-9]+(\.pub)?$/i.test(name) || /\.(pem|key|p12|pfx)$/i.test(name)) return "credentials file: never kept";
   return null;
 }
 

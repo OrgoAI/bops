@@ -10,6 +10,7 @@ import {
   checkFolder,
   freeSlug,
   isScript,
+  isVersion,
   junkReason,
   nextVersion,
   normalizePath,
@@ -93,9 +94,10 @@ export function skillDir(wsId: string, kind: SkillKind, slug: string): string | 
   return ws ? join(/*turbopackIgnore: true*/ ws, listKey(kind), slug) : null;
 }
 
+/** A version's folder; null for a string that isn't a version (never a path out of .versions). */
 const versionDir = (wsId: string, kind: SkillKind, slug: string, version: string) => {
   const ws = workspaceDir(wsId);
-  return ws ? join(/*turbopackIgnore: true*/ ws, ".versions", listKey(kind), slug, version) : null;
+  return ws && isVersion(version) ? join(/*turbopackIgnore: true*/ ws, ".versions", listKey(kind), slug, version) : null;
 };
 
 /* ---------------- What's in the state ---------------- */
@@ -234,6 +236,8 @@ function publishedBundle(wsId: string, r: SkillRef): Bundle | null {
   if (r.version) {
     const v = readBundle(versionDir(wsId, r.kind, r.slug, r.version));
     if (v) return v;
+    // Never the working folder for a published version: that's a draft. Only a procedure kept in the state.
+    return fromBackup(wsId, r);
   }
   return readBundle(skillDir(wsId, r.kind, r.slug)) ?? fromBackup(wsId, r);
 }
@@ -242,7 +246,7 @@ function publishedBundle(wsId: string, r: SkillRef): Bundle | null {
 function fromBackup(wsId: string, r: SkillRef): Bundle | null {
   const p = r.legacyId ? getState().proceduresBackup?.find((x) => x.id === r.legacyId) : undefined;
   const dir = skillDir(wsId, r.kind, r.slug);
-  if (!p || !dir) return null;
+  if (!p || !dir || (r.version && !isVersion(r.version))) return null;
   const body = procedureBody(p);
   try {
     const md = renderSkillMd(frontmatterOf(r.slug, r.description), body);
@@ -354,6 +358,7 @@ export function createSkill(wsId: string, input: NewSkill): { ref: SkillRef; war
   const body = (input.body ?? "").replace(/\r\n?/g, "\n");
   if (!body.trim()) throw new SkillError(`A ${kind} needs its SKILL.md text.`);
   const extra = input.frontmatter ?? {};
+  noSecretsIn(name, description, extra);
   const problems = validateFrontmatter(extra);
   if (problems.length) throw new SkillError("The frontmatter has a problem.", 400, problems);
   const { files } = checkFiles(body, input.files ?? []);
@@ -392,13 +397,21 @@ export function createSkill(wsId: string, input: NewSkill): { ref: SkillRef; war
   return { ref: findRef(wsId, kind, slug)!, warnings };
 }
 
+/** A key in the name, the description or the frontmatter would reach every prompt and Orgo: refused like one in the body. */
+function noSecretsIn(name: string, description: string, extra: Record<string, unknown> = {}) {
+  const found = [...scanSecrets("name", name), ...scanSecrets("description", description), ...scanSecrets("frontmatter", JSON.stringify(extra))];
+  if (found.length) throw new SkillError("That looks like a secret. Keep keys in the Vault, not in a skill.", 400, found);
+}
+
 export type SkillEdit = { name?: string; description?: string; body?: string; files?: FileIn[]; botIds?: string[] };
 
 /**
  * Change a skill: its name, description or SKILL.md text in its folder (a draft of the next version;
- * the bots keep reading the published one until it's published), or which bots have it.
+ * the bots keep reading the published one until it's published), or which bots have it. `draft` (a bot's
+ * edit): on a published skill the name and description the bots see stay as published; the description
+ * waits in the folder's SKILL.md and goes live with publishSkill.
  */
-export function updateSkill(wsId: string, kind: SkillKind, slug: string, edit: SkillEdit): SkillRef {
+export function updateSkill(wsId: string, kind: SkillKind, slug: string, edit: SkillEdit, opts: { draft?: boolean } = {}): SkillRef {
   const r = findRef(wsId, kind, slug);
   if (!r) throw new SkillError(`That ${kind} was deleted.`, 404);
   const dir = skillDir(wsId, kind, slug);
@@ -408,6 +421,7 @@ export function updateSkill(wsId: string, kind: SkillKind, slug: string, edit: S
   if (!/[\p{L}\p{N}]/u.test(name)) throw new SkillError(`A ${kind} needs a name.`);
   if (!description) throw new SkillError("Say what it does and when to use it.");
   if (description.length > BUNDLE_LIMITS.description) throw new SkillError(`The description is ${BUNDLE_LIMITS.description} characters at most.`);
+  noSecretsIn(name, description);
   const changesFolder = edit.body !== undefined || edit.files !== undefined || edit.description !== undefined;
   if (changesFolder) {
     const body = (edit.body ?? now?.body ?? "").replace(/\r\n?/g, "\n");
@@ -418,9 +432,12 @@ export function updateSkill(wsId: string, kind: SkillKind, slug: string, edit: S
     writeTree(dir!, renderSkillMd(fm, body), checked.files);
   }
   const team = teamIds(wsId);
+  const keep = opts.draft && r.status === "published";
   patchRef(wsId, kind, slug, (x) => {
-    x.name = name;
-    x.description = description;
+    if (!keep) {
+      x.name = name;
+      x.description = description;
+    }
     if (edit.botIds) x.botIds = [...new Set(edit.botIds)].filter((id) => team.has(id));
     x.updatedAt = Date.now();
   });
@@ -457,8 +474,12 @@ export function publishSkill(wsId: string, kind: SkillKind, slug: string, opts: 
   checkFiles(b.body, b.files);
   const versions = r.versions ?? [];
   const version = opts.version ?? nextVersion(versions.map((v) => v.version));
+  if (!isVersion(version)) throw new SkillError("A version looks like 1.2.0.");
   if (versions.some((v) => v.version === version)) throw new SkillError(`Version ${version} is already published.`, 409);
-  const fm = frontmatterOf(slug, r.description, b.frontmatter);
+  // The description as the folder has it (a bot's edit waits there until now).
+  const said = typeof b.frontmatter.description === "string" ? oneLine(b.frontmatter.description) : "";
+  const description = said && said.length <= BUNDLE_LIMITS.description && !scanSecrets("SKILL.md", said).length ? said : r.description;
+  const fm = frontmatterOf(slug, description, b.frontmatter);
   const skillMd = renderSkillMd({ ...fm, version }, b.body);
   const sha = bundleSha(skillMd, b.files);
   const last = versions.find((v) => v.version === r.version);
@@ -467,6 +488,7 @@ export function publishSkill(wsId: string, kind: SkillKind, slug: string, opts: 
   patchRef(wsId, kind, slug, (x) => {
     x.versions = [...versions, { version, at: Date.now(), sha256: sha }];
     x.version = version;
+    x.description = description;
     x.status = "published";
     x.risk = riskOf(b.frontmatter) ?? x.risk;
     x.runsOn = runsOnOf(b.frontmatter) ?? x.runsOn;
@@ -508,12 +530,11 @@ export async function deleteSkill(wsId: string, kind: SkillKind, slug: string): 
   return true;
 }
 
-/** A bot is gone: off every skill that named it; one only it had goes with it. */
+/** A bot is gone: off every skill that named it; one only it had is kept, for every bot of the workspace (never deleted with it). */
 export function dropBotFromSkills(botId: string, wsId: string) {
   for (const r of refsOf(wsId)) {
     if (!r.botIds.includes(botId)) continue;
-    if (r.botIds.length === 1) void deleteSkill(wsId, r.kind, r.slug);
-    else patchRef(wsId, r.kind, r.slug, (x) => (x.botIds = x.botIds.filter((id) => id !== botId)));
+    patchRef(wsId, r.kind, r.slug, (x) => (x.botIds = x.botIds.filter((id) => id !== botId)));
   }
 }
 
@@ -591,6 +612,7 @@ export function readSkill(botId: string, nameOrSlug: string, file?: string | nul
     const n = normalizePath(file.trim());
     const f = "reason" in n ? undefined : bundle.files.find((x) => x.path === n.path);
     if (!f) return `"${r.name}" has no file ${cut(oneLine(file), 120)}. Its files: ${bundle.files.map((x) => x.path).join(", ") || "none"}.`;
+    if (isScript(f) && !approvedIn(wsId).has(f.sha256)) return `${r.name}, ${f.path}: a script not approved yet. Ask to have it approved on the Skills page; its content comes once it is.`;
     return `${r.name}, ${f.path}:\n${f.content.length > FILE_CAP ? `${f.content.slice(0, FILE_CAP)}\n(cut short)` : f.content}`;
   }
   const at = Date.now();
@@ -650,6 +672,13 @@ export function skillsNote(botId: string): string {
     ...(apps.length ? ["Apps you can run on your computer (read one with read_skill before running it):", ...apps.map(line)] : []),
     ...(more > 0 ? [`(${more} more. read_skill with a name not listed here gives all their names.)`] : []),
   ].join("\n");
+}
+
+/** What a script nobody approved yet holds where it would run: never its content, so approval is a real gate. */
+const WAITING = "#!/bin/sh\n# This script is waiting for approval on the Skills page in Bops. Its content arrives once it's approved.\necho 'Not approved yet: ask to have it approved on the Skills page.' >&2\nexit 1\n";
+/** A bundle's files as they go to a task folder or a computer: scripts approved run; others are WAITING, not executable. */
+function shipped(files: BundleFile[], approved: Set<string>) {
+  return files.map((f) => (isScript(f) && !approved.has(f.sha256) ? { ...f, content: WAITING, executable: false } : { ...f, executable: f.executable && approved.has(f.sha256) }));
 }
 
 /** The tool a bot reads its skills with. */
@@ -801,15 +830,18 @@ function bundlesFor(botIds: string[]): { kind: SkillKind; slug: string; bundle: 
 }
 
 /**
- * The bots whose work lands on this bot's computer: everyone sharing it (workBot), in the same order
- * whoever asks (so the computer's folders are the same set, named the same, for each of them).
+ * The bots of this bot's workspace whose work lands on its computer: everyone of it sharing it (workBot), in
+ * the same order whoever asks (so the computer's folders are the same set, named the same, for each of them).
+ * Another workspace's bots on the same computer (the free one) are left out: each workspace's task gets only
+ * its own workspace's skills there, the others' cleared first.
  */
 function sharers(botId: string): string[] {
   const bots = getState().bots;
   const me = bot(botId);
   if (!me) return [];
   const host = workBot(me, bots);
-  return bots.filter((x) => workBot(x, bots).id === host.id).map((x) => x.id);
+  const ws = workspaceOf(me);
+  return bots.filter((x) => workBot(x, bots).id === host.id && workspaceOf(x) === ws).map((x) => x.id);
 }
 
 /**
@@ -823,7 +855,7 @@ export function writeSkillFiles(botId: string, dir: string): void {
   const approved = approvedIn(workspaceOf(b));
   for (const x of bundlesFor([botId])) {
     const to = x.kind === "app" ? join(/*turbopackIgnore: true*/ dirname(dir), "apps", x.slug) : join(/*turbopackIgnore: true*/ dir, x.slug);
-    writeTree(to, x.bundle.skillMd, x.bundle.files.map((f) => ({ ...f, executable: f.executable && approved.has(f.sha256) })));
+    writeTree(to, x.bundle.skillMd, shipped(x.bundle.files, approved));
   }
 }
 
@@ -838,16 +870,17 @@ export async function copySkillsToComputer(botId: string, computerId: string, ba
   const team = sharers(botId);
   const bundles = bundlesFor(team);
   // Nothing to copy and nothing copied there before (by this server, or as far as it knows): nothing to clear either.
-  const approved = new Set(team.flatMap((id) => [...approvedIn(workspaceOf(bot(id)))]));
+  const me = bot(botId);
+  const approved = me ? approvedIn(workspaceOf(me)) : new Set<string>();
   const copied = (g.bopsSkillsCopied ??= new Map());
-  const sig = sha256Hex(JSON.stringify(bundles.map((x) => [x.kind, x.slug, x.bundle.skillMd, x.bundle.files.map((f) => [f.path, f.sha256, f.executable && approved.has(f.sha256)])])));
+  const sig = sha256Hex(JSON.stringify(bundles.map((x) => [x.kind, x.slug, x.bundle.skillMd, shipped(x.bundle.files, approved).map((f) => [f.path, sha256Hex(f.content), f.executable])])));
   if ((!bundles.length && !copied.has(computerId)) || copied.get(computerId) === sig) return bundles.length;
   const lines: string[] = [`rm -rf ${COMPUTER_SKILLS} ${COMPUTER_APPS}`, `mkdir -p ${COMPUTER_SKILLS} ${COMPUTER_APPS}`];
   for (const x of bundles) {
     const base = `${x.kind === "app" ? COMPUTER_APPS : COMPUTER_SKILLS}/${x.slug}`;
-    for (const f of [{ path: "SKILL.md", content: x.bundle.skillMd, executable: false, sha256: "" }, ...x.bundle.files]) {
+    for (const f of [{ path: "SKILL.md", content: x.bundle.skillMd, executable: false }, ...shipped(x.bundle.files, approved)]) {
       const to = `${base}/${f.path}`;
-      lines.push(`mkdir -p ${shQuote(dirname(to))} && printf %s ${shQuote(Buffer.from(f.content).toString("base64"))} | base64 -d > ${shQuote(to)}${f.executable && approved.has(f.sha256) ? ` && chmod 755 ${shQuote(to)}` : ""}`);
+      lines.push(`mkdir -p ${shQuote(dirname(to))} && printf %s ${shQuote(Buffer.from(f.content).toString("base64"))} | base64 -d > ${shQuote(to)}${f.executable ? ` && chmod 755 ${shQuote(to)}` : ""}`);
     }
   }
   const chunks: string[][] = [[]];
@@ -1017,7 +1050,9 @@ async function pull(wsId: string, pid: string, x: RemoteSkill, into?: SkillRef):
     .filter(([p]) => p !== "SKILL.md")
     .map(([path, f]) => ({ path, content: f.content ?? "", executable: !!f.executable }));
   const kind = localKind(x.type);
-  const version = ex.json.version ?? x.current_version?.version;
+  const said = ex.json.version ?? x.current_version?.version;
+  // Only a version-shaped one names a folder here.
+  const version = isVersion(said) ? said : undefined;
   try {
     if (into) {
       writeTree(skillDir(wsId, kind, into.slug)!, md, files);

@@ -784,14 +784,31 @@ ipcMain.handle("pick-folder", async (event) => {
   const r = await dialog.showOpenDialog(win, { title: "Import a skill", buttonLabel: "Import", properties: ["openDirectory"] });
   return r.canceled || !r.filePaths[0] ? null : r.filePaths[0];
 });
-ipcMain.handle("reveal-folder", async (_, dir) => {
-  if (typeof dir !== "string" || !path.isAbsolute(dir) || !dir.split(path.sep).includes("workspaces")) return false;
+/** The real path of a folder the page may show: under a Bops data folder's workspaces (no "..", no link out), and never a bundle such as an .app. */
+function skillFolderToShow(dir) {
+  if (typeof dir !== "string" || !path.isAbsolute(dir)) return null;
+  let real;
   try {
-    if (!fs.statSync(dir).isDirectory()) return false;
+    real = fs.realpathSync(dir);
+    if (!fs.statSync(real).isDirectory()) return null;
   } catch {
-    return false;
+    return null;
   }
-  return (await shell.openPath(dir)) === "";
+  const roots = [path.join(serverHome(), ".data"), path.join(REPO, ".data")].flatMap((r) => {
+    try {
+      return [fs.realpathSync(r)];
+    } catch {
+      return [];
+    }
+  });
+  const under = roots.some((r) => real.startsWith(r + path.sep) && path.relative(r, real).split(path.sep).includes("workspaces"));
+  if (!under || real.split(path.sep).some((seg) => /\.(app|bundle|framework|plugin|kext|prefPane|appex|workflow|pkg|mpkg)$/i.test(seg))) return null;
+  return real;
+}
+ipcMain.handle("reveal-folder", async (_, dir) => {
+  const real = skillFolderToShow(dir);
+  if (!real) return false;
+  return (await shell.openPath(real)) === "";
 });
 
 /*

@@ -733,7 +733,7 @@ await part("Route: draft, then save it over the one it updates (a draft of its n
 
 /* ---------------- Going with their bot ---------------- */
 
-await part("A deleted bot's skills go with it (one only it had); the others stay", async () => {
+await part("A deleted bot's skills stay: one only it had goes to every bot, never deleted", async () => {
   let Rm;
   try {
     Rm = await import(`${root}/lib/server/remove.ts`);
@@ -745,7 +745,7 @@ await part("A deleted bot's skills go with it (one only it had); the others stay
   assert.equal(W.refsOf("ws_main", "skill").filter((r) => r.botIds.includes("penny")).length, 2);
   await Rm.deleteBot("penny");
   assert.equal(S.bot("penny"), undefined);
-  assert.equal(W.refsOf("ws_main", "skill").some((r) => r.slug === "pay-rent"), false, "hers alone went");
+  assert.deepEqual(W.findRef("ws_main", "skill", "pay-rent")?.botIds, [], "hers alone stays, for every bot");
   assert.deepEqual(W.findRef("ws_main", "skill", shared.slug).botIds, ["max"], "the shared one is Max's now");
   assert.equal(mine("max").length, 2);
 });

@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import type { AppApproval, AppState, Bot, Message } from "@/lib/types";
+import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type Message } from "@/lib/types";
 import { Mascot } from "./mascot";
 import { KeyIcon } from "./screen-cards";
 import { undash } from "./side-group";
@@ -31,10 +31,19 @@ const scopeLabel = (scope: Scope) => SCOPES.find((x) => x.id === scope)!;
 const readers = new Set<() => void>();
 const keysChanged = () => readers.forEach((f) => f());
 
-/** GET /api/keys: the services Bops can call and the keys in the vault (names only). `failed` when it didn't answer. */
-function useKeys() {
+/**
+ * GET /api/keys: the services Bops can call and the keys in the vault (names only). `failed` when it didn't
+ * answer. `ws`: the workspace they're read for (the server answers for the current one): another one and
+ * what was shown goes at once and is read again, so Reveal or Remove never acts on a row of the last one.
+ */
+function useKeys(ws: string) {
   const [info, setInfo] = useState<KeysInfo | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
+  const [readFor, setReadFor] = useState(ws);
+  if (readFor !== ws) {
+    setReadFor(ws);
+    setInfo(null);
+  }
   const read = useCallback((fresh = false) => {
     void fetch(`/api/keys${fresh ? "?fresh=1" : ""}`, { cache: "no-store" })
       .then(async (r) => {
@@ -51,7 +60,7 @@ function useKeys() {
     const again = () => read(true);
     readers.add(again);
     return () => void readers.delete(again);
-  }, [read]);
+  }, [read, ws]);
   return { info, failed, retry: () => read(true) };
 }
 
@@ -200,7 +209,7 @@ async function grant(name: string, botId: string, allowed: boolean): Promise<str
  * profile to add one for that bot, so it comes into view with the form open and that bot picked.
  */
 export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: string }) {
-  const { info, failed, retry } = useKeys();
+  const { info, failed, retry } = useKeys(state.workspace ?? MAIN_WORKSPACE);
   const team = teamOf(state);
   const main = team.find((b) => b.isMain) ?? team[0];
   const picked = keysFor && team.some((b) => b.id === keysFor) ? keysFor : main?.id;
@@ -208,8 +217,11 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
   const [form, setForm] = useState<{ replace?: KeyRow; bots: string[] } | null>(keysFor ? { bots: picked ? [picked] : [] } : null);
   // This workspace or All workspaces, as Orgo's Secrets shows them; only All workspaces where this
   // workspace has no Orgo workspace of its own (an Orgo without them).
-  const [tab, setTab] = useState<Scope>("workspace");
-  const scope: Scope = info?.workspaceKeys ? tab : "all";
+  // Opens on This workspace only when it has keys of its own (every key from before is for all workspaces);
+  // a new key is for all workspaces unless This workspace was picked.
+  const [tab, setTab] = useState<Scope | null>(null);
+  const scope: Scope = info?.workspaceKeys ? (tab ?? (info.keys.some((k) => k.scope === "workspace") ? "workspace" : "all")) : "all";
+  const addScope: Scope = info?.workspaceKeys && tab === "workspace" ? "workspace" : "all";
   const shown = info?.keys.filter((k) => k.scope === scope) ?? [];
   const [saved, setSaved] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
@@ -256,7 +268,7 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
           </Fragment>
         ))}
         {form?.replace ? null : form ? (
-          <AddKey info={info} team={team} scope={scope} bots={form.bots} first={!shown.length} onSaved={done} onCancel={() => setForm(null)} />
+          <AddKey info={info} team={team} scope={addScope} bots={form.bots} first={!shown.length} onSaved={done} onCancel={() => setForm(null)} />
         ) : (
           saved && <span className="motion-fade-in pt-3 text-[12px] leading-4 text-[#6B6B6B]">{saved}</span>
         )}
@@ -600,7 +612,7 @@ function AddKey({
 
 /** On a bot's profile: the keys in the vault, on or off for this bot, and the way to the Vault to add one. */
 export function BotKeys({ bot: b, onAdd, className }: { bot: Bot; onAdd: () => void; className: string }) {
-  const { info, failed, retry } = useKeys();
+  const { info, failed, retry } = useKeys(workspaceOf(b));
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   if (!info)

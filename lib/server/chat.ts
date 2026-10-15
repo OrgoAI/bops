@@ -1642,7 +1642,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         try {
           const ws = workspaceOf(b);
           const r = had
-            ? updateSkill(ws, had.kind, had.slug, { name: title, description: undash(String(p.description ?? had.description)), body })
+            ? updateSkill(ws, had.kind, had.slug, { name: title, description: undash(String(p.description ?? had.description)), body }, { draft: true })
             : createSkill(ws, { name: title, description: undash(String(p.description ?? "")), body, botIds: [botId], source: "bops", from: { chatId } }).ref;
           notes.push(`${had ? "Updated" : "Saved"} the skill "${r.name}" as a draft`);
           return `${had ? "Updated" : "Saved"} "${r.name}" as a draft. ${owner} can publish it on the Skills page; then you'll use it.`;

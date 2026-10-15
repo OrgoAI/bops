@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { workspaceOf, type AppState, type Bot, type SkillKind, type SkillRef } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { CloseButton, currentWorkspace, post, teamOf } from "./ui";
@@ -240,12 +240,21 @@ function SkillView({ state, ws, skill: r, team, onBack }: { state: AppState; ws:
   const [tick, setTick] = useState(0);
   const read = useCallback(async () => setTick((n) => n + 1), []);
   const approvals = state.workspaces?.find((w) => w.id === ws)?.approvals?.length ?? 0;
+  // The error a failed read put up (not one an action did), so a later read that works takes it down.
+  const readError = useRef<string | null>(null);
   useEffect(() => {
     let gone = false;
     void call<Detail>({ action: "detail", ws, kind: r.kind, slug: r.slug, ...(version ? { version } : {}) }).then((d) => {
       if (gone) return;
-      if (d.ok) setDetail(d.json);
-      else setError(d.error);
+      if (d.ok) {
+        setDetail(d.json);
+        // A read that worked since one that didn't: its error no longer holds.
+        setError((e) => (e === readError.current ? null : e));
+        readError.current = null;
+      } else {
+        readError.current = d.error;
+        setError(d.error);
+      }
     });
     return () => {
       gone = true;
@@ -273,7 +282,7 @@ function SkillView({ state, ws, skill: r, team, onBack }: { state: AppState; ws:
   return (
     <div className="motion-fade-in flex flex-col gap-4">
       <button onClick={onBack} className="self-start text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
-        ‹ All skills
+        ‹ Back
       </button>
       <div className="flex flex-col gap-1">
         <span className="flex flex-wrap items-center gap-1.5">

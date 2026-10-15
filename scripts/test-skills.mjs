@@ -289,6 +289,8 @@ await check("Scripts run once approved by content: shown as needing it, approved
   assert.equal(W.skillDetail("ws_main", "skill", report.slug).files[0].approved, false);
   // One file of it, for a bot; never one out of it.
   W.publishSkill("ws_main", "skill", report.slug);
+  assert.match(W.readSkill("max", report.slug, "scripts/sum.sh"), /a script not approved yet/, "a script nobody approved: never its content");
+  W.approveScript("ws_main", W.skillDetail("ws_main", "skill", report.slug).files[0].sha256);
   assert.equal(W.readSkill("max", report.slug, "scripts/sum.sh"), "Weekly report, scripts/sum.sh:\n#!/bin/sh\necho 2\n");
   assert.match(W.readSkill("max", report.slug, "../../../state.json"), /has no file/);
 });
@@ -309,6 +311,8 @@ await check("Import a folder: junk, links out of it and a file holding a secret 
   writeFileSync(join(f, ".DS_Store"), "x");
   writeFileSync(join(f, "SKILL.md.bak-1"), "old");
   writeFileSync(join(f, "sweep.log"), "ran");
+  writeFileSync(join(f, ".netrc"), "machine host login u password hunter2pass\n");
+  writeFileSync(join(f, ".env"), "ADMIN_PASSWORD=CorrectHorse42\n");
   writeFileSync(join(f, "__pycache__", "a.pyc"), "x");
   writeFileSync(join(f, "node_modules", "x", "index.js"), "x");
   writeFileSync(join(f, "logo.bin"), Buffer.from([0, 1, 2, 3]));
@@ -320,7 +324,7 @@ await check("Import a folder: junk, links out of it and a file holding a secret 
   assert.equal(r.body.drafted, false);
   assert.deepEqual(
     r.body.skipped.map((p) => `${p.path}${p.line ? `:${p.line}` : ""} ${p.reason}`).sort(),
-    [".DS_Store junk: .DS_Store", "SKILL.md.bak-1 junk: backup file", "__pycache__ junk: __pycache__", "hosts link to outside the folder", "logo.bin binary file (only text files are kept)", "node_modules junk: node_modules", "scripts/fix-vnc.sh:3 secret: private key block", "sweep.log junk: log file"].sort(),
+    [".DS_Store junk: .DS_Store", "SKILL.md.bak-1 junk: backup file", "__pycache__ junk: __pycache__", "hosts link to outside the folder", "logo.bin binary file (only text files are kept)", "node_modules junk: node_modules", "scripts/fix-vnc.sh:3 secret: private key block", "sweep.log junk: log file", ".netrc credentials file: never kept", ".env credentials file: never kept"].sort(),
   );
   assert.deepEqual(r.body.warnings, [{ path: "scripts/check-health.sh", line: 3, reason: "uses GITHUB_TOKEN, which requires_secrets doesn't declare" }]);
   const d = W.skillDetail("ws_main", "skill", "vm-health");
@@ -348,19 +352,43 @@ await check("Import a folder: junk, links out of it and a file holding a secret 
 
 /* ---------------- On a computer, and the prompts ---------------- */
 
-await check("A computer two workspaces' bots share gets both workspaces' published skills; a slug both have gets a number", async () => {
+await check("A computer two workspaces' bots share gets only the working bot's workspace's skills, the other's cleared; unapproved scripts never arrive", async () => {
   W.createSkill("ws_two", { name: "Weekly report", description: "Two's own", body: "# Two's\n", status: "published" });
   const sent = [];
   const n = await W.copySkillsToComputer("boppy", "c_free", async (id, command) => (sent.push({ id, command }), { output: "", exit_code: 0 }));
-  assert.equal(n, 2, "bops' weekly report and Two's (bops' app and the imported skill are drafts)");
+  assert.equal(n, 1, "bops' weekly report only (bops' app and the imported skill are drafts; Two's is Two's)");
   const all = sent.map((x) => x.command).join("\n");
   assert.match(all, /'\/workspace\/capabilities\/skills\/weekly-report\/SKILL\.md'/);
-  assert.match(all, /'\/workspace\/capabilities\/skills\/weekly-report-2\/SKILL\.md'/);
+  assert.doesNotMatch(all, /weekly-report-2/);
   assert.doesNotMatch(all, /vm-health|orgo-doctor/, "drafts don't go");
+  assert.doesNotMatch(all, new RegExp(Buffer.from("# Two's\n").toString("base64").slice(0, 8)), "nothing of Two's");
   // Unchanged since: nothing sent again.
   const again = sent.length;
-  await W.copySkillsToComputer("tess", "c_free", async (id, command) => (sent.push({ id, command }), { output: "", exit_code: 0 }));
+  await W.copySkillsToComputer("boppy", "c_free", async (id, command) => (sent.push({ id, command }), { output: "", exit_code: 0 }));
   assert.equal(sent.length, again);
+  // Two's bot works there next: everything is cleared and only Two's goes.
+  await W.copySkillsToComputer("tess", "c_free", async (id, command) => (sent.push({ id, command }), { output: "", exit_code: 0 }));
+  const two = sent.slice(again).map((x) => x.command).join("\n");
+  assert.match(two, /rm -rf \/workspace\/capabilities\/skills/);
+  assert.match(two, /'\/workspace\/capabilities\/skills\/weekly-report\/SKILL\.md'/);
+  assert.doesNotMatch(two, /scripts\/sum\.sh.*chmod/, "bops' approvals don't reach Two's");
+});
+
+await check("Versions are version shaped (never a path); a key in a description is refused; a bot's edit waits for Publish", async () => {
+  const r = W.createSkill("ws_main", { name: "Paths", description: "Tries versions", body: "# Paths\n" }).ref;
+  const home = join(scratch, "keep-me");
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "x"), "x");
+  assert.throws(() => W.publishSkill("ws_main", "skill", r.slug, { version: "../../../../../../../../.." }), /A version looks like 1\.2\.0\./);
+  assert.ok(existsSync(join(home, "x")), "nothing deleted outside");
+  assert.equal(W.skillDetail("ws_main", "skill", r.slug, "../../..").missing, true);
+  assert.throws(() => W.createSkill("ws_main", { name: "Leak", description: `Use ${FAKE_STRIPE}`, body: "# x\n" }), /looks like a secret/);
+  W.publishSkill("ws_main", "skill", r.slug);
+  W.updateSkill("ws_main", "skill", r.slug, { description: "Changed by a bot", body: "# Paths\n\nNew.\n" }, { draft: true });
+  assert.equal(W.findRef("ws_main", "skill", r.slug).description, "Tries versions", "the prompts keep the published one");
+  W.publishSkill("ws_main", "skill", r.slug);
+  assert.equal(W.findRef("ws_main", "skill", r.slug).description, "Changed by a bot", "live once published");
+  await W.deleteSkill("ws_main", "skill", r.slug);
 });
 
 await check("The prompts list skills and apps by name and description, at most 15 of them", async () => {
