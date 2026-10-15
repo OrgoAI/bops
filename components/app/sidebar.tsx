@@ -4,7 +4,6 @@ import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { live, MAIN_WORKSPACE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
 import { AutopilotButton, AutopilotSections, type AutopilotOpen } from "./autopilot";
-import { SkillsSideRow } from "./skills";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
@@ -38,7 +37,6 @@ export function Sidebar({
   onOpenWatch,
   onOpenMemory,
   onOpenAutopilot,
-  onOpenSkills,
   footer,
 }: {
   state: AppState;
@@ -59,8 +57,6 @@ export function Sidebar({
   onOpenMemory: (open: MemoryOpen) => void;
   /** Open Routines on the right, at a section and one of its rows (autopilot.tsx). */
   onOpenAutopilot: (open: AutopilotOpen) => void;
-  /** Open the workspace's Skills page (skills.tsx). */
-  onOpenSkills: () => void;
   /** Which of the footer's buttons is the pill: the page open on the right (sidebar-footer.tsx footerPageOf). */
   footer?: FooterPage;
 }) {
@@ -162,16 +158,14 @@ export function Sidebar({
       </div>
 
       {/*
-        Pinned under the chats: Skills (how the bots do a kind of job, and their apps), with a page on the
-        right; while searching, the routines that match instead. Routines and Knowledge open from the footer.
+        Pinned under the chats while searching: the routines that match. Routines and Knowledge (with
+        Skills in it) open from the footer.
       */}
-      <div className="-mx-2.5 shrink-0 border-t border-[#ECECEA] px-2.5 empty:hidden">
-        {query?.trim() ? (
+      {!!query?.trim() && (
+        <div className="-mx-2.5 shrink-0 border-t border-[#ECECEA] px-2.5 empty:hidden">
           <AutopilotSections state={state} query={query} onOpen={onOpenAutopilot} onOpenWatch={onOpenWatch} />
-        ) : (
-          <SkillsSideRow state={state} onOpen={onOpenSkills} />
-        )}
-      </div>
+        </div>
+      )}
       {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
       <UpdateNotice />
       {/* You, then People, your apps and logins (the Vault, with the apps you've connected), Routines and Knowledge (sidebar-footer.tsx). New bots are the + at the top. */}

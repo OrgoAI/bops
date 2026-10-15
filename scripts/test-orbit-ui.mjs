@@ -291,6 +291,33 @@ await test("All: every kind on one page, Issues still a chip", async () => {
   assert.match(t, /Select/);
 });
 
+await test("Skills, a kind in Knowledge: its chip after Issues with its count, its page in the tab, and not in All", async () => {
+  const { MemoryView } = await import(pathToFileURL(`${root}/components/app/memory-categories.tsx`).href);
+  const s = { on: true, ws: "w1", items: [item("aaaaaaaaaa", "people", "Priya Shah")], syncing: false };
+  let t = text(renderToStaticMarkup(h(MemoryPage, { snap: s, act: async () => null, forgetting, issues: 3, skills: 2, category: "all", onCategory: noop, onClose: noop })));
+  assert.match(t, /All 1 Issues 3 Skills 2 People 1/);
+  assert.ok(!/Standup post/.test(t), "All lists what memory learned, not the skills");
+  // Without the count (no state), no chip.
+  t = text(renderToStaticMarkup(h(MemoryPage, { snap: s, act: async () => null, forgetting, issues: 3, category: "all", onCategory: noop, onClose: noop })));
+  assert.ok(!/Skills/.test(t));
+  // Opened on Skills: the Skills page with Knowledge's chips under its title, Skills the one picked.
+  const ref = (kind, slug, name, extra = {}) => ({ kind, slug, name, description: `${name}, step by step`, version: 1, status: "published", botIds: [], updatedAt: 1, ...extra });
+  const state = {
+    account: { user: { id: "u1" } },
+    workspaces: [{ id: "w1", name: "Main", skills: [ref("skill", "standup-post", "Standup post", { status: "draft" })], apps: [ref("app", "invoice-total", "Invoice total")] }],
+    currentWorkspace: "w1",
+    bots: [{ id: "boppy", name: "Boppy", isMain: true, workspaceId: "w1" }],
+  };
+  const html = renderToStaticMarkup(h(MemoryView, { state, user: "u1", ws: "w1", category: "skills", onCategory: noop, onClose: noop }));
+  t = text(html);
+  assert.match(t, /^ ?Skills How this workspace/);
+  assert.match(t, /All Issues Skills 2/);
+  assert.match(html, /aria-pressed="true"[^>]*>Skills/);
+  assert.match(t, /Standup post/);
+  assert.match(t, /Invoice total/);
+  assert.match(t, /Draft/);
+});
+
 await test("Routines in the footer: a round button, with how many monitors have news", async () => {
   const { AutopilotButton } = await import(pathToFileURL(`${root}/components/app/autopilot.tsx`).href);
   const base = { bots: [{ id: "boppy", name: "Boppy", isMain: true }], routines: [], watches: [], sessions: [], messages: [] };
@@ -310,7 +337,7 @@ await test("groupsOf still orders a category", async () => {
 });
 
 await test("no em or en dashes in what these files show", async () => {
-  for (const f of ["components/app/orbit-issues.tsx", "components/app/memory-categories.tsx", "components/app/autopilot.tsx"]) {
+  for (const f of ["components/app/orbit-issues.tsx", "components/app/memory-categories.tsx", "components/app/autopilot.tsx", "components/app/skills.tsx"]) {
     const src = readFileSync(`${root}/${f}`, "utf8");
     // Strings and JSX text only: the comments may say anything.
     const shown = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");

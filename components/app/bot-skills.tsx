@@ -9,7 +9,7 @@ import { undash } from "./side-group";
 
 /*
  * Skills: what a bot can do, on one screen of its profile (bot-panel.tsx). Its workspace's skills and apps
- * that it has (the same list as the Skills page, skills.tsx), the Connected Apps it may use and how far,
+ * that it has (the same list as Skills, in Knowledge, skills.tsx), the Connected Apps it may use and how far,
  * its API keys, and what it can always do. What it runs on its own is its Routines tab (routines.tsx).
  * Everything is read from the app's state; opening a row goes where it's managed already (the Skills
  * page, the Vault, the chat's "Save as skill"). A group with nothing in it isn't shown: one quiet line at the end
@@ -34,7 +34,7 @@ export function BotSkills({
   onOpenChat: (chatId: string) => void;
   onOpenVault: () => void;
   onOpenKeys: (botId: string) => void;
-  /** The Skills page, at one of them ("skill:<slug>"). */
+  /** Skills, in Knowledge, at one of them ("skill:<slug>"). */
   onOpenSkills: (focus?: string) => void;
 }) {
   const skills = botSkills(state, b);

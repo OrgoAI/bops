@@ -28,7 +28,7 @@ import { FooterButton } from "./sidebar-footer";
  * Routines: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
  * in the chat, or a task on a computer, at set times) and Monitors (watches: a bot's screen, a window on the
  * user's Mac, or a web page with no screen). One bot owns each. How a bot does a kind of job is a skill
- * now, on the Skills page (skills.tsx). In the sidebar, a round button in the footer beside Knowledge
+ * now, in Skills, in Knowledge (skills.tsx). In the sidebar, a round button in the footer beside Knowledge
  * (AutopilotButton), and the matches while it searches (AutopilotSections); on the right, a page with every bot's, grouped
  * by bot and filtered by bot, Connected App or what needs the user, each opening in place with what can be
  * done to it (AutopilotPage). A bot's own are on its profile too (routines.tsx). All read the app's state
@@ -319,7 +319,7 @@ function SidebarGroup({
   const news = monitors.filter((w) => w.alert).length;
   const total = schedules.length + monitors.length;
   if (q && !total) return null;
-  // One row, like Skills under it, and what comes next under it: monitors with news, then the soonest
+  // One row, and what comes next under it: monitors with news, then the soonest
   // schedules, then the other monitors. Nothing under it while there are none (the page says how).
   const next = [
     ...monitors.filter((w) => w.alert).map((w) => <MonitorLine key={w.id} watch={w} onClick={() => onOpenWatch(w)} />),
@@ -348,7 +348,7 @@ function SidebarGroup({
   );
 }
 
-/** A row in the sidebar's pinned box: Routines here, Skills (skills.tsx) the same. */
+/** A row in the sidebar's pinned box, while it searches: Routines. */
 export const SIDE_HEAD =
   "flex h-8 w-full items-center gap-2 rounded-[10px] px-2.5 text-left text-[13px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-black/[0.04] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]";
 
@@ -542,7 +542,7 @@ export function AutopilotPage({
   focusAt?: number;
   /** Show a watched screen or Mac window (bops-app.tsx showWatch). */
   onOpenWatch: (w: Watch) => void;
-  /** The Skills page, where procedures went. */
+  /** Skills, in Knowledge, where procedures went. */
   onOpenSkills: () => void;
   onClose: () => void;
 }) {
@@ -584,6 +584,7 @@ export function AutopilotPage({
               <button onClick={onOpenSkills} className="font-medium text-ink underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink">
                 Skills
               </button>
+              , in Knowledge.
             </span>
           </div>
           <CloseButton onClick={onClose} className="mt-1.5" />

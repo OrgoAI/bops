@@ -188,7 +188,7 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
                     <pre className="whitespace-pre-wrap pt-1.5 font-mono text-[11.5px]">{f.content}</pre>
                   </details>
                 ))}
-                <span className="text-[12px] leading-4 text-[#9A9A98]">Scripts only say what they&apos;d do until run with --apply, and run once you approve them on the Skills page.</span>
+                <span className="text-[12px] leading-4 text-[#9A9A98]">Scripts only say what they&apos;d do until run with --apply, and run once you approve them in Skills, in Knowledge.</span>
               </div>
             )}
           </div>

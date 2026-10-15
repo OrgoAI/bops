@@ -279,7 +279,7 @@ await check("the instructions have the new rules, said once, and none of the old
   assert.ok(t.indexOf("Your apps:") < t.indexOf("Your skills:"));
   // Autopilot and Skills, in How Bops works.
   assert.match(t, /- Autopilot, in the sidebar, lists what bots do on their own: Schedules and Monitors\./);
-  assert.match(t, /- Skills, in the sidebar under Autopilot: /);
+  assert.match(t, /- Skills, in Knowledge: /);
   // Its own computer, truly.
   assert.match(t, /\nYou have your own cloud computer with a browser and four screens, so up to 4 long tasks at once\./);
   // Gone: the web as a reason to start a task, every bot with its own computer, helpers, ASCII diagrams,
@@ -797,7 +797,7 @@ await check("read_skill, create_skill (a draft), update_skill, and start_task fo
   assert.equal(t.out(1), 'No skill called "Taxes". Yours are: "Weekly invoice summary".');
   assert.equal(skillNamed("Weekly invoice summary").uses, 1, "a read counts as a use");
   const v = await turnWith("remember how you post the standup", [toolCall("create_skill", { name: "Standup post", description: "When Alex asks for \"the standup notes\"", steps: "1. Read yesterday's chat.\n2. Post three lines.", pitfalls: null })]);
-  assert.equal(v.out(), 'Saved "Standup post" as a draft. Alex can publish it on the Skills page; then you\'ll use it.');
+  assert.equal(v.out(), 'Saved "Standup post" as a draft. Alex can publish it in Skills, in Knowledge; then you\'ll use it.');
   assert.equal(skillNamed("Standup post").from.chatId, chatId);
   assert.equal(skillNamed("Standup post").status, "draft", "a bot's skill is a draft until Alex publishes it");
   assert.deepEqual(skillNamed("Standup post").botIds, ["boppy"]);

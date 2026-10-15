@@ -577,7 +577,7 @@ assert.equal(usesOf(), 1, "a read counts as a use");
 assert.ok(S.session(viaTool).steps.some((x) => x.tool === "skill" && x.detail.includes("weekly invoice summary")), "the thread says it read it");
 // One of its files, and one it doesn't have.
 // A script nobody approved yet: not read out, so a page can't get the bot to run what it says.
-assert.equal(W.readSkill(main.id, "Weekly invoice summary", "scripts/total.sh"), "Weekly invoice summary, scripts/total.sh: a script not approved yet. Ask to have it approved on the Skills page; its content comes once it is.");
+assert.equal(W.readSkill(main.id, "Weekly invoice summary", "scripts/total.sh"), "Weekly invoice summary, scripts/total.sh: a script not approved yet. Ask to have it approved in Skills, in Knowledge; its content comes once it is.");
 assert.match(W.readSkill(main.id, "Weekly invoice summary", "../etc/passwd"), /^"Weekly invoice summary" has no file \.\.\/etc\/passwd\. Its files: scripts\/total\.sh\.$/);
 // One it doesn't have: it says so, and names the ones it has.
 answers.push(

@@ -617,7 +617,7 @@ export function readSkill(botId: string, nameOrSlug: string, file?: string | nul
     const n = normalizePath(file.trim());
     const f = "reason" in n ? undefined : bundle.files.find((x) => x.path === n.path);
     if (!f) return `"${r.name}" has no file ${cut(oneLine(file), 120)}. Its files: ${bundle.files.map((x) => x.path).join(", ") || "none"}.`;
-    if (isScript(f) && !approvedIn(wsId).has(f.sha256)) return `${r.name}, ${f.path}: a script not approved yet. Ask to have it approved on the Skills page; its content comes once it is.`;
+    if (isScript(f) && !approvedIn(wsId).has(f.sha256)) return `${r.name}, ${f.path}: a script not approved yet. Ask to have it approved in Skills, in Knowledge; its content comes once it is.`;
     return `${r.name}, ${f.path}:\n${f.content.length > FILE_CAP ? `${f.content.slice(0, FILE_CAP)}\n(cut short)` : f.content}`;
   }
   const at = Date.now();
@@ -627,7 +627,7 @@ export function readSkill(botId: string, nameOrSlug: string, file?: string | nul
   });
   const approved = approvedIn(wsId);
   const base = r.kind === "app" ? COMPUTER_APPS : COMPUTER_SKILLS;
-  const files = bundle.files.map((f) => `- ${f.path}${isScript(f) ? (approved.has(f.sha256) ? " (script, approved)" : " (script, not approved yet: ask to have it approved on the Skills page before running it)") : ""}`);
+  const files = bundle.files.map((f) => `- ${f.path}${isScript(f) ? (approved.has(f.sha256) ? " (script, approved)" : " (script, not approved yet: ask to have it approved in Skills, in Knowledge, before running it)") : ""}`);
   return [
     `${r.kind === "app" ? "App" : "Skill"}: ${r.name}${r.version ? ` (version ${r.version})` : ""}`,
     bundle.body.trim(),
@@ -680,7 +680,7 @@ export function skillsNote(botId: string): string {
 }
 
 /** What a script nobody approved yet holds where it would run: never its content, so approval is a real gate. */
-const WAITING = "#!/bin/sh\n# This script is waiting for approval on the Skills page in Bops. Its content arrives once it's approved.\necho 'Not approved yet: ask to have it approved on the Skills page.' >&2\nexit 1\n";
+const WAITING = "#!/bin/sh\n# This script is waiting for approval in Bops, in Skills, in Knowledge. Its content arrives once it's approved.\necho 'Not approved yet: ask to have it approved in Skills, in Knowledge.' >&2\nexit 1\n";
 /** A bundle's files as they go to a task folder or a computer: scripts approved run; others are WAITING, not executable. */
 function shipped(files: BundleFile[], approved: Set<string>) {
   return files.map((f) => (isScript(f) && !approved.has(f.sha256) ? { ...f, content: WAITING, executable: false } : { ...f, executable: f.executable && approved.has(f.sha256) }));

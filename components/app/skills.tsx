@@ -4,12 +4,11 @@ import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } fr
 import { workspaceOf, type AppState, type Bot, type SkillKind, type SkillRef } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { CloseButton, currentWorkspace, post, teamOf } from "./ui";
-import { SIDE_HEAD } from "./autopilot";
 
 /*
  * Skills: a workspace's ways of doing a kind of job (skills) and the tools Bops built that bots run (apps),
- * each a folder in the Agent Skill shape on this Mac (lib/server/workspace-skills.ts). In the sidebar, one
- * row under Autopilot (SkillsSideRow); on the right, a page of cards (SkillsPage) that opens one in place:
+ * each a folder in the Agent Skill shape on this Mac (lib/server/workspace-skills.ts). A kind in Knowledge
+ * (memory-categories.tsx): its chip opens a page of cards (SkillsPage) in the Knowledge tab, opening one in place:
  * its SKILL.md and files, which bots have it, its versions (Publish, Roll back), its scripts to approve,
  * Open in Finder and Delete. Import folder takes a folder picked in Finder through the Mac app. The lists
  * are the app's state (Workspace.skills, Workspace.apps), so they're as current as everything else.
@@ -46,25 +45,6 @@ export function SkillsIcon({ size = 14 }: { size?: number }) {
   );
 }
 
-/** Skills in the sidebar, under Autopilot: one row, its count, and the page on a click. */
-export function SkillsSideRow({ state, onOpen }: { state: AppState; onOpen: () => void }) {
-  const { skills, apps } = skillsIn(state);
-  const drafts = [...skills, ...apps].filter((r) => r.status === "draft").length;
-  const n = skills.length + apps.length;
-  return (
-    <div className="pb-2 pt-1">
-      <button onClick={onOpen} className={SIDE_HEAD}>
-        <span className="text-[#6B6B6B]">
-          <SkillsIcon />
-        </span>
-        <span className="flex-1">Skills</span>
-        {drafts > 0 && <span className="rounded-full bg-[#F2F2F0] px-1.5 text-[11px] font-normal leading-4 text-[#6B6B6B]">{drafts} draft{drafts === 1 ? "" : "s"}</span>}
-        {n > 0 && <span className="tabular-nums font-normal text-[#9A9A98]">{n}</span>}
-      </button>
-    </div>
-  );
-}
-
 const PILL = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
 const CHIP = "rounded-full bg-[#F2F2F0] px-2 py-px text-[11px] leading-4 text-[#6B6B6B]";
 const RISK: Record<string, string> = { read: "Reads only", write: "Changes things", destructive: "Can delete" };
@@ -87,10 +67,11 @@ function botsLine(r: SkillRef, team: Bot[]) {
 }
 
 /**
- * The Skills page on the right (one tab per workspace): Skills and Apps as cards, Import folder, and one
- * opened in place (`focus`: "skill:<slug>" or "app:<slug>"; `focusAt` is when it was asked for).
+ * Skills, in the Knowledge tab (one per workspace): Skills and Apps as cards, Import folder, and one
+ * opened in place (`focus`: "skill:<slug>" or "app:<slug>"; `focusAt` is when it was asked for). `nav` is
+ * Knowledge's row of chips, under the title as on Issues.
  */
-export function SkillsPage({ state, focus, focusAt, onClose }: { state: AppState; focus?: string; focusAt?: number; onClose: () => void }) {
+export function SkillsPage({ state, focus, focusAt, nav, onClose }: { state: AppState; focus?: string; focusAt?: number; nav?: ReactNode; onClose: () => void }) {
   const ws = currentWorkspace(state);
   const team = teamOf(state);
   const { skills, apps } = skillsIn(state, ws);
@@ -144,6 +125,7 @@ export function SkillsPage({ state, focus, focusAt, onClose }: { state: AppState
           </div>
           <CloseButton onClick={onClose} className="mt-1.5" />
         </div>
+        {!ref && nav}
 
         {imported && <ImportNote result={imported} onDismiss={() => setImported(null)} />}
 
