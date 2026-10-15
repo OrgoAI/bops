@@ -7,7 +7,8 @@ import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
 import { Mascot } from "./mascot";
-import { MemorySections, type MemoryOpen } from "./memory-categories";
+import { KnowledgeIcon, type MemoryOpen } from "./memory-categories";
+import { AppLogo } from "./apps";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
 import { useSetupNeedsYou } from "./setup";
 import { UpdateNotice } from "./update-notice";
@@ -48,7 +49,7 @@ export function Sidebar({
   onMembers: () => void;
   /** Show a watched screen or Mac window. */
   onOpenWatch: (watch: Watch) => void;
-  /** Open a category of what Bops knows on the right, at one of its items (memory-categories.tsx). */
+  /** Open Knowledge on the right, on a kind, an item or a search (memory-categories.tsx). */
   onOpenMemory: (open: MemoryOpen) => void;
 }) {
   const [query, setQuery] = useState<string | null>(null);
@@ -116,6 +117,18 @@ export function Sidebar({
             ))}
         </div>
 
+        {/* A search looks in Knowledge too: one row that opens it with the search filled in. */}
+        {!!q && categoriesOpen(state) && (
+          <button onClick={() => onOpenMemory({ query: query ?? "" })} className="mt-1 flex h-[38px] items-center gap-2.5 rounded-[10px] px-2.5 text-left text-[14px] leading-[18px] text-[#3A3A38] hover:bg-black/[0.03]">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#F2F2F0] text-[#3A3A38]">
+              <KnowledgeIcon size={13} />
+            </span>
+            <span className="min-w-0 flex-1 truncate">
+              Search knowledge for &ldquo;{query?.trim()}&rdquo;
+            </span>
+          </button>
+        )}
+
         {!q && <Watching state={state} onOpen={onOpenWatch} />}
 
         {threads.length > 0 && (
@@ -136,34 +149,47 @@ export function Sidebar({
         )}
       </div>
 
-      {/* What Bops knows, pinned under the chats: Orbit, categories that fill themselves from memory, each a page on the right. Half the sidebar at most, scrolling on its own. Every signed-in account (lib/memory-categories.ts). */}
-      {categoriesOpen(state) && (
-        <div className="-mx-2.5 max-h-[50%] shrink-0 overflow-y-auto border-t border-[#ECECEA] px-2.5 empty:hidden">
-          <MemorySections state={state} query={query ?? ""} onOpen={onOpenMemory} />
-        </div>
-      )}
-
       {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
       <UpdateNotice />
-      <div className="flex items-center gap-2.5 p-1 pt-3">
+      {/* You, your apps and logins (the Vault, with the apps you've connected), and Knowledge. New bots are the + at the top. */}
+      <div className="flex items-center gap-2 p-1 pt-3">
         <YouMenu state={state} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />
         <MembersButton state={state} onClick={onMembers} />
         <button
-          onClick={onCompose}
-          className="flex h-10 flex-1 items-center justify-center rounded-full bg-white text-[14px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
-        >
-          + New bot
-        </button>
-        <button
           onClick={onVault}
-          title="Vault: your apps and logins, and which bots can use them"
-          aria-label="Vault"
-          className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-ink shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
+          title="Your apps and logins, and which bots can use them"
+          className="flex h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-full bg-white px-3 text-[14px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
         >
-          <KeyIcon />
+          <span className="truncate">Apps &amp; logins</span>
+          <AppStack state={state} />
         </button>
+        {categoriesOpen(state) && (
+          <button
+            onClick={() => onOpenMemory({})}
+            title="Knowledge: what your bots know, learned as you chat"
+            aria-label="Knowledge"
+            className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
+          >
+            <KnowledgeIcon size={16} />
+          </button>
+        )}
       </div>
     </aside>
+  );
+}
+
+/** The apps you've connected, as up to three overlapping logos (none yet: the Vault's key). */
+function AppStack({ state }: { state: AppState }) {
+  const apps = [...new Map((state.accounts ?? []).filter((a) => a.status === "active").map((a) => [a.app, a])).values()].slice(0, 3);
+  if (!apps.length) return <KeyIcon />;
+  return (
+    <span className="flex shrink-0 items-center">
+      {apps.map((a, i) => (
+        <span key={a.app} className={`flex rounded-[6px] bg-white shadow-[0_0_0_1.5px_#FFFFFF] ${i ? "-ml-1.5" : ""}`}>
+          <AppLogo app={a.app} name={a.appName} size={20} />
+        </span>
+      ))}
+    </span>
   );
 }
 

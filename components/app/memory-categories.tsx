@@ -2,24 +2,22 @@
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
-import { CATEGORIES, categoriesOpen, categoryOf, GROUP_NAME, settled, upcoming, whenLabel, type CategoryId, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
-import type { AppState } from "@/lib/types";
+import { CATEGORIES, categoryOf, GROUP_NAME, settled, upcoming, whenLabel, type CategoryId, type KnowledgeFilter, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
 import { Mascot, Spinner } from "./mascot";
-import { ago, clockTime, CloseButton, currentWorkspace, useNow } from "./ui";
+import { ago, clockTime, CloseButton, useNow } from "./ui";
 
 /*
- * What Bops knows, sorted into categories that fill themselves from the workspace's memory
- * (lib/memory-categories.ts, sorted on this Mac by lib/server/memory-categories.ts): under Memory in
- * the sidebar, a section each that folds, with what matters now (MemorySections); and a page on the
- * right for one category at a time, with everything (MemoryView), where each item opens to say where
- * it was learned, and can be marked done, renamed, hidden or forgotten. Both show the same copy of a
- * workspace's categories, read from /api/memory/categories once for both: when the first of them
- * opens, when Bops comes back in sight, every minute while it's in sight (every 5 seconds while new
- * things are being sorted), and with the answer to every change asked from either.
+ * Knowledge: what Bops knows, sorted into kinds that fill themselves from the workspace's memory
+ * (lib/memory-categories.ts, sorted on this Mac by lib/server/memory-categories.ts), as a page on the
+ * right opened from the sidebar like the Vault (MemoryView). It asks memory questions, lists every kind
+ * or one, and each item opens to say where it was learned, and can be marked done, renamed, hidden or
+ * forgotten. Its copy of a workspace's categories is read from /api/memory/categories: when it opens,
+ * when Bops comes back in sight, every minute while it's in sight (every 5 seconds while new things are
+ * being sorted), and with the answer to every change asked from it.
  */
 
-/** Open a category on the right (bops-app.tsx): at one of its items, or with a search filled in (Show all, from the sidebar's search). */
-export type MemoryOpen = { category: CategoryId; focus?: string; query?: string };
+/** Open Knowledge on the right (bops-app.tsx): on a kind, at one of its items, or with a search filled in (from the sidebar's search). */
+export type MemoryOpen = { category?: KnowledgeFilter; focus?: string; query?: string };
 
 /** What can be asked of the categories (app/api/memory/categories). */
 export type MemoryAction =
@@ -348,6 +346,15 @@ const GLYPHS: Record<CategoryId, React.ReactNode> = {
 };
 
 /** A category's mark, drawn by hand like the app's other icons: in its tab, and on its page. */
+/** The Knowledge page's mark: an open book, as quiet as the other icons. */
+export function KnowledgeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" aria-hidden className="shrink-0">
+      <path d="M2.5 3h4A1.5 1.5 0 0 1 8 4.5V13a1.5 1.5 0 0 0-1.5-1.5h-4zM13.5 3h-4A1.5 1.5 0 0 0 8 4.5V13a1.5 1.5 0 0 1 1.5-1.5h4z" />
+    </svg>
+  );
+}
+
 export function CategoryIcon({ id, size = 14 }: { id: CategoryId; size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" className="shrink-0" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -406,224 +413,17 @@ function When({ item }: { item: MemoryItem }) {
   return pressing(item) ? <mark className="rounded-[3px] bg-highlighter px-0.5 text-ink">{words}</mark> : <>{words}</>;
 }
 
-/* ---------------- The sidebar ---------------- */
-
-/** Items a section shows before "Show all". */
-const FIRST = 5;
-
-/** Where this Mac keeps whether a section is open: per Orgo account and workspace. */
-const openKey = (user: string, ws: string, c: CategoryId) => `bops.memory.open.${user}.${ws}.${c}`;
-
-/** Whether a section is open, as the user left it on this Mac (folded until opened). */
-function readOpen(user: string, ws: string, c: CategoryId) {
-  try {
-    return localStorage.getItem(openKey(user, ws, c)) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeOpen(user: string, ws: string, c: CategoryId, open: boolean) {
-  try {
-    localStorage.setItem(openKey(user, ws, c), open ? "1" : "0");
-  } catch {
-    /* kept until Bops reloads */
-  }
-}
-
-/** Where this Mac keeps whether the whole group is open (open until folded). */
-const groupKey = (user: string, ws: string) => `bops.memory.group.${user}.${ws}`;
-
-function readGroupOpen(user: string, ws: string) {
-  try {
-    return localStorage.getItem(groupKey(user, ws)) !== "0";
-  } catch {
-    return true;
-  }
-}
-
-function writeGroupOpen(user: string, ws: string, open: boolean) {
-  try {
-    localStorage.setItem(groupKey(user, ws), open ? "1" : "0");
-  } catch {
-    /* kept until Bops reloads */
-  }
-}
-
-/** The group's mark for opening its page: an arrow out. */
-function OpenIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 12 12" className="shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M4.5 3h4.5v4.5M9 3L3.5 8.5" />
-    </svg>
-  );
-}
-
-/**
- * What Bops knows, in the sidebar, under its name (GROUP_NAME, Orbit): a section per category from the
- * start, blank until chats fill it ("Fills in as you chat"), in the registry's order. The name folds
- * the whole group, and an arrow beside it opens the page. Each section counts and lists what matters
- * now (events coming up, open tasks and promises, all of the rest), its first five, folded until the
- * user opens it (this Mac remembers both); one with nothing now but something before offers the page.
- * While the sidebar searches, only sections with a match, every one open. Nothing for an account the
- * categories aren't open to (lib/memory-categories.ts), or where memory is off.
- */
-export function MemorySections({ state, query, onOpen }: { state: AppState; query?: string; onOpen: (open: MemoryOpen) => void }) {
-  if (!categoriesOpen(state)) return null;
-  return <LiveSections user={state.account?.user.id ?? ""} ws={currentWorkspace(state)} last={state.messages[state.messages.length - 1]?.id} query={query} onOpen={onOpen} />;
-}
-
-function LiveSections({ user, ws, last, query, onOpen }: { user: string; ws: string; last?: string; query?: string; onOpen: (open: MemoryOpen) => void }) {
-  const { snap } = useMemoryCategories(ws, user);
-  // A new message (a bot's answer may have changed Orbit): read it again soon, not at the next minute.
-  const seen = useRef(last);
-  useEffect(() => {
-    if (last === seen.current) return;
-    seen.current = last;
-    soon(user, ws);
-  }, [last, user, ws]);
-  return <SidebarSections user={user} ws={ws} snap={snap} query={query} onOpen={onOpen} />;
-}
-
-/**
- * The sections for a snapshot of the categories (MemorySections, without the fetching). `user`: the
- * Orgo account, whose folded sections this Mac remembers; `query`: the sidebar's search, as typed.
- */
-export function SidebarSections({
-  user = "",
-  ws,
-  snap,
-  query = "",
-  onOpen,
-}: {
-  user?: string;
-  ws: string;
-  snap: MemorySnapshot | null;
-  query?: string;
-  onOpen: (open: MemoryOpen) => void;
-}) {
-  // Sections, and the whole group, folded or opened since Bops opened, over what this Mac remembers.
-  const [toggled, setToggled] = useState<Record<string, boolean>>({});
-  const [groupToggled, setGroupToggled] = useState<Record<string, boolean>>({});
-  if (!snap?.on) return null;
-  const typed = query.trim();
-  const q = typed.toLowerCase();
-  const sections = CATEGORIES.map((c) => {
-    const all = groupsOf(c.id, snap.items);
-    const mine = all.flatMap((g) => g.items);
-    return { c, total: mine.length, items: q ? mine.filter((i) => matches(i, q)) : all.filter((g) => g.now).flatMap((g) => g.items) };
-  }).filter((s) => !q || s.items.length);
-  if (q && !sections.length) return null;
-  // The arrow opens the page at the first category with something in it (or something hidden), so the page is always a click away.
-  const first =
-    CATEGORIES.find((c) => snap.items.some((i) => i.category === c.id)) ?? CATEGORIES.find((c) => snap.hidden?.some((h) => h.category === c.id)) ?? CATEGORIES[0];
-  const gk = `${user}.${ws}`;
-  // While searching, the group stays open.
-  const shown = !!q || (groupToggled[gk] ?? readGroupOpen(user, ws));
-  return (
-    <div className="flex flex-col pt-4">
-      <div className="group/orbit mb-1.5 flex items-center pr-1">
-        <button
-          onClick={() => {
-            if (q) return;
-            setGroupToggled({ ...groupToggled, [gk]: !shown });
-            writeGroupOpen(user, ws, !shown);
-          }}
-          aria-expanded={shown}
-          className="flex items-center gap-1.5 rounded-[6px] px-2.5 text-left text-[13px] font-medium leading-4 text-[#9A9A98] outline-none hover:text-[#6B6B6B] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
-        >
-          {GROUP_NAME}
-          <Chevron open={shown} />
-        </button>
-        <span className="flex-1" />
-        <button
-          onClick={() => onOpen({ category: first.id })}
-          aria-label={`Open ${GROUP_NAME}`}
-          title={`Open ${GROUP_NAME}`}
-          className="flex size-6 items-center justify-center rounded-[6px] text-[#9A9A98] opacity-0 outline-none hover:bg-black/[0.04] hover:text-[#6B6B6B] focus-visible:opacity-100 focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] group-hover/orbit:opacity-100"
-        >
-          <OpenIcon />
-        </button>
-      </div>
-      {shown && !q && !snap.items.length && (
-        <div className="mb-1 flex items-center gap-2 px-2.5 text-[13px] leading-[18px] text-[#9A9A98]">
-          {snap.syncing && <Spinner size={11} color="#9A9A98" />}
-          {snap.hidden?.length ? "Everything Bops learned is hidden." : "Fills in as you chat"}
-        </div>
-      )}
-      {shown && sections.map(({ c, total, items }) => {
-        const key = `${user}.${ws}.${c.id}`;
-        const open = !!q || (toggled[key] ?? readOpen(user, ws, c.id));
-        return (
-          <div key={c.id} className="flex flex-col">
-            <button
-              onClick={() => {
-                // While searching, every section stays open.
-                if (q) return;
-                setToggled({ ...toggled, [key]: !open });
-                writeOpen(user, ws, c.id, !open);
-              }}
-              aria-expanded={open}
-              className="flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
-            >
-              <span className="text-[#6B6B6B]">
-                <CategoryIcon id={c.id} />
-              </span>
-              <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-ink">{c.label}</span>
-              {items.length > 0 && <span className="shrink-0 text-[12px] tabular-nums text-[#9A9A98]">{items.length}</span>}
-              <span className="text-[#B0B0AD]">
-                <Chevron open={open} />
-              </span>
-            </button>
-            {open && !items.length && !total && <div className="flex h-[30px] shrink-0 items-center pl-8 pr-2.5 text-[13px] leading-[18px] text-[#9A9A98]">Fills in as you chat</div>}
-            {open && items.slice(0, FIRST).map((i) => <SidebarRow key={i.id} item={i} onClick={() => onOpen({ category: c.id, focus: i.id })} />)}
-            {open && (items.length > FIRST || (!items.length && total > 0)) && (
-              <button
-                // From a search, the page opens with it filled in, showing the same matches.
-                onClick={() => onOpen(q ? { category: c.id, query: typed } : { category: c.id })}
-                className="flex h-[30px] shrink-0 items-center rounded-[10px] pl-8 pr-2.5 text-left text-[13px] leading-[18px] text-[#6B6B6B] outline-none hover:bg-black/[0.03] hover:text-ink focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
-              >
-                {items.length ? `Show all ${items.length}` : c.id === "events" ? `${total} past` : snap.items.every((i) => i.category !== c.id || i.done) ? `${total} done` : `${total} older`}
-              </button>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-/** An item in the sidebar, under its section's name: its name, then its date or its line in grey (a private one: its name only). */
-function SidebarRow({ item, onClick }: { item: MemoryItem; onClick: () => void }) {
-  const line = item.private ? null : item.when ? <When item={item} /> : undash(item.detail) || null;
-  return (
-    <button
-      onClick={onClick}
-      className="flex h-[30px] shrink-0 items-center gap-2 rounded-[10px] pl-8 pr-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
-    >
-      <span className="min-w-0 flex-1 truncate text-[13.5px] leading-[18px]">
-        <span className={greyed(item) ? "text-[#9A9A98]" : "text-ink"}>{undash(item.title)}</span>
-        {line && (
-          <span className="text-[#9A9A98]">
-            {" · "}
-            {line}
-          </span>
-        )}
-      </span>
-      {item.private && <Private />}
-      {item.done && <CheckIcon />}
-    </button>
-  );
-}
-
 /* ---------------- The page ---------------- */
 
+/** What memory answers a question with, and the facts it's based on (app/api/memory "ask"). */
+type Answer = { answer: string; based: { id: string; text: string; source: string }[] };
+
 /**
- * One category as a page on the right (a tab per workspace, of the signed-in account `user`): its
- * items in groups, each opening in place. `focus` opens one and brings it into view; `query` fills in
- * the search once (Show all, from the sidebar's search: `onQueryUsed` then takes it off the tab, so it
- * doesn't come back); `focusAt` is when they were asked for, so asking again for the same item (it
- * was closed since, or scrolled away) does it again.
+ * Knowledge as a page on the right (one tab per workspace, of the signed-in account `user`): every
+ * kind of thing Bops knows, or one kind (`category`). `focus` opens an item and brings it into view;
+ * `query` fills in the search once (from the sidebar's search: `onQueryUsed` then takes it off the
+ * tab, so it doesn't come back); `focusAt` is when they were asked for, so asking again for the same
+ * item (it was closed since, or scrolled away) does it again.
  */
 export function MemoryView({
   user,
@@ -638,19 +438,26 @@ export function MemoryView({
 }: {
   user?: string;
   ws: string;
-  category: CategoryId;
+  category: KnowledgeFilter;
   focus?: string;
   focusAt?: number;
   query?: string;
   onQueryUsed?: () => void;
-  onCategory: (category: CategoryId) => void;
+  onCategory: (category: KnowledgeFilter) => void;
   onClose: () => void;
 }) {
   const { snap, act } = useMemoryCategories(ws, user);
+  const ask = useCallback(async (question: string): Promise<Answer | string> => {
+    const r = await fetch("/api/memory", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "ask", ws, question }) })
+      .then((x) => x.json() as Promise<Answer & { error?: string }>)
+      .catch(() => ({ error: "Couldn't reach Bops." }) as Answer & { error?: string });
+    return r.error ?? r;
+  }, [ws]);
   return (
     <MemoryPage
       snap={snap}
       act={act}
+      ask={ask}
       category={category}
       focus={focus}
       focusAt={focusAt}
@@ -664,8 +471,9 @@ export function MemoryView({
 
 const BUTTON = "rounded-full bg-[#F2F2F0] px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#EAEAE7] disabled:opacity-40";
 
-/** What the add box suggests telling Orbit, on each section's page. */
-const EXAMPLE: Record<CategoryId, string> = {
+/** What the add box suggests telling Knowledge, for each kind (all of them: a person). */
+const EXAMPLE: Record<KnowledgeFilter, string> = {
+  all: "Priya Shah is my accountant",
   people: "Priya Shah is my accountant",
   todos: "Send Priya the receipts by Thursday",
   events: "Dentist on Friday at 3pm",
@@ -676,10 +484,29 @@ const EXAMPLE: Record<CategoryId, string> = {
   preferences: "I prefer aisle seats",
 };
 
+/** In All, how many of each kind show before "Show all". */
+const ALL_FIRST = 5;
+/** From this width the page shows the list and the open item side by side. */
+const SIDE_BY_SIDE = 640;
+
+/** The page's width, for side by side. */
+function useWidth() {
+  const [el, setEl] = useState<HTMLDivElement | null>(null);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setWidth(e.contentRect.width));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [el]);
+  return [setEl, width] as const;
+}
+
 /** The page for a snapshot of the categories (MemoryView, without the fetching). */
 export function MemoryPage({
   snap,
   act,
+  ask,
   category,
   focus,
   focusAt,
@@ -690,17 +517,18 @@ export function MemoryPage({
 }: {
   snap: MemorySnapshot | null;
   act: MemoryAct;
-  category: CategoryId;
+  ask?: (question: string) => Promise<Answer | string>;
+  category: KnowledgeFilter;
   focus?: string;
   focusAt?: number;
   query?: string;
   onQueryUsed?: () => void;
-  onCategory: (category: CategoryId) => void;
+  onCategory: (category: KnowledgeFilter) => void;
   onClose: () => void;
 }) {
   // "Updated 5m ago", and when Tidy up can run again, stay current.
   useNow(30_000);
-  const c = categoryOf(category) ?? CATEGORIES[0];
+  const c = category === "all" ? undefined : (categoryOf(category) ?? CATEGORIES[0]);
   const [search, setSearch] = useState(query ?? "");
   const [openId, setOpenId] = useState<string | null>(focus ?? null);
   // A new ask from the sidebar puts its search here (none: a search left here could hide what was asked for), and the item asked for opens.
@@ -716,7 +544,7 @@ export function MemoryPage({
   }, [query, onQueryUsed]);
   const [busy, setBusy] = useState<"refresh" | "sort-older" | "tidy-up" | null>(null);
   const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
-  // Told Orbit something (saved to memory, sorted in a few seconds): what's typed, and while it saves.
+  // Told Knowledge something (saved to memory, sorted in a few seconds): what's typed, and while it saves.
   const [adding, setAdding] = useState("");
   const [saving, setSaving] = useState(false);
   const add = async () => {
@@ -730,7 +558,22 @@ export function MemoryPage({
     setAdding("");
     if (r) setNote({ text: r.note, bad: false });
   };
+  // A question for memory (Honcho answers in a few seconds), and its answer with what it's based on.
+  const [question, setQuestion] = useState("");
+  const [thinking, setThinking] = useState(false);
+  const [answer, setAnswer] = useState<(Answer & { question: string }) | { error: string } | null>(null);
+  const putQuestion = async () => {
+    const q = question.trim();
+    if (!q || thinking || !ask) return;
+    setThinking(true);
+    setAnswer(null);
+    const r = await ask(q);
+    setThinking(false);
+    setAnswer(typeof r === "string" ? { error: r } : { ...r, question: q });
+  };
   const list = useRef<HTMLDivElement>(null);
+  const [measure, width] = useWidth();
+  const sideBySide = width >= SIDE_BY_SIDE;
   // ...and comes into view, once it's there (the categories may still be on their way).
   const there = !!focus && !!snap?.items.some((i) => i.id === focus);
   useEffect(() => {
@@ -754,41 +597,172 @@ export function MemoryPage({
 
   const q = search.trim().toLowerCase();
   const items = snap?.items ?? [];
-  const count = (id: CategoryId) => items.filter((i) => i.category === id && matches(i, q)).length;
-  const all = groupsOf(c.id, items);
-  const groups = all.map((g) => ({ ...g, items: g.items.filter((i) => matches(i, q)) })).filter((g) => g.items.length);
+  const count = (id: KnowledgeFilter) => items.filter((i) => (id === "all" || i.category === id) && matches(i, q)).length;
+  // One kind: its groups (Coming up, Earlier…). All: a section per kind, its first few unless searching.
+  const all = c
+    ? groupsOf(c.id, items)
+    : CATEGORIES.map((x) => ({ label: x.label, id: x.id, items: groupsOf(x.id, items).flatMap((g) => g.items) })).filter((g) => g.items.length);
+  const groups = all
+    .map((g) => {
+      const hits = g.items.filter((i) => matches(i, q));
+      const more = !c && !q && hits.length > ALL_FIRST ? hits.length - ALL_FIRST : 0;
+      return { ...g, items: more ? hits.slice(0, ALL_FIRST) : hits, more };
+    })
+    .filter((g) => g.items.length);
+  const shown = groups.flatMap((g) => g.items);
+  // Side by side, an item is always open beside the list: the one picked, else the first.
+  const open = sideBySide ? (shown.find((i) => i.id === openId) ?? shown[0]) : shown.find((i) => i.id === openId);
   const sorting = !!snap?.syncing || busy === "refresh" || busy === "sort-older";
   const readyAt = snap?.dreamReadyAt;
   const canTidy = reached(readyAt) && !busy;
   const tidyTip = reached(readyAt) || !readyAt ? TIDY : `Memory tidied up${snap?.dreamAt ? ` at ${clockTime(snap.dreamAt)}` : ""}. It can again at ${clockTime(readyAt)}.`;
   const said = note ?? (snap?.error ? { text: snap.error, bad: true } : null);
+  const kindOf = (id?: CategoryId) => (id ? (categoryOf(id)?.label ?? "") : "");
+
+  const listView = (
+    <div ref={list} className="flex flex-col gap-5">
+      {!snap ? (
+        <div className="flex justify-center py-12">
+          <Spinner size={16} color="#9A9A98" />
+        </div>
+      ) : !snap.on ? (
+        <div className="py-12 text-center text-[13.5px] leading-5 text-[#6B6B6B]">Memory isn&rsquo;t on yet.</div>
+      ) : !all.length ? (
+        <div className="flex flex-col items-center gap-3 py-12 text-center">
+          <Mascot botId="boppy" color="#0A0A0A" size={52} />
+          <span className="max-w-[300px] text-[13.5px] leading-5 text-[#6B6B6B]">
+            {c ? (snap.hidden?.some((h) => h.category === c.id) ? "Everything here is hidden." : c.empty) : "What your bots learn as you chat shows up here: people, plans, promises and more."}
+          </span>
+        </div>
+      ) : !groups.length ? (
+        <div className="py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">Nothing matches &ldquo;{search.trim()}&rdquo;.</div>
+      ) : (
+        groups.map((g) => (
+          <div key={g.label ?? "all"} className="flex flex-col gap-2">
+            {g.label && (
+              <span className="px-1 text-[12px] font-medium leading-4 text-[#9A9A98]">
+                {g.label} <span className="font-normal tabular-nums text-[#B0B0AD]">{g.items.length + g.more}</span>
+              </span>
+            )}
+            <div className="flex flex-col overflow-hidden rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
+              {g.items.map((i, n) => (
+                <div key={i.id} className={sideBySide && open?.id === i.id ? "bg-[#F7F7F6]" : ""}>
+                  <ItemRow
+                    item={i}
+                    last={n === g.items.length - 1 && !g.more}
+                    open={!sideBySide && open?.id === i.id}
+                    onToggle={() => setOpenId(!sideBySide && openId === i.id ? null : i.id)}
+                    act={act}
+                  />
+                </div>
+              ))}
+              {g.more > 0 && "id" in g && (
+                <button onClick={() => onCategory(g.id as CategoryId)} className="px-3.5 py-2.5 text-left text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:bg-[#F7F7F6] hover:text-ink">
+                  Show all {g.items.length + g.more}
+                </button>
+              )}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
-      <div className="flex w-full max-w-[560px] flex-col gap-5">
+    <div ref={measure} className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
+      <div className={`flex w-full flex-col gap-5 ${sideBySide ? "max-w-[980px]" : "max-w-[560px]"}`}>
         <div className="flex items-start gap-3.5">
-          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-ink text-highlighter">
-            <CategoryIcon id={c.id} size={20} />
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-[#F2F2F0] text-[#3A3A38]">
+            <KnowledgeIcon size={20} />
           </span>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
-            <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{c.label}</span>
-            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">{c.about}</span>
+            <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{GROUP_NAME}</span>
+            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
+              {snap?.on && items.length ? `${items.length.toLocaleString("en-US")} things your bots know, learned as you chat` : "What your bots know, learned as you chat"}
+            </span>
           </div>
           <CloseButton onClick={onClose} className="mt-1.5" />
         </div>
 
+        {snap?.on && ask && (
+          <div className="flex flex-col gap-2.5">
+            {/* Ask what your bots know: memory answers, with the facts it's based on and where each was learned. */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void putQuestion();
+              }}
+              className="flex h-11 items-center gap-2 rounded-2xl bg-white pl-4 pr-1.5 shadow-[0_0_0_1px_#E2E2DF] focus-within:shadow-[0_0_0_1.5px_#0A0A0A]"
+            >
+              <input
+                value={question}
+                onChange={(e) => {
+                  setQuestion(e.target.value);
+                  if (!e.target.value.trim()) setAnswer(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Escape" || (!question && !answer)) return;
+                  e.preventDefault();
+                  setQuestion("");
+                  setAnswer(null);
+                }}
+                placeholder="Ask what your bots know: what does Priya need from me?"
+                aria-label="Ask what your bots know"
+                maxLength={1000}
+                className="min-w-0 flex-1 bg-transparent text-[14px] leading-5 text-ink outline-none placeholder:text-[#9A9A98]"
+              />
+              {question.trim() && (
+                <button type="submit" disabled={thinking} className="h-8 shrink-0 rounded-full bg-ink px-3.5 text-[12.5px] font-medium text-white disabled:opacity-50">
+                  {thinking ? "Thinking…" : "Ask"}
+                </button>
+              )}
+            </form>
+            {(thinking || answer) && (
+              <div className="flex flex-col gap-3 rounded-2xl bg-[#F7F7F6] px-4 py-3.5">
+                {thinking ? (
+                  <span className="flex items-center gap-2 text-[13.5px] text-[#9A9A98]">
+                    <Spinner size={11} color="#9A9A98" />
+                    Thinking back…
+                  </span>
+                ) : answer && "error" in answer ? (
+                  <span role="alert" className="text-[13.5px] leading-5 text-[#B42318]">
+                    {answer.error}
+                  </span>
+                ) : (
+                  answer && (
+                    <>
+                      <span className="whitespace-pre-wrap text-[14.5px] leading-[22px] text-ink [overflow-wrap:anywhere]">{undash(answer.answer.replace(/\*\*/g, ""))}</span>
+                      {answer.based.length > 0 && (
+                        <div className="flex flex-col gap-1.5 border-t border-black/[0.06] pt-3">
+                          <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">Based on</span>
+                          {answer.based.map((f) => (
+                            <span key={f.id} className="flex flex-wrap items-baseline gap-x-2 text-[13px] leading-[19px] text-[#3A3A38]">
+                              <span className="[overflow-wrap:anywhere]">{undash(f.text)}</span>
+                              <span className="text-[11.5px] text-[#9A9A98]">{f.source}</span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-wrap gap-1.5">
-          {CATEGORIES.map((x) => {
-            const on = x.id === c.id;
+          {(["all", ...CATEGORIES.map((x) => x.id)] as KnowledgeFilter[]).map((id) => {
+            const on = id === category;
             return (
               <button
-                key={x.id}
-                onClick={() => !on && onCategory(x.id)}
+                key={id}
+                onClick={() => !on && onCategory(id)}
                 aria-pressed={on}
                 className={`flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}
               >
-                {x.label}
-                {snap?.on && <span className={`tabular-nums ${on ? "text-white/60" : "text-[#9A9A98]"}`}>{count(x.id)}</span>}
+                {id === "all" ? "All" : kindOf(id)}
+                {snap?.on && <span className={`tabular-nums ${on ? "text-white/60" : "text-[#9A9A98]"}`}>{count(id)}</span>}
               </button>
             );
           })}
@@ -796,7 +770,7 @@ export function MemoryPage({
 
         {snap?.on && (
           <div className="flex flex-col gap-2.5">
-            {/* Tell Orbit something by hand: saved to memory like a bot's remember, sorted into the right section in seconds. */}
+            {/* Tell Knowledge something by hand: saved to memory like a bot's remember, sorted into the right kind in seconds. */}
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -810,8 +784,8 @@ export function MemoryPage({
               <input
                 value={adding}
                 onChange={(e) => setAdding(e.target.value)}
-                placeholder={`Tell ${GROUP_NAME} something: ${EXAMPLE[c.id]}`}
-                aria-label={`Tell ${GROUP_NAME} something`}
+                placeholder={`Add something your bots should know: ${EXAMPLE[category]}`}
+                aria-label="Add something your bots should know"
                 maxLength={500}
                 className="min-w-0 flex-1 bg-transparent text-[13.5px] leading-5 text-ink outline-none placeholder:text-[#9A9A98]"
               />
@@ -832,9 +806,9 @@ export function MemoryPage({
                   e.preventDefault();
                   setSearch("");
                 }}
-                placeholder={`Search ${c.label.toLowerCase()}`}
+                placeholder={c ? `Search ${c.label.toLowerCase()}` : "Search knowledge"}
                 spellCheck={false}
-                aria-label={`Search ${c.label.toLowerCase()}`}
+                aria-label={c ? `Search ${c.label.toLowerCase()}` : "Search knowledge"}
                 className="min-w-0 flex-1 bg-transparent text-[13.5px] leading-5 text-ink outline-none placeholder:text-[#9A9A98]"
               />
             </label>
@@ -884,42 +858,19 @@ export function MemoryPage({
           </div>
         )}
 
-        <div ref={list} className="flex flex-col gap-5">
-          {!snap ? (
-            <div className="flex justify-center py-12">
-              <Spinner size={16} color="#9A9A98" />
+        {sideBySide && open ? (
+          // The list beside the open item: a mail app's way, so moving between people is one click.
+          <div className="flex items-start gap-5">
+            <div className="w-[300px] shrink-0">{listView}</div>
+            <div className="sticky top-0 min-w-0 flex-1 overflow-hidden rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
+              <span className="block px-3.5 pt-3 text-[11.5px] font-medium leading-4 text-[#9A9A98]">{kindOf(open.category)}</span>
+              <ItemRow key={open.id} item={open} last open onToggle={() => setOpenId(null)} act={act} />
             </div>
-          ) : !snap.on ? (
-            <div className="py-12 text-center text-[13.5px] leading-5 text-[#6B6B6B]">Memory isn&rsquo;t on yet.</div>
-          ) : !all.length ? (
-            <div className="flex flex-col items-center gap-3 py-12 text-center">
-              <Mascot botId="boppy" color="#0A0A0A" size={52} />
-              <span className="max-w-[300px] text-[13.5px] leading-5 text-[#6B6B6B]">
-                {snap.hidden?.some((h) => h.category === c.id) ? "Everything here is hidden." : c.empty}
-              </span>
-            </div>
-          ) : !groups.length ? (
-            <div className="py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">
-              No {c.label.toLowerCase()} match &ldquo;{search.trim()}&rdquo;.
-            </div>
-          ) : (
-            groups.map((g) => (
-              <div key={g.label ?? "all"} className="flex flex-col gap-2">
-                {g.label && (
-                  <span className="px-1 text-[12px] font-medium leading-4 text-[#9A9A98]">
-                    {g.label} <span className="font-normal tabular-nums text-[#B0B0AD]">{g.items.length}</span>
-                  </span>
-                )}
-                <div className="flex flex-col rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
-                  {g.items.map((i, n) => (
-                    <ItemRow key={i.id} item={i} last={n === g.items.length - 1} open={openId === i.id} onToggle={() => setOpenId(openId === i.id ? null : i.id)} act={act} />
-                  ))}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-        {snap?.on && <HiddenList hidden={(snap.hidden ?? []).filter((h) => h.category === c.id)} act={act} />}
+          </div>
+        ) : (
+          listView
+        )}
+        {snap?.on && <HiddenList hidden={(snap.hidden ?? []).filter((h) => !c || h.category === c.id)} act={act} />}
       </div>
     </div>
   );
