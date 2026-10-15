@@ -670,7 +670,18 @@ function stillOurs(ours: () => boolean) {
 }
 
 /** A routine's run, done as one turn of its bot (backgroundTurn): which routine, what to do, and how. */
-type BackgroundJob = { routineId: string; title: string; goal: string; quiet: boolean; procedureId?: string };
+type BackgroundJob = {
+  routineId: string;
+  title: string;
+  goal: string;
+  quiet: boolean;
+  procedureId?: string;
+  /**
+   * A look at a Connected App for Bops itself (routine-suggestions.ts learnTags), not a run of the routine:
+   * only find_app_actions and use_app's read actions (SAMPLE_TOOLS), no task, and nothing posted in the chat.
+   */
+  sample?: boolean;
+};
 
 type TurnOptions = {
   /** The inline reply this turn belongs to; the bot's answer joins it. */
@@ -712,6 +723,9 @@ const NOT_IN_BACKGROUND = new Set(["react", "schedule", "manage_routine", "watch
  * up, changes or stops what the bots do on their own (routines, watches, skills), or a new bot. Those
  * are the user's; the bot says it will pass the request on. (Nor the web or the user's data: see the tools.)
  */
+/** All a sample (BackgroundJob.sample) has: finding an app's actions and running the ones that only read. */
+const SAMPLE_TOOLS = new Set(["find_app_actions", "use_app"]);
+
 const NOT_FROM_OUTSIDE = new Set(["schedule", "manage_routine", "watch", "stop_watch", "create_skill", "update_skill", "create_bot"]);
 
 /** Lookups whose answers come from outside Bops: the web, email, apps and data. A turn that read one can't save a skill. */
@@ -1132,6 +1146,8 @@ function jobNote(b: Bot, job: BackgroundJob) {
   const owner = ownerName();
   const r = getState().routines.find((x) => x.id === job.routineId);
   const p = job.procedureId ? findSkill(b.id, job.procedureId) : undefined;
+  if (job.sample)
+    return `A job from Bops (not ${owner} just now): ${job.goal}\nDo it now with your tools. ${owner} isn't here to answer, so don't ask. Only read: never send, post, label or change anything. Your answer goes to Bops, not the chat.`;
   const also = r?.deliverTo ? deliveryWords(r.deliverTo).replace(/^, results /, " and sent ") : r?.textTo ? " and texted to them" : "";
   return [
     `A scheduled run of your routine "${job.title}" (from Bops, not ${owner} just now): ${job.goal}`,
@@ -1391,7 +1407,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // A routine's run looks things up and may start a task; it never sets something up or talks in the chat.
     // Someone else's turn never sets up or changes what the bots do on their own.
     const not = bg ? NOT_IN_BACKGROUND : opts.outside ? NOT_FROM_OUTSIDE : undefined;
-    const tools = not ? all.filter((t) => !("name" in t) || !not.has(t.name)) : all;
+    const tools = bg?.sample ? all.filter((t) => "name" in t && SAMPLE_TOOLS.has(t.name)) : not ? all.filter((t) => !("name" in t) || !not.has(t.name)) : all;
     // What this turn was given: a tool it wasn't (a routine's run, someone else's turn) does nothing, whatever the model says.
     const offered = new Set(tools.map((t) => ("name" in t ? t.name : t.type)));
     // Lines for the chat after the reply ("Remembered: …", "Scheduled …", "Didn't start …").
@@ -1707,6 +1723,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
                 });
               }),
           (a as { account?: string | null }).account ?? null,
+          { readOnly: !!bg?.sample },
         )
           .then((out) => {
             // What the app answered (JSON), not Bops' own words about it (an approval to wait for, an unknown action).
@@ -1896,7 +1913,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       const out = isNothing(text) ? null : text || (sessionIds.length && !bg.quiet ? says.join(" ") || "Started on it." : null);
       // What the run read or left out ("Read …") is said only with a result it posts (a quiet run's words
       // that only start a thread aren't posted: routines.ts chatRun). A quiet run with nothing posts nothing.
-      if (out && !(bg.quiet && sessionIds.length)) for (const n of notes) addMessage({ chatId, role: "system", text: n, routine: tag });
+      if (out && !bg.sample && !(bg.quiet && sessionIds.length)) for (const n of notes) addMessage({ chatId, role: "system", text: n, routine: tag });
       if (!out) return { text: null, ...started };
       // Sent on by text or to Slack, Telegram or Discord, where markdown shows as typed: links read as words and an address.
       const r = getState().routines.find((x) => x.id === bg.routineId);

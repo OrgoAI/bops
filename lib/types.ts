@@ -138,7 +138,25 @@ export type Workspace = {
   apps?: SkillRef[];
   /** Scripts someone approved to run in this workspace, by the content's sha256. */
   approvals?: ScriptApproval[];
+  /**
+   * Tags this workspace sorts mail and messages with besides the defaults (lib/routine-catalog.ts
+   * DEFAULT_TAGS: Customer, Outage, Bug, Office, FYI). Proposed by a bot from a sample of recent mail
+   * or messages when a Gmail, Slack or Discord starter routine is turned on
+   * (lib/server/routine-suggestions.ts learnTags), or added by the user.
+   */
+  tags?: WorkspaceTag[];
+  /** The Connected Apps whose recent items tags were already learned from (one sample per app). */
+  tagsLearnedFrom?: string[];
 };
+
+/** A tag routines sort by: a short name and what it's for. */
+export type WorkspaceTag = { name: string; description: string };
+
+/**
+ * Where a routine or watch came from, when it was a starter (lib/routine-catalog.ts): the Connected App's
+ * slug or the vault key's name it's for, and the catalog template's id. One per template per bot.
+ */
+export type RoutineSource = { app: string; template: string };
 
 /** A skill (how a bot does a kind of job) or an app (a tool Bops builds and bots run). */
 export type SkillKind = "skill" | "app";
@@ -555,6 +573,10 @@ export type Routine = {
    * the bot's own words; and the user sees who set it up.
    */
   fromOutside?: string;
+  /** The starter it was made from (lib/routine-catalog.ts), when it was one. */
+  source?: RoutineSource;
+  /** Tags it sorts what it reads with (the defaults and Workspace.tags), as its bot is told. */
+  tags?: string[];
 };
 
 /** A one-off whose time has passed: done. Run now before then doesn't finish it (it can still be paused and resumed). */
@@ -747,6 +769,12 @@ export type AppState = {
    * the plan (GET /api/plan, /api/account) shows credit again. Unset otherwise.
    */
   credits?: { out: boolean; at: number };
+  /**
+   * A Connected App (or a vault key) just finished connecting for a bot, and the window offers that bot's
+   * starter routines for it (GET /api/routines/suggestions). One at a time; cleared once answered or
+   * dismissed (POST /api/routines/suggestions, /api/routines/suggestions/dismiss).
+   */
+  suggest?: { app: string; botId: BotId; at: number };
   /** What running Bops cost, as it happened (lib/server/usage.ts); the account page totals it. */
   usage?: UsageEvent[];
   /** The Orgo user whose account the bots' computers are in (lib/server/orgo-sign-in.ts adoptComputers). */
@@ -989,6 +1017,8 @@ export type Watch = {
   target?: string;
   /** The screen shows something else right now (another conversation, page or view): no alerts until it's back. */
   away?: boolean;
+  /** The starter it was made from (lib/routine-catalog.ts), when it was one. */
+  source?: RoutineSource;
   /**
    * A web page watched with no screen (then `display` is 0): Bops fetches `url` every `everyMin` minutes,
    * keeps a fingerprint of every line with what's certainly noise taken out (a "5m ago", an "Updated 3:45

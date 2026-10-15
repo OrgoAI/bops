@@ -901,6 +901,21 @@ await check("backgroundTurn: an answer is returned, never posted; links made pla
   assert.match(hear(outputOf(asked[n + 1])), /^\{"your_address":"boppy@bops\.bot","emails":\[\]/, "lookups run (the inbox is empty here)");
 });
 
+await check("backgroundTurn: a sample for Bops (learning tags) has only the app tools that read, and posts nothing", async () => {
+  const r = routines().find((x) => x.title === "Calendar");
+  const before = messages().length;
+  answers.push(reply('{"tags": []}'));
+  const n = asked.length;
+  const k = started.length;
+  const out = await Chat.backgroundTurn("boppy", { routineId: r.id, title: "Tags from Gmail", goal: "Read my 30 most recent emails.", quiet: false, sample: true });
+  assert.deepEqual(out, { text: '{"tags": []}' });
+  assert.deepEqual(toolNames(asked[n]).sort(), ["find_app_actions", "use_app"]);
+  assert.equal(started.length, k, "no task");
+  assert.equal(messages().length, before, "nothing posted");
+  assert.match(asked[n].input.at(-1).content, /^A job from Bops \(not Alex just now\): Read my 30 most recent emails\.\n.*Only read: never send, post, label or change anything\./);
+  noDashes(asked[n].input.at(-1).content, "sample job");
+});
+
 await check("backgroundTurn: a job that needs a computer starts the routine's own task; a quiet one says nothing yet", async () => {
   const r = routines().find((x) => x.title === "News check");
   const before = messages().length;

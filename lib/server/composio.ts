@@ -242,6 +242,7 @@ export async function connectApp(app: string, label?: string, replaces?: string,
       give(s, accountId, grant);
     });
     if (isNew) trackServerEvent("bops_app_connected", { toolkit: app, reconnect: false });
+    if (isNew) await offerStartersFor(app, grant?.bots);
     return { accountId };
   }
   // Afterwards the browser lands on Bops' own "connected" page, not Composio's (Bops Cloud's, signed in with Orgo).
@@ -257,6 +258,7 @@ export async function connectApp(app: string, label?: string, replaces?: string,
   void req
     .waitForConnection(15 * 60_000)
     .then(async (ca: { id: string }) => {
+      let suggestAfter: string[] | undefined;
       const name = await accountName(ca.id).catch(() => undefined);
       const old = replaces ? getState().accounts?.find((a) => a.id === replaces) : undefined;
       const isNew = !getState().accounts?.some((a) => a.id === ca.id);
@@ -266,6 +268,8 @@ export async function connectApp(app: string, label?: string, replaces?: string,
         if (s.accounts?.some((a) => a.id === ca.id)) return;
         (s.accounts ??= []).push({ id: ca.id, app, appName, name, label: c?.label ?? old?.label, status: "active", at: Date.now() });
         give(s, ca.id, c?.grant);
+        // A new account: its bot is offered the app's starter routines (signing back in isn't new).
+        if (!old) suggestAfter = c?.grant?.bots;
         // Signed back in: the new account takes the old one's place, with the same access.
         if (old) {
           for (const b of s.bots) if (b.access?.[old.id]) b.access[ca.id] = b.access[old.id];
@@ -275,6 +279,7 @@ export async function connectApp(app: string, label?: string, replaces?: string,
         }
       });
       if (isNew) trackServerEvent("bops_app_connected", { toolkit: app, reconnect: !!old }, { userId: who });
+      if (suggestAfter) await offerStartersFor(app, suggestAfter);
       if (old) await cx().connectedAccounts.delete(old.id).catch(() => null);
     })
     .catch((e: Error) =>
@@ -285,6 +290,10 @@ export async function connectApp(app: string, label?: string, replaces?: string,
     );
   return { redirectUrl: req.redirectUrl };
 }
+
+/** A new account's bot is offered the app's starter routines (lib/server/routine-suggestions.ts); a failure there never fails the connect. */
+const offerStartersFor = (app: string, botIds?: string[]) =>
+  import("./routine-suggestions").then((m) => m.offerStarters(app, botIds)).catch((e: Error) => console.warn(`[apps] starters for ${app}: ${e.message}`));
 
 /** Stop waiting on a sign-in (or clear one that failed). */
 export function cancelConnect(waitId: string) {
@@ -619,6 +628,7 @@ export async function runAppAction(
   where: { chatId?: string; sessionId?: string },
   onAsk?: (ask: Promise<string>) => void,
   accountHint?: string | null,
+  opts: { readOnly?: boolean } = {},
 ): Promise<string> {
   const b = bot(botId);
   if (!b) return "Unknown bot.";
@@ -642,6 +652,8 @@ export async function runAppAction(
     return res.error || res.successful === false ? `Failed: ${res.error ?? "the app said no"}` : clip(JSON.stringify(res.data ?? {}));
   };
   if (reads) return run();
+  // A look for Bops itself (chat.ts BackgroundJob.sample) only reads.
+  if (opts.readOnly) return `Not done: this run only reads, and ${info.name} changes something. Use a read action.`;
   const destructive = info.tags.includes("destructiveHint");
   // Low-stakes and easy to undo, only touching the user's own things (marking read, a label, an event
   // only they attend): done without asking, and said so in the chat. Never anything that reaches

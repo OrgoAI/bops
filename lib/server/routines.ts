@@ -1,7 +1,8 @@
 import "server-only";
 import { readlinkSync } from "node:fs";
 import { trackServerEvent } from "./analytics";
-import { botChatId, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type Schedule, type Session } from "@/lib/types";
+import { botChatId, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
+import { tagsOf } from "@/lib/routine-catalog";
 import { clampEvery, describeSchedule as describe, nextRun, parseClock, resolveOnce, whenText } from "@/cloud/schedule";
 import { plainLinks } from "@/cloud/style";
 import { pingIfWorthIt } from "./attention";
@@ -162,6 +163,9 @@ type RoutineOpts = {
   procedure?: string;
   /** Set up on a turn someone else started: who it came from (Routine.fromOutside). */
   fromOutside?: string;
+  /** A starter it was made from (lib/server/routine-suggestions.ts), and the tags it sorts with. */
+  source?: RoutineSource;
+  tags?: string[];
 };
 
 /**
@@ -218,6 +222,8 @@ export function createRoutine(botId: string, title: string, goal: string, schedu
     ...(opts.deliverTo ? { deliverTo: opts.deliverTo } : {}),
     ...(procedure ? { procedure } : {}),
     ...(outside ? { fromOutside: outside.slice(0, 200) } : {}),
+    ...(!outside && opts.source ? { source: { app: opts.source.app, template: opts.source.template } } : {}),
+    ...(!outside && opts.tags?.length ? { tags: [...new Set(opts.tags.map((t) => t.trim()).filter(Boolean))].slice(0, 12) } : {}),
   };
   update((st) => st.routines.push(r));
   trackServerEvent("bops_routine_created", {});
@@ -768,14 +774,26 @@ export function routinesNote(botIds: string[]) {
       deliverText(r),
       r.procedure ? `follows skill "${findSkill(r.botId, r.procedure)?.name ?? r.procedure}"` : "",
       r.fromOutside ? `set up by ${r.fromOutside}, not ${owner}` : "",
+      r.source ? `a starter for ${appWord(r.source.app)}` : "",
+      r.tags?.length ? `sorts with tags ${r.tags.join(", ")}` : "",
       // A one-off is done once its time has passed (Run now before then doesn't finish it).
       r.enabled ? (r.nextRunAt ? `next ${inSentence(whenText(r.nextRunAt, now, tz))}` : "") : r.schedule.kind === "once" && r.schedule.at <= now ? "done" : "paused",
       r.last ? lastText(r.last, now, tz) : "",
     ]
       .filter(Boolean)
       .join(" · ");
-  return `Routines (change them with manage_routine):\n${mine.map(line).join("\n")}`;
+  // The tags its routines sort with: the defaults and each workspace's own (Workspace.tags), so "what do you do every day" can say how.
+  const tagged = [...new Set(mine.filter((r) => r.tags?.length).map((r) => workspaceOf(bot(r.botId))))];
+  const tags = tagged.map((wsId) => {
+    const t = tagsOf(getState().workspaces?.find((w) => w.id === wsId));
+    return `Tags your routines sort with${tagged.length > 1 ? ` (${getState().workspaces?.find((w) => w.id === wsId)?.name ?? wsId})` : ""}: ${t.map((x) => `${x.name} (${x.description})`).join("; ")}.`;
+  });
+  return [`Routines (change them with manage_routine; when asked what you do on your own, say these in plain words):\n${mine.map(line).join("\n")}`, ...tags].join("\n");
 }
+
+/** A Connected App's or a key's name as the user knows it. */
+const APP_WORDS: Record<string, string> = { gmail: "Gmail", googlecalendar: "Google Calendar", slack: "Slack", discord: "Discord", hubspot: "HubSpot", attio: "Attio", STRIPE_SECRET_KEY: "Stripe", PLAIN_API_KEY: "Plain" };
+const appWord = (app: string) => APP_WORDS[app] ?? app;
 
 // The timer calls whatever version of tick was loaded last, so edits apply without a restart.
 g.__bopsRoutineTick = tick;
