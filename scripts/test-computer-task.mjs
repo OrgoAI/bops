@@ -83,7 +83,9 @@ const answers = [];
  * The computer as orgo-web keeps Free's: its status, and when Bops last said it's in use (null: never, so it's
  * never put to sleep for want of use). Every call to Orgo, as "METHOD /path".
  */
-const pc = { status: "running", activeAt: null, shot409: false };
+const pc = { status: "running", activeAt: null, shot409: false, shotDelay: 0, actFail: null };
+/** Each screenshot asked of Orgo, as "screen format", in the order Orgo got them. */
+const shotLog = [];
 const idleAsleep = () => pc.status === "suspended" && pc.activeAt !== null && Date.now() - pc.activeAt > 15 * 60_000;
 const orgoCalls = [];
 /** Every command Bops ran on the computer, and what a run_command answers (a function of the command, run when it's called). */
@@ -141,6 +143,8 @@ globalThis.fetch = async (input, init) => {
       return json({ screens: [100, 101, 102].map((d) => listed(d, true)) });
     }
     if (path === `/computers/${COMPUTER}/screenshot`) {
+      shotLog.push(`${url.searchParams.get("screen")} ${url.searchParams.get("format")}`);
+      if (pc.shotDelay) await sleep(pc.shotDelay);
       // Orgo left it asleep for a look (the heartbeat lapsed mid-task, say): once, then it's woken by an action.
       if (pc.shot409) {
         pc.shot409 = false;
@@ -154,7 +158,14 @@ globalThis.fetch = async (input, init) => {
       if (pc.status === "suspended") pc.status = "running";
       const { command } = JSON.parse(body);
       bash.push(command);
-      if (command.includes("cd /workspace && export DISPLAY")) return json(await onCommand(command));
+      // A command that hangs (Orgo not answering) ends when Bops gives up on it, as a real fetch does.
+      if (command.includes("cd /workspace && export DISPLAY"))
+        return json(await Promise.race([onCommand(command), new Promise((_, no) => req.signal.addEventListener("abort", () => no(req.signal.reason)))]));
+      if (command.includes("@@bops-act@@") && pc.actFail) {
+        const output = pc.actFail;
+        pc.actFail = null;
+        return json({ output, exit_code: 0 });
+      }
       if (command.includes("/opt/bops/pw/page-script.cjs ")) return json(await onPage(command));
       return json({ output: command.includes("echo ok") ? "ok" : "", exit_code: 0 });
     }
@@ -234,7 +245,10 @@ assert.match(asked[0].instructions, /Bops CRM: .* save them with crm_save_rows a
 assert.match(asked[0].instructions, /call sign_in_from_vault: Bops fills/, "told to use it (no helpers' screens here)");
 // The fastest tool first and the screen last: web search, the shell, a page script, then the computer; look-ups never need the screen.
 const ladder = asked[0].instructions;
-assert.match(ladder, /use the first tool in this list that can do it\. Go further down the list only when the tools before it can't: \(1\) web_search .*\(2\) run_command .*fetch a page or an API \(curl\).*\(3\) page_script to read a website and use it by its elements .*\(4\) The computer, for what a page script can't do/);
+assert.match(ladder, /Your tools, quickest first\. For each step, use the quickest one that fits it: \(1\) web_search .*\(2\) run_command .*fetch a page or an API \(curl\).*\(3\) page_script to read a website, and to fill in or click things you can name .*\(4\) The screen: you see it/);
+// The screen for what needs seeing, and after two scripts that missed; never "pixels last".
+assert.match(ladder, /Use the screen when you need to see: menus, pop-ups, account and channel switchers, .*When two page scripts haven't got a step done, do that step on the screen\./);
+assert.ok(!/not pixels|Go further down the list only/.test(ladder + asked[0].tools.find((t) => t.name === "page_script").description), "the screen isn't the last resort");
 assert.match(ladder, /To look things up or read, don't use the screen: search, and read pages as text\./);
 assert.ok(!/in the open|the way a capable person/.test(ladder), "nothing tells it to do everything on the screen");
 assert.match(asked[0].tools.find((t) => t.name === "run_command").description, /and to fetch a page or an API \(curl\)\. Don't use it to sign in to or act on websites or apps/);
@@ -270,15 +284,15 @@ assert.ok(xdo.every((x) => x.display === `:${display}`));
 assert.deepEqual(
   xdo.map((x) => x.args),
   [
-    ["mousemove", "10", "21"],
+    ["mousemove", "--sync", "10", "21"],
     ["keydown", "ctrl"],
     ["click", "1"],
     ["keyup", "ctrl"],
     ["key", "--", "ctrl+plus"],
     ["key", "--", "'; touch PWNED; echo '"],
     ["key", "--", "$(touch PWNED2)"],
-    ["type", "--delay", "12", "--", "two lines\nend\n"],
-    ["mousemove", "5", "6"],
+    ["type", "--delay", "25", "--", "two lines\nend\n"],
+    ["mousemove", "--sync", "5", "6"],
     ["mousedown", "1"],
     ["mouseup", "1"],
     ["mousemove", "1", "2"],
@@ -317,8 +331,14 @@ assert.match(pageRuns[1], / 60 \/tmp\/bops-page-/, "60 seconds when it didn't sa
 // What came back: the value and the page it ended on; a failure as the runner said it; no marker, what the computer said.
 const pageOut = (call) => asked.find((b) => b.input?.some((i) => i.call_id === call)).input.find((i) => i.call_id === call).output;
 assert.equal(pageOut("call_p1"), '[\n "Basic $8"\n]\n\n(Now on https://example.com/pricing)');
-assert.equal(pageOut("call_p2"), "Failed: locator.click: Timeout 30000ms exceeded.\n\n(Now on https://example.com/pricing)");
-assert.equal(pageOut("call_p3"), "Failed: node: not found");
+// A script that failed comes back with the screen, at full size, as OpenAI's code-execution harness sends it;
+// a second miss in a row says to do it on the screen.
+const SCREEN = { type: "input_image", image_url: `data:image/png;base64,${PNG.toString("base64")}`, detail: "original" };
+assert.deepEqual(pageOut("call_p2"), [{ type: "input_text", text: "Failed: locator.click: Timeout 30000ms exceeded.\n\n(Now on https://example.com/pricing)" }, SCREEN]);
+assert.deepEqual(pageOut("call_p3"), [
+  { type: "input_text", text: "Failed: node: not found\n\nThat's two page scripts in a row that didn't do it. Do this part on the screen instead: the screenshot below is what's there now." },
+  SCREEN,
+]);
 // Past its first steps, with nobody looking at it, a step runs at standard speed.
 const callOf = (call) => asked.find((b) => b.input?.some((i) => i.call_id === call));
 assert.deepEqual([callOf("call_p1").service_tier, callOf("call_p2").service_tier, callOf("call_p3").service_tier], ["ultrafast", "ultrafast", undefined]);
@@ -534,6 +554,109 @@ assert.match(movedTurn, /Now book the cheapest one/);
 assert.notEqual(S.session("ses_moveq").lastDisplay, 101, "it moved");
 assert.equal(S.session("ses_moveq").screenMoved, undefined, "said once");
 S.update((st) => (st.sessions = st.sessions.filter((x) => !["ses_busyq", "ses_moveq"].includes(x.id))));
+
+/* ---------------- A screen action that fails stops the rest, and the model's told which ---------------- */
+
+// On the computer: the script stops at the failing action, lets go of held keys, and says which failed.
+answers.push(
+  () =>
+    response("resp_f1", [
+      { id: "cu_f1", type: "computer_call", call_id: "call_f1", status: "completed", actions: [{ type: "click", x: 1, y: 2, button: "left" }, { type: "keypress", keys: ["Foo"] }, { type: "type", text: "hi" }] },
+    ]),
+  () => response("resp_f2", [said("Pressed it.")]),
+);
+pc.actFail = "\n@@bops-act@@1 xdotool: Invalid key sequence 'Foo'\n";
+const askedF = asked.length;
+const bashF = bash.length;
+await task("Press a key", "Key");
+const toldFail = asked[askedF + 1];
+assert.equal(toldFail.input[0].type, "computer_call_output", "the screen goes back first");
+assert.equal(userText(toldFail), "(From Bops: Action 2 of 3 (pressed Foo) failed: xdotool: Invalid key sequence 'Foo'. The one after it wasn't done. The screenshot shows the screen now.)");
+const failScript = bash.slice(bashF).find((c) => c.includes("@@bops-act@@"));
+writeFileSync(join(bin, "xdotool"), `#!/bin/sh\nnode -e 'require("fs").appendFileSync(process.argv[1], JSON.stringify({ args: process.argv.slice(2) }) + "\\n")' ${JSON.stringify(log)} "$@"\n[ "$1" = key ] && { echo "Invalid key sequence '$3'" >&2; exit 1; }\nexit 0\n`, { mode: 0o755 });
+writeFileSync(log, "");
+const ran = execFileSync("/bin/bash", ["-c", failScript.replace(/^sleep [\d.]+$/m, "true")], { cwd: run, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdio: ["ignore", "pipe", "ignore"] }).toString();
+const failedXdo = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l).args);
+assert.deepEqual(failedXdo, [["mousemove", "--sync", "1", "2"], ["click", "1"], ["key", "--", "Foo"], ["keyup", "ctrl", "alt", "shift", "super"]], "nothing after the failed one, and keys let go");
+assert.equal(ran.trim(), "@@bops-act@@1 Invalid key sequence 'Foo'");
+
+// Long text, and text a US keyboard can't type, is pasted from the screen's clipboard.
+const LONG = "word ".repeat(60).trim();
+answers.push(
+  () => response("resp_t1", [{ id: "cu_t1", type: "computer_call", call_id: "call_t1", status: "completed", actions: [{ type: "type", text: LONG }, { type: "type", text: "Café ✓" }, { type: "type", text: "plain" }] }]),
+  () => response("resp_t2", [said("Typed.")]),
+);
+const bashT = bash.length;
+await task("Write it out", "Typing");
+const typeScript = bash.slice(bashT).find((c) => c.includes("@@bops-act@@"));
+const clipped = join(scratch, "clipboard.log");
+writeFileSync(join(bin, "xclip"), `#!/bin/sh\ncat >> ${JSON.stringify(clipped)}; echo "|" >> ${JSON.stringify(clipped)}\n`, { mode: 0o755 });
+writeFileSync(join(bin, "xdotool"), `#!/bin/sh\nnode -e 'require("fs").appendFileSync(process.argv[1], JSON.stringify({ args: process.argv.slice(2) }) + "\\n")' ${JSON.stringify(log)} "$@"\n`, { mode: 0o755 });
+writeFileSync(log, "");
+assert.equal(execFileSync("/bin/bash", ["-c", typeScript.replace(/^sleep [\d.]+$/m, "true")], { cwd: run, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdio: ["ignore", "pipe", "ignore"] }).toString().trim(), "@@bops-act@@");
+assert.equal(readFileSync(clipped, "utf8"), `${LONG}|\nCafé ✓|\n`, "pasted as written");
+assert.deepEqual(
+  readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l).args),
+  [["key", "--clearmodifiers", "ctrl+v"], ["key", "--clearmodifiers", "ctrl+v"], ["type", "--delay", "25", "--", "plain"]],
+);
+
+/* ---------------- One computer's screenshots: a task's go first, and the app's views don't pile up ---------------- */
+
+const O = await import(`${root}/lib/server/orgo.ts`);
+pc.shotDelay = 40;
+shotLog.length = 0;
+const looks = [
+  O.orgo.screenshot(COMPUTER, "screen-100", 0.3),
+  O.orgo.screenshot(COMPUTER, "screen-101", 0.3),
+  O.orgo.screenshot(COMPUTER, "screen-101", 0.3),
+  O.orgo.screenshot(COMPUTER, "screen-102", 1, "png", { task: true }),
+];
+await Promise.all(looks);
+pc.shotDelay = 0;
+assert.deepEqual(shotLog, ["screen-100 jpeg", "screen-102 png", "screen-101 jpeg"], "the task's ahead of the views waiting, and one view asked twice is asked once");
+
+/* ---------------- A command Orgo never answers: Stop doesn't wait for it ---------------- */
+
+answers.push(() => response("resp_h1", [{ id: "fc_h1", type: "function_call", call_id: "call_h1", name: "run_command", arguments: JSON.stringify({ command: "sleep-forever", timeout_seconds: 300 }) }]));
+let hung;
+onCommand = () => {
+  setTimeout(() => X.stopSession(hung), 50);
+  return new Promise(() => {});
+};
+const startedH = X.startSession({ botId: main.id, goal: "Wait on it", title: "Hung", where: "cloud", fresh: true });
+hung = startedH.id;
+const tH = Date.now();
+s = await ended(hung);
+assert.equal(s.error, "Stopped by you");
+assert.ok(Date.now() - tH < 10_000, "it stopped at once");
+assert.deepEqual(s.owed, [{ id: "call_h1", type: "function", output: "Stopped by the user before the computer answered, so it may or may not have run." }]);
+onCommand = () => ({ output: "", exit_code: 0 });
+
+/* ---------------- The page-script loop guard: when the model gets the screen ---------------- */
+
+const CT = await import(`${root}/lib/server/computer-task.ts`);
+const pageRan = (o) => ({ text: (o.ok ?? true) ? (o.value ?? "") : `Failed: ${o.error}`, run: { ok: true, changed: false, ...o } });
+let g = CT.newPageGuard();
+// Reads that answer something don't need a look, until the third in a row: then a glance, to check.
+assert.deepEqual(CT.pageLook(g, "return await page.title()", pageRan({ value: "Studio" })), { look: false, note: undefined });
+assert.deepEqual(CT.pageLook(g, "return await page.innerText('nav')", pageRan({ value: "Home Videos" })), { look: false, note: undefined });
+assert.deepEqual(CT.pageLook(g, "return await page.locator('a').allInnerTexts()", pageRan({ value: "a b" })), { look: true, note: "The screen as it is now, so you can check it's what you expect:" });
+// A click that changed nothing comes back with the screen; a second miss says to use the screen.
+g = CT.newPageGuard();
+assert.deepEqual(CT.pageLook(g, "await page.getByRole('button', { name: 'Account' }).click(); return 'ok'", pageRan({ value: "ok" })), { look: true, note: "That changed nothing on the page. The screenshot below is what's there now." });
+assert.equal(CT.pageLook(g, "await page.locator('#avatar').click(); return 'ok'", pageRan({ value: "ok" })).note, "That's two page scripts in a row that didn't do it. Do this part on the screen instead: the screenshot below is what's there now.");
+// One that changed the page resets it.
+assert.deepEqual(CT.pageLook(g, "await page.goto('https://studio.youtube.com'); return 'ok'", pageRan({ value: "ok", changed: true })), { look: false, note: undefined });
+// The same answer a third time: the page isn't doing what it expects.
+g = CT.newPageGuard();
+CT.pageLook(g, "return 1", pageRan({ value: "Agent Operators Podcast" }));
+g.since = 0;
+CT.pageLook(g, "return 2", pageRan({ value: "Agent Operators Podcast" }));
+g.since = 0;
+assert.deepEqual(CT.pageLook(g, "return 3", pageRan({ value: "Agent Operators Podcast" })), { look: true, note: "That's the same answer a third time: the page isn't doing what you expect. Look at the screenshot below and use the screen." });
+// Asked for (screenshot()): the screen, with no note.
+g = CT.newPageGuard();
+assert.deepEqual(CT.pageLook(g, "screenshot(); return 'x'", pageRan({ value: "x", look: true })), { look: true, note: undefined });
 
 /* ---------------- AI credit used up ---------------- */
 

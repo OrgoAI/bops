@@ -3,7 +3,8 @@ import { tierParam, withSpeed, type Speed } from "./routing";
 import { ResponsesSocket, responsesSocketOn, TransportError } from "./responses-ws";
 import { APIConnectionTimeoutError } from "openai";
 import { openaiClient } from "./openai-client";
-import { computerAsleepError, computerWakingError, orgo, screenId } from "./orgo";
+import { sleptSince } from "./awake";
+import { computerAsleepError, computerWakingError, orgo, OrgoTimeout, screenId } from "./orgo";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
@@ -22,9 +23,10 @@ import type { Session } from "@/lib/types";
  * than the Agents API with the screen MCP, at the same success rate (.context/bench, 2026-10-06): it
  * does several actions per model call, and carries no harness prompt.
  *
- * Pages by their elements, not pixels: page_script runs a short Playwright script on the screen's own
- * Chrome (vm/page-script.cjs, over CDP on the computer), the code-execution way OpenAI recommends for
- * GPT-6 Astra. What it doesn't have (the Agents API thread does): the browser tools as MCP, and helpers.
+ * Pages by their elements, and the screen where that's quicker: page_script runs a short Playwright script
+ * on the screen's own Chrome (vm/page-script.cjs, over CDP on the computer), the code-execution way OpenAI
+ * recommends for GPT-6 Astra, and its answer comes with the screen when the model should look (pageLook).
+ * What it doesn't have (the Agents API thread does): the browser tools as MCP, and helpers.
  */
 
 export const computerToolOn = () => process.env.BOPS_COMPUTER_TOOL !== "0";
@@ -109,6 +111,7 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   // A turn that was stopped mid-step owes OpenAI the outputs of the calls it was answering.
   let input: unknown[] = [...(await settle(t, s.owed ?? [])), { role: "user", content: [{ type: "input_text", text: t.input }] }];
   let prev = s.responseId;
+  const guard = newPageGuard();
 
   for (let calls = 0; ; calls++) {
     if (t.signal.aborted) throw new Error("Stopped");
@@ -134,9 +137,14 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
       });
     };
     // Fast while someone's waiting on it, falling back a tier when OpenAI's busy (routing.ts withSpeed).
-    const r = (await withSpeed(t.speed?.(calls) ?? "default", (tier, last) => (tier !== "default" && responsesSocketOn() ? overSocket(tier, last) : overHttp(tier, last))).catch((e: Error) => {
-      throw e instanceof APIConnectionTimeoutError ? new Error(`Stuck: nothing happened for ${Math.round(t.idleMs / 60_000)} minutes`) : e;
-    })) as unknown as { id: string; model: string; usage: Usage; output: OutputItem[] };
+    const ask = () => withSpeed(t.speed?.(calls) ?? "default", (tier, last) => (tier !== "default" && responsesSocketOn() ? overSocket(tier, last) : overHttp(tier, last)));
+    const asked = Date.now();
+    const r = (await ask()
+      // The Mac slept while it waited (awake.ts): that's not the task stalling, so it's asked again now the Mac's back.
+      .catch((e: unknown) => (e instanceof APIConnectionTimeoutError && sleptSince(asked) && !t.signal.aborted ? ask() : Promise.reject(e)))
+      .catch((e: Error) => {
+        throw e instanceof APIConnectionTimeoutError ? new Error(`Stuck: nothing happened for ${Math.round(t.idleMs / 60_000)} minutes`) : e;
+      })) as unknown as { id: string; model: string; usage: Usage; output: OutputItem[] };
     said?.sent();
     recordTokens("session", r.model, r.usage, b.id, epoch);
     prev = r.id;
@@ -158,19 +166,27 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
       return `Before my next step I need your OK. OpenAI flagged it: ${flagged.join("; ")}. Reply "go on" and I'll do it, or tell me what to do instead.`;
     }
     input = [];
+    // What a screenshot can't say (an action that failed), after the calls' outputs.
+    const notes: string[] = [];
     for (const o of asks) {
       if (t.signal.aborted) throw new Error("Stopped");
-      if (o.type === "computer_call") input.push(await act(t, o));
-      else {
-        const answered = await runFunction(t, o);
+      if (o.type === "computer_call") {
+        const done = await act(t, o);
+        input.push(done.out);
+        if (done.note) notes.push(done.note);
+        guard.since = 0;
+      } else {
+        const answered = await runFunction(t, o, guard);
         input.push(answered);
-        // Kept with the call, so a turn stopped before sending it answers with what really happened (settle).
+        // Kept with the call, so a turn stopped before sending it answers with what really happened (settle); its words, not the screen it came with.
+        const kept = typeof answered.output === "string" ? answered.output : (answered.output.find((c) => c.type === "input_text")?.text ?? "");
         patchSession(t.sessionId, (x) => {
           const owed = x.owed?.find((w) => w.id === o.call_id);
-          if (owed) owed.output = answered.output;
+          if (owed) owed.output = kept;
         });
       }
     }
+    if (notes.length) input.push({ role: "user", content: [{ type: "input_text", text: `(From Bops: ${notes.join(" ")})` }] });
   }
 }
 
@@ -223,27 +239,57 @@ function record(t: ComputerTurn, o: OutputItem, more: boolean) {
  * while it does), and the screenshot is taken again, once.
  */
 async function screen(t: ComputerTurn) {
-  const shot = () => orgo.screenshot(t.computerId, screenId(t.display), 1, "png");
+  const shot = () => orgo.screenshot(t.computerId, screenId(t.display), 1, "png", { task: true, signal: t.signal });
   const png = await shot().catch(async (e: unknown) => {
     if (!computerAsleepError(e) && !computerWakingError(e)) throw e;
-    await orgo.bash(t.computerId, "true", 30);
+    await orgo.bash(t.computerId, "true", 30, { signal: t.signal });
     return shot();
   });
   return { type: "computer_screenshot", image_url: `data:image/png;base64,${Buffer.from(png).toString("base64")}`, detail: "original" };
 }
 
-/** Do a computer call's actions on the screen, then send the screen back. */
-async function act(t: ComputerTurn, o: OutputItem) {
+/** The line the action script says how it went after: empty, or the action that failed and what xdotool said. */
+const ACT_MARK = "@@bops-act@@";
+
+/**
+ * Do a computer call's actions on the screen, in order, then send the screen back. One that fails stops
+ * the rest (as Anthropic's and OpenAI's reference loops do), and `note` tells the model which, since a
+ * screenshot alone can't; so does Orgo not answering, when they may or may not have happened.
+ */
+async function act(t: ComputerTurn, o: OutputItem): Promise<{ out: unknown; note?: string }> {
   const actions = o.actions ?? (o.action ? [o.action] : []);
   const doing = actions.filter((a) => a.type !== "screenshot");
   for (const a of actions) t.step(STEP_TOOL[a.type] ?? a.type, describeAction(a));
+  let note: string | undefined;
   if (doing.length) {
     const X = `DISPLAY=:${t.display} xdotool`;
-    const script = [...doing.map((a) => xdo(X, a)), `mkdir -p /root/.bops/activity && echo "$(date +%s.%N) ${STEP_TOOL[doing.at(-1)!.type] ?? "act"}" > /root/.bops/activity/${t.display}`, `sleep ${SETTLE_S}`];
-    const r = await orgo.bash(t.computerId, script.join("\n"), 60);
-    if (r.exit_code !== 0) console.warn(`[computer] ${t.sessionId}: ${r.output.slice(0, 160)}`);
+    const script = [
+      "F=",
+      // Each stops at its first error (xdo joins with &&), with what it said kept for the model.
+      ...doing.map((a, i) => `[ -z "$F" ] && { E="$( { ${xdo(X, a)} ; } 2>&1 )" || F="${i} $(printf %s "$E" | tr '\\n' ' ' | head -c 300)"; }`),
+      // Keys held down for a failed one come back up.
+      `[ -n "$F" ] && ${X} keyup ctrl alt shift super >/dev/null 2>&1`,
+      `mkdir -p /root/.bops/activity && echo "$(date +%s.%N) ${STEP_TOOL[doing.at(-1)!.type] ?? "act"}" > /root/.bops/activity/${t.display}`,
+      `sleep ${SETTLE_S}`,
+      `echo "${ACT_MARK}$F"`,
+    ];
+    try {
+      const r = await orgo.bash(t.computerId, script.join("\n"), 60, { signal: t.signal });
+      const at = r.output.lastIndexOf(ACT_MARK);
+      const failed = at < 0 ? null : r.output.slice(at + ACT_MARK.length).trim().match(/^(\d+)\s*([\s\S]*)$/);
+      if (failed) {
+        const i = Number(failed[1]);
+        const a = doing[i];
+        const left = doing.length - i - 1;
+        console.warn(`[computer] ${t.sessionId}: ${a?.type} failed: ${failed[2].slice(0, 160)}`);
+        note = `Action ${i + 1} of ${doing.length} (${a ? describeAction(a) : "?"}) failed${failed[2] ? `: ${failed[2].trim()}` : ""}.${left ? ` The ${left === 1 ? "one" : `${left}`} after it ${left === 1 ? "wasn't" : "weren't"} done.` : ""} The screenshot shows the screen now.`;
+      }
+    } catch (e) {
+      if (t.signal.aborted) throw e;
+      note = `Orgo didn't answer while doing these actions (${(e as Error).message}), so they may or may not have happened. The screenshot shows the screen now; check it before doing them again.`;
+    }
   }
-  return { type: "computer_call_output", call_id: o.call_id, output: await screen(t) };
+  return { out: { type: "computer_call_output", call_id: o.call_id, output: await screen(t) }, note };
 }
 
 const KEYS: Record<string, string> = {
@@ -267,26 +313,40 @@ const key = (k: string) => {
 const sh = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 const n = (v: unknown) => Math.round(Number(v) || 0);
 
+/** Text longer than this, or with characters a US keyboard doesn't have, is pasted rather than typed. */
+const PASTE_OVER = 200;
+
+/**
+ * One action as shell, its xdotool commands joined with && so the first that fails is the action's
+ * failure (act stops there). Typing goes at 25 ms a key (12 drops keys in Chrome on Xvfb); long text, and
+ * text a US layout can't type, is pasted from the screen's clipboard instead, when the computer has xclip.
+ */
 function xdo(X: string, a: Action): string {
   const held = (a.keys ?? []).map((k) => sh(key(k)));
-  const down = held.length ? `${X} keydown ${held.join(" ")}; ` : "";
-  const up = held.length ? `; ${X} keyup ${held.join(" ")}` : "";
+  const down = held.length ? `${X} keydown ${held.join(" ")} && ` : "";
+  const up = held.length ? ` && ${X} keyup ${held.join(" ")}` : "";
   const button = { left: 1, wheel: 2, middle: 2, right: 3, back: 8, forward: 9 }[a.button ?? "left"] ?? 1;
   switch (a.type) {
     case "click":
-      return `${X} mousemove ${n(a.x)} ${n(a.y)}; ${down}${X} click ${button}${up}`;
+      return `${X} mousemove --sync ${n(a.x)} ${n(a.y)} && ${down}${X} click ${button}${up}`;
     case "double_click":
-      return `${X} mousemove ${n(a.x)} ${n(a.y)}; ${down}${X} click --repeat 2 1${up}`;
+      return `${X} mousemove --sync ${n(a.x)} ${n(a.y)} && ${down}${X} click --repeat 2 1${up}`;
     case "move":
       return `${X} mousemove ${n(a.x)} ${n(a.y)}`;
     case "drag": {
       const [first, ...rest] = a.path ?? [];
       if (!first) return "true";
-      return [`${X} mousemove ${n(first.x)} ${n(first.y)}`, `${down}${X} mousedown 1`, ...rest.map((p) => `${X} mousemove --sync ${n(p.x)} ${n(p.y)}`), `${X} mouseup 1${up}`].join("; ");
+      return [`${X} mousemove --sync ${n(first.x)} ${n(first.y)}`, `${down}${X} mousedown 1`, ...rest.map((p) => `${X} mousemove --sync ${n(p.x)} ${n(p.y)}`), `${X} mouseup 1${up}`].join(" && ");
     }
-    case "type":
+    case "type": {
       // Base64, decoded on the computer, so the text needs no quoting; the "." keeps a newline at its end, which $(…) would drop.
-      return `T="$(echo ${Buffer.from(a.text ?? "").toString("base64")} | base64 -d; echo .)"; ${X} type --delay 12 -- "\${T%.}"`;
+      const text = a.text ?? "";
+      const T = `T="$(echo ${Buffer.from(text).toString("base64")} | base64 -d; echo .)"`;
+      const typed = `${X} type --delay 25 -- "\${T%.}"`;
+      if (text.length <= PASTE_OVER && /^[\x20-\x7e\n\t]*$/.test(text)) return `${T} && ${typed}`;
+      const clip = X.replace(/xdotool$/, "xclip");
+      return `${T} && if command -v xclip >/dev/null; then printf %s "\${T%.}" | ${clip} -selection clipboard -i >/dev/null 2>&1 && ${X} key --clearmodifiers ctrl+v; else ${typed}; fi`;
+    }
     case "keypress":
       return `${X} key -- ${sh((a.keys ?? []).map(key).join("+"))}`;
     case "scroll": {
@@ -295,7 +355,7 @@ function xdo(X: string, a: Action): string {
       const v = clicks(a.scroll_y), h = clicks(a.scroll_x);
       return [`${X} mousemove ${n(a.x)} ${n(a.y)}`, v && `${down}${X} click --repeat ${v} ${(a.scroll_y ?? 0) < 0 ? 4 : 5}${up}`, h && `${X} click --repeat ${h} ${(a.scroll_x ?? 0) < 0 ? 6 : 7}`]
         .filter(Boolean)
-        .join("; ");
+        .join(" && ");
     }
     case "wait":
       return "sleep 2";
@@ -355,7 +415,7 @@ const PAGE_TOOL = {
   type: "function",
   name: "page_script",
   description:
-    "Run a short Playwright script on the Chrome on your screen and get what it returns: the fastest, surest way to read a website and to use it by its elements, not pixels. `page` is the tab in front of your screen and `context` its browser context. The script is the body of an async function: use await, and end with return (text, or anything JSON can hold; long answers are cut). Read: page.title(), page.innerText('main'), page.locator(...).allInnerTexts(). Act: page.goto(url), page.getByLabel('Email').fill(...), page.getByRole('button', { name: 'Save' }).click(), page.waitForLoadState(). The user sees the page change, and a page it opens comes to the front. Use the screen for what a script can't do (a canvas, a native dialog, an app other than Chrome), and to check how a page looks. Never type a password: sign_in_from_vault does that. Up to 120 seconds.",
+    "Run a short Playwright script on the Chrome on your screen and get what it returns, with a receipt of what it changed: the quick way to read a website and to fill in or click things you can name (a field by its label, a button by its text). `page` is the tab in front of your screen and `context` its browser context. The script is the body of an async function: use await, and end with return (text, or anything JSON can hold; long answers are cut). Read: page.title(), page.innerText('main'), page.locator(...).allInnerTexts(). Act: page.goto(url), page.getByLabel('Email').fill(...), page.getByRole('button', { name: 'Save' }).click(), page.waitForLoadState(). Call screenshot() in it to see the screen with its answer; when it fails or changes nothing, the screen comes back anyway. The user sees the page change, and a page it opens comes to the front. Menus, pop-ups, account switchers, hover menus, drag and drop and canvases are quicker on the screen. Never type a password: sign_in_from_vault does that. Up to 120 seconds.",
   parameters: {
     type: "object",
     additionalProperties: false,
@@ -381,14 +441,18 @@ const VAULT_TOOL = {
 
 const clip = (s: string, max = 12_000) => (s.length > max ? `${s.slice(0, max / 2)}\n… (cut) …\n${s.slice(-max / 2)}` : s);
 
+/** What a page script's runner sends back (vm/page-script.cjs): its answer, the page it ended on, and its receipt. */
+type PageRun = { ok?: boolean; value?: string; error?: string; url?: string; changed?: boolean; dialogs?: string[]; downloads?: string[]; opened?: number; look?: boolean };
+
 /**
  * A page script, run on the computer by its runner against the Chrome of the task's screen (its CDP
  * port is 9200 + the display, vm/bin/bops-chrome). The script goes as base64, so it needs no quoting.
  * The screen counts as busy while it runs, as it does for a click (the screen ledger reads that).
+ * Its answer as the model reads it, with its receipt (what changed), or why it failed (`run` undefined).
  */
-async function pageScript(t: ComputerTurn, script: string, seconds: number) {
-  if (!script.trim()) return "Failed: the script is empty.";
-  if (!(await t.pages?.().catch(() => false))) return "Failed: the page tools aren't on this computer yet. Do this step on the screen.";
+async function pageScript(t: ComputerTurn, script: string, seconds: number): Promise<{ text: string; run?: PageRun }> {
+  if (!script.trim()) return { text: "Failed: the script is empty." };
+  if (!(await t.pages?.().catch(() => false))) return { text: "Failed: the page tools aren't on this computer yet. Do this step on the screen." };
   const limit = Math.min(120, Math.max(5, seconds));
   const file = `/tmp/bops-page-${t.display}-${Date.now()}.js`;
   const r = await orgo.bash(
@@ -399,20 +463,67 @@ async function pageScript(t: ComputerTurn, script: string, seconds: number) {
       `node ${PAGE_RUNNER} ${9200 + t.display} ${limit} ${file}; rm -f ${file}`,
     ].join("\n"),
     limit + 30,
+    { signal: t.signal },
   );
   const at = r.output.lastIndexOf(PAGE_MARK);
-  if (at < 0) return `Failed: ${clip(r.output.trim() || `exit code ${r.exit_code}`, 2000)}`;
-  let out: { ok?: boolean; value?: string; error?: string; url?: string };
+  if (at < 0) return { text: `Failed: ${clip(r.output.trim() || `exit code ${r.exit_code}`, 2000)}` };
+  let out: PageRun;
   try {
     out = JSON.parse(r.output.slice(at + PAGE_MARK.length).trim().split("\n")[0]);
   } catch {
-    return `Failed: ${clip(r.output.slice(at + PAGE_MARK.length).trim(), 2000)}`;
+    return { text: `Failed: ${clip(r.output.slice(at + PAGE_MARK.length).trim(), 2000)}` };
   }
+  const receipt = [
+    ...(out.dialogs ?? []).map((d) => `The page showed a dialog (${d}); it was dismissed. To answer it, handle it in the script before the step that opens it: page.once("dialog", (d) => d.accept()).`),
+    ...(out.downloads ?? []).map((f) => `Downloaded ${f}.`),
+    ...(out.opened ? [`It opened ${out.opened === 1 ? "a new tab" : `${out.opened} new tabs`}, now in front.`] : []),
+  ];
   const on = out.url ? `\n\n(Now on ${out.url.slice(0, 300)})` : "";
-  return out.ok ? `${clip(out.value ?? "")}${on}` : `Failed: ${out.error ?? "the script stopped"}${on}`;
+  const said = out.ok ? clip(out.value ?? "") : `Failed: ${out.error ?? "the script stopped"}`;
+  return { text: `${said}${receipt.length ? `\n\n${receipt.join(" ")}` : ""}${on}`, run: out };
 }
 
-async function runFunction(t: ComputerTurn, o: OutputItem) {
+/** A script that acts on the page (not only reads it): it should change something. */
+const ACTS = /\.(click|dblclick|fill|press|type|check|uncheck|selectOption|setInputFiles|hover|tap|dragTo|goto|goBack|reload)\(|\b(keyboard|mouse)\./;
+
+/**
+ * Page scripts in a turn, so one that keeps missing gets the screen (the loop guard): `since`, scripts
+ * since the model last saw the screen; `misses`, failed or no-effect ones in a row; `answers`, the last
+ * few answers of scripts that changed nothing, to tell the same one coming back.
+ */
+type PageGuard = { since: number; misses: number; answers: string[] };
+export const newPageGuard = (): PageGuard => ({ since: 0, misses: 0, answers: [] });
+
+/**
+ * Whether the model should see the screen with a page script's answer, and what to tell it. A script
+ * sends the screen back when it asked to (screenshot()), when it failed or acted and changed nothing,
+ * when the same answer came back a third time, and every third script with no look in between: a menu,
+ * pop-up or switcher that a script can't make out is plain on the screen. Two misses in a row say so.
+ */
+export function pageLook(g: PageGuard, script: string, r: { text: string; run?: PageRun }): { look: boolean; note?: string } {
+  const miss = !r.run?.ok || (ACTS.test(script) && r.run.changed === false);
+  g.misses = miss ? g.misses + 1 : 0;
+  g.since++;
+  // The same answer from scripts that changed nothing ("ok" from one that did is progress): a page that isn't moving.
+  const answer = r.text.slice(0, 2000);
+  const again = !r.run?.changed && g.answers.filter((x) => x === answer).length >= 2;
+  g.answers = r.run?.changed ? [] : [...g.answers, answer].slice(-6);
+  const look = !!r.run?.look || miss || again || g.since >= 3;
+  if (look) g.since = 0;
+  const note =
+    g.misses >= 2
+      ? "That's two page scripts in a row that didn't do it. Do this part on the screen instead: the screenshot below is what's there now."
+      : again
+        ? "That's the same answer a third time: the page isn't doing what you expect. Look at the screenshot below and use the screen."
+        : r.run?.ok && miss
+          ? "That changed nothing on the page. The screenshot below is what's there now."
+          : look && !r.run?.look && !miss
+            ? "The screen as it is now, so you can check it's what you expect:"
+            : undefined;
+  return { look, note };
+}
+
+async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard()) {
   const s = session(t.sessionId)!;
   let args: Record<string, unknown> = {};
   try {
@@ -426,11 +537,19 @@ async function runFunction(t: ComputerTurn, o: OutputItem) {
       const command = String(args.command ?? "");
       t.step("command", `ran ${command.slice(0, 100)}`);
       const timeout = Math.min(300, Math.max(5, Number(args.timeout_seconds) || 60));
-      const r = await orgo.bash(t.computerId, `mkdir -p /workspace && cd /workspace && export DISPLAY=:${t.display}\n${command}`, timeout);
+      const r = await orgo.bash(t.computerId, `mkdir -p /workspace && cd /workspace && export DISPLAY=:${t.display}\n${command}`, timeout, { signal: t.signal });
       output = `exit code ${r.exit_code}\n${clip(r.output)}`;
     } else if (o.name === "page_script") {
       t.step("page", String(args.what ?? "").trim().slice(0, 100) || "used the page");
-      output = await pageScript(t, String(args.script ?? ""), Number(args.timeout_seconds) || 60);
+      const script = String(args.script ?? "");
+      const r = await pageScript(t, script, Number(args.timeout_seconds) || 60);
+      const { look, note } = pageLook(guard, script, r);
+      output = note ? `${r.text}\n\n${note}` : r.text;
+      // The screen with it, as OpenAI's code-execution harness returns one: the model's coordinates are the screen's.
+      if (look) {
+        const shot = await screen(t).catch(() => undefined);
+        if (shot) return { type: "function_call_output", call_id: o.call_id, output: [{ type: "input_text", text: output }, { type: "input_image", image_url: shot.image_url, detail: "original" }] };
+      }
     } else if (o.name === "sign_in_from_vault") {
       t.step("vault", "signing in from your vault");
       output = await (await import("./vault")).vaultSignIn(s.botId, t.display, t.sessionId);
@@ -448,7 +567,15 @@ async function runFunction(t: ComputerTurn, o: OutputItem) {
       output = await runCrmTool(s.botId, o.name, args, { sessionId: t.sessionId });
     } else output = `Unknown tool ${o.name}.`;
   } catch (e) {
-    output = `Failed: ${(e as Error).message}`;
+    // Stopped, or Orgo not answering, mid-command: it may have run on the computer all the same, and the
+    // model's told so (kept with the call when it was stopped, for when the task picks up: settle).
+    const unsure = o.name === "run_command" || o.name === "page_script";
+    output =
+      t.signal.aborted && unsure
+        ? "Stopped by the user before the computer answered, so it may or may not have run."
+        : e instanceof OrgoTimeout && unsure
+          ? `Failed: ${e.message}, so it may or may not have run. Check (a quick command, or the screen) before doing it again.`
+          : `Failed: ${(e as Error).message}`;
   }
   return { type: "function_call_output", call_id: o.call_id, output };
 }
