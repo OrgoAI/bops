@@ -633,8 +633,9 @@ export function ComputerView({
                 </span>
               </div>
             )}
-            {/* Pointing at the screen brings up its controls, like a video player's: watch it, take control, reset it. */}
-            {!grid && !takeover && sheet !== display && (
+            {/* Pointing at the screen brings up its controls, like a video player's: watch it, take control, reset it.
+                Not over a card (a sign-in, a payment, a draft): it has its own Take over, and the bar would cover it. */}
+            {!grid && !takeover && sheet !== display && !(card && view !== "reader") && (
               <div
                 onClick={(e) => e.stopPropagation()}
                 className="absolute bottom-3 left-1/2 z-40 flex -translate-x-1/2 translate-y-1 items-center gap-1 rounded-full bg-white/95 p-1 opacity-0 shadow-[0_0_0_1px_#0000000F,0_10px_24px_-10px_#00000066] backdrop-blur transition duration-200 group-hover/screen:translate-y-0 group-hover/screen:opacity-100 has-[[data-open=true]]:translate-y-0 has-[[data-open=true]]:opacity-100"
@@ -667,7 +668,7 @@ export function ComputerView({
                   <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
                     <path d="M4 2.5l8.5 5-3.6.9-1.8 3.6z" fill="currentColor" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
                   </svg>
-                  Take control
+                  <span className="whitespace-nowrap">Take control</span>
                 </button>
                 {mode === "panel" && onFocus && (
                   <button onClick={onFocus} title="Full screen" aria-label="Full screen" className="flex size-[30px] items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0] hover:text-ink">

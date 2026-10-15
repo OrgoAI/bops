@@ -695,6 +695,8 @@ export type AppAccount = {
   /** "expired": the app signed Bops out (a password change, revoked access); it works again after signing in again. */
   status: "active" | "expired";
   at: number;
+  /** When a bot last used it (lib/server/composio.ts runAppAction), for the Vault's "not used lately". */
+  usedAt?: number;
 };
 
 /** An account being connected: its sign-in page is open, and Bops waits for it to finish. */

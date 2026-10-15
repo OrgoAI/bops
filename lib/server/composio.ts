@@ -612,6 +612,16 @@ function pickAccount(b: Bot, app: string, hint?: string | null) {
  * them, a label): never by its name, so GMAIL_SEND_DRAFT, which sends, asks like any send. `onAsk`
  * lets a chat turn go on while the user decides; a thread just waits.
  */
+/** An account a bot just used, for the Vault (AppAccount.usedAt): at most once an hour, so the state isn't rewritten on every call. */
+function markUsed(accountId: string) {
+  const a = getState().accounts?.find((x) => x.id === accountId);
+  if (!a || (a.usedAt && Date.now() - a.usedAt < 60 * 60_000)) return;
+  update((s) => {
+    const x = s.accounts?.find((y) => y.id === accountId);
+    if (x) x.usedAt = Date.now();
+  });
+}
+
 export async function runAppAction(
   botId: string,
   action: string,
@@ -639,6 +649,7 @@ export async function runAppAction(
       arguments: withConsts(info.input, args),
       dangerouslySkipVersionCheck: true,
     } as never)) as unknown as { data?: unknown; error?: string | null; successful?: boolean };
+    if (!res.error && res.successful !== false) markUsed(account.id);
     return res.error || res.successful === false ? `Failed: ${res.error ?? "the app said no"}` : clip(JSON.stringify(res.data ?? {}));
   };
   if (reads) return run();
