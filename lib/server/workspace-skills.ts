@@ -51,7 +51,12 @@ const NOTE_LINE_MAX = 220;
 /** The most of a file read_skill gives a bot. */
 const FILE_CAP = 20_000;
 
-const g = globalThis as unknown as { bopsSkillsRoutes?: Map<string, boolean>; bopsSkillsSync?: Map<string, ReturnType<typeof setTimeout>>; bopsSkillsCopied?: Map<string, string> };
+const g = globalThis as unknown as {
+  bopsSkillsRoutes?: Map<string, boolean>;
+  bopsSkillsSync?: Map<string, ReturnType<typeof setTimeout>>;
+  bopsSkillsCopied?: Map<string, string>;
+  bopsSkillsInFlight?: Map<string, { done: Promise<SyncResult>; again: boolean }>;
+};
 
 export class SkillError extends Error {
   status: number;
@@ -971,8 +976,32 @@ export type SyncResult = { mode: "local" | "orgo"; pushed: number; pulled: numbe
  * by slug, the later change winning (Orgo's updated_at against this Mac's updatedAt): a skill only here
  * goes to Orgo, one only on Orgo comes here, one changed on both sides takes the later. A workspace with
  * no Orgo project, or an Orgo without the routes, stays local and nothing is sent.
+ *
+ * One sync per workspace at a time: a call while one runs gets that run's promise, and the run goes
+ * once more after it ends (two runs side by side would both see a skill as "only here" and both POST it,
+ * leaving Orgo two copies). The answer is the last run's, so a caller that awaits sees the final state.
  */
-export async function syncSkills(wsId: string): Promise<SyncResult> {
+export function syncSkills(wsId: string): Promise<SyncResult> {
+  const inFlight = (g.bopsSkillsInFlight ??= new Map());
+  const going = inFlight.get(wsId);
+  if (going) {
+    going.again = true;
+    return going.done;
+  }
+  const entry = { done: Promise.resolve() as unknown as Promise<SyncResult>, again: false };
+  const loop = async (): Promise<SyncResult> => {
+    for (;;) {
+      entry.again = false;
+      const r = await syncOnce(wsId);
+      if (!entry.again) return r;
+    }
+  };
+  entry.done = loop().finally(() => inFlight.delete(wsId));
+  inFlight.set(wsId, entry);
+  return entry.done;
+}
+
+async function syncOnce(wsId: string): Promise<SyncResult> {
   const res: SyncResult = { mode: "local", pushed: 0, pulled: 0, failed: 0 };
   const pid = workspaceById(wsId)?.orgoProjectId;
   if (!pid || routes.get(pid) === false || !workspaceDir(wsId)) return res;

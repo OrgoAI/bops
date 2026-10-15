@@ -476,6 +476,27 @@ await check("With orgo-web's skills routes: pushed, pulled, the later change win
   assert.equal(remote.skills.some((s) => s.id === id), false);
 });
 
+await check("Syncs at once (the publish's timer, the window, the sign-in move) are one at a time: one POST, never a second copy on Orgo", async () => {
+  const made = W.createSkill("ws_two", { name: "Race check", description: "Checks the race", body: "# Race check\n" }).ref;
+  W.publishSkill("ws_two", "skill", made.slug);
+  for (const t of globalThis.bopsSkillsSync?.values() ?? []) clearTimeout(t);
+  globalThis.bopsSkillsSync?.clear();
+  remote.calls = [];
+  const [a, b, c] = await Promise.all([W.syncSkills("ws_two"), W.syncSkills("ws_two"), W.syncSkills("ws_two")]);
+  const posts = remote.calls.filter((x) => x.method === "POST" && x.path === "/api/workspaces/p_two/skills");
+  assert.equal(posts.length, 1, remote.calls.map((x) => `${x.method} ${x.path}`).join(", "));
+  assert.equal(remote.skills.filter((x) => x.pid === "p_two" && x.name === "Race check").length, 1, "one copy on Orgo");
+  assert.equal(W.findRef("ws_two", "skill", made.slug).remoteId, remote.skills.find((x) => x.name === "Race check").id, "tied to that copy");
+  // Every call waits for the run after the one under way, and sees the final state (nothing left to push).
+  assert.ok(a === b && b === c, "one answer for the calls made meanwhile");
+  assert.deepEqual(a, { mode: "orgo", pushed: 0, pulled: 0, failed: 0 });
+  // Over: the next call is a run of its own.
+  remote.calls = [];
+  assert.deepEqual(await W.syncSkills("ws_two"), { mode: "orgo", pushed: 0, pulled: 0, failed: 0 });
+  assert.equal(remote.calls.filter((x) => x.method === "POST").length, 0);
+  await W.deleteSkill("ws_two", "skill", made.slug);
+});
+
 await check("The route lists a workspace's skills and apps, after a sync when asked; only from the Bops window", async () => {
   const list = await route("?sync=1&ws=ws_two", "GET");
   assert.equal(list.status, 200);

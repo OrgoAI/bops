@@ -130,6 +130,11 @@ type Index = {
    */
   out?: { del: string[]; items: Record<string, number>; facts: Record<string, number> };
   pushed?: Record<string, string>;
+  /**
+   * Items Orgo refused (400), as the hash of what was refused: not sent again until they change. Kept apart
+   * from `pushed`, which says Orgo has them (a full read drops what was pushed and isn't there any more).
+   */
+  refused?: Record<string, string>;
   remote?: { project: string; at?: string };
   /** Before tombstones: forgotten keys in plain text (read once, then hashed). */
   forgotten?: Record<string, number>;
@@ -1473,7 +1478,7 @@ function entryOf(index: Index, item: Item, byItem?: Map<string, OrbitEntry["fact
 }
 
 /** The workspace's items and the facts behind each, and what each was when last sent (orbit-sync.ts push). */
-export function orbitItemsOf(ws: string): { bank: string; entries: OrbitEntry[]; pushed: Record<string, string> } | null {
+export function orbitItemsOf(ws: string): { bank: string; entries: OrbitEntry[]; pushed: Record<string, string>; refused: Record<string, string> } | null {
   if (!categoriesOn()) return null;
   const index = load(ws);
   const byItem = new Map<string, OrbitEntry["facts"]>();
@@ -1485,7 +1490,10 @@ export function orbitItemsOf(ws: string): { bank: string; entries: OrbitEntry[];
       byItem.set(it, list);
     }
   }
-  return { bank: index.bank, entries: Object.values(index.items).map((i) => entryOf(index, i, byItem)), pushed: { ...(index.pushed ?? {}) } };
+  // An item whose key is forgotten is never sent (it can be here a moment, from another Mac's copy before its forget arrived).
+  const keys = keysIn(index);
+  const live = Object.values(index.items).filter((i) => tombAt(index.tomb.items, itemTombs(keys, i.key)) === undefined);
+  return { bank: index.bank, entries: live.map((i) => entryOf(index, i, byItem)), pushed: { ...(index.pushed ?? {}) }, refused: { ...(index.refused ?? {}) } };
 }
 
 /**
@@ -1498,6 +1506,7 @@ export function orbitRemote(ws: string, project: string): { at?: string } | null
   if (index.remote?.project !== project) {
     index.remote = { project };
     index.pushed = {};
+    index.refused = undefined;
     save(ws, index, { quiet: true });
   }
   return { at: index.remote.at };
@@ -1516,6 +1525,15 @@ export function orbitPushed(ws: string, hashes: Record<string, string>) {
   if (!categoriesOn()) return;
   const index = load(ws);
   index.pushed = { ...(index.pushed ?? {}), ...hashes };
+  save(ws, index, { quiet: true });
+}
+
+/** Orgo refused these items as they are now (the hash of each, by id): not sent again until they change. */
+export function orbitRefused(ws: string, hashes: Record<string, string>) {
+  if (!categoriesOn()) return;
+  const index = load(ws);
+  index.refused = { ...(index.refused ?? {}), ...hashes };
+  for (const id of Object.keys(hashes)) if (index.pushed) delete index.pushed[id];
   save(ws, index, { quiet: true });
 }
 
@@ -1622,7 +1640,24 @@ function dropRemote(index: Index, id: string) {
     if (f.wrote) delete f.wrote[id];
   }
   if (index.pushed) delete index.pushed[id];
+  if (index.refused) delete index.refused[id];
   return true;
+}
+
+/**
+ * Whether an item from Orgo whose key was forgotten here comes back: only by what brings a forgotten item
+ * back on this Mac (bringsBack: something the user said in that chat after the forget, or a note saved
+ * after it), read from the facts Orgo knows it from. Another Mac that hadn't heard of the forget yet may
+ * have sorted a fact into it and sent it again; that alone doesn't.
+ */
+function remoteBringsBack(x: OrbitRemoteItem, forgotAt: number) {
+  return (x.sources ?? []).some((s) => {
+    if (typeof s?.honchoConclusionId !== "string") return false;
+    const session = typeof s.honchoSessionId === "string" ? s.honchoSessionId : null;
+    // Orgo doesn't say how a fact was learned: a chat's is "said", a notes one "saved", any other can't bring it back.
+    const how = session?.startsWith("bops-chat-") ? "said" : session?.startsWith("bops-notes-") ? "saved" : "figured";
+    return bringsBack({ at: msOf(s.at) ?? 0, session, how }, forgotAt);
+  });
 }
 
 const msOf = (s: string | null | undefined) => (s && Number.isFinite(Date.parse(s)) ? Date.parse(s) : undefined);
@@ -1644,14 +1679,30 @@ export function orbitApply(
   if (!categoriesOn()) return;
   const index = load(ws);
   const now = Date.now();
+  const newItemTombs = new Set<string>();
   for (const t of r.tombstones) {
     if (typeof t?.hash !== "string" || !/^[0-9a-f]{64}$/.test(t.hash)) continue;
     const m = t.kind === "fact" ? index.tomb.facts : index.tomb.items;
-    if (!Object.hasOwn(m, t.hash)) m[t.hash] = msOf(t.createdAt) ?? now;
+    if (!Object.hasOwn(m, t.hash)) {
+      m[t.hash] = msOf(t.createdAt) ?? now;
+      if (t.kind !== "fact") newItemTombs.add(t.hash);
+    }
   }
   index.tomb.items = newest(index.tomb.items, TOMB_ITEMS);
   index.tomb.facts = newest(index.tomb.facts, TOMB_FACTS);
   for (const id of r.deleted) dropRemote(index, id);
+  const keys = keysIn(index);
+  // Forgotten on another Mac while this one sorted something into it (and sent it before the forget came):
+  // gone here too, and deleted in Orgo again, unless something new here brings it back.
+  if (newItemTombs.size)
+    for (const item of Object.values(index.items)) {
+      const h = itemTombs(keys, item.key).find((x) => newItemTombs.has(x));
+      if (!h) continue;
+      const forgotAt = index.tomb.items[h];
+      if (item.sources.some((src) => bringsBack({ at: src.at, session: index.facts[src.fact]?.s ?? null, how: src.how }, forgotAt))) continue;
+      dropRemote(index, item.id);
+      sendLater(index, { del: [item.id] });
+    }
   const byKey = new Map(Object.values(index.items).map((i) => [i.key, i.id] as [string, string]));
   const deleting = new Set(index.purge?.facts ?? []);
   const forgotten = new Set(index.out?.del ?? []);
@@ -1661,6 +1712,18 @@ export function orbitApply(
     seen.add(x.bopsId);
     // Forgotten here, its delete not sent yet: it stays gone.
     if (forgotten.has(x.bopsId)) continue;
+    // Its key forgotten (here, or on a Mac whose hashes came): made again there by a Mac that hadn't heard
+    // of the forget. It stays gone, and its delete goes again, unless something new brings it back.
+    const forgotAt = tombAt(index.tomb.items, itemTombs(keys, x.key));
+    if (forgotAt !== undefined) {
+      if (!remoteBringsBack(x, forgotAt)) {
+        dropRemote(index, x.bopsId);
+        sendLater(index, { del: [x.bopsId] });
+        forgotten.add(x.bopsId);
+        continue;
+      }
+      for (const h of itemTombs(keys, x.key)) if (Object.hasOwn(index.tomb.items, h)) delete index.tomb.items[h];
+    }
     const other = byKey.get(x.key);
     if (other && other !== x.bopsId && Object.hasOwn(index.items, other)) mergeInto(index, other, x.bopsId);
     let item = Object.hasOwn(index.items, x.bopsId) ? index.items[x.bopsId] : undefined;

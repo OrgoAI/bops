@@ -225,7 +225,7 @@ const askedSince = (h) => openai.calls.slice(h).flat();
 
 // Each project's Orbit, as its tables keep it, and every call. `down`: Orgo doesn't answer. `missing`: an Orgo
 // without the routes (Next's own 404 page, no JSON). `hold(call)` keeps a call waiting until releaseOrgo().
-const orgo = { calls: [], projects: new Map(), down: false, missing: false, hold: null, held: [] };
+const orgo = { calls: [], projects: new Map(), down: false, missing: false, hold: null, held: [], answer: null };
 const CATEGORIES = ["people", "todos", "events", "promises", "companies", "projects", "decisions", "preferences"];
 const STATUSES = ["open", "waiting_them", "waiting_us", "done"];
 const PRIORITIES = ["urgent", "high", "normal", "low"];
@@ -298,6 +298,9 @@ async function orgoAnswer(req, url) {
   if (orgo.down) throw new TypeError("fetch failed (Orgo is down)");
   if (orgo.missing) return new Response("<!DOCTYPE html><title>404: This page could not be found.</title>", { status: 404, headers: { "content-type": "text/html" } });
   if (call.auth !== `Bearer ${process.env.ORGO_API_KEY}`) return json({ error: "Unauthorized" }, 401);
+  // A test's own answer for some calls (a 401, a 409, a 400 for one item).
+  const forced = orgo.answer?.(call);
+  if (forced) return forced;
   const m = url.pathname.match(/^\/api\/projects\/([^/]+)\/orbit(?:\/(.*))?$/);
   if (!m || !UUID.test(m[1])) return new Response("<!DOCTYPE html>", { status: 404, headers: { "content-type": "text/html" } });
   const p = oproj(m[1]);
@@ -356,7 +359,7 @@ async function orgoAnswer(req, url) {
       if (other) {
         const had = new Set(other.sources.map((s) => s.honchoConclusionId));
         const add = next.sources.filter((s) => !had.has(s.honchoConclusionId));
-        if (other.sources.length + add.length > 100) return json({ error: "An Orbit item keeps 100 sources at most.", code: "orbit_full", limit: 100 }, 409);
+        if (other.sources.length + add.length > 100) return json({ error: "An Orbit item keeps 100 sources at most.", code: "orbit_full", what: "itemSources", limit: 100 }, 409);
         p.items.delete(x.bopsId);
         if (add.length) {
           other.sources.push(...add);
@@ -962,6 +965,150 @@ await check("one sync per workspace at a time: a change while a PUT is under way
   await first;
   await T.flushAll();
   assert.equal(rowOf(PID, one((await get(MAIN)).body.items, "people", "Ivo").id).detail, "Your driver, blue van", "the newer one went after");
+});
+
+/* ---------------- Review fixes ---------------- */
+
+await check("a forget Orgo can't take now (401, 403, 409 full, 429) stays to send, and goes once Orgo takes it", async () => {
+  seed(MAIN, [["w1", "Wren is Tiger's neighbour.", [item("people", "Wren", { key: "wren", detail: "Your neighbour" })]]]);
+  const wren = one((await refresh(MAIN)).items, "people", "Wren");
+  await settle();
+  assert.ok(rowOf(PID, wren.id), "sent");
+  const hash = keyed(MAIN, "item|people:wren");
+  const refuse = (status, code, paths) => (orgo.answer = (c) => (c.method !== "PUT" && c.method !== "GET" && paths.some((x) => c.path.endsWith(`/orbit/${x}`)) ? json({ error: "no", code }, status) : null));
+  const kept = (what, del) => {
+    const out = indexOf(MAIN).out;
+    assert.ok(out, `${what}: still to send`);
+    assert.equal(out.del.includes(wren.id), del, `${what}: the delete ${del ? "kept" : "sent"}`);
+    assert.ok(Object.hasOwn(out.items, hash), `${what}: the hash kept`);
+    assert.ok(T.pendingCount() >= 1, `${what}: sent again later`);
+  };
+  refuse(401, "unauthorized", ["items", "tombstones"]);
+  assert.equal((await post({ action: "forget", ws: MAIN, id: wren.id })).status, 200);
+  await settle();
+  kept("401", true);
+  assert.ok(rowOf(PID, wren.id), "401: still in Orgo");
+  refuse(403, "forbidden", ["items", "tombstones"]);
+  await T.flushAll();
+  kept("403", true);
+  refuse(409, "orbit_full", ["tombstones"]);
+  await T.flushAll();
+  kept("409 full", false);
+  assert.ok(!rowOf(PID, wren.id), "the delete went");
+  refuse(429, "rate_limited", ["tombstones"]);
+  await T.flushAll();
+  kept("429", false);
+  orgo.answer = null;
+  await T.flushAll();
+  assert.ok(!rowOf(PID, wren.id), "gone in Orgo");
+  assert.ok(oproj(PID).tombstones.has(keyed(MAIN, "item|people:wren")), "with its hash");
+  assert.equal(indexOf(MAIN).out, undefined, "nothing left to send");
+});
+
+await check("an item another Mac sent again after a forget here (it hadn't heard yet) stays gone, and its delete goes again", async () => {
+  const wrenId = "e0e0e0e0e0";
+  // Another Mac, not yet read the forget, sorted a fact it worked out from an old chat into Wren and sent it.
+  const late = addFact("bops", "Wren waters the plants.", { at: Date.now() + 1000, session: OTHER_CHAT });
+  SORTS.set("Wren waters the plants.", []);
+  orgoItem(PID, { bopsId: wrenId, category: "people", key: "people:wren", title: "Wren", detail: "Your neighbour", sources: [{ honchoConclusionId: late.id, honchoSessionId: OTHER_CHAT, said: "Wren waters the plants.", at: iso(late.at) }] });
+  const h = orgo.calls.length;
+  OS.pullSoon(MAIN);
+  await settle();
+  await T.flushAll();
+  assert.ok(!(await get(MAIN)).body.items.some((i) => i.title === "Wren"), "not back here");
+  assert.deepEqual(orgoSince(h, "DELETE items").map((c) => c.body), [{ bopsIds: [wrenId] }], "its delete went again");
+  assert.ok(!rowOf(PID, wrenId), "and it's gone in Orgo");
+  assert.ok(!orgoSince(h, "PUT items").some((c) => c.body.items.some((x) => x.key === "people:wren")), "never sent from here");
+  await MC.purge(MAIN);
+  assert.ok(!factIds("bops").includes(late.id), "the other Mac's fact deleted from memory too");
+});
+
+await check("one the user brought back on another Mac (said in that chat after the forget) comes back here", async () => {
+  const forgotAt = Date.now();
+  seed(MAIN, [["v1", "Vic is Tiger's tailor.", [item("people", "Vic", { key: "vic", detail: "Your tailor" })]]]);
+  const vic = one((await refresh(MAIN)).items, "people", "Vic");
+  await settle();
+  assert.equal((await post({ action: "forget", ws: MAIN, id: vic.id })).status, 200);
+  await settle();
+  await MC.purge(MAIN);
+  S.update((s) => void s.messages.push({ id: "m_vic_again", chatId: "other-mac-chat", role: "user", text: "Vic is my tailor again.", at: forgotAt + 60_000 }));
+  const again = addFact("bops", "Vic is Tiger's tailor again.", { at: forgotAt + 61_000, session: OTHER_CHAT });
+  SORTS.set("Vic is Tiger's tailor again.", []);
+  orgoItem(PID, { bopsId: "f0f0f0f0f0", category: "people", key: "people:vic", title: "Vic", detail: "Your tailor", sources: [{ honchoConclusionId: again.id, honchoSessionId: OTHER_CHAT, said: "Vic is Tiger's tailor again.", at: iso(again.at) }] });
+  OS.pullSoon(MAIN);
+  await settle();
+  one((await get(MAIN)).body.items, "people", "Vic");
+  assert.ok(rowOf(PID, "f0f0f0f0f0"), "kept in Orgo");
+  // Its hash comes again with later reads (the overlap, a read whole): what brought it back still does.
+  oproj(PID).tombstones.get(keyed(MAIN, "item|people:vic")).createdAt = Date.now();
+  OS.pullSoon(MAIN);
+  await settle();
+  one((await get(MAIN)).body.items, "people", "Vic");
+});
+
+await check("hashes that come for an item here (forgotten on another Mac meanwhile) take it away here, and delete it there", async () => {
+  seed(MAIN, [["k1", "Kit is Tiger's accountant.", [item("people", "Kit", { key: "kit", detail: "Your accountant" })]]]);
+  const kit = one((await refresh(MAIN)).items, "people", "Kit");
+  await settle();
+  // The other Mac forgot Kit before this one's copy reached Orgo: Orgo has the hash and this Mac's row.
+  oproj(PID).tombstones.set(keyed(MAIN, "item|people:kit"), { kind: "item", createdAt: Date.now() });
+  const h = orgo.calls.length;
+  OS.pullSoon(MAIN);
+  await settle();
+  await T.flushAll();
+  assert.ok(!(await get(MAIN)).body.items.some((i) => i.title === "Kit"), "gone here");
+  assert.deepEqual(orgoSince(h, "DELETE items").map((c) => c.body), [{ bopsIds: [kit.id] }]);
+  assert.ok(!rowOf(PID, kit.id), "and there");
+});
+
+await check("an item Orgo refuses (400) isn't sent again until it changes, and a full read doesn't delete it here", async () => {
+  orgo.answer = (c) => (c.method === "PUT" && c.body?.items?.some((x) => x.title === "Yara") ? json({ error: "The request is not valid.", code: "invalid_orbit" }, 400) : null);
+  seed(MAIN, [["y1", "Yara is Tiger's piano teacher.", [item("people", "Yara", { key: "yara", detail: "Your piano teacher" })]]]);
+  const yara = one((await refresh(MAIN)).items, "people", "Yara");
+  await settle();
+  assert.ok(!rowOf(PID, yara.id), "Orgo didn't take it");
+  assert.ok(indexOf(MAIN).refused?.[yara.id], "kept as refused");
+  assert.equal(indexOf(MAIN).pushed?.[yara.id], undefined, "not as something Orgo has");
+  let h = orgo.calls.length;
+  await refresh(MAIN);
+  await settle();
+  assert.equal(orgoSince(h, "PUT items").length, 0, "not sent again");
+  // A read whole (the last one over 30 days ago).
+  const idx = indexOf(MAIN);
+  idx.remote.at = iso(Date.now() - 40 * 86_400_000);
+  writeFileSync(fileFor(MAIN), JSON.stringify(idx));
+  globalThis.bopsCategories.spaces.get(MAIN).index = undefined;
+  h = orgo.calls.length;
+  OS.pullSoon(MAIN);
+  await settle();
+  assert.equal(orgoSince(h, "GET ").length, 1, "read once");
+  one((await get(MAIN)).body.items, "people", "Yara");
+  orgo.answer = null;
+  assert.equal((await post({ action: "edit", ws: MAIN, id: yara.id, title: "Yara Lind" })).status, 200);
+  await settle();
+  assert.equal(rowOf(PID, yara.id)?.title, "Yara Lind", "changed, it goes again");
+  assert.ok(indexOf(MAIN).pushed?.[yara.id], "and Orgo has it now");
+});
+
+await check("an older Orgo's 409 for a merge past 100 sources: the batch goes in halves, the rest gets in", async () => {
+  orgoItem(PID, { bopsId: "a0a0a0a0a0", category: "people", key: "people:busy bee", title: "Busy Bee", updatedAt: Date.now() - 3_600_000, sources: Array.from({ length: 100 }, (_, i) => ({ honchoConclusionId: `busy${i}`, honchoSessionId: null, said: null, at: iso(Date.now() - 7_200_000 + i) })) });
+  seed(MAIN, [
+    ["bb", "Busy Bee called Tiger.", [item("people", "Busy Bee", { key: "busy bee", detail: "Called you" })]],
+    ["cc", "Cato is Tiger's barista.", [item("people", "Cato", { key: "cato", detail: "Your barista" })]],
+  ]);
+  const h = orgo.calls.length;
+  const r = await refresh(MAIN);
+  const busy = one(r.items, "people", "Busy Bee");
+  const cato = one(r.items, "people", "Cato");
+  await settle();
+  const puts = orgoSince(h, "PUT items");
+  assert.ok(puts.length >= 3, `split (${puts.length} PUTs)`);
+  assert.ok(rowOf(PID, cato.id), "the rest of the batch went in");
+  assert.ok(indexOf(MAIN).refused?.[busy.id], "the one past the limit waits until it changes");
+  const n = orgo.calls.length;
+  await refresh(MAIN);
+  await settle();
+  assert.equal(orgoSince(n, "PUT items").length, 0, "and isn't sent on every sort");
 });
 
 await check("nothing unexpected: no rejections, no dashes in what's said, no unknown Honcho calls", async () => {

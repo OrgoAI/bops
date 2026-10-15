@@ -1,6 +1,6 @@
 import "server-only";
 import { createHash } from "node:crypto";
-import { orbitApply, orbitForgetFacts, orbitItemsOf, orbitMerged, orbitOutbox, orbitPushed, orbitRemote, orbitRemoteAt, orbitSent, type OrbitEntry, type OrbitRemoteItem } from "./memory-categories";
+import { orbitApply, orbitForgetFacts, orbitItemsOf, orbitMerged, orbitOutbox, orbitPushed, orbitRefused, orbitRemote, orbitRemoteAt, orbitSent, type OrbitEntry, type OrbitRemoteItem } from "./memory-categories";
 import { orbitIssuesApply, orbitIssuesFlush } from "./orbit-issues";
 import { cleanText } from "./routine-sync";
 import { getState } from "./store";
@@ -25,7 +25,8 @@ import { getState } from "./store";
  *
  * Never in the way: nothing the window or a bot does waits on it (the preview waits PREVIEW_MS at most),
  * every failure is a warning, and Orbit works the same without it. One sync per workspace at a time; a
- * batch Orgo didn't take (no answer, 5xx) is sent again after a backoff (RETRY_MS, doubling). An Orgo
+ * batch Orgo didn't take (no answer, 5xx), and a forget it can't take for now (401, 403, 409, 429), is
+ * sent again after a backoff (RETRY_MS, doubling). An Orgo
  * without the routes (404 or 405) is asked again at most once every 6 hours. Runs on the signed-in Orgo
  * key; signed out, nothing is sent.
  */
@@ -107,6 +108,12 @@ type Reply = { status: number; json: Record<string, unknown> };
 const ok = (r: Awaited<ReturnType<typeof orbitCall>>): r is { status: number; json: Record<string, unknown> } => !!r && r !== "off" && r.status < 300;
 /** Worth sending again: no answer, or 5xx. */
 const retryable = (r: Awaited<ReturnType<typeof orbitCall>>) => r === null || (r !== "off" && r.status >= 500);
+/**
+ * A forget Orgo didn't take that it may take later (the key signed out or revoked, not allowed for now,
+ * full, too many asks): kept to send again, never dropped. Only an answer that this request will never be
+ * taken (400 bad request, 413 too large, 404 for the item itself) is given up on.
+ */
+const held = (r: Reply) => r.status !== 400 && r.status !== 413 && r.status !== 404;
 
 const iso = (ms: number | undefined) => (ms !== undefined && Number.isFinite(ms) && ms >= 0 ? new Date(ms).toISOString() : null);
 const WHEN = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}(:?\d{2})?)?)?$/;
@@ -161,7 +168,7 @@ export function payloadHash(bank: string, e: OrbitEntry): string | null {
 }
 
 /** The forgotten items' deletes and the new hashes: Orgo answers the facts the items came from, and memory deletes those too. */
-async function sendOutbox(ws: string): Promise<"off" | "retry" | "ok"> {
+async function sendOutbox(ws: string): Promise<"off" | "retry" | "held" | "ok"> {
   const out = orbitOutbox(ws);
   if (!out) return "ok";
   for (let i = 0; i < out.del.length; i += BULK) {
@@ -172,7 +179,10 @@ async function sendOutbox(ws: string): Promise<"off" | "retry" | "ok"> {
     if (ok(r)) {
       const facts = Array.isArray(r.json.honchoConclusionIds) ? r.json.honchoConclusionIds.filter((x): x is string => typeof x === "string") : [];
       if (facts.length) orbitForgetFacts(ws, facts);
-    } else console.warn(`[orbit-sync] ${ws}: Orgo answered ${(r as unknown as Reply).status} to a delete`);
+    } else {
+      console.warn(`[orbit-sync] ${ws}: Orgo answered ${(r as unknown as Reply).status} to a delete`);
+      if (held(r as unknown as Reply)) return "held";
+    }
     orbitSent(ws, { del: ids });
   }
   for (const kind of ["item", "fact"] as const) {
@@ -183,7 +193,10 @@ async function sendOutbox(ws: string): Promise<"off" | "retry" | "ok"> {
         const r = await orbitCall(ws, "POST", "/tombstones", { hashes, kind });
         if (r === "off") return "off";
         if (retryable(r)) return "retry";
-        if (!ok(r)) console.warn(`[orbit-sync] ${ws}: Orgo answered ${(r as unknown as Reply).status} to the forgotten hashes`);
+        if (!ok(r)) {
+          console.warn(`[orbit-sync] ${ws}: Orgo answered ${(r as unknown as Reply).status} to the forgotten hashes`);
+          if (held(r as unknown as Reply)) return "held";
+        }
       }
       orbitSent(ws, kind === "item" ? { items: all.slice(i, i + TOMBS) } : { facts: all.slice(i, i + TOMBS) });
     }
@@ -191,7 +204,10 @@ async function sendOutbox(ws: string): Promise<"off" | "retry" | "ok"> {
   return "ok";
 }
 
-/** The items that changed since they were last sent. A batch Orgo refuses (400) is sent in halves, so one item can't hold up the rest. */
+/**
+ * The items that changed since they were last sent. A batch Orgo refuses (400, or an older Orgo's 409 for
+ * an item past its sources in a merge) is sent in halves, so one item can't hold up the rest.
+ */
 async function push(ws: string): Promise<"off" | "retry" | "ok"> {
   const ex = orbitItemsOf(ws);
   if (!ex) return "ok";
@@ -199,7 +215,7 @@ async function push(ws: string): Promise<"off" | "retry" | "ok"> {
   for (const e of ex.entries) {
     const p = itemPayload(ex.bank, e);
     const h = p && payloadHash(ex.bank, e);
-    if (p && h && ex.pushed[p.bopsId] !== h) changed.push({ p, h });
+    if (p && h && ex.pushed[p.bopsId] !== h && ex.refused[p.bopsId] !== h) changed.push({ p, h });
   }
   let merged = false;
   const send = async (batch: typeof changed): Promise<"off" | "retry" | "ok"> => {
@@ -215,14 +231,18 @@ async function push(ws: string): Promise<"off" | "retry" | "ok"> {
       }
       return "ok";
     }
-    if ((r as unknown as Reply).status === 400 && batch.length > 1) {
+    const rr = r as unknown as Reply;
+    const refused = rr.status === 400 || (rr.status === 409 && rr.json.what === "itemSources");
+    if (refused && batch.length > 1) {
       const mid = Math.ceil(batch.length / 2);
       const a = await send(batch.slice(0, mid));
       return a === "ok" ? send(batch.slice(mid)) : a;
     }
-    // Refused (one item Orgo won't take, or the workspace is full): not sent again until it changes.
-    console.warn(`[orbit-sync] ${ws}: Orgo answered ${(r as unknown as Reply).status}${typeof (r as unknown as Reply).json.code === "string" ? ` (${(r as unknown as Reply).json.code})` : ""} to ${batch.length} item${batch.length === 1 ? "" : "s"}`);
-    if ((r as unknown as Reply).status === 400) orbitPushed(ws, Object.fromEntries(batch.map((x) => [x.p.bopsId, x.h])));
+    console.warn(`[orbit-sync] ${ws}: Orgo answered ${rr.status}${typeof rr.json.code === "string" ? ` (${rr.json.code})` : ""} to ${batch.length} item${batch.length === 1 ? "" : "s"}`);
+    // One item Orgo won't take: not sent again until it changes. Kept apart from what Orgo has, so a full
+    // read doesn't take its absence there for a delete. The workspace full, or anything else: tried again
+    // at the next change or read.
+    if (refused) orbitRefused(ws, Object.fromEntries(batch.map((x) => [x.p.bopsId, x.h])));
     return "ok";
   };
   for (let i = 0; i < changed.length; i += BULK) {
@@ -287,9 +307,10 @@ async function flush(ws: string): Promise<void> {
     sp.pull ||= pullToo;
     schedule(ws, Math.min(RETRY_MS * 2 ** (sp.tries - 1), RETRY_MAX_MS));
   };
-  let r = await sendOutbox(ws);
-  if (r === "off") return;
-  if (r === "retry") return again(wantPull);
+  const out = await sendOutbox(ws);
+  if (out === "off") return;
+  if (out === "retry") return again(wantPull);
+  let r: "off" | "retry" | "ok";
   const issues = await orbitIssuesFlush(ws).catch((e: Error) => (console.warn(`[orbit-sync] ${ws}: issues: ${e.message}`), "retry" as const));
   if (issues === "off") return;
   if (wantPull) {
@@ -302,7 +323,9 @@ async function flush(ws: string): Promise<void> {
     if (r === "off") return;
     if (r === "retry") return again(false);
   }
-  if (issues === "retry") return again(false);
+  // A forget Orgo didn't take for now (signed out, full, too many asks): kept and sent again later. The
+  // rest went on meanwhile (an item whose key is forgotten is never sent, so nothing comes back from it).
+  if (issues === "retry" || out === "held") return again(false);
   sp.tries = 0;
   // Merged there: read again now, so the next send has what the other Mac knew.
   if (sp.pull) schedule(ws, 0);
