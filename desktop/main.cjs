@@ -3,7 +3,7 @@
  * isn't already running, opens the window with the Mac title bar from the design, and on quit
  * stops what it started, including the bots' background browsers.
  */
-const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, nativeImage, Notification, screen, session, shell, systemPreferences } = require("electron");
+const { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, Notification, screen, session, shell, systemPreferences } = require("electron");
 const { execFile, execFileSync, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -717,13 +717,61 @@ async function createWindow() {
   await openApp(win);
 }
 
+/*
+ * The tabs' sessions (persist:bops-web-<user>) answer what a page may use. Electron says yes to everything
+ * unless told otherwise; a site in a tab never gets to read the clipboard (a key copied in the Vault sits
+ * there for a minute) or reach USB, HID, serial or MIDI devices. The rest stays as a browser has it.
+ */
+const TAB_DENIED = new Set(["clipboard-read", "hid", "serial", "usb", "midi", "midiSysex"]);
+const fencedTabs = new WeakSet();
+function fenceTabSession(s) {
+  if (fencedTabs.has(s)) return;
+  fencedTabs.add(s);
+  s.setPermissionRequestHandler((_wc, permission, callback) => callback(!TAB_DENIED.has(permission)));
+  s.setPermissionCheckHandler((_wc, permission) => !TAB_DENIED.has(permission));
+  s.setDevicePermissionHandler(() => false);
+}
+
 // A page in a tab that opens a new window opens it in your browser instead.
 app.on("web-contents-created", (_, contents) => {
   if (contents.getType() !== "webview") return;
+  fenceTabSession(contents.session);
   contents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: "deny" };
   });
+});
+
+/*
+ * A key copied in the Vault (components/app/keys.tsx). On the Mac it's marked concealed and transient
+ * (nspasteboard.org), so clipboard managers skip it, and kept to this Mac, so Universal Clipboard doesn't
+ * send it to your iPhone. The value goes to osascript on stdin, never in its arguments. After a minute it's
+ * cleared if it's still there; here, unlike the page, that works with the window in the background.
+ */
+const SECRET_CLIPBOARD_MS = 60_000;
+const COPY_CONCEALED = `ObjC.import("AppKit");
+const text = $.NSString.alloc.initWithDataEncoding($.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile, $.NSUTF8StringEncoding);
+const pb = $.NSPasteboard.generalPasteboard;
+pb.prepareForNewContentsWithOptions(1);
+pb.setStringForType(text, "public.utf8-plain-text");
+pb.setDataForType($.NSData.data, "org.nspasteboard.ConcealedType");
+pb.setDataForType($.NSData.data, "org.nspasteboard.TransientType");
+"ok";`;
+let secretClear;
+const copyConcealed = (value) =>
+  new Promise((resolve) => {
+    const child = execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", COPY_CONCEALED], { timeout: 5000, killSignal: "SIGKILL" }, (err, out) => resolve(!err && String(out).trim() === "ok"));
+    child.stdin?.end(value);
+  });
+ipcMain.handle("copy-secret", async (_, value) => {
+  if (typeof value !== "string" || !value) return false;
+  const ok = process.platform === "darwin" ? await copyConcealed(value) : (clipboard.writeText(value), true);
+  if (!ok) return false;
+  clearTimeout(secretClear);
+  secretClear = setTimeout(() => {
+    if (clipboard.readText() === value) clipboard.clear();
+  }, SECRET_CLIPBOARD_MS);
+  return true;
 });
 
 /*

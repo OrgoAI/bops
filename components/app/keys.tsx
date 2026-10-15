@@ -69,16 +69,19 @@ async function reveal(name: string): Promise<{ value: string } | { error: string
   }
 }
 
+/** The Mac app's copy (desktop/main.cjs): concealed from clipboard managers, kept off other devices, cleared after a minute. */
+const macCopy = () => (window as unknown as { bopsMac?: { copySecret?: (v: string) => Promise<boolean> } }).bopsMac?.copySecret;
+
 /**
- * After a while, empty the clipboard if it still holds `value` (the user may have copied something else since).
- * The timer outlives the row. When reading the clipboard isn't allowed, it's left alone.
+ * In a plain browser: after a while, empty the clipboard if it still holds `value` (the user may have copied
+ * something else since). The browser only lets a page at the clipboard while it has focus, and after a copy
+ * the user is usually pasting somewhere else; so when it's refused, it's tried again when the window is back.
  */
 function clearClipboardLater(value: string) {
+  const clear = () =>
+    navigator.clipboard.readText().then((now) => (now === value ? navigator.clipboard.writeText("") : undefined));
   setTimeout(() => {
-    void navigator.clipboard
-      .readText()
-      .then((now) => (now === value ? navigator.clipboard.writeText("") : undefined))
-      .catch(() => {});
+    void clear().catch(() => window.addEventListener("focus", () => void clear().catch(() => {}), { once: true }));
   }, CLIPBOARD_MS);
 }
 
@@ -136,12 +139,17 @@ function useKeyValue(name: string, onError: (e: string | null) => void) {
   const copy = async () => {
     const v = shown ?? (await fetchValue());
     if (v === null) return;
-    try {
-      await navigator.clipboard.writeText(v);
-    } catch {
-      return onError("Couldn't copy it. Click the window and try again.");
+    const viaMac = macCopy();
+    if (viaMac) {
+      if (!(await viaMac(v).catch(() => false))) return onError("Couldn't copy it. Try again.");
+    } else {
+      try {
+        await navigator.clipboard.writeText(v);
+      } catch {
+        return onError("Couldn't copy it. Click the window and try again.");
+      }
+      clearClipboardLater(v);
     }
-    clearClipboardLater(v);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -325,7 +333,6 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
             disabled={busy || v.busy}
             onClick={() => void v.toggle()}
             aria-label={v.shown !== null ? "Hide key" : "Show key"}
-            aria-pressed={v.shown !== null}
             data-tip={v.shown !== null ? "Hide key" : "Show key"}
             className={`${iconBtn} w-7 ${v.shown !== null ? "bg-[#F2F2F0] text-ink" : "text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink"}`}
           >
@@ -335,7 +342,7 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
             type="button"
             disabled={busy || v.busy}
             onClick={() => void v.copy()}
-            aria-label={v.copied ? "Copied" : "Copy key"}
+            aria-label="Copy key"
             data-tip={v.copied ? undefined : "Copy key"}
             className={`${iconBtn} ${v.copied ? "bg-[#2BB673]/15 px-2.5 text-[#1E8A55]" : "w-7 text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink"}`}
           >
@@ -363,7 +370,7 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
       </div>
       {v.shown !== null && (
         <div className="motion-fade-in flex flex-col gap-1">
-          <span aria-label={`${k.label} key`} className="select-text break-all rounded-[10px] bg-[#F7F7F6] px-3 py-2 font-mono text-[12px] leading-[17px] text-ink shadow-[0_0_0_1px_#ECECEA]">
+          <span className="select-text break-all rounded-[10px] bg-[#F7F7F6] px-3 py-2 font-mono text-[12px] leading-[17px] text-ink shadow-[0_0_0_1px_#ECECEA]">
             {v.shown}
           </span>
           <span className="text-[11.5px] leading-4 text-[#9A9A98]">Hides in 30 seconds, or when you leave the window.</span>
@@ -393,6 +400,9 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
           {error}
         </span>
       )}
+      <span role="status" className="sr-only">
+        {v.copied ? `${k.label} key copied` : ""}
+      </span>
     </div>
   );
 }

@@ -120,7 +120,7 @@ export function BotSkills({
 /**
  * What the bot can always do, from what it has now (lib/server/chat.ts offers the same): the web,
  * pictures and pages, its computer, and only what's set up of email, texts, calls, Orbit, business data
- * and teammates. A bot with no number shows no texting.
+ * and teammates. A bot with no number shows no texting. Only the main bot hands work off; the others ask.
  */
 function builtIn(state: AppState, b: Bot): string[] {
   const line = state.workspaces?.find((w) => w.id === workspaceOf(b))?.line;
@@ -138,7 +138,7 @@ function builtIn(state: AppState, b: Bot): string[] {
     calls ? "Takes calls" : "",
     categoriesOpen(state) ? ORBIT : "",
     state.businessData && !b.dataOff ? "Looks up companies and people" : "",
-    teammates ? "Hands work to teammates" : "",
+    teammates ? (b.isMain ? "Hands work to teammates" : "Asks teammates") : "",
   ].filter(Boolean);
 }
 

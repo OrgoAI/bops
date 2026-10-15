@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld("bopsMac", {
   // Restart Bops, cleanly: the state saved, cached sessions dropped, the server started
   // again, and the app opened again. Still signed in, nothing lost (desktop/main.cjs).
   relaunch: () => ipcRenderer.invoke("relaunch"),
+  // Copy a key from the Vault, kept out of clipboard managers and other devices, and cleared after a minute.
+  copySecret: (value) => ipcRenderer.invoke("copy-secret", value),
   // The page shown when Bops can't start (desktop/trouble.html): start again, or open the logs folder.
   startup: {
     retry: () => ipcRenderer.invoke("startup-retry"),
