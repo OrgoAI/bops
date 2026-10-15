@@ -15,7 +15,7 @@ const base = () => `${orgoOrigin()}/api`;
  * The key Orgo calls run on: the signed-in user's (Sign in with Orgo, kept in the Keychain), else
  * ORGO_API_KEY (self-hosting), else the Orgo CLI's login in ~/.orgo/credentials.json.
  */
-async function apiKey(): Promise<string> {
+export async function apiKey(): Promise<string> {
   const signedIn = await loadOrgoKey();
   if (signedIn) return signedIn;
   if (process.env.ORGO_API_KEY) return process.env.ORGO_API_KEY;

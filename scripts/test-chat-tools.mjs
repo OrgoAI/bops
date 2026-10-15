@@ -364,7 +364,7 @@ await check("web_fetch reads a page, marked as information, and refuses private 
 });
 
 /** web_fetch's refusal of an address that isn't written down, on the user's own turn. */
-const NOT_READ = /^Not read: Bops opens only web addresses written down in Alex's messages, or what your tools found this turn \(search results, a page you read and its links, an email you got, or what an app or a data lookup answered\)\. Use the exact address from there, or ask Alex for it\.$/;
+const NOT_READ = /^Not read: Bops opens only web addresses written down in Alex's messages, or what your tools found this turn \(search results, a page you read and its links, an email you got, or what an app, an API or a data lookup answered\)\. Use the exact address from there, or ask Alex for it\.$/;
 const htmlPage = (title, text) => `<!doctype html><html><head><title>${title}</title></head><body><main><p>${text}</p></main></body></html>`;
 for (const path of ["/doc-abc", "/review", "/doc-news", "/quoted", "/cjk", "/its"]) pages[path] = htmlPage(path.slice(1), `The ${path.slice(1)} page has some words on it for the reader.`);
 

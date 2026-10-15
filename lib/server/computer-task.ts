@@ -5,6 +5,7 @@ import { computerAsleepError, computerWakingError, orgo, screenId } from "./orgo
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
+import { callApi, callApiTool, usableKeys } from "./keys";
 import { proceduresOf, readProcedure } from "./procedures";
 import { bot, patchSession, session, stateEpoch } from "./store";
 import { recordTokens, usageTags } from "./usage";
@@ -89,6 +90,9 @@ export async function computerTurn(t: ComputerTurn): Promise<string> {
   // Business data and the user's CRM run in this process (treg.ts, crm.ts), so the task has them wherever its computer is.
   // Not the CRM for a task someone outside Bops started (Session.fromOutside), as for a chat turn of theirs.
   // read_procedure only when the bot has procedures to read (sessions.ts lists them in its instructions).
+  // call_api with the user's keys (keys.ts) reads only (GET): anything that changes something is asked for in the chat.
+  // Not for a task someone outside Bops started, like the CRM.
+  const keyed = s.fromOutside ? [] : await usableKeys(b);
   const tools = [
     { type: "computer" },
     { type: "web_search" },
@@ -98,6 +102,7 @@ export async function computerTurn(t: ComputerTurn): Promise<string> {
     ...(t.apps ? APP_TOOLS(b) : []),
     ...DATA_TOOLS(b),
     ...(s.fromOutside ? [] : CRM_TOOLS(b)),
+    ...(keyed.length ? [callApiTool(keyed, { getOnly: true })] : []),
   ];
   // A turn that was stopped mid-step owes OpenAI the outputs of the calls it was answering.
   let input: unknown[] = [...(await settle(t, s.owed ?? [])), { role: "user", content: [{ type: "input_text", text: t.input }] }];
@@ -389,6 +394,10 @@ async function runFunction(t: ComputerTurn, o: OutputItem) {
     } else if (o.name === "use_app") {
       t.step("use_app", `used ${String(args.action ?? "an app")}`);
       output = await runAppAction(s.botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId: t.sessionId }, undefined, (args.account as string | null) ?? null);
+    } else if (o.name === "call_api" && !s.fromOutside) {
+      const r = await callApi(s.botId, args, { sessionId: t.sessionId });
+      t.step("call_api", r.did ?? `tried to call ${String(args.key ?? "an API")}`);
+      output = r.text;
     } else if (o.name && DATA_TOOL_NAMES.has(o.name)) {
       t.step(o.name, o.name === "business_search" ? `looked up ${String(args.job ?? "business data")}` : o.name === "find_data" ? `looked for "${String(args.query ?? "").slice(0, 60)}" in business data` : `got ${String(args.endpoint_id ?? "data")}`);
       output = await runDataTool(s.botId, o.name, args, { sessionId: t.sessionId });

@@ -89,6 +89,11 @@ export type Bot = {
    * overrides Bops' own rules (approvals, text on pages being information).
    */
   persona?: string;
+  /**
+   * Keys (lib/server/keys.ts): the names of the user's API keys in their Orgo vault this bot may call
+   * with call_api ("STRIPE_SECRET_KEY"). Only the names: the keys themselves never leave Orgo.
+   */
+  keys?: string[];
 };
 
 export const MAX_PERSONA_CHARS = 1500;
@@ -218,6 +223,8 @@ export type Message = {
   sms?: { dir: "in" | "out"; from: string; to: string; id?: string };
   /** Set on the note an app action leaves when the user answered its approval: what the app answered, so the bot sees whether it worked. */
   appResult?: { action: string; ok: boolean; output: string };
+  /** Set on a bot's reply: the API calls it made with the user's keys for it (call_api), "Called Stripe GET /v1/customers". */
+  called?: string[];
   /** Set on a heads-up from a watched screen: which watch, so the message can offer to show it or reply. */
   watch?: { id: string };
   /**
