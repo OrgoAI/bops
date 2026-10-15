@@ -5,8 +5,12 @@
 // and what each mention may change; a look with nothing new costing nothing; new facts waiting to be
 // sorted together (10 at a time, after 30 minutes, or at once when asked; what a chat taught at once); a fact saved now sorted within
 // seconds; a big memory (the newest 300, 150 a look, Sort older for the rest); sweeps that check what was
-// sorted with memory itself; facts gone from memory; the user's changes (rename, done, hide, forget) and
-// what may bring a forgotten item back; an item worked out again from the facts left when one goes (and
+// sorted with memory itself; facts gone from memory; the user's changes (rename, done, hide); Forget (one
+// item or several, every fact and card line deleted in memory and confirmed by id, tried again when memory
+// fails or doesn't apply a delete, hashes only kept, a fact memory works out again or had from before
+// deleted as it comes, and only something new said in a chat bringing an item back); Delete everywhere (the
+// chats in memory listed with what else they taught, then deleted); Orbit per workspace (two sharing a
+// bank see only their own chats, the card is the bank's own workspace's, an index kept per bank moved); an item worked out again from the facts left when one goes (and
 // its lock); what's left to sort (behind, more, failures let go, kept rows); a new card line and a fact
 // saved by hand sorted at once, Bops's own notes batched; tidying up; what goes wrong (the model down or
 // answering unusably, memory, a damaged file, another account signing in mid-look); the window's polls
@@ -22,6 +26,7 @@
 // Usage: node --conditions=react-server scripts/test-memory-categories.mjs
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -98,10 +103,10 @@ const iso = (ms) => new Date(ms).toISOString();
 const honcho = { banks: new Map(), calls: [], unknown: [], fail: null, hold: null, held: [], seq: 0 };
 function hbank(id) {
   let b = honcho.banks.get(id);
-  if (!b) honcho.banks.set(id, (b = { peers: new Set(), cards: new Map(), facts: [], dreams: [] }));
+  if (!b) honcho.banks.set(id, (b = { peers: new Set(), cards: new Map(), facts: [], dreams: [], sessions: new Map() }));
   return b;
 }
-const asConclusion = (f) => ({ id: f.id, content: f.text, observer_id: f.observer, observed_id: f.observed, session_id: f.session, created_at: iso(f.at), level: f.level, source_ids: null, times_derived: 1 });
+const asConclusion = (f) => ({ id: f.id, content: f.text, observer_id: f.observer, observed_id: f.observed, session_id: f.session, created_at: iso(f.at), level: f.level, source_ids: f.from ?? null, times_derived: 1 });
 function addFact(bank, text, { at = Date.now(), session = null, level = "explicit" } = {}) {
   const seq = ++honcho.seq;
   const f = { id: `c${seq}`, text, at, session, level, seq, observer: "user", observed: "user" };
@@ -164,6 +169,47 @@ async function honchoAnswer(req, url) {
     if (!b.facts.some((x) => x.id === one[1])) return json({ detail: "Conclusion not found" }, 404);
     removeFact(p[2], one[1]);
     return new Response(null, { status: 204 });
+  }
+  // Sessions: made (get or create), listed (metadata filters match by containment), deleted with their messages.
+  const asSession = (x) => ({ id: x.id, workspace_id: p[2], is_active: true, metadata: x.metadata, configuration: x.configuration, created_at });
+  if (rest === "sessions" && req.method === "POST") {
+    let x = b.sessions.get(call.body.id);
+    if (!x) b.sessions.set(call.body.id, (x = { id: call.body.id, metadata: call.body.metadata ?? {}, configuration: call.body.configuration ?? {}, peers: { ...(call.body.peers ?? {}) }, messages: [] }));
+    return json(asSession(x));
+  }
+  if (rest === "sessions/list" && req.method === "POST") {
+    const f = call.body?.filters ?? {};
+    const all = [...b.sessions.values()].filter((x) => (!f.id || x.id === f.id) && Object.entries(f.metadata ?? {}).every(([k, v]) => JSON.stringify(x.metadata[k]) === JSON.stringify(v)));
+    return json({ items: all.map(asSession), total: all.length, page: 1, size: 50, pages: 1 });
+  }
+  const sess = rest.match(/^sessions\/([^/]+)(?:\/(.*))?$/);
+  if (sess) {
+    const x = b.sessions.get(sess[1]);
+    if (!x) return json({ detail: "Session not found" }, 404);
+    if (!sess[2] && req.method === "DELETE") {
+      b.sessions.delete(x.id);
+      return new Response(null, { status: 202 });
+    }
+    if (!sess[2] && req.method === "PUT") {
+      if (call.body.metadata) x.metadata = call.body.metadata;
+      if (call.body.configuration) x.configuration = call.body.configuration;
+      return json(asSession(x));
+    }
+    if (sess[2] === "peers" && req.method === "POST") {
+      Object.assign(x.peers, call.body);
+      return json(asSession(x));
+    }
+    const pc = sess[2]?.match(/^peers\/([^/]+)\/config$/);
+    if (pc && req.method === "PUT") {
+      x.peers[pc[1]] = { ...x.peers[pc[1]], ...call.body };
+      return new Response(null, { status: 204 });
+    }
+    if (sess[2] === "messages" && req.method === "POST") {
+      const made = call.body.messages.map((m) => ({ id: `m${++honcho.seq}`, content: m.content, peer_id: m.peer_id, session_id: x.id, workspace_id: p[2], metadata: m.metadata ?? {}, configuration: m.configuration, created_at: m.created_at ?? iso(Date.now()), token_count: 1 }));
+      x.messages.push(...made);
+      return json(made);
+    }
+    if (sess[2] === "messages/list" && req.method === "POST") return json({ items: x.messages, total: x.messages.length, page: 1, size: 50, pages: 1 });
   }
   if (rest === "schedule_dream" && req.method === "POST") {
     b.dreams.push(call.body);
@@ -296,11 +342,14 @@ function one(items, category, title) {
   return found[0];
 }
 const pick = (o, keys) => Object.fromEntries(keys.map((k) => [k, o[k]]));
-const fileFor = (bank) => join(work, ".data", "memory-categories", `${bank}.json`);
+/** The workspace whose own bank this is: each part's workspace has its own (bops-<workspace>), the first one bops. */
+const wsOfBank = (bank) => (bank === "bops" ? MAIN : bank.replace(/^bops-/, ""));
+/** The index of a workspace's Orbit (by its bank, as the parts name it): <userDir>/memory-categories/ws-<workspace>.json. */
+const fileFor = (bank) => join(work, ".data", "memory-categories", `ws-${wsOfBank(bank)}.json`);
 const indexOf = (bank) => JSON.parse(readFileSync(fileFor(bank), "utf8"));
 const mode = (p) => statSync(p).mode & 0o777;
 /** The engine's own bookkeeping for a bank (it keeps it on globalThis): the look under way and the looks set for later. */
-const liveBank = (bank) => globalThis.bopsCategories?.banks.get(bank);
+const liveBank = (bank) => globalThis.bopsCategories?.spaces.get(wsOfBank(bank));
 const timersOf = (bank) => [...(liveBank(bank)?.timers.keys() ?? [])].sort();
 const delayOf = (bank, why) => liveBank(bank)?.timers.get(why)?._idleTimeout;
 function clearTimers(bank) {
@@ -380,9 +429,9 @@ async function reset() {
   releaseOpenai();
   honcho.fail = null;
   releaseHoncho();
-  const banks = () => [...(globalThis.bopsCategories?.banks.values() ?? [])];
+  const banks = () => [...(globalThis.bopsCategories?.spaces.values() ?? [])];
   try {
-    await until(() => banks().every((b) => !b.running), "every look to end", 10_000);
+    await until(() => banks().every((b) => !b.running && !b.purging), "every look and forget to end", 10_000);
   } catch (e) {
     console.log(`       (after the part: ${e.message})`);
   }
@@ -421,7 +470,7 @@ const WORKSPACES = [
   ...["ws_big", "ws_window", "ws_scan", "ws_switch", "ws_tidy", "ws_tidy2", "ws_tidy3", "ws_tidy4", "ws_tz", "ws_budget", "ws_retry", "ws_split", "ws_range", "ws_more", "ws_serial"],
   ...["ws_hide", "ws_card", "ws_card2", "ws_older", "ws_names", "ws_keys", "ws_ranges", "ws_known", "ws_ids"],
   ...["ws_outage", "ws_lock", "ws_oldidx", "ws_behind", "ws_more2", "ws_more3", "ws_prune", "ws_rows", "ws_cardnow", "ws_wait2", "ws_learn", "ws_rev", "ws_setting"],
-  ...["ws_you", "ws_chat", "ws_add"],
+  ...["ws_you", "ws_chat", "ws_add", "ws_multi", "ws_everywhere", "ws_shareA", "ws_shareB", "ws_moved", "ws_movedB"],
 ];
 S.update((s) => {
   s.owner = { name: "Tiger" };
@@ -649,7 +698,10 @@ await section("A first look at memory: the card first, then the newest facts, so
   assert.deepEqual(idx.facts["card:Sister: Ana"].wrote, { [ana.id]: { t: "Ana", d: "", h: "card", at: ana.sources[0].at } });
   assert.deepEqual(idx.facts[F.f8.id].wrote[one(items, "decisions", "Pro plan at 40 dollars a month").id].d, "To cover costs, servers and support", "as the item shows it");
   // Small talk makes nothing, but it's marked sorted so it isn't sent again; so is a card line about Tiger.
-  assert.deepEqual(idx.facts[F.f10.id], { items: [], at: F.f10.at, wrote: {} });
+  assert.deepEqual(pick(idx.facts[F.f10.id], ["items", "at", "wrote"]), { items: [], at: F.f10.at, wrote: {} });
+  // Each sorted fact keeps where it was learned (for Delete everywhere) and a hash of its words (for Forget), never more of it.
+  assert.deepEqual([idx.facts[F.f1.id].s, idx.facts[F.f2.id].s, idx.facts[F.f3.id].s], [MAX_CHAT, "bops-task-t_flight", null]);
+  assert.match(idx.facts[F.f1.id].h, /^[0-9a-f]{64}$/);
   assert.deepEqual(idx.facts["card:Tiger lives in Oakland."].items, []);
   assert.ok(items.every((i) => !Object.hasOwn(i, "detailPrivate")), "nothing kept only for the engine goes to the window");
 
@@ -657,8 +709,8 @@ await section("A first look at memory: the card first, then the newest facts, so
   const dir = join(work, ".data", "memory-categories");
   assert.equal(mode(dir), 0o700, "the folder is the user's only");
   assert.equal(mode(fileFor("bops")), 0o600, "and so is the file");
-  assert.deepEqual(readdirSync(dir), ["bops.json"], "no temp files left");
-  assert.deepEqual(pick(idx, ["v", "bank", "forgotten", "error"]), { v: 1, bank: "bops", forgotten: {}, error: undefined });
+  assert.deepEqual(readdirSync(dir), ["ws-ws_main.json"], "kept per workspace, no temp files left");
+  assert.deepEqual(pick(idx, ["v", "ws", "bank", "tomb", "error"]), { v: 1, ws: MAIN, bank: "bops", tomb: { items: {}, facts: {} }, error: undefined });
   assert.equal(Object.keys(idx.facts).length, 13);
   assert.equal(Object.keys(idx.items).length, 11);
   assert.equal(idx.syncedAt, snap.syncedAt);
@@ -921,7 +973,7 @@ await section("The user's changes: rename, done, hide, and they stay through lat
 
 /* ---------------- Forget ---------------- */
 
-await section("Forgetting an item: memory forgets what was only about it, and only a chat brings it back", async () => {
+await section("Forgetting an item: memory deletes every fact and card line it was learned from, for good; only something new said in a chat brings it back", async () => {
   const ws = "ws_forget";
   const bank = Mem.bankOf(ws);
   const F = seed(
@@ -940,6 +992,7 @@ await section("Forgetting an item: memory forgets what was only about it, and on
       ],
       ["g2", 30, "Priya Nair is Tiger's investor.", [item("people", "Priya Nair", { key: "priya nair", detail: "Your investor" })]],
       ["g3", 20, "Priya Nair's daughter is called Mila.", [item("people", "Priya Nair", { key: "priya nair" })]],
+      ["g4", 15, "Tom Berg runs the Orbit design team.", [item("people", "Tom Berg", { key: "tom berg", detail: "Runs design at Orbit" })]],
     ],
     {
       cards: [
@@ -952,22 +1005,27 @@ await section("Forgetting an item: memory forgets what was only about it, and on
   const priya = one(r.items, "people", "Priya Nair");
   assert.deepEqual(priya.sources.map((s) => s.fact).sort(), [F.g1.id, F.g2.id, F.g3.id, "card:Tiger's investor is Priya Nair."].sort());
   const h = honcho.calls.length;
-  const f = await post({ action: "forget", ws, id: priya.id });
+  const f = await post({ action: "forget", ws, ids: [priya.id] });
   assert.equal(f.status, 200);
+  assert.ok(!f.body.items.some((i) => i.id === priya.id), "gone from Orbit at once, before memory has deleted anything");
+  await MC.purge(ws);
   const calls = honcho.calls.slice(h);
   assert.deepEqual(
     calls.filter((c) => c.method === "DELETE").map((c) => c.path).sort(),
-    [F.g2.id, F.g3.id].map((id) => `/v3/workspaces/${bank}/conclusions/${id}`).sort(),
-    "the facts only about her are deleted in memory",
+    [F.g1.id, F.g2.id, F.g3.id].map((id) => `/v3/workspaces/${bank}/conclusions/${id}`).sort(),
+    "every fact she was learned from is deleted in memory, the lunch too (her name is in it)",
   );
   assert.deepEqual(calls.filter((c) => c.method === "PUT").map((c) => c.body), [{ peer_card: ["Tiger's lawyer is Ben Ode."] }], "and her card line");
-  assert.deepEqual(factIds(bank), [F.g1.id], "the lunch, about others too, stays in memory");
-  assert.ok(!f.body.items.some((i) => i.id === priya.id));
-  for (const t of ["Lunch with Priya and Tom", "Tom Berg", "Orbit", "Ben Ode"]) assert.ok(f.body.items.some((i) => i.title === t), `${t} stays`);
-  assert.deepEqual(one(f.body.items, "events", "Lunch with Priya and Tom").sources.map((s) => s.fact), [F.g1.id]);
+  assert.ok(calls.some((c) => c.path === `/v3/workspaces/${bank}/conclusions/list` && c.body?.filters?.id?.in?.length === 3), "then memory is asked by id whether it still has them");
+  assert.deepEqual(factIds(bank), [F.g4.id], "only the fact about Tom alone stays in memory");
+  r = (await get(ws)).body;
+  assert.deepEqual(r.items.map((i) => i.title).sort(), ["Ben Ode", "Tom Berg"], "what only the lunch taught goes with it; Tom stays from his own fact");
+  assert.deepEqual(one(r.items, "people", "Tom Berg").sources.map((s) => s.fact), [F.g4.id]);
   const idx = indexOf(bank);
-  assert.ok(idx.forgotten["people:priya nair"] > 0, "forgotten, with when");
-  assert.ok(!idx.facts[F.g1.id].items.includes(priya.id));
+  const sha = (x) => createHash("sha256").update(x).digest("hex");
+  assert.ok(idx.tomb.items[sha("item|people:priya nair")] > 0, "a tombstone for her, with when");
+  assert.equal(idx.purge, undefined, "nothing left to delete");
+  assert.ok(!/priya|mila/i.test(readFileSync(fileFor(bank), "utf8")), "nothing of her words is kept on this Mac: hashes only");
   // The next look doesn't bring her back from what's left.
   const n = openai.calls.length;
   r = await refresh(ws);
@@ -975,45 +1033,71 @@ await section("Forgetting an item: memory forgets what was only about it, and on
   assert.ok(!r.items.some((i) => i.title === "Priya Nair"));
   // An item from a card line alone: the line comes off the card.
   assert.equal((await post({ action: "forget", ws, id: one(r.items, "people", "Ben Ode").id })).status, 200);
+  await MC.purge(ws);
   assert.deepEqual(hbank(bank).cards.get("user"), []);
   // An id that's an item's shape but no item's: nothing happens.
   const h2 = honcho.calls.length;
-  assert.equal((await post({ action: "forget", ws, id: "0123456789" })).status, 200);
+  assert.equal((await post({ action: "forget", ws, ids: ["0123456789"] })).status, 200);
+  await MC.purge(ws);
   assert.equal(honcho.calls.length, h2);
 
-  await check("A forgotten item comes back only from something said in a chat after it was forgotten", async () => {
+  await check("Several at once (picked in a section): one request, every fact of each deleted, one card write", async () => {
+    const wm = "ws_multi";
+    const bm = Mem.bankOf(wm);
+    const P = (name, detail) => [item("people", name, { key: name.toLowerCase(), detail })];
+    const M = seed(wm, [["a", 30, "Tiger's barber is Sal.", P("Sal", "Your barber")], ["b", 20, "Tiger's tailor is Ines.", P("Ines", "Your tailor")], ["c", 10, "Tiger's dentist is Ravi.", P("Ravi", "Your dentist")]], {
+      cards: [["Tiger sees Sal every month.", P("Sal", "Your barber")], ["Ines made Tiger's wedding suit.", P("Ines", "Your tailor")]],
+    });
+    const items = (await refresh(wm)).items;
+    const h3 = honcho.calls.length;
+    const x = await post({ action: "forget", ws: wm, ids: [one(items, "people", "Sal").id, one(items, "people", "Ines").id] });
+    assert.equal(x.status, 200);
+    assert.deepEqual(x.body.items.map((i) => i.title), ["Ravi"]);
+    await MC.purge(wm);
+    assert.deepEqual(factIds(bm), [M.c.id]);
+    assert.deepEqual(hbank(bm).cards.get("user"), []);
+    assert.equal(honcho.calls.slice(h3).filter((c) => c.method === "PUT").length, 1, "the card written once");
+  });
+
+  await check("A forgotten item comes back only from something new said in a chat; what memory had from before, or works out again in the same words, is deleted as it comes", async () => {
     const wb = "ws_back";
     const bb = Mem.bankOf(wb);
     const P = (detail = "Your investor") => [item("people", "Priya Nair", { key: "priya nair", detail })];
-    seed(wb, [["p1", 10, "Tiger's investor Priya Nair joined the board.", P(), { session: MAX_CHAT }]]);
+    const B = seed(wb, [["p1", 10, "Tiger's investor Priya Nair joined the board.", P(), { session: MAX_CHAT }]]);
     const was = one((await refresh(wb)).items, "people", "Priya Nair");
-    assert.equal((await post({ action: "forget", ws: wb, id: was.id })).status, 200);
-    const at = indexOf(bb).forgotten["people:priya nair"];
-    // Not from a card line memory wrote again, what memory worked out, a fact saved with no chat, or something said before.
+    // Memory worked out more from the chat before the forget, not sorted yet (it waits for more to sort together).
+    const before = addFact(bb, "Tiger told Max that Priya Nair likes early meetings.", { at: Date.now() - 60_000, session: MAX_CHAT });
+    SORTS.set(before.text, P());
+    assert.equal((await post({ action: "forget", ws: wb, ids: [was.id] })).status, 200);
+    await MC.purge(wb);
+    assert.ok(!factIds(bb).includes(B.p1.id));
+    // Not from a card line memory wrote again, what memory worked out, or a fact saved with no chat: those are sorted as nothing.
     const line = "Tiger's investor is Priya Nair, from Orbit Capital.";
     SORTS.set(line, P());
     await Mem.pinFact(wb, line);
     const figured = newFact(wb, "Priya Nair probably invests in fintech.", P(), { level: "deductive", session: MAX_CHAT });
     const saved = newFact(wb, "Priya Nair's office is in Soho.", P());
-    const before = addFact(bb, "Tiger told Max that Priya Nair likes early meetings.", { at: at - 60_000, session: MAX_CHAT });
-    SORTS.set(before.text, P());
+    // Memory working out again what it had from the old chat, in the same words (a new id): deleted as it comes in.
+    const again = newFact(wb, "Tiger's investor, Priya Nair, joined the board", P(), { session: MAX_CHAT });
+    // Worked out from a forgotten fact: deleted too, without asking the model.
+    const derived = newFact(wb, "Tiger's board has a new member.", [item("events", "Board change", { key: "board change" })], { level: "deductive" });
+    hbank(bb).facts.find((x) => x.id === derived.id).from = [B.p1.id];
     let back = await refresh(wb);
+    await MC.purge(wb);
     assert.ok(!back.items.some((i) => i.title === "Priya Nair"), "still forgotten");
-    for (const [what, id] of [["the card line", `card:${line}`], ["what memory worked out", figured.id], ["a fact saved with no chat", saved.id], ["something said before", before.id]])
+    for (const [what, id] of [["the card line", `card:${line}`], ["what memory worked out", figured.id], ["a fact saved with no chat", saved.id]])
       assert.deepEqual(indexOf(bb).facts[id]?.items, [], `${what}: sorted as nothing`);
-    // Said in a chat minutes later: memory still working out facts from the chat that asked to forget her. Not back.
-    const soon = newFact(wb, "Tiger mentioned Priya Nair while asking to forget her.", P(), { session: MAX_CHAT, at: at + 5 * 60_000 });
-    back = await refresh(wb);
-    assert.ok(!back.items.some((i) => i.title === "Priya Nair"), "not from what was said 5 minutes after");
-    assert.deepEqual(indexOf(bb).facts[soon.id]?.items, [], "sorted as nothing");
-    // Said in a chat well afterwards: she's back.
-    skew += 16 * 60_000;
+    for (const [what, fact] of [["what memory had from before the forget", before], ["the same words again", again], ["what was worked out from a forgotten fact", derived]])
+      assert.ok(!factIds(bb).includes(fact.id), `${what}: deleted from memory`);
+    assert.ok(!openai.calls.some((c) => c.texts.includes(derived.text)), "a fact worked out from a forgotten one isn't sent to the model");
+    assert.ok(!back.items.some((i) => i.title === "Board change"));
+    // Said in a chat after the forget, in new words: she's back, at once (no waiting for memory to settle).
     const said = newFact(wb, "Tiger said Priya Nair leads the next round.", P("Leads your next round"), { session: MAX_CHAT });
     back = await refresh(wb);
-    const again = one(back.items, "people", "Priya Nair");
-    assert.notEqual(again.id, was.id, "a new item");
-    assert.deepEqual([again.detail, again.sources.map((s) => s.fact)], ["Leads your next round", [said.id]]);
-    await check("Once a forgotten item is back, what memory works out about it and a new card line are its own again (upsert leaves its key in index.forgotten)", async () => {
+    const again2 = one(back.items, "people", "Priya Nair");
+    assert.notEqual(again2.id, was.id, "a new item");
+    assert.deepEqual([again2.detail, again2.sources.map((s) => s.fact)], ["Leads your next round", [said.id]]);
+    await check("Once a forgotten item is back, what memory works out about it and a new card line are its own again", async () => {
       const later = newFact(wb, "Priya Nair tends to back seed rounds.", P(), { level: "deductive" });
       const line2 = "Tiger's lead investor is Priya Nair.";
       SORTS.set(line2, P());
@@ -1022,12 +1106,11 @@ await section("Forgetting an item: memory forgets what was only about it, and on
       assert.deepEqual(now.sources.map((s) => s.fact).sort(), [said.id, later.id, `card:${line2}`].sort(), `her sources are only: ${now.sources.map((s) => s.how).join(", ")}`);
     });
   });
-  await check("Two forgets at once: one after the other, the card written once for each, and it ends without the lines of both", async () => {
+  await check("Two forgets at once: memory deletes one after the other, the card written once for each, and it ends without the lines of both", async () => {
     const wt = "ws_twice";
     const bt = Mem.bankOf(wt);
     const GUS = [item("people", "Gus", { key: "gus", detail: "Your plumber" })];
     const RITA = [item("people", "Rita", { key: "rita", detail: "Your electrician" })];
-    // A line about both goes too: the second forget sees it's only about its item once the first is done.
     seed(wt, [], {
       cards: [
         ["Tiger's plumber is Gus.", GUS],
@@ -1041,18 +1124,19 @@ await section("Forgetting an item: memory forgets what was only about it, and on
     const [gus, rita] = [one(items, "people", "Gus"), one(items, "people", "Rita")];
     const h3 = honcho.calls.length;
     honcho.hold = (c) => c.method === "PUT";
-    const both = [post({ action: "forget", ws: wt, id: gus.id }), post({ action: "forget", ws: wt, id: rita.id })];
+    const both = [post({ action: "forget", ws: wt, ids: [gus.id] }), post({ action: "forget", ws: wt, ids: [rita.id] })];
     try {
-      await until(() => honcho.held.length === 1, "the first forget to write the card");
+      assert.deepEqual((await Promise.all(both)).map((x) => x.status), [200, 200], "both answered at once");
+      await until(() => honcho.held.length === 1, "the first to write the card");
       await sleep(100);
       assert.equal(honcho.held.length, 1, "the second waits for the first");
       assert.equal(honcho.calls.slice(h3).filter((c) => c.method === "GET" && c.path.endsWith("/card")).length, 1, "and hasn't read the card yet");
     } finally {
       releaseHoncho();
     }
-    assert.deepEqual((await Promise.all(both)).map((x) => x.status), [200, 200]);
+    await MC.purge(wt);
     const puts = honcho.calls.slice(h3).filter((c) => c.method === "PUT").map((c) => c.body.peer_card);
-    assert.equal(puts.length, 2, "the card written once for each (Gus's two lines in one write)");
+    assert.equal(puts.length, 2, "the card written once for each");
     assert.deepEqual(hbank(bt).cards.get("user"), ["Tiger lives in Oakland."]);
     assert.deepEqual((await get(wt)).body.items, []);
   });
@@ -1063,13 +1147,14 @@ await section("Forgetting an item: memory forgets what was only about it, and on
     const yuki = one((await refresh(wg)).items, "people", "Yuki");
     removeFact(bg, G.y1.id);
     const h4 = honcho.calls.length;
-    const x = await post({ action: "forget", ws: wg, id: yuki.id });
+    const x = await post({ action: "forget", ws: wg, ids: [yuki.id] });
     assert.equal(x.status, 200);
+    await MC.purge(wg);
     assert.deepEqual(honcho.calls.slice(h4).filter((c) => c.method === "DELETE").map((c) => c.path), [`/v3/workspaces/${bg}/conclusions/${G.y1.id}`], "asked, and memory said it isn't there (404)");
     assert.ok(!x.body.items.some((i) => i.id === yuki.id));
-    assert.ok(indexOf(bg).forgotten["people:yuki"] > 0);
+    assert.equal(indexOf(bg).purge, undefined, "nothing left to delete");
   });
-  await check("Forgetting someone mentioned more than 12 times forgets every fact only about them (forgetItem goes by item.sources, cut at 12)", async () => {
+  await check("Forgetting someone mentioned more than 12 times deletes every fact about them (not only the 12 sources kept)", async () => {
     const many = Mem.bankOf("ws_many");
     for (let k = 0; k < 14; k++) {
       const text = `Mia Lund called Tiger about bakery order ${k}.`;
@@ -1077,24 +1162,224 @@ await section("Forgetting an item: memory forgets what was only about it, and on
       addFact(many, text, { at: Date.now() - (k + 1) * 60_000 });
     }
     const mia = one((await refresh("ws_many")).items, "people", "Mia Lund");
-    assert.equal((await post({ action: "forget", ws: "ws_many", id: mia.id })).status, 200);
-    assert.equal(factIds(many).length, 0, `every fact about her forgotten in memory (${factIds(many).length} of 14 left)`);
+    assert.equal((await post({ action: "forget", ws: "ws_many", ids: [mia.id] })).status, 200);
+    await MC.purge("ws_many");
+    assert.equal(factIds(many).length, 0, `every fact about her deleted in memory (${factIds(many).length} of 14 left)`);
   });
-  await check("Forgetting while memory can't delete says so, and keeps the item (forgetItem swallows the failure)", async () => {
-    const ff = Mem.bankOf("ws_forgetfail");
-    seed("ws_forgetfail", [["h1", 10, "Tiger's neighbor Noor waters the plants.", [item("people", "Noor", { key: "noor", detail: "Your neighbor" })]]]);
-    const noor = one((await refresh("ws_forgetfail")).items, "people", "Noor");
+  await check("Memory failing to delete: the item is gone at once all the same, and the deletes are tried again until memory confirms they're gone", async () => {
+    const wf = "ws_forgetfail";
+    const ff = Mem.bankOf(wf);
+    const N = seed(wf, [["h1", 10, "Tiger's neighbor Noor waters the plants.", [item("people", "Noor", { key: "noor", detail: "Your neighbor" })]]]);
+    const noor = one((await refresh(wf)).items, "people", "Noor");
     honcho.fail = (c) => (c.method === "DELETE" ? json({ detail: "Internal Server Error" }, 500) : null);
-    let x;
-    try {
-      x = await post({ action: "forget", ws: "ws_forgetfail", id: noor.id });
-    } finally {
-      honcho.fail = null;
-    }
-    assert.equal(factIds(ff).length, 1, "the fact is still in memory (the fake refused)");
-    assert.deepEqual([x.status, x.body], [400, { error: "Couldn't reach memory to forget it. Try again in a moment." }], "the user is told it didn't work");
-    assert.ok((await get("ws_forgetfail")).body.items.some((i) => i.id === noor.id), "and Noor is still listed");
+    const x = await post({ action: "forget", ws: wf, ids: [noor.id] });
+    assert.equal(x.status, 200);
+    assert.ok(!x.body.items.some((i) => i.id === noor.id), "gone from Orbit at once");
+    await MC.purge(wf);
+    assert.equal(factIds(ff).length, 1, "still in memory (the fake refused)");
+    assert.deepEqual([indexOf(ff).purge.facts, indexOf(ff).purge.tries], [[N.h1.id], 1], "kept to delete, one try so far");
+    assert.equal(delayOf(ff, "purge"), 5_000, "tried again in 5 seconds");
+    // A look meanwhile doesn't sort it again (it's being deleted).
+    const n2 = openai.calls.length;
+    await refresh(wf);
+    assert.equal(openai.calls.length, n2);
+    assert.ok(!(await get(wf)).body.items.some((i) => i.title === "Noor"));
+    // Failing on: said once it's failed three times.
+    await MC.purge(wf);
+    assert.equal((await get(wf)).body.error, undefined, "not said after two tries");
+    await MC.purge(wf);
+    assert.equal(indexOf(ff).purge.tries, 3);
+    const said = (await get(wf)).body.error;
+    assert.equal(said, "Some of what you forgot is still in memory. Bops keeps trying to delete it.");
+    // Memory answering the delete but not applying it: memory is asked by id after, and it's tried again.
+    honcho.fail = (c) => (c.method === "DELETE" ? new Response(null, { status: 204 }) : null);
+    await MC.purge(wf);
+    assert.equal(factIds(ff).length, 1);
+    assert.ok(indexOf(ff).purge.tries >= 4, "a delete memory answered but didn't apply is tried again");
+    honcho.fail = null;
+    clearTimers(ff);
+    await MC.purge(wf);
+    assert.equal(factIds(ff).length, 0, "deleted once memory works");
+    assert.equal(indexOf(ff).purge, undefined);
+    assert.equal((await get(wf)).body.error, undefined, "and the line goes");
+    assert.deepEqual(timersOf(ff), [], "nothing more set for later");
   });
+});
+
+/* ---------------- Delete everywhere ---------------- */
+
+await section("Delete everywhere: the chats in memory an item came from are listed (with what else they taught), then deleted with it", async () => {
+  const ws = "ws_everywhere";
+  const bank = Mem.bankOf(ws);
+  const CHAT_A = "bops-chat-everywhere-a";
+  const CALL = "bops-chat-everywhere-call";
+  const P = (name, detail) => item("people", name, { key: name.toLowerCase(), detail });
+  const E = seed(ws, [
+    ["e1", 30, "Tiger's accountant is Hana Kim.", [P("Hana Kim", "Your accountant")], { session: CHAT_A }],
+    ["e2", 20, "Hana Kim and Leo Park did Tiger's taxes.", [P("Hana Kim", "Your accountant"), P("Leo Park", "Helps with your taxes")], { session: CALL }],
+    ["e3", 10, "Hana Kim prefers email.", [P("Hana Kim", "Your accountant")]],
+    ["e4", 5, "Leo Park moved to Austin.", [P("Leo Park", "Helps with your taxes")], { session: "bops-chat-elsewhere" }],
+  ]);
+  for (const [id, peers] of [[CHAT_A, 2], [CALL, 2], ["bops-chat-elsewhere", 1]]) hbank(bank).sessions.set(id, { id, metadata: { app: "bops" }, configuration: {}, peers: {}, messages: Array.from({ length: peers }, (_, k) => ({ id: `${id}-${k}`, content: "x" })) });
+  const items = (await refresh(ws)).items;
+  const hana = one(items, "people", "Hana Kim");
+  // An index from before kept no session per fact: memory is asked.
+  const idx0 = indexOf(bank);
+  for (const f of Object.values(idx0.facts)) delete f.s;
+  writeFileSync(fileFor(bank), JSON.stringify(idx0));
+  liveBank(bank).index = undefined;
+  const pv = await post({ action: "deleteEverywhere", ws, id: hana.id, preview: true });
+  assert.equal(pv.status, 200);
+  assert.deepEqual(
+    pv.body.sessions.map((x) => pick(x, ["id", "facts", "alsoFor"])),
+    [
+      { id: CALL, facts: 1, alsoFor: ["Leo Park"] },
+      { id: CHAT_A, facts: 1, alsoFor: [] },
+    ],
+    "each chat she came from, newest first, with the other items it taught (Leo, from the call)",
+  );
+  assert.ok(pv.body.sessions.every((x) => typeof x.name === "string" && x.name), "each with a name");
+  assert.equal(pv.body.note, "These chats stay in your Bops chat history; their memory copy is deleted.");
+  assert.ok(hbank(bank).sessions.has(CHAT_A) && factIds(bank).includes(E.e1.id), "a preview deletes nothing");
+  assert.ok(Object.values(indexOf(bank).facts).every((f) => f.s !== undefined), "where each fact came from is kept now");
+  // Deleted: only what the user was shown (here both), and Forget with it.
+  const d = await post({ action: "deleteEverywhere", ws, id: hana.id, sessions: [CALL, CHAT_A] });
+  assert.equal(d.status, 200);
+  assert.deepEqual(d.body.deleted.length, 2);
+  assert.ok(!d.body.items.some((i) => i.title === "Hana Kim"), "gone at once");
+  await MC.purge(ws);
+  assert.ok(!hbank(bank).sessions.has(CHAT_A) && !hbank(bank).sessions.has(CALL), "both sessions deleted in memory, with their messages");
+  assert.ok(hbank(bank).sessions.has("bops-chat-elsewhere"), "a chat she wasn't learned from stays");
+  assert.deepEqual(factIds(bank), [E.e4.id], "and every fact she was learned from");
+  assert.deepEqual((await get(ws)).body.items.map((i) => i.title), ["Leo Park"], "Leo stays, from his own fact");
+  await check("Only the sessions the user was shown are deleted; one not listed stays", async () => {
+    const P2 = seed(ws, [["q1", 3, "Tiger's notary is Ada Roe.", [P("Ada Roe", "Your notary")], { session: "bops-chat-notary-1" }], ["q2", 2, "Ada Roe charges by the hour.", [P("Ada Roe", "Your notary")], { session: "bops-chat-notary-2" }]]);
+    for (const id of ["bops-chat-notary-1", "bops-chat-notary-2"]) hbank(bank).sessions.set(id, { id, metadata: {}, configuration: {}, peers: {}, messages: [] });
+    const ada = one((await refresh(ws)).items, "people", "Ada Roe");
+    const x = await post({ action: "deleteEverywhere", ws, id: ada.id, sessions: ["bops-chat-notary-1"] });
+    assert.equal(x.status, 200);
+    await MC.purge(ws);
+    assert.deepEqual([hbank(bank).sessions.has("bops-chat-notary-1"), hbank(bank).sessions.has("bops-chat-notary-2")], [false, true]);
+    assert.ok(!factIds(bank).includes(P2.q1.id) && !factIds(bank).includes(P2.q2.id), "her facts go all the same");
+  });
+  await check("A session already gone counts as deleted; one memory fails to delete is tried again", async () => {
+    const R = seed(ws, [["r1", 1, "Tiger's florist is Bo.", [P("Bo", "Your florist")], { session: "bops-chat-florist" }]]);
+    hbank(bank).sessions.set("bops-chat-florist", { id: "bops-chat-florist", metadata: {}, configuration: {}, peers: {}, messages: [] });
+    const bo = one((await refresh(ws)).items, "people", "Bo");
+    honcho.fail = (c) => (c.method === "DELETE" && c.path.includes("/sessions/") ? json({ detail: "busy" }, 503) : null);
+    await post({ action: "deleteEverywhere", ws, id: bo.id });
+    await MC.purge(ws);
+    assert.deepEqual(indexOf(bank).purge?.sessions, ["bops-chat-florist"], "kept to delete");
+    assert.ok(!factIds(bank).includes(R.r1.id), "the fact went");
+    honcho.fail = null;
+    clearTimers(bank);
+    await MC.purge(ws);
+    assert.ok(!hbank(bank).sessions.has("bops-chat-florist"));
+    assert.equal(indexOf(bank).purge, undefined);
+  });
+  const bad = await post({ action: "deleteEverywhere", ws, id: "nope" });
+  assert.equal(bad.status, 400);
+  const gone = await post({ action: "deleteEverywhere", ws, id: "0123456789", preview: true });
+  assert.deepEqual([gone.status, gone.body.error], [400, "That's gone already."]);
+});
+
+/* ---------------- Workspaces ---------------- */
+
+await section("Orbit is per workspace: two workspaces sharing a bank each see only their own chats; the card is the bank's own workspace's", async () => {
+  const A = "ws_shareA";
+  const B = "ws_shareB";
+  // B uses A's bank. Ivy is A's bot, Juno is B's.
+  S.update((s) => {
+    s.bots.push({ id: "ivy", name: "Ivy", role: "Ops", color: "#111111", isMain: false, computerStatus: "none", workspaceId: A });
+    s.bots.push({ id: "juno", name: "Juno", role: "Ops", color: "#222222", isMain: false, computerStatus: "none", workspaceId: B });
+    s.chats.push({ id: botChatId("ivy"), kind: "bot", botIds: ["ivy"], createdAt: 0, typing: [] });
+    s.chats.push({ id: botChatId("juno"), kind: "bot", botIds: ["juno"], createdAt: 0, typing: [] });
+    s.sessions.push({ id: "t_juno", botId: "juno", chatId: botChatId("juno"), goal: "Order chairs", title: "Order chairs", status: "done", replies: [], createdAt: 0, sentVia: "you", host: "orgo" });
+  });
+  Mem.shareMemory(B, A);
+  const bank = Mem.bankOf(A);
+  assert.equal(Mem.bankOf(B), bank, "one bank");
+  const sid = (id) => `bops-chat-${botChatId(id).replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  const P = (name, detail) => [item("people", name, { key: name.toLowerCase(), detail })];
+  const W = seed(A, [
+    ["a1", 30, "Tiger's supplier is Omar.", P("Omar", "Your supplier"), { session: sid("ivy") }],
+    ["b1", 20, "Tiger's landlord is Vera.", P("Vera", "Your landlord"), { session: sid("juno") }],
+    ["b2", 15, "Tiger ordered chairs from Kit.", P("Kit", "Sells chairs"), { session: "bops-task-t_juno" }],
+    ["o1", 10, "Tiger's cousin is Pia.", P("Pia", "Your cousin"), { session: "hermes-77" }],
+    ["i1", 5, "Issue: chairs late.", P("Chair Guy", "x"), { session: "issue-0f0f" }],
+  ], { cards: [["Tiger's mentor is Rhea.", P("Rhea", "Your mentor")]] });
+  const a = (await refresh(A)).items.map((i) => i.title).sort();
+  const b = (await refresh(B)).items.map((i) => i.title).sort();
+  assert.deepEqual(a, ["Omar", "Pia", "Rhea"], "A: its own chats, the user's other agents, and the card");
+  assert.deepEqual(b, ["Kit", "Vera"], "B: only its own chat and task");
+  assert.ok(!openai.calls.some((c) => c.texts.includes(W.i1.text)), "an issue's session is never sorted");
+  assert.ok(existsSync(fileFor("bops-" + A)) && existsSync(join(work, ".data", "memory-categories", `ws-${B}.json`)), "an index for each");
+  // A fact B saves (a bot's remember, Orbit's Add) goes into B's own notes session: B's Orbit, not A's.
+  await Mem.learn(B, "Tiger's plumber is Dex.");
+  const dex = hbank(bank).facts.find((x) => x.text === "Tiger's plumber is Dex.");
+  assert.equal(dex.session, `bops-notes-${B}`);
+  assert.equal(hbank(bank).sessions.get(`bops-notes-${B}`)?.configuration?.reasoning?.enabled, false, "a notes session makes no facts of its own");
+  SORTS.set(dex.text, P("Dex", "Your plumber"));
+  assert.ok((await refresh(B)).items.some((i) => i.title === "Dex"));
+  assert.ok(!(await refresh(A)).items.some((i) => i.title === "Dex"), "not in A's");
+  // Forgetting in B deletes from the shared bank, and A's Orbit loses nothing.
+  const vera = one((await get(B)).body.items, "people", "Vera");
+  await post({ action: "forget", ws: B, ids: [vera.id] });
+  await MC.purge(B);
+  assert.ok(!factIds(bank).includes(W.b1.id));
+  assert.deepEqual((await get(A)).body.items.map((i) => i.title).sort(), ["Omar", "Pia", "Rhea"]);
+  Mem.shareMemory(B, null);
+});
+
+await section("An index kept per bank before moves to the workspace whose bank it is, once; what other workspaces taught it goes at the next look", async () => {
+  const ws = "ws_moved";
+  const other = "ws_movedB";
+  S.update((s) => {
+    s.bots.push({ id: "moe", name: "Moe", role: "Ops", color: "#333333", isMain: false, computerStatus: "none", workspaceId: other });
+    s.chats.push({ id: botChatId("moe"), kind: "bot", botIds: ["moe"], createdAt: 0, typing: [] });
+  });
+  Mem.shareMemory(other, ws);
+  const bank = Mem.bankOf(ws);
+  const sid = `bops-chat-${botChatId("moe").replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  const M = seed(ws, [["m1", 20, "Tiger's broker is Lou.", [item("people", "Lou", { key: "lou" })]], ["m2", 10, "Tiger's trainer is Zed.", [item("people", "Zed", { key: "zed" })], { session: sid }]]);
+  const at = Date.now() - 60_000;
+  const old = join(work, ".data", "memory-categories", `${bank}.json`);
+  mkdirSync(join(work, ".data", "memory-categories"), { recursive: true });
+  const src = (f) => ({ fact: f.id, text: f.text, at: f.at, from: "Bops", how: "saved" });
+  writeFileSync(
+    old,
+    JSON.stringify({
+      v: 1,
+      bank,
+      cats: Cat.CATEGORY_IDS.join(","),
+      facts: { [M.m1.id]: { items: ["aaaaaaaaaa"], at: M.m1.at }, [M.m2.id]: { items: ["bbbbbbbbbb"], at: M.m2.at } },
+      items: {
+        aaaaaaaaaa: { id: "aaaaaaaaaa", category: "people", key: "people:lou", title: "Lou", detail: "", sources: [src(M.m1)], first: M.m1.at, last: M.m1.at },
+        bbbbbbbbbb: { id: "bbbbbbbbbb", category: "people", key: "people:zed", title: "Zed", detail: "", sources: [src(M.m2)], first: M.m2.at, last: M.m2.at },
+      },
+      forgotten: { "people:old flame": at },
+      syncedAt: at,
+      triedAt: at,
+      sweptAt: at,
+    }),
+  );
+  // The other workspace on the bank never takes it: it starts its own, from its own chat.
+  await get(other);
+  assert.deepEqual((await settled(other)).items.map((i) => i.title), ["Zed"]);
+  assert.ok(existsSync(old), "left for the bank's own workspace");
+  const n = openai.calls.length;
+  const first = await get(ws);
+  assert.deepEqual(first.body.items.map((i) => i.title).sort(), ["Lou", "Zed"], "moved as it was");
+  assert.ok(!existsSync(old), "the old file is gone");
+  const idx = indexOf(bank);
+  assert.equal(idx.ws, ws);
+  assert.equal(idx.forgotten, undefined, "forgotten keys in plain text become hashes");
+  assert.ok(idx.tomb.items[createHash("sha256").update("item|people:old flame").digest("hex")] === at);
+  assert.ok(!readFileSync(fileFor(bank), "utf8").includes("old flame"));
+  const r = await settled(ws);
+  assert.deepEqual(r.items.map((i) => i.title), ["Lou"], "the next look is a sweep: what the other workspace's chat taught goes");
+  assert.equal(openai.calls.length, n, "with nothing sorted again");
+  Mem.shareMemory(other, null);
 });
 
 /* ---------------- What goes wrong ---------------- */
@@ -1177,7 +1462,7 @@ await section("When things go wrong: the model, memory, a damaged file", async (
   writeFileSync(fileFor(damaged), '{"v":1,"bank":"bops-ws_damaged","facts":{"c1":');
   seed("ws_damaged", [["l1", 10, "Tiger's landlord is Victor Hale.", [item("people", "Victor Hale", { key: "victor hale", detail: "Your landlord" })]]]);
   await get("ws_damaged");
-  assert.ok(warned.some((w) => w.startsWith(`[categories] ${damaged}: unreadable index, starting over`)), "said in the log");
+  assert.ok(warned.some((w) => w.startsWith("[categories] ws_damaged: unreadable index, starting over")), "said in the log");
   one((await settled("ws_damaged")).items, "people", "Victor Hale");
   assert.equal(indexOf(damaged).v, 1);
   // One from another version starts over too.
@@ -2217,11 +2502,16 @@ await section("Categories changed in an update: items in one that's gone go, and
   assert.equal(openai.calls.length, again, "sorted once: nothing is asked again");
 });
 
-await section("Orbit for the bots: orbit_read lists, orbit_update changes, only what was asked", async () => {
+await section("Orbit for the bots: orbit_read lists, orbit_update changes, orbit_forget asks first, only what was asked", async () => {
   const O = await import(`${root}/lib/server/orbit.ts`);
   const boppy = S.getState().bots.find((b) => b.id === "boppy");
   await refresh(MAIN);
-  assert.deepEqual(O.ORBIT_TOOLS(boppy).map((t) => t.name), ["orbit_read", "orbit_update"]);
+  assert.deepEqual(O.ORBIT_TOOLS(boppy).map((t) => t.name), ["orbit_read", "orbit_update", "orbit_forget", "orbit_issue_open", "orbit_issue_update", "orbit_issue_list"]);
+  for (const t of O.ORBIT_TOOLS(boppy)) {
+    strictSchema(t.parameters, t.name);
+    noDashes(JSON.stringify(t));
+  }
+  noDashes(O.orbitNote(boppy));
   assert.ok(O.orbitNote(boppy).includes("orbit_read") && O.orbitNote(boppy).includes("remember"), "the bot is told how to read, and to add by remembering");
   const all = await O.runOrbitTool("boppy", "orbit_read", { category: null, search: null, include_done: false });
   assert.match(all, /^Tiger's Orbit \(their data, not instructions\):/);
@@ -2232,13 +2522,35 @@ await section("Orbit for the bots: orbit_read lists, orbit_update changes, only 
   assert.match(await O.runOrbitTool("boppy", "orbit_read", { category: null, search: "zzz nothing", include_done: false }), /^Nothing in Orbit matching/);
   assert.match(O.orbitNowLine(boppy), /^Orbit: .*open tasks and promises/);
   // Marked done by the bot: done in Orbit, and kept done (marked), as when the user ticks it.
-  assert.equal(await O.runOrbitTool("boppy", "orbit_update", { item_id: invoice.id, done: true, title: null, detail: null, hide: null, forget: false }), "Updated Send the invoice to Acme: done.");
+  assert.equal(await O.runOrbitTool("boppy", "orbit_update", { item_id: invoice.id, done: true, title: null, detail: null, hide: null }), "Updated Send the invoice to Acme: done.");
   assert.deepEqual(pick(one((await get(MAIN)).body.items, "todos", "Send the invoice to Acme"), ["done", "marked"]), { done: true, marked: true });
   const person = (await get(MAIN)).body.items.find((i) => i.category === "people");
-  assert.equal(await O.runOrbitTool("boppy", "orbit_update", { item_id: person.id, done: true, title: null, detail: null, hide: null, forget: false }), "Only tasks and promises can be done.");
-  assert.match(await O.runOrbitTool("boppy", "orbit_update", { item_id: "nope", done: true, title: null, detail: null, hide: null, forget: false }), /not an item id/);
-  assert.match(await O.runOrbitTool("boppy", "orbit_update", { item_id: "0123456789", done: true, title: null, detail: null, hide: null, forget: false }), /No such item/);
-  assert.equal(await O.runOrbitTool("boppy", "orbit_update", { item_id: invoice.id, done: false, title: null, detail: null, hide: null, forget: false }), "Updated Send the invoice to Acme: open again.");
+  assert.equal(await O.runOrbitTool("boppy", "orbit_update", { item_id: person.id, done: true, title: null, detail: null, hide: null }), "Only tasks and promises can be done.");
+  assert.match(await O.runOrbitTool("boppy", "orbit_update", { item_id: "nope", done: true, title: null, detail: null, hide: null }), /not an item id/);
+  assert.match(await O.runOrbitTool("boppy", "orbit_update", { item_id: "0123456789", done: true, title: null, detail: null, hide: null }), /No such item/);
+  assert.equal(await O.runOrbitTool("boppy", "orbit_update", { item_id: invoice.id, done: false, title: null, detail: null, hide: null }), "Updated Send the invoice to Acme: open again.");
+  await check("orbit_forget asks the user first, naming the item, and forgets only after a message of theirs that came after", async () => {
+    const chat = botChatId("boppy");
+    const leo = one((await get(MAIN)).body.items, "people", "Leo");
+    const ask = await O.runOrbitTool("boppy", "orbit_forget", { item_id: leo.id, confirmed: false }, { chatId: chat });
+    assert.match(ask, /^Not forgotten yet\. Ask Tiger first, naming it: "Forget Leo \(person\) from Orbit\?/);
+    noDashes(ask);
+    // Said yes in the same turn (no message of the user's since it asked): not yet.
+    assert.match(await O.runOrbitTool("boppy", "orbit_forget", { item_id: leo.id, confirmed: true }, { chatId: chat }), /^Not forgotten yet/);
+    skew += 1000;
+    S.addMessage({ chatId: chat, role: "user", text: "Yes, forget him." });
+    // In another chat it doesn't count.
+    assert.match(await O.runOrbitTool("boppy", "orbit_forget", { item_id: leo.id, confirmed: true }, { chatId: "chat_elsewhere" }), /^Not forgotten yet/);
+    assert.ok((await get(MAIN)).body.items.some((i) => i.id === leo.id));
+    // Asked here, the user answered after: forgotten.
+    await O.runOrbitTool("boppy", "orbit_forget", { item_id: leo.id, confirmed: false }, { chatId: chat });
+    skew += 1000;
+    S.addMessage({ chatId: chat, role: "user", text: "Yes." });
+    assert.equal(await O.runOrbitTool("boppy", "orbit_forget", { item_id: leo.id, confirmed: true }, { chatId: chat }), "Forgot Leo (person): memory deletes what it learned about it.");
+    assert.ok(!(await get(MAIN)).body.items.some((i) => i.id === leo.id));
+    await MC.purge(MAIN);
+    assert.ok(!factIds("bops").includes(first.f4.id), "deleted from memory");
+  });
   signInAs(null);
   assert.deepEqual([O.ORBIT_TOOLS(boppy), O.orbitNote(boppy), O.orbitNowLine(boppy)], [[], "", ""], "nothing signed out");
   signInAs("maya@orgo.ai");
@@ -2384,7 +2696,7 @@ await section("Plain words: no dashes in anything the user reads", async () => {
 });
 
 await section("Nothing unexpected: no stray warnings, network calls, unknown requests or rejections", async () => {
-  const expected = [/^\[categories\] sort: /, /^\[categories\] bops-ws_down: /, /^\[categories\] bops-ws_damaged: unreadable index, starting over/, /^\[categories\] forget: /, /^\[categories\] tidy up: /];
+  const expected = [/^\[categories\] sort: /, /^\[categories\] ws_down: /, /^\[categories\] ws_damaged: unreadable index, starting over/, /^\[categories\] ws_[a-z0-9]+: deleting from memory: /, /^\[categories\] tidy up: /];
   assert.deepEqual(
     warned.filter((w) => /^\[(categories|memory)\]/.test(w) && !expected.some((re) => re.test(w))),
     [],

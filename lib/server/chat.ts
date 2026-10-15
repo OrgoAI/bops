@@ -7,7 +7,7 @@ import { callApi, callApiTool, usableKeys, type CallApiDone } from "./keys";
 import { appsNote, placesNote } from "./skills";
 import { DATA_TOOL_NAMES, DATA_TOOLS, dataNote, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmNote, crmNowLine, runCrmTool } from "./crm";
-import { ORBIT_TOOL_NAMES, ORBIT_TOOLS, orbitNote, orbitNowLine, runOrbitTool } from "./orbit";
+import { ORBIT_OWNER_ONLY, ORBIT_TOOL_NAMES, ORBIT_TOOLS, orbitNote, orbitNowLine, runOrbitTool } from "./orbit";
 import { openaiClient } from "./openai-client";
 import { contactLine, createBot } from "./bots";
 import { creditsOut, noteOutOfCredit, OUT_OF_CREDIT } from "./cloud";
@@ -713,10 +713,10 @@ type TurnOptions = {
 
 /**
  * What a routine's run can't do: set up or change standing things, save to the user's memory (no one is
- * there to say it's right, and what it read may be a stranger's), talk in the chat, or ask a teammate.
- * Those are for the user's own turns.
+ * there to say it's right, and what it read may be a stranger's), forget from it, talk in the chat, or ask
+ * a teammate. Those are for the user's own turns. (It can open and update Orbit's issues.)
  */
-const NOT_IN_BACKGROUND = new Set(["react", "schedule", "manage_routine", "watch", "stop_watch", "create_skill", "update_skill", "remember", "make_page", "make_image", "hand_off", "tell_task", "ask_teammate", "create_bot"]);
+const NOT_IN_BACKGROUND = new Set(["react", "schedule", "manage_routine", "watch", "stop_watch", "create_skill", "update_skill", "remember", "make_page", "make_image", "hand_off", "tell_task", "ask_teammate", "create_bot", ...ORBIT_OWNER_ONLY]);
 
 /**
  * What a turn someone else started (an email, a text or a call from outside) never has: anything that sets
@@ -1602,7 +1602,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           .then((out) => (bring(answerText(out)), out))
           .catch(failed);
       if (CRM_TOOL_NAMES.has(name)) return runCrmTool(botId, name, a, { chatId }).catch(failed);
-      if (ORBIT_TOOL_NAMES.has(name)) return runOrbitTool(botId, name, a).catch(failed);
+      if (ORBIT_TOOL_NAMES.has(name)) return runOrbitTool(botId, name, a, { chatId, routineId: bg?.routineId }).catch(failed);
       if (name === "ask_teammate") return askTeammate(b, String(a.bot_id ?? ""), String(a.question ?? ""), chatId, asked).catch((e: Error) => `Couldn't reach them: ${e.message}`);
       if (name === "web_fetch") {
         const got = await pageForBot(String(a.url ?? ""), (key) => seenKeys.has(key), notSeen);

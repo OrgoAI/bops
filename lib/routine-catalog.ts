@@ -8,7 +8,8 @@ import type { Schedule, Workspace, WorkspaceTag } from "@/lib/types";
  *
  * Every starter runs as a chat run (the bot's tools, no computer): use_app for Connected Apps, call_api
  * for vault keys, Orbit and memory for people. They read; anything that sends, saves, labels, posts,
- * changes or pays asks the user first. An "every" starter, and every monitor, is quiet: it says something
+ * changes or pays asks the user first. The support watches keep Orbit's issues (orbit_issue_open), one
+ * per thread or ticket, by its id there. An "every" starter, and every monitor, is quiet: it says something
  * only when something needs the user.
  *
  * Imported by the window and the server alike: no server imports here.
@@ -64,6 +65,9 @@ const READS_ONLY = "Writes always ask me first.";
 const MAIL_NEVER = ["Send an email", "Save a draft in Gmail", "Label, archive or delete mail"];
 const CHAT_NEVER = (app: string) => [`Post or reply in ${app}`, "React to or edit a message"];
 const SORT = "Sort with the tags listed with your routines (the workspace's own tags too).";
+/** How a support starter keeps track: one issue in Orbit per thread or ticket, opened or updated by its id there. */
+const ISSUE = (app: string, what: string, id: string) =>
+  `Keep each one as an issue in Orbit: orbit_issue_open with source_app "${app}" and external_id ${id}, with the title, a short summary, the tags, the customer and a link, for ${what}. It updates the issue already open for that ${id.startsWith("the ticket") ? "ticket" : "thread"} instead of making another, so call it for every new message on it; when one is answered or fixed, orbit_issue_update its status.`;
 
 /** Slack and Discord work the same way: one pair of starters each. */
 const chatApp = (app: "slack" | "discord", name: string): RoutineTemplate[] => [
@@ -71,7 +75,7 @@ const chatApp = (app: "slack" | "discord", name: string): RoutineTemplate[] => [
     id: `${app}-support-watch`,
     app,
     title: `${name} support watch`,
-    summary: "Tags new threads, drafts answers, and tells you at once about an outage.",
+    summary: "Tags new threads, drafts answers, keeps an issue in Orbit for each, and tells you at once about an outage.",
     when: "Every 15 minutes",
     kind: "monitor",
     defaultOn: true,
@@ -80,8 +84,9 @@ const chatApp = (app: "slack" | "discord", name: string): RoutineTemplate[] => [
       `Read the new messages and threads in my ${name} channels since the last run (find_app_actions, then use_app).`,
       "Tag each new thread Customer, Bug, Outage or FYI.",
       "For a question someone is still waiting on, write a short draft answer in your reply, in my voice.",
+      ISSUE(app, "each thread tagged Customer, Bug or Outage (not FYI)", `the thread's id in ${name}`),
       "Put anything tagged Outage first.",
-      `Read only: don't post, reply, react or change anything in ${name}. ${READS_ONLY}`,
+      `Read only in ${name}: don't post, reply, react or change anything there. ${READS_ONLY}`,
       "If nothing new needs me, answer NOTHING.",
     ].join(" "),
     tags: ["Customer", "Bug", "Outage", "FYI"],
@@ -123,8 +128,9 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
       `${SORT} Give each email one tag.`,
       "Look people up in Orbit (orbit_read) and memory (recall) when it helps to know who they are.",
       "For each email that needs an answer from me, write a short draft reply in my voice in your answer.",
+      ISSUE("gmail", "each email from a customer that needs me, an outage or a bug report", "the email's thread id"),
       "Answer with one short summary: what needs me first, then a line per tag that has mail, then the drafts.",
-      `Read only: don't send, save drafts, label, archive or delete anything. ${READS_ONLY}`,
+      `Read only in Gmail: don't send, save drafts, label, archive or delete anything. ${READS_ONLY}`,
     ].join(" "),
     tags: ALL_TAGS,
     neverWithoutAsking: MAIL_NEVER,
@@ -133,7 +139,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     id: "gmail-alerts",
     app: "gmail",
     title: "Outage and customer alerts",
-    summary: "Checks your mail every half hour and speaks up only for an outage or a customer who needs you.",
+    summary: "Checks your mail every half hour, keeps an issue in Orbit for an outage or a customer who needs you, and speaks up only then.",
     when: "Every 30 minutes",
     kind: "schedule",
     defaultOn: true,
@@ -141,7 +147,8 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     goal: [
       "Check my Gmail for mail from the last 30 minutes (find_app_actions, then use_app).",
       "Tell me only about an outage, an incident or downtime (Outage), or a customer who needs attention (Customer): who it's from, what happened, and one line on what to do.",
-      `Read only: don't send, label or change anything. ${READS_ONLY}`,
+      ISSUE("gmail", "each of those, urgent for an outage", "the email's thread id"),
+      `Read only in Gmail: don't send, label or change anything. ${READS_ONLY}`,
       "If there's none, answer NOTHING.",
     ].join(" "),
     tags: ["Outage", "Customer"],
@@ -250,7 +257,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     id: "plain-support-queue",
     app: "PLAIN_API_KEY",
     title: "Support queue watch",
-    summary: "Watches your Plain queue and tells you about new or waiting threads.",
+    summary: "Watches your Plain queue, keeps an issue in Orbit for each thread, and tells you about new or waiting ones.",
     when: "Every 15 minutes",
     kind: "monitor",
     defaultOn: true,
@@ -259,7 +266,8 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
       "With call_api on the Plain key, read the support queue with a GraphQL query (POST /graphql/v1 with a query, never a mutation):",
       "threads with status TODO, newest first, with their customer, title and when they came in.",
       "Tell me about threads that are new since the last run, or waiting more than 2 hours, tagged Customer, Bug or Outage, with a short draft answer for each.",
-      `Read only: never assign, reply to, or change a thread. ${READS_ONLY}`,
+      ISSUE("plain", "each of those threads, its status Waiting on us while the customer waits", "the ticket's thread id in Plain"),
+      `Read only in Plain: never assign, reply to, or change a thread. ${READS_ONLY}`,
       "If nothing new or waiting, answer NOTHING.",
     ].join(" "),
     tags: ["Customer", "Bug", "Outage"],
