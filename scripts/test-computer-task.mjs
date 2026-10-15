@@ -455,7 +455,8 @@ const bashBefore = bash.length;
 const dozed = await task("Look at the screen", "Look");
 assert.equal(S.session(dozed).status, "done", `it finished (${S.session(dozed).error ?? ""})`);
 const shots = orgoCalls.slice(sinceShot).filter((c) => c === `GET /computers/${COMPUTER}/screenshot`).length;
-assert.equal(shots, 2, "the screenshot taken again once it woke");
+// Two for the step (the second once it woke), and one as it let go of its screen: its last frame (sessions.ts leaveScreen).
+assert.equal(shots, 3, "the screenshot taken again once it woke, then its last frame");
 assert.ok(bash.slice(bashBefore).includes("true"), "woken by an action");
 assert.equal(pc.status, "running");
 const zshot = asked.at(-1).input.find((i) => i.type === "computer_call_output");
@@ -488,6 +489,51 @@ await task("Book a table for 2", "Table for 2");
 assert.deepEqual(asked.at(-1).tools.map((t) => t.name ?? t.type).filter((n) => n.startsWith("crm_")), [], "no CRM tools outside Orgo's team");
 assert.doesNotMatch(asked.at(-1).instructions, /Bops CRM:/, "and no CRM note");
 S.update((st) => (st.account = { user: USER, signedInAt: Date.now() }));
+
+/* ---------------- Screens: who left them, holds, and picking up where it left off (lib/screens.ts) ---------------- */
+
+const { existsSync: frameExists } = await import("node:fs");
+const F = await import(`${root}/lib/server/frames.ts`);
+// A task that let go of its screen: the screen says who left it and when, and the thread keeps its last frame.
+answers.push(() => response("resp_l1", [said("Done.")]));
+const leaver = S.session(await task("Check the weather", "Weather"));
+const leftOn = leaver.lastDisplay;
+const left = S.getState().screenLog?.[`${main.id}:${leftOn}`];
+assert.deepEqual([left?.sessionId, left?.botId, left?.title], [leaver.id, main.id, "Weather"], "the screen remembers who left it");
+assert.ok(Date.now() - left.at < 60_000);
+assert.ok(leaver.lastFrameAt && frameExists(F.framePath(leaver.id)), "its last frame is kept");
+assert.equal(F.framePath("../../etc/passwd"), null, "only a thread's id names a frame");
+
+// A thread that stopped to ask the user keeps its screen: a new task takes another one while one is free.
+const heldAt = 100;
+S.update((st) =>
+  st.sessions.push({ id: "ses_heldq", botId: main.id, chatId: `bot:${main.id}`, sentVia: "you", title: "Asking you", goal: "x", host: "orgo", status: "done", waitingOnYou: true, endedAt: Date.now(), lastDisplay: heldAt, steps: [], replies: [], createdAt: Date.now() }),
+);
+answers.push(() => response("resp_h1", [said("Done.")]));
+const fresh = S.session(await task("Find a restaurant", "Restaurant"));
+assert.notEqual(fresh.lastDisplay, heldAt, `a held screen is left for its thread (got ${fresh.lastDisplay})`);
+S.update((st) => (st.sessions = st.sessions.filter((x) => x.id !== "ses_heldq")));
+
+// A thread picked up again whose screen is busy waits for it a while, then moves, and is told, with the page it was on.
+X.screenTiming.homeWaitMs = 300;
+S.update((st) => {
+  st.sessions.push({ id: "ses_busyq", botId: main.id, chatId: `bot:${main.id}`, sentVia: "you", title: "Busy elsewhere", goal: "x", host: "orgo", status: "running", display: 101, steps: [], replies: [], createdAt: Date.now() });
+  st.sessions.push({
+    id: "ses_moveq", botId: main.id, chatId: `bot:${main.id}`, sentVia: "you", title: "Hotels", goal: "Find hotels", host: "orgo", status: "done", runner: "computer", responseId: "resp_before",
+    effort: "medium", lastDisplay: 101, lastPage: { url: "https://www.expedia.com/Hotel-Search?city=Spokane", title: "Spokane hotels" }, steps: [], replies: [], createdAt: Date.now(), endedAt: Date.now(), answer: "Found three.",
+  });
+});
+answers.push(() => response("resp_m1", [said("Picked up again.")]));
+const askedBefore = asked.length;
+X.replyToSession("ses_moveq", "Now book the cheapest one");
+await until(() => S.session("ses_moveq").steps.some((st) => st.detail === "Waiting for screen 2, where it left off"), "it to wait for its screen");
+await until(() => S.session("ses_moveq").status === "done" && asked.length > askedBefore, "it to move and finish");
+const movedTurn = userText(asked[askedBefore]);
+assert.match(movedTurn, /^\(From Bops: you're on screen \d now; screen 2, where you left off, was busy\. You were on "Spokane hotels" \(https:\/\/www\.expedia\.com\/Hotel-Search\?city=Spokane\): open it again before you go on\.\)/);
+assert.match(movedTurn, /Now book the cheapest one/);
+assert.notEqual(S.session("ses_moveq").lastDisplay, 101, "it moved");
+assert.equal(S.session("ses_moveq").screenMoved, undefined, "said once");
+S.update((st) => (st.sessions = st.sessions.filter((x) => !["ses_busyq", "ses_moveq"].includes(x.id))));
 
 /* ---------------- AI credit used up ---------------- */
 

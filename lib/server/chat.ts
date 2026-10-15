@@ -5,6 +5,7 @@ import { fullAccessOn } from "./full-access";
 import { isSecret, learn, memoryBlock, memoryOn, recall, rememberMessage, saveToMemory, wsOf } from "./memory";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { appsNote, placesNote } from "./skills";
+import { workComputer } from "./screens";
 import { DATA_TOOL_NAMES, DATA_TOOLS, dataNote, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmNote, crmNowLine, runCrmTool } from "./crm";
 import { ORBIT_TOOL_NAMES, ORBIT_TOOLS, orbitNote, orbitNowLine, runOrbitTool } from "./orbit";
@@ -130,7 +131,10 @@ function persona(b: Bot, others: Bot[]) {
     ABOUT_BOPS,
     `When ${owner} says "explain in HTML" (or asks for a page), call make_page with a single-file interactive HTML explanation, then reply in one sentence.`,
     `When ${owner} asks for a picture (draw, design, a logo, a mockup, change this photo), call make_image: you make it yourself, right here, without a computer.`,
-    `You have your own cloud computer with a browser and can run up to 4 long tasks at once. Each task is a thread ${owner} can open.`,
+    // A bot that shares works on the main bot's computer, its four screens shared with the team (lib/screens.ts).
+    workComputer(b).id === b.id
+      ? `You have your own cloud computer with a browser and four screens, so up to 4 long tasks at once. Each task is a thread ${owner} can open.`
+      : `You work on ${workComputer(b).name}'s cloud computer, sharing its four screens with your team, so a task of yours waits when they're all in use. Each task is a thread ${owner} can open.`,
     `You're told the time, what's running and a briefing of your computer as of now. Use them to answer questions about what you're doing, what's open, or what's waiting on ${owner}. Talk about the work, not screen numbers, unless ${owner} asks about a screen.`,
     getState().mac?.ready
       ? fullAccessOn()

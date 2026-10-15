@@ -352,6 +352,12 @@ export type Session = {
   display?: number;
   /** The screen it last held, so a finished session can still show where it left off. */
   lastDisplay?: number;
+  /** The page it was on when it last let go of its screen (lib/screens.ts): where it left off, for it and for the user. */
+  lastPage?: { url: string; title?: string };
+  /** When its last frame was kept (the screen as it let go: /api/frames?session=<id>), so a finished thread can show where it stopped. */
+  lastFrameAt?: number;
+  /** Picked up again on another screen than it left (its own was busy): the next turn tells it, with the page it was on. Then cleared. */
+  screenMoved?: { from: number; to: number };
   agentSessionId?: string;
   /** "computer": it runs on the Responses API's computer tool (lib/server/computer-task.ts), not an Agents API session. */
   runner?: "computer";
@@ -464,6 +470,9 @@ export const BLOCKER_ASK: Record<Blocker, string> = {
 };
 
 /** What's on a bot's screen, as read from the mirror: where it is, what stands in the way, and whether it's private. */
+/** A thread letting go of a screen: who, on what, and the page it left there. */
+export type ScreenLeft = { sessionId: string; botId: string; title: string; page?: { url: string; title?: string }; at: number };
+
 export type ScreenRead = {
   url: string;
   title: string;
@@ -499,6 +508,11 @@ export type AppState = {
   takeover?: Takeover;
   /** Latest read of each watched screen, keyed `${botId}:${display}`. */
   screens?: Record<string, ScreenRead>;
+  /**
+   * Who last let go of each screen, keyed `${computer bot id}:${display}`: the thread, its bot, and the
+   * page it left there (lib/screens.ts screenMap shows it as "left by …" for half an hour).
+   */
+  screenLog?: Record<string, ScreenLeft>;
   /** Screens a bot keeps open on a site and keeps an eye on for the user (an X inbox, LinkedIn messages). */
   watches?: Watch[];
   /** Logins bots can sign in with. Only what's safe to show is here; secrets live in the Keychain. */
