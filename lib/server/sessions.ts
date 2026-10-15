@@ -19,7 +19,8 @@ import { fullAccessOn } from "./full-access";
 import { onPostgres } from "./persist";
 import { chose, decide, yes } from "./decide";
 import { watchScreen } from "./screen-watch";
-import { forgetScreens, pageAt, sameComputer, screenEndpoint, screenPages, workComputer } from "./screens";
+import { forgetScreens, listedScreenId, pageAt, sameComputer, screenEndpoint, screenPages, workComputer } from "./screens";
+import { saveFrame } from "./frames";
 import { namesSite, onASite } from "@/lib/task-sites";
 import { siteOf } from "@/lib/watch-sites";
 import { ensureTailnet } from "./tailnet";
@@ -40,6 +41,7 @@ import { addMessage, bot, getState, id, ownerLine, ownerName, patchSession, sess
 import { recordTokens, usageTags } from "./usage";
 import { computerToolOn, computerTurn, PAGE_RUNNER } from "./computer-task";
 import { ASKS_AGAIN, LIGHT, logRoute, routeTask, speedFor, taskConfig } from "./routing";
+import { holdsScreen, screenLabel, screenNo } from "@/lib/screens";
 import { watching } from "./presence";
 import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours";
 
@@ -508,6 +510,10 @@ const notBefore = new Map<string, number>();
 const SAME_SITE_WAIT_MS = 3 * 60_000;
 /** When each queued task started waiting for the screen already on its site. */
 const siteWait = new Map<string, number>();
+/** How long a thread picked up again waits for its own screen (where it left off) while other work uses it, before moving. Tests shorten it. */
+export const screenTiming = { homeWaitMs: 60_000 };
+/** When each thread picked up again started waiting for its own screen. */
+const homeWait = new Map<string, number>();
 
 /**
  * Where a new task goes, among its computer's screens (or its bot's Chromes on the Mac): the free one
@@ -607,12 +613,27 @@ async function pump() {
       // Watched screens stay on their site; only a thread started from one runs there.
       let held = [...using, ...watched.filter((w) => w !== mine).map((w) => w.display)];
       if (!mine && held.length >= MAX_SCREENS) continue;
+      // Screens other threads keep while they wait on the user (lib/screens.ts holdsScreen): new work takes
+      // another while one is free, so an answer picks its thread up where it was.
+      const soft = softHolds(b.id, s.id).filter((d) => !held.includes(d));
+      const open = (d: number) => !held.includes(d) && (!soft.includes(d) || DISPLAYS.every((x) => held.includes(x) || soft.includes(x)));
       // A thread picked up again waits for the screen its agent was set up for (its browser tools drive
       // that screen's Chrome): on another, Bops would watch, claim and show one screen while the bot
       // works on the other, and the vault would never see its sign-in pages. Not for a watched screen,
       // which stays on its site: then it starts over on another (run: a fresh agent session).
       const own = s.agentSessionId ? s.env?.display : undefined;
       if (own !== undefined && !mine && held.includes(own) && !watched.some((w) => w.display === own)) continue;
+      // A thread picked up again waits a while for its own screen (where it left off) before moving to another.
+      const home = !mine && own === undefined ? s.lastDisplay : undefined;
+      if (home !== undefined && held.includes(home) && !watched.some((w) => w.display === home)) {
+        const since = homeWait.get(s.id) ?? Date.now();
+        if (!homeWait.has(s.id)) {
+          homeWait.set(s.id, since);
+          step(s.id, "note", `Waiting for ${screenLabel(home)}, where it left off`);
+          setTimeout(() => void pump(), screenTiming.homeWaitMs + 100);
+        }
+        if (Date.now() - since < screenTiming.homeWaitMs) continue;
+      }
       // Pick up where it left off when that screen is free.
       let display = mine
         ? mine.display
@@ -620,7 +641,7 @@ async function pump() {
           ? own
           : s.lastDisplay !== undefined && !held.includes(s.lastDisplay)
             ? s.lastDisplay
-            : DISPLAYS.find((d) => !held.includes(d))!;
+            : DISPLAYS.find(open)!;
       // A new task: the screen already on its site, if there is one (never a watched screen: those stay on theirs).
       if (!mine && own === undefined && s.lastDisplay === undefined) {
         const pages = await screenPages(b);
@@ -630,14 +651,20 @@ async function pump() {
         if (held.length >= MAX_SCREENS || session(s.id)?.status !== "queued") continue;
         const pick = pickBySite(
           s,
-          DISPLAYS.map((d, i) => ({ at: d, free: !held.includes(d), page: now.watched.some((w) => w.display === d) ? null : pages[i] })),
+          DISPLAYS.map((d, i) => ({ at: d, free: open(d) && !held.includes(d), page: now.watched.some((w) => w.display === d) ? null : pages[i] })),
         );
         if (pick === "wait" || pick === undefined) continue;
         display = pick;
       }
       siteWait.delete(s.id);
-      patchSession(s.id, { status: "starting", display, lastDisplay: display, startedAt: s.startedAt ?? Date.now() });
-      void run(s.id).finally(() => {
+      homeWait.delete(s.id);
+      // Picked up again on another screen than it left: its next turn says so, with the page it was on.
+      const moved = s.lastDisplay !== undefined && display !== s.lastDisplay && !mine && !!s.responseId ? { from: screenNo(s.lastDisplay), to: screenNo(display) } : undefined;
+      patchSession(s.id, { status: "starting", display, lastDisplay: display, startedAt: s.startedAt ?? Date.now(), ...(moved ? { screenMoved: moved } : {}) });
+      const at = display;
+      void run(s.id).finally(async () => {
+        // Where it left off (the page, a last frame) before the screen is anyone else's.
+        await leaveScreen(s.id, at).catch((e: Error) => console.warn(`[screens] ${s.id}: ${e.message}`));
         patchSession(s.id, { display: undefined });
         void pump();
       });
@@ -646,6 +673,47 @@ async function pump() {
     pumping = false;
     if (pumpAgain) void pump();
   }
+}
+
+/** Screens on `botId`'s computer that other threads keep while they wait on the user (lib/screens.ts holdsScreen). */
+function softHolds(botId: string, except: string): number[] {
+  return getState()
+    .sessions.filter((x) => x.id !== except && sameComputer(x.botId, botId) && holdsScreen(x))
+    .map((x) => x.lastDisplay!)
+    .filter((d) => d !== undefined);
+}
+
+/** What the screen watch last read on a screen (screen-watch.ts), as a page. */
+function lastRead(botId: string, display: number): { url: string; title?: string } | null {
+  const r = getState().screens?.[`${botId}:${display}`];
+  return r?.url ? { url: r.url, ...(r.title ? { title: r.title } : {}) } : null;
+}
+
+/** How long a thread letting go of its screen waits for its page and last frame before the screen is free. */
+const LEAVE_MS = 5_000;
+
+/**
+ * A thread letting go of its screen: the page it's on (its lastPage, and the screen's "left by" in
+ * screenLog) and its last frame, kept on this Mac (~/.bops, /api/frames). Read from the screen's own
+ * Chrome and Orgo, quickly or not at all: the screen frees after LEAVE_MS either way.
+ */
+async function leaveScreen(sessionId: string, display: number) {
+  const s = session(sessionId);
+  const b = s && bot(s.botId);
+  if (!s || !b || s.runsOn === "mac" || s.host !== "orgo") return;
+  const c = workComputer(b);
+  const timeout = <T>(p: Promise<T>) => Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), LEAVE_MS))]);
+  const [page, frame] = await Promise.all([
+    // Its own Chrome's page (over the tailnet), else what the screen watch last read there.
+    timeout(pageNow(s).catch(() => null)).then((p) => p ?? lastRead(s.botId, display)),
+    c.computerId ? timeout(orgo.screenshot(c.computerId, listedScreenId(c.computerId, display), 0.5, "jpeg").catch(() => null)) : Promise.resolve(null),
+  ]);
+  const kept = frame ? saveFrame(sessionId, Buffer.from(frame as Uint8Array)) : false;
+  const left = { sessionId, botId: s.botId, title: s.title, ...(page ? { page } : {}), at: Date.now() };
+  update((state) => {
+    state.screenLog = { ...(state.screenLog ?? {}), [`${c.id}:${display}`]: left };
+  });
+  patchSession(sessionId, { ...(page ? { lastPage: page } : {}), ...(kept ? { lastFrameAt: Date.now() } : {}) });
 }
 
 /**
@@ -1766,7 +1834,7 @@ async function run(sessionId: string) {
     // the cloud, with what it did there (cloudRecord).
     const moved = !resuming && s.movedFrom ? await cloudRecord(s.movedFrom, movePages.get(sessionId)) : "";
     movePages.delete(sessionId);
-    let input: string | undefined = resuming ? takeReplies(sessionId) : freshStart(sessionId, moved);
+    let input: string | undefined = resuming ? withMovedNote(sessionId, takeReplies(sessionId)) : freshStart(sessionId, moved);
     while (input) {
       if (stopped.has(sessionId)) throw new Error("Stopped by you");
       // A new turn starts clean; the screen watch raises the blocker again if it's still there.
@@ -1879,10 +1947,27 @@ function freshStart(sessionId: string, moved = "") {
     moved,
     s.answer ? `You worked on this before, in an earlier session you can't see now. Your last answer was:\n${s.answer}` : "",
     replies ? `Since then ${ownerName()} said${passedOn ? " (what's marked as passed on from outside Bops is someone else's)" : ""}:\n${replies}` : "",
+    s.answer && s.lastPage ? `You left off on ${pageWords(s.lastPage)}.` : "",
     s.answer || replies ? "Look at the screen as it is now and carry on from there." : "",
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+/** A page as a bot reads it: its title and address. */
+const pageWords = (p: { url: string; title?: string }) => (p.title ? `"${p.title.slice(0, 80)}" (${p.url})` : p.url);
+
+/**
+ * A thread picked up again on another screen than it left (its own was busy past screenTiming.homeWaitMs): its turn
+ * starts by saying so, with the page it was on, so it opens that again instead of starting over. Said once.
+ */
+function withMovedNote(sessionId: string, input: string | undefined): string | undefined {
+  const s = session(sessionId);
+  const m = s?.screenMoved;
+  if (!s || !m || !input) return input;
+  patchSession(sessionId, { screenMoved: undefined });
+  const where = s.lastPage ? ` You were on ${pageWords(s.lastPage)}: open it again before you go on.` : " Pick up where you left off.";
+  return `(From Bops: you're on screen ${m.to} now; screen ${m.from}, where you left off, was busy.${where})\n\n${input}`;
 }
 
 /** The user's replies not yet sent to the agent, joined into one turn. */
@@ -2354,7 +2439,6 @@ export function returnControl() {
   void pump();
 }
 
-export const screenLabel = (display: number) => `screen ${DISPLAYS.indexOf(display) + 1}`;
-/** Screens are numbered 1-4 for agents and the user (displays :100, :101, :102, :99). */
-const screenNo = (display: number) => DISPLAYS.indexOf(display) + 1;
+// Screens are numbered 1-4 for agents and the user (lib/screens.ts): one numbering, everywhere.
+export { screenLabel };
 export { screenId };

@@ -1,5 +1,6 @@
 "use client";
 
+import { screenNo as screenNumber } from "@/lib/screens";
 import { useEffect, useRef, useState } from "react";
 import { DISPLAYS, live, MAIN_WORKSPACE, workspaceOf, type AppState, type Bot, type Chat, type Logo, type Session } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
@@ -18,7 +19,7 @@ export const post = async (url: string, body: unknown = {}, method = "POST") => 
   return res;
 };
 
-export const screenNo = (display?: number) => (display === undefined ? undefined : DISPLAYS.indexOf(display) + 1);
+export const screenNo = (display?: number) => (display === undefined ? undefined : screenNumber(display));
 
 export function ago(t: number) {
   const s = Math.max(0, Math.round((Date.now() - t) / 1000));

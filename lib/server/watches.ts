@@ -1,4 +1,5 @@
 import "server-only";
+import { screenNo } from "@/lib/screens";
 import { LIGHT, speedFor, tierParam } from "./routing";
 import { trackServerEvent } from "./analytics";
 import { botChatId, DISPLAYS, live, MAIN_WORKSPACE, workspaceOf, type Watch } from "@/lib/types";
@@ -48,7 +49,6 @@ function busy(botId: string, display: number) {
   return state.sessions.some((s) => sameComputer(s.botId, botId) && live(s) && (s.display === display || s.helperScreens?.includes(display)));
 }
 
-const screenNo = (display: number) => DISPLAYS.indexOf(display) + 1;
 
 const client = openaiClient();
 /** A site's name and a few words to watch for: Luna, without reasoning (routing.ts LIGHT), as fast as Luna goes (the user is waiting). */
