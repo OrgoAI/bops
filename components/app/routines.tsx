@@ -6,7 +6,8 @@ import { describeSchedule } from "@/cloud/schedule";
 import { sameApp, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
 import type { AppState, Bot, Schedule, Watch } from "@/lib/types";
 import { AppLogo, botApps } from "./apps";
-import { appNameOf, autopilotOf, FilterPill, filterRoutines, monitorNeedsYou, RoutineList, scheduleNeedsYou, sourceApps, TagChips, timeOf, useOpenRow } from "./autopilot";
+import { appNameOf, autopilotOf, FilterPill, filterRoutines, monitorNeedsYou, RoutineList, scheduleNeedsYou, sourceApps, TagChips, useOpenRow } from "./autopilot";
+import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
 import { Mascot, Spinner } from "./mascot";
 import { Chevron, small, undash } from "./side-group";
 import { post, teamOf, useNow } from "./ui";
@@ -14,7 +15,7 @@ import { post, teamOf, useNow } from "./ui";
 /*
  * Routines from a Connected App. Once an app is connected, the bot that handles it offers what it can
  * do there on its own (lib/routine-catalog.ts): a popover on the app's icon, a row each, the usual ones
- * ticked, each opening in place to say what it does, when (a time to change), its tags, what it never
+ * ticked, each opening in place to say what it does, when (its suggested times, or any other), its tags, what it never
  * does without asking, and the skill it follows. "Set up N" makes them, owned by that bot, marked with
  * the app they came from. It opens by itself when a connect just finished (AppState.suggest, one at a
  * time, until it's answered or put off), and again from "Add routines". In the Vault it first asks which
@@ -150,23 +151,32 @@ export function RoutineSuggest({
   // What it runs already counts as it's made (some of a Set up can fail, and the popover stays for those).
   const offers = useOffers(state, app, botId)?.map((t) => (t.already || !botId || !runsAlready(state, botId, app, t.id) ? t : { ...t, already: true })) ?? null;
   const [ticks, setTicks] = useState<Record<string, boolean>>({});
-  const [times, setTimes] = useState<Record<string, string>>({});
+  // When each one runs, as changed here (its schedule, the zone its times are in).
+  const [whens, setWhens] = useState<Record<string, { schedule?: Cadence; zone?: string }>>({});
   const [openId, setOpenId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const tz = state.owner?.timeZone;
+  // Before each meeting is offered when the app is Google Calendar or the bot uses it.
+  const calendar = sameApp(app, "googlecalendar") || (!!bot && botApps(state, bot).some((x) => sameApp(x.app, "googlecalendar")));
   const box = useRef<HTMLDivElement>(null);
   const place = usePlace(anchor, WIDTH);
 
   const ticked = (t: Offer) => !t.already && (ticks[t.id] ?? t.defaultOn);
   const picked = (offers ?? []).filter(ticked);
+  /** Its schedule as picked here, when that isn't the starter's own. */
   const scheduleOf = (t: Offer): Schedule | undefined => {
-    const time = times[t.id];
-    return t.schedule && time && timeOf(t.schedule) && time !== timeOf(t.schedule) ? ({ ...t.schedule, time } as Schedule) : undefined;
+    const s = whens[t.id]?.schedule;
+    return t.schedule && s && !sameCadence(s, asCadence(t.schedule)) ? asSchedule(tidy(s)) : undefined;
+  };
+  /** The zone picked for it here, when that isn't the owner's. */
+  const zoneOf = (t: Offer) => {
+    const z = whens[t.id]?.zone;
+    return z && z !== tz ? z : undefined;
   };
   const whenOf = (t: Offer) => {
     const s = scheduleOf(t);
-    return s ? describeSchedule(s, tz) : undash(t.when);
+    return s ? describeSchedule(s as Parameters<typeof describeSchedule>[0], zoneOf(t) ?? tz) : undash(t.when);
   };
 
   // Kept current for the listeners below, which are set once.
@@ -227,7 +237,7 @@ export function RoutineSuggest({
   // Tab goes round inside it.
   const trap = (e: React.KeyboardEvent) => {
     if (e.key !== "Tab" || !box.current) return;
-    const all = [...box.current.querySelectorAll<HTMLElement>("input:not(:disabled), button:not(:disabled), [tabindex='0']")].filter((el) => !el.closest("[inert]"));
+    const all = [...box.current.querySelectorAll<HTMLElement>("input:not(:disabled), select:not(:disabled), button:not(:disabled), [tabindex='0']")].filter((el) => !el.closest("[inert]"));
     if (!all.length) return;
     const i = all.indexOf(document.activeElement as HTMLElement);
     if (e.shiftKey && i <= 0) {
@@ -244,7 +254,11 @@ export function RoutineSuggest({
     setBusy(true);
     setError(null);
     try {
-      const res = await post("/api/routines/suggestions", { app, botId, templates: picked.map((t) => ({ id: t.id, ...(scheduleOf(t) ? { schedule: scheduleOf(t) } : {}) })) });
+      const res = await post("/api/routines/suggestions", {
+        app,
+        botId,
+        templates: picked.map((t) => ({ id: t.id, ...(scheduleOf(t) ? { schedule: scheduleOf(t) } : {}), ...(zoneOf(t) ? { timeZone: zoneOf(t) } : {}) })),
+      });
       const j = (await res.json().catch(() => null)) as { created?: string[]; errors?: string[]; error?: string } | null;
       if (!res.ok || j?.error) {
         setError(j?.error ? undash(j.error) : "That didn't work. Try again.");
@@ -327,11 +341,15 @@ export function RoutineSuggest({
               offer={t}
               ticked={ticked(t)}
               when={whenOf(t)}
-              time={times[t.id] ?? (t.schedule ? timeOf(t.schedule) : null) ?? null}
+              schedule={whens[t.id]?.schedule ?? (t.schedule ? asCadence(t.schedule) : undefined)}
+              zone={whens[t.id]?.zone ?? tz}
+              ownerZone={tz}
+              calendar={calendar}
               open={openId === t.id}
               disabled={busy}
               onTick={(on) => setTicks({ ...ticks, [t.id]: on })}
-              onTime={(v) => setTimes({ ...times, [t.id]: v })}
+              onSchedule={(s) => setWhens((w) => ({ ...w, [t.id]: { ...w[t.id], schedule: s } }))}
+              onZone={(z) => setWhens((w) => ({ ...w, [t.id]: { ...w[t.id], zone: z } }))}
               onToggle={() => setOpenId(openId === t.id ? null : t.id)}
             />
           ))
@@ -365,21 +383,29 @@ function OfferRow({
   offer: t,
   ticked,
   when,
-  time,
+  schedule,
+  zone,
+  ownerZone,
+  calendar,
   open,
   disabled,
   onTick,
-  onTime,
+  onSchedule,
+  onZone,
   onToggle,
 }: {
   offer: Offer;
   ticked: boolean;
   when: string;
-  time: string | null;
+  schedule?: Cadence;
+  zone?: string;
+  ownerZone?: string;
+  calendar: boolean;
   open: boolean;
   disabled: boolean;
   onTick: (on: boolean) => void;
-  onTime: (v: string) => void;
+  onSchedule: (s: Cadence) => void;
+  onZone: (z: string) => void;
   onToggle: () => void;
 }) {
   const id = `offer-${t.id}`;
@@ -411,18 +437,21 @@ function OfferRow({
       {open && (
         <div id={`${id}-more`} className="motion-fade-in flex flex-col gap-2 pb-3 pl-[34px] pr-3 text-[12.5px] leading-[17px] text-[#3A3A38]">
           <span>{undash(t.summary)}</span>
-          {t.kind === "schedule" && time && !t.already ? (
-            <label className="flex flex-wrap items-center gap-2 text-[#6B6B6B]">
-              <span>When</span>
-              <input
-                type="time"
-                value={time}
-                onChange={(e) => e.target.value && onTime(e.target.value)}
-                disabled={disabled}
-                className="h-7 rounded-full bg-white px-2.5 text-[12.5px] tabular-nums text-ink outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
-              />
-              <span className="text-[#9A9A98]">{when}</span>
-            </label>
+          {schedule && !t.already ? (
+            <CadencePicker
+              value={schedule}
+              onChange={(s) => {
+                onSchedule(s);
+                // Changing when it runs means it's wanted.
+                if (!ticked) onTick(true);
+              }}
+              zone={zone}
+              ownerZone={ownerZone}
+              onZone={onZone}
+              presets={suggestedOf(t)}
+              calendar={calendar}
+              disabled={disabled}
+            />
           ) : (
             <Line label="When">{when}</Line>
           )}

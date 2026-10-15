@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useRef, useState, type AnimationEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
-import { appNameFor, canonicalApp, sameApp } from "@/lib/routine-catalog";
+import { appNameFor, canonicalApp, sameApp, templateById } from "@/lib/routine-catalog";
 import { DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Delivery, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
 import { Fold } from "./fold";
 import { Mascot } from "./mascot";
@@ -25,7 +25,8 @@ import {
   writeSectionOpen,
 } from "./side-group";
 import { watchName } from "./watch-overlay";
-import { AppLogo } from "./apps";
+import { AppLogo, botApps } from "./apps";
+import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
 import { CloseButton, currentWorkspace, needsYou, post, teamOf, useNow } from "./ui";
 
 /*
@@ -791,15 +792,39 @@ function AppName({ state, app }: { state: AppState; app: string }) {
   );
 }
 
-/** A schedule's clock time ("09:00"), for the kinds that have one. */
-export const timeOf = (s: Routine["schedule"]) => (s.kind === "daily" || s.kind === "weekdays" || s.kind === "weekly" ? s.time : null);
+/** The zone a routine's times are in: its own (Routine.timeZone), else the owner's. */
+export const zoneOf = (r: Routine, ownerZone?: string) => (r as Routine & { timeZone?: string }).timeZone || ownerZone;
+
+/** What the When picker needs for a routine: its starter's suggested times, and whether its bot uses Google Calendar. */
+function whenContext(r: Routine, state: AppState) {
+  const bot = state.bots.find((b) => b.id === r.botId);
+  return {
+    presets: r.source?.template ? suggestedOf(templateById(r.source.template)) : undefined,
+    calendar: !!bot && botApps(state, bot).some((x) => sameApp(x.app, "googlecalendar")),
+  };
+}
+
+type WhenEdit = { schedule?: Routine["schedule"]; timeZone?: string };
+
+/** When it runs, as picked: what changed from the routine's own (nothing when nothing did). */
+function useWhen(r: Routine, tz?: string) {
+  const [schedule, setSchedule] = useState<Cadence>(() => asCadence(r.schedule));
+  const was = zoneOf(r, tz);
+  const [zone, setZone] = useState(was);
+  const edit: WhenEdit = {
+    ...(!sameCadence(schedule, asCadence(r.schedule)) ? { schedule: asSchedule(tidy(schedule)) } : {}),
+    ...(zone && zone !== was ? { timeZone: zone } : {}),
+  };
+  return { schedule, setSchedule, zone, setZone, edit };
+}
 
 /**
- * Change a schedule in place: its name, what it does, its time (for a daily, weekday or weekly one) and
- * whether it's quiet. Esc cancels (and only that), Cmd+Enter saves.
+ * Change a schedule in place: its name, what it does, when it runs (CadencePicker) and whether it's
+ * quiet. Esc cancels (and only that), Cmd+Enter saves.
  */
 function ScheduleEdit({
   routine: r,
+  state,
   tz,
   busy,
   error,
@@ -807,22 +832,22 @@ function ScheduleEdit({
   onCancel,
 }: {
   routine: Routine;
+  state: AppState;
   tz?: string;
   busy: boolean;
   error: string | null;
-  onSave: (edit: { title?: string; goal?: string; schedule?: Routine["schedule"]; quiet?: boolean }) => void;
+  onSave: (edit: { title?: string; goal?: string; quiet?: boolean } & WhenEdit) => void;
   onCancel: () => void;
 }) {
   const [title, setTitle] = useState(r.title);
   const [goal, setGoal] = useState(r.goal);
-  const was = timeOf(r.schedule);
-  const [time, setTime] = useState(was ?? "");
+  const when = useWhen(r, tz);
   const [quiet, setQuiet] = useState(!!r.quiet);
-  const schedule = was && time && time !== was ? ({ ...r.schedule, time } as Routine["schedule"]) : undefined;
+  const ctx = whenContext(r, state);
   const edit = {
     ...(title.trim() && title.trim() !== r.title ? { title: title.trim() } : {}),
     ...(goal.trim() && goal.trim() !== r.goal ? { goal: goal.trim() } : {}),
-    ...(schedule ? { schedule } : {}),
+    ...when.edit,
     ...(quiet !== !!r.quiet ? { quiet } : {}),
   };
   const changed = Object.keys(edit).length > 0;
@@ -852,13 +877,11 @@ function ScheduleEdit({
         <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">What it does</span>
         <textarea value={goal} onChange={(e) => setGoal(e.target.value)} rows={3} className={`${field} resize-none`} />
       </label>
+      <div className="flex flex-col gap-1">
+        <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">When</span>
+        <CadencePicker value={when.schedule} onChange={when.setSchedule} zone={when.zone} ownerZone={tz} onZone={when.setZone} presets={ctx.presets} calendar={ctx.calendar} disabled={busy} />
+      </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        {was && (
-          <label className="flex items-center gap-2 text-[12.5px] leading-4 text-[#6B6B6B]">
-            {describeSchedule({ ...r.schedule, time: "00:00" } as Routine["schedule"], tz).replace(/ at .*$/, " at")}
-            <input type="time" value={time} onChange={(e) => setTime(e.target.value)} required className="h-7 rounded-full bg-[#F7F7F6] px-2.5 text-[12.5px] tabular-nums text-ink outline-none focus:shadow-[0_0_0_1.5px_#0A0A0A]" />
-          </label>
-        )}
         <label className="flex items-center gap-2 text-[12.5px] leading-4 text-[#3A3A38]">
           <input type="checkbox" checked={quiet} onChange={(e) => setQuiet(e.target.checked)} className="size-3.5 accent-[#0A0A0A]" />
           Quiet: post only when there&rsquo;s something for you
@@ -874,6 +897,38 @@ function ScheduleEdit({
       </div>
       <ErrorLine text={error} />
     </form>
+  );
+}
+
+/** Just when a schedule runs, changed in place on its When: Save, Cancel, Esc cancels, Cmd+Enter saves. */
+function WhenChange({ routine: r, state, tz, busy, onSave, onCancel }: { routine: Routine; state: AppState; tz?: string; busy: boolean; onSave: (edit: WhenEdit) => void; onCancel: () => void }) {
+  const when = useWhen(r, tz);
+  const ctx = whenContext(r, state);
+  const changed = Object.keys(when.edit).length > 0;
+  return (
+    <div
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!busy) onCancel();
+        } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && changed && !busy) {
+          e.preventDefault();
+          onSave(when.edit);
+        }
+      }}
+      className="flex flex-col gap-2 pt-0.5"
+    >
+      <CadencePicker value={when.schedule} onChange={when.setSchedule} zone={when.zone} ownerZone={tz} onZone={when.setZone} presets={ctx.presets} calendar={ctx.calendar} disabled={busy} />
+      <div className="-ml-2.5 flex items-center gap-0.5">
+        <button type="button" onClick={() => onSave(when.edit)} disabled={!changed || busy} className="rounded-full bg-ink px-3 py-1 text-[12px] font-medium leading-4 text-white disabled:opacity-40">
+          {busy ? "Saving…" : "Save"}
+        </button>
+        <button type="button" onClick={onCancel} disabled={busy} className={small("plain")}>
+          Cancel
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -929,7 +984,11 @@ function ErrorLine({ text }: { text: string | null }) {
 export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { routine: Routine; state: AppState; tz?: string; last: boolean; open: boolean; onToggle: () => void }) {
   const { busy, error, setError, sure, setSure, removeButton, run, cancelRemove } = useActions(open);
   const [editing, setEditing] = useState(false);
+  // Changing only when it runs, in place on its When.
+  const [changingWhen, setChangingWhen] = useState(false);
+  if (!open && changingWhen) setChangingWhen(false);
   const bad = trouble(r);
+  const zone = zoneOf(r, tz);
   const next = nextRunText(r, tz);
   const ran = r.last;
   const delivery = ran?.delivery;
@@ -937,7 +996,7 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
     <PageRow
       id={r.id}
       title={undash(r.title)}
-      line={`${describeSchedule(r.schedule, tz)} · ${nextWords(r, state.sessions, tz)}${r.quiet ? " · quiet" : ""}`}
+      line={`${describeSchedule(r.schedule, zone)} · ${nextWords(r, state.sessions, tz)}${r.quiet ? " · quiet" : ""}`}
       dim={!r.enabled}
       end={
         (bad || r.source) && (
@@ -951,6 +1010,7 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
         editing && (
           <ScheduleEdit
             routine={r}
+            state={state}
             tz={tz}
             busy={busy === "save"}
             error={error}
@@ -972,7 +1032,33 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
           ["Bot", <BotName key="bot" bot={state.bots.find((b) => b.id === r.botId)} />],
           ["From", r.source && <AppName key="from" state={state} app={r.source.app} />],
           ["Tags", r.tags?.length ? <TagChips key="tags" tags={r.tags} /> : ""],
-          ["When", `${describeSchedule(r.schedule, tz)}${next ? `. Next: ${next}` : ""}`],
+          [
+            "When",
+            changingWhen ? (
+              <WhenChange
+                key="when"
+                routine={r}
+                state={state}
+                tz={tz}
+                busy={busy === "save"}
+                onSave={async (edit) => (await run("save", "/api/routines", { id: r.id, edit }, "PATCH")) && setChangingWhen(false)}
+                onCancel={() => {
+                  setError(null);
+                  setChangingWhen(false);
+                }}
+              />
+            ) : (
+              <span key="when">
+                {`${describeSchedule(r.schedule, zone)}${next ? `. Next: ${next}` : ""}`}
+                {zone && zone !== tz ? <span className="text-[#9A9A98]">{` (${zone.split("/").pop()?.replace(/_/g, " ")} time)`}</span> : null}
+                {!done(r) && (
+                  <button onClick={() => setChangingWhen(true)} disabled={!!busy} className="ml-1.5 text-[12px] font-medium leading-4 text-ink underline-offset-2 outline-none hover:underline focus-visible:underline disabled:opacity-40">
+                    Change
+                  </button>
+                )}
+              </span>
+            ),
+          ],
           ["Runs", howWords(r)],
           ["Quiet", r.quiet ? "Yes: it posts only when there's something for you" : ""],
           ["Results go to", destinations(r, state)],
