@@ -537,7 +537,7 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
               </div>
             ),
           )}
-          {/* Once, after each workspace became an Orgo workspace of its own: names Orgo already had, and computers that move later. */}
+          {/* After each workspace became an Orgo workspace of its own: names Orgo already had (until dismissed), and computers that move later. */}
           {(renamed.length > 0 || pending > 0) && (
             <div className="flex flex-col gap-0.5 px-2.5 pt-1 text-[12px] leading-4 text-[#6B6B6B]">
               {renamed.map((r) => (
@@ -545,6 +545,11 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
                   {r.from} is {r.to} in Orgo: you already had an Orgo workspace named {r.from}.
                 </span>
               ))}
+              {renamed.length > 0 && (
+                <button onClick={() => void post("/api/workspaces", { noticeSeen: true }, "PATCH").catch(() => {})} className="self-start text-[12px] font-medium text-[#0A0A0A] hover:underline">
+                  Dismiss
+                </button>
+              )}
               {pending > 0 && (
                 <span>
                   {pending} computer{pending === 1 ? "" : "s"} move{pending === 1 ? "s" : ""} to {pending === 1 ? "its" : "their"} workspace once Orgo can.

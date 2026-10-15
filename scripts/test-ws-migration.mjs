@@ -75,14 +75,18 @@ process.on("unhandledRejection", (e) => rejections.push(String(e?.stack ?? e)));
  * `blocked`: computers the move route answers 409 for. `failAt`: the nth call that changes something does
  * its work and then answers 500 (a crash after Orgo did it, before the app heard).
  */
-const orgo = { modern: false, projects: [], computers: new Map(), secrets: [], blocked: new Set(), calls: [], changes: 0, failAt: 0, seq: 0, members: [] };
-const project = (p) => ({ id: p.id, name: p.name, role: "owner", created_at: p.created_at, member_count: 1, desktops: [...orgo.computers.values()].filter((c) => c.project === p.id).map((c) => ({ id: c.id, name: c.name })), ...(orgo.modern ? { product: p.product, bops_ws_id: p.bops_ws_id ?? null } : {}) });
-function world({ modern }) {
+const orgo = { modern: false, columnOnly: false, noCopy: false, projects: [], computers: new Map(), secrets: [], blocked: new Set(), calls: [], changes: 0, failAt: 0, seq: 0, members: [] };
+// `columnOnly`: the migration is applied (GET answers every column, so `product` shows) but the routes are still today's.
+const project = (p) => ({ id: p.id, name: p.name, role: "owner", created_at: p.created_at, member_count: 1, desktops: [...orgo.computers.values()].filter((c) => c.project === p.id).map((c) => ({ id: c.id, name: c.name })), ...(orgo.modern || orgo.columnOnly ? { product: p.product, bops_ws_id: p.bops_ws_id ?? null } : {}) });
+function world({ modern, columnOnly = false, noCopy = false }) {
   orgo.modern = modern;
+  orgo.columnOnly = columnOnly;
+  orgo.noCopy = noCopy;
   orgo.calls = [];
   orgo.changes = 0;
   orgo.failAt = 0;
   orgo.blocked = new Set();
+  orgo.refuse = new Map();
   orgo.members = [];
   orgo.projects = [
     { id: "p_bops", name: "bops", product: "bops", created_at: "2026-01-01T00:00:00Z" },
@@ -134,12 +138,13 @@ const server = createServer(async (req, res) => {
     const name = String(body?.name ?? "").trim();
     if (orgo.modern && body?.bops_ws_id) {
       const had = orgo.projects.find((x) => x.bops_ws_id === body.bops_ws_id);
-      if (had) return changed(200, { id: had.id, name: had.name });
+      if (had) return changed(200, { id: had.id, name: had.name, product: had.product, bops_ws_id: had.bops_ws_id });
     }
     if (orgo.projects.some((x) => x.name.toLowerCase() === name.toLowerCase())) return send(res, 400, { error: "A project with this name already exists" });
     const id = `p_new${++orgo.seq}`;
-    orgo.projects.push({ id, name, created_at: new Date().toISOString(), ...(orgo.modern ? { product: body?.product ?? (name.toLowerCase() === "bops" ? "bops" : "orgo"), bops_ws_id: body?.bops_ws_id ?? null } : { product: name.toLowerCase() === "bops" ? "bops" : "orgo" }) });
-    return changed(201, { id, name });
+    const made = { id, name, created_at: new Date().toISOString(), ...(orgo.modern ? { product: body?.product ?? (name.toLowerCase() === "bops" ? "bops" : "orgo"), bops_ws_id: body?.bops_ws_id ?? null } : { product: name.toLowerCase() === "bops" ? "bops" : "orgo" }) };
+    orgo.projects.push(made);
+    return changed(201, { id, name, ...(orgo.modern ? { product: made.product, bops_ws_id: made.bops_ws_id } : {}) });
   }
   const one = p.match(/^\/api\/workspaces\/([^/]+)$/);
   if (one) {
@@ -152,12 +157,15 @@ const server = createServer(async (req, res) => {
       return send(res, 200, { id: x.id, name: x.name, desktops });
     }
     if (req.method === "PATCH") {
+      // Today's route takes name, icon_url, status and private_screens only.
+      if (!orgo.modern && body?.bops_ws_id !== undefined) return send(res, 400, { error: "Unsupported field" });
+      if (orgo.modern && body?.bops_ws_id !== undefined && x.bops_ws_id && x.bops_ws_id !== body.bops_ws_id) return send(res, 409, { error: "This workspace or that Bops workspace is already bound", code: "BOPS_WS_ID_TAKEN" });
       if (body?.name !== undefined) {
         if (orgo.projects.some((y) => y.id !== x.id && y.name.toLowerCase() === String(body.name).toLowerCase())) return send(res, 400, { error: "A project with this name already exists" });
         x.name = body.name;
       }
       if (orgo.modern && body?.bops_ws_id !== undefined && !x.bops_ws_id) x.bops_ws_id = body.bops_ws_id;
-      return changed(200, { id: x.id, name: x.name });
+      return changed(200, { id: x.id, name: x.name, ...(orgo.modern && body?.bops_ws_id !== undefined ? { product: "bops", bops_ws_id: body.bops_ws_id } : {}) });
     }
     if (req.method === "DELETE") {
       orgo.projects = orgo.projects.filter((y) => y.id !== x.id);
@@ -166,7 +174,7 @@ const server = createServer(async (req, res) => {
   }
   const copy = p.match(/^\/api\/workspaces\/([^/]+)\/members\/copy$/);
   if (copy && req.method === "POST") {
-    if (!orgo.modern) return html404(res);
+    if (!orgo.modern || orgo.noCopy) return html404(res);
     orgo.members.push({ to: copy[1], from: body?.from });
     return changed(200, { copied: 2 });
   }
@@ -176,12 +184,18 @@ const server = createServer(async (req, res) => {
     return c ? send(res, 200, { id: c.id, name: c.name, project_id: c.project, workspace_id: c.project }) : send(res, 404, { error: "Computer not found" });
   }
   const move = p.match(/^\/api\/computers\/([^/]+)\/move$/);
-  if (move && req.method === "POST") {
+  // orgo-web's move route answers PATCH only: anything else is 405 with no body, as Next answers it.
+  if (move && req.method !== "PATCH") {
+    res.writeHead(405);
+    return res.end();
+  }
+  if (move) {
     if (!orgo.modern) return html404(res);
     const c = orgo.computers.get(move[1]);
     if (!c) return send(res, 404, { error: "Computer not found" });
     if (c.project === body.workspace_id) return send(res, 400, { error: "Already in this workspace" });
     if (orgo.blocked.has(c.id)) return send(res, 409, { error: "It's busy right now", code: "computer_busy" });
+    if (orgo.refuse?.has(c.id)) return send(res, orgo.refuse.get(c.id), { error: "No" });
     c.project = body.workspace_id;
     return changed(200, { ok: true });
   }
@@ -264,6 +278,7 @@ function seed() {
       { id: "bea", name: "Bea", role: "Chief of Staff", color: "#0A0A0A", isMain: true, computerStatus: "ready", computerId: "c_busy", workspaceId: "ws_busy" },
     ];
     delete s.orgoMigration;
+    delete s.orgoMigrationRevertedAt;
   });
 }
 const ws = (id) => S.getState().workspaces.find((w) => w.id === id);
@@ -395,7 +410,7 @@ await check("New workspace: its Orgo workspace is made too, marked and tied; a n
   const n = orgo.projects.length;
   const taken = await Route.POST(post({ name: "Clients" }));
   assert.equal(taken.status, 409);
-  assert.deepEqual(await taken.json(), { error: "You already have an Orgo workspace named Clients. Name this one", code: "name_taken", suggestion: "Clients (Bops)" });
+  assert.deepEqual(await taken.json(), { error: "You already have an Orgo workspace named Clients. Try Clients (Bops) or another name.", code: "name_taken", suggestion: "Clients (Bops)" });
   assert.equal(S.getState().workspaces.length, before, "nothing made here");
   assert.equal(orgo.projects.length, n, "nor on Orgo");
   // The name it suggests works.
@@ -503,7 +518,11 @@ await check("Roll back: every computer goes back where it was; only the empty pr
   assert.equal(where("c_busy"), acme);
   // Someone put another computer in Acme's project since: it isn't empty, so it stays.
   orgo.computers.set("c_later", { id: "c_later", name: "later", project: acme });
+  // Renamed on orgo.ai since: it goes back to "bops", the name older apps find it by.
+  orgo.projects.find((p) => p.id === "p_bops").name = "Renamed";
+  orgo.projects.find((p) => p.id === "p_bops_old").name = "Bops old";
   const r = await Wk.revertWorkspaceMigration();
+  assert.equal(orgo.projects.find((p) => p.id === "p_bops").name, "bops");
   assert.deepEqual(r, { movedBack: 2, deleted: 1, kept: 1 });
   assert.equal(where("c_orgo"), "p_bops");
   assert.equal(where("c_busy"), "p_bops");
@@ -513,6 +532,76 @@ await check("Roll back: every computer goes back where it was; only the empty pr
   assert.ok(S.getState().workspaces.every((w) => !w.orgoProjectId));
   assert.equal(S.getState().orgoMigration, undefined);
   assert.equal(ws("ws_main").name, "Main");
+});
+
+await check("After a roll back the move never runs again by itself, and every computer goes to the bops project", async () => {
+  assert.ok(S.getState().orgoMigrationRevertedAt);
+  const n = changes().length;
+  assert.deepEqual(await Wk.migrateWorkspacesToOrgo(), { status: "legacy" });
+  assert.equal(await O.perWorkspaceProjects({ fresh: true }), false);
+  assert.equal(await O.orgoProjectFor("ws_orgo"), "p_bops");
+  assert.deepEqual(changes().slice(n), [], "nothing on Orgo");
+});
+
+await check("The column without orgo-web's code for it: stays as before, nothing tied or made, a refused tie isn't kept", async () => {
+  world({ modern: false, columnOnly: true });
+  seed();
+  assert.deepEqual(await Wk.migrateWorkspacesToOrgo(), { status: "legacy" });
+  assert.equal(S.getState().orgoMigration, undefined);
+  assert.ok(S.getState().workspaces.every((w) => !w.orgoProjectId), "nothing tied here");
+  assert.deepEqual(changes().map((c) => `${c.method} ${c.path}`), ["PATCH /api/workspaces/p_bops"], "only the tie that finds out, which today's route refuses");
+  assert.notEqual(await O.perWorkspaceProjects(), true);
+  assert.equal(await O.orgoProjectFor("ws_orgo"), "p_bops", "another workspace's computer: the bops project");
+  const made = await (await Route.POST(post({ name: "Plain" }))).json();
+  assert.equal(made.orgoProjectId, undefined);
+  assert.equal(named("Plain"), undefined, "no plain Orgo project made");
+});
+
+await check("Without orgo-web's route to copy people, no computer moves away from them", async () => {
+  world({ modern: true, noCopy: true });
+  seed();
+  const r = await Wk.migrateWorkspacesToOrgo();
+  assert.equal(r.status, "unreachable");
+  assert.equal(S.getState().orgoMigration.step, "members", "goes on from here at the next sign-in");
+  assert.equal(where("c_orgo"), "p_bops");
+  assert.equal(where("c_busy"), "p_bops");
+  assert.deepEqual(S.getState().orgoMigration.moves, []);
+  orgo.noCopy = false;
+  assert.equal((await Wk.migrateWorkspacesToOrgo()).status, "done");
+  assert.equal(where("c_orgo"), ws("ws_orgo").orgoProjectId);
+});
+
+await check("A move Orgo refuses in a way not known here waits as pending, never dropped; the default's project keeps the name bops", async () => {
+  world({ modern: true });
+  seed();
+  S.update((s) => (s.workspaces.find((w) => w.id === "ws_main").name = "Acme Main"));
+  orgo.refuse.set("c_orgo", 404);
+  const r = await Wk.migrateWorkspacesToOrgo();
+  assert.equal(r.status, "done");
+  assert.deepEqual(S.getState().orgoMigration.pending, ["c_orgo"]);
+  assert.equal(where("c_orgo"), "p_bops");
+  assert.ok(!S.getState().orgoMigration.moves.some((m) => m.computerId === "c_orgo"));
+  assert.equal(orgo.projects.find((p) => p.id === "p_bops").name, "bops", "older apps find it by that name");
+  assert.equal(ws("ws_main").name, "Acme Main");
+  orgo.refuse.clear();
+  assert.equal((await Wk.migrateWorkspacesToOrgo()).status, "done");
+  assert.equal(where("c_orgo"), ws("ws_orgo").orgoProjectId, "tried again at the next sign-in");
+  warned.splice(0, warned.length, ...warned.filter((w) => !/Orgo refused moving/.test(w)));
+});
+
+await check("A workspace with no project yet: no people of the default's, and a rename to a name Orgo has is asked about", async () => {
+  assert.equal(ws("ws_quiet").orgoProjectId, undefined);
+  assert.deepEqual(await O.findBopsWorkspace(ORGO_KEY, { fresh: true, wsId: "ws_quiet" }), { kind: "none" });
+  assert.equal((await O.findBopsWorkspace(ORGO_KEY, { fresh: true, wsId: "ws_main" })).id, "p_bops");
+  const clash = await Route.PATCH(req("PATCH", { id: "ws_quiet", name: "orgo" }));
+  assert.equal(clash.status, 409);
+  assert.equal(ws("ws_quiet").name, "Quiet");
+});
+
+await check("The switcher's note about names Orgo had goes once dismissed", async () => {
+  assert.equal(Wk.migrationNotice().renamed.length, 1);
+  assert.equal((await Route.PATCH(req("PATCH", { noticeSeen: true }))).status, 200);
+  assert.deepEqual(Wk.migrationNotice().renamed, []);
 });
 
 await check("Nothing unexpected: no stray warnings or rejections", async () => {

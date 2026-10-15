@@ -14,9 +14,11 @@ import {
   OrgoError,
   ownedWorkspaces,
   perWorkspaceProjects,
+  perWorkspaceUnconfirmed,
   pickMainProject,
   projectComputers,
   renameProject,
+  tieProject,
   apiKey,
 } from "./orgo";
 import { folderKey, moveWorkspaceFolder, syncSkills } from "./workspace-skills";
@@ -62,7 +64,10 @@ export async function createWorkspace(name: string): Promise<CreateResult> {
     try {
       orgoProjectId = (await ensureProject(ws, { interactive: true, name: clean })).id;
     } catch (e) {
-      if (nameTaken(e)) return { error: `You already have an Orgo workspace named ${clean}. Name this one`, code: "name_taken", suggestion: `${clean} (Bops)`.slice(0, NAME_MAX) };
+      if (nameTaken(e)) {
+        const suggestion = await freeOrgoName(clean);
+        return { error: `You already have an Orgo workspace named ${clean}. Try ${suggestion} or another name.`, code: "name_taken", suggestion };
+      }
       if (e instanceof OrgoError && e.status >= 400 && e.status < 500) return { error: e.said || "Orgo didn't make the workspace.", code: "orgo", status: e.status };
       console.warn(`[workspaces] Orgo didn't make ${ws}'s workspace yet: ${(e as Error).message}`);
     }
@@ -87,6 +92,13 @@ export async function createWorkspace(name: string): Promise<CreateResult> {
   return { id: ws, chatId: botChatId(mainId), ...(orgoProjectId ? { orgoProjectId } : {}) };
 }
 
+/** A name to suggest when the user's Orgo has `name`: the first of collisionNames it doesn't have, that fits. */
+async function freeOrgoName(name: string): Promise<string> {
+  const taken = new Set(((await ownedWorkspaces().catch(() => [])) as { name: string }[]).map((w) => w.name.trim().toLowerCase()));
+  const fits = collisionNames(name).slice(1).map((n) => (n.length > NAME_MAX ? `${name.slice(0, NAME_MAX - (n.length - name.length))}${n.slice(name.length)}` : n));
+  return fits.find((n) => !taken.has(n.toLowerCase())) ?? fits[0];
+}
+
 /** Bops from before workspaces: if any bot has no workspace, make sure "Main" is listed. */
 export function ensureMain() {
   const s = getState();
@@ -105,7 +117,14 @@ export async function renameWorkspace(workspaceId: string, name: string): Promis
   if (!clean) return { ok: true };
   const w = getState().workspaces?.find((x) => x.id === workspaceId);
   if (!w) return { ok: true };
-  if (w.orgoProjectId && (await perWorkspaceProjects().catch(() => null)) === true) {
+  // The default's project keeps the name "bops": older apps on the user's other Macs find it by that name.
+  const per = workspaceId !== MAIN_WORKSPACE && (await perWorkspaceProjects().catch(() => null)) === true;
+  if (per && !w.orgoProjectId) {
+    // No project of its own yet (made with its first computer): a name the user's Orgo has is asked about now, not changed then.
+    const owned = await ownedWorkspaces().catch(() => null);
+    if (owned?.some((p) => p.name.trim().toLowerCase() === clean.toLowerCase())) return { error: `You already have an Orgo workspace named ${clean}. Pick another name.`, code: "name_taken" };
+  }
+  if (per && w.orgoProjectId) {
     try {
       await renameProject(w.orgoProjectId, clean);
     } catch (e) {
@@ -183,11 +202,21 @@ export function migrateWorkspacesToOrgo(): Promise<MigrationResult> {
 async function runMigration(): Promise<MigrationResult> {
   const before = getState().orgoMigration;
   if (before?.doneAt && !before.pending.length) return { status: "done", moved: before.moves.length, pending: 0, renamed: before.renamed ?? [] };
+  // Undone on this Mac: never again by itself.
+  if (getState().orgoMigrationRevertedAt) return { status: "legacy" };
   let on: boolean | null;
   try {
     on = await perWorkspaceProjects({ fresh: true });
   } catch {
     return { status: "unreachable" };
+  }
+  // The list carries `product` but nothing is tied yet: the column may be there without orgo-web's code for it.
+  // Tying the default's project finds out (only the code says the tie back); anything else and it stays as before.
+  if (on === null && perWorkspaceUnconfirmed()) {
+    const owned = await ownedWorkspaces();
+    const freeId = await import("./plan").then((p) => p.orgoPlan()).then((p) => p?.freeComputerId ?? null).catch(() => null);
+    const pick = pickMainProject(owned, freeId);
+    if (pick && (await tieProject(pick.id, MAIN_WORKSPACE))) on = true;
   }
   if (on !== true) return { status: "legacy" };
   const epoch = stateEpoch();
@@ -214,7 +243,8 @@ async function runMigration(): Promise<MigrationResult> {
     const freeId = kept ? null : await import("./plan").then((p) => p.orgoPlan()).then((p) => p?.freeComputerId ?? null).catch(() => null);
     const pick = kept ?? pickMainProject(owned, freeId);
     if (pick) {
-      if (pick.bops_ws_id !== MAIN_WORKSPACE) await callPatch(pick.id, { bops_ws_id: MAIN_WORKSPACE });
+      // Tied here only once Orgo tied it: a refusal (409 taken, 400) stops the move, to go on at the next sign-in.
+      if (pick.bops_ws_id !== MAIN_WORKSPACE && !(await tieProject(pick.id, MAIN_WORKSPACE))) throw new Error(`Orgo didn't tie ${pick.id.slice(0, 8)} to the default workspace`);
       same();
       bindProject(MAIN_WORKSPACE, pick.id);
     }
@@ -251,10 +281,11 @@ async function runMigration(): Promise<MigrationResult> {
     if (main && key)
       for (const to of m()?.created ?? []) {
         same();
-        // orgo-web copies them as they are (role kept, accepted for them, anyone already there skipped). An
-        // orgo-web without the route answers 404: nobody is invited by email instead.
+        // orgo-web copies them as they are (role kept, accepted for them, anyone already there skipped). Anything
+        // but a yes (an orgo-web without the route answers 404) stops here, before any computer moves away from
+        // people who can reach it today: this step runs again at the next sign-in.
         const r = await callOrgo<{ copied?: number }>(key, `/api/workspaces/${encodeURIComponent(to)}/members/copy`, { method: "POST", body: { from: main } });
-        if (r && r.status >= 500) throw new Error(`copying people to ${to.slice(0, 8)}: ${r.status}`);
+        if (!r || r.status < 200 || r.status >= 300) throw new Error(`copying people to ${to.slice(0, 8)}: ${r?.status ?? "no answer"}`);
       }
     save((x) => (x.step = "moves"));
   }
@@ -265,7 +296,8 @@ async function runMigration(): Promise<MigrationResult> {
     if (!after(m(), "moves")) save((x) => (x.step = "rename-default"));
   }
 
-  // 5. The default workspace's name: "Main" left as it was is "bops" (its project's name); a name the user gave it goes to its project.
+  // 5. The default workspace's name: "Main" left as it was is "bops" (its project's name). Its project keeps the
+  // name "bops" whatever the user named it here: older apps on the user's other Macs find it by that name.
   if (!after(m(), "rename-default")) {
     const main = getState().workspaces?.find((w) => w.id === MAIN_WORKSPACE);
     if (main && /^main$/i.test(main.name.trim()))
@@ -273,23 +305,6 @@ async function runMigration(): Promise<MigrationResult> {
         const x = s.workspaces?.find((w) => w.id === MAIN_WORKSPACE);
         if (x) x.name = "bops";
       });
-    else if (main?.orgoProjectId) {
-      const owned = await ownedWorkspaces();
-      const now = owned.find((w) => w.id === main.orgoProjectId);
-      if (now && now.name.trim().toLowerCase() !== main.name.trim().toLowerCase()) {
-        const taken = new Set(owned.filter((w) => w.id !== now.id).map((w) => w.name.trim().toLowerCase()));
-        for (const n of collisionNames(main.name.trim())) {
-          if (taken.has(n.toLowerCase())) continue;
-          try {
-            await renameProject(now.id, n);
-            if (n !== main.name.trim()) save((x) => (x.renamed ??= []).push({ wsId: MAIN_WORKSPACE, from: main.name, to: n }));
-            break;
-          } catch (e) {
-            if (!nameTaken(e)) throw e;
-          }
-        }
-      }
-    }
     save((x) => (x.step = "folders"));
   }
 
@@ -304,13 +319,6 @@ async function runMigration(): Promise<MigrationResult> {
   }
   const end = m()!;
   return { status: "done", moved: end.moves.length, pending: end.pending.length, renamed: end.renamed ?? [] };
-}
-
-/** PATCH a project, saying back only that it failed. */
-async function callPatch(projectId: string, body: Record<string, unknown>) {
-  const key = await apiKey();
-  const r = await callOrgo(key, `/api/workspaces/${encodeURIComponent(projectId)}`, { method: "PATCH", body });
-  if (!r || r.status >= 500) throw new Error(`tying ${projectId.slice(0, 8)}: ${r?.status ?? "no answer"}`);
 }
 
 /** Where each own computer is on Orgo now, and where it belongs; moved when they differ (DESIGN.md step 6). */
@@ -356,9 +364,11 @@ async function moveComputers(same: () => void, save: (fn: (m: OrgoMigration) => 
       save((x) => {
         const i = x.moves.findLastIndex((mv) => mv.computerId === computerId && mv.to === to);
         if (i >= 0) x.moves.splice(i, 1);
-        // Busy, a pool Mac, enrolled, moved meanwhile, or not allowed: it stays, and is tried at the next sign-in.
-        if ((status === 409 || status === 403) && !x.pending.includes(computerId)) x.pending.push(computerId);
+        // Busy, a pool Mac, enrolled, moved meanwhile, not allowed, or a refusal not known here (405, 404): it
+        // stays, and is tried again at the next sign-in. Never dropped without a trace.
+        if (!x.pending.includes(computerId)) x.pending.push(computerId);
       });
+      if (status !== 409 && status !== 403) console.warn(`[workspaces] Orgo refused moving ${computerId.slice(0, 8)} (${status}); tried again at the next sign-in`);
     }
   }
   return moved;
@@ -396,6 +406,17 @@ export async function revertWorkspaceMigration(): Promise<{ movedBack: number; d
       deleted++;
     } else kept++;
   }
+  // The default's project goes back to the name "bops", which every app before the move finds it by.
+  const mainProject = getState().workspaces?.find((w) => w.id === MAIN_WORKSPACE)?.orgoProjectId;
+  if (mainProject) {
+    const now = (await ownedWorkspaces()).find((p) => p.id === mainProject);
+    // Another project has the name already (any case): it stays, and the apps find that one.
+    if (now && now.name.trim().toLowerCase() !== "bops")
+      await renameProject(mainProject, "bops").catch((e: Error) => {
+        if (!nameTaken(e)) throw e;
+        console.warn(`[workspaces] the default's project ${mainProject.slice(0, 8)} keeps its name: ${e.message}`);
+      });
+  }
   for (const w of getState().workspaces ?? []) {
     if (!w.orgoProjectId) continue;
     const from = folderKey(w);
@@ -407,11 +428,20 @@ export async function revertWorkspaceMigration(): Promise<{ movedBack: number; d
   }
   update((s) => {
     delete s.orgoMigration;
+    // Never run again by itself (bops_ws_id stays tied on Orgo, which has no way to untie): the one "bops" project from now on.
+    s.orgoMigrationRevertedAt = new Date().toISOString();
     const main = s.workspaces?.find((x) => x.id === MAIN_WORKSPACE);
     // "bops" was "Main" before the move.
     if (main && main.name === "bops") main.name = "Main";
   });
   return { movedBack, deleted, kept };
+}
+
+/** The user saw the switcher's note about names Orgo already had: it isn't shown again. */
+export function dismissRenamedNotice() {
+  update((s) => {
+    if (s.orgoMigration?.renamed?.length) s.orgoMigration.renamed = [];
+  });
 }
 
 /** What Settings shows of the move: computers Orgo hasn't moved yet, and names changed because Orgo had them. */

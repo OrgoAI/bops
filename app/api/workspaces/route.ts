@@ -1,5 +1,5 @@
 import { deleteWorkspace } from "@/lib/server/remove";
-import { createWorkspace, ensureMain, renameWorkspace, switchWorkspace } from "@/lib/server/workspaces";
+import { createWorkspace, dismissRenamedNotice, ensureMain, renameWorkspace, revertWorkspaceMigration, switchWorkspace } from "@/lib/server/workspaces";
 import { notReady } from "@/lib/server/ready";
 
 /**
@@ -17,12 +17,24 @@ export async function POST(request: Request) {
   return Response.json(made);
 }
 
-/** Switch to a workspace, or rename one (its Orgo workspace too, when it has one). */
+/**
+ * Switch to a workspace, or rename one (its Orgo workspace too, when it has one). `noticeSeen`: the switcher's
+ * note about names Orgo already had was seen. `revertOrgoMove`: undo the move onto Orgo workspaces
+ * (revertWorkspaceMigration, DESIGN.md section 8), for a rollback.
+ */
 export async function PATCH(request: Request) {
   const unready = notReady();
   if (unready) return unready;
-  const { id, name, current } = (await request.json().catch(() => ({}))) as { id?: string; name?: string; current?: string };
+  const { id, name, current, noticeSeen, revertOrgoMove } = (await request.json().catch(() => ({}))) as { id?: string; name?: string; current?: string; noticeSeen?: boolean; revertOrgoMove?: boolean };
   ensureMain();
+  if (noticeSeen === true) dismissRenamedNotice();
+  if (revertOrgoMove === true) {
+    try {
+      return Response.json({ ok: true, ...(await revertWorkspaceMigration()) });
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: 502 });
+    }
+  }
   try {
     if (current) switchWorkspace(current);
     if (id && typeof name === "string") {

@@ -682,6 +682,11 @@ export type AppState = {
    * Orgo wouldn't move yet, and when it was done. Saved after every step, so a stop resumes.
    */
   orgoMigration?: OrgoMigration;
+  /**
+   * When the move onto Orgo workspaces was undone (revertWorkspaceMigration): from then on this app keeps
+   * every workspace's computers in the one "bops" project and never runs the move again by itself.
+   */
+  orgoMigrationRevertedAt?: string;
   host: Host;
   takeover?: Takeover;
   /** Latest read of each watched screen, keyed `${botId}:${display}`. */
@@ -1099,7 +1104,7 @@ export type OrgoMigration = {
   pending: string[];
   /** Orgo workspaces made by the move, for a rollback (deleted when empty). */
   created: string[];
-  /** A workspace renamed because the user's Orgo already had that name: shown once. */
+  /** A workspace renamed because the user's Orgo already had that name: shown until the user dismisses it. */
   renamed?: { wsId: string; from: string; to: string }[];
   doneAt?: string;
 };

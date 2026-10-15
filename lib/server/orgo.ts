@@ -187,8 +187,13 @@ const g = globalThis as unknown as {
   bopsOrgoWorkspace?: Promise<string>;
   bopsComputerChanges?: number;
   bopsMadeHere?: Set<string>;
-  /** Whether this Orgo has per workspace projects, for the key that asked (null: it couldn't tell, as with no workspaces yet). */
-  bopsOrgoPerWorkspace?: { key: string; on: boolean | null };
+  /**
+   * Whether this Orgo has per workspace projects, for the key that asked (null: it couldn't tell yet).
+   * `marked`: its list carries `product`, which only says the column is there, not that orgo-web's code for
+   * it is live; `on` is true only once that code has answered (a project tied by bops_ws_id, or a bind or a
+   * create that said it back).
+   */
+  bopsOrgoPerWorkspace?: { key: string; on: boolean | null; marked?: boolean };
 };
 
 /**
@@ -218,12 +223,48 @@ export const ownedWorkspaces = async () => {
   return list;
 };
 
-/** What a list says about this Orgo: a project carrying `product` is from an orgo-web with per workspace projects. Nothing to go on with no projects. */
+/**
+ * What a list says about this Orgo. `product` on a project shows only the column (GET answers every column,
+ * so it shows as soon as the migration is applied, before or without the code): per workspace projects are
+ * on only when a project is tied by bops_ws_id, or once a bind or a create said its bops_ws_id back here
+ * (confirmPerWorkspace). Nothing to go on with no projects.
+ */
 function notePerWorkspace(list: OrgoWorkspace[], key: string) {
-  const on = list.some((w) => w && typeof w === "object" && "product" in w) ? true : list.length ? false : null;
+  const marked = list.some((w) => w && typeof w === "object" && "product" in w);
+  const tied = list.some((w) => typeof w?.bops_ws_id === "string" && !!w.bops_ws_id);
+  const was = g.bopsOrgoPerWorkspace?.key === key ? g.bopsOrgoPerWorkspace : undefined;
   // A list with no projects says nothing: what was learned before stands.
-  if (on === null && g.bopsOrgoPerWorkspace?.key === key) return;
-  g.bopsOrgoPerWorkspace = { key, on };
+  if (!list.length && was) return;
+  const on = marked && (tied || was?.on === true) ? true : marked ? null : list.length ? false : null;
+  g.bopsOrgoPerWorkspace = { key, on, marked };
+}
+
+/** orgo-web's code for per workspace projects answered (a bind or a create said its bops_ws_id back): it's on for this key. */
+async function confirmPerWorkspace() {
+  const key = await apiKey().catch(() => "");
+  if (key) g.bopsOrgoPerWorkspace = { key, on: true, marked: true };
+}
+
+/** Whether Orgo's list carries `product` without anything tied yet: the move on sign-in tries a bind to find out. */
+export const perWorkspaceUnconfirmed = () => g.bopsOrgoPerWorkspace?.marked === true && g.bopsOrgoPerWorkspace.on === null;
+
+/**
+ * A Bops tie orgo-web said back: true when its answer carries the bops_ws_id asked for (only the code for
+ * per workspace projects does); false for a 4xx or an answer without it (an orgo-web with only the column
+ * answers 400 Unsupported field, or makes a plain project), so nothing is tied here. Throws when Orgo didn't
+ * answer or failed (5xx), to be tried again.
+ */
+const saidBack = (j: { product?: unknown; bops_ws_id?: unknown } | null | undefined, wsId: string) => j?.product === "bops" && j.bops_ws_id === wsId;
+export async function tieProject(projectId: string, wsId: string): Promise<boolean> {
+  try {
+    const r = await call<{ product?: unknown; bops_ws_id?: unknown }>("PATCH", `/workspaces/${encodeURIComponent(projectId)}`, { bops_ws_id: wsId }, { wait: false });
+    if (!saidBack(r, wsId)) return false;
+    await confirmPerWorkspace();
+    return true;
+  } catch (e) {
+    if (e instanceof OrgoError && e.status >= 400 && e.status < 500) return false;
+    throw e;
+  }
 }
 
 /**
@@ -231,6 +272,8 @@ function notePerWorkspace(list: OrgoWorkspace[], key: string) {
  * (projects carry `product`). False, or not known yet (null), and Bops works as before: one "bops" project.
  */
 export async function perWorkspaceProjects({ fresh = false } = {}): Promise<boolean | null> {
+  // Undone on this Mac (revertWorkspaceMigration): the one "bops" project, as before.
+  if (getState().orgoMigrationRevertedAt) return false;
   const key = await apiKey().catch(() => "");
   if (!key) return false;
   if (!fresh && g.bopsOrgoPerWorkspace?.key === key) return g.bopsOrgoPerWorkspace.on;
@@ -276,7 +319,9 @@ export async function bopsWorkspace(): Promise<string> {
     const found = await find();
     if (found) return found;
     try {
-      return (await call<{ id: string }>("POST", "/workspaces", { name: WORKSPACE, product: "bops", bops_ws_id: MAIN_WORKSPACE })).id;
+      const made = await call<{ id: string; product?: unknown; bops_ws_id?: unknown }>("POST", "/workspaces", { name: WORKSPACE, product: "bops", bops_ws_id: MAIN_WORKSPACE });
+      if (saidBack(made, MAIN_WORKSPACE) && !getState().orgoMigrationRevertedAt) await confirmPerWorkspace();
+      return made.id;
     } catch (e) {
       // Orgo refuses a second workspace with the same name (any case): someone else just made it.
       const made = await find();
@@ -328,7 +373,8 @@ export async function ensureProject(wsId: string, opts: { interactive?: boolean;
   const owned = await ownedWorkspaces();
   const tied = owned.find((x) => x.bops_ws_id === wsId) ?? (wsId === MAIN_WORKSPACE ? pickMainProject(owned) : undefined);
   if (tied) {
-    if (tied.bops_ws_id !== wsId) await call("PATCH", `/workspaces/${encodeURIComponent(tied.id)}`, { bops_ws_id: wsId }).catch((e: Error) => console.warn(`[workspaces] tying ${tied.id.slice(0, 8)}: ${e.message}`));
+    // Tied here only once Orgo tied it too (a refusal, a 409 taken by another, or an orgo-web without the code: nothing).
+    if (tied.bops_ws_id !== wsId && !(await tieProject(tied.id, wsId))) throw new Error(`Orgo didn't tie ${tied.id.slice(0, 8)} to this workspace`);
     bindProject(wsId, tied.id);
     return { id: tied.id, name: tied.name };
   }
@@ -338,7 +384,14 @@ export async function ensureProject(wsId: string, opts: { interactive?: boolean;
   for (const n of tries) {
     if (!opts.interactive && taken.has(n.toLowerCase())) continue;
     try {
-      const made = await call<{ id: string; name?: string }>("POST", "/workspaces", { name: n, product: "bops", bops_ws_id: wsId }, { wait: false });
+      const made = await call<{ id: string; name?: string; product?: unknown; bops_ws_id?: unknown }>("POST", "/workspaces", { name: n, product: "bops", bops_ws_id: wsId }, { wait: false });
+      if (!saidBack(made, wsId)) {
+        // An orgo-web without the code made a plain Orgo project: it goes again, and this workspace stays on the "bops" project.
+        if (g.bopsOrgoPerWorkspace) g.bopsOrgoPerWorkspace.on = null;
+        await call("DELETE", `/workspaces/${encodeURIComponent(made.id)}`).catch((e: Error) => console.warn(`[workspaces] deleting the plain project ${made.id.slice(0, 8)}: ${e.message}`));
+        throw new Error("Orgo didn't make it a Bops workspace");
+      }
+      await confirmPerWorkspace();
       bindProject(wsId, made.id);
       return { id: made.id, name: made.name ?? n, ...(n !== name ? { renamed: true } : {}) };
     } catch (e) {
@@ -367,7 +420,14 @@ export async function orgoProjectFor(wsId: string = MAIN_WORKSPACE): Promise<str
     if (wsId === MAIN_WORKSPACE && g.bopsOrgoPerWorkspace?.on === true) bindProject(MAIN_WORKSPACE, id);
     return id;
   }
-  return (await ensureProject(wsId)).id;
+  const made = await ensureProject(wsId);
+  // The name was taken on Orgo: said in the switcher, as the move's are.
+  if (made.renamed)
+    update((s) => {
+      const from = s.workspaces?.find((w) => w.id === wsId)?.name;
+      if (s.orgoMigration && from) (s.orgoMigration.renamed ??= []).push({ wsId, from, to: made.name });
+    });
+  return made.id;
 }
 
 /** Every Bops project the user owns (on an Orgo without per workspace projects, the one "bops" project). */
@@ -413,6 +473,8 @@ export type BopsWorkspaceFound =
 export async function findBopsWorkspace(key: string, { fresh = false, wsId }: { fresh?: boolean; wsId?: string } = {}): Promise<BopsWorkspaceFound> {
   // A workspace with its own Orgo project (per workspace projects): its people are that project's.
   const bound = wsId ? workspaceOfId(wsId)?.orgoProjectId : undefined;
+  // Another workspace with no project of its own yet, where each has one: nobody's in it yet, never the default's people.
+  if (wsId && wsId !== MAIN_WORKSPACE && !bound && (await perWorkspaceProjects().catch(() => null)) === true) return { kind: "none" };
   const known = fresh || bound ? undefined : await g.bopsOrgoWorkspace?.catch(() => undefined);
   if (bound && !fresh) return { kind: "found", id: bound, cached: true };
   if (known) return { kind: "found", id: known, cached: true };
@@ -722,7 +784,7 @@ async function forkTarget(wsId?: string): Promise<string | undefined> {
 }
 
 /** Move a computer to another of the user's Orgo workspaces (orgo-web's move route). */
-export const moveComputer = (computerId: string, workspaceId: string) => call<{ ok?: boolean }>("POST", `/computers/${encodeURIComponent(computerId)}/move`, { workspace_id: workspaceId }, { wait: false });
+export const moveComputer = (computerId: string, workspaceId: string) => call<{ ok?: boolean }>("PATCH", `/computers/${encodeURIComponent(computerId)}/move`, { workspace_id: workspaceId }, { wait: false });
 
 /** Rename one of the user's Orgo workspaces, or delete one (the caller makes sure it's an empty Bops one). */
 export const renameProject = (projectId: string, name: string) => call("PATCH", `/workspaces/${encodeURIComponent(projectId)}`, { name }, { wait: false });
