@@ -1,4 +1,4 @@
-import { askMemory, copyMemory, deleteGroup, fixFact, forgetFact, memoryFor, memoryInfo, pinFact, previewCopy, reviewMemory, settleFlag, shareMemory, undoMemory } from "@/lib/server/memory";
+import { askMemory, askWorkspace, copyMemory, deleteGroup, fixFact, forgetFact, memoryFor, memoryInfo, pinFact, previewCopy, reviewMemory, settleFlag, shareMemory, undoMemory } from "@/lib/server/memory";
 import { currentWorkspaceId } from "@/lib/server/workspaces";
 import type { MemoryGroup } from "@/lib/types";
 import { notReady } from "@/lib/server/ready";
@@ -47,7 +47,8 @@ export async function POST(request: Request) {
         await settleFlag(ws, b.id ?? "", b.action === "keep");
         return Response.json({ ok: true });
       case "ask":
-        return Response.json(await askMemory(b.bot ?? "", b.question ?? ""));
+        // A bot's Memory tab asks as that bot (its workspace); the Knowledge page asks its workspace.
+        return Response.json(b.bot ? await askMemory(b.bot, b.question ?? "") : await askWorkspace(ws, b.question ?? ""));
       case "fix":
         await fixFact(ws, b.id ?? "", b.text ?? "");
         return Response.json({ ok: true });

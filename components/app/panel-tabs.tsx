@@ -1,14 +1,14 @@
 "use client";
 
 import { createContext, createElement, useEffect, useRef, useState } from "react";
-import { categoryOf, type CategoryId } from "@/lib/memory-categories";
+import { GROUP_NAME, type KnowledgeFilter } from "@/lib/memory-categories";
 import { live, type AppState } from "@/lib/types";
 import { computerOf } from "@/lib/screens";
 import type { Section } from "./bot-panel";
 import { CrmFileIcon } from "./crm";
 import { Mascot } from "./mascot";
 import { MacIcon } from "./mac-tab";
-import { CategoryIcon } from "./memory-categories";
+import { KnowledgeIcon } from "./memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MonitorIcon, teamOf } from "./ui";
 
@@ -33,7 +33,7 @@ export type PanelTab =
    * taken off once the page has filled it in). `focusAt` is when they were asked for, so asking again
    * for the same one shows it again.
    */
-  | { id: string; kind: "memory"; ws: string; category: CategoryId; focus?: string; focusAt?: number; query?: string };
+  | { id: string; kind: "memory"; ws: string; category: KnowledgeFilter; focus?: string; focusAt?: number; query?: string };
 
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";
@@ -114,7 +114,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
               : t.kind === "crm"
                 ? t.file
                 : t.kind === "memory"
-                  ? (categoryOf(t.category)?.label ?? "Memory")
+                  ? GROUP_NAME
                   : "New tab";
   return (
     <div
@@ -136,7 +136,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
       ) : t.kind === "crm" ? (
         <CrmFileIcon />
       ) : t.kind === "memory" ? (
-        <CategoryIcon id={t.category} />
+        <KnowledgeIcon />
       ) : (
         <GlobeIcon />
       )}

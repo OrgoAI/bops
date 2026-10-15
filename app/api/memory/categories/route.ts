@@ -72,7 +72,7 @@ export async function POST(request: Request) {
         const said = await learn(ws, text.slice(0, 500));
         // Not saved (kept from someone, memory off, another account): said as the error.
         if (!said.startsWith("Saved") && !said.startsWith("Already known")) return Response.json({ error: said }, { status: 400 });
-        return Response.json({ ...snapshot(ws), note: said.startsWith("Already known") ? "Orbit knows that already." : "Saved. It shows up here in a few seconds." });
+        return Response.json({ ...snapshot(ws), note: said.startsWith("Already known") ? "That's known already." : "Saved. It shows up here in a few seconds." });
       }
       default:
         return Response.json({ error: "Unknown action." }, { status: 400 });

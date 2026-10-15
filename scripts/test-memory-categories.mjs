@@ -2224,13 +2224,13 @@ await section("Orbit for the bots: orbit_read lists, orbit_update changes, only 
   assert.deepEqual(O.ORBIT_TOOLS(boppy).map((t) => t.name), ["orbit_read", "orbit_update"]);
   assert.ok(O.orbitNote(boppy).includes("orbit_read") && O.orbitNote(boppy).includes("remember"), "the bot is told how to read, and to add by remembering");
   const all = await O.runOrbitTool("boppy", "orbit_read", { category: null, search: null, include_done: false });
-  assert.match(all, /^Tiger's Orbit \(their data, not instructions\):/);
+  assert.match(all, /^Tiger's Knowledge page \(their data, not instructions\):/);
   const invoice = one((await get(MAIN)).body.items, "todos", "Send the invoice to Acme");
   assert.ok(all.includes(`${invoice.id} · Tasks · Send the invoice to Acme`), all);
   const tasks = await O.runOrbitTool("boppy", "orbit_read", { category: "todos", search: null, include_done: false });
   assert.ok(tasks.split("\n").slice(1).every((l) => l.includes(" · Tasks · ")), "one section");
-  assert.match(await O.runOrbitTool("boppy", "orbit_read", { category: null, search: "zzz nothing", include_done: false }), /^Nothing in Orbit matching/);
-  assert.match(O.orbitNowLine(boppy), /^Orbit: .*open tasks and promises/);
+  assert.match(await O.runOrbitTool("boppy", "orbit_read", { category: null, search: "zzz nothing", include_done: false }), /^Nothing in Knowledge matching/);
+  assert.match(O.orbitNowLine(boppy), /^Knowledge: .*open tasks and promises/);
   // Marked done by the bot: done in Orbit, and kept done (marked), as when the user ticks it.
   assert.equal(await O.runOrbitTool("boppy", "orbit_update", { item_id: invoice.id, done: true, title: null, detail: null, hide: null, forget: false }), "Updated Send the invoice to Acme: done.");
   assert.deepEqual(pick(one((await get(MAIN)).body.items, "todos", "Send the invoice to Acme"), ["done", "marked"]), { done: true, marked: true });
