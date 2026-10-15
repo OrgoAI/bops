@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { APP_LEVELS, appLogo, FEATURED_APPS, type AppAccount, type AppLevel, type AppState, type Bot } from "@/lib/types";
+import { isKeyApp } from "@/lib/routine-catalog";
 import { Mascot, Spinner } from "./mascot";
+import { KeyIcon } from "./screen-cards";
 import { hasTemplates, RoutineSuggest, usePendingSuggest } from "./routines";
 import { post, teamOf } from "./ui";
 
@@ -40,11 +42,17 @@ function useCatalog() {
   return { apps, error };
 }
 
-/** An app's real logo on a white tile; its first letter if the logo won't load. */
+/** An app's real logo on a white tile; its first letter if the logo won't load. A vault key (STRIPE_SECRET_KEY) is a key. */
 export function AppLogo({ app, name, size }: { app: string; name: string; size: number }) {
   const [broken, setBroken] = useState(false);
   const logo = appLogo(app);
   const radius = Math.round(size * 0.26);
+  if (isKeyApp(app))
+    return (
+      <span role="img" aria-label={name} className="flex shrink-0 items-center justify-center bg-[#F2F2F0] text-[#3A3A38]" style={{ width: size, height: size, borderRadius: radius }}>
+        <KeyIcon size={Math.max(10, Math.round(size * 0.6))} />
+      </span>
+    );
   if (broken)
     return (
       <span className="flex shrink-0 items-center justify-center bg-[#F2F2F0] font-semibold text-[#3A3A38]" style={{ width: size, height: size, borderRadius: radius, fontSize: Math.round(size * 0.42) }}>

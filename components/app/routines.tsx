@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { describeSchedule } from "@/cloud/schedule";
-import { templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
+import { sameApp, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
 import type { AppState, Bot, Schedule, Watch } from "@/lib/types";
 import { AppLogo, botApps } from "./apps";
 import { appNameOf, autopilotOf, FilterPill, filterRoutines, monitorNeedsYou, RoutineList, scheduleNeedsYou, sourceApps, TagChips, timeOf, useOpenRow } from "./autopilot";
@@ -27,21 +27,38 @@ type Offer = RoutineTemplate & { already: boolean };
 
 /** Whether this bot already runs a template (a routine or monitor that came from it). */
 const runsAlready = (state: AppState, botId: string, app: string, id: string) =>
-  state.routines.some((r) => r.botId === botId && r.source?.app === app && r.source.template === id) ||
-  (state.watches ?? []).some((w) => w.botId === botId && w.source?.app === app && w.source.template === id);
+  state.routines.some((r) => r.botId === botId && r.source?.template === id && sameApp(r.source.app, app)) ||
+  (state.watches ?? []).some((w) => w.botId === botId && w.source?.template === id && sameApp(w.source.app, app));
+
+/** The anchor kept for an app, by any of its names (a key saved as STRIPE_API_KEY is Stripe's). */
+export const anchorOf = (anchors: Map<string, HTMLElement>, app: string) => anchors.get(app) ?? [...anchors].find(([a]) => sameApp(a, app))?.[1] ?? null;
 
 /** Whether a Connected App has routines to offer at all. */
 export const hasTemplates = (app: string) => templatesFor(app).length > 0;
 
 /**
+ * Suggestions already closed in this window, by when they were made (AppState.suggest.at): shared by every
+ * place that shows one, so one closed on Details doesn't open again on the Routines tab before the server's
+ * answer arrives, or ever when that answer failed.
+ */
+const handledSuggests = new Set<number>();
+
+/**
  * The suggestion waiting from a connect that just finished (AppState.suggest), if this place shows it:
- * once closed here it isn't shown again (the server clears it too), until the next one.
+ * once closed anywhere it isn't shown again (the server clears it too), until the next one.
  */
 export function usePendingSuggest(state: AppState, here: (s: { app: string; botId: string }) => boolean) {
   const s = state.suggest;
-  const [handled, setHandled] = useState<number | null>(null);
-  const pending = s && s.at !== handled && hasTemplates(s.app) && here(s) ? s : null;
-  return { pending, handled: () => s && setHandled(s.at) };
+  const [, setSeen] = useState(0);
+  const pending = s && !handledSuggests.has(s.at) && hasTemplates(s.app) && here(s) ? s : null;
+  return {
+    pending,
+    handled: () => {
+      if (!s) return;
+      handledSuggests.add(s.at);
+      setSeen((n) => n + 1);
+    },
+  };
 }
 
 /** Puts the waiting suggestion off (Not now): the server forgets it. */
@@ -126,11 +143,12 @@ export function RoutineSuggest({
   const appName = appNameOf(state, app);
   // The bots that can use the app, the main bot first; any of the team when none can yet.
   const team = teamOf(state);
-  const users = team.filter((b) => botApps(state, b).some((x) => x.app === app));
+  const users = team.filter((b) => botApps(state, b).some((x) => sameApp(x.app, app)) || !!b.keys?.some((k) => sameApp(k, app)));
   const choices = users.length ? users : team;
   const [botId, setBotId] = useState<string | null>(() => start ?? (choices.find((b) => b.isMain) ?? choices[0])?.id ?? null);
   const bot = state.bots.find((b) => b.id === botId);
-  const offers = useOffers(state, app, botId);
+  // What it runs already counts as it's made (some of a Set up can fail, and the popover stays for those).
+  const offers = useOffers(state, app, botId)?.map((t) => (t.already || !botId || !runsAlready(state, botId, app, t.id) ? t : { ...t, already: true })) ?? null;
   const [ticks, setTicks] = useState<Record<string, boolean>>({});
   const [times, setTimes] = useState<Record<string, string>>({});
   const [openId, setOpenId] = useState<string | null>(null);
@@ -154,7 +172,7 @@ export function RoutineSuggest({
   // Kept current for the listeners below, which are set once.
   const close = useRef(onClose);
   const notNow = useRef(() => {});
-  const suggested = state.suggest?.app === app;
+  const suggested = !!state.suggest && sameApp(state.suggest.app, app);
   useLayoutEffect(() => {
     close.current = onClose;
     notNow.current = () => {
@@ -227,9 +245,16 @@ export function RoutineSuggest({
     setError(null);
     try {
       const res = await post("/api/routines/suggestions", { app, botId, templates: picked.map((t) => ({ id: t.id, ...(scheduleOf(t) ? { schedule: scheduleOf(t) } : {}) })) });
-      const j = (await res.json().catch(() => null)) as { created?: string[]; error?: string } | null;
+      const j = (await res.json().catch(() => null)) as { created?: string[]; errors?: string[]; error?: string } | null;
       if (!res.ok || j?.error) {
         setError(j?.error ? undash(j.error) : "That didn't work. Try again.");
+        setBusy(false);
+        return;
+      }
+      // Some made, some not: the made ones show as Already on, and why the rest weren't stays here.
+      if (j?.errors?.length) {
+        setError(j.errors.map(undash).join(" "));
+        setTicks({});
         setBusy(false);
         return;
       }
@@ -473,10 +498,16 @@ export function BotRoutines({
   const shown = filterRoutines(state, mine, { app: only ?? undefined });
   const { openId, toggle, list } = useOpenRow(undefined, undefined, false);
   const fromApps = sourceApps(mine);
-  const offers = botApps(state, b).filter((x) => hasTemplates(x.app));
+  // Its Connected Apps with routines to offer, then its keys that have some (Stripe, Plain).
+  const offers = [
+    ...botApps(state, b)
+      .filter((x) => hasTemplates(x.app))
+      .map((x) => ({ app: x.app, appName: x.appName })),
+    ...(b.keys ?? []).filter((k, i, all) => hasTemplates(k) && all.findIndex((x) => sameApp(x, k)) === i).map((k) => ({ app: k, appName: appNameOf(state, k) })),
+  ];
   const anchors = useRef(new Map<string, HTMLElement>());
   const [asked, setAsked] = useState<string | null>(null);
-  const suggest = usePendingSuggest(state, (s) => s.botId === b.id && offers.some((x) => x.app === s.app));
+  const suggest = usePendingSuggest(state, (s) => s.botId === b.id && offers.some((x) => sameApp(x.app, s.app)));
   const popover = asked ?? suggest.pending?.app ?? null;
   const total = mine.schedules.length + mine.monitors.length;
   const needs = [...mine.schedules.filter((r) => scheduleNeedsYou(r, state)), ...mine.monitors.filter(monitorNeedsYou)].length;
@@ -487,7 +518,7 @@ export function BotRoutines({
         <div className="flex w-full items-center gap-3 rounded-2xl bg-white/60 px-4 py-3 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]">
           <div className="flex min-w-0 flex-1 flex-col">
             <span className="text-[13px] font-semibold leading-4">Add routines</span>
-            <span className="text-[12px] leading-4 text-[#6B6B6B]">From the Connected Apps {b.name} uses</span>
+            <span className="text-[12px] leading-4 text-[#6B6B6B]">{(b.keys ?? []).some(hasTemplates) ? `From the Connected Apps and keys ${b.name} uses` : `From the Connected Apps ${b.name} uses`}</span>
           </div>
           <span className="flex shrink-0 flex-wrap justify-end gap-1.5">
             {offers.map((x) => (
@@ -556,7 +587,7 @@ export function BotRoutines({
           state={state}
           app={popover}
           botId={b.id}
-          anchor={() => anchors.current.get(popover) ?? null}
+          anchor={() => anchorOf(anchors.current, popover)}
           onClose={() => {
             setAsked(null);
             suggest.handled();
@@ -570,7 +601,7 @@ export function BotRoutines({
 /** How many routines and monitors a bot runs from one Connected App. */
 export function routinesFrom(state: AppState, botId: string, app: string) {
   const { schedules, monitors } = autopilotOf(state, botId);
-  return schedules.filter((r) => r.source?.app === app).length + monitors.filter((w) => w.source?.app === app).length;
+  return schedules.filter((r) => !!r.source && sameApp(r.source.app, app)).length + monitors.filter((w) => !!w.source && sameApp(w.source.app, app)).length;
 }
 
 /** "3 routines", "1 routine". */

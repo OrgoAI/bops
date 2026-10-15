@@ -240,7 +240,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
       "failed payments (charges with status failed, and GET /v1/payment_intents still needing a payment method),",
       "refunds (GET /v1/refunds) and new disputes (GET /v1/disputes).",
       "Answer with revenue by currency, each failed payment with the customer and amount, and any refund or dispute I should look at.",
-      "Read only: never create, refund, cancel or change anything in Stripe.",
+      `Read only: don't create, refund, cancel or change anything in Stripe. ${READS_ONLY}`,
     ].join(" "),
     neverWithoutAsking: ["Refund a payment", "Change a customer or subscription", "Anything that moves money"],
   },
@@ -296,6 +296,35 @@ export function templatesFor(app: string): RoutineTemplate[] {
   const a = SAME_APP[app] ?? app;
   return ROUTINE_TEMPLATES.filter((t) => t.app === a || t.app.toLowerCase() === a.toLowerCase());
 }
+
+/**
+ * The one name an app's starters are kept under: a key saved by another name for the same service
+ * (STRIPE_API_KEY) is STRIPE_SECRET_KEY, and "Gmail" is gmail. Compare apps by this, on both sides.
+ */
+export function canonicalApp(app: string): string {
+  return templatesFor(app)[0]?.app ?? SAME_APP[app] ?? app;
+}
+
+/** Whether two names are the same app (canonicalApp). */
+export const sameApp = (a: string, b: string) => canonicalApp(a).toLowerCase() === canonicalApp(b).toLowerCase();
+
+/** A vault key's name (STRIPE_SECRET_KEY), not a Connected App's slug (gmail). */
+export const isKeyApp = (app: string) => /^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/.test(app);
+
+/** The apps with starters, and their keys, by the names the user knows them by. */
+const APP_NAMES: Record<string, string> = {
+  gmail: "Gmail",
+  googlecalendar: "Google Calendar",
+  slack: "Slack",
+  discord: "Discord",
+  hubspot: "HubSpot",
+  attio: "Attio",
+  STRIPE_SECRET_KEY: "Stripe",
+  PLAIN_API_KEY: "Plain",
+};
+
+/** A Connected App's or a key's name as the user knows it ("Stripe" for STRIPE_API_KEY), or undefined. */
+export const appNameFor = (app: string): string | undefined => APP_NAMES[canonicalApp(app)] ?? APP_NAMES[app.toLowerCase()];
 
 /** A starter by its id. */
 export const templateById = (id: string) => ROUTINE_TEMPLATES.find((t) => t.id === id);

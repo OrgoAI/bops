@@ -2,7 +2,7 @@ import "server-only";
 import { readlinkSync } from "node:fs";
 import { trackServerEvent } from "./analytics";
 import { botChatId, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
-import { tagsOf } from "@/lib/routine-catalog";
+import { appNameFor, tagsOf } from "@/lib/routine-catalog";
 import { clampEvery, describeSchedule as describe, nextRun, parseClock, resolveOnce, whenText } from "@/cloud/schedule";
 import { plainLinks } from "@/cloud/style";
 import { pingIfWorthIt } from "./attention";
@@ -792,8 +792,7 @@ export function routinesNote(botIds: string[]) {
 }
 
 /** A Connected App's or a key's name as the user knows it. */
-const APP_WORDS: Record<string, string> = { gmail: "Gmail", googlecalendar: "Google Calendar", slack: "Slack", discord: "Discord", hubspot: "HubSpot", attio: "Attio", STRIPE_SECRET_KEY: "Stripe", PLAIN_API_KEY: "Plain" };
-const appWord = (app: string) => APP_WORDS[app] ?? app;
+const appWord = (app: string) => appNameFor(app) ?? app;
 
 // The timer calls whatever version of tick was loaded last, so edits apply without a restart.
 g.__bopsRoutineTick = tick;

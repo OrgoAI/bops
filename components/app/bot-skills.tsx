@@ -87,7 +87,7 @@ export function BotSkills({
       )}
 
       {/* Its keys: the Vault's, on or off for this bot, as on Details. */}
-      {keyed && <BotKeys bot={b} onAdd={() => onOpenKeys(b.id)} className={GLASS} />}
+      {keyed && <BotKeys state={state} bot={b} onAdd={() => onOpenKeys(b.id)} className={GLASS} />}
 
       <div className={`flex w-full flex-col gap-2 rounded-2xl px-4 py-3 ${GLASS}`}>
         <span className="text-[13px] font-semibold leading-4">Built in</span>

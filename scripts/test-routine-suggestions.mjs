@@ -232,6 +232,34 @@ await check("refused: an unknown bot, an app with no starters, a starter of anot
   assert.deepEqual(S.offersFor("gmail", "bot_none"), { error: "No such bot." });
 });
 
+await check("set up for another bot than the one offered: the suggestion is answered all the same", () => {
+  S.offerStarters("googlecalendar", ["bot_main"]);
+  assert.deepEqual([state.suggest.app, state.suggest.botId], ["googlecalendar", "bot_main"]);
+  const out = S.acceptStarters("googlecalendar", "bot_max", [{ id: C.templatesFor("googlecalendar")[0].id }]);
+  assert.equal(out.created.length, 1);
+  assert.equal(state.suggest, undefined);
+});
+
+await check("a Stripe key by its other name: the same starters, already on either way", () => {
+  const made = S.acceptStarters("STRIPE_API_KEY", "bot_main", [{ id: "stripe-daily-money" }]);
+  assert.equal(made.created.length, 1);
+  assert.equal(state.routines.find((r) => r.id === made.created[0]).source.app, "STRIPE_SECRET_KEY");
+  assert.equal(S.offersFor("STRIPE_API_KEY", "bot_main").templates[0].already, true);
+  assert.equal(S.offersFor("STRIPE_SECRET_KEY", "bot_main").templates[0].already, true);
+  assert.equal(C.canonicalApp("STRIPE_API_KEY"), "STRIPE_SECRET_KEY");
+  assert.equal(C.appNameFor("STRIPE_API_KEY"), "Stripe");
+  assert.equal(C.isKeyApp("PLAIN_API_KEY"), true);
+  assert.equal(C.isKeyApp("googlecalendar"), false);
+  // A suggestion made under one name is answered under the other.
+  state.suggest = { app: "STRIPE_API_KEY", botId: "bot_main", at: Date.now() };
+  S.clearSuggest({ app: "STRIPE_SECRET_KEY" });
+  assert.equal(state.suggest, undefined);
+});
+
+await check("every starter's goal says writes ask first", () => {
+  for (const t of C.ROUTINE_TEMPLATES) assert.match(t.goal, /Writes always ask me first\./, t.id);
+});
+
 /* ---------------- Learning tags ---------------- */
 
 await check("turning on a Gmail starter learned tags once, from a read only sample, in the background", async () => {

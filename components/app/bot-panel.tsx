@@ -222,7 +222,7 @@ function Details({
 
       <ComputerSummary state={state} bot={b} className={`w-full ${glass}`} onOpen={() => onOpenComputer(b.id)} />
       <Uses state={state} bot={b} onOpenVault={onOpenVault} onOpenRoutines={onOpenRoutines} className={glass} />
-      <BotKeys bot={b} onAdd={() => onOpenKeys(b.id)} className={glass} />
+      <BotKeys state={state} bot={b} onAdd={() => onOpenKeys(b.id)} className={glass} />
 
       <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
         <div className="flex min-w-0 flex-1 flex-col">

@@ -1,8 +1,10 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { sameApp } from "@/lib/routine-catalog";
 import type { AppApproval, AppState, Bot, Message } from "@/lib/types";
 import { Mascot } from "./mascot";
+import { anchorOf, hasTemplates, RoutineSuggest, usePendingSuggest } from "./routines";
 import { KeyIcon } from "./screen-cards";
 import { undash } from "./side-group";
 import { post, teamOf } from "./ui";
@@ -229,6 +231,11 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
     setTimeout(() => setSaved(null), 2500);
   };
   const add = () => setForm({ bots: main ? [main.id] : [] });
+  // A key with starter routines (Stripe, Plain) offers them on its row, and by itself right after it's saved.
+  const anchors = useRef(new Map<string, HTMLElement>());
+  const [asked, setAsked] = useState<string | null>(null);
+  const suggest = usePendingSuggest(state, (s) => shown.some((k) => sameApp(k.name, s.app)));
+  const routinesFor = asked ? { app: asked, botId: undefined } : suggest.pending ? { app: suggest.pending.app, botId: suggest.pending.botId } : null;
 
   let body: React.ReactNode;
   if (!info)
@@ -250,7 +257,13 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
       <>
         {shown.map((k) => (
           <Fragment key={`${k.scope}:${k.name}`}>
-            <KeyLine k={k} team={team} onReplace={() => setForm({ replace: k, bots: [] })} />
+            <KeyLine
+              k={k}
+              team={team}
+              onReplace={() => setForm({ replace: k, bots: [] })}
+              onRoutines={hasTemplates(k.name) ? () => setAsked(k.name) : undefined}
+              anchorRef={(el) => void (el ? anchors.current.set(k.name, el) : anchors.current.delete(k.name))}
+            />
             {/* A new value for this key, right under it. */}
             {form?.replace?.name === k.name && form.replace.scope === k.scope && <AddKey info={info} team={team} replace={k} scope={k.scope} bots={[]} first={false} onSaved={done} onCancel={() => setForm(null)} />}
           </Fragment>
@@ -305,12 +318,39 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
         </div>
       )}
       <div className="flex flex-col rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#ECECEA]">{body}</div>
+      {routinesFor && (
+        <RoutineSuggest
+          key={`${routinesFor.app}:${routinesFor.botId ?? ""}`}
+          state={state}
+          app={routinesFor.app}
+          botId={routinesFor.botId}
+          pickBot
+          anchor={() => anchorOf(anchors.current, routinesFor.app)}
+          onClose={() => {
+            setAsked(null);
+            suggest.handled();
+          }}
+        />
+      )}
     </div>
   );
 }
 
 /** One key in the vault: what it is, who may use it (tap a bot to change), Replace, and Remove after a confirm. */
-function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: () => void }) {
+function KeyLine({
+  k,
+  team,
+  onReplace,
+  onRoutines,
+  anchorRef,
+}: {
+  k: KeyRow;
+  team: Bot[];
+  onReplace: () => void;
+  /** Opens its starter routines, when it has some; the button that does is the popover's anchor. */
+  onRoutines?: () => void;
+  anchorRef: (el: HTMLSpanElement | null) => void;
+}) {
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -394,6 +434,13 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
               </svg>
             )}
           </button>
+          {onRoutines && (
+            <span ref={anchorRef} className="flex">
+              <button disabled={busy} onClick={onRoutines} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+                Add routines
+              </button>
+            </span>
+          )}
           <button disabled={busy} onClick={onReplace} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
             Replace
           </button>
@@ -599,10 +646,18 @@ function AddKey({
 /* ---------------- A bot's profile ---------------- */
 
 /** On a bot's profile: the keys in the vault, on or off for this bot, and the way to the Vault to add one. */
-export function BotKeys({ bot: b, onAdd, className }: { bot: Bot; onAdd: () => void; className: string }) {
+export function BotKeys({ state, bot: b, onAdd, className }: { state: AppState; bot: Bot; onAdd: () => void; className: string }) {
   const { info, failed, retry } = useKeys();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // One row per name: this workspace's key and the account's by the same name are one to a bot (its workspace's wins).
+  const keys = (info?.keys ?? []).filter((k, i, all) => all.findIndex((x) => x.name === k.name) === i);
+  // A key this bot uses with starter routines (Stripe, Plain) offers them on its row, and by itself right after it's saved for this bot.
+  const routinesOn = (name: string) => hasTemplates(name) && !!b.keys?.includes(name);
+  const anchors = useRef(new Map<string, HTMLElement>());
+  const [asked, setAsked] = useState<string | null>(null);
+  const suggest = usePendingSuggest(state, (s) => s.botId === b.id && keys.some((k) => routinesOn(k.name) && sameApp(k.name, s.app)));
+  const popover = asked ?? suggest.pending?.app ?? null;
   if (!info)
     return failed ? (
       <div className={`flex w-full flex-col rounded-2xl ${className}`}>
@@ -620,8 +675,6 @@ export function BotKeys({ bot: b, onAdd, className }: { bot: Bot; onAdd: () => v
     setError(await grant(name, b.id, allowed));
     setBusy(null);
   };
-  // One row per name: this workspace's key and the account's by the same name are one to a bot (its workspace's wins).
-  const keys = info.keys.filter((k, i, all) => all.findIndex((x) => x.name === k.name) === i);
   return (
     <div className={`flex w-full flex-col rounded-2xl ${className}`}>
       <div className="flex items-center justify-between px-4 pb-1 pt-[11px]">
@@ -643,6 +696,16 @@ export function BotKeys({ bot: b, onAdd, className }: { bot: Bot; onAdd: () => v
                 <span className="shrink-0 text-[14px] leading-[18px]">{k.label}</span>
                 <span className="truncate font-mono text-[11px] leading-4 text-[#9A9A98]">{k.name}</span>
               </div>
+              {routinesOn(k.name) && (
+                <span ref={(el) => void (el ? anchors.current.set(k.name, el) : anchors.current.delete(k.name))} className="flex shrink-0">
+                  <button
+                    onClick={() => setAsked(k.name)}
+                    className="h-[22px] rounded-full bg-black/[0.05] px-2 text-[11.5px] leading-4 text-[#3A3A38] outline-none hover:bg-black/[0.08] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+                  >
+                    Add routines
+                  </button>
+                </span>
+              )}
               <button
                 role="switch"
                 aria-checked={on}
@@ -661,6 +724,19 @@ export function BotKeys({ bot: b, onAdd, className }: { bot: Bot; onAdd: () => v
         <span role="alert" className="px-4 pb-3 text-[12px] leading-4 text-[#B42318]">
           {error}
         </span>
+      )}
+      {popover && (
+        <RoutineSuggest
+          key={popover}
+          state={state}
+          app={popover}
+          botId={b.id}
+          anchor={() => anchorOf(anchors.current, popover)}
+          onClose={() => {
+            setAsked(null);
+            suggest.handled();
+          }}
+        />
       )}
     </div>
   );

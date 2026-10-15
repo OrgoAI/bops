@@ -1,5 +1,5 @@
 import "server-only";
-import { quietOf, scheduleOf, TAG_LEARNING_APPS, tagsOf, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
+import { quietOf, sameApp, scheduleOf, TAG_LEARNING_APPS, tagsOf, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
 import { botChatId, MAIN_WORKSPACE, workspaceOf, type AppState, type Schedule, type Watch, type WorkspaceTag } from "@/lib/types";
 import { createRoutine } from "./routines";
 import { addMessage, bot, getState, update } from "./store";
@@ -19,7 +19,7 @@ export type Offer = RoutineTemplate & { already: boolean };
 
 /** Whether `botId` already has a routine or a watch made from this starter. */
 export function hasStarter(s: Pick<AppState, "routines" | "watches">, botId: string, app: string, template: string) {
-  const same = (x: { botId: string; source?: { app: string; template: string } }) => x.botId === botId && x.source?.template === template && x.source.app.toLowerCase() === app.toLowerCase();
+  const same = (x: { botId: string; source?: { app: string; template: string } }) => x.botId === botId && x.source?.template === template && sameApp(x.source.app, app);
   return s.routines.some(same) || (s.watches ?? []).some((w: Watch) => same(w));
 }
 
@@ -36,11 +36,14 @@ export function offerStarters(app: string, botIds: string[] | undefined) {
   update((s) => void (s.suggest = { app, botId, at: Date.now() }));
 }
 
-/** The waiting suggestion is answered or put off: the window stops offering it. Only that one, when given. */
-export function clearSuggest(match?: { app: string; botId: string }) {
+/**
+ * The waiting suggestion is answered or put off: the window stops offering it. Only when it's for that
+ * app, when given, whichever bot it was offered to (in the Vault the user may pick another bot for it).
+ */
+export function clearSuggest(match?: { app: string }) {
   const s = getState().suggest;
   if (!s) return;
-  if (match && (s.app.toLowerCase() !== match.app.toLowerCase() || s.botId !== match.botId)) return;
+  if (match && !sameApp(s.app, match.app)) return;
   update((x) => void delete x.suggest);
 }
 
@@ -48,7 +51,7 @@ export function clearSuggest(match?: { app: string; botId: string }) {
 export function offersFor(app: string, botId: string): { botId: string; app: string; templates: Offer[] } | { error: string } {
   if (!bot(botId)) return { error: "No such bot." };
   const s = getState();
-  return { botId, app, templates: templatesFor(app).map((t) => ({ ...t, already: hasStarter(s, botId, app, t.id) })) };
+  return { botId, app, templates: templatesFor(app).map((t) => ({ ...t, already: hasStarter(s, botId, t.app, t.id) })) };
 }
 
 /**
@@ -85,7 +88,7 @@ export function acceptStarters(app: string, botId: string, picks: { id: string; 
     if (made.routine) created.push(made.routine.id);
     else errors.push(`${t.title}: ${made.error ?? "couldn't be made."}`);
   }
-  clearSuggest({ app, botId });
+  clearSuggest({ app });
   // Tags come from a sample of the app's own mail or messages, once per app and workspace, after the answer.
   const first = created[0];
   if (first && TAG_LEARNING_APPS.has(app.toLowerCase())) void learnTags(botId, app.toLowerCase(), first).catch((e: Error) => console.warn(`[routines] tags from ${app}: ${e.message}`));

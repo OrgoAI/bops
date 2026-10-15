@@ -3,6 +3,7 @@
 import { Fragment, useEffect, useRef, useState, type AnimationEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
+import { appNameFor, canonicalApp, sameApp } from "@/lib/routine-catalog";
 import { DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Delivery, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
 import { Fold } from "./fold";
 import { Mascot } from "./mascot";
@@ -113,9 +114,9 @@ export function scheduleNeedsYou(r: Routine, state: AppState) {
 /** A monitor needs the user when its page couldn't be read (news is its own mark, New). */
 export const monitorNeedsYou = (w: Watch) => !!w.page?.error && !w.paused;
 
-/** A Connected App's name as the user knows it: from their accounts, else its slug, capitalized. */
+/** A Connected App's or a key's name as the user knows it: from their accounts or the catalog ("Stripe"), else its slug, capitalized. */
 export function appNameOf(state: AppState, app: string) {
-  return state.accounts?.find((a) => a.app === app)?.appName ?? app.replace(/[_-]+/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+  return state.accounts?.find((a) => a.app === app)?.appName ?? appNameFor(app) ?? app.replace(/[_-]+/g, " ").replace(/^\w/, (c) => c.toUpperCase());
 }
 
 /** The Connected App a routine or monitor came from, as a small logo that says so on hover. */
@@ -470,14 +471,14 @@ export type RoutineFilter = { bot?: string; app?: string; needsYou?: boolean };
 /** The schedules and monitors a filter keeps (each list keeps its order). */
 export function filterRoutines(state: AppState, lists: { schedules: Routine[]; monitors: Watch[] }, f: RoutineFilter) {
   return {
-    schedules: lists.schedules.filter((r) => (!f.bot || r.botId === f.bot) && (!f.app || r.source?.app === f.app) && (!f.needsYou || scheduleNeedsYou(r, state))),
-    monitors: lists.monitors.filter((w) => (!f.bot || w.botId === f.bot) && (!f.app || w.source?.app === f.app) && (!f.needsYou || monitorNeedsYou(w))),
+    schedules: lists.schedules.filter((r) => (!f.bot || r.botId === f.bot) && (!f.app || (!!r.source && sameApp(r.source.app, f.app))) && (!f.needsYou || scheduleNeedsYou(r, state))),
+    monitors: lists.monitors.filter((w) => (!f.bot || w.botId === f.bot) && (!f.app || (!!w.source && sameApp(w.source.app, f.app))) && (!f.needsYou || monitorNeedsYou(w))),
   };
 }
 
 /** The Connected Apps these came from, in the order first met. */
 export function sourceApps(lists: { schedules: Routine[]; monitors: Watch[] }) {
-  return [...new Set([...lists.schedules, ...lists.monitors].map((x) => x.source?.app).filter((a): a is string => !!a))];
+  return [...new Set([...lists.schedules, ...lists.monitors].map((x) => x.source?.app).filter((a): a is string => !!a).map(canonicalApp))];
 }
 
 /**

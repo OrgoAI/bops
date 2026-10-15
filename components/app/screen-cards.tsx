@@ -135,9 +135,9 @@ export function SignInCard({
   );
 }
 
-export function KeyIcon({ color = "currentColor" }: { color?: string }) {
+export function KeyIcon({ color = "currentColor", size = 15 }: { color?: string; size?: number }) {
   return (
-    <svg width="15" height="15" viewBox="0 0 16 16" className="shrink-0">
+    <svg width={size} height={size} viewBox="0 0 16 16" className="shrink-0" aria-hidden="true">
       <circle cx="5.5" cy="10.5" r="3" fill="none" stroke={color} strokeWidth="1.4" />
       <path d="M7.7 8.3L13.5 2.5M11.5 4.5l1.6 1.6M10 6l1.2 1.2" fill="none" stroke={color} strokeWidth="1.4" strokeLinecap="round" />
     </svg>
