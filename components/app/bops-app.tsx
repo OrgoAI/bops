@@ -12,6 +12,7 @@ import { ChatView, forgetSheet, ThreadSheet, ToPicker } from "./chat-view";
 import { ComputerPeek, ComputerView, defaultDisplay } from "./computer";
 import { crmOpen } from "@/lib/crm-access";
 import { categoriesOpen } from "@/lib/memory-categories";
+import { tagsOf } from "@/lib/routine-catalog";
 import { CrmView, OpenCrm } from "./crm";
 import { BoppyLoading, BusyBots, Mascot } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
@@ -768,6 +769,7 @@ function Bops({ state }: { state: AppState | null }) {
                         focus={tab.focus}
                         focusAt={tab.focusAt}
                         query={tab.query}
+                        tags={tagsOf(state.workspaces?.find((w) => w.id === tab.ws)).map((t) => t.name)}
                         // The search asked for is used once: off the tab, so coming back doesn't fill it in again.
                         onQueryUsed={() => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, query: undefined } : t)))}
                         onCategory={(category) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, category, focus: undefined } : t)))}

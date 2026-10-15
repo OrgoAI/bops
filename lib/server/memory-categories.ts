@@ -1,10 +1,11 @@
 import "server-only";
-import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CATEGORIES, CATEGORY_IDS, categoriesOpen, type CategoryId, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
 import { creditsOut, noteOutOfCredit } from "./cloud";
-import { bankOf, cardOf, dream as askToDream, existingFacts, factSource, forgetFacts, memoryOn, privateLines, scanFacts, type FactRow } from "./memory";
+import { MAIN_WORKSPACE } from "@/lib/types";
+import { bankOf, bankOwner, bindingOf, cardOf, dream as askToDream, existingFacts, factSource, factsByIds, memoryOn, privateLines, purgeMemory, saidSince, scanFacts, sessionWorkspace, type FactRow } from "./memory";
 import { openaiClient } from "./openai-client";
 import { onPostgres } from "./persist";
 import { getState, ownerName, sameState, stateEpoch, userDir } from "./store";
@@ -31,8 +32,19 @@ import { currentWorkspaceId } from "./workspaces";
  * The first look sorts the card and the newest 300 facts; older ones are counted, and sorted 300 at a
  * time when the user asks (Sort older).
  *
- * Kept per bank (workspaces can share one) in the user's folder on this Mac, never in the app state
- * (which goes to the window every few seconds and to Bops Cloud): <userDir>/memory-categories/<bank>.json.
+ * Orbit lives in memory (Honcho): this index is only a cache of how its facts were sorted, kept per
+ * workspace in the user's folder on this Mac, never in the app state (which goes to the window every few
+ * seconds and to Bops Cloud): <userDir>/memory-categories/ws-<workspace>.json. Workspaces can share a
+ * bank; each one's Orbit sorts only what was learned in its own chats, calls and tasks (and the facts it
+ * saved), and the bank's card and what came from no Bops chat go to the workspace whose bank it is. An
+ * index kept per bank before is moved to that workspace on first load.
+ *
+ * Forget deletes the facts and card lines an item was learned from in memory, for good, and checks that
+ * memory no longer has them (tried again until it doesn't). What's kept of a forgotten item is hashes
+ * only, never its text: of its key, and of its key with each fact's words, so that a fact memory works
+ * out again from the old chats is deleted when it comes in, and the item stays gone. Delete everywhere
+ * also deletes the memory copy of the chats and calls in Bops its facts came from (never a session
+ * Bops has no copy of: the user's other agents', a chat deleted from Bops).
  */
 
 /** A sweep reads this many of the newest facts; anything sorted that isn't among them is checked with memory by id. */
@@ -49,8 +61,14 @@ const WAIT_MS = 30 * 60_000;
 /** A look when the last was this long ago (the window asking, or the timer), and a sweep this often. */
 const STALE_MS = 15 * 60_000;
 const SWEEP_MS = 6 * 60 * 60_000;
-/** After an item is forgotten, what memory learns from chats this soon is still from before (it takes minutes to work out facts): it doesn't bring the item back. */
-const FORGET_SETTLES_MS = 15 * 60_000;
+/** Deleting from memory again after a try that left something there: after 5 seconds, then 30, 2 minutes, 10, then every 30. */
+const PURGE_RETRY_MS = [5_000, 30_000, 2 * 60_000, 10 * 60_000, 30 * 60_000];
+/** Said once deleting has failed this many times in a row. */
+const PURGE_SAY_AFTER = 3;
+const PURGE_ERROR = "Some of what you forgot is still in memory. Bops keeps trying to delete it.";
+/** Forgotten items and facts kept (hashes), the newest. */
+const TOMB_ITEMS = 2000;
+const TOMB_FACTS = 10_000;
 /** Tidying up (dreaming) on request, at most this often. */
 const DREAM_EVERY_MS = 60 * 60_000;
 
@@ -64,14 +82,33 @@ type Item = MemoryItem & { detailPrivate?: boolean };
 
 type Index = {
   v: 1;
+  /** The workspace whose Orbit this is, and the bank (Honcho workspace) its memory is in. */
+  ws?: string;
   bank: string;
+  /** The user's peer in that bank: what's still to delete there can be, after the workspace moved to another bank. */
+  peer?: string;
   /** The categories it was sorted into: when they change, items in one that's gone go, and facts that made nothing are sorted again. */
   cats?: string;
-  /** Every fact (and card line, "card:<line>") already sorted, the items it went into, and what it said about each. */
-  facts: Record<string, { items: string[]; at: number; wrote?: Record<string, Said> }>;
+  /**
+   * Every fact (and card line, "card:<line>") already sorted, the items it went into, and what it said
+   * about each; `s`: the session it was learned in (null: none); `h`: the hash of its words.
+   */
+  facts: Record<string, Fact>;
   items: Record<string, Item>;
-  /** Items the user forgot ("<category>:<key>", and when): only something said in a chat after that makes one again. */
-  forgotten: Record<string, number>;
+  /**
+   * What the user forgot, as hashes only (and when). items: an item's key (only something the user says in
+   * a chat after the forget, or a fact saved after it, brings it back: bringsBack). facts: an item's key with a fact's words (memory working that fact out again: it's
+   * deleted as it comes in), or a fact's id (a fact worked out from it goes too).
+   */
+  tomb: { items: Record<string, number>; facts: Record<string, number> };
+  /**
+   * Still to delete from memory (Forget, Delete everywhere), tried until memory no longer has it: facts by
+   * id, card lines by the hash of their words, sessions by id. `need`: facts forgotten before their words'
+   * hash was kept, with the items' key hashes, for their tombstones (read from memory before they go).
+   */
+  purge?: { facts: string[]; cards: string[]; sessions: string[]; need: Record<string, string[]>; tries: number; at: number };
+  /** Before tombstones: forgotten keys in plain text (read once, then hashed). */
+  forgotten?: Record<string, number>;
   /** How many of the newest facts are sorted (Sort older adds to it), and the date of the oldest of them. */
   depth?: number;
   floorAt?: number;
@@ -97,7 +134,10 @@ const RANK: Record<Mode, number> = { quick: 0, look: 1, fill: 2, sweep: 3 };
 /** `now`: sort what's new right away (a fact saved by hand, Refresh, the first look) instead of waiting for more. */
 type SyncOpts = { mode?: Mode; now?: boolean };
 
-type Bank = {
+type Fact = { items: string[]; at: number; wrote?: Record<string, Said>; s?: string | null; h?: string };
+
+/** One workspace's Orbit while Bops runs. */
+type Space = {
   index?: Index;
   /** The file the index was read from: an index is only ever written back there (another account's sign-in has another folder). */
   file?: string;
@@ -105,75 +145,208 @@ type Bank = {
   /** A look asked for while one runs: it runs once that one is done. */
   again?: SyncOpts;
   timers: Map<string, ReturnType<typeof setTimeout>>;
-  /** Forgets, one at a time (each changes memory and the card). */
-  forgetting?: Promise<unknown>;
+  /** Deleting what was forgotten from memory, one run at a time; `purgeAgain`: more was forgotten meanwhile. */
+  purging?: Promise<void>;
+  purgeAgain?: boolean;
   /** The facts last read to the sorted depth, for the next look that continues sorting them (not read again for 10 minutes). */
   rows?: { at: number; depth: number; rows: FactRow[]; total: number };
   /** Changes with anything a snapshot shows, so the window's polls can be answered "unchanged". */
   rev: number;
 };
-type Live = { banks: Map<string, Bank>; timer?: ReturnType<typeof setInterval> };
+type Live = { spaces: Map<string, Space>; timer?: ReturnType<typeof setInterval> };
 const g = globalThis as unknown as { bopsCategories?: Live };
-const live: Live = (g.bopsCategories ??= { banks: new Map() });
+const live: Live = (g.bopsCategories ??= { spaces: new Map() });
 
 const openai = openaiClient();
 
 /** On this Mac (not a hosted server), signed in, with memory set up, for an account they're open to. */
 export const categoriesOn = () => !onPostgres() && userDir() !== null && memoryOn() && categoriesOpen(getState());
 
-const bankState = (bank: string) => {
-  let b = live.banks.get(bank);
-  if (!b) live.banks.set(bank, (b = { timers: new Map(), rev: Date.now() }));
+const space = (ws: string) => {
+  let b = live.spaces.get(ws);
+  if (!b) live.spaces.set(ws, (b = { timers: new Map(), rev: Date.now() }));
   return b;
 };
 
-/** Honcho ids are letters, digits, _ and -: safe as a file name as they are. */
-const fileOf = (bank: string) => {
+/** Ids are letters, digits, _ and -: safe as a file name as they are. */
+const safe = (id: string) => id.replace(/[^A-Za-z0-9_-]/g, "-");
+const dirOf = () => {
   const dir = userDir();
-  return dir ? join(/*turbopackIgnore: true*/ dir, "memory-categories", `${bank.replace(/[^A-Za-z0-9_-]/g, "-")}.json`) : null;
+  return dir ? join(/*turbopackIgnore: true*/ dir, "memory-categories") : null;
+};
+const fileOf = (ws: string) => {
+  const dir = dirOf();
+  return dir ? join(/*turbopackIgnore: true*/ dir, `ws-${safe(ws)}.json`) : null;
+};
+/** A workspace's index for a bank it used before: kept when it moves to another bank, and back when it returns. */
+const stashOf = (ws: string, bank: string) => {
+  const dir = dirOf();
+  return dir ? join(/*turbopackIgnore: true*/ dir, `ws-${safe(ws)}@${safe(bank)}.json`) : null;
+};
+/** Where a bank's index was kept before Orbit was per workspace. */
+const legacyFileOf = (bank: string) => {
+  const dir = dirOf();
+  return dir ? join(/*turbopackIgnore: true*/ dir, `${safe(bank)}.json`) : null;
 };
 
 /** The categories as they are now, for Index.cats. */
 const CATS = CATEGORY_IDS.join(",");
 
-const empty = (bank: string): Index => ({ v: 1, bank, cats: CATS, facts: {}, items: {}, forgotten: {} });
+const empty = (ws: string, bank: string): Index => ({ v: 1, ws, bank, cats: CATS, facts: {}, items: {}, tomb: { items: {}, facts: {} } });
 
-/** The bank's index for the account signed in, from its file once (a damaged file starts over: everything in it can be sorted again). */
-function load(bank: string): Index {
-  const b = bankState(bank);
-  const file = fileOf(bank);
-  if (b.index && b.file === (file ?? undefined)) return b.index;
-  let index = empty(bank);
-  if (file && existsSync(/*turbopackIgnore: true*/ file)) {
-    try {
-      const read = JSON.parse(readFileSync(/*turbopackIgnore: true*/ file, "utf8")) as Index;
-      if (read?.v === 1 && read.items && read.facts) {
-        index = { ...empty(bank), ...read };
-        if (Array.isArray(index.forgotten)) index.forgotten = Object.fromEntries((index.forgotten as unknown as string[]).map((k) => [k, Date.now()]));
-        // Sorted into other categories: items in one that's gone go with it, and what made nothing may fit
-        // one now. That's sorted again at the window's next poll, not 15 minutes after the last look (an
-        // update, then a restart).
-        if (read.cats !== CATS) {
-          for (const [id, item] of Object.entries(index.items)) if (!CATEGORY_IDS.includes(item.category)) delete index.items[id];
-          const before = Object.keys(index.facts).length;
-          for (const [id, f] of Object.entries(index.facts)) {
-            f.items = f.items.filter((i) => Object.hasOwn(index.items, i));
-            if (f.wrote) for (const i of Object.keys(f.wrote)) if (!Object.hasOwn(index.items, i)) delete f.wrote[i];
-            if (!f.items.length) delete index.facts[id];
-          }
-          if (Object.keys(index.facts).length < before) index.syncedAt = index.triedAt = undefined;
-        }
-        index.cats = CATS;
-      }
-    } catch (e) {
-      console.warn(`[categories] ${bank}: unreadable index, starting over (${(e as Error).message})`);
-    }
+/* Hashes for what's forgotten: never its words. */
+const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+/** A fact's words as memory may write them again: lowercase, accents and punctuation gone. */
+const normal = (t: string) =>
+  t
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+const wordsHash = (text: string) => sha(`text|${normal(text)}`);
+const itemTomb = (key: string) => sha(`item|${key}`);
+const factTomb = (itemHash: string, words: string) => sha(`fact|${itemHash}|${words}`);
+const idTomb = (id: string) => sha(`id|${id}`);
+const CARD = "card:";
+
+/** An index as read from a file: null when it isn't one (a damaged file starts over: everything in it can be sorted again). */
+function readIndex(file: string | null, what: string): Index | null {
+  if (!file || !existsSync(/*turbopackIgnore: true*/ file)) return null;
+  try {
+    const read = JSON.parse(readFileSync(/*turbopackIgnore: true*/ file, "utf8")) as Index;
+    return read?.v === 1 && read.items && read.facts ? read : null;
+  } catch (e) {
+    console.warn(`[categories] ${what}: unreadable index, starting over (${(e as Error).message})`);
+    return null;
   }
+}
+
+/**
+ * The workspace's index for the account signed in, from its file once. The first time, the index kept per
+ * bank before moves to the workspace whose bank it is, and is swept soon (what other workspaces sharing
+ * the bank taught it goes); its forgotten list, hashed, goes to every workspace on the bank, and the
+ * old file keeps only that. A workspace now on another bank starts over, or from the index it had there:
+ * the one for the bank it leaves is kept (its forgotten list, and what's still to delete there).
+ */
+function load(ws: string): Index {
+  const b = space(ws);
+  const file = fileOf(ws);
+  const bank = bankOf(ws);
+  if (b.index && b.file === (file ?? undefined) && b.index.bank === bank) return b.index;
+  let index = empty(ws, bank);
+  let read = readIndex(file, ws);
+  let moved: string | null = null;
+  let restored: string | null = null;
+  let legacyTomb: Index | null = null;
+  if (read && read.bank !== bank) {
+    keep(stashOf(ws, read.bank), read);
+    read = null;
+    void drainStashes(ws);
+  }
+  if (!read) {
+    const st = stashOf(ws, bank);
+    read = readIndex(st, ws);
+    if (read?.bank === bank) restored = st;
+    else read = null;
+  }
+  if (!read && file && !existsSync(/*turbopackIgnore: true*/ file)) {
+    const old = legacyFileOf(bank);
+    const legacy = readIndex(old, bank);
+    if (legacy?.bank === bank && bankOwner(bank) === ws) {
+      read = legacy;
+      moved = old;
+    } else if (legacy?.bank === bank) legacyTomb = legacy;
+  }
+  if (read) {
+    index = { ...empty(ws, bank), ...read, ws };
+    index.tomb ??= { items: {}, facts: {} };
+    hashForgotten(index);
+    // Moved from the bank's index: swept at the window's next poll.
+    if (moved) index.sweptAt = index.syncedAt = index.triedAt = undefined;
+    // Sorted into other categories: items in one that's gone go with it, and what made nothing may fit
+    // one now. That's sorted again at the window's next poll, not 15 minutes after the last look (an
+    // update, then a restart).
+    if (read.cats !== CATS) {
+      for (const [id, item] of Object.entries(index.items)) if (!CATEGORY_IDS.includes(item.category)) delete index.items[id];
+      const before = Object.keys(index.facts).length;
+      for (const [id, f] of Object.entries(index.facts)) {
+        f.items = f.items.filter((i) => Object.hasOwn(index.items, i));
+        if (f.wrote) for (const i of Object.keys(f.wrote)) if (!Object.hasOwn(index.items, i)) delete f.wrote[i];
+        if (!f.items.length) delete index.facts[id];
+      }
+      if (Object.keys(index.facts).length < before) index.syncedAt = index.triedAt = undefined;
+    }
+    index.cats = CATS;
+  }
+  // Another workspace on the bank: what was forgotten in the bank's index stays forgotten here too.
+  if (legacyTomb) {
+    hashForgotten(legacyTomb);
+    Object.assign(index.tomb.items, legacyTomb.tomb?.items);
+    Object.assign(index.tomb.facts, legacyTomb.tomb?.facts);
+  }
+  index.peer = bindingOf(ws).peer;
   b.index = index;
   b.file = file ?? undefined;
   b.rows = undefined;
   b.rev++;
+  if (moved || restored || legacyTomb) save(ws, index);
+  // The bank's old file keeps only the hashes of what was forgotten, for the other workspaces on it.
+  if (moved) keep(moved, { ...empty("", bank), ws: undefined, tomb: index.tomb });
+  if (restored) {
+    rmSync(/*turbopackIgnore: true*/ restored, { force: true });
+    // What was still to delete there: on with it.
+    if (index.purge) void purge(ws);
+  }
   return index;
+}
+
+/** Forgotten keys kept in plain text before: hashed, and the text dropped. */
+function hashForgotten(index: Index) {
+  index.tomb ??= { items: {}, facts: {} };
+  const was = Array.isArray(index.forgotten) ? Object.fromEntries((index.forgotten as unknown as string[]).map((k) => [k, Date.now()])) : (index.forgotten ?? {});
+  for (const [k, at] of Object.entries(was)) index.tomb.items[itemTomb(k)] = at;
+  delete index.forgotten;
+}
+
+/** An index written whole to a file other than the workspace's own (a bank's kept index), readable by this user only. */
+function keep(file: string | null, index: Index) {
+  if (!file) return;
+  mkdirSync(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ file, ".."), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
+  try {
+    writeFileSync(/*turbopackIgnore: true*/ tmp, JSON.stringify(index), { mode: 0o600 });
+    renameSync(/*turbopackIgnore: true*/ tmp, file);
+  } catch (e) {
+    rmSync(/*turbopackIgnore: true*/ tmp, { force: true });
+    console.warn(`[categories] keeping an index: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * What's still to delete in a bank the workspace no longer uses (forgotten there, then it moved): deleted
+ * there, with that bank's peer, at the move and at every sweep, until nothing is left.
+ */
+async function drainStashes(ws: string) {
+  const dir = dirOf();
+  if (!dir || !existsSync(/*turbopackIgnore: true*/ dir)) return;
+  const ours = sameState();
+  const mine = readdirSync(/*turbopackIgnore: true*/ dir).filter((n) => n.startsWith(`ws-${safe(ws)}@`) && n.endsWith(".json"));
+  for (const name of mine) {
+    const file = join(/*turbopackIgnore: true*/ dir, name);
+    const kept = readIndex(file, ws);
+    const p = kept?.purge;
+    if (!kept || !p || !kept.peer || kept.bank === bankOf(ws) || (!p.facts.length && !p.cards.length && !p.sessions.length)) continue;
+    const cards = new Set(p.cards);
+    const left = await purgeMemory(ws, { facts: p.facts, cardLine: cards.size ? (l) => cards.has(wordsHash(l)) : undefined, sessions: p.sessions }, { bank: kept.bank, peer: kept.peer }).catch(() => null);
+    // Back on that bank meanwhile (the file is the workspace's own again), or another account: left as it is.
+    if (!left || !ours() || !existsSync(/*turbopackIgnore: true*/ file)) continue;
+    p.facts = left.facts;
+    p.sessions = left.sessions;
+    if (!left.card) p.cards = [];
+    if (!p.facts.length && !p.cards.length && !p.sessions.length && !Object.keys(p.need).length) kept.purge = undefined;
+    keep(file, kept);
+  }
 }
 
 /**
@@ -181,9 +354,9 @@ function load(bank: string): Index {
  * read from, and only while that's still the signed-in account's: work that outlived a sign-out never
  * writes one account's categories into another's folder.
  */
-function save(bank: string, index: Index) {
-  const b = bankState(bank);
-  const file = fileOf(bank);
+function save(ws: string, index: Index) {
+  const b = space(ws);
+  const file = fileOf(ws);
   if (!file || b.index !== index || b.file !== file) return;
   b.rev++;
   mkdirSync(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ file, ".."), { recursive: true, mode: 0o700 });
@@ -267,20 +440,42 @@ const lockOf = (item: Item) => (item.sources.length > 0 && item.sources.every((s
  * Add what a fact says about one item: a new item, or one more mention of a known one. Returns the
  * item's id and what the fact said about it (kept with the fact).
  */
-function upsert(index: Index, byKey: Map<string, string>, raw: Raw, src: ItemSource): { id: string; said: Said } | null {
+/** The key an item the model gave has ("people:dana reyes"), or null when it isn't one. */
+function keyOfRaw(raw: Raw) {
   if (!CATEGORY_IDS.includes(raw.category as CategoryId)) return null;
+  const title = clip(raw.title, 90);
+  return title ? keyOf(raw.category as CategoryId, raw.key, title) : null;
+}
+
+/**
+ * A fact memory worked out again from what was forgotten: sorted as nothing, and deleted from memory (a
+ * card line comes off the card: kept as the hash of its words only, never as "card:<line>").
+ */
+function bury(index: Index, f: { id: string; text: string; at: number; session: string | null }) {
+  const words = wordsHash(f.text);
+  if (index.failures?.[f.id]) delete index.failures[f.id];
+  if (f.id.startsWith(CARD)) return toPurge(index, { cards: [words] });
+  index.facts[f.id] = { items: [], at: f.at || Date.now(), s: f.session, h: words };
+  toPurge(index, { facts: [f.id] });
+}
+
+/**
+ * A fact about a forgotten item that may bring it back: something the user said in that chat after the
+ * forget (their messages, by this Mac's clock: not when memory worked the fact out, which can be minutes
+ * after the chat), or a fact saved after it (by hand or a bot's remember). Never a card line, what memory
+ * works out, or a fact from a task or another agent.
+ */
+const bringsBack = (f: { at: number; session: string | null; how: ItemSource["how"] }, forgotAt: number) =>
+  f.how === "said" ? saidSince(f.session, forgotAt) : f.how === "saved" && (!f.session || f.session.startsWith("bops-notes-")) && (f.at || 0) > forgotAt;
+
+function upsert(index: Index, byKey: Map<string, string>, raw: Raw, src: ItemSource): { id: string; said: Said } | null {
+  const key = keyOfRaw(raw);
+  if (!key) return null;
   const category = raw.category as CategoryId;
   const title = clip(raw.title, 90);
-  const key = title ? keyOf(category, raw.key, title) : null;
-  if (!key) return null;
-  // Forgotten: only something said in a chat well after that brings it back (memory works out facts from the
-  // chat for minutes after, the very chat that asked to forget it among them), never a rewritten card line or
-  // what memory works out.
-  const forgot = Object.hasOwn(index.forgotten, key) ? index.forgotten[key] : 0;
-  if (forgot) {
-    if (src.how !== "said" || src.at <= forgot + FORGET_SETTLES_MS) return null;
-    delete index.forgotten[key];
-  }
+  // Forgotten, and brought back by something new (bringsBack: apply buries everything else about it).
+  const forgot = itemTomb(key);
+  if (Object.hasOwn(index.tomb.items, forgot)) delete index.tomb.items[forgot];
   const known = byKey.get(key);
   let item = known && Object.hasOwn(index.items, known) ? index.items[known] : undefined;
   if (!item) {
@@ -368,13 +563,37 @@ function dropMany(index: Index, facts: string[]) {
   return true;
 }
 
-/** Facts deleted from memory on this Mac (memory.ts: Delete, Undo, Fix, the review's Delete all): out of the categories at once. */
+/** The user's workspaces whose memory is in this bank. */
+const workspacesIn = (bank: string) => [...new Set([MAIN_WORKSPACE, ...(getState().workspaces ?? []).map((w) => w.id)])].filter((ws) => bankOf(ws) === bank);
+
+/** Facts deleted from memory on this Mac (memory.ts: Delete, Undo, Fix, the review's Delete all, Forget): out of the categories of every workspace on that bank at once. */
 export function dropFacts(bank: string, ids: string[]) {
   if (!categoriesOn()) return;
-  const index = load(bank);
-  // A fact not sorted yet mustn't be sorted from rows read before it went.
-  bankState(bank).rows = undefined;
-  if (dropMany(index, ids)) save(bank, index);
+  for (const ws of workspacesIn(bank)) {
+    const index = load(ws);
+    // A fact not sorted yet mustn't be sorted from rows read before it went.
+    space(ws).rows = undefined;
+    if (dropMany(index, ids)) save(ws, index);
+  }
+}
+
+/**
+ * Which facts a workspace's Orbit sorts: those learned in its own chats, calls and tasks, and what it
+ * saved; the bank's own workspace also gets what came from no Bops chat of a workspace on this bank (the
+ * user's other agents, a fact saved by hand) and the card. An issue's session (orbit-issues.ts) makes no facts.
+ */
+function scopeOf(ws: string, bank: string) {
+  const owner = bankOwner(bank) === ws;
+  const known = new Map<string, string | null>();
+  const mine = (session: string | null | undefined) => {
+    if (session?.startsWith("issue-")) return false;
+    if (!session) return owner;
+    if (!known.has(session)) known.set(session, sessionWorkspace(session));
+    const w = known.get(session);
+    // A workspace's session in a bank it doesn't use (its bot moved, it shares another's now): the bank's own.
+    return w && bankOf(w) === bank ? w === ws : owner;
+  };
+  return { owner, mine };
 }
 
 const SCHEMA = {
@@ -510,8 +729,7 @@ function knownFor(index: Index, batch: Fresh[]) {
  */
 export function sync(ws: string, opts: SyncOpts = {}): Promise<void> {
   if (!categoriesOn()) return Promise.resolve();
-  const bank = bankOf(ws);
-  const b = bankState(bank);
+  const b = space(ws);
   if (b.running) {
     const mode = b.again?.mode && RANK[b.again.mode] > RANK[opts.mode ?? "look"] ? b.again.mode : (opts.mode ?? "look");
     b.again = { mode, now: !!opts.now || !!b.again?.now };
@@ -519,14 +737,15 @@ export function sync(ws: string, opts: SyncOpts = {}): Promise<void> {
   }
   const ours = sameState();
   const epoch = stateEpoch();
-  const index = load(bank);
+  const index = load(ws);
+  const bank = index.bank;
   b.rev++;
   b.running = run(ws, bank, index, opts, ours, epoch)
     .catch((e: Error) => {
-      console.warn(`[categories] ${bank}: ${e.message}`);
+      console.warn(`[categories] ${ws}: ${e.message}`);
       if (!ours()) return;
       index.error = "Couldn't reach memory just now. It tries again on its own.";
-      save(bank, index);
+      save(ws, index);
     })
     .finally(() => {
       b.running = undefined;
@@ -539,7 +758,10 @@ export function sync(ws: string, opts: SyncOpts = {}): Promise<void> {
 }
 
 async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours: () => boolean, epoch: number) {
-  const b = bankState(bank);
+  const b = space(ws);
+  const { owner, mine } = scopeOf(ws, bank);
+  // What's still to delete from memory, if nothing is deleting it now or is set to try again.
+  if (index.purge && !b.purging && !b.timers.has("purge")) void purge(ws);
   const first = !index.syncedAt && !Object.keys(index.facts).length;
   let mode: Mode = opts.mode ?? "look";
   // A sweep every 6 hours (never on the first look: nothing to check yet).
@@ -558,9 +780,17 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
   const kept = b.rows && Date.now() - b.rows.at < 10 * 60_000 && b.rows.depth >= depth ? b.rows : undefined;
   if (mode === "fill" && kept) ({ rows, total } = kept);
   else {
-    const seen = (r: FactRow) => Object.hasOwn(index.facts, r.id) || (!!index.floorAt && r.at < index.floorAt);
-    ({ rows, total } = await scanFacts(ws, mode === "quick" ? 100 : mode === "look" ? SWEEP_SCAN : mode === "sweep" ? Math.max(depth, SWEEP_SCAN) : depth, mode === "look" ? (page) => page.every(seen) : undefined));
+    // Another workspace's facts (sharing the bank), and what's being deleted, count as seen.
+    const deleting = new Set(index.purge?.facts ?? []);
+    const seen = (r: FactRow) => !mine(r.session) || deleting.has(r.id) || Object.hasOwn(index.facts, r.id) || (!!index.floorAt && r.at < index.floorAt);
+    const read = await scanFacts(ws, mode === "quick" ? 100 : mode === "look" ? SWEEP_SCAN : mode === "sweep" ? Math.max(depth, SWEEP_SCAN) : depth, mode === "look" ? (page) => page.every(seen) : undefined);
     if (!ours()) return;
+    // Only this workspace's (the total too, as near as the rows read can tell), and not what's being deleted.
+    rows = read.rows.filter((r) => mine(r.session) && !deleting.has(r.id));
+    const theirs = read.rows.filter((r) => !mine(r.session)).length;
+    total = theirs && read.rows.length ? Math.round(read.total * (1 - theirs / read.rows.length)) : read.total;
+    // Where each sorted fact was learned, for Delete everywhere (indexes from before didn't keep it).
+    for (const r of rows) if (Object.hasOwn(index.facts, r.id) && index.facts[r.id].s === undefined) index.facts[r.id].s = r.session;
     if (mode === "fill" || mode === "sweep") {
       b.rows = { at: Date.now(), depth, rows: rows.slice(0, depth), total };
       // Facts older than the sorted depth aren't sorted (Sort older adds 300).
@@ -570,7 +800,8 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
       index.behind = Math.max(0, total - depth - sortedOlder) || undefined;
     }
   }
-  const lines = mode === "quick" ? null : await cardOf(ws).catch(() => null);
+  // The card is the bank's own workspace's.
+  const lines = mode === "quick" || !owner ? null : await cardOf(ws).catch(() => null);
   if (!ours()) return;
   if (index.error === "Couldn't reach memory just now. It tries again on its own.") index.error = undefined;
   const failing = (id: string) => {
@@ -588,7 +819,8 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
     const unlisted = [...new Set([...Object.keys(index.facts), ...failed])].filter((id) => !id.startsWith("card:") && !listed.has(id));
     const still = await existingFacts(ws, unlisted);
     if (!ours()) return;
-    dropMany(index, unlisted.filter((id) => !still.has(id)));
+    // Gone from memory, or another workspace's (an index moved from the bank's, which held both).
+    dropMany(index, unlisted.filter((id) => !still.has(id) || !mine(still.get(id))));
     const onCard = lines ? new Set(lines.map((l) => `card:${l}`)) : null;
     if (onCard) dropMany(index, Object.keys(index.facts).filter((id) => id.startsWith("card:") && !onCard.has(id)));
     // A failing fact that's gone, off the card, or now older than what's sorted won't come up again.
@@ -598,15 +830,23 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
     }
     index.sweptAt = Date.now();
     b.rows = undefined;
+    void drainStashes(ws);
   }
 
   // New: card lines first (who the user is, their people), then the newest facts not sorted yet. A fact
   // that failed waits longer each time (30 minutes, then an hour) before it's tried again.
   const inScope = (r: FactRow) => !index.floorAt || r.at >= index.floorAt;
-  const pending: Fresh[] = [
-    ...(lines ?? []).filter((l) => !Object.hasOwn(index.facts, `card:${l}`) && !failing(`card:${l}`)).map((l) => ({ id: `card:${l}`, text: l, at: Date.now(), session: null, level: "card", how: "card" as const })),
+  const fresh: Fresh[] = [
+    ...(lines ?? []).filter((l) => !Object.hasOwn(index.facts, `card:${l}`) && !failing(`card:${l}`) && !index.purge?.cards.includes(wordsHash(l))).map((l) => ({ id: `card:${l}`, text: l, at: Date.now(), session: null, level: "card", how: "card" as const })),
     ...rows.filter((r) => !Object.hasOwn(index.facts, r.id) && inScope(r) && !failing(r.id)).map((r) => ({ ...r, how: howOf(r.level, r.session) })),
   ];
+  // Worked out by memory from a fact that was forgotten: deleted, without asking the model.
+  const derived = (f: Fresh) => (f.from ?? []).some((id) => Object.hasOwn(index.tomb.facts, idTomb(id)));
+  const pending = fresh.filter((f) => !derived(f));
+  if (pending.length < fresh.length) {
+    for (const f of fresh) if (derived(f)) bury(index, f);
+    if (!b.purging && !b.timers.has("purge")) void purge(ws);
+  }
 
   // Sorted together: now when asked, when the card changed (a few lines, and what the user is), when
   // enough wait, or when the oldest has waited long enough.
@@ -615,14 +855,14 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
   if (pending.length && !now && !card && pending.length < WAIT_FOR && Date.now() - oldest < WAIT_MS) {
     index.waiting = pending.length;
     if (mode !== "quick") index.syncedAt = Date.now();
-    save(bank, index);
-    later(ws, bank, "waiting", Math.max(60_000, WAIT_MS - (Date.now() - oldest)), { mode: "look", now: true }, true);
+    save(ws, index);
+    later(ws, "waiting", Math.max(60_000, WAIT_MS - (Date.now() - oldest)), { mode: "look", now: true }, true);
     return;
   }
   const todo = pending.slice(0, PER_RUN);
   if (todo.length && (await creditsOut())) {
     index.error = "Out of AI credit: new things wait until there's more.";
-    if (ours()) save(bank, index);
+    if (ours()) save(ws, index);
     return;
   }
   if (!ours()) return;
@@ -678,6 +918,22 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
     }
     answered = true;
     batch.forEach((f, j) => {
+      const raws = got.get(j) ?? [];
+      const words = wordsHash(f.text);
+      // About something forgotten, in a forgotten fact's words, or not brought back by something new (worked
+      // out again from the old chats, a card line, what memory works out): deleted, and its item stays gone.
+      // Kept and hidden instead, it would still reach the bots with nothing in Orbit to forget again.
+      const buried = raws.some((raw) => {
+        const key = keyOfRaw(raw);
+        if (!key) return false;
+        const ih = itemTomb(key);
+        return Object.hasOwn(index.tomb.facts, factTomb(ih, words)) || (Object.hasOwn(index.tomb.items, ih) && !bringsBack(f, index.tomb.items[ih]));
+      });
+      if (buried) {
+        bury(index, f);
+        if (!b.purging && !b.timers.has("purge")) void purge(ws);
+        return;
+      }
       const src: ItemSource = {
         fact: f.id,
         text: clip(f.text, 600, true),
@@ -686,15 +942,15 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
         how: f.how,
         ...(priv.has(f.text) ? { private: true } : {}),
       };
-      const made = (got.get(j) ?? []).map((raw) => upsert(index, byKey, raw, src)).filter((x) => !!x);
-      index.facts[f.id] = { items: [...new Set(made.map((m) => m.id))], at: src.at, wrote: Object.fromEntries(made.map((m) => [m.id, m.said])) };
+      const made = raws.map((raw) => upsert(index, byKey, raw, src)).filter((x) => !!x);
+      index.facts[f.id] = { items: [...new Set(made.map((m) => m.id))], at: src.at, wrote: Object.fromEntries(made.map((m) => [m.id, m.said])), s: f.session, h: words };
       if (index.failures?.[f.id]) delete index.failures[f.id];
     });
   };
   // One batch after another: each sees what the ones before it found (Dana, the demo), so mentions merge.
   for (let i = 0; i < todo.length && !stopped; i += BATCH) {
     await apply(todo.slice(i, i + BATCH));
-    if (ours()) save(bank, index);
+    if (ours()) save(ws, index);
   }
   if (!ours()) return;
   const left = pending.length - todo.length;
@@ -709,14 +965,14 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
   if (mode !== "quick" && !stopped) index.syncedAt = Date.now();
   // Said while facts wait to be tried again (a fact given up after three tries no longer counts).
   if (!stopped) index.error = failed || Object.keys(index.failures ?? {}).length ? "Some new things couldn't be sorted yet. They're tried again later." : undefined;
-  save(bank, index);
+  save(ws, index);
   // More to sort than one look takes: the next look soon (not after a failure: that waits).
-  if (left > 0 && !failed && !stopped) later(ws, bank, "more", 60_000, { mode: "fill", now: true });
+  if (left > 0 && !failed && !stopped) later(ws, "more", 60_000, { mode: "fill", now: true });
 }
 
 /** A look later, once per reason: a newer ask replaces it, or (`keep`) leaves one already set. Never for an account that signed in since. */
-function later(ws: string, bank: string, why: string, ms: number, opts: SyncOpts, keep = false) {
-  const b = bankState(bank);
+function later(ws: string, why: string, ms: number, opts: SyncOpts, keep = false) {
+  const b = space(ws);
   if (keep && b.timers.has(why)) return;
   clearTimeout(b.timers.get(why));
   const ours = sameState();
@@ -734,7 +990,7 @@ function ensureTimer() {
   live.timer = setInterval(() => {
     if (!categoriesOn()) return;
     const ws = currentWorkspaceId();
-    const index = load(bankOf(ws));
+    const index = load(ws);
     if (Date.now() - Math.max(index.syncedAt ?? 0, index.triedAt ?? 0) >= STALE_MS - 30_000) void sync(ws, { mode: "look" });
   }, STALE_MS);
   live.timer.unref?.();
@@ -750,14 +1006,13 @@ function ensureTimer() {
 export function nudge(ws: string, why: "chat" | "saved" | "learned" | "card") {
   if (!categoriesOn()) return;
   ensureTimer();
-  const bank = bankOf(ws);
-  if (why === "learned") later(ws, bank, "learned", 4_000, { mode: "quick", now: true });
+  if (why === "learned") later(ws, "learned", 4_000, { mode: "quick", now: true });
   // A card line fixed or pinned: a look that reads the card, in a few seconds.
-  else if (why === "card") later(ws, bank, "card", 4_000, { mode: "look", now: true });
+  else if (why === "card") later(ws, "card", 4_000, { mode: "look", now: true });
   else if (why === "chat") {
-    later(ws, bank, "chat", 4 * 60_000, { mode: "quick", now: true }, true);
-    later(ws, bank, "chat-late", 10 * 60_000, { mode: "quick", now: true }, true);
-  } else later(ws, bank, "saved", 3 * 60_000, { mode: "quick" }, true);
+    later(ws, "chat", 4 * 60_000, { mode: "quick", now: true }, true);
+    later(ws, "chat-late", 10 * 60_000, { mode: "quick", now: true }, true);
+  } else later(ws, "saved", 3 * 60_000, { mode: "quick" }, true);
 }
 
 /** An item as the window gets it: at most 6 sources, each up to 300 characters, and nothing kept only for the engine. */
@@ -774,9 +1029,8 @@ function forWindow(item: Item): MemoryItem {
 export function snapshot(ws: string, since?: number): MemorySnapshot | { unchanged: true; rev: number } {
   if (!categoriesOn()) return { on: false, ws, items: [], syncing: false };
   ensureTimer();
-  const bank = bankOf(ws);
-  const index = load(bank);
-  const b = bankState(bank);
+  const index = load(ws);
+  const b = space(ws);
   const last = Math.max(index.syncedAt ?? 0, index.triedAt ?? 0);
   if (!b.running && Date.now() - last > STALE_MS) void sync(ws, { mode: "look" });
   if (since === b.rev) return { unchanged: true, rev: b.rev };
@@ -793,7 +1047,7 @@ export function snapshot(ws: string, since?: number): MemorySnapshot | { unchang
     waiting: index.waiting,
     dreamAt: index.dreamAt,
     dreamReadyAt: index.dreamAt ? index.dreamAt + DREAM_EVERY_MS : undefined,
-    error: index.error,
+    error: index.error ?? ((index.purge?.tries ?? 0) >= PURGE_SAY_AFTER ? PURGE_ERROR : undefined),
   };
 }
 
@@ -803,11 +1057,10 @@ export const refresh = (ws: string) => sync(ws, { mode: "sweep", now: true });
 /** Sort 300 more of the older facts (each 25 a model call). */
 export function sortOlder(ws: string) {
   if (!categoriesOn()) throw new Error("Memory isn't set up.");
-  const bank = bankOf(ws);
-  const index = load(bank);
+  const index = load(ws);
   if (!index.behind) return Promise.resolve();
   index.depth = (index.depth ?? FIRST_DEPTH) + OLDER_STEP;
-  save(bank, index);
+  save(ws, index);
   return sync(ws, { mode: "fill", now: true });
 }
 
@@ -815,8 +1068,7 @@ export function sortOlder(ws: string) {
 export async function tidyUp(ws: string) {
   if (!categoriesOn()) throw new Error("Memory isn't set up.");
   const ours = sameState();
-  const bank = bankOf(ws);
-  const index = load(bank);
+  const index = load(ws);
   if (index.dreamAt && Date.now() - index.dreamAt < DREAM_EVERY_MS) {
     const mins = Math.ceil((index.dreamAt + DREAM_EVERY_MS - Date.now()) / 60_000);
     throw new Error(`Memory tidied up a little while ago. Try again in ${mins} minute${mins === 1 ? "" : "s"}.`);
@@ -824,27 +1076,26 @@ export async function tidyUp(ws: string) {
   // Noted before asking, so a second press meanwhile doesn't ask (and pay) twice.
   const before = index.dreamAt;
   index.dreamAt = Date.now();
-  save(bank, index);
+  save(ws, index);
   try {
     await askToDream(ws);
   } catch (e) {
     console.warn(`[categories] tidy up: ${(e as Error).message}`);
     if (ours()) {
       index.dreamAt = before;
-      save(bank, index);
+      save(ws, index);
     }
     throw new Error("Couldn't reach memory to tidy up. Try again in a moment.");
   }
   if (!ours()) return;
-  later(ws, bank, "dream-soon", 4 * 60_000, { mode: "sweep", now: true });
-  later(ws, bank, "dream-later", 15 * 60_000, { mode: "sweep", now: true });
+  later(ws, "dream-soon", 4 * 60_000, { mode: "sweep", now: true });
+  later(ws, "dream-later", 15 * 60_000, { mode: "sweep", now: true });
 }
 
 /** The user changed an item: its name or line (kept from then on), done or not, hidden or shown. */
 export function editItem(ws: string, id: string, patch: { title?: string; detail?: string; done?: boolean; hidden?: boolean }) {
   if (!categoriesOn()) throw new Error("Memory isn't set up.");
-  const bank = bankOf(ws);
-  const index = load(bank);
+  const index = load(ws);
   if (!Object.hasOwn(index.items, id)) throw new Error("That's gone already.");
   const item = index.items[id];
   if (patch.title !== undefined) {
@@ -864,54 +1115,202 @@ export function editItem(ws: string, id: string, patch: { title?: string; detail
     item.marked = true;
   }
   if (patch.hidden !== undefined) item.hidden = patch.hidden || undefined;
-  save(bank, index);
+  save(ws, index);
   return item;
 }
 
-/**
- * Forget an item: memory forgets the facts and card lines it was learned from that aren't about
- * anything else (the rest stay, for the other items they fed), and only something said in a chat
- * afterwards brings it back. One forget at a time per bank. When memory can't be reached, the item
- * stays and the user is told.
- */
-export function forgetItem(ws: string, id: string) {
-  if (!categoriesOn()) return Promise.reject(new Error("Memory isn't set up."));
-  const bank = bankOf(ws);
-  const b = bankState(bank);
-  const next = (b.forgetting ?? Promise.resolve()).then(() => forgetOne(ws, bank, id));
-  b.forgetting = next.catch(() => {});
-  return next;
+/** Add to what's still to delete from memory (deleted by the next purge). */
+function toPurge(index: Index, what: { facts?: string[]; cards?: string[]; sessions?: string[]; need?: Record<string, string[]> }) {
+  const p = (index.purge ??= { facts: [], cards: [], sessions: [], need: {}, tries: 0, at: Date.now() });
+  const add = (list: string[], more: string[] = []) => {
+    for (const x of more) if (!list.includes(x)) list.push(x);
+  };
+  add(p.facts, what.facts);
+  add(p.cards, what.cards);
+  add(p.sessions, what.sessions);
+  for (const [id, keys] of Object.entries(what.need ?? {})) p.need[id] = [...new Set([...(p.need[id] ?? []), ...keys])];
+  // Something new to delete: tried at once, from the first try again.
+  p.tries = 0;
 }
 
-async function forgetOne(ws: string, bank: string, id: string) {
+/** The newest `n` of a tombstone list. */
+const newest = (m: Record<string, number>, n: number) => (Object.keys(m).length > n ? Object.fromEntries(Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, n)) : m);
+
+/**
+ * Forget items: gone from Orbit at once, and deleted from memory, for good: every fact they were learned
+ * from (about other things too: their words are in it) and their card lines, checked with memory after
+ * and tried again until it doesn't have them (purge). Other items that were learned from those facts too
+ * lose them (and go, when nothing else backs them and the user didn't change them). What's kept is
+ * hashes only (Index.tomb). `sessions`: whole sessions to delete too (Delete everywhere). Answers the
+ * names of what was forgotten.
+ */
+export function forgetItems(ws: string, ids: string[], sessions: string[] = []): string[] {
+  if (!categoriesOn()) throw new Error("Memory isn't set up.");
+  const index = load(ws);
+  const items = [...new Set(ids)].filter((id) => Object.hasOwn(index.items, id)).map((id) => index.items[id]);
+  if (!items.length && !sessions.length) return [];
+  const now = Date.now();
+  const facts = new Set<string>();
+  const cards: string[] = [];
+  const need: Record<string, string[]> = {};
+  for (const item of items) {
+    const ih = itemTomb(item.key);
+    index.tomb.items[ih] = now;
+    const text = new Map(item.sources.map((x) => [x.fact, x.text]));
+    // Every fact sorted into it (its sources are only the newest 12).
+    for (const [id, f] of Object.entries(index.facts)) {
+      if (!f.items.includes(item.id)) continue;
+      facts.add(id);
+      const card = id.startsWith(CARD);
+      const words = f.h ?? (card ? wordsHash(id.slice(CARD.length)) : text.has(id) ? wordsHash(text.get(id)!) : undefined);
+      if (words) index.tomb.facts[factTomb(ih, words)] = now;
+      // Words not kept here (sorted before they were): read from memory before it goes.
+      else (need[id] ??= []).push(ih);
+      if (card) cards.push(words!);
+      else index.tomb.facts[idTomb(id)] = now;
+    }
+    delete index.items[item.id];
+  }
+  index.tomb.items = newest(index.tomb.items, TOMB_ITEMS);
+  index.tomb.facts = newest(index.tomb.facts, TOMB_FACTS);
+  const all = [...facts];
+  dropMany(index, all);
+  // Sorted as nothing until memory no longer has them, so a look meanwhile doesn't sort them again.
+  for (const id of all) if (!id.startsWith(CARD)) index.facts[id] = { items: [], at: now, s: null };
+  toPurge(index, { facts: all.filter((id) => !id.startsWith(CARD)), cards, sessions, need });
+  space(ws).rows = undefined;
+  save(ws, index);
+  void purge(ws);
+  return items.map((i) => i.title);
+}
+
+/** Forget one item (the bots' orbit_forget, and the route's old shape). */
+export function forgetItem(ws: string, id: string) {
+  return Promise.resolve().then(() => void forgetItems(ws, [id]));
+}
+
+/**
+ * Delete what's still to delete from memory (Index.purge), then check memory no longer has it; what it
+ * still has is tried again: in 5 seconds, then 30, 2 minutes, 10, then every 30 (and at every look).
+ * One run at a time per workspace; one asked for meanwhile runs after it.
+ */
+export function purge(ws: string): Promise<void> {
+  const b = space(ws);
+  if (b.purging) {
+    b.purgeAgain = true;
+    return b.purging;
+  }
+  clearTimeout(b.timers.get("purge"));
+  b.timers.delete("purge");
+  const ours = sameState();
+  b.purging = (async () => {
+    do {
+      b.purgeAgain = false;
+      if (!categoriesOn() || !ours()) return;
+      const index = load(ws);
+      const p = index.purge;
+      if (!p) return;
+      const take = { facts: [...p.facts], cards: [...p.cards], sessions: [...p.sessions], need: { ...p.need } };
+      // Facts forgotten before their words were kept: read first, for their tombstones.
+      const needed = Object.keys(take.need);
+      if (needed.length) {
+        const rows = await factsByIds(ws, needed).catch(() => null);
+        if (!ours()) return;
+        if (rows) {
+          for (const r of rows) for (const ih of take.need[r.id] ?? []) index.tomb.facts[factTomb(ih, wordsHash(r.text))] = Date.now();
+          for (const id of needed) delete p.need[id];
+        }
+      }
+      const cards = new Set(take.cards);
+      const left = await purgeMemory(ws, { facts: take.facts, cardLine: cards.size ? (l) => cards.has(wordsHash(l)) : undefined, sessions: take.sessions }).catch((e: Error) => {
+        console.warn(`[categories] ${ws}: deleting from memory: ${e.message}`);
+        return { facts: take.facts, card: cards.size > 0, sessions: take.sessions };
+      });
+      if (!ours()) return;
+      // What was deleted comes off the list; what was added meanwhile stays on it.
+      const gone = (list: string[], tried: string[], still: string[]) => list.filter((x) => !tried.includes(x) || still.includes(x));
+      p.facts = gone(p.facts, take.facts, left.facts);
+      p.sessions = gone(p.sessions, take.sessions, left.sessions);
+      if (!left.card) p.cards = p.cards.filter((h) => !cards.has(h));
+      // Deleted for good: no longer kept as sorted.
+      for (const id of take.facts) if (!left.facts.includes(id) && Object.hasOwn(index.facts, id) && !index.facts[id].items.length) delete index.facts[id];
+      const failed = left.facts.length > 0 || left.card || left.sessions.length > 0 || Object.keys(p.need).length > 0;
+      if (!p.facts.length && !p.cards.length && !p.sessions.length && !Object.keys(p.need).length) index.purge = undefined;
+      else if (failed && !b.purgeAgain) {
+        p.tries++;
+        p.at = Date.now();
+        const t = setTimeout(() => {
+          b.timers.delete("purge");
+          if (ours()) void purge(ws);
+        }, PURGE_RETRY_MS[Math.min(p.tries, PURGE_RETRY_MS.length) - 1]);
+        t.unref?.();
+        b.timers.set("purge", t);
+      }
+      save(ws, index);
+    } while (b.purgeAgain);
+  })().finally(() => {
+    b.purging = undefined;
+    b.rev++;
+  });
+  return b.purging;
+}
+
+/** A chat or call in memory that Delete everywhere would delete, and the other items it also taught Orbit. */
+export type DeleteSession = { id: string; name: string; at: number; facts: number; alsoFor: string[] };
+
+/**
+ * What Delete everywhere would delete with an item: the sessions in memory its facts came from that Bops
+ * still has the chat or task of (its copy there, every message in it), each with the other items in this Orbit learned from it
+ * too, so none goes unsaid. Where a fact was learned is asked of memory for facts sorted before that was kept.
+ */
+export async function deletePreview(ws: string, id: string): Promise<DeleteSession[]> {
   if (!categoriesOn()) throw new Error("Memory isn't set up.");
   const ours = sameState();
-  const index = load(bank);
-  if (!Object.hasOwn(index.items, id)) return;
-  const item = index.items[id];
-  // Every fact sorted into it (its sources are only the newest 12).
-  const facts = Object.entries(index.facts)
-    .filter(([, f]) => f.items.includes(id))
-    .map(([fact]) => fact);
-  const only = facts.filter((f) => index.facts[f].items.every((x) => x === id));
-  try {
-    await forgetFacts(ws, only);
-  } catch (e) {
-    console.warn(`[categories] forget: ${(e as Error).message}`);
-    throw new Error("Couldn't reach memory to forget it. Try again in a moment.");
+  const index = load(ws);
+  if (!Object.hasOwn(index.items, id)) throw new Error("That's gone already.");
+  const unknown = Object.entries(index.facts)
+    .filter(([fid, f]) => !fid.startsWith(CARD) && f.s === undefined && f.items.length)
+    .map(([fid]) => fid);
+  for (let i = 0; i < unknown.length; i += 100) {
+    const chunk = unknown.slice(i, i + 100);
+    const rows = await factsByIds(ws, chunk);
+    if (!ours()) throw new Error("Another account signed in.");
+    const got = new Map(rows.map((r) => [r.id, r.session]));
+    for (const fid of chunk) if (Object.hasOwn(index.facts, fid)) index.facts[fid].s = got.get(fid) ?? null;
   }
-  if (!ours()) return;
-  for (const f of only) delete index.facts[f];
-  for (const f of facts) if (Object.hasOwn(index.facts, f)) index.facts[f].items = index.facts[f].items.filter((x) => x !== id);
-  delete index.items[id];
-  index.forgotten[item.key] = Date.now();
-  // The 500 latest are kept.
-  index.forgotten = Object.fromEntries(
-    Object.entries(index.forgotten)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 500),
-  );
-  save(bank, index);
+  if (unknown.length) save(ws, index);
+  const out = new Map<string, DeleteSession>();
+  for (const f of Object.values(index.facts)) {
+    // Only a chat, a call or a task still in Bops (its copy in memory goes, the chat stays): never the
+    // user's other agents' sessions or a chat deleted from Bops, whose only copy is memory's. Not an issue,
+    // not a workspace's saved facts.
+    if (!f.items.includes(id) || !f.s || !(f.s.startsWith("bops-chat-") || f.s.startsWith("bops-task-")) || !sessionWorkspace(f.s)) continue;
+    const x = out.get(f.s) ?? { id: f.s, name: factSource(f.s), at: 0, facts: 0, alsoFor: [] };
+    x.at = Math.max(x.at, f.at);
+    x.facts++;
+    out.set(f.s, x);
+  }
+  for (const f of Object.values(index.facts)) {
+    const x = f.s ? out.get(f.s) : undefined;
+    if (!x) continue;
+    for (const other of f.items) {
+      const title = other !== id && Object.hasOwn(index.items, other) ? index.items[other].title : null;
+      if (title && !x.alsoFor.includes(title)) x.alsoFor.push(title);
+    }
+  }
+  return [...out.values()].sort((a, b) => b.at - a.at);
+}
+
+/**
+ * Delete everywhere: Forget, and delete from memory the sessions its facts came from (deletePreview, all
+ * of them, or of `only` those the user was shown: never one deletePreview leaves out). The chats stay in Bops; their copy in memory goes.
+ * Answers what was deleted.
+ */
+export async function deleteEverywhere(ws: string, id: string, only?: string[]) {
+  const shown = await deletePreview(ws, id);
+  const sessions = shown.filter((x) => !only || only.includes(x.id));
+  forgetItems(ws, [id], sessions.map((x) => x.id));
+  return sessions;
 }
 
 /** The workspace asked for when it's one of the user's, else the one in use. */
