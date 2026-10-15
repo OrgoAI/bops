@@ -27,8 +27,8 @@ import { CloseButton, currentWorkspace, needsYou, post, teamOf, useNow } from ".
  * Routines: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
  * in the chat, or a task on a computer, at set times) and Monitors (watches: a bot's screen, a window on the
  * user's Mac, or a web page with no screen). One bot owns each. How a bot does a kind of job is a skill
- * now, on the Skills page (skills.tsx), just below in the sidebar. In the sidebar, a group pinned above
- * Orbit with a section each that folds (AutopilotSections); on the right, a page with every bot's, grouped
+ * now, on the Skills page (skills.tsx). In the sidebar, a round button in the footer beside Knowledge
+ * (AutopilotButton), and the matches while it searches (AutopilotSections); on the right, a page with every bot's, grouped
  * by bot and filtered by bot, Connected App or what needs the user, each opening in place with what can be
  * done to it (AutopilotPage). A bot's own are on its profile too (routines.tsx). All read the app's state
  * (useAppState), so they're as current as everything else. (Called Autopilot before; the code keeps the name.)
@@ -260,10 +260,34 @@ function useFresh(id: string) {
 /* ---------------- The sidebar ---------------- */
 
 /**
- * Routines in the sidebar, above Skills and Orbit: one row with its count (and New while a monitor has
- * news) that opens the page, and under it the next three: monitors with news, the soonest schedules,
- * the other monitors. Nothing under it while there are none. While the sidebar searches, the matches
- * (up to five); none, and the row is gone.
+ * Routines in the sidebar's footer, beside Knowledge: a round button that opens the page (one tab per
+ * workspace), with how many monitors have news on it while some do (it pops in when news comes).
+ */
+export function AutopilotButton({ state, onOpen }: { state: AppState; onOpen: (open: AutopilotOpen) => void }) {
+  const lists = autopilotOf(state);
+  const news = lists.monitors.filter((w) => w.alert).length;
+  // The page opens on monitors while one has news, else on the first section with something in it.
+  const section: AutopilotSection = news ? "monitors" : (SECTIONS.find((s) => lists[s.id].length)?.id ?? "schedules");
+  return (
+    <button
+      onClick={() => onOpen({ section })}
+      title={news ? `${GROUP_NAME}: ${news === 1 ? "a monitor has" : `${news} monitors have`} news` : `${GROUP_NAME}: what your bots do on their own`}
+      aria-label={news ? `${GROUP_NAME}, ${news} with news` : GROUP_NAME}
+      className="relative flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
+    >
+      <AutopilotIcon size={16} />
+      {news > 0 && (
+        <span key={news} className="motion-dot-in absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-highlighter px-1 text-[11px] font-semibold leading-none tabular-nums text-ink shadow-[0_0_0_2px_#F9F9F8]">
+          {news}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/**
+ * Routines while the sidebar searches: one row with the count of matches (and New while a matching
+ * monitor has news) that opens the page, and the matches under it (up to five). None, and it's gone.
  */
 export function AutopilotSections({ state, query = "", onOpen, onOpenWatch }: { state: AppState; query?: string; onOpen: (open: AutopilotOpen) => void; onOpenWatch: (w: Watch) => void }) {
   const user = state.account?.user.id ?? "";

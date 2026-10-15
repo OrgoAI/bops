@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { live, MAIN_WORKSPACE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
-import { AutopilotSections, type AutopilotOpen } from "./autopilot";
+import { AutopilotButton, AutopilotSections, type AutopilotOpen } from "./autopilot";
 import { SkillsSideRow } from "./skills";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
@@ -158,17 +158,19 @@ export function Sidebar({
       </div>
 
       {/*
-        Pinned under the chats: Skills (how the bots do a kind of job, and their apps), with a page on the right.
-        Routines (Autopilot) and Knowledge open from the footer.
+        Pinned under the chats: Skills (how the bots do a kind of job, and their apps), with a page on the
+        right; while searching, the routines that match instead. Routines and Knowledge open from the footer.
       */}
-      {!query?.trim() && (
-        <div className="-mx-2.5 shrink-0 border-t border-[#ECECEA] px-2.5 empty:hidden">
+      <div className="-mx-2.5 shrink-0 border-t border-[#ECECEA] px-2.5 empty:hidden">
+        {query?.trim() ? (
+          <AutopilotSections state={state} query={query} onOpen={onOpenAutopilot} onOpenWatch={onOpenWatch} />
+        ) : (
           <SkillsSideRow state={state} onOpen={onOpenSkills} />
-        </div>
-      )}
+        )}
+      </div>
       {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
       <UpdateNotice />
-      {/* You, your apps and logins (the Vault, with the apps you've connected), and Knowledge. New bots are the + at the top. */}
+      {/* You, your apps and logins (the Vault, with the apps you've connected), Routines and Knowledge. New bots are the + at the top. */}
       <div className="flex items-center gap-1.5 p-1 pt-3">
         <YouMenu state={state} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />
         <MembersButton state={state} onClick={onMembers} />
@@ -180,6 +182,7 @@ export function Sidebar({
           <span className="truncate">Apps &amp; logins</span>
           <AppStack state={state} />
         </button>
+        <AutopilotButton state={state} onOpen={onOpenAutopilot} />
         {categoriesOpen(state) && (
           <button
             onClick={() => onOpenMemory({})}

@@ -291,13 +291,26 @@ await test("All: every kind on one page, Issues still a chip", async () => {
   assert.match(t, /Select/);
 });
 
+await test("Routines in the footer: a round button, with how many monitors have news", async () => {
+  const { AutopilotButton } = await import(pathToFileURL(`${root}/components/app/autopilot.tsx`).href);
+  const base = { bots: [{ id: "boppy", name: "Boppy", isMain: true }], routines: [], watches: [], sessions: [], messages: [] };
+  let html = renderToStaticMarkup(h(AutopilotButton, { state: base, onOpen: noop }));
+  assert.match(html, /aria-label="Routines"/);
+  assert.ok(!/bg-highlighter/.test(html), "no badge without news");
+  const watch = (id, alert) => ({ id, botId: "boppy", site: "acme.example", lookFor: "a price drop", alert, page: { url: "https://acme.example" } });
+  html = renderToStaticMarkup(h(AutopilotButton, { state: { ...base, watches: [watch("w1", { at: 1, text: "Down 10%" }), watch("w2", undefined)] }, onOpen: noop }));
+  assert.match(html, /aria-label="Routines, 1 with news"/);
+  assert.match(text(html), / 1 /);
+  assert.match(html, /title="Routines: a monitor has news"/);
+});
+
 await test("groupsOf still orders a category", async () => {
   const g = groupsOf("todos", [item("aaaaaaaaaa", "todos", "A", { done: true }), item("bbbbbbbbbb", "todos", "B")]);
   assert.deepEqual(g.map((x) => x.label), ["Open", "Done"]);
 });
 
 await test("no em or en dashes in what these files show", async () => {
-  for (const f of ["components/app/orbit-issues.tsx", "components/app/memory-categories.tsx"]) {
+  for (const f of ["components/app/orbit-issues.tsx", "components/app/memory-categories.tsx", "components/app/autopilot.tsx"]) {
     const src = readFileSync(`${root}/${f}`, "utf8");
     // Strings and JSX text only: the comments may say anything.
     const shown = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
