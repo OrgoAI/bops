@@ -616,6 +616,28 @@
   animation: typing-wave 1.2s ease-in-out infinite;
 }
 
+/*
+ * The sidebar's footer (sidebar-footer.tsx): the button picked grows into the pill as the one before
+ * shrinks back to a circle, both at once and on the same curve, so their flex-grow always adds up to 1
+ * and the row keeps its width. The label fades and slides in as it opens.
+ */
+.motion-footer-slot {
+  transition: flex-grow 250ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.motion-footer-label {
+  transition:
+    max-width 250ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    padding 250ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    translate 250ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 200ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .motion-footer-slot,
+  .motion-footer-label {
+    transition: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .motion-rise-in,
   .motion-send-in,

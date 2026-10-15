@@ -18,6 +18,7 @@ import {
   type Person,
 } from "@/lib/members";
 import { peopleAside, peopleShort, upgradeLabel } from "@/lib/plan-includes";
+import { FooterButton } from "./sidebar-footer";
 import type { AppState } from "@/lib/types";
 import { initialsFrom, LoadFailed, Notice, Placeholder, Section, signOutOfOrgo } from "./account";
 import { Spinner } from "./mascot";
@@ -75,28 +76,33 @@ export function useMembersCount(state: AppState) {
 
 /**
  * The People button, beside the user's initials: two people, and a grey count of who has access besides
- * the user (guests too, invites not). Grey, not highlighter: nothing here needs the user.
+ * the user (guests too, invites not). Grey, not highlighter: nothing here needs the user. The pill, with
+ * its name, while the People sheet is open (sidebar-footer.tsx).
  */
-export function MembersButton({ state, onClick }: { state: AppState; onClick: () => void }) {
+export function MembersButton({ state, expanded = false, onClick }: { state: AppState; expanded?: boolean; onClick: () => void }) {
   const count = useMembersCount(state);
   return (
-    <button
+    <FooterButton
+      expanded={expanded}
+      label="People"
+      tip="People: who can see your bots' computers"
+      ariaLabel={count ? `People, ${count} with access` : "People"}
       onClick={onClick}
-      title="People: who can see your bots' computers"
-      aria-label={count ? `People, ${count} with access` : "People"}
-      className="relative flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-ink shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
-    >
-      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
-        <circle cx="6" cy="5.6" r="2.4" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />
-        <path d="M1.8 13.2c.6-2.3 2.2-3.5 4.2-3.5s3.6 1.2 4.2 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
-        <path d="M10.4 3.5a2.4 2.4 0 010 4.4M12 9.9c1.2.4 2 1.5 2.3 3.3" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
-      </svg>
-      {count ? (
-        <span className="absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[#EEEEEC] px-1 text-[11px] font-semibold leading-none tabular-nums text-[#3A3A38] shadow-[0_0_0_2px_#F9F9F8]">
-          {count}
-        </span>
-      ) : null}
-    </button>
+      icon={
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
+          <circle cx="6" cy="5.6" r="2.4" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />
+          <path d="M1.8 13.2c.6-2.3 2.2-3.5 4.2-3.5s3.6 1.2 4.2 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
+          <path d="M10.4 3.5a2.4 2.4 0 010 4.4M12 9.9c1.2.4 2 1.5 2.3 3.3" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
+        </svg>
+      }
+      badge={
+        count ? (
+          <span className="pointer-events-none absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[#EEEEEC] px-1 text-[11px] font-semibold leading-none tabular-nums text-[#3A3A38] shadow-[0_0_0_2px_#F9F9F8]">
+            {count}
+          </span>
+        ) : null
+      }
+    />
   );
 }
 

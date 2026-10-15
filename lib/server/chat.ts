@@ -1454,8 +1454,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
               fn(
                 tool,
                 tool === "create_skill"
-                  ? `Write down how you do one kind of job as a new skill of your workspace, so it's done the same way next time. Only when ${owner} asks you to remember how to do something, or says yes to saving one. It's saved as a draft: ${owner} publishes it on the Skills page, and then you use it.`
-                  : `Change one of your skills (by its name), when ${owner} asks you to, or says yes to it. The change is a draft of its next version until ${owner} publishes it on the Skills page.`,
+                  ? `Write down how you do one kind of job as a new skill of your workspace, so it's done the same way next time. Only when ${owner} asks you to remember how to do something, or says yes to saving one. It's saved as a draft: ${owner} publishes it in Skills, in Knowledge, and then you use it.`
+                  : `Change one of your skills (by its name), when ${owner} asks you to, or says yes to it. The change is a draft of its next version until ${owner} publishes it in Skills, in Knowledge.`,
                 {
                   name: { type: "string", description: tool === "create_skill" ? "A short name for the kind of job, e.g. \"Weekly invoice summary\"." : "The skill's name, as listed." },
                   description: { type: "string", description: `What it does and when to use it, with ${owner}'s own words for asking in quotes.` },
@@ -1805,7 +1805,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
             ? updateSkill(ws, had.kind, had.slug, { name: title, description: undash(String(p.description ?? had.description)), body }, { draft: true })
             : createSkill(ws, { name: title, description: undash(String(p.description ?? "")), body, botIds: [botId], source: "bops", from: { chatId } }).ref;
           notes.push(`${had ? "Updated" : "Saved"} the skill "${r.name}" as a draft`);
-          return `${had ? "Updated" : "Saved"} "${r.name}" as a draft. ${owner} can publish it on the Skills page; then you'll use it.`;
+          return `${had ? "Updated" : "Saved"} "${r.name}" as a draft. ${owner} can publish it in Skills, in Knowledge; then you'll use it.`;
         } catch (e) {
           if (e instanceof SkillError) return `Not saved: ${e.message}${e.problems?.length ? ` (${e.problems.map((x) => `${x.path}${x.line ? ` line ${x.line}` : ""}: ${x.reason}`).join("; ")})` : ""}`;
           throw e;

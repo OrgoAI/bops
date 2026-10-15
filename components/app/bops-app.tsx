@@ -6,7 +6,6 @@ import { useEffect, useRef, useState } from "react";
 import { botChatId, isScreenWatch, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
 import { Account } from "./account";
 import { AutopilotPage, type AutopilotSection } from "./autopilot";
-import { SkillsPage } from "./skills";
 import { Members } from "./members";
 import { BotPanel, type Section } from "./bot-panel";
 import { CallBar } from "./call-bar";
@@ -24,6 +23,7 @@ import { CHAT_TAB, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenLink, 
 const MAC_TAB = "tab_mac";
 const PROFILE_TAB = "tab_profile";
 import { Sidebar } from "./sidebar";
+import { footerPageOf } from "./sidebar-footer";
 import { CloudUnreachable, SignIn, useAuthStatus } from "./sign-in";
 import { Setup, ThisMacSettings } from "./setup";
 import { TooltipLayer } from "./tooltip";
@@ -290,10 +290,13 @@ function Bops({ state }: { state: AppState | null }) {
     .map((t) => (t.id === PROFILE_TAB && t.kind === "bot" ? { ...t, botId: chatBotId } : t))
     .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId))
     .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)))
-    .filter((t) => t.kind !== "memory" || (memory && t.ws === currentWorkspace(state)))
+    // Skills are this Mac's folders and need no account, so a Knowledge tab on Skills stays without one.
+    .filter((t) => t.kind !== "memory" || (t.ws === currentWorkspace(state) && (memory || t.category === "skills")))
     // Routines shows its own workspace's bots only: another workspace's tab goes on a switch.
-    .filter((t) => (t.kind !== "autopilot" && t.kind !== "skills") || t.ws === currentWorkspace(state));
+    .filter((t) => t.kind !== "autopilot" || t.ws === currentWorkspace(state));
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
+  // The footer's pill: People while its sheet is open, else the page in sight on the right.
+  const footer = footerPageOf({ people: members, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory });
   if (recent.at(-1) !== active) {
     setRecent([...recent.filter((id) => id !== active), active].slice(-20));
     // Gone on to another tab: leaving that one later shouldn't hide the panel this one opened.
@@ -313,7 +316,6 @@ function Bops({ state }: { state: AppState | null }) {
         tab.kind === "crm" ||
         tab.kind === "memory" ||
         tab.kind === "autopilot" ||
-        tab.kind === "skills" ||
         (tab.kind === "computer" && tab.botId !== chatBotId) ||
         (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
@@ -425,10 +427,12 @@ function Bops({ state }: { state: AppState | null }) {
   const openMemory = ({ category, focus: item, query }: MemoryOpen = {}) => {
     const ws = currentWorkspace(state);
     const focusAt = Date.now();
+    // A search with no kind goes to All: left on Skills or Issues, the tab would show a page that has no search.
+    const cat = category ?? (query !== undefined ? "all" : undefined);
     openTab(
       (t) => t.kind === "memory" && t.ws === ws,
-      () => ({ id: tabId(), kind: "memory", ws, category: category ?? "all", focus: item, focusAt, query }),
-      (t) => (t.kind === "memory" ? memoryAgain(t, { category, focus: item, query }, focusAt) : t),
+      () => ({ id: tabId(), kind: "memory", ws, category: cat ?? "all", focus: item, focusAt, query }),
+      (t) => (t.kind === "memory" ? memoryAgain(t, { category: cat, focus: item, query }, focusAt) : t),
     );
   };
   /**
@@ -444,16 +448,8 @@ function Bops({ state }: { state: AppState | null }) {
       (t) => ({ ...t, section, focus: item, focusAt }) as PanelTab,
     );
   };
-  /** The workspace's Skills page (skills.tsx): its one tab, at the skill asked for ("skill:<slug>"), or opened. */
-  const openSkills = (item?: string) => {
-    const ws = currentWorkspace(state);
-    const focusAt = Date.now();
-    openTab(
-      (t) => t.kind === "skills" && t.ws === ws,
-      () => ({ id: tabId(), kind: "skills", ws, focus: item, focusAt }),
-      (t) => ({ ...t, focus: item, focusAt }) as PanelTab,
-    );
-  };
+  /** Skills (skills.tsx), a kind in Knowledge: the Knowledge tab on Skills, at the skill asked for ("skill:<slug>"). */
+  const openSkills = (item?: string) => openMemory({ category: "skills", focus: item });
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
   // eslint-disable-next-line react-hooks/refs -- kept current for the storage listener above
   openMacRef.current = openMac;
@@ -494,7 +490,7 @@ function Bops({ state }: { state: AppState | null }) {
   // a search) stays there.
   // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
   escTab.current = (e) => {
-    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot" || tab?.kind === "skills") ? tab : undefined;
+    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot") ? tab : undefined;
     if (!page || e.defaultPrevented || thread || composing || settings || account || setup || members || document.querySelector('[role="dialog"]')) return;
     const el = e.target instanceof HTMLElement ? e.target : null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && !panelRef.current?.contains(el)) return;
@@ -533,7 +529,7 @@ function Bops({ state }: { state: AppState | null }) {
     );
     if (cutAlerts === null) return setCutAlerts(new Set(alerting.map(key)));
     const fresh = alerting.find((w) => !cutAlerts.has(key(w)));
-    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot" || tab?.kind === "skills") return;
+    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot") return;
     const el = document.activeElement as HTMLInputElement | null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && (el.value ?? el.textContent ?? "").trim()) return;
     setCutAlerts(new Set([...cutAlerts, key(fresh)]));
@@ -672,7 +668,7 @@ function Bops({ state }: { state: AppState | null }) {
             onOpenWatch={showWatch}
             onOpenMemory={openMemory}
             onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item)}
-            onOpenSkills={() => openSkills()}
+            footer={footer}
           />
           {focus && crmFocus && crm ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
@@ -796,6 +792,7 @@ function Bops({ state }: { state: AppState | null }) {
                   ) : tab?.kind === "memory" ? (
                     <div key={tab.id} className="motion-fade-in flex min-h-0 flex-1 flex-col">
                       <MemoryView
+                        state={state}
                         user={state.account?.user.id}
                         ws={tab.ws}
                         category={tab.category}
@@ -820,10 +817,6 @@ function Bops({ state }: { state: AppState | null }) {
                         onOpenSkills={() => openSkills()}
                         onClose={() => leaveTab(tab.id)}
                       />
-                    </div>
-                  ) : tab?.kind === "skills" ? (
-                    <div key={tab.id} className="motion-fade-in flex min-h-0 flex-1 flex-col">
-                      <SkillsPage state={state} focus={tab.focus} focusAt={tab.focusAt} onClose={() => leaveTab(tab.id)} />
                     </div>
                   ) : null}
                   {/* Your Mac stays capturing, hidden, for two minutes after you leave it (restarting capture is slow). */}

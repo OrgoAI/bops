@@ -10,7 +10,6 @@ import { CrmFileIcon } from "./crm";
 import { Mascot } from "./mascot";
 import { MacIcon } from "./mac-tab";
 import { KnowledgeIcon, type OrbitSection } from "./memory-categories";
-import { SkillsIcon } from "./skills";
 import { KeyIcon } from "./screen-cards";
 import { MonitorIcon, teamOf } from "./ui";
 
@@ -40,16 +39,14 @@ export type PanelTab =
    * Autopilot (autopilot.tsx): what the workspace's bots do on their own, a section at a time. One tab per
    * workspace, at the row asked for (`focus`); `focusAt` is when it was asked for, so asking again shows it again.
    */
-  | { id: string; kind: "autopilot"; ws: string; section: AutopilotSection; focus?: string; focusAt?: number }
-  /** Skills (skills.tsx): the workspace's skills and apps, one opened (`focus`: "skill:<slug>"). One tab per workspace. */
-  | { id: string; kind: "skills"; ws: string; focus?: string; focusAt?: number };
+  | { id: string; kind: "autopilot"; ws: string; section: AutopilotSection; focus?: string; focusAt?: number };
 
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";
 
-/** A tab you're reading (a page, the Vault, a CRM file, Knowledge, a profile, Routines, Skills): a new "Needs you" doesn't take the panel from it. */
+/** A tab you're reading (a page, the Vault, a CRM file, Knowledge and Skills in it, a profile, Routines): a new "Needs you" doesn't take the panel from it. */
 export const isReading = (t?: PanelTab) =>
-  !!t && (t.kind === "web" || t.kind === "vault" || t.kind === "crm" || t.kind === "memory" || t.kind === "bot" || t.kind === "autopilot" || t.kind === "skills");
+  !!t && (t.kind === "web" || t.kind === "vault" || t.kind === "crm" || t.kind === "memory" || t.kind === "bot" || t.kind === "autopilot");
 
 /**
  * The Knowledge tab, opened again for a kind, an item or a search: on the kind asked for, else where it
@@ -159,9 +156,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
                   ? GROUP_NAME
                   : t.kind === "autopilot"
                     ? "Routines"
-                    : t.kind === "skills"
-                      ? "Skills"
-                      : "New tab";
+                    : "New tab";
   return (
     <div
       onClick={onPick}
@@ -186,8 +181,6 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
         <KnowledgeIcon />
       ) : t.kind === "autopilot" ? (
         <AutopilotIcon />
-      ) : t.kind === "skills" ? (
-        <SkillsIcon />
       ) : (
         <GlobeIcon />
       )}

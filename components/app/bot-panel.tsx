@@ -54,7 +54,7 @@ export function BotPanel({
   onOpenKeys: (botId: string) => void;
   /** Open the workspace's Routines page at a section, and at one of its rows (a schedule or monitor). */
   onOpenAutopilot: (section: AutopilotSection, item?: string) => void;
-  /** Open the Skills page, at one of them ("skill:<slug>"). */
+  /** Open Skills, in Knowledge, at one of them ("skill:<slug>"). */
   onOpenSkills: (focus?: string) => void;
   /** Show a watched screen or Mac window (bops-app.tsx showWatch). */
   onOpenWatch: (w: Watch) => void;

@@ -1,13 +1,13 @@
 "use client";
 
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { live, MAIN_WORKSPACE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
 import { AutopilotButton, AutopilotSections, type AutopilotOpen } from "./autopilot";
-import { SkillsSideRow } from "./skills";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
+import { FooterButton, type FooterPage } from "./sidebar-footer";
 import { Mascot } from "./mascot";
 import { KnowledgeIcon, type MemoryOpen } from "./memory-categories";
 import { AppLogo } from "./apps";
@@ -37,7 +37,7 @@ export function Sidebar({
   onOpenWatch,
   onOpenMemory,
   onOpenAutopilot,
-  onOpenSkills,
+  footer,
 }: {
   state: AppState;
   chatId: string;
@@ -57,8 +57,8 @@ export function Sidebar({
   onOpenMemory: (open: MemoryOpen) => void;
   /** Open Routines on the right, at a section and one of its rows (autopilot.tsx). */
   onOpenAutopilot: (open: AutopilotOpen) => void;
-  /** Open the workspace's Skills page (skills.tsx). */
-  onOpenSkills: () => void;
+  /** Which of the footer's buttons is the pill: the page open on the right (sidebar-footer.tsx footerPageOf). */
+  footer?: FooterPage;
 }) {
   const [query, setQuery] = useState<string | null>(null);
   const q = query?.trim().toLowerCase();
@@ -158,43 +158,86 @@ export function Sidebar({
       </div>
 
       {/*
-        Pinned under the chats: Skills (how the bots do a kind of job, and their apps), with a page on the
-        right; while searching, the routines that match instead. Routines and Knowledge open from the footer.
+        Pinned under the chats while searching: the routines that match. Routines and Knowledge (with
+        Skills in it) open from the footer.
       */}
-      <div className="-mx-2.5 shrink-0 border-t border-[#ECECEA] px-2.5 empty:hidden">
-        {query?.trim() ? (
+      {!!query?.trim() && (
+        <div className="-mx-2.5 shrink-0 border-t border-[#ECECEA] px-2.5 empty:hidden">
           <AutopilotSections state={state} query={query} onOpen={onOpenAutopilot} onOpenWatch={onOpenWatch} />
-        ) : (
-          <SkillsSideRow state={state} onOpen={onOpenSkills} />
-        )}
-      </div>
+        </div>
+      )}
       {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
       <UpdateNotice />
-      {/* You, your apps and logins (the Vault, with the apps you've connected), Routines and Knowledge. New bots are the + at the top. */}
-      <div className="flex items-center gap-1.5 p-1 pt-3">
-        <YouMenu state={state} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />
-        <MembersButton state={state} onClick={onMembers} />
-        <button
-          onClick={onVault}
-          title="Your apps and logins, and which bots can use them"
-          className="flex h-10 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full bg-white px-2.5 text-[13.5px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
-        >
-          <span className="truncate">Apps &amp; logins</span>
-          <AppStack state={state} />
-        </button>
-        <AutopilotButton state={state} onOpen={onOpenAutopilot} />
-        {categoriesOpen(state) && (
-          <button
-            onClick={() => onOpenMemory({})}
-            title="Knowledge: what your bots know, learned as you chat"
-            aria-label="Knowledge"
-            className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
-          >
-            <KnowledgeIcon size={16} />
-          </button>
-        )}
-      </div>
+      {/* You, then People, your apps and logins (the Vault, with the apps you've connected), Routines and Knowledge (sidebar-footer.tsx). New bots are the + at the top. */}
+      <SidebarFooter state={state} open={footer} you={<YouMenu state={state} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />} onMembers={onMembers} onVault={onVault} onOpenAutopilot={onOpenAutopilot} onOpenMemory={onOpenMemory} />
     </aside>
+  );
+}
+
+/**
+ * The footer's row: `you` (the initials and their menu), then People, Apps & logins, Routines and
+ * Knowledge, the one `open` names as the pill with its label (sidebar-footer.tsx footerPageOf), the
+ * others round. Picking a round one opens its page, and it grows as the pill before it shrinks.
+ */
+export function SidebarFooter({
+  state,
+  open = "vault",
+  you,
+  onMembers,
+  onVault,
+  onOpenAutopilot,
+  onOpenMemory,
+}: {
+  state: AppState;
+  open?: FooterPage;
+  you: ReactNode;
+  onMembers: () => void;
+  onVault: () => void;
+  onOpenAutopilot: (open: AutopilotOpen) => void;
+  onOpenMemory: (open: MemoryOpen) => void;
+}) {
+  const knowledge = categoriesOpen(state);
+  const page = open === "knowledge" && !knowledge ? "vault" : open;
+  return (
+    <div className="flex items-center gap-1.5 p-1 pt-3">
+      {you}
+      <MembersButton state={state} expanded={page === "people"} onClick={onMembers} />
+      <FooterButton
+        expanded={page === "vault"}
+        label="Apps & logins"
+        tip="Your apps and logins, and which bots can use them"
+        onClick={onVault}
+        trail={<AppsTrail state={state} expanded={page === "vault"} />}
+      />
+      <AutopilotButton state={state} expanded={page === "routines"} onOpen={onOpenAutopilot} />
+      {knowledge && (
+        <FooterButton
+          expanded={page === "knowledge"}
+          label="Knowledge"
+          tip="Knowledge: what your bots know, learned as you chat"
+          onClick={() => onOpenMemory({})}
+          icon={<KnowledgeIcon size={16} />}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Apps & logins' end: as the pill, the apps you've connected; round, the Vault's key. Both are there
+ * and fade with the label (globals.css .motion-footer-label), so the logos don't pop in or out as it
+ * grows or shrinks; the key sits over the middle of the round button.
+ */
+function AppsTrail({ state, expanded }: { state: AppState; expanded: boolean }) {
+  return (
+    <span className="relative flex items-center">
+      <span aria-hidden className={`motion-footer-label flex min-w-0 overflow-hidden py-0.5 ${expanded ? "max-w-[48px] opacity-100" : "max-w-0 opacity-0"}`}>
+        <AppStack state={state} />
+      </span>
+      <span aria-hidden className={`motion-footer-label pointer-events-none absolute inset-0 flex items-center justify-center ${expanded ? "opacity-0" : "opacity-100"}`}>
+        <KeyIcon />
+      </span>
+    </span>
   );
 }
 

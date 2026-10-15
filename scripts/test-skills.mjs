@@ -272,7 +272,7 @@ await check("Which bots have it: every bot until one is taken away; the last one
 await check("Scripts run once approved by content: shown as needing it, approved, kept through an unchanged version, cleared by a change", async () => {
   const file = W.skillDetail("ws_main", "skill", report.slug).files[0];
   assert.deepEqual([file.path, file.script, file.approved], ["scripts/sum.sh", true, false]);
-  assert.match(W.readSkill("max", report.slug), /- scripts\/sum\.sh \(script, not approved yet: ask to have it approved on the Skills page before running it\)/);
+  assert.match(W.readSkill("max", report.slug), /- scripts\/sum\.sh \(script, not approved yet: ask to have it approved in Skills, in Knowledge, before running it\)/);
   assert.throws(() => W.approveScript("ws_main", "f".repeat(64)), /No script in this workspace has that content\./);
   assert.throws(() => W.approveScript("ws_main", "not-a-sha"), /That isn't a script's sha256\./);
   const shown = await route({ action: "file", kind: "skill", slug: report.slug, path: "scripts/sum.sh" });

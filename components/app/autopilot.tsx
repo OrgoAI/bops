@@ -22,12 +22,13 @@ import { watchName } from "./watch-overlay";
 import { AppLogo, botApps } from "./apps";
 import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
 import { CloseButton, currentWorkspace, needsYou, post, teamOf, useNow } from "./ui";
+import { FooterButton } from "./sidebar-footer";
 
 /*
  * Routines: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
  * in the chat, or a task on a computer, at set times) and Monitors (watches: a bot's screen, a window on the
  * user's Mac, or a web page with no screen). One bot owns each. How a bot does a kind of job is a skill
- * now, on the Skills page (skills.tsx). In the sidebar, a round button in the footer beside Knowledge
+ * now, in Skills, in Knowledge (skills.tsx). In the sidebar, a round button in the footer beside Knowledge
  * (AutopilotButton), and the matches while it searches (AutopilotSections); on the right, a page with every bot's, grouped
  * by bot and filtered by bot, Connected App or what needs the user, each opening in place with what can be
  * done to it (AutopilotPage). A bot's own are on its profile too (routines.tsx). All read the app's state
@@ -261,9 +262,10 @@ function useFresh(id: string) {
 
 /**
  * Routines in the sidebar's footer, beside Knowledge: a round button that opens the page (one tab per
- * workspace), with how many monitors have news on it while some do (it pops in when news comes).
+ * workspace), with how many monitors have news on it while some do (it pops in when news comes). The
+ * pill, with its name, while the page is open (sidebar-footer.tsx).
  */
-export function AutopilotButton({ state, onOpen }: { state: AppState; onOpen: (open: AutopilotOpen) => void }) {
+export function AutopilotButton({ state, expanded = false, onOpen }: { state: AppState; expanded?: boolean; onOpen: (open: AutopilotOpen) => void }) {
   const lists = autopilotOf(state);
   const news = lists.monitors.filter((w) => w.alert).length;
   // The page opens on monitors while one has news, else on the first section with something in it.
@@ -271,19 +273,21 @@ export function AutopilotButton({ state, onOpen }: { state: AppState; onOpen: (o
   // At the monitor with news (the list puts them first), as a monitor's own row opens it.
   const fresh = news ? lists.monitors.find((w) => w.alert) : undefined;
   return (
-    <button
+    <FooterButton
+      expanded={expanded}
+      label={GROUP_NAME}
+      tip={news ? `${GROUP_NAME}: ${news === 1 ? "a monitor has" : `${news} monitors have`} news` : `${GROUP_NAME}: what your bots do on their own`}
+      ariaLabel={news ? `${GROUP_NAME}, ${news} with news` : GROUP_NAME}
       onClick={() => onOpen({ section, focus: fresh?.id })}
-      title={news ? `${GROUP_NAME}: ${news === 1 ? "a monitor has" : `${news} monitors have`} news` : `${GROUP_NAME}: what your bots do on their own`}
-      aria-label={news ? `${GROUP_NAME}, ${news} with news` : GROUP_NAME}
-      className="relative flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
-    >
-      <AutopilotIcon size={16} />
-      {news > 0 && (
-        <span key={news} className="motion-dot-in absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-highlighter px-1 text-[11px] font-semibold leading-none tabular-nums text-ink shadow-[0_0_0_2px_#F9F9F8]">
-          {news}
-        </span>
-      )}
-    </button>
+      icon={<AutopilotIcon size={16} />}
+      badge={
+        news > 0 && (
+          <span key={news} className="motion-dot-in pointer-events-none absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-highlighter px-1 text-[11px] font-semibold leading-none tabular-nums text-ink shadow-[0_0_0_2px_#F9F9F8]">
+            {news}
+          </span>
+        )
+      }
+    />
   );
 }
 
@@ -317,7 +321,7 @@ function SidebarGroup({
   const news = monitors.filter((w) => w.alert).length;
   const total = schedules.length + monitors.length;
   if (q && !total) return null;
-  // One row, like Skills under it, and what comes next under it: monitors with news, then the soonest
+  // One row, and what comes next under it: monitors with news, then the soonest
   // schedules, then the other monitors. Nothing under it while there are none (the page says how).
   const next = [
     ...monitors.filter((w) => w.alert).map((w) => <MonitorLine key={w.id} watch={w} onClick={() => onOpenWatch(w)} />),
@@ -346,7 +350,7 @@ function SidebarGroup({
   );
 }
 
-/** A row in the sidebar's pinned box: Routines here, Skills (skills.tsx) the same. */
+/** A row in the sidebar's pinned box, while it searches: Routines. */
 export const SIDE_HEAD =
   "flex h-8 w-full items-center gap-2 rounded-[10px] px-2.5 text-left text-[13px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-black/[0.04] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]";
 
@@ -540,7 +544,7 @@ export function AutopilotPage({
   focusAt?: number;
   /** Show a watched screen or Mac window (bops-app.tsx showWatch). */
   onOpenWatch: (w: Watch) => void;
-  /** The Skills page, where procedures went. */
+  /** Skills, in Knowledge, where procedures went. */
   onOpenSkills: () => void;
   onClose: () => void;
 }) {
@@ -582,6 +586,7 @@ export function AutopilotPage({
               <button onClick={onOpenSkills} className="font-medium text-ink underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink">
                 Skills
               </button>
+              , in Knowledge.
             </span>
           </div>
           <CloseButton onClick={onClose} className="mt-1.5" />

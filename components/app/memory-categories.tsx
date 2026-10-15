@@ -5,6 +5,8 @@ import { flushSync } from "react-dom";
 import { CATEGORIES, categoryOf, GROUP_NAME, settled, upcoming, whenLabel, type CategoryId, type KnowledgeFilter, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
 import { Mascot, Spinner } from "./mascot";
 import { IssuesIcon, IssuesPage, isOpen, issuesSoon, useIssues } from "./orbit-issues";
+import { SkillsPage, skillsIn } from "./skills";
+import type { AppState } from "@/lib/types";
 import { Fold } from "./fold";
 import { Chevron, since, small, undash } from "./side-group";
 import { clockTime, CloseButton, useNow } from "./ui";
@@ -23,11 +25,13 @@ import { clockTime, CloseButton, useNow } from "./ui";
  * it's sent (memory then deletes what it learned about them, for good). Delete everywhere first asks
  * the server which chats in memory it would delete, lists them, then asks once more.
  *
- * Issues (orbit-issues.tsx) are Knowledge's first kind, with a page of their own in the same tab.
+ * Issues (orbit-issues.tsx) are Knowledge's first kind, with a page of their own in the same tab, and
+ * Skills (skills.tsx: how the bots do a kind of job, and the apps they run) the next, the same way. They
+ * aren't facts memory learned, so All doesn't list them: each has its chip and its own page.
  */
 
-/** What the Knowledge page shows: All, one kind, or Issues. */
-export type OrbitSection = KnowledgeFilter | "issues";
+/** What the Knowledge page shows: All, one kind, Issues or Skills. */
+export type OrbitSection = KnowledgeFilter | "issues" | "skills";
 
 /** Open Knowledge on the right (bops-app.tsx): on a kind, at one of its items, or with a search filled in (from the sidebar's search). */
 export type MemoryOpen = { category?: OrbitSection; focus?: string; query?: string };
@@ -609,7 +613,16 @@ type Answer = { answer: string; based: { id: string; text: string; source: strin
  * tab, so it doesn't come back); `focusAt` is when they were asked for, so asking again for the same
  * item (it was closed since, or scrolled away) does it again.
  */
-export function MemoryView({
+export function MemoryView(props: Parameters<typeof KnowledgeView>[0]) {
+  // No account (self-hosted, or signed out): no memory or issues, but Skills are this Mac's folders, so
+  // Skills still opens here, without the kinds it would sit among.
+  const { state, user, category, focus, focusAt, onClose } = props;
+  if (!user && category === "skills" && state) return <SkillsPage state={state} focus={focus} focusAt={focusAt} onClose={onClose} />;
+  return <KnowledgeView {...props} />;
+}
+
+function KnowledgeView({
+  state,
   user,
   ws,
   category,
@@ -622,6 +635,8 @@ export function MemoryView({
   onCategory,
   onClose,
 }: {
+  /** The app's state, for Skills (its lists are the workspace's, in the state). None: no Skills chip. */
+  state?: AppState;
   user?: string;
   ws: string;
   category: OrbitSection;
@@ -648,6 +663,11 @@ export function MemoryView({
     soon(user ?? "", ws);
     issuesSoon(user ?? "", ws);
   }, [last, user, ws]);
+  const lists = state ? skillsIn(state, ws) : undefined;
+  const skills = lists ? lists.skills.length + lists.apps.length : undefined;
+  // Saved by a bot and waiting to be published: said on the Skills chip, as the sidebar's Skills row did.
+  const drafts = lists ? [...lists.skills, ...lists.apps].filter((r) => r.status === "draft").length : undefined;
+  const count = (id: KnowledgeFilter) => (snap?.items ?? []).filter((i) => id === "all" || i.category === id).length;
   const ask = useCallback(async (question: string): Promise<Answer | string> => {
     const r = await fetch("/api/memory", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "ask", ws, question }) })
       .then((x) => x.json() as Promise<Answer & { error?: string }>)
@@ -662,10 +682,12 @@ export function MemoryView({
         focus={focus}
         focusAt={focusAt}
         tags={tags}
-        nav={<KnowledgeChips on="issues" snap={snap} issues={openIssues} count={(id) => (snap?.items ?? []).filter((i) => id === "all" || i.category === id).length} onPick={onCategory} />}
+        nav={<KnowledgeChips on="issues" snap={snap} issues={openIssues} skills={skills} drafts={drafts} count={count} onPick={onCategory} />}
         onClose={onClose}
       />
     );
+  if (category === "skills" && state)
+    return <SkillsPage state={state} focus={focus} focusAt={focusAt} nav={<KnowledgeChips on="skills" snap={snap} issues={openIssues} skills={skills} drafts={drafts} count={count} onPick={onCategory} />} onClose={onClose} />;
   return (
     <MemoryPage
       snap={snap}
@@ -673,7 +695,9 @@ export function MemoryView({
       ask={ask}
       forgetting={forgetting}
       issues={openIssues}
-      category={category}
+      skills={skills}
+      drafts={drafts}
+      category={category === "skills" ? "all" : category}
       focus={focus}
       focusAt={focusAt}
       query={query}
@@ -701,12 +725,32 @@ const EXAMPLE: Record<KnowledgeFilter, string> = {
 
 /**
  * Knowledge's kinds as a row of chips at the top of its page: All, Issues (`issues`: how many are open,
- * once known), then each kind with its count (`count`). Only once memory is on are the counts there.
+ * once known), Skills (`skills`: how many skills and apps, and `drafts` of them waiting to be published;
+ * none given, no chip), then each kind with its
+ * count (`count`). Only once memory is on are the counts there.
  */
-function KnowledgeChips({ on, snap, issues, count, onPick }: { on: OrbitSection; snap: MemorySnapshot | null; issues?: number; count: (id: KnowledgeFilter) => number; onPick: (s: OrbitSection) => void }) {
-  const chips: { id: OrbitSection; label: string; n?: number }[] = [
+function KnowledgeChips({
+  on,
+  snap,
+  issues,
+  skills,
+  drafts,
+  count,
+  onPick,
+}: {
+  on: OrbitSection;
+  snap: MemorySnapshot | null;
+  issues?: number;
+  skills?: number;
+  /** How many of those are drafts waiting to be published: said after the count. */
+  drafts?: number;
+  count: (id: KnowledgeFilter) => number;
+  onPick: (s: OrbitSection) => void;
+}) {
+  const chips: { id: OrbitSection; label: string; n?: number; more?: string }[] = [
     { id: "all", label: "All", n: snap?.on ? count("all") : undefined },
     { id: "issues", label: "Issues", n: issues },
+    ...(skills !== undefined ? [{ id: "skills" as const, label: "Skills", n: skills, more: drafts ? `${drafts} draft${drafts === 1 ? "" : "s"}` : undefined }] : []),
     ...CATEGORIES.map((x) => ({ id: x.id as OrbitSection, label: x.label, n: snap?.on ? count(x.id) : undefined })),
   ];
   return (
@@ -722,6 +766,7 @@ function KnowledgeChips({ on, snap, issues, count, onPick }: { on: OrbitSection;
           >
             {x.label}
             {x.n !== undefined && <span className={`tabular-nums ${here ? "text-white/60" : "text-[#9A9A98]"}`}>{x.n}</span>}
+            {x.more && <span className={here ? "text-white/60" : "text-[#9A9A98]"}>· {x.more}</span>}
           </button>
         );
       })}
@@ -754,6 +799,8 @@ export function MemoryPage({
   ask,
   forgetting,
   issues,
+  skills,
+  drafts,
   category,
   focus,
   focusAt,
@@ -769,6 +816,10 @@ export function MemoryPage({
   forgetting: ForgetCalls;
   /** How many issues are open (the Issues chip), once known. */
   issues?: number;
+  /** How many skills and apps the workspace has (the Skills chip; none: no chip). */
+  skills?: number;
+  /** How many of those are drafts (said on the Skills chip). */
+  drafts?: number;
   category: KnowledgeFilter;
   focus?: string;
   focusAt?: number;
@@ -1049,7 +1100,7 @@ export function MemoryPage({
           </div>
         )}
 
-        <KnowledgeChips on={category} snap={snap} issues={issues} count={count} onPick={onCategory} />
+        <KnowledgeChips on={category} snap={snap} issues={issues} skills={skills} drafts={drafts} count={count} onPick={onCategory} />
 
         {snap?.on && (
           <div className="flex flex-col gap-2.5">
