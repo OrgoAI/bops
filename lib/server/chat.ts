@@ -25,7 +25,7 @@ import { needsMemory } from "./judgment";
 import { dataUrlOf, uploadPath } from "./uploads";
 import { makeImage, SHAPES, type Shape } from "./images";
 import { stopWatch, watchesNote, watchFromChat, watchInstead } from "./watches";
-import { addMessage, bot, chat, getState, ownerLine, ownerName, patchSession, react, sameState, setAsking, setTyping, stateEpoch, update } from "./store";
+import { addMessage, bot, chat, getState, id, ownerLine, ownerName, patchSession, react, sameState, setAsking, setTyping, stateEpoch, update } from "./store";
 import { checkEmail, emailOwner, mailOn, readEmail, replyEmail, sendEmail } from "./mail";
 import { isOwner, ownerPhone, textingLine, textOwner } from "./phone";
 import { pingIfWorthIt } from "./attention";
@@ -95,6 +95,14 @@ const TASK = {
   goal: { type: "string", description: "A complete, standalone instruction. The worker sees only this." },
 };
 
+/** One of several tasks started together for one request, run side by side on different screens. */
+const PART = {
+  part_of: {
+    type: ["string", "null"],
+    description: "When this is one of several tasks you're starting now for one request, to run side by side: the same 2-5 word name for all of them (\"Four screen showcase\"). Otherwise null.",
+  },
+};
+
 /** What the bot says as it starts a task: the reply the user sees, so it fits their request. */
 const SAY = {
   say: {
@@ -142,6 +150,7 @@ function persona(b: Bot, others: Bot[]) {
         : `You can also work on ${owner}'s own Mac, in a Chrome of your own there, so websites see their home internet. You can't use the apps on their Mac (Messages, Notes, Finder…) or their files for now. Most work belongs on your cloud computer; use their Mac only when the task needs it or they ask (start_task with where).`
       : "",
     "Start a task (start_task) for work on a website (signing in, filling a form, posting, booking, buying), for something to make (a document, a list, a draft), or for research across many sources. Call it once per independent task, then say in one short sentence what you're on.",
+    "Each task gets one screen of your computer, and you have four. A request with parts that can run side by side (something on each screen, several sites, several companies or people to research, several drafts) is several tasks: call start_task once for each part, up to four, all in this turn, with the same part_of name, so they run at once on different screens. Keep steps that depend on each other in one task. Give each part everything it needs: it sees only its own goal.",
     `If ${owner} asks for something on a schedule or later, call schedule.`,
     "If nothing needs a task, just answer.",
     `When ${owner} attaches images (screenshots, photos), look at them and use what's in them. A task you start can't see them in the cloud, so put what matters from them into its goal.`,
@@ -646,7 +655,7 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
             }),
           ]
         : []),
-      fn("start_task", `Start a long task (a thread) on your own cloud computer, or on ${owner}'s Mac when it needs their Mac.`, { ...TASK, ...SAY, ...WHERE }),
+      fn("start_task", `Start a long task (a thread) on your own cloud computer, or on ${owner}'s Mac when it needs their Mac.`, { ...TASK, ...SAY, ...WHERE, ...PART }),
       fn("schedule", "Schedule a routine or a one-off task for later.", {
         ...TASK,
         schedule: SCHEDULE_PARAMS,
@@ -954,6 +963,14 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     const withImages = (goal: string) =>
       pics.length ? `${goal}\n\n${pics.length === 1 ? "An image" : `${pics.length} images`} attached by ${owner} (files on their Mac; a cloud computer can't open them): ${pics.join(", ")}` : goal;
     const sessionIds: string[] = [];
+    // Parts started together in this turn (start_task part_of), by their name: one group each.
+    const groups = new Map<string, { id: string; title: string }>();
+    const groupOf = (name?: string | null) => {
+      const t = name?.trim();
+      if (!t) return undefined;
+      if (!groups.has(t.toLowerCase())) groups.set(t.toLowerCase(), { id: id("grp"), title: t });
+      return groups.get(t.toLowerCase());
+    };
     const says: string[] = [];
     let reacted = false;
     const pages: string[] = [];
@@ -982,7 +999,7 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
         }
         continue;
       }
-      const args = JSON.parse(item.arguments) as { bot_id?: string; title: string; goal: string; say?: string; schedule?: RawSchedule; where?: "auto" | "cloud" | "mac"; then_on_mac?: string | null };
+      const args = JSON.parse(item.arguments) as { bot_id?: string; title: string; goal: string; say?: string; schedule?: RawSchedule; where?: "auto" | "cloud" | "mac"; then_on_mac?: string | null; part_of?: string | null };
       if ((item.name === "start_task" || item.name === "hand_off" || item.name === "tell_task") && args.say?.trim()) says.push(args.say.trim());
       if (item.name === "tell_task") {
         const a = JSON.parse(item.arguments) as { thread_id: string; message: string; on_mac?: boolean };
@@ -1022,7 +1039,7 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
       // Someone else's words (an email, a text or a call from outside) never put work on the Mac: sessions.ts StartOptions.outside.
       // A thread already doing the job moves to the Mac only when the user's own words ask for it too (sessions.ts foldInto).
       const place = { where: args.where ?? "auto", thenOnMac: args.then_on_mac ?? undefined, outside: outsideFrom, ownerAsked: !opts.outside && asksForMac(ownerSaid(chatId)) };
-      if (item.name === "start_task") sessionIds.push(startSession({ botId, goal: withImages(args.goal), title: args.title, chatId, sentVia: "you", ...place }).id);
+      if (item.name === "start_task") sessionIds.push(startSession({ botId, goal: withImages(args.goal), title: args.title, chatId, sentVia: "you", ...place, group: groupOf(args.part_of) }).id);
       if (item.name === "hand_off" && args.bot_id) {
         const s = startSession({ botId: args.bot_id, goal: withImages(args.goal), title: args.title, chatId, sentVia: botId, ...place });
         sessionIds.push(s.id);

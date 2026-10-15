@@ -410,6 +410,12 @@ export type Session = {
   activity?: string;
   /** Jev's read of the last answer: is the bot waiting on the user to answer, decide or act? */
   waitingOnYou?: boolean;
+  /**
+   * One of several tasks started together for one request, each on a screen of its own (parallel work):
+   * the group they show under in the chat. `partOf`: the thread that split it off (split_task), if one did.
+   */
+  group?: { id: string; title: string };
+  partOf?: string;
   /** Jev's read too: what it waits on is the user approving something on another device (a sign-in prompt on their phone). */
   approveElsewhere?: boolean;
   /** The answer Bops texted the user about, after it waited unanswered (sessions.ts textIfUnanswered): once per question. */
