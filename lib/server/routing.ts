@@ -140,9 +140,9 @@ export function tierFrom(a: { difficulty?: Answer; stakes?: Answer; long?: Answe
  * Otherwise one Jev call: the old question (hard?) and the router's. The old rule runs unless
  * BOPS_ROUTER=on. Without Jev: the old rule's no-answer, medium on Sol.
  */
-export async function routeTask(pref: Effort | undefined, goal: string, botId?: string): Promise<TaskRoute> {
+export async function routeTask(pref: Effort | undefined, goal: string, botId?: string, opts: { mode?: "off" | "shadow" | "on" } = {}): Promise<TaskRoute> {
   if (pref && pref !== "auto") return { by: "setting", model: pref === "high" ? ASTRA() : SOL(), effort: pref };
-  const mode = routerMode();
+  const mode = opts.mode ?? routerMode();
   const a = await decide(
     { task: goal },
     {

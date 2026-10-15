@@ -294,6 +294,48 @@ await Chat.outsideNews("boppy", text.id, "A text");
 assert.equal(asked[n0].service_tier, undefined, "standard");
 assert.ok(!jevAsked.slice(jevBefore).some((b) => "one_shot" in b.questions), "no route asked");
 
+/* ---------------- The comparison runs' endpoints ---------------- */
+
+const post = async (mod, body) => {
+  const res = await mod.POST(new Request("http://localhost:3210/x", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+  return { status: res.status, body: await res.json() };
+};
+// What Bops would run a task on: the old rule's pick and the router's, whatever BOPS_ROUTER says.
+process.env.BOPS_ROUTER = "off";
+const RouteApi = await import(`${root}/app/api/route/route.ts`);
+jevAnswers = jev({ difficulty: "deep", hard: 0.5 });
+let res = await post(RouteApi, { goal: "Compare three CRMs" });
+assert.deepEqual(res.body, { rule: { model: "gpt-6-astra", effort: "high" }, router: { model: "gpt-6.1-sol", effort: "high", tier: "deep", why: "deep (80%)" } });
+assert.equal((await post(RouteApi, {})).status, 400);
+delete process.env.BOPS_ROUTER;
+
+// A task started on a set configuration: checked, kept on the session as forced, and always a new thread.
+const SessionsApi = await import(`${root}/app/api/sessions/route.ts`);
+assert.equal((await post(SessionsApi, { botId: "boppy", goal: "x", model: "gpt 6; rm" })).status, 400, "not a model name");
+assert.equal((await post(SessionsApi, { botId: "boppy", goal: "x", model: "gpt-6.1-sol", effort: "huge" })).status, 400);
+assert.equal((await post(SessionsApi, { botId: "boppy", goal: "x", model: "gpt-6.1-sol", speed: "warp" })).status, 400);
+res = await post(SessionsApi, { botId: "boppy", goal: "Grid case", title: "Grid: a", model: "gpt-6-astra", effort: "xhigh", speed: "ultrafast" });
+assert.equal(res.status, 200);
+assert.deepEqual(S.session(res.body.id).route, { by: "forced", model: "gpt-6-astra", effort: "xhigh", speed: "ultrafast" });
+assert.equal(S.session(res.body.id).effort, "xhigh");
+const again = await post(SessionsApi, { botId: "boppy", goal: "Grid case", title: "Grid: a", model: "gpt-6-astra", effort: "xhigh" });
+assert.notEqual(again.body.id, res.body.id, "the same goal again is a new thread, not the one running");
+for (const id of [res.body.id, again.body.id]) (await import(`${root}/lib/server/sessions.ts`)).stopSession(id);
+
+// The grader: pass or fail and why, from a strong model; an empty answer fails without asking.
+const JudgeApi = await import(`${root}/app/api/judge/route.ts`);
+answers.push((b) => {
+  assert.deepEqual([b.model, b.reasoning, b.text.format.name], ["gpt-6.1-sol", { effort: "high" }, "grade"]);
+  assert.match(b.input, /"rubric":"Says A6 shows 15/);
+  return json(response("resp_j", [said(JSON.stringify({ pass: true, why: "It says A6 shows 15 and the file was saved." }))]));
+});
+res = await post(JudgeApi, { task: "Make a sheet", rubric: "Says A6 shows 15.", answer: "A6 shows 15. Saved /workspace/bench.ods." });
+assert.deepEqual(res.body, { pass: true, why: "It says A6 shows 15 and the file was saved." });
+const n1 = asked.length;
+res = await post(JudgeApi, { task: "Make a sheet", rubric: "Says A6 shows 15.", answer: "  " });
+assert.deepEqual([res.body.pass, asked.length], [false, n1], "nothing to grade");
+assert.equal((await post(JudgeApi, { answer: "x" })).status, 400);
+
 rmSync(scratch, { recursive: true, force: true });
 console.log("routing: all tests passed");
 process.exit(0);

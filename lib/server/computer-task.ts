@@ -1,5 +1,6 @@
 import "server-only";
 import { tierParam, withSpeed, type Speed } from "./routing";
+import { ResponsesSocket, responsesSocketOn, TransportError } from "./responses-ws";
 import { APIConnectionTimeoutError } from "openai";
 import { openaiClient } from "./openai-client";
 import { computerAsleepError, computerWakingError, orgo, screenId } from "./orgo";
@@ -86,8 +87,18 @@ export type ComputerTurn = {
   speed?: (calls: number) => Speed;
 };
 
-/** One turn: from the user's message to the bot's answer. Returns the answer. */
+/** One turn: from the user's message to the bot's answer. Returns the answer. Its WebSocket, if it opened one, closes with it. */
 export async function computerTurn(t: ComputerTurn): Promise<string> {
+  const ws: { socket?: ResponsesSocket | null } = {};
+  try {
+    return await steps(t, ws);
+  } finally {
+    ws.socket?.close();
+  }
+}
+
+/** The turn's steps. `ws.socket`: its WebSocket for fast steps (undefined until one is needed; null when it couldn't open or dropped). */
+async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): Promise<string> {
   const s = session(t.sessionId)!;
   const b = bot(s.botId)!;
   const epoch = stateEpoch();
@@ -107,23 +118,23 @@ export async function computerTurn(t: ComputerTurn): Promise<string> {
     // rather than wait for the turn to end. Marked sent once the model has them; a failed call leaves them for the next turn.
     const said = calls > 0 ? t.steer?.() : undefined;
     if (said) input.push({ role: "user", content: [{ type: "input_text", text: said.text }] });
+    const body = { model: t.model, instructions: t.instructions, tools, reasoning: { effort: t.effort, summary: "auto" }, input, previous_response_id: prev, truncation: "auto" };
+    // A step that hangs is the turn stalling: it ends rather than waiting out the hour.
+    const overHttp = (tier: Speed, last: boolean) =>
+      client.responses.create({ ...body, ...tierParam(tier) } as never, { ...usageTags("session", b.id), signal: t.signal, timeout: t.idleMs, maxRetries: last ? 1 : 0 });
+    // A fast step goes over the turn's WebSocket (what OpenAI recommends for Ultrafast); one the socket can't carry, over HTTP.
+    const overSocket = async (tier: Speed, last: boolean) => {
+      if (ws.socket === undefined) ws.socket = await ResponsesSocket.open(b.id).catch(() => null);
+      if (!ws.socket?.open) return overHttp(tier, last);
+      return ws.socket.create({ ...body, ...tierParam(tier) }, { signal: t.signal, timeoutMs: t.idleMs }).catch((e: unknown) => {
+        if (!(e instanceof TransportError)) throw e;
+        ws.socket?.close();
+        ws.socket = null;
+        return overHttp(tier, last);
+      });
+    };
     // Fast while someone's waiting on it, falling back a tier when OpenAI's busy (routing.ts withSpeed).
-    const r = (await withSpeed(t.speed?.(calls) ?? "default", (tier, last) =>
-      client.responses.create(
-        {
-          model: t.model,
-          instructions: t.instructions,
-          tools,
-          reasoning: { effort: t.effort, summary: "auto" },
-          input,
-          previous_response_id: prev,
-          truncation: "auto",
-          ...tierParam(tier),
-        } as never,
-        // A step that hangs is the turn stalling: it ends rather than waiting out the hour.
-        { ...usageTags("session", b.id), signal: t.signal, timeout: t.idleMs, maxRetries: last ? 1 : 0 },
-      ),
-    ).catch((e: Error) => {
+    const r = (await withSpeed(t.speed?.(calls) ?? "default", (tier, last) => (tier !== "default" && responsesSocketOn() ? overSocket(tier, last) : overHttp(tier, last))).catch((e: Error) => {
       throw e instanceof APIConnectionTimeoutError ? new Error(`Stuck: nothing happened for ${Math.round(t.idleMs / 60_000)} minutes`) : e;
     })) as unknown as { id: string; model: string; usage: Usage; output: OutputItem[] };
     said?.sent();

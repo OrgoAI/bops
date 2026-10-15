@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "@/cloud/protocol";
-import { BLOCKER_LABEL, botChatId, DISPLAYS, live, MAIN_WORKSPACE, MAX_SCREENS, workBot, workspaceOf, type Bot, type Session, type ThreadReply } from "@/lib/types";
+import { BLOCKER_LABEL, botChatId, DISPLAYS, live, MAIN_WORKSPACE, MAX_SCREENS, workBot, workspaceOf, type Bot, type Session, type TaskRoute, type ThreadReply } from "@/lib/types";
 import { CloudError, creditsOut, executorKey, noteOutOfCredit, OUT_OF_CREDIT, outOfCreditError, shortOfCredit } from "./cloud";
 import { appsMcp, appsSocket, browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
 import { relayNewComputer } from "./relay";
@@ -119,6 +119,8 @@ type StartOptions = {
   ownerAsked?: boolean;
   /** The cloud thread this one carries on from on the Mac (moveToMac). */
   movedFrom?: string;
+  /** What it runs on, set here rather than routed (a benchmark run: app/api/sessions). */
+  route?: TaskRoute;
 };
 
 const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -187,7 +189,7 @@ function foldInto(s: Session, goal: string, where: "mac" | "cloud" | "auto", opt
   return s;
 }
 
-export function startSession({ botId, goal, title, chatId, sentVia = "you", onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom }: StartOptions): Session {
+export function startSession({ botId, goal, title, chatId, sentVia = "you", onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom, route: forced }: StartOptions): Session {
   // Someone else's words (an email or a text from outside) never put work on the user's Mac (StartOptions.outside).
   const where = outside && asked === "mac" ? "auto" : asked;
   // One job, one thread: asking for a job that's already running (or waiting on the user) adds to it.
@@ -211,6 +213,7 @@ export function startSession({ botId, goal, title, chatId, sentVia = "you", onWa
     thenOnMac: (!outside && thenOnMac?.trim()) || undefined,
     ...(outside ? { fromOutside: true as const } : {}),
     ...(movedFrom ? { movedFrom } : {}),
+    ...(forced ? { route: forced, effort: forced.effort } : {}),
   };
   update((state) => state.sessions.push(s));
   trackServerEvent("bops_task_started", { task_id: s.id, sent_via: sentVia === "you" || sentVia === "routine" ? sentVia : "bot", on_watch: !!onWatch, where_asked: where });
@@ -1337,7 +1340,7 @@ function logTaskRoute(sessionId: string) {
 async function computerToolTurns(sessionId: string, at: { computerId: string; display: number; sharedWith?: string; resuming: boolean }) {
   const s = session(sessionId)!;
   const b = bot(s.botId)!;
-  if (!at.resuming) {
+  if (!at.resuming && !s.route) {
     const route = await routeTask(b.effort, s.goal, b.id);
     patchSession(sessionId, { runner: "computer", effort: route.effort, route });
     logTaskRoute(sessionId);
@@ -1377,7 +1380,7 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         timeoutMs: TURN_MAX_MS,
         idleMs: TURN_IDLE_MS,
         step: (tool, detail) => step(sessionId, tool, detail),
-        speed: (calls) => speedFor(config.model, waitingOn(sessionId, calls)),
+        speed: (calls) => now.route?.speed ?? speedFor(config.model, waitingOn(sessionId, calls)),
         pages: () => ensureBrowserTool(at.computerId),
         steer: () => {
           const pending = unsent(sessionId);
@@ -1668,9 +1671,11 @@ async function run(sessionId: string) {
     if (onComputerTool) turn = await computerToolTurns(sessionId, { computerId, display, sharedWith: c.id !== b.id ? c.name : undefined, resuming });
     else {
       if (!resuming) {
-        const route = await routeTask(b.effort, s.goal, b.id);
-        patchSession(sessionId, { effort: route.effort, route });
-        logTaskRoute(sessionId);
+        const route = s.route ?? (await routeTask(b.effort, s.goal, b.id));
+        if (!s.route) {
+          patchSession(sessionId, { effort: route.effort, route });
+          logTaskRoute(sessionId);
+        }
         // What's known about the user that bears on this task (long-term memory).
         const memory = await memoryBlock(wsOf(s.botId), s.goal, 3000);
         const created = (await client.beta.agents.sessions.create({
