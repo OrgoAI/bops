@@ -6,7 +6,6 @@ import { Account } from "./account";
 import { AutopilotPage, type AutopilotSection } from "./autopilot";
 import { Members } from "./members";
 import { BotPanel, type Section } from "./bot-panel";
-import { KeysSettings } from "./keys";
 import { CallBar } from "./call-bar";
 import { ChatView, forgetSheet, ThreadSheet, ToPicker } from "./chat-view";
 import { ComputerPeek, ComputerView, defaultDisplay } from "./computer";
@@ -145,7 +144,7 @@ function Bops({ state }: { state: AppState | null }) {
   // Screens you picked yourself stay put; otherwise the panel follows the action (see ComputerView).
   const [pinned, setPinned] = useState<Record<string, boolean>>({});
   // Settings, or Settings at Keys to add one for a bot (from its profile).
-  const [settings, setSettings] = useState<boolean | { keysFor: string }>(false);
+  const [settings, setSettings] = useState(false);
   const [account, setAccount] = useState(false);
   const [setup, setSetup] = useState(false);
   // The People sheet (members.tsx): who can see the bots' computers.
@@ -373,7 +372,8 @@ function Bops({ state }: { state: AppState | null }) {
       () => ({ id: id === chatBotId ? PROFILE_TAB : tabId(), kind: "bot", botId: id, section }),
       (t) => ({ ...t, section }) as PanelTab,
     );
-  const openVault = () => openTab((t) => t.kind === "vault", () => ({ id: tabId(), kind: "vault" }));
+  const openVault = (keysFor?: string) =>
+    openTab((t) => t.kind === "vault", () => ({ id: tabId(), kind: "vault", keysFor }), (t) => ({ ...t, kind: "vault", keysFor }) as PanelTab);
   /** A CRM file, as a tab (one per file). */
   const openCrm = (ws: string, file: string) =>
     openTab(
@@ -620,7 +620,7 @@ function Bops({ state }: { state: AppState | null }) {
             onSettings={() => setSettings(true)}
             onAccount={() => setAccount(true)}
             onSetup={() => setSetup(true)}
-            onVault={openVault}
+            onVault={() => openVault()}
             onMembers={() => setMembers(true)}
             onOpenWatch={showWatch}
             onOpenMemory={openMemory}
@@ -703,9 +703,9 @@ function Bops({ state }: { state: AppState | null }) {
                       onSection={(section) => setTabs(tabs.map((t) => (t.id === tab.id ? { ...tab, section } : t)))}
                       onOpenChat={openChat}
                       onOpenThread={openThread}
-                      onOpenVault={openVault}
+                      onOpenVault={() => openVault()}
                       onOpenComputer={openComputer}
-                      onOpenKeys={(keysFor) => setSettings({ keysFor })}
+                      onOpenKeys={(keysFor) => openVault(keysFor)}
                       onUpgrade={() => {
                         trackEvent("bops_upgrade_clicked", { surface: "bot_panel" });
                         setAccount(true);
@@ -725,7 +725,7 @@ function Bops({ state }: { state: AppState | null }) {
                       onMac={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "mac" } : t)))}
                     />
                   ) : tab?.kind === "vault" ? (
-                    <VaultTab state={state} onClose={() => leaveTab(tab.id)} />
+                    <VaultTab state={state} keysFor={tab.keysFor} onClose={() => leaveTab(tab.id)} />
                   ) : tab?.kind === "crm" ? (
                     // These two pages fade in from here (the others in their own files). The key is on the
                     // wrapper, so the page remounts exactly when it did before.
@@ -828,7 +828,7 @@ function Bops({ state }: { state: AppState | null }) {
             }}
           />
         )}
-        {settings && <Settings state={state} keysFor={typeof settings === "object" ? settings.keysFor : undefined} onClose={() => setSettings(false)} />}
+        {settings && <Settings state={state} onClose={() => setSettings(false)} />}
         {account && (
           <Account
             state={state}
@@ -1222,7 +1222,7 @@ function SelfHosting({ state }: { state: AppState }) {
   );
 }
 
-function Settings({ state, keysFor, onClose }: { state: AppState; keysFor?: string; onClose: () => void }) {
+function Settings({ state, onClose }: { state: AppState; onClose: () => void }) {
   const setHost = (host: Host) => void post("/api/host", { host });
   const selfHosted = useSelfHosted();
   return (
@@ -1231,7 +1231,7 @@ function Settings({ state, keysFor, onClose }: { state: AppState; keysFor?: stri
         <div className="flex items-center justify-between border-b border-[#F0F0EE] px-[22px] py-[18px]">
           <div className="flex flex-col gap-0.5">
             <span className="text-[18px] font-semibold leading-[22px]">Settings</span>
-            <span className="text-[13px] leading-[17px] text-[#6B6B6B]">You, how your bots reach you, keys, this Mac, and where your bots work</span>
+            <span className="text-[13px] leading-[17px] text-[#6B6B6B]">You, how your bots reach you, this Mac, and where your bots work</span>
           </div>
           <button onClick={onClose} aria-label="Close" className="flex size-8 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3]">
             <svg width="12" height="12" viewBox="0 0 12 12">
@@ -1244,7 +1244,6 @@ function Settings({ state, keysFor, onClose }: { state: AppState; keysFor?: stri
         {!selfHosted && <UsageData />}
         <ReachSettings />
         {!selfHosted && <EmailAddresses state={state} />}
-        <KeysSettings state={state} keysFor={keysFor} />
         <ThisMacSettings state={state} />
 
         <div className="flex flex-col gap-2 px-[22px] pt-4">

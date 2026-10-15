@@ -3,19 +3,20 @@
 import { useState } from "react";
 import type { AppState, BotId, VaultLogin } from "@/lib/types";
 import { AppsSection } from "./apps";
+import { KeysSettings } from "./keys";
 import { Mascot } from "./mascot";
 import { KeyIcon } from "./screen-cards";
 import { ago, CloseButton, post, teamOf } from "./ui";
 
 /*
  * The vault: everything your bots can get into, in one place. Apps (any of Composio's catalog, several
- * accounts each) with how much each bot may do in them, and logins bots sign in with. For logins, Bops shows the site,
+ * accounts each) with how much each bot may do in them, API keys in the Orgo vault (keys.tsx), and logins bots sign in with. For logins, Bops shows the site,
  * the username and who may use each; the password and 2FA setup key live in the Mac's Keychain and
  * are filled straight into the sign-in page, so no AI ever sees them.
  */
 
 /** The Vault, as a tab on the right. Its X (or Esc, see bops-app.tsx) closes it, back to where you were. */
-export function VaultTab({ state, onClose }: { state: AppState; onClose: () => void }) {
+export function VaultTab({ state, keysFor, onClose }: { state: AppState; keysFor?: string; onClose: () => void }) {
   const logins = [...(state.vault ?? [])].sort((a, b) => a.site.localeCompare(b.site));
   const [editing, setEditing] = useState<string | "new" | null>(null);
 
@@ -28,12 +29,14 @@ export function VaultTab({ state, onClose }: { state: AppState; onClose: () => v
           </span>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">Vault</span>
-            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">Your apps and logins, and which bots can use them.</span>
+            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">Your apps, API keys and logins, and which bots can use them.</span>
           </div>
           <CloseButton onClick={onClose} className="mt-1.5" />
         </div>
 
         <AppsSection state={state} />
+
+        <KeysSettings state={state} keysFor={keysFor} />
 
         <div className="flex items-end justify-between gap-3 pt-2">
           <div className="flex flex-col gap-0.5">

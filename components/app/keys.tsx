@@ -18,7 +18,7 @@ type Provider = { name: string; label: string; where: string; tip: string; readO
 type KeyRow = Provider & { updatedAt: string | null; bots: string[] };
 type KeysInfo = { signedIn: boolean; keys: KeyRow[]; providers: Provider[]; error?: string };
 
-/** Every Keys list on the page, so a save or a remove in Settings shows on a bot's profile too. */
+/** Every Keys list on the page, so a save or a remove in the Vault shows on a bot's profile too. */
 const readers = new Set<() => void>();
 const keysChanged = () => readers.forEach((f) => f());
 
@@ -79,10 +79,10 @@ async function grant(name: string, botId: string, allowed: boolean): Promise<str
   }
 }
 
-/* ---------------- Settings ---------------- */
+/* ---------------- Vault ---------------- */
 
 /**
- * Keys in Settings: each key in the vault (its service, its vault name, where it applies, when it was set),
+ * API keys in the Vault: each key in the vault (its service, its vault name, where it applies, when it was set),
  * the bots that may use it (tap to change), Replace and Remove; and Add key. `keysFor`: opened from a bot's
  * profile to add one for that bot, so it comes into view with the form open and that bot picked.
  */
@@ -99,6 +99,12 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
   useEffect(() => {
     if (keysFor && loaded) ref.current?.scrollIntoView({ block: "start", behavior: "smooth" });
   }, [keysFor, loaded]);
+  // The Vault already open when a bot's profile asks to add a key for it: open the form for that bot.
+  const [askedFor, setAskedFor] = useState(keysFor);
+  if (keysFor !== askedFor) {
+    setAskedFor(keysFor);
+    if (keysFor && picked) setForm({ bots: [picked] });
+  }
   const done = (label: string) => {
     setForm(null);
     setSaved(`${label} key saved to your Orgo vault.`);
@@ -119,15 +125,7 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
       <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">Checking</span>
     );
   else if (!info.signedIn) body = <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{undash(info.error ?? "Sign in to Orgo to use Keys.")}</span>;
-  else if (!info.keys.length && !form)
-    body = (
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{saved ?? "No keys yet."}</span>
-        <button onClick={add} className={`${btn} bg-ink text-white`}>
-          Add key
-        </button>
-      </div>
-    );
+  else if (!info.keys.length && !form) body = <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{saved ?? "No keys yet. Add one for Stripe, OpenAI, GitHub and more."}</span>;
   else
     body = (
       <>
@@ -141,12 +139,7 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
         {form?.replace ? null : form ? (
           <AddKey info={info} team={team} bots={form.bots} first={!info.keys.length} onSaved={done} onCancel={() => setForm(null)} />
         ) : (
-          <div className="flex items-center gap-2 pt-3">
-            <button onClick={add} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-              Add key
-            </button>
-            {saved && <span className="motion-fade-in text-[12px] leading-4 text-[#6B6B6B]">{saved}</span>}
-          </div>
+          saved && <span className="motion-fade-in pt-3 text-[12px] leading-4 text-[#6B6B6B]">{saved}</span>
         )}
         {failed && (
           <span role="alert" className="pt-2 text-[12px] leading-4 text-[#B42318]">
@@ -157,12 +150,22 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
     );
 
   return (
-    <div ref={ref} className="flex scroll-mt-4 flex-col gap-2 px-[22px] pt-4">
-      <div className="flex flex-col gap-0.5">
-        <span className="text-[13px] font-semibold">Keys</span>
-        <span className="text-[12px] leading-4 text-[#6B6B6B]">Saved in your Orgo vault, the same keys as Orgo&apos;s Settings, Secrets. Bots use them through Orgo and never see them.</span>
+    <div ref={ref} className="flex scroll-mt-4 flex-col gap-2 pt-2">
+      <div className="flex items-end justify-between gap-3">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-[15px] font-semibold leading-5">API keys</span>
+          <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Kept in your Orgo vault, the same keys as Orgo&apos;s Settings, Secrets. Bots call through Orgo and never see them.</span>
+        </div>
+        {info?.signedIn && !form && (
+          <button onClick={add} className="flex shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[#2A2A28]">
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M5 1v8M1 5h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            Add a key
+          </button>
+        )}
       </div>
-      <div className="flex flex-col rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]">{body}</div>
+      <div className="flex flex-col rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#ECECEA]">{body}</div>
     </div>
   );
 }
@@ -316,7 +319,7 @@ function AddKey({
         void save();
       }}
       onKeyDown={(e) => {
-        // Closes the form, and keeps Settings open (the app's Esc would close it).
+        // Closes the form, and keeps the Vault open (the app's Esc would close it).
         if (e.key === "Escape") {
           e.preventDefault();
           e.stopPropagation();
@@ -405,7 +408,7 @@ function AddKey({
 
 /* ---------------- A bot's profile ---------------- */
 
-/** On a bot's profile: the keys in the vault, on or off for this bot, and the way to Settings to add one. */
+/** On a bot's profile: the keys in the vault, on or off for this bot, and the way to the Vault to add one. */
 export function BotKeys({ bot: b, onAdd, className }: { bot: Bot; onAdd: () => void; className: string }) {
   const { info, failed, retry } = useKeys();
   const [busy, setBusy] = useState<string | null>(null);
@@ -433,7 +436,7 @@ export function BotKeys({ bot: b, onAdd, className }: { bot: Bot; onAdd: () => v
         <span className="text-[13px] font-semibold leading-4">Keys</span>
         {info.signedIn && (
           <button onClick={onAdd} className="text-[12px] font-medium leading-4 text-ink">
-            Add in Settings ›
+            Add in Vault ›
           </button>
         )}
       </div>

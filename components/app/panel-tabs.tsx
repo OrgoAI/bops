@@ -23,7 +23,7 @@ export type PanelTab =
   | { id: string; kind: "bot"; botId: string; section: Section }
   | { id: string; kind: "web"; url: string; title?: string }
   | { id: string; kind: "new" }
-  | { id: string; kind: "vault" }
+  | { id: string; kind: "vault"; keysFor?: string }
   | { id: string; kind: "mac" }
   /** A CRM file (crm.tsx), in the workspace it belongs to. */
   | { id: string; kind: "crm"; ws: string; file: string }
