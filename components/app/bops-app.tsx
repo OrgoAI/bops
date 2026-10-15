@@ -6,14 +6,14 @@ import { Account } from "./account";
 import { Members } from "./members";
 import { BotPanel, type Section } from "./bot-panel";
 import { CallBar } from "./call-bar";
-import { ChatView, ThreadSheet, ToPicker } from "./chat-view";
+import { ChatView, forgetSheet, ThreadSheet, ToPicker } from "./chat-view";
 import { ComputerPeek, ComputerView, defaultDisplay } from "./computer";
 import { crmOpen } from "@/lib/crm-access";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { CrmView, OpenCrm } from "./crm";
 import { BoppyLoading, BusyBots, Mascot } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
-import { CHAT_TAB, hostOf, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
+import { CHAT_TAB, forgetTab, hostOf, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
 
 /** Your Mac's tab, and the chat's bot's profile (it follows the chat, like the computer tab); both open on demand. */
 const MAC_TAB = "tab_mac";
@@ -90,6 +90,10 @@ function Bops({ state }: { state: AppState | null }) {
   // Empty until a chat is picked: the workspace's main bot's chat shows (see `chat` below).
   const [chatId, setChatId] = useState("");
   const [threadId, setThreadId] = useState<string | null>(null);
+  // Closed by any way (Esc, a chat opened, its own close): the thread sheet's next opening plays its entrance again.
+  useEffect(() => {
+    if (!threadId) forgetSheet();
+  }, [threadId]);
   const [composing, setComposing] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
   const [focus, setFocus] = useState(false);
@@ -404,6 +408,7 @@ function Bops({ state }: { state: AppState | null }) {
     }
     const rest = tabs.filter((t) => t.id !== id);
     setTabs(rest);
+    forgetTab(id);
     setRecent(recent.filter((r) => r !== id));
     if (active === id) leave(id, rest, rest[i - 1]?.id ?? rest[i]?.id ?? CHAT_TAB);
   };
@@ -689,33 +694,37 @@ function Bops({ state }: { state: AppState | null }) {
                   ) : tab?.kind === "vault" ? (
                     <VaultTab state={state} onClose={() => leaveTab(tab.id)} />
                   ) : tab?.kind === "crm" ? (
-                    <CrmView
-                      key={`${tab.id}:${tab.file}`}
-                      state={state}
-                      ws={tab.ws}
-                      file={tab.file}
-                      mode="panel"
-                      onClose={() => leaveTab(tab.id)}
-                      onFocus={() => {
-                        setMacFocus(false);
-                        setCrmFocus({ ws: tab.ws, file: tab.file });
-                        setFocus(true);
-                      }}
-                    />
+                    // These two pages fade in from here (the others in their own files). The key is on the
+                    // wrapper, so the page remounts exactly when it did before.
+                    <div key={`${tab.id}:${tab.file}`} className="motion-fade-in flex min-h-0 flex-1 flex-col">
+                      <CrmView
+                        state={state}
+                        ws={tab.ws}
+                        file={tab.file}
+                        mode="panel"
+                        onClose={() => leaveTab(tab.id)}
+                        onFocus={() => {
+                          setMacFocus(false);
+                          setCrmFocus({ ws: tab.ws, file: tab.file });
+                          setFocus(true);
+                        }}
+                      />
+                    </div>
                   ) : tab?.kind === "memory" ? (
-                    <MemoryView
-                      key={tab.id}
-                      user={state.account?.user.id}
-                      ws={tab.ws}
-                      category={tab.category}
-                      focus={tab.focus}
-                      focusAt={tab.focusAt}
-                      query={tab.query}
-                      // The search asked for is used once: off the tab, so coming back doesn't fill it in again.
-                      onQueryUsed={() => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, query: undefined } : t)))}
-                      onCategory={(category) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, category, focus: undefined } : t)))}
-                      onClose={() => leaveTab(tab.id)}
-                    />
+                    <div key={tab.id} className="motion-fade-in flex min-h-0 flex-1 flex-col">
+                      <MemoryView
+                        user={state.account?.user.id}
+                        ws={tab.ws}
+                        category={tab.category}
+                        focus={tab.focus}
+                        focusAt={tab.focusAt}
+                        query={tab.query}
+                        // The search asked for is used once: off the tab, so coming back doesn't fill it in again.
+                        onQueryUsed={() => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, query: undefined } : t)))}
+                        onCategory={(category) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, category, focus: undefined } : t)))}
+                        onClose={() => leaveTab(tab.id)}
+                      />
+                    </div>
                   ) : null}
                   {/* Your Mac stays capturing, hidden, for two minutes after you leave it (restarting capture is slow). */}
                   {(showingMac || macHeld) && (
@@ -1172,8 +1181,8 @@ function Settings({ state, onClose }: { state: AppState; onClose: () => void }) 
   const setHost = (host: Host) => void post("/api/host", { host });
   const selfHosted = useSelfHosted();
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} className="flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
+    <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="motion-dialog-in flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
         <div className="flex items-center justify-between border-b border-[#F0F0EE] px-[22px] py-[18px]">
           <div className="flex flex-col gap-0.5">
             <span className="text-[18px] font-semibold leading-[22px]">Settings</span>

@@ -65,10 +65,11 @@ export function BotPanel({
     </div>
   );
 
+  // Each part fades in as it opens (motion-fade-in, opacity only); another bot's profile in the same tab just changes in place.
   if (tab === "details") return <Details state={state} bot={b} tabs={tabs} close={close} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenComputer={onOpenComputer} onUpgrade={onUpgrade} />;
 
   return (
-    <section className="relative flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto bg-white px-5 py-4">
+    <section className="motion-fade-in relative flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto bg-white px-5 py-4">
       {close}
       <div className="flex flex-col items-center gap-2">
         <Mascot botId={b.id} color={b.color} size={52} />
@@ -135,7 +136,7 @@ function Details({
   };
 
   return (
-    <section className="relative flex min-h-0 min-w-0 flex-col items-center gap-3.5 overflow-y-auto px-6 pb-5 pt-6" style={{ backgroundImage: `linear-gradient(180deg, transparent 40%, #FFFFFF 100%), ${botWash(b)}`, backgroundSize: "100% 520px", backgroundRepeat: "no-repeat", backgroundColor: "#FFFFFF" }}>
+    <section className="motion-fade-in relative flex min-h-0 min-w-0 flex-col items-center gap-3.5 overflow-y-auto px-6 pb-5 pt-6" style={{ backgroundImage: `linear-gradient(180deg, transparent 40%, #FFFFFF 100%), ${botWash(b)}`, backgroundSize: "100% 520px", backgroundRepeat: "no-repeat", backgroundColor: "#FFFFFF" }}>
       {close}
       <div className={`flex size-[104px] items-center justify-center rounded-full ${glass} shadow-[inset_0_0_0_2px_#FFFFFF,0_14px_30px_-12px_#2832002E,0_0_0_1px_#0000000F]`}>
         <Mascot botId={b.id} color={b.color} size={70} />
@@ -362,7 +363,7 @@ function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppSta
         </div>
       </div>
       {sure && (
-        <div className="flex flex-col gap-2 rounded-xl bg-[#FEF3F2] px-3 py-2.5 shadow-[0_0_0_1px_#FECDCA]">
+        <div className="motion-rise-in flex flex-col gap-2 rounded-xl bg-[#FEF3F2] px-3 py-2.5 shadow-[0_0_0_1px_#FECDCA]">
           <span className="text-[12.5px] leading-[17px] text-[#3A3A38]">
             {`Move ${b.name} to ${main.name}'s computer? Its own computer is deleted, with anything saved on it that ${main.name}'s doesn't have.`}
           </span>
@@ -409,7 +410,7 @@ function DeleteBot({ bot: b }: { bot: Bot }) {
       </button>
     );
   return (
-    <div className="flex w-full flex-col gap-2.5 rounded-2xl bg-[#FEF3F2] px-4 py-3 shadow-[0_0_0_1px_#FECDCA]">
+    <div className="motion-rise-in flex w-full flex-col gap-2.5 rounded-2xl bg-[#FEF3F2] px-4 py-3 shadow-[0_0_0_1px_#FECDCA]">
       <span className="text-[13px] leading-[18px] text-[#3A3A38]">
         {sharesComputer(b)
           ? `Delete ${b.name}? Its chat, threads and routines go with it; the computer it works on stays. This can't be undone.`

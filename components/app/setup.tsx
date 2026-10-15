@@ -359,10 +359,10 @@ export function Setup({ state, onClose }: { state: AppState; onClose: () => void
     onClose();
   };
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
+    <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[90vh] w-[560px] animate-[call-in_220ms_ease-out] flex-col overflow-y-auto rounded-[22px] bg-white px-7 pb-6 pt-8 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
+        className="motion-dialog-in flex max-h-[90vh] w-[560px] flex-col overflow-y-auto rounded-[22px] bg-white px-7 pb-6 pt-8 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
       >
         <div className="flex flex-col items-center gap-1.5 pb-5 text-center">
           <Mascot botId="boppy" color="#0A0A0A" size={48} />

@@ -199,13 +199,13 @@ export function Members({ state, onClose, onUpgrade }: { state: AppState; onClos
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
+    <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="members-title"
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
+        className="motion-dialog-in flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
       >
         <div className="flex items-center justify-between gap-3 border-b border-[#F0F0EE] px-[22px] py-[18px]">
           <div className="flex flex-col gap-0.5">
@@ -766,7 +766,7 @@ function InviteRow({ invite: i, fullAccess, canSend, act }: { invite: Invite; fu
           </span>
         </div>
         {sure ? (
-          <span className="flex shrink-0 items-center gap-1">
+          <span className="motion-rise-in flex shrink-0 items-center gap-1">
             <button disabled={!!busy} onClick={() => void cancel()} className="rounded-full bg-[#B42318] px-2.5 py-1 text-[12px] font-semibold leading-4 text-white disabled:opacity-50">
               {busy === "cancel" ? "Cancelling…" : "Cancel invite"}
             </button>
@@ -858,13 +858,13 @@ function Confirm({
   }, [busy, onClose]);
   const button = "rounded-full px-3.5 py-1.5 text-[13px] font-medium leading-4 disabled:opacity-50";
   return createPortal(
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onClose()}>
+    <div className="motion-fade-in fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onClose()}>
       <div
         role="alertdialog"
         aria-labelledby="member-confirm-title"
         aria-describedby="member-confirm-line"
         onClick={(e) => e.stopPropagation()}
-        className="flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
+        className="motion-dialog-in flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
       >
         <span id="member-confirm-title" className="text-[15px] font-semibold leading-5">
           {title}

@@ -55,13 +55,13 @@ export function RestartConfirm({ onClose }: { onClose: () => void }) {
   };
   const pill = "rounded-full px-3.5 py-1.5 text-[13px] font-medium leading-4 disabled:opacity-50";
   return createPortal(
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onClose()}>
+    <div className="motion-fade-in fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onClose()}>
       <div
         role="alertdialog"
         aria-labelledby="restart-title"
         aria-describedby="restart-line"
         onClick={(e) => e.stopPropagation()}
-        className="flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
+        className="motion-dialog-in flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
       >
         <span id="restart-title" className="text-[15px] font-semibold leading-5">
           Restart Bops?

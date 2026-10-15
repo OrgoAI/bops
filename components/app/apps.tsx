@@ -373,13 +373,13 @@ function AppPicker({ state, start, replaces, onClose }: { state: AppState; start
   const info = chosen ? (apps?.find((a) => a.app === chosen) ?? { app: chosen, name: (state.accounts ?? []).find((a) => a.app === chosen)?.appName ?? chosen, tags: [], auth: "oauth" as const }) : null;
 
   return (
-    <div onClick={onClose} className="fixed inset-0 z-50 flex items-start justify-center bg-black/10 p-6 pt-[9vh] backdrop-blur-[2px]">
+    <div onClick={onClose} className="motion-fade-in fixed inset-0 z-50 flex items-start justify-center bg-black/10 p-6 pt-[9vh] backdrop-blur-[2px]">
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Add an app"
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[76vh] w-full max-w-[600px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]"
+        className="motion-dialog-in flex max-h-[76vh] w-full max-w-[600px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]"
       >
         {info ? (
           <ConnectStep state={state} app={info} replaces={replaces} onBack={start ? onClose : () => setChosen(undefined)} onDone={onClose} hasOne={connected.has(info.app)} />

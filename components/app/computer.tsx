@@ -594,7 +594,7 @@ export function ComputerView({
             {handoff && (
               <div
                 key={handoff.key}
-                className="pointer-events-none absolute left-1/2 top-3 z-40 flex animate-[handoff_1900ms_ease-in-out_both] items-center gap-2 rounded-full bg-white/95 py-1 pl-1 pr-3 shadow-[0_0_0_1px_#0000000F,0_10px_24px_-10px_#00000066] backdrop-blur"
+                className="pointer-events-none absolute left-1/2 top-3 z-40 flex -translate-x-1/2 animate-[handoff_1900ms_ease-in-out_both] items-center gap-2 rounded-full bg-white/95 py-1 pl-1 pr-3 shadow-[0_0_0_1px_#0000000F,0_10px_24px_-10px_#00000066] backdrop-blur"
               >
                 {handoff.to === "you" ? (
                   <span className="flex size-6 items-center justify-center rounded-full" style={{ background: botBezel(b) }}>

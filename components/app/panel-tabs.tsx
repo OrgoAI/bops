@@ -50,6 +50,17 @@ export const hostOf = (url: string) => {
   }
 };
 
+/**
+ * The tabs the bar has shown, kept while it's away (it's unmounted while the side panel is hidden). A
+ * tab that opens later slides in; the ones there when Bops opened, or back as the panel shows again,
+ * are simply there.
+ */
+const shownTabs = new Set<string>();
+let barShown = false;
+
+/** A tab closed (not just out of sight): opened again, it slides in again. */
+export const forgetTab = (id: string) => void shownTabs.delete(id);
+
 export function TabBar({
   state,
   tabs,
@@ -67,6 +78,9 @@ export function TabBar({
   onClose: (id: string) => void;
   onNew: () => void;
 }) {
+  useEffect(() => {
+    barShown = true;
+  }, []);
   const all: PanelTab[] = [{ id: CHAT_TAB, kind: "computer", botId: chatBotId }, ...tabs];
   return (
     <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
@@ -88,6 +102,11 @@ export function TabBar({
 }
 
 function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState; tab: PanelTab; on: boolean; closable: boolean; onPick: () => void; onClose: () => void }) {
+  // New since the bar first showed, decided once as it mounts (see shownTabs).
+  const [opening] = useState(() => barShown && !shownTabs.has(t.id));
+  useEffect(() => {
+    shownTabs.add(t.id);
+  }, [t.id]);
   const b = "botId" in t ? state.bots.find((x) => x.id === t.botId) : undefined;
   // A computer tab says when its bot is working, or when something there needs you.
   const working =
@@ -116,9 +135,10 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
       onClick={onPick}
       onAuxClick={(e) => e.button === 1 && closable && onClose()}
       title={t.kind === "web" ? t.url : label}
-      className={`group/tab flex h-[30px] min-w-0 max-w-[220px] shrink cursor-default items-center gap-1.5 rounded-[10px] pl-2.5 ${closable ? "pr-1" : "pr-3"} text-[13px] leading-4 [-webkit-app-region:no-drag] ${
-        on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F,0_2px_6px_-3px_#00000026]" : "text-[#6B6B6B] hover:bg-[#EEEEEC]"
-      }`}
+      // Clipped, so what's in a tab stays inside it while it opens up.
+      className={`group/tab flex h-[30px] min-w-0 max-w-[220px] shrink cursor-default items-center gap-1.5 overflow-hidden rounded-[10px] pl-2.5 ${closable ? "pr-1" : "pr-3"} text-[13px] leading-4 transition-[background-color,box-shadow,color] duration-150 ease-out motion-reduce:transition-none [-webkit-app-region:no-drag] ${
+        opening ? "motion-tab-in" : ""
+      } ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F,0_2px_6px_-3px_#00000026]" : "text-[#6B6B6B] hover:bg-[#EEEEEC]"}`}
     >
       {t.kind === "computer" ? (
         <MonitorIcon size={14} color={on ? "#0A0A0A" : "#6B6B6B"} />
@@ -305,7 +325,7 @@ export function NewTab({
   const target = typed ? toAddress(typed) : "";
   const site = target && !target.startsWith("https://www.google.com/search?") ? hostOf(target).replace(/^www\./, "") : null;
   return (
-    <div className="flex min-h-0 flex-1 flex-col items-center gap-6 overflow-y-auto px-8 pt-[12vh]">
+    <div className="motion-fade-in flex min-h-0 flex-1 flex-col items-center gap-6 overflow-y-auto px-8 pt-[12vh]">
       <form
         onSubmit={(e) => {
           e.preventDefault();

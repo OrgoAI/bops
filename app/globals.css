@@ -172,16 +172,16 @@
 @keyframes cut-note {
   0% {
     opacity: 0;
-    transform: translate(-50%, -4px);
+    transform: translateY(-4px);
   }
   10%,
   80% {
     opacity: 1;
-    transform: translate(-50%, 0);
+    transform: none;
   }
   100% {
     opacity: 0;
-    transform: translate(-50%, 0);
+    transform: none;
   }
 }
 
@@ -435,19 +435,19 @@
 @keyframes handoff {
   0% {
     opacity: 0;
-    transform: translate(-50%, -6px) scale(0.96);
+    transform: translateY(-6px) scale(0.96);
   }
   14% {
     opacity: 1;
-    transform: translate(-50%, 0) scale(1);
+    transform: none;
   }
   82% {
     opacity: 1;
-    transform: translate(-50%, 0) scale(1);
+    transform: none;
   }
   100% {
     opacity: 0;
-    transform: translate(-50%, -4px) scale(0.98);
+    transform: translateY(-4px) scale(0.98);
   }
 }
 
@@ -474,5 +474,160 @@
   }
   to {
     --chin: 0px;
+  }
+}
+
+/*
+ * The app's motions, one name each, so everything moves alike (components/app). Arrivals only: what
+ * appears eases in, and nothing holds its end state (fill backwards), so an element's own transform,
+ * hover or background is back the moment it's done. Each animates opacity and the scale and translate
+ * properties, or transform where nothing else positions the element. With reduced motion, all off
+ * (the block at the end). Folding open and shut is components/app/fold.tsx.
+ */
+
+/* Something new arriving in a list (a chat reply, a note, a thread): up a few pixels, fading in. */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.motion-rise-in {
+  animation: rise-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+
+/* What you just sent: up from the composer, a touch smaller at first. */
+@keyframes send-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.96);
+  }
+  30% {
+    opacity: 1;
+  }
+}
+.motion-send-in {
+  transform-origin: right bottom;
+  animation: send-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1) backwards;
+}
+
+/* Something Orbit just learned: rises in, with a soft grey wash that fades (yellow only marks what needs you). */
+@keyframes wash {
+  from {
+    background-color: #eeeeec;
+  }
+}
+.motion-new-item {
+  animation:
+    rise-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards,
+    wash 1400ms ease-out;
+}
+
+/* Menus and popovers: from their anchor (set transform-origin where it's used), opacity and scale only. */
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    scale: 0.96;
+  }
+}
+.motion-menu-in {
+  animation: pop-in 150ms cubic-bezier(0.2, 0.9, 0.3, 1) backwards;
+}
+
+/* A dialog's card: in from just above, settling. Its scrim fades (motion-fade-in). */
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    scale: 0.97;
+    translate: 0 -4px;
+  }
+}
+.motion-dialog-in {
+  animation: dialog-in 220ms cubic-bezier(0.2, 0.9, 0.3, 1) backwards;
+}
+.motion-fade-in {
+  animation: screen-in 160ms ease-out backwards;
+}
+
+/* A sheet over the window or a screen: up from below. */
+@keyframes sheet-up {
+  from {
+    opacity: 0;
+    translate: 0 14px;
+    scale: 0.985;
+  }
+}
+.motion-sheet-in {
+  animation: sheet-up 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+
+/* A new tab in the title bar: opens up, pushing the others over. */
+@keyframes tab-in {
+  from {
+    opacity: 0;
+    max-width: 0;
+  }
+  to {
+    max-width: 220px;
+  }
+}
+.motion-tab-in {
+  animation: tab-in 180ms cubic-bezier(0.2, 0.9, 0.3, 1) backwards;
+}
+
+/* A number that went up: drops into place. */
+@keyframes tick {
+  from {
+    opacity: 0.3;
+    translate: 0 -3px;
+  }
+}
+.motion-tick {
+  animation: tick 260ms ease-out backwards;
+}
+
+/* A dot that just appeared (unread, needs you): one small pop, no loop. */
+@keyframes dot-in {
+  from {
+    scale: 0;
+  }
+  60% {
+    scale: 1.15;
+  }
+}
+.motion-dot-in {
+  animation: dot-in 240ms ease-out backwards;
+}
+
+/* A bot typing: three dots in a wave (stagger them with animation-delay). */
+@keyframes typing-wave {
+  0%,
+  60%,
+  100% {
+    opacity: 0.45;
+    translate: 0 0;
+  }
+  30% {
+    opacity: 1;
+    translate: 0 -3px;
+  }
+}
+.motion-typing-dot {
+  animation: typing-wave 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-rise-in,
+  .motion-send-in,
+  .motion-new-item,
+  .motion-menu-in,
+  .motion-dialog-in,
+  .motion-fade-in,
+  .motion-sheet-in,
+  .motion-tab-in,
+  .motion-tick,
+  .motion-dot-in,
+  .motion-typing-dot {
+    animation: none;
   }
 }

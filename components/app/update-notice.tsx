@@ -20,16 +20,18 @@ const bridge = () => (window as unknown as { bopsMac?: { update?: Update } }).bo
 
 /** One calm line above the sidebar's bottom row while a newer release is out, and what's new in it under that. */
 export function UpdateNotice() {
-  const [info, setInfo] = useState<UpdateInfo>(null);
+  // `late`: the card turned up while Bops was open (a check after launch), so it rises in; what launch
+  // already knew just shows. Set as the card appears and kept while it stays, so a later check never replays it.
+  const [{ info, late }, setShown] = useState<{ info: UpdateInfo; late: boolean }>({ info: null, late: false });
   useEffect(() => {
     const update = bridge();
     if (!update) return;
     let stop = false;
     void update
       .info()
-      .then((i) => !stop && setInfo(i))
+      .then((i) => !stop && setShown((s) => ({ info: i, late: s.late })))
       .catch(() => {});
-    const off = update.onChange((i) => setInfo(i));
+    const off = update.onChange((i) => setShown((s) => ({ info: i, late: s.info ? s.late : true })));
     return () => {
       stop = true;
       off();
@@ -39,7 +41,7 @@ export function UpdateNotice() {
   // Without notes (an older latest.json, or a release before them) the notice is the one line alone.
   const notes = Array.isArray(info.notes) ? info.notes : [];
   return (
-    <div className="mx-1 mt-3 rounded-[12px] bg-white py-2 pl-3 pr-1.5 shadow-[0_0_0_1px_#E6E6E3]">
+    <div className={`mx-1 mt-3 rounded-[12px] bg-white py-2 pl-3 pr-1.5 shadow-[0_0_0_1px_#E6E6E3] ${late ? "motion-rise-in" : ""}`}>
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 text-[12.5px] leading-[17px] text-[#6B6B6B]">
           <span className="font-medium text-ink">Bops {info.version} is out.</span> Get it at bops.bot
@@ -50,7 +52,7 @@ export function UpdateNotice() {
         <button
           onClick={() => {
             void bridge()?.dismiss(info.version);
-            setInfo(null);
+            setShown({ info: null, late: false });
           }}
           aria-label="Hide until the next version"
           title="Hide until the next version"

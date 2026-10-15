@@ -330,11 +330,11 @@ export function Waking({ thumbnail, bot, text }: { thumbnail: boolean; bot?: { i
         </div>
       </div>
       <div className={`absolute bottom-[3%] left-1/2 -translate-x-1/2 rounded-[30%] bg-white/45 ${thumbnail ? "h-[10%] w-[30%]" : "h-[7%] w-[24%]"}`} />
-      <div className="absolute inset-0 animate-[shimmer_1.8s_ease-in-out_infinite] bg-gradient-to-r from-transparent via-white/45 to-transparent" />
+      <div className="absolute inset-0 animate-[shimmer_1.8s_ease-in-out_infinite] bg-gradient-to-r motion-reduce:hidden from-transparent via-white/45 to-transparent" />
       {!thumbnail && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2.5">
           {bot && (
-            <span className="animate-[bob_2.4s_ease-in-out_infinite]">
+            <span className="animate-[bob_2.4s_ease-in-out_infinite] motion-reduce:animate-none">
               <Mascot botId={bot.id} color={bot.color} size={40} />
             </span>
           )}
