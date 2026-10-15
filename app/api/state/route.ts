@@ -40,11 +40,13 @@ export async function GET(request: Request) {
  * it), and so does the usage ledger, which grows to thousands of events and which the account page
  * totals on the server (/api/account), and what's kept of each watched web page to compare it (only the
  * server compares), with when the page was last read even when that wasn't saved (watches.ts
- * watchesForApp). It also says whether the other screens stream through Orgo.
+ * watchesForApp), and each workspace's Orbit secret (memory-categories.ts). It also says whether the other
+ * screens stream through Orgo.
  */
 function forApp(state: AppState): AppState {
   // Full access is kept on this Mac, not in the state (full-access.ts): shown as part of it.
   const mac = state.mac ? { ...state.mac, fullAccess: fullAccessOn() || undefined } : state.mac;
   const watches = watchesForApp(state.watches);
-  return { ...state, mac, watches, usage: undefined, bots: state.bots.map((b) => ({ ...b, appsKey: undefined })), screenStream: screenStreamWanted(), businessData: tregOn() };
+  const workspaces = state.workspaces?.map((w) => (w.orbitKey ? { ...w, orbitKey: undefined } : w));
+  return { ...state, mac, watches, workspaces, usage: undefined, bots: state.bots.map((b) => ({ ...b, appsKey: undefined })), screenStream: screenStreamWanted(), businessData: tregOn() };
 }

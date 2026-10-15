@@ -26,7 +26,7 @@
 // Usage: node --conditions=react-server scripts/test-memory-categories.mjs
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -95,6 +95,13 @@ async function until(check, what, ms = 4000) {
 }
 const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
 const iso = (ms) => new Date(ms).toISOString();
+/** A forgotten thing's hash as Orbit keeps it: HMAC-SHA256 under the workspace's own secret (Workspace.orbitKey, in the state). */
+const keyed = (ws, text) => {
+  const k = S.getState().workspaces.find((w) => w.id === ws)?.orbitKey;
+  assert.ok(k, `${ws} has its Orbit secret`);
+  return createHmac("sha256", k).update(text).digest("hex");
+};
+const plainSha = (text) => createHash("sha256").update(text).digest("hex");
 
 /* ---------------- Honcho: a fake of the REST calls the SDK makes ---------------- */
 
@@ -1022,8 +1029,8 @@ await section("Forgetting an item: memory deletes every fact and card line it wa
   assert.deepEqual(r.items.map((i) => i.title).sort(), ["Ben Ode", "Tom Berg"], "what only the lunch taught goes with it; Tom stays from his own fact");
   assert.deepEqual(one(r.items, "people", "Tom Berg").sources.map((s) => s.fact), [F.g4.id]);
   const idx = indexOf(bank);
-  const sha = (x) => createHash("sha256").update(x).digest("hex");
-  assert.ok(idx.tomb.items[sha("item|people:priya nair")] > 0, "a tombstone for her, with when");
+  assert.ok(idx.tomb.items[keyed(ws, "item|people:priya nair")] > 0, "a tombstone for her, with when, keyed with the workspace's secret");
+  assert.equal(idx.tomb.items[plainSha("item|people:priya nair")], undefined, "never a plain sha256 of her name");
   assert.equal(idx.purge, undefined, "nothing left to delete");
   assert.ok(!/priya|mila/i.test(readFileSync(fileFor(bank), "utf8")), "nothing of her words is kept on this Mac: hashes only");
   // The next look doesn't bring her back from what's left.
@@ -1406,11 +1413,12 @@ await section("An index kept per bank before moves to the workspace whose bank i
   assert.deepEqual([kept.items, kept.facts, kept.forgotten], [{}, {}, undefined], "the old file keeps only what was forgotten");
   assert.ok(!readFileSync(old, "utf8").includes("old flame") && !readFileSync(old, "utf8").includes("Lou"), "as hashes");
   const otherIdx = JSON.parse(readFileSync(join(work, ".data", "memory-categories", `ws-${other}.json`), "utf8"));
-  assert.ok(otherIdx.tomb.items[createHash("sha256").update("item|people:old flame").digest("hex")] === at, "the other workspace on the bank keeps it forgotten too");
+  assert.ok(otherIdx.tomb.items[keyed(other, "item|people:old flame")] === at, "the other workspace on the bank keeps it forgotten too");
   const idx = indexOf(bank);
   assert.equal(idx.ws, ws);
   assert.equal(idx.forgotten, undefined, "forgotten keys in plain text become hashes");
-  assert.ok(idx.tomb.items[createHash("sha256").update("item|people:old flame").digest("hex")] === at);
+  assert.ok(idx.tomb.items[keyed(ws, "item|people:old flame")] === at, "under its own secret");
+  assert.ok(!Object.hasOwn(idx.tomb.items, plainSha("item|people:old flame")), "not as a plain sha256");
   assert.ok(!readFileSync(fileFor(bank), "utf8").includes("old flame"));
   const r = await settled(ws);
   assert.deepEqual(r.items.map((i) => i.title), ["Lou"], "the next look is a sweep: what the other workspace's chat taught goes");
@@ -1437,7 +1445,7 @@ await section("A workspace moved to another bank keeps its forgotten list and wh
   await MC.purge(ws);
   const idx = JSON.parse(readFileSync(join(work, ".data", "memory-categories", `ws-${ws}.json`), "utf8"));
   assert.equal(idx.bank, bank);
-  assert.ok(idx.tomb.items[createHash("sha256").update("item|people:ines").digest("hex")], "back on it, Ines is still forgotten");
+  assert.ok(idx.tomb.items[keyed(ws, "item|people:ines")], "back on it, Ines is still forgotten");
   assert.equal(idx.purge, undefined, "with nothing left to delete");
 });
 

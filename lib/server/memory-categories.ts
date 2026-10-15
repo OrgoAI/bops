@@ -1,5 +1,5 @@
 import "server-only";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CATEGORIES, CATEGORY_IDS, categoriesOpen, type CategoryId, type ItemSource, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
@@ -7,8 +7,9 @@ import { creditsOut, noteOutOfCredit } from "./cloud";
 import { MAIN_WORKSPACE } from "@/lib/types";
 import { bankOf, bankOwner, bindingOf, cardOf, dream as askToDream, existingFacts, factSource, factsByIds, memoryOn, privateLines, purgeMemory, saidSince, scanFacts, sessionWorkspace, type FactRow } from "./memory";
 import { openaiClient } from "./openai-client";
+import { orbitChanged, orbitOpened, orbitPreview } from "./orbit-sync";
 import { onPostgres } from "./persist";
-import { getState, ownerName, sameState, stateEpoch, userDir } from "./store";
+import { getState, ownerName, sameState, stateEpoch, update, userDir } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { currentWorkspaceId } from "./workspaces";
 
@@ -45,6 +46,14 @@ import { currentWorkspaceId } from "./workspaces";
  * out again from the old chats is deleted when it comes in, and the item stays gone. Delete everywhere
  * also deletes the memory copy of the chats and calls in Bops its facts came from (never a session
  * Bops has no copy of: the user's other agents', a chat deleted from Bops).
+ *
+ * The hashes are keyed: HMAC-SHA256 under the workspace's own secret (Workspace.orbitKey, made once and
+ * synced to the user's other Macs with the state, never sent to Orgo), so a list of names can't reverse
+ * them. Plain sha256 hashes kept by an index from before still match here; new ones are never plain.
+ *
+ * With an Orgo project (Workspace.orgoProjectId), the index is also the workspace's Orbit in Orgo
+ * (orbit-sync.ts): items, their facts' ids and the hashes of what was forgotten go there, and what the
+ * user's other Macs sorted or forgot comes back here. The facts themselves stay in memory.
  */
 
 /** A sweep reads this many of the newest facts; anything sorted that isn't among them is checked with memory by id. */
@@ -107,6 +116,21 @@ type Index = {
    * hash was kept, with the items' key hashes, for their tombstones (read from memory before they go).
    */
   purge?: { facts: string[]; cards: string[]; sessions: string[]; need: Record<string, string[]>; tries: number; at: number };
+  /**
+   * The workspace's secrets the hashes were made with, the one in use first (a key another Mac made at the
+   * same time may take its place: what was hashed with the old one still matches). Only on this Mac.
+   */
+  keys?: string[];
+  /** The secret of a workspace not in the state's list (a test, a bank's old index): kept here. */
+  localKey?: string;
+  /**
+   * Orbit in the workspace's Orgo project (orbit-sync.ts): what's still to send (items forgotten here, by
+   * id, and the keyed hashes of what was forgotten), what each item was when last sent (a hash of it), and
+   * the project and the time of the last read (the next read asks for what changed since).
+   */
+  out?: { del: string[]; items: Record<string, number>; facts: Record<string, number> };
+  pushed?: Record<string, string>;
+  remote?: { project: string; at?: string };
   /** Before tombstones: forgotten keys in plain text (read once, then hashed). */
   forgotten?: Record<string, number>;
   /** How many of the newest facts are sorted (Sort older adds to it), and the date of the oldest of them. */
@@ -205,10 +229,56 @@ const normal = (t: string) =>
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
 const wordsHash = (text: string) => sha(`text|${normal(text)}`);
-const itemTomb = (key: string) => sha(`item|${key}`);
-const factTomb = (itemHash: string, words: string) => sha(`fact|${itemHash}|${words}`);
-const idTomb = (id: string) => sha(`id|${id}`);
+const mac = (k: string, s: string) => createHmac("sha256", k).update(s).digest("hex");
+/**
+ * The hashes of a forgotten item's key, of an item's key with a fact's words, and of a fact's id: under each
+ * of the workspace's secrets (the one in use first: new hashes are made with it), then the plain sha256 an
+ * index from before kept (matched, never made again).
+ */
+const itemTombs = (keys: string[], key: string) => [...keys.map((k) => mac(k, `item|${key}`)), sha(`item|${key}`)];
+const factTombs = (keys: string[], key: string, words: string) => [...keys.map((k) => mac(k, `fact|${mac(k, `item|${key}`)}|${words}`)), sha(`fact|${sha(`item|${key}`)}|${words}`)];
+const idTombs = (keys: string[], id: string) => [...keys.map((k) => mac(k, `id|${id}`)), sha(`id|${id}`)];
+/** When any of these hashes was kept (forgotten), or undefined. */
+const tombAt = (m: Record<string, number>, hashes: string[]) => {
+  for (const h of hashes) if (Object.hasOwn(m, h)) return m[h];
+  return undefined;
+};
 const CARD = "card:";
+
+/**
+ * A workspace's secret for its hashes (Workspace.orbitKey), made once and kept in the state, so the user's
+ * other Macs (the state syncs) hash the same way. Never sent to Orgo. Null for a workspace not in the list.
+ */
+function workspaceSecret(ws: string): string | null {
+  const w = getState().workspaces?.find((x) => x.id === ws);
+  if (!w) return null;
+  if (w.orbitKey) return w.orbitKey;
+  const made = randomBytes(32).toString("base64url");
+  update((s) => {
+    const x = s.workspaces?.find((y) => y.id === ws);
+    if (x && !x.orbitKey) x.orbitKey = made;
+  });
+  return getState().workspaces?.find((x) => x.id === ws)?.orbitKey ?? made;
+}
+
+/** The secrets this index's hashes are made with and matched under (Index.keys), the workspace's own first. */
+function secretsOf(ws: string, index: Index): string[] {
+  const k = workspaceSecret(ws) ?? (index.localKey ??= randomBytes(32).toString("base64url"));
+  if (index.keys?.[0] !== k) index.keys = [k, ...(index.keys ?? []).filter((x) => x !== k)].slice(0, 8);
+  return index.keys;
+}
+const keysIn = (index: Index) => index.keys ?? [];
+
+/** What's still to send to the workspace's Orbit in Orgo (Index.out): items forgotten here, and the new hashes. */
+function sendLater(index: Index, what: { del?: string[]; items?: string[]; facts?: string[] }, at = Date.now()) {
+  const o = (index.out ??= { del: [], items: {}, facts: {} });
+  for (const id of what.del ?? []) if (!o.del.includes(id)) o.del.push(id);
+  if (o.del.length > 2000) o.del = o.del.slice(-2000);
+  for (const h of what.items ?? []) o.items[h] = at;
+  for (const h of what.facts ?? []) o.facts[h] = at;
+  o.items = newest(o.items, TOMB_ITEMS);
+  o.facts = newest(o.facts, TOMB_FACTS);
+}
 
 /** An index as read from a file: null when it isn't one (a damaged file starts over: everything in it can be sorted again). */
 function readIndex(file: string | null, what: string): Index | null {
@@ -233,7 +303,10 @@ function load(ws: string): Index {
   const b = space(ws);
   const file = fileOf(ws);
   const bank = bankOf(ws);
-  if (b.index && b.file === (file ?? undefined) && b.index.bank === bank) return b.index;
+  if (b.index && b.file === (file ?? undefined) && b.index.bank === bank) {
+    secretsOf(ws, b.index);
+    return b.index;
+  }
   let index = empty(ws, bank);
   let read = readIndex(file, ws);
   let moved: string | null = null;
@@ -258,10 +331,13 @@ function load(ws: string): Index {
       moved = old;
     } else if (legacy?.bank === bank) legacyTomb = legacy;
   }
+  // Forgotten keys kept in plain text (an index from before) are hashed for every workspace on the bank: a
+  // bank's old index is shared by them, each with its own secret.
+  const secrets = () => [...new Set([secretsOf(ws, index)[0], ...workspacesIn(bank).map(workspaceSecret).filter((k): k is string => !!k)])];
   if (read) {
     index = { ...empty(ws, bank), ...read, ws };
     index.tomb ??= { items: {}, facts: {} };
-    hashForgotten(index);
+    hashForgotten(index, secrets());
     // Moved from the bank's index: swept at the window's next poll.
     if (moved) index.sweptAt = index.syncedAt = index.triedAt = undefined;
     // Sorted into other categories: items in one that's gone go with it, and what made nothing may fit
@@ -281,11 +357,12 @@ function load(ws: string): Index {
   }
   // Another workspace on the bank: what was forgotten in the bank's index stays forgotten here too.
   if (legacyTomb) {
-    hashForgotten(legacyTomb);
+    hashForgotten(legacyTomb, secrets());
     Object.assign(index.tomb.items, legacyTomb.tomb?.items);
     Object.assign(index.tomb.facts, legacyTomb.tomb?.facts);
   }
   index.peer = bindingOf(ws).peer;
+  secretsOf(ws, index);
   b.index = index;
   b.file = file ?? undefined;
   b.rows = undefined;
@@ -301,11 +378,14 @@ function load(ws: string): Index {
   return index;
 }
 
-/** Forgotten keys kept in plain text before: hashed, and the text dropped. */
-function hashForgotten(index: Index) {
+/** Forgotten keys kept in plain text before: hashed (under each of `secrets`), and the text dropped. */
+function hashForgotten(index: Index, secrets: string[]) {
   index.tomb ??= { items: {}, facts: {} };
   const was = Array.isArray(index.forgotten) ? Object.fromEntries((index.forgotten as unknown as string[]).map((k) => [k, Date.now()])) : (index.forgotten ?? {});
-  for (const [k, at] of Object.entries(was)) index.tomb.items[itemTomb(k)] = at;
+  for (const [k, at] of Object.entries(was)) {
+    for (const s of secrets) index.tomb.items[mac(s, `item|${k}`)] = at;
+    if (secrets[0] && index.keys?.[0] === secrets[0]) sendLater(index, { items: [mac(secrets[0], `item|${k}`)] }, at);
+  }
   delete index.forgotten;
 }
 
@@ -354,11 +434,13 @@ async function drainStashes(ws: string) {
  * read from, and only while that's still the signed-in account's: work that outlived a sign-out never
  * writes one account's categories into another's folder.
  */
-function save(ws: string, index: Index) {
+function save(ws: string, index: Index, opts: { quiet?: boolean } = {}) {
   const b = space(ws);
   const file = fileOf(ws);
   if (!file || b.index !== index || b.file !== file) return;
   b.rev++;
+  // What changed goes to the workspace's Orbit in Orgo soon (orbit-sync.ts; only what it hasn't got).
+  if (!opts.quiet) orbitChanged(ws);
   mkdirSync(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ file, ".."), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
   try {
@@ -474,8 +556,7 @@ function upsert(index: Index, byKey: Map<string, string>, raw: Raw, src: ItemSou
   const category = raw.category as CategoryId;
   const title = clip(raw.title, 90);
   // Forgotten, and brought back by something new (bringsBack: apply buries everything else about it).
-  const forgot = itemTomb(key);
-  if (Object.hasOwn(index.tomb.items, forgot)) delete index.tomb.items[forgot];
+  for (const h of itemTombs(keysIn(index), key)) if (Object.hasOwn(index.tomb.items, h)) delete index.tomb.items[h];
   const known = byKey.get(key);
   let item = known && Object.hasOwn(index.items, known) ? index.items[known] : undefined;
   if (!item) {
@@ -841,7 +922,7 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
     ...rows.filter((r) => !Object.hasOwn(index.facts, r.id) && inScope(r) && !failing(r.id)).map((r) => ({ ...r, how: howOf(r.level, r.session) })),
   ];
   // Worked out by memory from a fact that was forgotten: deleted, without asking the model.
-  const derived = (f: Fresh) => (f.from ?? []).some((id) => Object.hasOwn(index.tomb.facts, idTomb(id)));
+  const derived = (f: Fresh) => (f.from ?? []).some((id) => tombAt(index.tomb.facts, idTombs(keysIn(index), id)) !== undefined);
   const pending = fresh.filter((f) => !derived(f));
   if (pending.length < fresh.length) {
     for (const f of fresh) if (derived(f)) bury(index, f);
@@ -926,8 +1007,10 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
       const buried = raws.some((raw) => {
         const key = keyOfRaw(raw);
         if (!key) return false;
-        const ih = itemTomb(key);
-        return Object.hasOwn(index.tomb.facts, factTomb(ih, words)) || (Object.hasOwn(index.tomb.items, ih) && !bringsBack(f, index.tomb.items[ih]));
+        const keys = keysIn(index);
+        if (tombAt(index.tomb.facts, factTombs(keys, key, words)) !== undefined) return true;
+        const forgotAt = tombAt(index.tomb.items, itemTombs(keys, key));
+        return forgotAt !== undefined && !bringsBack(f, forgotAt);
       });
       if (buried) {
         bury(index, f);
@@ -1033,6 +1116,8 @@ export function snapshot(ws: string, since?: number): MemorySnapshot | { unchang
   const b = space(ws);
   const last = Math.max(index.syncedAt ?? 0, index.triedAt ?? 0);
   if (!b.running && Date.now() - last > STALE_MS) void sync(ws, { mode: "look" });
+  // Opened: what the user's other Macs changed comes from Orgo (once now, then every 10 minutes).
+  orbitOpened(ws);
   if (since === b.rev) return { unchanged: true, rev: b.rev };
   const all = Object.values(index.items);
   return {
@@ -1153,9 +1238,12 @@ export function forgetItems(ws: string, ids: string[], sessions: string[] = []):
   const facts = new Set<string>();
   const cards: string[] = [];
   const need: Record<string, string[]> = {};
+  const [k] = secretsOf(ws, index);
+  const sent = { del: items.map((i) => i.id), items: [] as string[], facts: [] as string[] };
   for (const item of items) {
-    const ih = itemTomb(item.key);
+    const ih = mac(k, `item|${item.key}`);
     index.tomb.items[ih] = now;
+    sent.items.push(ih);
     const text = new Map(item.sources.map((x) => [x.fact, x.text]));
     // Every fact sorted into it (its sources are only the newest 12).
     for (const [id, f] of Object.entries(index.facts)) {
@@ -1163,16 +1251,25 @@ export function forgetItems(ws: string, ids: string[], sessions: string[] = []):
       facts.add(id);
       const card = id.startsWith(CARD);
       const words = f.h ?? (card ? wordsHash(id.slice(CARD.length)) : text.has(id) ? wordsHash(text.get(id)!) : undefined);
-      if (words) index.tomb.facts[factTomb(ih, words)] = now;
-      // Words not kept here (sorted before they were): read from memory before it goes.
-      else (need[id] ??= []).push(ih);
+      if (words) {
+        const fh = mac(k, `fact|${ih}|${words}`);
+        index.tomb.facts[fh] = now;
+        sent.facts.push(fh);
+      }
+      // Words not kept here (sorted before they were): read from memory before it goes ("h:", made with the secret).
+      else (need[id] ??= []).push(`h:${ih}`);
       if (card) cards.push(words!);
-      else index.tomb.facts[idTomb(id)] = now;
+      else {
+        const dh = mac(k, `id|${id}`);
+        index.tomb.facts[dh] = now;
+        sent.facts.push(dh);
+      }
     }
     delete index.items[item.id];
   }
   index.tomb.items = newest(index.tomb.items, TOMB_ITEMS);
   index.tomb.facts = newest(index.tomb.facts, TOMB_FACTS);
+  sendLater(index, sent, now);
   const all = [...facts];
   dropMany(index, all);
   // Sorted as nothing until memory no longer has them, so a look meanwhile doesn't sort them again.
@@ -1217,7 +1314,13 @@ export function purge(ws: string): Promise<void> {
         const rows = await factsByIds(ws, needed).catch(() => null);
         if (!ours()) return;
         if (rows) {
-          for (const r of rows) for (const ih of take.need[r.id] ?? []) index.tomb.facts[factTomb(ih, wordsHash(r.text))] = Date.now();
+          for (const r of rows)
+            for (const ih of take.need[r.id] ?? []) {
+              // Made with the secret ("h:"), or an item hash from before it (plain, matched only here, never sent).
+              const fh = ih.startsWith("h:") ? mac(keysIn(index)[0], `fact|${ih.slice(2)}|${wordsHash(r.text)}`) : sha(`fact|${ih}|${wordsHash(r.text)}`);
+              index.tomb.facts[fh] = Date.now();
+              if (ih.startsWith("h:")) sendLater(index, { facts: [fh] });
+            }
           for (const id of needed) delete p.need[id];
         }
       }
@@ -1258,6 +1361,9 @@ export function purge(ws: string): Promise<void> {
 /** A chat or call in memory that Delete everywhere would delete, and the other items it also taught Orbit. */
 export type DeleteSession = { id: string; name: string; at: number; facts: number; alsoFor: string[] };
 
+/** Only these sessions are ever deleted everywhere: a chat or call, or a task, in Bops. */
+const deletable = (s: string | null | undefined): s is string => !!s && (s.startsWith("bops-chat-") || s.startsWith("bops-task-"));
+
 /**
  * What Delete everywhere would delete with an item: the sessions in memory its facts came from that Bops
  * still has the chat or task of (its copy there, every message in it), each with the other items in this Orbit learned from it
@@ -1284,7 +1390,7 @@ export async function deletePreview(ws: string, id: string): Promise<DeleteSessi
     // Only a chat, a call or a task still in Bops (its copy in memory goes, the chat stays): never the
     // user's other agents' sessions or a chat deleted from Bops, whose only copy is memory's. Not an issue,
     // not a workspace's saved facts.
-    if (!f.items.includes(id) || !f.s || !(f.s.startsWith("bops-chat-") || f.s.startsWith("bops-task-")) || !sessionWorkspace(f.s)) continue;
+    if (!f.items.includes(id) || !deletable(f.s) || !sessionWorkspace(f.s)) continue;
     const x = out.get(f.s) ?? { id: f.s, name: factSource(f.s), at: 0, facts: 0, alsoFor: [] };
     x.at = Math.max(x.at, f.at);
     x.facts++;
@@ -1297,6 +1403,17 @@ export async function deletePreview(ws: string, id: string): Promise<DeleteSessi
       const title = other !== id && Object.hasOwn(index.items, other) ? index.items[other].title : null;
       if (title && !x.alsoFor.includes(title)) x.alsoFor.push(title);
     }
+  }
+  // The workspace's Orbit in Orgo knows the sessions the user's other Macs learned it from too (the same
+  // rule: a chat, call or task still in Bops), and how many other items they taught.
+  const theirs = await orbitPreview(ws, id);
+  if (!ours()) throw new Error("Another account signed in.");
+  for (const s of theirs ?? []) {
+    if (!deletable(s.honchoSessionId) || !sessionWorkspace(s.honchoSessionId)) continue;
+    const x = out.get(s.honchoSessionId) ?? { id: s.honchoSessionId, name: factSource(s.honchoSessionId), at: 0, facts: 0, alsoFor: [] };
+    const more = s.otherItems - x.alsoFor.length;
+    if (more > 0) x.alsoFor.push(`${more} more item${more === 1 ? "" : "s"}`);
+    out.set(s.honchoSessionId, x);
   }
   return [...out.values()].sort((a, b) => b.at - a.at);
 }
@@ -1315,3 +1432,283 @@ export async function deleteEverywhere(ws: string, id: string, only?: string[]) 
 
 /** The workspace asked for when it's one of the user's, else the one in use. */
 export const wsOrCurrent = (ws: string | null | undefined) => (ws && (getState().workspaces ?? []).some((w) => w.id === ws) ? ws : currentWorkspaceId());
+
+/* ---------------- The workspace's Orbit in Orgo (orbit-sync.ts) ---------------- */
+
+/** An item and the facts behind it (every one, not only the newest 12 it shows), as orbit-sync.ts sends it. */
+export type OrbitEntry = { item: MemoryItem & { detailPrivate?: boolean }; facts: { id: string; session: string | null; at: number; said?: string; private?: boolean }[] };
+
+/** An item as Orgo answers it (app/api/projects/[id]/orbit). */
+export type OrbitRemoteItem = {
+  bopsId: string;
+  category: string;
+  key: string;
+  title: string;
+  detail: string | null;
+  whenAt: string | null;
+  done: boolean;
+  marked: boolean;
+  who: string | null;
+  firstSeen: string | null;
+  lastSeen: string | null;
+  sources: { honchoConclusionId: string; honchoSessionId: string | null; said: string | null; at: string | null }[];
+};
+
+const ITEM_ID = /^[0-9a-f]{10}$/;
+
+function entryOf(index: Index, item: Item, byItem?: Map<string, OrbitEntry["facts"]>): OrbitEntry {
+  let facts = byItem?.get(item.id);
+  if (!byItem) {
+    facts = [];
+    for (const [id, f] of Object.entries(index.facts)) if (!id.startsWith(CARD) && f.items.includes(item.id)) facts.push({ id, session: f.s ?? null, at: f.at, private: f.wrote?.[item.id]?.p });
+  }
+  const shown = new Map(item.sources.map((s) => [s.fact, s]));
+  return {
+    item,
+    facts: (facts ?? []).map((f) => {
+      const s = shown.get(f.id);
+      return { ...f, at: s?.at ?? f.at, ...(s && !s.private ? { said: s.text } : {}), ...(f.private || s?.private ? { private: true } : {}) };
+    }),
+  };
+}
+
+/** The workspace's items and the facts behind each, and what each was when last sent (orbit-sync.ts push). */
+export function orbitItemsOf(ws: string): { bank: string; entries: OrbitEntry[]; pushed: Record<string, string> } | null {
+  if (!categoriesOn()) return null;
+  const index = load(ws);
+  const byItem = new Map<string, OrbitEntry["facts"]>();
+  for (const [id, f] of Object.entries(index.facts)) {
+    if (id.startsWith(CARD)) continue;
+    for (const it of f.items) {
+      const list = byItem.get(it) ?? [];
+      list.push({ id, session: f.s ?? null, at: f.at, private: f.wrote?.[it]?.p });
+      byItem.set(it, list);
+    }
+  }
+  return { bank: index.bank, entries: Object.values(index.items).map((i) => entryOf(index, i, byItem)), pushed: { ...(index.pushed ?? {}) } };
+}
+
+/**
+ * The Orgo project the workspace's Orbit was last read from and sent to, and when it was read. Another
+ * project (the workspace was tied to another): read whole again, and everything is sent again.
+ */
+export function orbitRemote(ws: string, project: string): { at?: string } | null {
+  if (!categoriesOn()) return null;
+  const index = load(ws);
+  if (index.remote?.project !== project) {
+    index.remote = { project };
+    index.pushed = {};
+    save(ws, index, { quiet: true });
+  }
+  return { at: index.remote.at };
+}
+
+export function orbitRemoteAt(ws: string, project: string, at: string) {
+  if (!categoriesOn()) return;
+  const index = load(ws);
+  if (index.remote?.project !== project) return;
+  index.remote.at = at;
+  save(ws, index, { quiet: true });
+}
+
+/** These items are as Orgo has them now (the hash of what was sent, by id). */
+export function orbitPushed(ws: string, hashes: Record<string, string>) {
+  if (!categoriesOn()) return;
+  const index = load(ws);
+  index.pushed = { ...(index.pushed ?? {}), ...hashes };
+  save(ws, index, { quiet: true });
+}
+
+/** What's still to send: items forgotten here and the hashes of what was forgotten. */
+export function orbitOutbox(ws: string): { del: string[]; items: string[]; facts: string[] } | null {
+  if (!categoriesOn()) return null;
+  const o = load(ws).out;
+  return { del: [...(o?.del ?? [])], items: Object.keys(o?.items ?? {}), facts: Object.keys(o?.facts ?? {}) };
+}
+
+/** Sent (or given up on): off the list. */
+export function orbitSent(ws: string, what: { del?: string[]; items?: string[]; facts?: string[] }) {
+  if (!categoriesOn()) return;
+  const index = load(ws);
+  const o = index.out;
+  if (!o) return;
+  if (what.del) o.del = o.del.filter((x) => !what.del!.includes(x));
+  for (const h of what.items ?? []) delete o.items[h];
+  for (const h of what.facts ?? []) delete o.facts[h];
+  if (!o.del.length && !Object.keys(o.items).length && !Object.keys(o.facts).length) index.out = undefined;
+  save(ws, index, { quiet: true });
+}
+
+/**
+ * Facts Orgo said the forgotten items were learned from that this Mac didn't sort (the user's other Macs
+ * did): deleted from memory too, and hashed (a fact worked out from one goes as well).
+ */
+export function orbitForgetFacts(ws: string, ids: string[]) {
+  if (!categoriesOn()) return;
+  const index = load(ws);
+  const fresh = [...new Set(ids)].filter((id) => typeof id === "string" && id && !id.startsWith(CARD) && !index.purge?.facts.includes(id));
+  if (!fresh.length) return;
+  dropMany(index, fresh);
+  const [k] = secretsOf(ws, index);
+  const now = Date.now();
+  const sent: string[] = [];
+  for (const id of fresh) {
+    index.facts[id] = { items: [], at: now, s: null };
+    const h = mac(k, `id|${id}`);
+    index.tomb.facts[h] = now;
+    sent.push(h);
+  }
+  sendLater(index, { facts: sent }, now);
+  toPurge(index, { facts: fresh });
+  space(ws).rows = undefined;
+  save(ws, index);
+  void purge(ws);
+}
+
+/** One item into another (the same thing, sorted on two Macs): its facts, sources and what the user set go with it. */
+function mergeInto(index: Index, from: string, into: string) {
+  if (from === into || !Object.hasOwn(index.items, from)) return;
+  const a = index.items[from];
+  delete index.items[from];
+  if (!Object.hasOwn(index.items, into)) {
+    a.id = into;
+    index.items[into] = a;
+  } else {
+    const b = index.items[into];
+    const seen = new Set(b.sources.map((s) => s.fact));
+    b.sources = [...b.sources, ...a.sources.filter((s) => !seen.has(s.fact))].sort((x, y) => y.at - x.at).slice(0, 12);
+    b.first = Math.min(b.first, a.first);
+    b.last = Math.max(b.last, a.last);
+    if (!b.detail && a.detail) {
+      b.detail = a.detail;
+      b.detailPrivate = a.detailPrivate;
+    }
+    b.when ??= a.when;
+    b.who ??= a.who;
+    if (a.edited) b.edited = true;
+    if (a.hidden) b.hidden = true;
+    if (a.marked && !b.marked) {
+      b.marked = true;
+      b.done = a.done;
+    }
+    b.private = lockOf(b);
+  }
+  for (const f of Object.values(index.facts)) {
+    if (!f.items.includes(from)) continue;
+    f.items = [...new Set(f.items.map((x) => (x === from ? into : x)))];
+    if (f.wrote?.[from]) {
+      f.wrote[into] ??= f.wrote[from];
+      delete f.wrote[from];
+    }
+  }
+  if (index.pushed) delete index.pushed[from];
+}
+
+/** Orgo merged items into others (the same category and key from another Mac): the same here. */
+export function orbitMerged(ws: string, merged: { bopsId: string; intoBopsId: string }[]) {
+  if (!categoriesOn() || !merged.length) return;
+  const index = load(ws);
+  for (const m of merged) if (ITEM_ID.test(m.intoBopsId)) mergeInto(index, m.bopsId, m.intoBopsId);
+  save(ws, index);
+}
+
+/** An item gone in Orgo (forgotten on another Mac): gone here, its facts kept as sorted into nothing (they're being deleted there). */
+function dropRemote(index: Index, id: string) {
+  if (!Object.hasOwn(index.items, id)) return false;
+  delete index.items[id];
+  for (const f of Object.values(index.facts)) {
+    if (!f.items.includes(id)) continue;
+    f.items = f.items.filter((x) => x !== id);
+    if (f.wrote) delete f.wrote[id];
+  }
+  if (index.pushed) delete index.pushed[id];
+  return true;
+}
+
+const msOf = (s: string | null | undefined) => (s && Number.isFinite(Date.parse(s)) ? Date.parse(s) : undefined);
+
+/**
+ * What Orgo has of the workspace's Orbit (all of it when `full`, else what changed since the last read):
+ * the hashes of what was forgotten join this Mac's, items deleted there go here (first), and each item
+ * comes in. An item this Mac changed since it last sent it keeps its own name, line and the rest (it's
+ * sent next), and either way gets the facts Orgo knows it from, so the next send has them all. One with
+ * the same key as an item here under another id takes the place of that one. With `full`, an item sent
+ * from here before that Orgo no longer has is gone (deleted there long ago). `hashOf`: what an item is as
+ * it would be sent (orbit-sync.ts), to tell what this Mac changed.
+ */
+export function orbitApply(
+  ws: string,
+  r: { items: OrbitRemoteItem[]; tombstones: { hash: string; kind: string; createdAt: string | null }[]; deleted: string[]; full: boolean },
+  hashOf: (e: OrbitEntry) => string | null,
+) {
+  if (!categoriesOn()) return;
+  const index = load(ws);
+  const now = Date.now();
+  for (const t of r.tombstones) {
+    if (typeof t?.hash !== "string" || !/^[0-9a-f]{64}$/.test(t.hash)) continue;
+    const m = t.kind === "fact" ? index.tomb.facts : index.tomb.items;
+    if (!Object.hasOwn(m, t.hash)) m[t.hash] = msOf(t.createdAt) ?? now;
+  }
+  index.tomb.items = newest(index.tomb.items, TOMB_ITEMS);
+  index.tomb.facts = newest(index.tomb.facts, TOMB_FACTS);
+  for (const id of r.deleted) dropRemote(index, id);
+  const byKey = new Map(Object.values(index.items).map((i) => [i.key, i.id] as [string, string]));
+  const deleting = new Set(index.purge?.facts ?? []);
+  const forgotten = new Set(index.out?.del ?? []);
+  const seen = new Set<string>();
+  for (const x of r.items) {
+    if (!x || !ITEM_ID.test(x.bopsId) || !CATEGORY_IDS.includes(x.category as CategoryId) || typeof x.key !== "string" || !x.key || typeof x.title !== "string") continue;
+    seen.add(x.bopsId);
+    // Forgotten here, its delete not sent yet: it stays gone.
+    if (forgotten.has(x.bopsId)) continue;
+    const other = byKey.get(x.key);
+    if (other && other !== x.bopsId && Object.hasOwn(index.items, other)) mergeInto(index, other, x.bopsId);
+    let item = Object.hasOwn(index.items, x.bopsId) ? index.items[x.bopsId] : undefined;
+    const clean = !item || (index.pushed?.[x.bopsId] !== undefined && hashOf(entryOf(index, item)) === index.pushed[x.bopsId]);
+    const first = msOf(x.firstSeen) ?? now;
+    const last = msOf(x.lastSeen) ?? first;
+    if (!item) {
+      item = { id: x.bopsId, category: x.category as CategoryId, key: x.key, title: "", detail: "", sources: [], first, last };
+      index.items[x.bopsId] = item;
+    }
+    byKey.set(x.key, x.bopsId);
+    if (clean) {
+      item.category = x.category as CategoryId;
+      item.key = x.key;
+      item.title = clip(x.title, 90, true) || item.title || "Untitled";
+      item.detail = clip(x.detail ?? "", 160, true);
+      item.detailPrivate = undefined;
+      item.when = (x.whenAt && whenOf(x.whenAt.slice(0, 16).replace(" ", "T"))) || whenOf((x.whenAt ?? "").slice(0, 10)) || undefined;
+      item.who = x.who ? clip(x.who, 90, true) : undefined;
+      item.done = x.done || undefined;
+      item.marked = x.marked || undefined;
+      item.first = first;
+      item.last = last;
+    }
+    // The facts Orgo knows it from (another Mac's too): this Mac's sorting knows them, and the next send has them all.
+    for (const s of x.sources ?? []) {
+      const id = s?.honchoConclusionId;
+      if (typeof id !== "string" || !id || id.startsWith(CARD) || deleting.has(id)) continue;
+      const at = msOf(s.at) ?? last;
+      const session = typeof s.honchoSessionId === "string" ? s.honchoSessionId : null;
+      if (!Object.hasOwn(index.facts, id)) index.facts[id] = { items: [x.bopsId], at, s: session };
+      else if (!index.facts[id].items.includes(x.bopsId)) index.facts[id].items.push(x.bopsId);
+      if (!item.sources.some((y) => y.fact === id))
+        item.sources.push({ fact: id, text: clip(s.said ?? "", 600, true), at, from: clip(factSource(session), 90, true), how: session?.startsWith("bops-chat-") ? "said" : "saved" });
+    }
+    item.sources = item.sources.sort((a, b) => b.at - a.at).slice(0, 12);
+    item.private = lockOf(item);
+    // As Orgo has it: sent only when this Mac has more (or other) to say.
+    if (clean) {
+      const theirs = hashOf({
+        item: { ...item, title: clip(x.title, 90, true), sources: [] },
+        facts: (x.sources ?? []).filter((s) => typeof s?.honchoConclusionId === "string").map((s) => ({ id: s.honchoConclusionId, session: s.honchoSessionId ?? null, at: msOf(s.at) ?? last, ...(s.said ? { said: s.said } : {}) })),
+      });
+      if (theirs) (index.pushed ??= {})[x.bopsId] = theirs;
+    }
+  }
+  // Read whole: what was sent from here before and isn't there any more was deleted there.
+  if (r.full) for (const id of Object.keys(index.pushed ?? {})) if (!seen.has(id)) dropRemote(index, id);
+  space(ws).rows = undefined;
+  save(ws, index);
+}

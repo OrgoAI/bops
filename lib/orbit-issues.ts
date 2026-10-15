@@ -54,6 +54,8 @@ export type Issue = {
   lastMessageAt?: number;
   /** Oldest first, with an issue's own answer. */
   history?: IssueEvent[];
+  /** Its row's id in the workspace's Orgo project, once it's there (lib/server/orbit-sync.ts). */
+  orgoId?: string;
 };
 
 /** What the window and the bots may change. `draft`: a reply drafted for it (in its history). */

@@ -134,6 +134,12 @@ export type Workspace = {
    */
   orgoProjectId?: string;
   /**
+   * The secret Orbit's hashes of what was forgotten are keyed with (HMAC-SHA256: lib/server/memory-categories.ts),
+   * made once by the first Mac that needs it and synced to the others with the state, so each Mac knows what
+   * the others forgot. Never sent to Orgo, and never to the window.
+   */
+  orbitKey?: string;
+  /**
    * Its Orgo project's name as Orgo has it, last seen or set here; `orgoUpdatedAt` its updated_at then. A
    * list that names the project otherwise was renamed on orgo.ai, and the name comes here too
    * (syncWorkspaceNames). It may differ from `name`: "orgo (Bops)" for a workspace named "orgo" here, or
