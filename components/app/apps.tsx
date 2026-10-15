@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { APP_LEVELS, appLogo, FEATURED_APPS, type AppAccount, type AppLevel, type AppState, type Bot } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { post, teamOf } from "./ui";
@@ -75,43 +75,12 @@ export function botApps(state: AppState, b: Bot) {
   return [...seen.values()];
 }
 
-/* ---------------- The Vault's Apps section ---------------- */
+/* ---------------- Pieces of the Vault (vault.tsx) ---------------- */
 
-export function AppsSection({ state }: { state: AppState }) {
-  const [picking, setPicking] = useState<{ app?: string; replaces?: string } | null>(null);
-  const [open, setOpen] = useState<string | null>(null);
-  // Pick up accounts connected, signed out or removed in Composio's own dashboard.
-  useEffect(() => {
-    void post("/api/apps", {}, "PATCH");
-  }, []);
-  const groups = useMemo(() => {
-    const m = new Map<string, AppAccount[]>();
-    for (const a of state.accounts ?? []) m.set(a.app, [...(m.get(a.app) ?? []), a]);
-    return [...m.entries()].sort((x, y) => x[1][0].appName.localeCompare(y[1][0].appName));
-  }, [state.accounts]);
-  // A sign-in just finished: open that app, so the user sees who can use it.
-  const before = useRef(new Set((state.accounts ?? []).map((a) => a.id)));
-  useEffect(() => {
-    const fresh = (state.accounts ?? []).find((a) => !before.current.has(a.id));
-    before.current = new Set((state.accounts ?? []).map((a) => a.id));
-    if (fresh) setOpen(fresh.app);
-  }, [state.accounts]);
-
+/** Accounts being connected: each waits for its sign-in in the browser, or says why it didn't connect. */
+export function Connecting({ state }: { state: AppState }) {
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-end justify-between gap-3">
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[15px] font-semibold leading-5">Apps</span>
-          <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Your accounts. Each bot gets only the access you give it.</span>
-        </div>
-        <button onClick={() => setPicking({})} className="flex shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[#2A2A28]">
-          <svg width="10" height="10" viewBox="0 0 10 10">
-            <path d="M5 1v8M1 5h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
-          Add an app
-        </button>
-      </div>
-
+    <>
       {(state.connecting ?? []).map((c) => (
         <div key={c.id} className="flex items-center gap-3 rounded-2xl bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_#ECECEA]">
           <AppLogo app={c.app} name={c.appName} size={28} />
@@ -131,33 +100,12 @@ export function AppsSection({ state }: { state: AppState }) {
           </button>
         </div>
       ))}
-
-      {groups.length ? (
-        <div className="flex flex-col rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
-          {groups.map(([app, accounts], i) => (
-            <AppGroup
-              key={app}
-              state={state}
-              accounts={accounts}
-              last={i === groups.length - 1}
-              open={open === app}
-              onToggle={() => setOpen(open === app ? null : app)}
-              onAddAnother={() => setPicking({ app })}
-              onSignIn={(replaces) => setPicking({ app, replaces })}
-            />
-          ))}
-        </div>
-      ) : (
-        <QuickStart onPick={(app) => setPicking({ app })} />
-      )}
-
-      {picking && <AppPicker state={state} start={picking.app} replaces={picking.replaces} onClose={() => setPicking(null)} />}
-    </div>
+    </>
   );
 }
 
 /** Nothing connected yet: the apps most teams start with, one tap each. */
-function QuickStart({ onPick }: { onPick: (app: string) => void }) {
+export function QuickStart({ onPick }: { onPick: (app: string) => void }) {
   const { apps } = useCatalog();
   // Once the catalog is in, only apps it offers (signed in with Orgo, the ones that can connect through Bops Cloud).
   const pick = (apps ? FEATURED_APPS.map((a) => apps.find((x) => x.app === a)).filter((x): x is CatalogApp => !!x) : FEATURED_APPS.map((a) => ({ app: a, name: a }))).slice(0, 8);
@@ -176,71 +124,8 @@ function QuickStart({ onPick }: { onPick: (app: string) => void }) {
   );
 }
 
-/** One app: its accounts and who can use them, folded away until it's opened. */
-function AppGroup({
-  state,
-  accounts,
-  last,
-  open,
-  onToggle,
-  onAddAnother,
-  onSignIn,
-}: {
-  state: AppState;
-  accounts: AppAccount[];
-  last: boolean;
-  open: boolean;
-  onToggle: () => void;
-  onAddAnother: () => void;
-  onSignIn: (replaces: string) => void;
-}) {
-  const first = accounts[0];
-  const team = teamOf(state);
-  const users = team.filter((b) => accounts.some((a) => b.access?.[a.id]));
-  const expired = accounts.filter((a) => a.status === "expired").length;
-  const openApp = first.id.startsWith("open:");
-  const summary = openApp ? "No sign-in needed" : accounts.length === 1 ? accountTitle(first) : `${accounts.length} accounts · ${accounts.map((a) => a.label ?? a.name ?? "").filter(Boolean).join(", ")}`;
-  return (
-    <div className={last ? "" : "border-b border-[#F0F0EE]"}>
-      <button onClick={onToggle} className="flex w-full items-center gap-3 px-3.5 py-3 text-left hover:bg-[#FCFCFB]">
-        <AppLogo app={first.app} name={first.appName} size={32} />
-        <span className="flex min-w-0 flex-1 flex-col">
-          <span className="text-[14px] font-medium leading-[18px]">{first.appName}</span>
-          <span className={`truncate text-[12.5px] leading-4 ${expired ? "text-[#B54708]" : "text-[#6B6B6B]"}`}>{expired ? `Signed out${accounts.length > 1 ? ` (${expired} of ${accounts.length})` : ""} · sign in again` : summary}</span>
-        </span>
-        {users.length ? (
-          <span className="flex shrink-0 -space-x-1.5" title={users.map((b) => b.name).join(", ")}>
-            {users.slice(0, 5).map((b) => (
-              <span key={b.id} className="rounded-full bg-white p-px">
-                <Mascot botId={b.id} color={b.color} size={20} antenna={false} />
-              </span>
-            ))}
-          </span>
-        ) : (
-          <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">No bots yet</span>
-        )}
-        <svg width="10" height="10" viewBox="0 0 10 10" className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`}>
-          <path d="M2 3.5l3 3 3-3" fill="none" stroke="#9A9A98" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-      {open && (
-        <div className="flex flex-col gap-3 px-3.5 pb-3.5">
-          {accounts.map((a) => (
-            <AccountBlock key={a.id} state={state} account={a} many={accounts.length > 1} onSignIn={() => onSignIn(a.id)} />
-          ))}
-          {!openApp && (
-            <button onClick={onAddAnother} className="self-start rounded-full px-2 py-1 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0]">
-              + Add another {first.appName} account
-            </button>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 /** One account: its name (and the user's label for it), and each bot's access to it. */
-function AccountBlock({ state, account: a, many, onSignIn }: { state: AppState; account: AppAccount; many: boolean; onSignIn: () => void }) {
+export function AccountBlock({ state, account: a, many, onSignIn }: { state: AppState; account: AppAccount; many: boolean; onSignIn: () => void }) {
   const [naming, setNaming] = useState(false);
   const [label, setLabel] = useState(a.label ?? "");
   const [sure, setSure] = useState(false);
@@ -351,7 +236,7 @@ function search(apps: CatalogApp[], q: string) {
  * Add an app: search the whole catalog (or pick a popular one), then say who may use the account
  * before signing in, so it's ready the moment the sign-in finishes.
  */
-function AppPicker({ state, start, replaces, onClose }: { state: AppState; start?: string; replaces?: string; onClose: () => void }) {
+export function AppPicker({ state, start, replaces, onClose }: { state: AppState; start?: string; replaces?: string; onClose: () => void }) {
   const { apps, error } = useCatalog();
   const [q, setQ] = useState("");
   const [cursor, setCursor] = useState(0);
