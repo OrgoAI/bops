@@ -40,7 +40,8 @@ import {
 } from "./protocol.ts";
 import { answerTo, chatPage, chatSaid, checkUser, loadState, messagesById, newestSeq, rowsAfter, sendZipped, sweptSeq, writeMessages, type MessageRow } from "./state.ts";
 import { tidyAnswer } from "./style.ts";
-import { recordTokens } from "./usage.ts";
+import { atSpeed } from "./speed.ts";
+import { isWebSearch, recordTokens, recordWebSearch } from "./usage.ts";
 
 /**
  * The main bot's chat from the phone (Bops for iPhone; README "The main bot's chat from the phone").
@@ -402,27 +403,38 @@ export const routes: Route[] = [info, messages, send];
 
 /** What a turn answers. `memory`: the user allowed memory from the phone (MEMORY_HEADER); without it, nothing is read from or saved to Honcho. */
 type TurnFor = { userId: string; orgoName: string | null; chatId: string; message: { id: string; text: string; at: number }; tz: string; memory: boolean };
-type Answer = { id: string | null; model: unknown; usage: unknown; text: string };
+type Answer = { id: string | null; model: unknown; usage: unknown; tier: unknown; text: string; searches: unknown[] };
 
 /** What went wrong, for the log: a status, or the kind of failure. Never what was said. */
 class TurnError extends Error {}
 const why = (e: unknown) => (e instanceof TurnError ? e.message : ((e as Error)?.name ?? "error"));
 
-/** One Responses call: the answer's text, and what it used (counted by the caller). */
-async function respond(instructions: string, input: InputItem[]): Promise<Answer> {
+/**
+ * OpenAI's hosted web search, as the Mac's chat has it (lib/server/chat.ts WEB_SEARCH): it runs inside
+ * the call, a small search context keeps the answer quick, and the phone's time zone places it.
+ */
+const webSearch = (tz: string) => ({ type: "web_search", search_context_size: "low", user_location: { type: "approximate", timezone: tz } });
+
+/** One Responses call: the answer's text, and what it used, its web searches included (counted by the caller). */
+async function respond(instructions: string, input: InputItem[], tz: string): Promise<Answer> {
   let res: Response;
   try {
-    res = await fetch(`${config.upstream.openai()}/v1/responses`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${config.openaiKey()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: MODEL(), instructions, input, reasoning: { effort: "low" }, max_output_tokens: MAX_OUTPUT_TOKENS, store: false }),
-      signal: AbortSignal.timeout(timing.openaiMs),
-    });
+    // The user is waiting on the phone: as fast as the model goes, a tier down when OpenAI's busy (speed.ts).
+    const model = MODEL();
+    const signal = AbortSignal.timeout(timing.openaiMs);
+    res = await atSpeed(model, (tier) =>
+      fetch(`${config.upstream.openai()}/v1/responses`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${config.openaiKey()}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, instructions, input, tools: [webSearch(tz)], reasoning: { effort: "low" }, max_output_tokens: MAX_OUTPUT_TOKENS, store: false, ...tier }),
+        signal,
+      }),
+    );
   } catch (e) {
     throw new TurnError(`OpenAI couldn't be reached (${(e as Error)?.name ?? "error"})`);
   }
   if (!res.ok) throw new TurnError(`OpenAI answered ${res.status}`);
-  const r = (await res.json().catch(() => null)) as { id?: unknown; model?: unknown; usage?: unknown; output?: unknown } | null;
+  const r = (await res.json().catch(() => null)) as { id?: unknown; model?: unknown; usage?: unknown; service_tier?: unknown; output?: unknown } | null;
   if (!r) throw new TurnError("OpenAI's answer wasn't JSON");
   const text = (Array.isArray(r.output) ? r.output : [])
     .filter((o) => isObject(o) && o.type === "message")
@@ -430,7 +442,8 @@ async function respond(instructions: string, input: InputItem[]): Promise<Answer
     .filter((p) => isObject(p) && p.type === "output_text" && typeof p.text === "string")
     .map((p) => p.text as string)
     .join("");
-  return { id: typeof r.id === "string" ? r.id : null, model: r.model, usage: r.usage, text };
+  const searches = (Array.isArray(r.output) ? r.output : []).filter(isWebSearch);
+  return { id: typeof r.id === "string" ? r.id : null, model: r.model, usage: r.usage, tier: r.service_tier, text, searches };
 }
 
 /**
@@ -454,7 +467,7 @@ async function answer(t: Turn, c: TurnFor) {
     const binding = c.memory ? bindingFor(workspaceOf(b), v.workspaces.find((w) => w.id === workspaceOf(b))?.memory) : null;
     const memory = binding ? await memoryBlock(c.userId, binding, c.message.text, owner, timing.memoryMs) : "";
     const input = [...historyInput(window, roots, v, b.id, owner), nowNote(v, b, owner, c.tz, memory)];
-    const a = await respond(instructionsFor(v, b, c.orgoName), input);
+    const a = await respond(instructionsFor(v, b, c.orgoName), input, c.tz);
     try {
       const tidy = tidyAnswer(a.text);
       // An answer the phone would show nothing of (all of it words about buying) isn't one.
@@ -465,7 +478,9 @@ async function answer(t: Turn, c: TurnFor) {
       if (binding && !keptFromOthers(c.message.text)) saveChat(c.userId, binding, { id: c.chatId, name: b.name }, b, c.message.text, tidy.text);
     } finally {
       // OpenAI charged for it whether or not the answer was written.
-      if (a.id) await recordTokens(c.userId, a.id, a.usage, { model: a.model, source: "iphone", botId: b.id }).catch((e: Error) => console.warn(`[agent] ${c.userId}: usage: ${e.message}`));
+      if (a.id) await recordTokens(c.userId, a.id, a.usage, { model: a.model, source: "iphone", botId: b.id, tier: a.tier }).catch((e: Error) => console.warn(`[agent] ${c.userId}: usage: ${e.message}`));
+      // And each search, as the proxy counts the Mac's (cloud/proxy.ts recordResponse).
+      for (const item of a.searches) await recordWebSearch(c.userId, item, b.id).catch((e: Error) => console.warn(`[agent] ${c.userId}: web search: ${e.message}`));
     }
   } catch (e) {
     console.warn(`[agent] ${c.userId}: ${c.message.id} wasn't answered (${why(e)})`);

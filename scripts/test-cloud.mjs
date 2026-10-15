@@ -33,6 +33,8 @@ async function until(check, what, ms = 4000) {
 // No keys or settings from the shell, a throwaway home and working folder (the state file, the
 // Keychain), and stand-ins for the programs the server runs.
 for (const k of Object.keys(process.env)) if (/^(BOPS|OPENAI|AGENTPHONE|AGENTMAIL|HONCHO|COMPOSIO|TYPESAFE|TWILIO|ORGO)_/.test(k)) delete process.env[k];
+// Fast task steps go over a WebSocket (lib/server/responses-ws.ts, tested in test-responses-ws.mjs); here, over HTTP to the fakes.
+process.env.BOPS_RESPONSES_WS = "0";
 const scratch = mkdtempSync(join(tmpdir(), "bops-test-cloud-"));
 process.chdir(scratch);
 process.env.HOME = scratch;

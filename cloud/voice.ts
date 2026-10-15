@@ -5,6 +5,7 @@ import type { CallerVerdict, CloudCallPayload } from "./protocol.ts";
 import { loadState } from "./state.ts";
 import { queueForMac } from "./tunnel.ts";
 import { recordTokens } from "./usage.ts";
+import { atSpeed } from "./speed.ts";
 
 /**
  * A call's turns, answered in the cloud while the Mac is away (asleep, off, offline, or not answering
@@ -138,15 +139,20 @@ async function respond(c: VoiceCall, instructions: string): Promise<{ text: stri
   const input = c.turns.length
     ? c.turns.map((t) => ({ role: t.who === "Caller" ? "user" : "assistant", content: t.text }))
     : [{ role: "user", content: "(The call just connected; the caller hasn't said anything yet. Say hello.)" }];
-  const res = await fetch(`${config.upstream.openai()}/v1/responses`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config.openaiKey()}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: MODEL(), instructions, input, tools: TOOLS, parallel_tool_calls: false, reasoning: { effort: "low" }, max_output_tokens: 1200, store: false }),
-    signal: AbortSignal.timeout(timing.openaiMs),
-  });
+  // A caller is waiting on the line: as fast as the model goes, a tier down when OpenAI's busy (speed.ts).
+  const model = MODEL();
+  const signal = AbortSignal.timeout(timing.openaiMs);
+  const res = await atSpeed(model, (tier) =>
+    fetch(`${config.upstream.openai()}/v1/responses`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${config.openaiKey()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, instructions, input, tools: TOOLS, parallel_tool_calls: false, reasoning: { effort: "low" }, max_output_tokens: 1200, store: false, ...tier }),
+      signal,
+    }),
+  );
   if (!res.ok) throw new Error(`OpenAI answered ${res.status}`);
-  const r = (await res.json()) as { id?: unknown; model?: unknown; usage?: unknown; output?: Output[] };
-  if (typeof r.id === "string") void recordTokens(c.userId, r.id, r.usage, { model: r.model, source: "phone", botId: c.bot.id }).catch((e: Error) => console.warn(`[voice] usage: ${e.message}`));
+  const r = (await res.json()) as { id?: unknown; model?: unknown; usage?: unknown; service_tier?: unknown; output?: Output[] };
+  if (typeof r.id === "string") void recordTokens(c.userId, r.id, r.usage, { model: r.model, source: "phone", botId: c.bot.id, tier: r.service_tier }).catch((e: Error) => console.warn(`[voice] usage: ${e.message}`));
   const out = Array.isArray(r.output) ? r.output : [];
   const text = out
     .filter((o) => o.type === "message")

@@ -339,7 +339,7 @@ function imageAsk(n: unknown, size: unknown, quality: unknown) {
   if (!IMAGE_QUALITIES.has(String(quality))) throw new HttpError(400, "Bops Cloud makes images at low, medium or high quality.");
 }
 
-type ResponseObject = { id?: unknown; object?: unknown; model?: unknown; usage?: unknown; output?: unknown };
+type ResponseObject = { id?: unknown; object?: unknown; model?: unknown; usage?: unknown; output?: unknown; service_tier?: unknown };
 
 /**
  * A response (JSON, or the `response` of a streamed event): its id is the user's, and its tokens are
@@ -349,7 +349,7 @@ async function recordResponse(call: Call, r: ResponseObject | undefined, done: b
   if (r?.object !== "response" || typeof r.id !== "string") return;
   await own(call, "openai", "response", r.id);
   if (!done) return;
-  counted(recordTokens(call.user.id, r.id, r.usage, { model: r.model, source: call.source ?? "responses", botId: call.bot }));
+  counted(recordTokens(call.user.id, r.id, r.usage, { model: r.model, source: call.source ?? "responses", botId: call.bot, tier: r.service_tier }));
   for (const item of Array.isArray(r.output) ? r.output : []) if (isWebSearch(item)) counted(recordWebSearch(call.user.id, item, call.bot));
 }
 
@@ -1784,6 +1784,7 @@ async function attach(req: IncomingMessage, socket: Duplex, head: Buffer, user: 
   const key = config.openaiKey();
   if (!key) throw new HttpError(503, "OpenAI isn't set up on this cloud.");
   const { path, query: q } = target(req.url, "/proxy/openai");
+  if (path.join("/") === "v1/responses") return responsesSocket(req, socket, head, user, key);
   const params = matchPath(["v1", "live", "sessions", ":live", "attach"], path);
   if (!params) throw new HttpError(404, "Not found");
   if ((await objectOwner("openai", params.live)) !== user.id) throw new HttpError(404, "Not found");
@@ -1791,6 +1792,91 @@ async function attach(req: IncomingMessage, socket: Duplex, head: Buffer, user: 
   const upstream = await connectUpstream(`${config.upstream.openai().replace(/\/+$/, "").replace(/^http/, "ws")}/${path.join("/")}${qs(q)}`, key, req);
   if (socket.destroyed) return upstream.ws.terminate();
   sidebands.handleUpgrade(req, socket, head, (client) => bridge(client, upstream, user.id, params.live));
+}
+
+/* ---------------- Responses over a WebSocket ---------------- */
+
+/**
+ * OpenAI's WebSocket mode for the Responses API (developers.openai.com guides/websocket-mode): one
+ * socket to /v1/responses for a task's many steps, each a `response.create` with only its new input
+ * and `previous_response_id`, which OpenAI says makes long tool loops up to about 40% faster, and is
+ * what it recommends for Ultrafast. The Mac's computer-tool tasks use it (lib/server/responses-ws.ts).
+ *
+ * Each `response.create` gets the checks a POST /v1/responses gets (its tools, the stored objects it
+ * names, the user's AI credit) before it goes on; one that fails comes back as OpenAI's own `error`
+ * event, with the cloud's status and code, and isn't sent. Each response is the user's as it's
+ * created, and its tokens (at the tier it ran on) and web searches are counted when it's done, as a
+ * streamed POST's are. Only `response.create` goes on: anything else the Mac sends is refused.
+ */
+const RESPONSES_RULE: Rule = match(openai, { method: "POST", path: ["v1", "responses"], params: {} } as unknown as Call);
+
+async function responsesSocket(req: IncomingMessage, socket: Duplex, head: Buffer, user: CloudUser, key: string) {
+  const base: Call = { user, orgoKey: bearer(req), method: "POST", path: ["v1", "responses"], params: {}, query: new URLSearchParams(), headers: {}, owned: new Set(), asked: req.headers, ...usageHeaders(req) };
+  const upstream = await connectUpstream(`${config.upstream.openai().replace(/\/+$/, "").replace(/^http/, "ws")}/v1/responses`, key, req);
+  if (socket.destroyed) return upstream.ws.terminate();
+  sidebands.handleUpgrade(req, socket, head, (client) => responsesBridge(client, upstream, base));
+}
+
+/** What a refused `response.create` comes back as: OpenAI's error event, with the cloud's words, status and code. */
+function refusal(e: unknown) {
+  const status = e instanceof HttpError ? e.status : 502;
+  const extra = (e instanceof HttpError ? e.extra : undefined) as { code?: string } | undefined;
+  const message = e instanceof HttpError ? e.message : "Bops Cloud couldn't send that on.";
+  return JSON.stringify({ type: "error", status, error: { type: "invalid_request_error", code: extra?.code ?? null, message } });
+}
+
+function responsesBridge(client: WebSocket, { ws: upstream, early, keep }: Upstream, base: Call) {
+  const toClient = (data: RawData, binary: boolean) => {
+    if (!binary) {
+      let e: { type?: string; response?: ResponseObject } | undefined;
+      try {
+        e = JSON.parse(data.toString()) as typeof e;
+      } catch {
+        /* not JSON: passed on as it is */
+      }
+      if (e?.response) counted(recordResponse(base, e.response, /^response\.(completed|incomplete|failed)$/.test(e.type ?? "")));
+    }
+    if (client.readyState === WebSocket.OPEN) client.send(data, { binary });
+  };
+  upstream.off("message", keep);
+  for (const [data, binary] of early) toClient(data, binary);
+  upstream.on("message", toClient);
+  // In order: a check that waits (the credit, a stored object's owner) never lets a later message overtake it.
+  let queue = Promise.resolve();
+  client.on("message", (data, binary) => {
+    queue = queue.then(async () => {
+      let event: Record<string, unknown> | undefined;
+      try {
+        event = binary ? undefined : (JSON.parse(data.toString()) as Record<string, unknown>);
+      } catch {
+        /* refused below */
+      }
+      if (!isObject(event) || event.type !== "response.create") {
+        if (client.readyState === WebSocket.OPEN) client.send(refusal(new HttpError(400, "Bops Cloud only passes response.create on this socket.")));
+        return;
+      }
+      const body: Record<string, unknown> = { ...event };
+      delete body.type;
+      const call: Call = { ...base, json: body, owned: new Set() };
+      try {
+        await openai.check?.(call);
+        await RESPONSES_RULE.check?.(call);
+        if (RESPONSES_RULE.spends) await requireCredit(base.user.id, await RESPONSES_RULE.minCost?.(call));
+      } catch (e) {
+        if (client.readyState === WebSocket.OPEN) client.send(refusal(e));
+        return;
+      }
+      if (upstream.readyState === WebSocket.OPEN) upstream.send(JSON.stringify({ type: "response.create", ...(call.json as object) }));
+    });
+  });
+  const closeBoth = (code: number, reason: Buffer) => {
+    if (client.readyState === WebSocket.OPEN) client.close(sendable(code), reason);
+    if (upstream.readyState === WebSocket.OPEN) upstream.close(sendable(code), reason);
+  };
+  client.on("close", closeBoth);
+  upstream.on("close", closeBoth);
+  client.on("error", () => upstream.terminate());
+  upstream.on("error", () => client.terminate());
 }
 
 /* ---------------- Routes ---------------- */

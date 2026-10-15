@@ -1,4 +1,5 @@
 import "server-only";
+import { setting } from "./models";
 import { trackServerEvent } from "./analytics";
 import type { BopsEventProps } from "@/cloud/analytics-rules";
 import { openaiClient } from "./openai-client";
@@ -7,7 +8,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "@/cloud/protocol";
-import { BLOCKER_LABEL, botChatId, DISPLAYS, live, MAIN_WORKSPACE, MAX_SCREENS, workBot, workspaceOf, type Bot, type Effort, type Session, type ThreadReply } from "@/lib/types";
+import { BLOCKER_LABEL, botChatId, DISPLAYS, live, MAIN_WORKSPACE, MAX_SCREENS, workBot, workspaceOf, type Bot, type Session, type TaskRoute, type ThreadReply } from "@/lib/types";
 import { CloudError, creditsOut, executorKey, noteOutOfCredit, OUT_OF_CREDIT, outOfCreditError, shortOfCredit } from "./cloud";
 import { appsMcp, appsSocket, browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
 import { relayNewComputer } from "./relay";
@@ -37,7 +38,9 @@ import { channelResult } from "./channels";
 import { asksForMac, chooseWhere } from "./where";
 import { addMessage, bot, getState, id, ownerLine, ownerName, patchSession, session, stateEpoch, stateReady, update } from "./store";
 import { recordTokens, usageTags } from "./usage";
-import { computerToolOn, computerTurn } from "./computer-task";
+import { computerToolOn, computerTurn, PAGE_RUNNER } from "./computer-task";
+import { ASKS_AGAIN, LIGHT, logRoute, routeTask, speedFor, taskConfig } from "./routing";
+import { watching } from "./presence";
 import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours";
 
 /**
@@ -54,9 +57,9 @@ import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours
  */
 
 const client = openaiClient();
-const SESSION_MODEL = process.env.BOPS_SESSION_MODEL ?? "gpt-6.1-sol";
+const SESSION_MODEL = setting("gpt-6.1-sol", "BOPS_SESSION_MODEL");
 /** For tasks Jev rates hard: GPT-6 Astra, what OpenAI's dots run on (slower and about 5× the price). */
-const HARD_MODEL = process.env.BOPS_HARD_MODEL ?? "gpt-6-astra";
+const HARD_MODEL = setting("gpt-6-astra", "BOPS_HARD_MODEL");
 /** Helpers a thread can run at once, each on its own screen (a bot has 4). */
 const MAX_HELPERS = 3;
 /**
@@ -116,6 +119,8 @@ type StartOptions = {
   ownerAsked?: boolean;
   /** The cloud thread this one carries on from on the Mac (moveToMac). */
   movedFrom?: string;
+  /** What it runs on, set here rather than routed (a benchmark run: app/api/sessions). */
+  route?: TaskRoute;
 };
 
 const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -184,7 +189,7 @@ function foldInto(s: Session, goal: string, where: "mac" | "cloud" | "auto", opt
   return s;
 }
 
-export function startSession({ botId, goal, title, chatId, sentVia = "you", onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom }: StartOptions): Session {
+export function startSession({ botId, goal, title, chatId, sentVia = "you", onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom, route: forced }: StartOptions): Session {
   // Someone else's words (an email or a text from outside) never put work on the user's Mac (StartOptions.outside).
   const where = outside && asked === "mac" ? "auto" : asked;
   // One job, one thread: asking for a job that's already running (or waiting on the user) adds to it.
@@ -208,6 +213,7 @@ export function startSession({ botId, goal, title, chatId, sentVia = "you", onWa
     thenOnMac: (!outside && thenOnMac?.trim()) || undefined,
     ...(outside ? { fromOutside: true as const } : {}),
     ...(movedFrom ? { movedFrom } : {}),
+    ...(forced ? { route: forced, effort: forced.effort } : {}),
   };
   update((state) => state.sessions.push(s));
   trackServerEvent("bops_task_started", { task_id: s.id, sent_via: sentVia === "you" || sentVia === "routine" ? sentVia : "bot", on_watch: !!onWatch, where_asked: where });
@@ -483,6 +489,11 @@ export function replyToSession(sessionId: string, text: string, note?: string, f
   });
   if (!live(s)) {
     stopped.delete(sessionId);
+    // It failed, or the user says it's wrong: on the router's route, the next turn thinks a tier harder (routing.ts taskConfig).
+    if (s.route?.by === "router" && (s.status === "failed" || ASKS_AGAIN.test(text)))
+      patchSession(sessionId, (x) => {
+        if (x.route) x.route.bumps = (x.route.bumps ?? 0) + 1;
+      });
     patchSession(sessionId, { status: "queued", error: undefined, endedAt: undefined });
     void pump();
   } else steerers.get(sessionId)?.();
@@ -1210,18 +1221,20 @@ function macChromeNote(owner: string) {
 function instructions(botName: string, role: string, mac: boolean, display: number, sharedWith?: string, apps = false, auto = false, full = false, computer = false, onMacChrome = false, vaultTool = false, ui = false) {
   const owner = ownerName();
   const appsLine = `For ${owner}'s email, calendar, documents, CRM and anything else they connected, use their apps (find_app_actions, then use_app; see "Your apps" below) before a website.`;
+  // The fastest tool first: each one only for what the ones before it can't do. The screen is last.
   const tools = [
     ...(apps ? [`${owner}'s apps (find_app_actions, then use_app; see "Your apps" below) for their email, calendar, documents, CRM and anything else they connected.`] : []),
     "web_search to look things up and read pages as text quickly (search, open a page, find in a page).",
+    "The shell (bash) and file edits for files, data and code: download, fetch a page or an API (curl), parse, calculate, and write documents in /workspace.",
     `The browser tools (browser_navigate, browser_snapshot, browser_click, browser_type, browser_fill_form, browser_select_option, browser_tabs…) to work in websites. They drive the Chrome on your screen, so ${owner} sees it happen. Read a page with browser_snapshot and act on its elements by ref; that's faster and surer than pixels.`,
-    "The shell (bash) and file edits for files, data and code: download, parse, calculate, and write documents in /workspace.",
     "The screen tools (screenshot, click, type_text, key, scroll, drag) for what the browser tools can't reach: native dialogs, canvas apps, drag and drop, or to check visually that something looks right. Coordinates come from the latest screenshot.",
   ].map((t, i) => `(${i + 1}) ${t}`);
   const computerTools = [
     ...(apps ? [`${owner}'s apps (find_app_actions, then use_app; see "Your apps" below) for their email, calendar, documents, CRM and anything else they connected.`] : []),
     "web_search to look things up and read pages as text quickly (search, open a page, find in a page).",
-    `The computer: you see your screen and use its mouse and keyboard, for websites in Chrome and any app on the computer, so ${owner} sees it happen. Go straight to URLs you know (ctrl+l, type it, Enter).`,
-    "run_command for files, data and code: download, parse, calculate, and write documents in /workspace.",
+    "run_command for files, data and code: download, fetch a page or an API (curl), parse, calculate, and write documents in /workspace.",
+    `page_script to read a website and use it by its elements (a field by its label, a button by its text): faster and surer than the screen. It runs on the Chrome on your screen, so ${owner} sees the page change.`,
+    `The computer, for what a page script can't do (a canvas, a native dialog, an app other than Chrome) and to check how a page looks: you see your screen and use its mouse and keyboard, so ${owner} sees it happen. Go straight to URLs you know (ctrl+l, type it, Enter).`,
   ].map((t, i) => `(${i + 1}) ${t}`);
   return [
     `You are ${botName}, the ${role} bot in Bops.`,
@@ -1254,11 +1267,11 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
         ]
       : [
           sharedWith
-            ? `You work on ${screenLabel(display)} of the Linux computer you share with ${sharedWith}, where Chrome is open. ${sharedWith} and other bots may be working on its other screens: never touch a screen that isn't yours. Your screen is live for ${owner} to watch, so do the work there, in the open.`
-            : `You work on ${screenLabel(display)} of your own Linux computer, where Chrome is open. That screen is live for ${owner} to watch, so do the work there, in the open.`,
-          "Pick the right tool for each step, the way a capable person at a computer would:",
+            ? `You work on ${screenLabel(display)} of the Linux computer you share with ${sharedWith}, where Chrome is open. ${sharedWith} and other bots may be working on its other screens: never touch a screen that isn't yours. ${owner} can watch your screen live.`
+            : `You work on ${screenLabel(display)} of your own Linux computer, where Chrome is open. ${owner} can watch that screen live.`,
+          "For each step, use the first tool in this list that can do it. Go further down the list only when the tools before it can't:",
           ...(computer ? computerTools : tools),
-          `When the task is about a website ${owner} should see (signing in, filling a form, writing a post or a draft), do it in the browser on your screen, not only through search.`,
+          `Do what ${owner} should see happen or check (signing in, filling a form, writing a post or a draft) in the Chrome on your screen. To look things up or read, don't use the screen: search, and read pages as text.`,
           `This task runs in the cloud and can't reach ${owner}'s Mac: no tool or setting here switches to it. If you're asked to carry on on their Mac, don't look for a way: say in one sentence that it has to be moved there (when ${owner} asks for their Mac, Bops moves it, with a record of what you did here), and stop.`,
           "Bops gives a task the screen that already has its site open, when one does: if yours shows the site you need, carry on from that page rather than opening it again in a new tab.",
           ...(computer
@@ -1299,6 +1312,26 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
   ].join(" ");
 }
 
+/** A task's steps after the user starts or answers it that count as them waiting, wherever they look. */
+const FIRST_STEPS = 3;
+
+/**
+ * Whether someone is waiting on a task's step now, so it runs fast (routing.ts speedFor): the user is
+ * looking at it (its thread or chat open in the window in front: presence.ts), or it's one of its first
+ * steps after they started or answered it. Not a routine's, or one someone outside Bops started.
+ */
+function waitingOn(sessionId: string, calls: number): boolean {
+  const s = session(sessionId);
+  if (!s) return false;
+  return watching(s) || (calls < FIRST_STEPS && s.sentVia !== "routine" && !s.fromOutside);
+}
+
+/** A new task's route, next to what the router would have picked, for the comparison (routing.ts logRoute). */
+function logTaskRoute(sessionId: string) {
+  const s = session(sessionId);
+  if (s?.route) logRoute({ kind: "task", id: s.id, botId: s.botId, goal: s.goal.slice(0, 400), ran: { model: s.route.model, effort: s.route.effort, by: s.route.by }, router: s.route.router });
+}
+
 /**
  * A thread's turns on the computer tool (computer-task.ts). A new thread gets its effort set (as an
  * Agents API one does). Its instructions are made fresh each run, memory included: there's no agent
@@ -1307,8 +1340,14 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
 async function computerToolTurns(sessionId: string, at: { computerId: string; display: number; sharedWith?: string; resuming: boolean }) {
   const s = session(sessionId)!;
   const b = bot(s.botId)!;
-  if (!at.resuming) patchSession(sessionId, { runner: "computer", effort: await threadEffort(b.effort, s.goal, b.id) });
-  const effort = session(sessionId)!.effort ?? "medium";
+  if (!at.resuming && !s.route) {
+    const route = await routeTask(b.effort, s.goal, b.id);
+    patchSession(sessionId, { runner: "computer", effort: route.effort, route });
+    logTaskRoute(sessionId);
+  }
+  // What this turn runs on: the route (a tier up for each bump), or for a thread from before routes, the old rule.
+  const now = session(sessionId)!;
+  const config = taskConfig(now.route) ?? { model: now.effort === "high" ? HARD_MODEL : SESSION_MODEL, effort: now.effort ?? "medium" };
   // Its apps are tools in this process (composio.ts), so it has them wherever its computer is.
   const apps = composioOn() && accountsOf(b).length > 0;
   const memory = await memoryBlock(wsOf(s.botId), s.goal, 3000);
@@ -1332,9 +1371,8 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         sessionId,
         computerId: at.computerId,
         display: at.display,
-        // Hard tasks get the model Dots runs on; the rest the faster, cheaper one.
-        model: effort === "high" ? HARD_MODEL : SESSION_MODEL,
-        effort,
+        model: config.model,
+        effort: config.effort,
         instructions: text,
         apps,
         input,
@@ -1342,6 +1380,8 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         timeoutMs: TURN_MAX_MS,
         idleMs: TURN_IDLE_MS,
         step: (tool, detail) => step(sessionId, tool, detail),
+        speed: (calls) => now.route?.speed ?? speedFor(config.model, waitingOn(sessionId, calls)),
+        pages: () => ensureBrowserTool(at.computerId),
         steer: () => {
           const pending = unsent(sessionId);
           if (!pending.length || stopped.has(sessionId)) return undefined;
@@ -1370,27 +1410,6 @@ async function startOrgoExecutor(computerId: string, display: number, env: { id:
     30,
   );
   if (started.exit_code !== 0) throw new Error(`executor failed: ${started.output.slice(0, 200)}`);
-}
-
-/**
- * How hard a thread thinks: the bot's own setting, or on "auto" Jev's read of the task. Hard tasks
- * (many steps, research across several sources, careful forms) get high effort; the rest medium.
- */
-async function threadEffort(setting: Effort | undefined, goal: string, botId?: string): Promise<Exclude<Effort, "auto">> {
-  if (setting && setting !== "auto") return setting;
-  const a = await decide(
-    { task: goal },
-    {
-      hard: {
-        type: "noul",
-        instructions: "Is `task` hard: many steps, research across several sources, comparing or judging, or careful form-filling where mistakes matter?",
-        criteria: { true: "Hard: worth thinking it through carefully", false: "Simple: a quick lookup or a few clicks" },
-      },
-    },
-    { botId },
-  );
-  // Jev is conservative here: a multi-source research task scores about 0.4, a one-page lookup about 0.03.
-  return (yes(a?.hard) ?? 0) >= 0.3 ? "high" : "medium";
 }
 
 /** Is the bot's latest answer waiting on the user? Decides whether the thread shows "needs you". */
@@ -1429,8 +1448,9 @@ async function suggestReplies(task: string, recent: Session["replies"], question
   const owner = ownerName();
   const epoch = stateEpoch();
   const res = await client.responses.create({
-    model: process.env.BOPS_CHAT_MODEL ?? "gpt-6.1-sol",
-    reasoning: { effort: "low" },
+    // A few words of a fixed shape: Luna, without reasoning.
+    model: LIGHT(),
+    reasoning: { effort: "none" },
     instructions:
       `A bot asked ${owner} something while working on a task. Suggest 2 or 3 short replies (2 to 8 words each) that ${owner} could tap to answer it, written the way ${owner} would say them. Make them different real answers, not "I don't know". When the question shows the bot misunderstood, include a reply that clears it up. Don't suggest "never mind" or "stop": Bops already has that button. No full stops at the end.`,
     input: JSON.stringify({ task, recent: recent.map((r) => `${r.role === "user" ? owner : "Bot"}: ${r.text}`).join("\n").slice(-3000), question }),
@@ -1462,18 +1482,33 @@ export function dismissWaiting(sessionId: string) {
 const BROWSER_MCP = "/opt/bops/pw/node_modules/@playwright/mcp/cli.js";
 /** Brings the page the bot navigates to the front of its screen (vm/browser-front.cjs). */
 const BROWSER_FRONT = "/opt/bops/pw/front.cjs";
-const browserReady = new Set<string>();
-/** Install the browser tools on a computer once (same version as this copy of Bops uses). */
-async function ensureBrowserTool(computerId: string) {
-  if (browserReady.has(computerId)) return;
+/** Each computer's install of the browser tools, once per run of Bops: true once they're there. One that failed is tried again next time. */
+const browserReady = new Map<string, Promise<boolean>>();
+/**
+ * Install the browser tools on a computer once (same version as this copy of Bops uses): Playwright
+ * MCP for Agents API threads, and the page-script runner (vm/page-script.cjs, computer-task.ts
+ * page_script) next to the playwright-core it brings. True when they're there.
+ */
+function ensureBrowserTool(computerId: string): Promise<boolean> {
+  const known = browserReady.get(computerId);
+  if (known) return known;
   const v = JSON.parse(readFileSync(join(process.cwd(), "node_modules/@playwright/mcp/package.json"), "utf8")).version as string;
   const front = readFileSync(join(process.cwd(), "vm/browser-front.cjs")).toString("base64");
-  const r = await orgo.bash(
-    computerId,
-    `mkdir -p /opt/bops/pw && echo ${front} | base64 -d > ${BROWSER_FRONT} && cd /opt/bops/pw && (grep -q '"version": "${v}"' node_modules/@playwright/mcp/package.json 2>/dev/null || npm install --silent --no-audit --no-fund @playwright/mcp@${v} >/tmp/pw-install.log 2>&1) && test -f ${BROWSER_MCP} && echo ok`,
-    240,
-  );
-  if (r.output.includes("ok")) browserReady.add(computerId);
+  const runner = readFileSync(join(process.cwd(), "vm/page-script.cjs")).toString("base64");
+  const ready = orgo
+    .bash(
+      computerId,
+      `mkdir -p /opt/bops/pw && echo ${front} | base64 -d > ${BROWSER_FRONT} && echo ${runner} | base64 -d > ${PAGE_RUNNER} && cd /opt/bops/pw && (grep -q '"version": "${v}"' node_modules/@playwright/mcp/package.json 2>/dev/null || npm install --silent --no-audit --no-fund @playwright/mcp@${v} >/tmp/pw-install.log 2>&1) && test -f ${BROWSER_MCP} && test -d node_modules/playwright-core && echo ok`,
+      240,
+    )
+    .then((r) => r.output.includes("ok"))
+    .catch(() => false)
+    .then((ok) => {
+      if (!ok) browserReady.delete(computerId);
+      return ok;
+    });
+  browserReady.set(computerId, ready);
+  return ready;
 }
 
 // The screen tools every computer needs to run threads, kept matching this copy of Bops.
@@ -1579,8 +1614,10 @@ async function run(sessionId: string) {
       await ensureTailnet(c).catch(() => null);
       // The computer's screen ledger: drop stale claims, then take this thread's screen.
       await ensureScreenTools(computerId, b.id);
-      // Not fatal: without them the task still has web search, the shell and the screen tools.
-      if (!onComputerTool) await ensureBrowserTool(computerId).catch(() => {});
+      // Not fatal: without them the task still has web search, the shell and the screen tools. A thread on
+      // the computer tool doesn't wait for them: its first page_script does (computerToolTurns).
+      if (!onComputerTool) await ensureBrowserTool(computerId);
+      else void ensureBrowserTool(computerId);
       // Every bot's live threads on this computer, not just this bot's: a sync that left out a bot
       // sharing it would drop that bot's claims. Thread ids are unique across bots, so claims never collide.
       const liveOwners = getState().sessions.filter((x) => sameComputer(x.botId, b.id) && live(x)).map((x) => `thread:${x.id}`);
@@ -1634,14 +1671,17 @@ async function run(sessionId: string) {
     if (onComputerTool) turn = await computerToolTurns(sessionId, { computerId, display, sharedWith: c.id !== b.id ? c.name : undefined, resuming });
     else {
       if (!resuming) {
-        const effort = await threadEffort(b.effort, s.goal, b.id);
-        patchSession(sessionId, { effort });
+        const route = s.route ?? (await routeTask(b.effort, s.goal, b.id));
+        if (!s.route) {
+          patchSession(sessionId, { effort: route.effort, route });
+          logTaskRoute(sessionId);
+        }
         // What's known about the user that bears on this task (long-term memory).
         const memory = await memoryBlock(wsOf(s.botId), s.goal, 3000);
         const created = (await client.beta.agents.sessions.create({
           agent: {
-            // Hard tasks get the model Dots runs on; the rest the faster, cheaper one.
-            model: session(sessionId)!.effort === "high" ? HARD_MODEL : SESSION_MODEL,
+            // Fixed for the session: an Agents API thread can't move to another model (a bump only reaches the computer tool's).
+            model: route.model,
             // Reasoning summaries become the thread's live caption ("checking the pricing page…").
             reasoning: { effort: session(sessionId)!.effort ?? "medium", summary: "auto" },
             instructions: [
@@ -1947,7 +1987,7 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
   let mainTurn: string | undefined;
   // Each turn's tokens (the thread's and its helpers'), counted once when it ends; `seen` keeps it once.
   const s = session(sessionId);
-  const model = s?.effort === "high" ? HARD_MODEL : SESSION_MODEL;
+  const model = s?.route?.model ?? (s?.effort === "high" ? HARD_MODEL : SESSION_MODEL);
   // Whose state this turn belongs to: tokens counted after a hosted server swapped users are dropped (stateEpoch).
   const epoch = stateEpoch();
   const countTurn = (turnId: string, usage: TokenCount) => {

@@ -17,6 +17,7 @@ import { ownerPhoneTable } from "./persist-pg";
 import { forgetOwnerNumber, syncCloudLines, tellCloudLine } from "./phone-lines";
 import { saveToMemory, wsOf } from "./memory";
 import { saveUpload } from "./uploads";
+import { plainLinks } from "./style";
 import { addMessage, bot, getState, ofThisUser, ownerName, patchSession, react, sameState, stateEpoch, stateReady, stateUser, update, userDir } from "./store";
 import { recordCallMinutes, recordUsage } from "./usage";
 import { checkVerification, forgetVerification, pendingConsentAt, pendingVerifications, startVerification, toE164, verifyOn } from "./verify";
@@ -401,11 +402,9 @@ export async function lineUpkeep() {
   return fixed;
 }
 
-/** A bot's text, plain: links written out, no markdown (a text shows it raw). */
+/** A bot's text, plain: links written out (a web source as one line at the end), no markdown (a text shows it raw). */
 const plain = (t: string) =>
-  t
-    .replace(/\n*Open: \[[^\]]*\]\(\/api\/pages\/[^)]*\)/g, "")
-    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, "$1 $2")
+  plainLinks(t.replace(/\n*Open: \[[^\]]*\]\(\/api\/pages\/[^)]*\)/g, ""))
     .replace(/\[([^\]]+)\]\((?:\/|~\/|file:)[^)]*\)/g, "$1 (in Bops)")
     .replace(/\*\*([^*]+)\*\*/g, "$1")
     .trim();

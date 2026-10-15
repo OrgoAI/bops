@@ -1,4 +1,5 @@
 import "server-only";
+import { setting } from "./models";
 import { trackServerEvent } from "./analytics";
 import { fullAccessOn } from "./full-access";
 import { isSecret, learn, memoryBlock, memoryOn, recall, rememberMessage, saveToMemory, wsOf } from "./memory";
@@ -28,6 +29,7 @@ import { checkEmail, emailOwner, mailOn, readEmail, replyEmail, sendEmail } from
 import { isOwner, ownerPhone, textingLine, textOwner } from "./phone";
 import { pingIfWorthIt } from "./attention";
 import { recordTokens, usageTags } from "./usage";
+import { LIGHT, logRoute, routeChat, speedFor, tierParam, withSpeed, type Config } from "./routing";
 
 /**
  * Chat engine. Every bot answers in its own chat, like texting a person: it replies, starts
@@ -37,9 +39,9 @@ import { recordTokens, usageTags } from "./usage";
  */
 
 const client = openaiClient();
-const CHAT_MODEL = process.env.BOPS_CHAT_MODEL ?? process.env.BOPS_SAM_MODEL ?? "gpt-6.1-sol";
+const CHAT_MODEL = setting("gpt-6.1-sol", "BOPS_CHAT_MODEL", "BOPS_SAM_MODEL");
 /** Texting should feel instant: chat turns mostly reply and route, so they think lightly. Threads think harder. */
-const CHAT_REASONING = { effort: (process.env.BOPS_CHAT_EFFORT ?? "low") as "low" | "medium" | "high" };
+const CHAT_REASONING = { effort: setting("low", "BOPS_CHAT_EFFORT") as "low" | "medium" | "high" };
 
 const SCHEDULE_PARAMS = {
   type: "object",
@@ -67,6 +69,25 @@ const fn = (name: string, description: string, properties: Record<string, unknow
   strict: true,
   parameters: { type: "object", additionalProperties: false, properties, required: Object.keys(properties) },
 });
+
+/**
+ * OpenAI's hosted web search: it runs inside the model call (no lookup round of ours), so a question
+ * about the web is answered in the chat in seconds, not by a task on a computer. A small search
+ * context keeps a reply quick, and the user's time zone places it (OpenAI assumes the United States
+ * otherwise). It leads the tools and never changes, so the cached prefix stays the same from turn to
+ * turn. Bops Cloud counts each search (cloud/usage.ts isWebSearch).
+ */
+const WEB_SEARCH = {
+  type: "web_search" as const,
+  search_context_size: "low" as const,
+  user_location: { type: "approximate" as const, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+};
+
+/** How a bot uses WEB_SEARCH in its chat. Not on a turn someone else started, which has no web search. */
+const SEARCHING = [
+  "To look something up on the web (a fact, a price, the news, opening hours, a quick comparison), search it yourself with web_search and answer here. Don't start a task for that.",
+  "When you answer from the web, name your source with one link, like ([site.com](https://site.com/page)), and keep the reply short.",
+].join("\n");
 
 const TASK = {
   title: { type: "string", description: "A 2-5 word label, e.g. \"Lisbon flights\"." },
@@ -116,9 +137,9 @@ function persona(b: Bot, others: Bot[]) {
         ? `You can also work on ${owner}'s own Mac with full access: a Chrome of your own there (so websites see their home internet), a shell, their files and the apps installed on it (Messages, Notes, Calendar, Finder…). Tasks that need their files or Mac apps go there (start_task with where "mac"); most other work belongs on your cloud computer. Those Mac apps aren't your apps (below): for an app you have there, use it yourself, never a Mac app of the same name.`
         : `You can also work on ${owner}'s own Mac, in a Chrome of your own there, so websites see their home internet. You can't use the apps on their Mac (Messages, Notes, Finder…) or their files for now. Most work belongs on your cloud computer; use their Mac only when the task needs it or they ask (start_task with where).`
       : "",
-    "When something needs the computer or the web, call start_task once per independent task, then say in one short sentence what you're on.",
+    "Start a task (start_task) for work on a website (signing in, filling a form, posting, booking, buying), for something to make (a document, a list, a draft), or for research across many sources. Call it once per independent task, then say in one short sentence what you're on.",
     `If ${owner} asks for something on a schedule or later, call schedule.`,
-    "If nothing needs a computer, just answer.",
+    "If nothing needs a task, just answer.",
     `When ${owner} attaches images (screenshots, photos), look at them and use what's in them. A task you start can't see them in the cloud, so put what matters from them into its goal.`,
     contactLine(b),
     // Every place the user reaches it (texts, calls, email, Slack, Telegram, Discord), and how a message from there reads.
@@ -356,14 +377,21 @@ async function acknowledge(b: Bot | undefined, request: string, task: string, pa
   const epoch = stateEpoch();
   const plain = passTo ? `Passing that to ${passTo}.` : `Adding that to ${task.charAt(0).toLowerCase()}${task.slice(1)}.`;
   try {
+    // One short line, said while they wait: Luna (its job is a fixed shape), as fast as Luna goes.
+    const model = LIGHT();
     const res = await Promise.race([
-      client.responses
-        .create({
-          model: CHAT_MODEL,
-          reasoning: { effort: "low" },
+      withSpeed(speedFor(model, true), (tier, last) =>
+        client.responses.create(
+          {
+          model,
+          reasoning: { effort: "none" },
+          ...tierParam(tier),
           instructions: `You are ${b?.name ?? "a bot"}, texting ${ownerName()} back. They just added something to a task you're already doing${passTo ? ` (${passTo} is doing it; say you'll pass it on)` : ""}. Reply with one short, natural line about what you'll do now, in words that fit what they said, like a friend would text. The task isn't done yet: never give an answer or a result, and never say it's done. No "On it.", no quotes, no emoji, under 12 words.`,
           input: JSON.stringify({ task, owner_said: request }),
-        }, usageTags("chat", b?.id))
+          },
+          { ...usageTags("chat", b?.id), ...(last ? {} : { maxRetries: 0 }) },
+        ),
+      )
         // Counted when it arrives, even after the plain words won the race: it cost the same.
         .then((r) => (recordTokens("chat", r.model, r.usage, b?.id, epoch), r)),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
@@ -530,12 +558,10 @@ async function askTeammate(asker: Bot, toId: string, question: string, chatId: s
       `This is your conversation with ${asker.name} (${asker.role}), your teammate; ${asker.name} asks you things while helping ${owner}. Answer ${asker.name} in one to three plain sentences, from what you know. If you don't know, say so plainly and say how you'd find out. You can't start tasks or ask anyone else here.`,
     ].join("\n");
     stillOurs(ours);
-    const res = await client.responses.create({
-      model: CHAT_MODEL,
-      reasoning: CHAT_REASONING,
-      instructions,
-      input: history(pair, t.id).slice(-16),
-    }, usageTags("chat", t.id));
+    // The user is waiting on the answer this goes into: fast.
+    const res = await withSpeed(speedFor(CHAT_MODEL, true), (tier, last) =>
+      client.responses.create({ model: CHAT_MODEL, reasoning: CHAT_REASONING, instructions, input: history(pair, t.id).slice(-16), ...tierParam(tier) }, { ...usageTags("chat", t.id), ...(last ? {} : { maxRetries: 0 }) }),
+    );
     stillOurs(ours);
     recordTokens("chat", res.model, res.usage, t.id);
     const answer = tidyAnswer(res.output_text ?? "").text.trim() || "I don't know.";
@@ -598,9 +624,17 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     // there, and still cost them, so the bot doesn't make one from there.
     const lastAsk = [...getState().messages].reverse().find((m) => m.chatId === chatId && m.role === "user");
     const relayed = !!opts.emailBack || !!lastAsk?.via;
+    // Someone's waiting on this reply: the user's own message, in the app, by text or in a channel (not
+    // an email, which nobody expects back in seconds, or a turn someone else started). It runs fast.
+    const waiting = !!opts.answering && !opts.outside && !opts.emailBack;
+    const base: Config = { model: CHAT_MODEL, effort: CHAT_REASONING.effort };
+    // How much thinking the message needs (routing.ts routeChat: Jev, alongside what's below). Only the user's own.
+    const routing = waiting ? routeChat(base, lastWords(chatId), botId).catch(() => ({ config: base })) : Promise.resolve({ config: base });
     const noOwnRoom =
       b.isMain && getState().host !== "mac" ? await Promise.race([noOwnComputer(workspaceOf(b)), new Promise<null>((r) => setTimeout(() => r(null), 1500))]) : null;
     const tools = [
+      // First, so it never moves the cached prefix. Not for someone else's turn: what they wrote could send it to their site with what it read here.
+      ...(opts.outside ? [] : [WEB_SEARCH]),
       ...(answering
         ? [
             fn("react", "Tapback the message you're answering, like in iMessage: a quick acknowledgement, or instead of a reply when words would add nothing (\"thanks!\" gets a love, \"sounds good\" gets a like).", {
@@ -751,6 +785,7 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     // every turn instead (at 1.25×), and never read back.
     const instructions = [
       persona(b, others),
+      opts.outside ? "" : SEARCHING,
       "If a tapback says it all (thanks, ok, sounds good), react instead of replying.",
       "When you start, hand off or tell a task something, or make a picture, its `say` is your reply: write no other text, and don't answer the request yourself; the task will.",
       appsNote(b, "chat"),
@@ -787,7 +822,14 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     ].filter(Boolean);
     const input = [...history(chatId, botId), { role: "developer" as const, content: `As of now (from Bops, not ${owner}):\n${now.join("\n")}` }];
     stillOurs(ours);
-    let response = await client.responses.create({ model: CHAT_MODEL, reasoning: CHAT_REASONING, instructions, input, tools }, usageTags("chat", botId));
+    const routed = await routing;
+    if ("router" in routed && routed.router) logRoute({ kind: "chat", chatId, botId, words: lastWords(chatId).slice(0, 400), ran: routed.config, router: routed.router });
+    const { model, effort, mode } = routed.config;
+    const reasoning = { effort, ...(mode ? { mode } : {}) };
+    const speed = speedFor(model, waiting);
+    let response = await withSpeed(speed, (tier, last) =>
+      client.responses.create({ model, reasoning, instructions, input, tools, ...tierParam(tier) }, { ...usageTags("chat", botId), ...(last ? {} : { maxRetries: 0 }) }),
+    );
     stillOurs(ours);
     recordTokens("chat", response.model, response.usage, botId);
     // App lookups come back to the model before it answers (a few rounds at most). Other tools
@@ -883,14 +925,21 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
       const rest = response.output.filter((o) => o.type === "function_call" && !calls.includes(o as never)) as { call_id: string }[];
       earlier.push(...(rest as never[]));
       stillOurs(ours);
-      response = await client.responses.create({
-        model: CHAT_MODEL,
-        reasoning: CHAT_REASONING,
-        instructions,
-        previous_response_id: response.id,
-        input: [...outputs, ...rest.map((o) => ({ type: "function_call_output" as const, call_id: o.call_id, output: "ok" }))],
-        tools,
-      }, usageTags("chat", botId));
+      const previous = response.id;
+      response = await withSpeed(speed, (tier, last) =>
+        client.responses.create(
+          {
+            model,
+            reasoning,
+            instructions,
+            previous_response_id: previous,
+            input: [...outputs, ...rest.map((o) => ({ type: "function_call_output" as const, call_id: o.call_id, output: "ok" }))],
+            tools,
+            ...tierParam(tier),
+          },
+          { ...usageTags("chat", botId), ...(last ? {} : { maxRetries: 0 }) },
+        ),
+      );
       stillOurs(ours);
       recordTokens("chat", response.model, response.usage, botId);
     }
