@@ -489,20 +489,31 @@ export type Session = {
 };
 
 /**
- * When a routine runs. Times ("HH:MM", 24h) are the user's local time: Owner.timeZone when set, else the
- * Mac's. The math lives in cloud/schedule.ts, so Bops Cloud can run the same schedules later.
+ * When a routine runs. Times ("HH:MM", 24h) are wall clock times in the routine's zone (Routine.timeZone),
+ * else the user's (Owner.timeZone), else the Mac's. The math lives in cloud/schedule.ts (ScheduleLike is
+ * the same shape), so Bops Cloud can run the same schedules later. Every older shape is still one.
  */
 export type Schedule =
-  | { kind: "daily"; time: string }
-  | { kind: "weekdays"; time: string }
-  | { kind: "weekly"; day: number; time: string }
+  /** `times`: several a day ("HH:MM", sorted, each once, at most 6); `time` is times[0]. */
+  | { kind: "daily"; time: string; times?: string[] }
+  | { kind: "weekdays"; time: string; times?: string[] }
+  /** `days`: several days (0 Sunday to 6, sorted); `day` is days[0]. */
+  | { kind: "weekly"; day: number; days?: number[]; time: string; times?: string[] }
+  /** `dayOfMonth` 1 to 31, or -1 for the last day; a day the month doesn't have runs on its last day. */
+  | { kind: "monthly"; dayOfMonth: number; time: string; times?: string[] }
   | { kind: "once"; at: number }
   /**
-   * Every `minutes` (MIN_EVERY_MINUTES at least). `hours`: only between these local times ("08:00" to
-   * "22:00"; a run that falls outside waits for the next start); `days` (0 Sunday to 6): only on these.
-   * A check-in is a quiet routine on this kind.
+   * Every `minutes` (MIN_EVERY_MINUTES at least, a day at most). `hours`: only between these local times
+   * ("08:00" to "22:00"; a run that falls outside waits for the next start); `days` (0 Sunday to 6): only
+   * on these. A check-in is a quiet routine on this kind.
    */
-  | { kind: "every"; minutes: number; hours?: { from: string; to: string }; days?: number[] };
+  | { kind: "every"; minutes: number; hours?: { from: string; to: string }; days?: number[] }
+  /**
+   * `minutes` (5 to 240) before each meeting in the user's Google Calendar: a check every 15 minutes
+   * (inside `hours` and `days` when set), each run told the meetings that start in its window
+   * (cloud/schedule.ts eventWindow), so every meeting is handled once.
+   */
+  | { kind: "before_event"; minutes: number; source: "googlecalendar"; hours?: { from: string; to: string }; days?: number[] };
 
 /** The shortest gap an "every" routine may have, in minutes. */
 export const MIN_EVERY_MINUTES = 15;
@@ -543,6 +554,8 @@ export type Routine = {
   title: string;
   goal: string;
   schedule: Schedule;
+  /** The IANA zone its times are in ("Europe/London"); unset: the user's (Owner.timeZone). */
+  timeZone?: string;
   enabled: boolean;
   nextRunAt?: number;
   lastRunAt?: number;

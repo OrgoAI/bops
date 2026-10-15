@@ -26,7 +26,10 @@ export type RoutineTemplate = {
   kind: "schedule" | "monitor";
   /** Picked already when the window offers it. */
   defaultOn: boolean;
+  /** When it runs unless the user picks another; one of `suggested`. */
   schedule?: Schedule;
+  /** 2 to 4 good times for it, offered first when it's turned on or changed (`schedule` is one of them). */
+  suggested: { label: string; schedule: Schedule }[];
   /** What the bot does each run, as the user would ask it. */
   goal: string;
   /** Tags it sorts what it reads with. */
@@ -53,8 +56,8 @@ export function tagsOf(ws?: Pick<Workspace, "tags">): WorkspaceTag[] {
   return out;
 }
 
-/** A run every few minutes, or a monitor: quiet, so it posts only when something needs the user. */
-export const quietOf = (t: Pick<RoutineTemplate, "kind" | "schedule">) => t.kind === "monitor" || t.schedule?.kind === "every";
+/** A run every few minutes, a meeting check, or a monitor: quiet, so it posts only when something needs the user. */
+export const quietOf = (t: Pick<RoutineTemplate, "kind" | "schedule">) => t.kind === "monitor" || t.schedule?.kind === "every" || t.schedule?.kind === "before_event";
 
 /** The schedule a starter runs on: its own, else a monitor's 15 minute check. */
 export const scheduleOf = (t: Pick<RoutineTemplate, "schedule">): Schedule => t.schedule ?? { kind: "every", minutes: 15 };
@@ -64,6 +67,33 @@ const READS_ONLY = "Writes always ask me first.";
 const MAIL_NEVER = ["Send an email", "Save a draft in Gmail", "Label, archive or delete mail"];
 const CHAT_NEVER = (app: string) => [`Post or reply in ${app}`, "React to or edit a message"];
 const SORT = "Sort with the tags listed with your routines (the workspace's own tags too).";
+
+/* Suggested times, by what kind of job it is. */
+const WEEKDAYS = [1, 2, 3, 4, 5];
+const at = (time: string): Schedule => ({ kind: "daily", time });
+const every = (minutes: number): Schedule => ({ kind: "every", minutes });
+/** A check through the working day: every `minutes`, 8 AM to 8 PM, weekdays. */
+const workday = (minutes: number): Schedule => ({ kind: "every", minutes, hours: { from: "08:00", to: "20:00" }, days: WEEKDAYS });
+const beforeMeeting = (minutes: number): Schedule => ({ kind: "before_event", minutes, source: "googlecalendar" });
+/** For a check that runs often: every 15, 30 or 60 minutes, or every 30 through the working day. */
+const ALERT_TIMES = [
+  { label: "Every 15 minutes", schedule: every(15) },
+  { label: "Every 30 minutes", schedule: every(30) },
+  { label: "Every hour", schedule: every(60) },
+  { label: "Every 30 minutes, 8 AM to 8 PM weekdays", schedule: workday(30) },
+];
+/** For a morning read: 7:30, 8 or 9 AM, or 8 AM and 5 PM. */
+const MORNING_TIMES = [
+  { label: "7:30 AM", schedule: at("07:30") },
+  { label: "8 AM", schedule: at("08:00") },
+  { label: "9 AM", schedule: at("09:00") },
+  { label: "8 AM and 5 PM", schedule: { kind: "daily", time: "08:00", times: ["08:00", "17:00"] } as Schedule },
+];
+/** For a weekly look: Monday morning or Friday afternoon. */
+const WEEKLY_TIMES = [
+  { label: "Monday 9 AM", schedule: { kind: "weekly", day: 1, time: "09:00" } as Schedule },
+  { label: "Friday 4 PM", schedule: { kind: "weekly", day: 5, time: "16:00" } as Schedule },
+];
 
 /** Slack and Discord work the same way: one pair of starters each. */
 const chatApp = (app: "slack" | "discord", name: string): RoutineTemplate[] => [
@@ -76,6 +106,12 @@ const chatApp = (app: "slack" | "discord", name: string): RoutineTemplate[] => [
     kind: "monitor",
     defaultOn: true,
     schedule: { kind: "every", minutes: 15 },
+    suggested: [
+      { label: "Every 15 minutes", schedule: every(15) },
+      { label: "Every 30 minutes", schedule: every(30) },
+      { label: "Every hour", schedule: every(60) },
+      { label: "Every 15 minutes, 8 AM to 8 PM weekdays", schedule: workday(15) },
+    ],
     goal: [
       `Read the new messages and threads in my ${name} channels since the last run (find_app_actions, then use_app).`,
       "Tag each new thread Customer, Bug, Outage or FYI.",
@@ -96,6 +132,11 @@ const chatApp = (app: "slack" | "discord", name: string): RoutineTemplate[] => [
     kind: "schedule",
     defaultOn: false,
     schedule: { kind: "weekdays", time: "17:00" },
+    suggested: [
+      { label: "Weekdays 5 PM", schedule: { kind: "weekdays", time: "17:00" } },
+      { label: "Weekdays 12 PM and 5 PM", schedule: { kind: "weekdays", time: "12:00", times: ["12:00", "17:00"] } },
+      { label: "Every day 5 PM", schedule: at("17:00") },
+    ],
     goal: [
       `Read today's messages in my ${name} channels (find_app_actions, then use_app).`,
       "Write one short digest: decisions made, questions still open, anything that mentions me or needs me, grouped by channel.",
@@ -118,6 +159,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     kind: "schedule",
     defaultOn: true,
     schedule: { kind: "daily", time: "08:00" },
+    suggested: MORNING_TIMES,
     goal: [
       "Check my Gmail for mail since the last run, or the last 24 hours (find_app_actions, then use_app).",
       `${SORT} Give each email one tag.`,
@@ -138,6 +180,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     kind: "schedule",
     defaultOn: true,
     schedule: { kind: "every", minutes: 30 },
+    suggested: ALERT_TIMES,
     goal: [
       "Check my Gmail for mail from the last 30 minutes (find_app_actions, then use_app).",
       "Tell me only about an outage, an incident or downtime (Outage), or a customer who needs attention (Customer): who it's from, what happened, and one line on what to do.",
@@ -156,6 +199,12 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     kind: "monitor",
     defaultOn: false,
     schedule: { kind: "every", minutes: 15 },
+    suggested: [
+      { label: "Every 15 minutes", schedule: every(15) },
+      { label: "Every 30 minutes", schedule: every(30) },
+      { label: "Every hour", schedule: every(60) },
+      { label: "Every 15 minutes, 8 AM to 8 PM weekdays", schedule: workday(15) },
+    ],
     goal: [
       "Check my Gmail for new mail since the last run that needs a reply from me (find_app_actions, then use_app).",
       "Skip newsletters, receipts and notifications. Look the sender up in Orbit (orbit_read) and memory (recall).",
@@ -175,6 +224,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     kind: "schedule",
     defaultOn: false,
     schedule: { kind: "weekly", day: 1, time: "09:00" },
+    suggested: [...WEEKLY_TIMES, { label: "Monday and Thursday 9 AM", schedule: { kind: "weekly", day: 1, days: [1, 4], time: "09:00" } }],
     goal: [
       "Look through the mail I sent in the last 14 days that got no reply yet (find_app_actions, then use_app), and the open promises in Orbit (orbit_read).",
       "List who I'm waiting on and since when, most important first.",
@@ -194,6 +244,11 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     kind: "schedule",
     defaultOn: true,
     schedule: { kind: "weekdays", time: "07:30" },
+    suggested: [
+      { label: "Weekdays 7:30 AM", schedule: { kind: "weekdays", time: "07:30" } },
+      { label: "Weekdays 8 AM", schedule: { kind: "weekdays", time: "08:00" } },
+      { label: "Every day 7:30 AM", schedule: at("07:30") },
+    ],
     goal: [
       "List today's events on my Google Calendar (find_app_actions, then use_app).",
       "For each meeting with other people, look the attendees up in Orbit (orbit_read) and memory (recall): who they are, when we last talked, anything still open with them.",
@@ -210,10 +265,15 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     when: "15 minutes before each meeting",
     kind: "monitor",
     defaultOn: false,
-    schedule: { kind: "every", minutes: 15, hours: { from: "07:00", to: "20:00" }, days: [1, 2, 3, 4, 5] },
+    schedule: beforeMeeting(15),
+    suggested: [
+      { label: "10 minutes before", schedule: beforeMeeting(10) },
+      { label: "15 minutes before", schedule: beforeMeeting(15) },
+      { label: "30 minutes before", schedule: beforeMeeting(30) },
+    ],
     goal: [
-      "Check my Google Calendar for a meeting with other people that starts in the next 15 to 30 minutes (find_app_actions, then use_app).",
-      "If there is one you haven't prepped yet in this chat, write a short prep: who's coming (Orbit, orbit_read, and memory, recall), what it's about, the last emails with them, and what I should ask or bring.",
+      "Check my Google Calendar for meetings with other people that start in this run's window, given below (find_app_actions, then use_app).",
+      "For each one, write a short prep: who's coming (Orbit, orbit_read, and memory, recall), what it's about, the last emails with them, and what I should ask or bring.",
       `Read only: don't change the event or write to anyone. ${READS_ONLY}`,
       "If there's no such meeting, answer NOTHING.",
     ].join(" "),
@@ -234,6 +294,11 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     kind: "schedule",
     defaultOn: true,
     schedule: { kind: "daily", time: "08:00" },
+    suggested: [
+      { label: "8 AM", schedule: at("08:00") },
+      { label: "9 AM", schedule: at("09:00") },
+      { label: "Weekdays 8 AM", schedule: { kind: "weekdays", time: "08:00" } },
+    ],
     goal: [
       "With call_api on the Stripe key, GET only, look at the last 24 hours:",
       "successful charges and revenue (GET /v1/charges and GET /v1/balance_transactions with created[gte] set to 24 hours ago),",
@@ -255,6 +320,11 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     kind: "monitor",
     defaultOn: true,
     schedule: { kind: "every", minutes: 15 },
+    suggested: [
+      { label: "Every 15 minutes", schedule: every(15) },
+      { label: "Every 30 minutes", schedule: every(30) },
+      { label: "Every 15 minutes, 8 AM to 8 PM weekdays", schedule: workday(15) },
+    ],
     goal: [
       "With call_api on the Plain key, read the support queue with a GraphQL query (POST /graphql/v1 with a query, never a mutation):",
       "threads with status TODO, newest first, with their customer, title and when they came in.",
@@ -277,6 +347,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
       kind: "schedule",
       defaultOn: true,
       schedule: { kind: "weekly", day: 1, time: "09:00" },
+      suggested: [...WEEKLY_TIMES, { label: "First of the month 9 AM", schedule: { kind: "monthly", dayOfMonth: 1, time: "09:00" } }],
       goal: [
         `Read my open deals in ${app === "hubspot" ? "HubSpot" : "Attio"} (find_app_actions, then use_app).`,
         "List the deals with no activity in the last 14 days, biggest first, each with its owner, stage and a suggested next step.",

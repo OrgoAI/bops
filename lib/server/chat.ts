@@ -18,7 +18,7 @@ import { ABOUT_BOPS, ASKING, tidyAnswer, WRITING } from "./style";
 import { howIWork, plainLinks } from "@/cloud/style";
 import { whenText } from "@/cloud/schedule";
 import { savePage } from "./pages";
-import { createRoutine, deleteRoutine, describeSchedule, isNothing, NO_CREDIT_FOR_ROUTINES, routineZone, routinesNote, runRoutine, setRoutineEnabled, setRoutineWhere } from "./routines";
+import { createRoutine, deleteRoutine, describeSchedule, editRoutine, isNothing, NO_CREDIT_FOR_ROUTINES, routinesNote, runRoutine, setRoutineEnabled, setRoutineWhere, zoneOf } from "./routines";
 import { undash } from "./procedures";
 import { createSkill, findSkill, readSkill, skillRefId, skillsNote, skillText, SkillError, updateSkill, READ_SKILL_TOOL } from "./workspace-skills";
 import { linksFor } from "./channels";
@@ -52,56 +52,100 @@ const CHAT_REASONING = { effort: (process.env.BOPS_CHAT_EFFORT ?? "low") as "low
 const SCHEDULE_PARAMS = {
   type: "object",
   additionalProperties: false,
+  description:
+    'When it runs. Examples: "8 AM and 5 PM on Mon, Wed, Fri" is weekly, times ["08:00","17:00"], days [1,3,5]. "Every morning at 7:30" is daily, time "07:30". "On the 1st of each month at 9" is monthly, day_of_month 1. "On the last day of the month" is day_of_month -1. "Every 30 minutes from 8 AM to 8 PM on weekdays" is every, minutes 30, from "08:00", to "20:00", days [1,2,3,4,5]. "30 minutes before each meeting" is before_event, minutes 30. Fields a kind does not use are null.',
   properties: {
-    kind: { type: "string", enum: ["daily", "weekdays", "weekly", "every", "once"] },
-    time: { type: ["string", "null"], description: "24h HH:MM for daily, weekdays and weekly." },
-    day: { type: ["integer", "null"], description: "0 = Sunday … 6 = Saturday, for weekly." },
+    kind: {
+      type: "string",
+      enum: ["daily", "weekdays", "weekly", "monthly", "every", "before_event", "once"],
+      description:
+        "daily: every day at its times. weekdays: Monday to Friday at its times. weekly: on the given days at its times. monthly: one day a month at its times. every: every few minutes, optionally only between some hours and on some days. before_event: before each meeting in the Google Calendar. once: one date and time.",
+    },
+    time: { type: ["string", "null"], description: "24h HH:MM, for one time of day (daily, weekdays, weekly, monthly). Null when times is given." },
+    times: {
+      type: ["array", "null"],
+      items: { type: "string" },
+      description: 'Several times a day, 24h HH:MM, up to 6, e.g. ["08:00", "17:00"] for 8 AM and 5 PM (daily, weekdays, weekly, monthly). Null for one time.',
+    },
+    day: { type: ["integer", "null"], description: "For weekly with one day: 0 = Sunday … 6 = Saturday. Null when days is given." },
+    days: {
+      type: ["array", "null"],
+      items: { type: "integer" },
+      description: "Days of the week, 0 = Sunday … 6 = Saturday. For weekly: the days it runs, e.g. [1, 3, 5] for Mon, Wed and Fri. For every and before_event: only on these days, e.g. [1, 2, 3, 4, 5] for weekdays. Null for every day.",
+    },
+    day_of_month: { type: ["integer", "null"], description: "For monthly: 1 to 31, or -1 for the last day of the month. 29 to 31 run on the last day of a shorter month." },
     at: { type: ["string", "null"], description: "For once: an ISO date-time with the user's UTC offset, e.g. 2026-10-14T15:00:00-04:00." },
-    minutes: { type: ["integer", "null"], description: `For every: the minutes between runs, ${MIN_EVERY_MINUTES} at least (60 for every hour).` },
-    from: { type: ["string", "null"], description: "For every: runs only from this local time (24h HH:MM), e.g. 08:00. Null for all day." },
-    to: { type: ["string", "null"], description: "For every: and until this local time, e.g. 22:00. Null for all day." },
-    days: { type: ["array", "null"], items: { type: "integer" }, description: "For every: only on these days (0 = Sunday … 6 = Saturday), e.g. [1, 2, 3, 4, 5] for weekdays. Null for every day." },
+    minutes: {
+      type: ["integer", "null"],
+      description: `For every: the minutes between runs, ${MIN_EVERY_MINUTES} to 1440 (60 for every hour). For before_event: how long before each meeting, 5 to 240 (15 for "15 minutes before").`,
+    },
+    from: { type: ["string", "null"], description: "For every and before_event: runs only from this local time (24h HH:MM), e.g. 08:00. Null for all day." },
+    to: { type: ["string", "null"], description: "For every and before_event: and until this local time, e.g. 22:00. Null for all day." },
   },
-  required: ["kind", "time", "day", "at", "minutes", "from", "to", "days"],
+  required: ["kind", "time", "times", "day", "days", "day_of_month", "at", "minutes", "from", "to"],
+} as const;
+
+/** The schedule tool's own zone field: the times in another zone than the user's. */
+const TIME_ZONE_PARAM = {
+  type: ["string", "null"],
+  description: 'The IANA time zone its times are in, only when the user names one ("9 AM London time" is Europe/London). Null: the user\'s own zone.',
 } as const;
 
 type RawSchedule = {
   kind: Schedule["kind"];
   time: string | null;
+  times?: string[] | null;
   day: number | null;
+  days?: number[] | null;
+  day_of_month?: number | null;
   at: string | null;
   minutes?: number | null;
   from?: string | null;
   to?: string | null;
-  days?: number[] | null;
 };
 
 /**
  * The schedule the model gave, as Bops keeps it, or what's missing in words it can fix and call again
  * with. Nothing is guessed: a reminder at a made-up time is worse than a question. createRoutine checks
- * the rest (times it can read, days, the least gap) and says so in the same plain way.
+ * the rest (times it can read, days, the least gap, at most 6 times) and says so in the same plain way.
  */
 function toSchedule(r: RawSchedule | undefined): { schedule: Schedule } | { error: string } {
   if (!r || typeof r !== "object") return { error: "No schedule was given." };
   const time = r.time?.trim();
+  const times = (r.times ?? []).map((t) => String(t).trim()).filter(Boolean);
   const noTime = "It needs the time of day, as 24 hour HH:MM.";
-  if (r.kind === "once") {
-    if (!r.at?.trim()) return { error: "A one-off needs its date and time (at), as an ISO date-time." };
-    const at = Date.parse(r.at);
-    if (!Number.isFinite(at)) return { error: `"${r.at}" isn't a date and time Bops can read. Use an ISO date-time like 2026-10-14T15:00:00-04:00.` };
-    return { schedule: { kind: "once", at } };
-  }
-  if (r.kind === "daily" || r.kind === "weekdays") return time ? { schedule: { kind: r.kind, time } } : { error: noTime };
-  if (r.kind === "weekly") {
-    if (typeof r.day !== "number") return { error: "A weekly routine needs its day: 0 is Sunday, 6 is Saturday." };
-    return time ? { schedule: { kind: "weekly", day: r.day, time } } : { error: noTime };
-  }
-  if (r.kind === "every") {
-    if (typeof r.minutes !== "number" || !(r.minutes > 0)) return { error: "A repeating routine needs the minutes between runs." };
+  const timed = times.length ? { time: times[0], times } : time ? { time } : undefined;
+  const window = (): { hours?: { from: string; to: string }; days?: number[] } | { error: string } => {
     const from = r.from?.trim();
     const to = r.to?.trim();
     if (!from !== !to) return { error: "Give both ends of its hours (from and to), or neither for all day." };
-    return { schedule: { kind: "every", minutes: r.minutes, ...(from && to ? { hours: { from, to } } : {}), ...(r.days?.length ? { days: r.days } : {}) } };
+    return { ...(from && to ? { hours: { from, to } } : {}), ...(r.days?.length ? { days: r.days } : {}) };
+  };
+  if (r.kind === "once") {
+    if (!r.at?.trim()) return { error: "A one-off needs its date and time (at), as an ISO date-time." };
+    const ms = Date.parse(r.at);
+    if (!Number.isFinite(ms)) return { error: `"${r.at}" isn't a date and time Bops can read. Use an ISO date-time like 2026-10-14T15:00:00-04:00.` };
+    return { schedule: { kind: "once", at: ms } };
+  }
+  if (r.kind === "daily" || r.kind === "weekdays") return timed ? { schedule: { kind: r.kind, ...timed } } : { error: noTime };
+  if (r.kind === "weekly") {
+    const days = r.days?.length ? r.days : typeof r.day === "number" ? [r.day] : [];
+    if (!days.length) return { error: "A weekly routine needs its day: 0 is Sunday, 6 is Saturday." };
+    return timed ? { schedule: { kind: "weekly", day: days[0], ...(days.length > 1 ? { days } : {}), ...timed } } : { error: noTime };
+  }
+  if (r.kind === "monthly") {
+    if (typeof r.day_of_month !== "number") return { error: "A monthly routine needs its day of the month: 1 to 31, or -1 for the last day." };
+    return timed ? { schedule: { kind: "monthly", dayOfMonth: r.day_of_month, ...timed } } : { error: noTime };
+  }
+  if (r.kind === "every") {
+    if (typeof r.minutes !== "number" || !(r.minutes > 0)) return { error: "A repeating routine needs the minutes between runs." };
+    const w = window();
+    return "error" in w ? w : { schedule: { kind: "every", minutes: r.minutes, ...w } };
+  }
+  if (r.kind === "before_event") {
+    if (typeof r.minutes !== "number") return { error: "A meeting routine needs how many minutes before each meeting it runs (5 to 240)." };
+    const w = window();
+    return "error" in w ? w : { schedule: { kind: "before_event", minutes: r.minutes, source: "googlecalendar", ...w } };
   }
   return { error: "That isn't a kind of schedule Bops knows." };
 }
@@ -799,13 +843,17 @@ type ScheduleArgs = {
   quiet?: boolean | null;
   deliver_to?: DeliverTo;
   skill?: string | null;
+  time_zone?: string | null;
 };
+
+/** A routine's own zone, when it has one: " (Europe/London time)". */
+const zoneWords = (r: Routine) => (r.timeZone ? ` (${r.timeZone} time)` : "");
 
 /** The note in the chat that shows what was scheduled. */
 function scheduledNote(r: Routine) {
   const how = r.reminder ? " · a reminder" : r.where && r.where !== "auto" ? ` · ${r.where === "mac" ? "on your Mac" : "in the cloud"}` : "";
   const goes = deliveryWords(r.deliverTo).replace(/^, /, " · ");
-  return `Scheduled "${r.title}" · ${describeSchedule(r.schedule)}${how}${r.quiet ? " · quiet" : ""}${goes}${r.fromOutside ? ` · set up by ${r.fromOutside}` : ""}`;
+  return `Scheduled "${r.title}" · ${describeSchedule(r.schedule, zoneOf(r))}${zoneWords(r)}${how}${r.quiet ? " · quiet" : ""}${goes}${r.fromOutside ? ` · set up by ${r.fromOutside}` : ""}`;
 }
 
 /**
@@ -831,19 +879,56 @@ function scheduleFor(b: Bot, a: ScheduleArgs, ctx: { ask?: Message; email: boole
     quiet: a.quiet === true,
     deliverTo: d.deliverTo,
     procedure: a.skill?.trim() || undefined,
+    timeZone: a.time_zone?.trim() || undefined,
   });
   const r = made.routine;
   if (!r) return `Not set: ${made.error ?? "Bops couldn't set it up."}`;
   notes.push(scheduledNote(r));
   const now = Date.now();
-  const tz = routineZone();
+  const tz = zoneOf(r);
   const next = r.nextRunAt !== undefined ? inSentence(whenText(r.nextRunAt, now, tz)) : "not set";
-  const set = `Set: ${describeSchedule(r.schedule)}${r.reminder ? " (a reminder)" : ""}${r.quiet ? ", quiet" : ""}${deliveryWords(r.deliverTo)}.`;
+  const set = `Set: ${describeSchedule(r.schedule, tz)}${zoneWords(r)}${r.reminder ? " (a reminder)" : ""}${r.quiet ? ", quiet" : ""}${deliveryWords(r.deliverTo)}.`;
   if (made.moved && s.schedule.kind === "once") return `${set} ${whenText(s.schedule.at, now, tz)} had passed, so it's set for ${next}; say so to ${owner}.`;
   return `${set} Next: ${next}.`;
 }
 
-type ManageArgs = { routine_id?: string; action?: "run_now" | "pause" | "resume" | "delete" | "run_on_mac" | "run_in_cloud" };
+type ManageArgs = {
+  routine_id?: string;
+  action?: "run_now" | "pause" | "resume" | "delete" | "run_on_mac" | "run_in_cloud" | "edit";
+  /** For edit: each null is left as it is. */
+  schedule?: RawSchedule | null;
+  title?: string | null;
+  goal?: string | null;
+  quiet?: boolean | null;
+  time_zone?: string | null;
+};
+
+/**
+ * manage_routine's edit: a new schedule (whole, any kind), title, goal, quiet or zone ("user" for the
+ * user's own); each null is left as it is. Refused in plain words, nothing changed, when one can't be.
+ */
+function editFor(r: Routine, a: ManageArgs, notes: string[]): string {
+  const patch: Parameters<typeof editRoutine>[1] = {};
+  if (a.schedule) {
+    const s = toSchedule(a.schedule);
+    if ("error" in s) return `Not changed: ${s.error}`;
+    patch.schedule = s.schedule;
+  }
+  if (typeof a.title === "string") patch.title = a.title;
+  if (typeof a.goal === "string") patch.goal = a.goal;
+  if (typeof a.quiet === "boolean") patch.quiet = a.quiet;
+  const tz = a.time_zone?.trim();
+  if (tz) patch.timeZone = tz.toLowerCase() === "user" ? undefined : tz;
+  if (!Object.keys(patch).length) return "Not changed: give what to change (schedule, title, goal, quiet or time_zone).";
+  const done = editRoutine(r.id, patch);
+  const now = done.routine;
+  if (!now) return `Not changed: ${done.error ?? "Bops couldn't change it."}`;
+  const when = `${describeSchedule(now.schedule, zoneOf(now))}${zoneWords(now)}`;
+  notes.push(`Changed routine "${now.title}" · ${when}`);
+  const next = now.enabled && now.nextRunAt !== undefined ? ` Next: ${inSentence(whenText(now.nextRunAt, Date.now(), zoneOf(now)))}.` : now.enabled ? "" : " It's paused.";
+  const moved = done.moved && now.schedule.kind === "once" ? ` That time had passed, so it's set for the next day; say so to ${ownerName()}.` : "";
+  return `Changed "${now.title}": ${when}${now.quiet ? ", quiet" : ""}.${next}${moved}`;
+}
 
 /** How long "run now" waits for a run to finish before it says the run is still going. */
 const RUN_NOW_WAIT_MS = 90_000;
@@ -902,7 +987,7 @@ async function manageRoutine(b: Bot, others: Bot[], a: ManageArgs, notes: string
     if (res.error) return `Not resumed: ${res.error}`;
     notes.push(`Resumed routine "${r.title}"`);
     const next = getState().routines.find((x) => x.id === r.id)?.nextRunAt;
-    return `Resumed "${r.title}".${next !== undefined ? ` Next: ${inSentence(whenText(next, Date.now(), routineZone()))}.` : ""}`;
+    return `Resumed "${r.title}".${next !== undefined ? ` Next: ${inSentence(whenText(next, Date.now(), zoneOf(r)))}.` : ""}`;
   }
   if (a.action === "run_on_mac" || a.action === "run_in_cloud") {
     const mac = a.action === "run_on_mac";
@@ -918,6 +1003,7 @@ async function manageRoutine(b: Bot, others: Bot[], a: ManageArgs, notes: string
     const run = await Promise.race([runRoutine(r.id, { manual: askedIn }), waited]).finally(() => clearTimeout(timer));
     return ranWords(r, run, chatId, since);
   }
+  if (a.action === "edit") return editFor(r, a, notes);
   return "That isn't something manage_routine does.";
 }
 
@@ -1244,11 +1330,21 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         },
         skill: { type: ["string", "null"], description: "The name of one of your skills each run follows, or null." },
         where: { type: "string", enum: ["auto", "cloud", "mac"], description: `For a task: where it runs each time. cloud or mac if ${owner} said so; else auto.` },
+        time_zone: TIME_ZONE_PARAM,
       }),
-      fn("manage_routine", `Run a routine now, pause, resume or delete it, or change where its task runs, when ${owner} asks ("run the news check now", "pause it", "stop the water reminder", "run the calendar check on my Mac"). It answers with how it went.`, {
-        routine_id: { type: "string", description: "The routine's id from the Routines list." },
-        action: { type: "string", enum: ["run_now", "pause", "resume", "delete", "run_on_mac", "run_in_cloud"] },
-      }),
+      fn(
+        "manage_routine",
+        `Run a routine now, pause, resume or delete it, change where its task runs, or edit it, when ${owner} asks ("run the news check now", "pause it", "stop the water reminder", "run the calendar check on my Mac", "make the digest 8 AM and 5 PM", "move it to Mondays and Fridays", "do the prep 30 minutes before instead"). edit takes a whole new schedule, a title, a goal, quiet or a time zone; the fields it doesn't change are null. It answers with how it went.`,
+        {
+          routine_id: { type: "string", description: "The routine's id from the Routines list." },
+          action: { type: "string", enum: ["run_now", "pause", "resume", "delete", "run_on_mac", "run_in_cloud", "edit"] },
+          schedule: { anyOf: [SCHEDULE_PARAMS, { type: "null" }], description: "For edit: the whole new schedule (every field, as for schedule). Null to keep it." },
+          title: { type: ["string", "null"], description: "For edit: a new 2-5 word label. Null to keep it." },
+          goal: { type: ["string", "null"], description: "For edit: a new complete instruction for each run. Null to keep it." },
+          quiet: { type: ["boolean", "null"], description: "For edit: true to post only when something needs the user, false to post every run. Null to keep it." },
+          time_zone: { type: ["string", "null"], description: 'For edit: the IANA zone its times are in (Europe/London), or "user" for the user\'s own. Null to keep it.' },
+        },
+      ),
       fn("make_page", `Make a single-file interactive HTML page that explains something, when ${owner} says "explain in HTML" or asks for a page. It opens in a tab in Bops; reply in one sentence.`, {
         title: { type: "string", description: "A short title for the tab." },
         html: {
@@ -1904,7 +2000,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       // A task it started: its chip, so the thread shows in the chat (a quiet routine's comes with its result: routines.ts onRoutineTaskEnd).
       if (sessionIds.length && !bg.quiet) {
         const r = getState().routines.find((x) => x.id === bg.routineId);
-        addMessage({ chatId, role: "system", text: `Routine · ${r ? describeSchedule(r.schedule) : bg.title}`, sessionIds, routine: tag });
+        addMessage({ chatId, role: "system", text: `Routine · ${r ? describeSchedule(r.schedule, zoneOf(r)) : bg.title}`, sessionIds, routine: tag });
       }
       // Returned, never posted (routines.ts posts and delivers it). Nothing for the user (NOTHING, or no words)
       // stays nothing: no "Done." in its place. A run that only started a task says so, unless it's quiet.

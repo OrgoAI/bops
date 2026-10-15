@@ -57,10 +57,11 @@ export function offersFor(app: string, botId: string): { botId: string; app: str
 /**
  * Turn starters on for a bot: each becomes a routine of the bot's, a chat run with its source and tags,
  * quiet for an alert or a monitor, following its skill when the bot has one by that name. A starter it
- * already runs is skipped (not made twice). `schedule` changes when one runs. Returns the new routines'
- * ids; any starter that couldn't be made says why, and the rest are still made.
+ * already runs is skipped (not made twice). `schedule` changes when one runs (a suggested one, or any),
+ * and `timeZone` the zone its times are in. Returns the new routines' ids; any starter that couldn't be
+ * made says why, and the rest are still made.
  */
-export function acceptStarters(app: string, botId: string, picks: { id: string; schedule?: Schedule }[]): { created: string[]; errors?: string[]; error?: string } {
+export function acceptStarters(app: string, botId: string, picks: { id: string; schedule?: Schedule; timeZone?: string }[]): { created: string[]; errors?: string[]; error?: string } {
   const b = bot(botId);
   if (!b) return { created: [], error: "No such bot." };
   const offered = templatesFor(app);
@@ -84,6 +85,7 @@ export function acceptStarters(app: string, botId: string, picks: { id: string; 
       ...(skill ? { procedure: skill } : {}),
       source: { app: t.app, template: t.id },
       ...(t.tags?.length ? { tags: t.tags } : {}),
+      ...(typeof p.timeZone === "string" && p.timeZone.trim() ? { timeZone: p.timeZone.trim() } : {}),
     });
     if (made.routine) created.push(made.routine.id);
     else errors.push(`${t.title}: ${made.error ?? "couldn't be made."}`);

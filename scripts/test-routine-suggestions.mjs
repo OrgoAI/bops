@@ -121,6 +121,40 @@ const settle = () => new Promise((r) => setTimeout(r, 20));
 
 /* ---------------- The catalog ---------------- */
 
+await check("every starter suggests 2 to 4 valid times, its own schedule among them, and the meeting prep runs before each meeting", async () => {
+  const Sched = await import("@/cloud/schedule");
+  for (const t of C.ROUTINE_TEMPLATES) {
+    assert.ok(Array.isArray(t.suggested) && t.suggested.length >= 2 && t.suggested.length <= 4, `${t.id} suggests ${t.suggested?.length}`);
+    const own = C.scheduleOf(t);
+    assert.ok(t.suggested.some((p) => JSON.stringify(p.schedule) === JSON.stringify(own)), `${t.id}: its schedule isn't one of its suggestions`);
+    const labels = new Set();
+    const shapes = new Set();
+    for (const p of t.suggested) {
+      assert.ok(p.label && !labels.has(p.label), `${t.id}: label "${p.label}" empty or twice`);
+      labels.add(p.label);
+      noDashes(p.label, `${t.id} suggested label`);
+      // Valid, and already as kept: normalizing it changes nothing.
+      const n = Sched.normalizeSchedule(p.schedule);
+      assert.ok(!("error" in n), `${t.id} "${p.label}": ${n.error}`);
+      assert.deepEqual(n.schedule, p.schedule, `${t.id} "${p.label}" isn't in its kept shape`);
+      assert.ok(!shapes.has(JSON.stringify(p.schedule)), `${t.id}: "${p.label}" is the same as another`);
+      shapes.add(JSON.stringify(p.schedule));
+      assert.ok(Number.isFinite(Sched.nextRun(p.schedule, Date.parse("2026-10-13T20:30:00Z"), "America/New_York")), `${t.id} "${p.label}" never comes due`);
+      noDashes(Sched.describeSchedule(p.schedule, "America/New_York"), `${t.id} "${p.label}" described`);
+    }
+  }
+  const byId = (id) => C.templateById(id);
+  assert.deepEqual(byId("gmail-morning-inbox").suggested.map((p) => p.label), ["7:30 AM", "8 AM", "9 AM", "8 AM and 5 PM"]);
+  assert.deepEqual(byId("gmail-alerts").suggested.map((p) => p.label), ["Every 15 minutes", "Every 30 minutes", "Every hour", "Every 30 minutes, 8 AM to 8 PM weekdays"]);
+  assert.deepEqual(byId("gmail-weekly-follow-ups").suggested.slice(0, 2).map((p) => p.label), ["Monday 9 AM", "Friday 4 PM"]);
+  const prep = byId("googlecalendar-meeting-prep");
+  assert.deepEqual(prep.schedule, { kind: "before_event", minutes: 15, source: "googlecalendar" });
+  assert.deepEqual(prep.suggested.map((p) => p.schedule.minutes), [10, 15, 30]);
+  assert.equal(Sched.describeSchedule(prep.schedule), "15 minutes before each meeting");
+  assert.equal(Sched.describeSchedule(prep.schedule), prep.when, "its when reads as its schedule");
+  assert.equal(C.quietOf(prep), true, "a meeting check is quiet");
+});
+
 await check("every starter has an id, an app, a goal, a when and a kind, and no dashes", () => {
   const ids = new Set();
   assert.ok(C.ROUTINE_TEMPLATES.length >= 14, `only ${C.ROUTINE_TEMPLATES.length} starters`);

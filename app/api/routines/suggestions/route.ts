@@ -25,7 +25,7 @@ export async function GET(request: Request) {
   return Response.json(out);
 }
 
-/** POST { app, botId, templates: [{ id, schedule? }] }: { created: string[] }, the new routines' ids. */
+/** POST { app, botId, templates: [{ id, schedule?, timeZone? }] }: { created: string[] }, the new routines' ids. */
 export async function POST(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
   if (unready) return unready;
@@ -34,8 +34,8 @@ export async function POST(request: Request) {
   const botId = typeof body.botId === "string" ? body.botId.trim() : "";
   if (!app || !botId || !Array.isArray(body.templates)) return bad("app, botId and templates required");
   const picks = body.templates
-    .filter((t): t is { id: string; schedule?: Schedule } => !!t && typeof t === "object" && typeof (t as { id?: unknown }).id === "string")
-    .map((t) => ({ id: t.id, ...(t.schedule && typeof t.schedule === "object" ? { schedule: t.schedule } : {}) }));
+    .filter((t): t is { id: string; schedule?: Schedule; timeZone?: unknown } => !!t && typeof t === "object" && typeof (t as { id?: unknown }).id === "string")
+    .map((t) => ({ id: t.id, ...(t.schedule && typeof t.schedule === "object" ? { schedule: t.schedule } : {}), ...(typeof t.timeZone === "string" ? { timeZone: t.timeZone } : {}) }));
   const done = acceptStarters(app, botId, picks);
   if (done.error) return bad(done.error);
   // Some made, some not: what was made is kept, and why the rest weren't is said.
