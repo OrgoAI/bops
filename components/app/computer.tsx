@@ -1347,11 +1347,12 @@ function TeamRow({ state, mainId, hidden, onShow }: { state: AppState; mainId: s
   if (!team.length) return null;
   const busy = (t: TeamScreen) => t.kind === "needsYou" || t.kind === "working" || t.kind === "helper" || t.kind === "driving";
   const liveCount = team.filter(busy).length;
+  const leftCount = team.filter((t) => t.kind === "free").length;
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center gap-2 text-[12px] leading-4 text-[#6B6B6B]">
         <span className="font-medium text-ink">Team</span>
-        <span>{liveCount ? `${liveCount} working` : "nothing live right now"}</span>
+        <span>{[liveCount && `${liveCount} working`, leftCount && `${leftCount} finished lately`].filter(Boolean).join(" · ") || "nothing live right now"}</span>
         <span className="flex-1" />
         <button onClick={() => setGrid(!grid)} className="rounded-full bg-white px-2 py-[2px] font-medium text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
           {grid ? "Row" : "Grid"}
@@ -1362,6 +1363,8 @@ function TeamRow({ state, mainId, hidden, onShow }: { state: AppState; mainId: s
           const who = state.bots.find((x) => x.id === (t.botId ?? t.left?.botId));
           const host = state.bots.find((x) => x.id === t.computerBotId);
           const snap = !hidden && visible && busy(t) && i < TEAM_LIVE && !!host;
+          // A screen a thread just left shows the last frame it saw there (lib/server/frames.ts), as its thread does.
+          const leftBy = t.kind === "free" && t.left ? state.sessions.find((x) => x.id === t.left!.sessionId) : undefined;
           const words = t.kind === "free" && t.left ? `left ${t.left.title} · ${ago(t.left.at)}` : t.kind === "held" ? `held for ${t.title}` : t.kind === "watched" ? `watching ${t.title}` : t.kind === "driving" ? "you're driving" : (t.title ?? "");
           return (
             <button
@@ -1374,6 +1377,9 @@ function TeamRow({ state, mainId, hidden, onShow }: { state: AppState; mainId: s
               <div className={`relative shrink-0 overflow-hidden rounded-[7px] ${grid ? "h-[110px]" : "h-[52px]"}`} style={{ backgroundImage: host ? botWash(host) : undefined }}>
                 {snap ? (
                   <LiveScreen key={`team-${t.computerBotId}-${t.display}`} bot={host} botId={host!.id} display={t.display} intervalMs={5000} scale={0.3} className="absolute inset-x-2 bottom-0 top-2 rounded-t-sm" />
+                ) : leftBy?.lastFrameAt ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- a frame Bops serves, sized by the tile
+                  <img src={`/api/frames?session=${leftBy.id}&t=${leftBy.lastFrameAt}`} alt={`The screen as ${leftBy.title} left it`} className="absolute inset-x-2 bottom-0 top-2 w-[calc(100%-1rem)] rounded-t-sm object-cover object-top opacity-80" />
                 ) : (
                   <div className="absolute inset-x-2.5 bottom-0 top-2 flex items-center justify-center rounded-t-sm bg-white/90">
                     {who && <Mascot botId={who.id} color={who.color} size={18} />}
