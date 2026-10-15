@@ -24,32 +24,43 @@ export type KeyProvider = {
   tip: string;
   /** Orgo calls it with GET only, whatever the bot asks. */
   readOnly?: boolean;
+  /** For a service whose GETs can change things too (Slack's Web API takes a write's arguments in the query): the paths a GET only reads at. Any other GET asks first, like a write. */
+  getReads?: RegExp;
+  /** Paths Bops never calls: ones that make a new key or token, whose answer would hand the model a credential. */
+  denied?: RegExp;
+  /** Bank, payroll and compliance data: for the chat only, never a task's, whose browser can type it into any site. */
+  chatOnly?: boolean;
   /** How the API works, in one line for the model. */
   hint: string;
 };
 
+/** Stripe paths that hand back a new secret (an ephemeral key). */
+const STRIPE_KEYS = /^\/v1\/ephemeral_keys/i;
+/** Slack Web API methods a GET only reads with: *.list, *.info, *.history, *.replies, *.members, and a few more. */
+const SLACK_READS = /^\/([a-z]+\.)*(list|info|history|replies|members)$|^\/(auth\.test|users\.lookupByEmail|users\.profile\.get|users\.getPresence|search\.(messages|files|all))$/i;
+
 /** The providers Orgo's broker can call (orgo-web keeps the addresses and how each takes its key). */
 export const KEY_PROVIDERS: KeyProvider[] = [
-  { name: "STRIPE_SECRET_KEY", label: "Stripe", where: "Stripe Dashboard, Developers, API keys", tip: "Use a restricted key with only the access the bots need.", hint: "REST at /v1/... (e.g. GET /v1/customers?email=...). Writes take form fields: give body as a JSON object and Orgo sends it form encoded (nested objects and lists work)." },
-  { name: "STRIPE_API_KEY", label: "Stripe", where: "Stripe Dashboard, Developers, API keys", tip: "Use a restricted key with only the access the bots need.", hint: "REST at /v1/... (e.g. GET /v1/customers?email=...). Writes take form fields: give body as a JSON object and Orgo sends it form encoded (nested objects and lists work)." },
+  { name: "STRIPE_SECRET_KEY", label: "Stripe", where: "Stripe Dashboard, Developers, API keys", tip: "Use a restricted key with only the access the bots need.", hint: "REST at /v1/... (e.g. GET /v1/customers with query {\"email\": \"...\"}). Writes take form fields: give body as a JSON object and Orgo sends it form encoded (nested objects and lists work).", denied: STRIPE_KEYS },
+  { name: "STRIPE_API_KEY", label: "Stripe", where: "Stripe Dashboard, Developers, API keys", tip: "Use a restricted key with only the access the bots need.", hint: "REST at /v1/... (e.g. GET /v1/customers with query {\"email\": \"...\"}). Writes take form fields: give body as a JSON object and Orgo sends it form encoded (nested objects and lists work).", denied: STRIPE_KEYS },
   { name: "OPENAI_API_KEY", label: "OpenAI", where: "platform.openai.com, API keys", tip: "Make a project key with a spending limit.", hint: "REST at /v1/... (e.g. GET /v1/models), JSON bodies." },
-  { name: "OPENAI_ADMIN_KEY", label: "OpenAI admin", where: "platform.openai.com, Admin keys", tip: "Admin keys can change the organization. Prefer a project key unless the bots need usage or billing.", hint: "REST at /v1/organization/... (e.g. GET /v1/organization/usage/completions), JSON bodies." },
+  { name: "OPENAI_ADMIN_KEY", label: "OpenAI admin", where: "platform.openai.com, Admin keys", tip: "Admin keys can change the organization. Prefer a project key unless the bots need usage or billing.", hint: "REST at /v1/organization/... (e.g. GET /v1/organization/usage/completions), JSON bodies.", denied: /^\/v1\/organization\/(admin_api_keys|projects\/[^/]+\/(api_keys|service_accounts))/i },
   { name: "ANTHROPIC_API_KEY", label: "Anthropic", where: "console.anthropic.com, API keys", tip: "Make a key in a workspace with a spending limit.", hint: "REST at /v1/... (e.g. GET /v1/models), JSON bodies." },
   { name: "ANTHROPIC_ADMIN_KEY", label: "Anthropic admin", where: "console.anthropic.com, Admin keys", tip: "Admin keys can change the organization. Only add one if the bots need usage or cost reports.", hint: "REST at /v1/organizations/... (e.g. GET /v1/organizations/usage_report/messages), JSON bodies." },
   { name: "DEEPINFRA_API_KEY", label: "DeepInfra", where: "deepinfra.com, Dashboard, API keys", tip: "Make a separate key for the bots.", hint: "REST at /v1/... (e.g. GET /v1/openai/models), JSON bodies." },
-  { name: "LATITUDE_API_KEY", label: "Latitude.sh", where: "Latitude.sh dashboard, API keys", tip: "Use a read only key unless the bots must change servers.", hint: "REST at /... (e.g. GET /servers), JSON:API bodies." },
+  { name: "LATITUDE_API_KEY", label: "Latitude.sh", where: "Latitude.sh dashboard, API keys", tip: "Use a read only key unless the bots must change servers.", hint: "REST at /... (e.g. GET /servers), JSON:API bodies.", denied: /^\/auth\/api_keys/i },
   { name: "GITHUB_TOKEN", label: "GitHub", where: "GitHub, Settings, Developer settings, Fine-grained tokens", tip: "Use a fine-grained token limited to the repositories and permissions the bots need.", hint: "REST at /... (e.g. GET /repos/{owner}/{repo}/issues), JSON bodies." },
   { name: "DISCORD_BOT_TOKEN", label: "Discord", where: "Discord Developer Portal, your app, Bot, Token", tip: "Give the bot only the server permissions it needs.", hint: "REST at /... (e.g. GET /users/@me/guilds, POST /channels/{id}/messages), JSON bodies." },
   { name: "PLAIN_API_KEY", label: "Plain", where: "Plain, Settings, Machine users, API keys", tip: "Give the machine user only the permissions the bots need.", hint: "GraphQL: POST /graphql/v1 with body {\"query\": \"...\", \"variables\": {...}}. Queries are POST too, so they ask first." },
   { name: "ATTIO_API_KEY", label: "Attio", where: "Attio, Workspace settings, Developers, Access tokens", tip: "Give the token read scopes only, unless the bots must change records.", hint: "REST at /v2/... (e.g. POST /v2/objects/people/records/query to search), JSON bodies." },
   { name: "LINEAR_API_KEY", label: "Linear", where: "Linear, Settings, Security and access, Personal API keys", tip: "Make a key with read access unless the bots must change issues.", hint: "GraphQL: POST /graphql with body {\"query\": \"...\", \"variables\": {...}}. Queries are POST too, so they ask first." },
   { name: "NOTION_API_KEY", label: "Notion", where: "notion.so/my-integrations, then share pages with the integration", tip: "Share only the pages the bots need with the integration.", hint: "REST at /v1/... (e.g. POST /v1/search, GET /v1/pages/{id}), JSON bodies." },
-  { name: "SLACK_BOT_TOKEN", label: "Slack", where: "api.slack.com/apps, your app, OAuth and Permissions", tip: "Give the app only the scopes the bots need.", hint: "Web API at /{method} (e.g. GET /conversations.list, POST /chat.postMessage), JSON bodies." },
-  { name: "RESEND_API_KEY", label: "Resend", where: "resend.com, API Keys", tip: "Use a sending access key for one domain.", hint: "REST at /... (e.g. GET /emails/{id}, POST /emails), JSON bodies." },
-  { name: "POSTHOG_PERSONAL_API_KEY", label: "PostHog", where: "PostHog, Settings, Personal API keys", tip: "Give the key read scopes for one project.", hint: "REST at /api/... (e.g. GET /api/projects/{id}/insights/, POST /api/projects/{id}/query/), JSON bodies." },
-  { name: "MERCURY_API_KEY", label: "Mercury", where: "Mercury, Settings, API tokens", tip: "Use a read only token.", readOnly: true, hint: "Read only REST at /... (e.g. GET /accounts, GET /account/{id}/transactions)." },
-  { name: "RIPPLING_API_KEY", label: "Rippling", where: "Rippling, API tokens", tip: "Give the token read access only.", readOnly: true, hint: "Read only REST at /platform/api/... (e.g. GET /platform/api/employees)." },
-  { name: "VANTA_API_TOKEN", label: "Vanta", where: "Vanta, Settings, Developer console", tip: "Give the app read scopes only.", readOnly: true, hint: "Read only REST at /v1/... (e.g. GET /v1/tests)." },
+  { name: "SLACK_BOT_TOKEN", label: "Slack", where: "api.slack.com/apps, your app, OAuth and Permissions", tip: "Give the app only the scopes the bots need.", hint: "Web API at /{method} (e.g. GET /conversations.list, POST /chat.postMessage), JSON bodies. Only a GET of a list, info, history or replies method runs at once; any other call asks first.", getReads: SLACK_READS },
+  { name: "RESEND_API_KEY", label: "Resend", where: "resend.com, API Keys", tip: "Use a sending access key for one domain.", hint: "REST at /... (e.g. GET /emails/{id}, POST /emails), JSON bodies.", denied: /^\/api-keys/i },
+  { name: "POSTHOG_PERSONAL_API_KEY", label: "PostHog", where: "PostHog, Settings, Personal API keys", tip: "Give the key read scopes for one project.", hint: "REST at /api/... (e.g. GET /api/projects/{id}/insights/, POST /api/projects/{id}/query/), JSON bodies.", denied: /personal_api_keys/i },
+  { name: "MERCURY_API_KEY", label: "Mercury", where: "Mercury, Settings, API tokens", tip: "Use a read only token.", readOnly: true, hint: "Read only REST at /... (e.g. GET /accounts, GET /account/{id}/transactions).", chatOnly: true },
+  { name: "RIPPLING_API_KEY", label: "Rippling", where: "Rippling, API tokens", tip: "Give the token read access only.", readOnly: true, hint: "Read only REST at /platform/api/... (e.g. GET /platform/api/employees).", chatOnly: true },
+  { name: "VANTA_API_TOKEN", label: "Vanta", where: "Vanta, Settings, Developer console", tip: "Give the app read scopes only.", readOnly: true, hint: "Read only REST at /v1/... (e.g. GET /v1/tests).", chatOnly: true },
   { name: "X_BEARER_TOKEN", label: "X", where: "developer.x.com, your app, Keys and tokens, Bearer token", tip: "An app bearer token reads public data only.", readOnly: true, hint: "Read only REST at /2/... (e.g. GET /2/users/by/username/{name})." },
 ];
 
@@ -234,7 +245,7 @@ export function callApiTool(keys: KeyProvider[], { getOnly = false } = {}) {
       properties: {
         key: { type: "string", enum: keys.map((k) => k.name) },
         method: { type: "string", enum: getOnly ? ["GET"] : [...KEY_METHODS] },
-        path: { type: "string", description: "The path after the service's address, starting with /, e.g. \"/v1/customers\"." },
+        path: { type: "string", description: "The path after the service's address, starting with /, e.g. \"/v1/customers\". No ?: the query goes in query." },
         query: { type: ["string", "null"], description: "The query as a JSON object in a string, e.g. \"{\\\"limit\\\": 10}\", or null." },
         body: { type: ["string", "null"], description: "The body as JSON in a string, or null (GET has none)." },
       },
@@ -244,12 +255,19 @@ export function callApiTool(keys: KeyProvider[], { getOnly = false } = {}) {
 
 type CallApiArgs = { key?: unknown; method?: unknown; path?: unknown; query?: unknown; body?: unknown };
 
-/** What call_api did, for the turn: words for the model, a line for the chat, and the provider's own text (for the web rule). */
-export type CallApiDone = { text: string; did?: string; brought?: string };
+/**
+ * What call_api did, for the turn: words for the model, a line for the chat, and the provider's own text (for
+ * the web rule). `failed`: the call went out but didn't work (Orgo didn't send it, or the service said no with
+ * a 4xx or 5xx), with what was called and why, for a red note in the chat.
+ */
+export type CallApiDone = { text: string; did?: string; brought?: string; failed?: { did: string; why: string } };
+
+/** The most of a write's query and body the approval card shows. A longer one is refused: the user approves all of what's sent, or none. */
+const SHOW_CAP = 4000;
 
 /**
  * call_api. The key must be one the bot may use (Bot.keys) and set in the vault; a read-only service takes
- * GET only. GET runs at once. Anything else waits for the user's yes every time (askOwner, the app approval
+ * GET only. GET runs at once (for Slack, only a GET of a read method: its others can post and delete). Anything else waits for the user's yes every time (askOwner, the app approval
  * card), whatever "Just do it" says: an email or a text from outside can ask for a refund, and the bot can't
  * tell who's really asking. `onAsk` lets a chat turn go on while the user decides; without it (`getOnly`,
  * a task) only GET is allowed.
@@ -270,10 +288,15 @@ export async function callApi(
   if (!usable.some((k) => k.name === name)) return { text: `The ${p.label} key isn't set in ${owner}'s vault. ${owner} can add it in Keys.` };
   const method = String(a.method ?? "").toUpperCase() as KeyMethod;
   if (!KEY_METHODS.includes(method)) return { text: `${String(a.method)} isn't a method call_api knows: use GET, POST, PUT, PATCH or DELETE.` };
-  const path = String(a.path ?? "").trim();
+  // A query written into the path ("/v1/customers?email=..."; a "more pages" link) goes in the query: Orgo takes it only there.
+  const [path, inPath = ""] = String(a.path ?? "").trim().split(/\?([\s\S]*)/);
   if (!path.startsWith("/") || /^\/\//.test(path) || /\s/.test(path)) return { text: "The path must start with / and be the part after the service's address, with no spaces." };
   if (p.readOnly && method !== "GET") return { text: `${p.label} is read only in Bops: only GET.` };
-  if (!onAsk && method !== "GET") return { text: "Only GET here. Ask in the chat for anything that changes something." };
+  if (p.denied?.test(path)) return { text: `Bops doesn't call ${path} in ${p.label}: it makes a new key, and keys never reach you.` };
+  if (!onAsk && p.chatOnly) return { text: `${p.label} is for the chat only, not a task.` };
+  // Slack's GETs can post and delete: only its read methods count as a GET here.
+  const asks = method !== "GET" || (!!p.getReads && !p.getReads.test(path));
+  if (!onAsk && asks) return { text: "Only GET here, and only reads. Ask in the chat for anything that changes something." };
   const parse = (v: unknown, what: string): { ok: true; v: unknown } | { ok: false; why: string } => {
     if (v === null || v === undefined || v === "") return { ok: true, v: null };
     if (typeof v !== "string") return { ok: true, v };
@@ -286,20 +309,25 @@ export async function callApi(
   const q = parse(a.query, "query");
   if (!q.ok) return { text: q.why };
   if (q.v !== null && (typeof q.v !== "object" || Array.isArray(q.v))) return { text: "The query must be a JSON object, or null." };
-  const body = parse(a.body, "body");
+  if (inPath) q.v = { ...Object.fromEntries(new URLSearchParams(inPath)), ...(q.v as Record<string, unknown> | null) };
+  // A GET has no body: Orgo refuses one, so whatever the model put there is dropped.
+  const body = method === "GET" ? ({ ok: true, v: null } as const) : parse(a.body, "body");
   if (!body.ok) return { text: body.why };
   const shown = path.length > 120 ? `${path.slice(0, 120)}…` : path;
   const did = `Called ${p.label} ${method} ${shown}`;
   const run = async (): Promise<CallApiDone> => {
     try {
       const r = await callKey({ name, method, path, query: q.v as Record<string, unknown> | null, body: body.v });
+      // Orgo sent it, but the service said no (a refund already made, a page not found): not done.
+      if (r.status >= 400) return { text: answerForBot(p.label, r), brought: answerTextOf(r), failed: { did, why: `${p.label} answered ${r.status}` } };
       return { text: answerForBot(p.label, r), did, brought: answerTextOf(r) };
     } catch (e) {
-      return { text: `Failed: ${(e as Error).message}` };
+      return { text: `Failed: ${(e as Error).message}`, failed: { did, why: (e as Error).message } };
     }
   };
-  if (method === "GET") return run();
-  const detail = [q.v ? `query: ${JSON.stringify(q.v)}` : "", body.v !== null ? `body: ${typeof body.v === "string" ? body.v : JSON.stringify(body.v, null, 1)}` : ""].filter(Boolean).join("\n").slice(0, 1500);
+  if (!asks) return run();
+  const detail = [q.v ? `query: ${JSON.stringify(q.v)}` : "", body.v !== null ? `body: ${typeof body.v === "string" ? body.v : JSON.stringify(body.v, null, 1)}` : ""].filter(Boolean).join("\n");
+  if (detail.length > SHOW_CAP) return { text: `That's too long to show ${owner} for a yes (${detail.length} characters, at most ${SHOW_CAP}). Send a shorter query and body.` };
   const ask = askOwner({ botId, app: "api", action: `${name} ${method} ${path}`, title: `${method} ${shown} in ${p.label}`, detail, ...where }).then((yes) =>
     yes ? run() : { text: `Not approved: ${owner} said no. Don't do it.` },
   );

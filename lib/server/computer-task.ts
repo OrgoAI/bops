@@ -91,8 +91,9 @@ export async function computerTurn(t: ComputerTurn): Promise<string> {
   // Not the CRM for a task someone outside Bops started (Session.fromOutside), as for a chat turn of theirs.
   // read_procedure only when the bot has procedures to read (sessions.ts lists them in its instructions).
   // call_api with the user's keys (keys.ts) reads only (GET): anything that changes something is asked for in the chat.
-  // Not for a task someone outside Bops started, like the CRM.
-  const keyed = s.fromOutside ? [] : await usableKeys(b);
+  // Not for a task someone outside Bops started, like the CRM. Not bank, payroll or compliance keys (chatOnly):
+  // the task's browser and shell can reach any site, so a page could have it type what they answer anywhere.
+  const keyed = s.fromOutside ? [] : (await usableKeys(b)).filter((k) => !k.chatOnly);
   const tools = [
     { type: "computer" },
     { type: "web_search" },

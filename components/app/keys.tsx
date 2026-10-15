@@ -46,9 +46,6 @@ function useKeys() {
   return { info, failed, retry: () => read(true) };
 }
 
-/** The vault's own way with names (orgo-web /api/secrets): "stripe-secret-key" is STRIPE_SECRET_KEY. */
-const vaultName = (s: string) => s.toUpperCase().replace(/-/g, "_").replace(/[^A-Z0-9_]/g, "");
-
 /** "Oct 15", as Orgo's Secrets shows when a secret was set. */
 const setOn = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : null);
 
@@ -163,7 +160,7 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
     <div ref={ref} className="flex scroll-mt-4 flex-col gap-2 px-[22px] pt-4">
       <div className="flex flex-col gap-0.5">
         <span className="text-[13px] font-semibold">Keys</span>
-        <span className="text-[12px] leading-4 text-[#6B6B6B]">Saved in your Orgo vault. Bots use them through Orgo and never see them.</span>
+        <span className="text-[12px] leading-4 text-[#6B6B6B]">Saved in your Orgo vault, the same keys as Orgo&apos;s Settings, Secrets. Bots use them through Orgo and never see them.</span>
       </div>
       <div className="flex flex-col rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]">{body}</div>
     </div>
@@ -191,6 +188,9 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
         setBusy(false);
         return;
       }
+      // Done: the list reads again and drops this row. If that read fails, the row isn't stuck on Removing.
+      setBusy(false);
+      setSure(false);
       keysChanged();
     } catch {
       setError("Couldn't reach Bops. Try again.");
@@ -255,11 +255,11 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
   );
 }
 
-const OTHER = "__other__";
+/** Orgo's computers run their agents on these keys from the same vault (orgo-web lib/computer-agent). */
+const ORGO_USES: Record<string, string> = { ANTHROPIC_API_KEY: "Anthropic", OPENAI_API_KEY: "OpenAI" };
 
 /**
- * Add a key: a service from the list Bops can call, or its vault name typed (as in Orgo's Secrets), the
- * key pasted into a password field, and the bots that may use it. `replace`: a new value for a saved key,
+ * Add a key: a service from the list Bops can call (by its vault name, as in Orgo's Secrets), the key pasted into a password field, and the bots that may use it. `replace`: a new value for a saved key,
  * which keeps who may use it. The value is cleared once Orgo has it, and is never shown.
  */
 function AddKey({
@@ -279,15 +279,15 @@ function AddKey({
   onSaved: (label: string) => void;
   onCancel: () => void;
 }) {
-  // One entry a service in the list (Stripe takes two names; the second is typed under Other name).
-  const services = info.providers.filter((p, i, all) => all.findIndex((x) => x.label === p.label) === i);
-  const [pick, setPick] = useState(replace?.name ?? services.find((p) => !info.keys.some((k) => k.name === p.name))?.name ?? services[0]?.name ?? OTHER);
-  const [typed, setTyped] = useState("");
+  // Every name Orgo can call. A service with two (Stripe) shows each one's name.
+  const services = info.providers;
+  const twice = (label: string) => services.filter((x) => x.label === label).length > 1;
+  const [pick, setPick] = useState(replace?.name ?? services.find((p) => !info.keys.some((k) => k.name === p.name))?.name ?? services[0]?.name ?? "");
   const [value, setValue] = useState("");
   const [bots, setBots] = useState(startBots);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const name = replace?.name ?? (pick === OTHER ? typed : pick);
+  const name = replace?.name ?? pick;
   const p = info.providers.find((x) => x.name === name);
   const isSaved = !replace && info.keys.some((k) => k.name === name);
   const canSave = !!p && !!value.trim() && !busy;
@@ -344,32 +344,18 @@ function AddKey({
               {services.map((s) => (
                 <option key={s.name} value={s.name}>
                   {s.label}
+                  {twice(s.label) ? ` (${s.name})` : ""}
                   {info.keys.some((k) => k.name === s.name) ? " (saved)" : ""}
                 </option>
               ))}
-              <option value={OTHER}>Other name…</option>
             </select>
             <svg width="10" height="10" viewBox="0 0 12 12" className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2" aria-hidden>
               <path d="M3 4.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </span>
-          {pick === OTHER ? (
-            <input
-              value={typed}
-              onChange={(e) => setTyped(vaultName(e.target.value))}
-              placeholder="STRIPE_SECRET_KEY"
-              aria-label="Name in your vault"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              autoFocus
-              className={`${field} w-[230px] font-mono text-[12.5px]`}
-            />
-          ) : (
-            <span data-tip="Its name in your Orgo vault" className="font-mono text-[11.5px] text-[#6B6B6B]">
-              {name}
-            </span>
-          )}
+          <span data-tip="Its name in your Orgo vault" className="font-mono text-[11.5px] text-[#6B6B6B]">
+            {name}
+          </span>
         </div>
       )}
       {p ? (
@@ -377,10 +363,9 @@ function AddKey({
           {p.tip}
           {p.readOnly ? ` Orgo lets bots only read from ${p.label}.` : ""} <span className="text-[#9A9A98]">Get one in {p.where}.</span>
           {isSaved && <span className="text-[#9A9A98]"> Saving replaces the one in your vault.</span>}
+          {ORGO_USES[p.name] && <span className="text-[#9A9A98]"> Orgo computers that use your {ORGO_USES[p.name]} key use this one too.</span>}
         </span>
-      ) : (
-        name && <span className="text-[12px] leading-[17px] text-[#B42318]">Bops can&apos;t call {name} yet. Pick a service from the list.</span>
-      )}
+      ) : null}
       <input
         type="password"
         value={value}
@@ -389,7 +374,7 @@ function AddKey({
         aria-label="Key"
         autoComplete="off"
         spellCheck={false}
-        autoFocus={!!replace || pick !== OTHER}
+        autoFocus
         className={`${field} w-full font-mono text-[12.5px]`}
       />
       {!replace && !!team.length && (
@@ -422,10 +407,21 @@ function AddKey({
 
 /** On a bot's profile: the keys in the vault, on or off for this bot, and the way to Settings to add one. */
 export function BotKeys({ bot: b, onAdd, className }: { bot: Bot; onAdd: () => void; className: string }) {
-  const { info } = useKeys();
+  const { info, failed, retry } = useKeys();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  if (!info) return null;
+  if (!info)
+    return failed ? (
+      <div className={`flex w-full flex-col rounded-2xl ${className}`}>
+        <span className="px-4 pb-1 pt-[11px] text-[13px] font-semibold leading-4">Keys</span>
+        <span role="alert" className="flex flex-wrap items-center gap-x-3 px-4 pb-3 pt-0.5 text-[12px] leading-4 text-[#6B6B6B]">
+          {failed}
+          <button onClick={retry} className="font-medium text-ink underline-offset-2 hover:underline">
+            Try again
+          </button>
+        </span>
+      </div>
+    ) : null;
   const toggle = async (name: string, allowed: boolean) => {
     setBusy(name);
     setError(await grant(name, b.id, allowed));

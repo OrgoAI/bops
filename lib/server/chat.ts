@@ -1187,8 +1187,9 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     const relayed = !!opts.emailBack || !!lastAsk?.via;
     // Whether a new bot could have a computer of its own on the user's Orgo plan, so the main bot doesn't promise one.
     // Read quickly or not at all: createBot checks again anyway. Not asked when the bots work on this Mac.
-    // The user's API keys it may call (keys.ts): only ones set in their Orgo vault.
-    const keyed = await usableKeys(b);
+    // The user's API keys it may call (keys.ts): only ones set in their Orgo vault. None on a turn someone
+    // outside Bops started: a GET runs at once, and would read the user's Stripe or bank on a stranger's say.
+    const keyed = opts.outside ? [] : await usableKeys(b);
     const noOwnRoom =
       b.isMain && !bg && getState().host !== "mac" ? await Promise.race([noOwnComputer(workspaceOf(b)), new Promise<null>((r) => setTimeout(() => r(null), 1500))]) : null;
     const all = [
@@ -1274,7 +1275,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           ]
         : []),
       ...APP_TOOLS(b),
-      ...(keyed.length ? [callApiTool(keyed)] : []),
+      ...(opts.outside || !keyed.length ? [] : [callApiTool(keyed)]),
       // The web, right in the chat: OpenAI's own search, and one page read here through Bops' checks. Not on a
       // turn someone else started: a page fetched for them could carry the user's data out in its address.
       ...(opts.outside
@@ -1647,11 +1648,13 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
             .then((r) => {
               if (saidNo(r.text)) return addMessage({ chatId, role: "system", text: `${b.name} didn't call it: you said no` });
               const ok = !!r.did;
-              addMessage({ chatId, role: "system", text: ok ? `${b.name}: ${did}` : `${b.name} couldn't call it: ${r.text.replace(/^Failed:\s*/, "").slice(0, 160)}`, appResult: { action: did.replace(/^Called /, ""), ok, output: r.text } });
+              addMessage({ chatId, role: "system", text: ok ? `${b.name}: ${did}` : `${b.name} couldn't call it: ${(r.failed?.why ?? r.text.replace(/^Failed:\s*/, "")).slice(0, 160)}`, appResult: { action: did.replace(/^Called /, ""), ok, output: r.text } });
             }),
         )
           .then((r) => {
             if (r.brought !== undefined) bring(r.brought);
+            // A GET that went out and didn't work: a red note, like a write's.
+            if (r.failed) addMessage({ chatId, role: "system", text: `${b.name} couldn't call it: ${r.failed.why.slice(0, 160)}`, appResult: { action: r.failed.did.replace(/^Called /, ""), ok: false, output: r.text } });
             if (r.did) {
               called.push(r.did);
               notes.push(r.did);
