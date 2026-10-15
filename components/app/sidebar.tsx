@@ -9,7 +9,8 @@ import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
 import { Mascot } from "./mascot";
-import { MemorySections, type MemoryOpen } from "./memory-categories";
+import { KnowledgeIcon, type MemoryOpen } from "./memory-categories";
+import { AppLogo } from "./apps";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
 import { useSetupNeedsYou } from "./setup";
 import { arrived, DeleteX, forgetShown, rememberShown, usePop, useRise } from "./side-group";
@@ -52,7 +53,7 @@ export function Sidebar({
   onMembers: () => void;
   /** Show a watched screen or Mac window (a watched page: its row on the Routines page). */
   onOpenWatch: (watch: Watch) => void;
-  /** Open a category of what Bops knows on the right, at one of its items (memory-categories.tsx). */
+  /** Open Knowledge on the right, on a kind, an item or a search (memory-categories.tsx). */
   onOpenMemory: (open: MemoryOpen) => void;
   /** Open Routines on the right, at a section and one of its rows (autopilot.tsx). */
   onOpenAutopilot: (open: AutopilotOpen) => void;
@@ -134,6 +135,18 @@ export function Sidebar({
             ))}
         </div>
 
+        {/* A search looks in Knowledge too: one row that opens it with the search filled in. */}
+        {!!q && categoriesOpen(state) && (
+          <button onClick={() => onOpenMemory({ query: query ?? "" })} className="mt-1 flex h-[38px] items-center gap-2.5 rounded-[10px] px-2.5 text-left text-[14px] leading-[18px] text-[#3A3A38] hover:bg-black/[0.03]">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[#F2F2F0] text-[#3A3A38]">
+              <KnowledgeIcon size={13} />
+            </span>
+            <span className="min-w-0 flex-1 truncate">
+              Search knowledge for &ldquo;{query?.trim()}&rdquo;
+            </span>
+          </button>
+        )}
+
         {threads.length > 0 && (
           <div className="flex flex-col pt-4">
             <div className="px-2.5 pb-1.5 text-[13px] font-medium leading-4 text-[#9A9A98]">Threads</div>
@@ -145,38 +158,55 @@ export function Sidebar({
       </div>
 
       {/*
-        Pinned under the chats, together: Routines (what the bots do on their own: schedules and monitors;
-        every account), Skills (how they do a kind of job, and their apps) and below them Orbit (what Bops knows, categories that fill themselves from
-        memory; every signed-in account, lib/memory-categories.ts), each with a page on the right. Half the
-        sidebar at most between them, scrolling on its own; gone while a search matches nothing in either.
+        Pinned under the chats: Skills (how the bots do a kind of job, and their apps), with a page on the right.
+        Routines (Autopilot) and Knowledge open from the footer.
       */}
-      <div className="-mx-2.5 max-h-[50%] shrink-0 overflow-y-auto border-t border-[#ECECEA] px-2.5 empty:hidden">
-        <AutopilotSections state={state} query={query ?? ""} onOpen={onOpenAutopilot} onOpenWatch={onOpenWatch} />
-        {!query?.trim() && <SkillsSideRow state={state} onOpen={onOpenSkills} />}
-        {categoriesOpen(state) && <MemorySections state={state} query={query ?? ""} onOpen={onOpenMemory} />}
-      </div>
-
+      {!query?.trim() && (
+        <div className="-mx-2.5 shrink-0 border-t border-[#ECECEA] px-2.5 empty:hidden">
+          <SkillsSideRow state={state} onOpen={onOpenSkills} />
+        </div>
+      )}
       {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
       <UpdateNotice />
-      <div className="flex items-center gap-2.5 p-1 pt-3">
+      {/* You, your apps and logins (the Vault, with the apps you've connected), and Knowledge. New bots are the + at the top. */}
+      <div className="flex items-center gap-1.5 p-1 pt-3">
         <YouMenu state={state} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />
         <MembersButton state={state} onClick={onMembers} />
         <button
-          onClick={onCompose}
-          className="flex h-10 flex-1 items-center justify-center rounded-full bg-white text-[14px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
-        >
-          + New bot
-        </button>
-        <button
           onClick={onVault}
-          title="Vault: your apps and logins, and which bots can use them"
-          aria-label="Vault"
-          className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-ink shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
+          title="Your apps and logins, and which bots can use them"
+          className="flex h-10 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full bg-white px-2.5 text-[13.5px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
         >
-          <KeyIcon />
+          <span className="truncate">Apps &amp; logins</span>
+          <AppStack state={state} />
         </button>
+        {categoriesOpen(state) && (
+          <button
+            onClick={() => onOpenMemory({})}
+            title="Knowledge: what your bots know, learned as you chat"
+            aria-label="Knowledge"
+            className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
+          >
+            <KnowledgeIcon size={16} />
+          </button>
+        )}
       </div>
     </aside>
+  );
+}
+
+/** The apps you've connected, as up to three overlapping logos (none yet: the Vault's key). */
+function AppStack({ state }: { state: AppState }) {
+  const apps = [...new Map((state.accounts ?? []).filter((a) => a.status === "active").map((a) => [a.app, a])).values()].slice(0, 3);
+  if (!apps.length) return <KeyIcon />;
+  return (
+    <span className="flex shrink-0 items-center">
+      {apps.map((a, i) => (
+        <span key={a.app} className={`flex rounded-[5px] bg-white shadow-[0_0_0_1.5px_#FFFFFF] ${i ? "-ml-2" : ""}`}>
+          <AppLogo app={a.app} name={a.appName} size={18} />
+        </span>
+      ))}
+    </span>
   );
 }
 

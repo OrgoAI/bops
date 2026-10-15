@@ -1,4 +1,6 @@
 import "server-only";
+import { LIGHT } from "./routing";
+import { setting } from "./models";
 import { Honcho, Session as HonchoSessionRef, type Peer, type Session as HonchoSession } from "@honcho-ai/sdk";
 import { openaiClient } from "./openai-client";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -28,7 +30,8 @@ import { recordTokens, usageTags } from "./usage";
  */
 
 const on = () => (cloudOn() ? !!cloudSessionNow()?.honcho : !!process.env.HONCHO_API_KEY);
-const MODEL = process.env.BOPS_CHAT_MODEL ?? process.env.BOPS_SAM_MODEL ?? "gpt-6.1-sol";
+/** Facts out of a message: a small job of a fixed shape, for Luna (routing.ts LIGHT). */
+const MODEL = () => setting(LIGHT(), "BOPS_MEMORY_MODEL");
 
 /** Which Honcho workspace (bank) a Bops workspace's memory lives in, and the user's peer in it. */
 export type Binding = { bank: string; peer: string };
@@ -439,7 +442,7 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
     saveToMemory(ws, "chat", chatId, [{ who: "owner", text: said }], metadata);
     if (said.trim().length < 8 || (yes(a?.worth) ?? 0) < 0.6) return;
     const res = await openai.responses.create({
-      model: MODEL,
+      model: MODEL(),
       reasoning: { effort: "low" },
       instructions: `${owner} told their assistant something about themselves. Write each lasting fact in it as one plain sentence in the third person, starting with "${owner}" ("${owner} is vegetarian.", "${owner}'s sister is Ana."). One per line, at most three. Only what they said, nothing guessed. If there's no lasting fact, write NONE.`,
       input: said.slice(0, 2000),
@@ -818,8 +821,10 @@ export async function memoryFor(botId: string, opts: { q?: string; mine?: boolea
 }
 
 /** Ask memory a question, with what it's based on: the closest facts and where each was learned. */
-export async function askMemory(botId: string, question: string) {
-  const ws = wsOf(botId);
+export const askMemory = (botId: string, question: string) => askWorkspace(wsOf(botId), question);
+
+/** The same for a workspace's memory (the Knowledge page). */
+export async function askWorkspace(ws: string, question: string) {
   const b = bindingOf(ws);
   const [answer, near] = await Promise.all([recall(ws, question), (async () => (await peer(b)).conclusions.query(question.slice(0, 300), 8))().catch(() => [])]);
   // Only facts that are about what was asked (the nearest ones can still be off topic).

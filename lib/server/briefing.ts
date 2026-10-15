@@ -2,6 +2,7 @@ import "server-only";
 import { BLOCKER_LABEL, DISPLAYS, isScreenWatch, live, workspaceOf, type Session } from "@/lib/types";
 import { fullAccessOn } from "./full-access";
 import { sameComputer, screenPages, workComputer } from "./screens";
+import { ago, holdsScreen, LEFT_FOR_MS, screenNo } from "@/lib/screens";
 import { bot, getState, ownerName } from "./store";
 
 /**
@@ -31,6 +32,9 @@ export async function computerBriefing(botId: string, opts: { thread?: string } 
     const at = s.helperOrder?.indexOf(d) ?? -1;
     return at >= 0 ? s.helperNames?.[at] : undefined;
   };
+  // A thread, as this bot says it: itself, one of its own, or another bot's.
+  const whose = (owner: string, id: string, title: string) =>
+    owner === botId ? (opts.thread === id ? "this thread (you)" : `your thread "${title}"`) : `${bot(owner)?.name ?? "another bot"}'s thread "${title}"`;
   // What's open on each screen, read from its browser (quick, and only where Bops can reach it).
   const pages = await screenPages(b);
   const pageText = (i: number) => {
@@ -66,7 +70,13 @@ export async function computerBriefing(botId: string, opts: { thread?: string } 
     const w = state.watches?.find((x) => isScreenWatch(x) && sameComputer(x.botId, botId) && x.display === d);
     if (w)
       return `Screen ${n}: watched for ${owner} · ${w.site}, for ${w.lookFor}${w.away ? " · paused: it shows something else right now" : ""}${w.alert ? ` · waiting for ${owner}: "${w.alert.text}"` : ""}. Leave it on ${w.site}; don't use it for other work.`;
-    return `Screen ${n}: free · ${pageText(i)} is open.`;
+    // Kept for a thread waiting on the user (lib/screens.ts holdsScreen): its answer picks it up here.
+    const holder = state.sessions.find((x) => holdsScreen(x) && x.lastDisplay === d && sameComputer(x.botId, botId));
+    if (holder) return `Screen ${n}: kept for ${whose(holder.botId, holder.id, holder.title)} while it waits on ${owner}; don't use it for other work · showing ${pageText(i)}.`;
+    // Who left it, and on what: a thread picked up again carries on from that page.
+    const left = state.screenLog?.[`${c.id}:${d}`];
+    const recent = left && Date.now() - left.at < LEFT_FOR_MS ? `, left by ${whose(left.botId, left.sessionId, left.title)} ${ago(left.at)}` : "";
+    return `Screen ${n}: free · ${pageText(i)} is open${recent}.`;
   });
 
   const waiting = [
@@ -133,7 +143,10 @@ export function teamBriefing(mainId: string) {
   const lines = others.map((b) => {
     const mine = state.sessions.filter((s) => s.botId === b.id);
     const running = mine.filter(live);
-    const doing = running.map((s) => `"${s.title}" (${s.status === "queued" ? "up next" : (s.activity ?? "working")}, ${where(s)}${s.blocker ? `, stuck: needs ${owner}, ${BLOCKER_LABEL[s.blocker]}` : ""})`);
+    // Where each runs: its computer's screen n (the number the user sees in the app), or the Mac.
+    const shared = workComputer(b).id !== b.id;
+    const on = (s: Session) => (s.runsOn === "mac" || s.display === undefined ? where(s) : `on ${shared ? "your computer's" : "its computer's"} screen ${screenNo(s.display)}`);
+    const doing = running.map((s) => `"${s.title}" (${s.status === "queued" ? "up next" : (s.activity ?? "working")}, ${on(s)}${s.blocker ? `, stuck: needs ${owner}, ${BLOCKER_LABEL[s.blocker]}` : ""})`);
     const alerts = (state.watches ?? []).filter((w) => w.botId === b.id && w.alert).map((w) => `heads-up on ${w.site}: "${w.alert!.text}"`);
     const watching = (state.watches ?? []).filter((w) => w.botId === b.id).map((w) => w.site);
     const done = mine

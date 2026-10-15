@@ -67,7 +67,7 @@ const item = (id, category, title, extra = {}) => ({ id, category, key: title.to
 let items = [item("aaaaaaaaaa", "people", "Priya Shah"), item("bbbbbbbbbb", "people", "Dana Lee"), item("cccccccccc", "todos", "Send receipts")];
 const snap = () => ({ on: true, ws: "w1", rev: Math.random(), items: items.map((i) => ({ ...i })), syncing: false, syncedAt: Date.now() });
 
-const { orbitStore, SidebarSections, MemoryPage, groupsOf } = await import(pathToFileURL(`${root}/components/app/memory-categories.tsx`).href);
+const { orbitStore, MemoryPage, groupsOf } = await import(pathToFileURL(`${root}/components/app/memory-categories.tsx`).href);
 const { issueStore, issueOrder, isOpen } = await import(pathToFileURL(`${root}/components/app/orbit-issues.tsx`).href);
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { createElement: h } = await import("react");
@@ -270,40 +270,25 @@ stopIssues();
 const noop = () => {};
 const text = (html) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 
-await test("sidebar: Issues first with its open count, its rows, then the categories", async () => {
-  const s = { on: true, ws: "w1", items: [item("aaaaaaaaaa", "people", "Priya Shah")], syncing: false };
-  const html = renderToStaticMarkup(h(SidebarSections, { ws: "w1", snap: s, issues: [issue("issue-1", { customer: { name: "Acme" } }), issue("issue-2", { status: "done" })], onOpen: noop }));
-  const t = text(html);
-  assert.ok(t.indexOf("Issues") < t.indexOf("People"), "Issues comes first");
-  assert.match(t, /Issues 1 /);
-  assert.match(t, /Issue issue-1 · Acme/);
-  assert.ok(!t.includes("Issue issue-2"), "done issues aren't in the sidebar");
-});
-
-await test("sidebar: blank Issues says how they come", async () => {
-  const s = { on: true, ws: "w1", items: [item("aaaaaaaaaa", "people", "Priya Shah")], syncing: false };
-  const t = text(renderToStaticMarkup(h(SidebarSections, { ws: "w1", snap: s, issues: [], onOpen: noop })));
-  assert.match(t, /Issues show up here when a routine or a bot opens one/);
-  assert.match(t, /Fills in as you chat/);
-});
-
-await test("sidebar search: issues match by customer", async () => {
-  const s = { on: true, ws: "w1", items: [], syncing: false };
-  const t = text(renderToStaticMarkup(h(SidebarSections, { ws: "w1", snap: s, issues: [issue("issue-1", { customer: { name: "Acme" } })], query: "acme", onOpen: noop })));
-  assert.match(t, /Issue issue-1/);
-  assert.ok(!t.includes("People"));
-});
-
 const forgetting = { undo: null, error: null, forget: noop, undoForget: noop, dismiss: noop, preview: async () => [] };
-await test("a category's page: Issues chip first, Select, every item; Undo once something is forgotten", async () => {
+await test("a kind's page: All, then Issues with its open count, then the kinds; Select, every item; Undo once something is forgotten", async () => {
   const s = { on: true, ws: "w1", items: [item("aaaaaaaaaa", "people", "Priya Shah")], syncing: false };
   let t = text(renderToStaticMarkup(h(MemoryPage, { snap: s, act: async () => null, forgetting, issues: 3, category: "people", onCategory: noop, onClose: noop })));
-  assert.match(t, /Issues 3 People 1/);
+  assert.match(t, /All 1 Issues 3 People 1/);
   assert.match(t, /Select/);
   assert.match(t, /Priya Shah/);
   assert.ok(!t.includes("Undo"));
   t = text(renderToStaticMarkup(h(MemoryPage, { snap: s, act: async () => null, forgetting: { ...forgetting, undo: { label: "Forgot Dana Lee", ids: ["x"] } }, issues: 3, category: "people", onCategory: noop, onClose: noop })));
   assert.match(t, /Forgot Dana Lee Undo/);
+});
+
+await test("All: every kind on one page, Issues still a chip", async () => {
+  const s = { on: true, ws: "w1", items: [item("aaaaaaaaaa", "people", "Priya Shah"), item("bbbbbbbbbb", "todos", "Send the receipts")], syncing: false };
+  const t = text(renderToStaticMarkup(h(MemoryPage, { snap: s, act: async () => null, forgetting, issues: 0, category: "all", onCategory: noop, onClose: noop })));
+  assert.match(t, /All 2 Issues 0 People 1/);
+  assert.match(t, /Priya Shah/);
+  assert.match(t, /Send the receipts/);
+  assert.match(t, /Select/);
 });
 
 await test("groupsOf still orders a category", async () => {

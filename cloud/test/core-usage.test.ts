@@ -41,12 +41,14 @@ before(async () => {
   orgo = await fakeOrgo();
   openai = await fakeProvider(async (g, res) => {
     if (g.method === "POST" && g.path === "/v1/responses") {
-      const asked = (g.json ?? {}) as { input?: unknown; stream?: unknown };
+      const asked = (g.json ?? {}) as { input?: unknown; stream?: unknown; service_tier?: unknown };
       const id = `resp_${tag}_${++n}`;
       const response = {
         id,
         object: "response",
         model: "gpt-6.1-sol",
+        // The tier it ran on, as OpenAI says it: the one asked for, except "busy", where Ultrafast was full and it ran as Fast.
+        service_tier: asked.input === "busy" ? "fast" : (asked.service_tier ?? "default"),
         // "searches": an answer that searched the web and read a page (a task on the computer tool, lib/server/computer-task.ts).
         output: asked.input === "searches" ? [search(`ws_${id}_1`), search(`ws_${id}_page`, "open_page"), { id: `msg_${id}`, type: "message" }] : [],
         // "long": one response past 272K input tokens.
@@ -132,6 +134,21 @@ test("a model's answer is counted once, for the bot and the kind of work the Mac
   assert.equal(longRow.detail.source, "responses");
   // Past 272K in one response: input, cached and cache writes twice, output half as much again.
   assert.equal(longRow.cost, ((300_000 - 400 - 500) * 2 + 400 * 0.1 + 500 * 2.5) * 2 + 100 * 10 * 1.5);
+});
+
+test("a model's answer is priced at the service tier it ran on: Ultrafast 6x, Fast 2x, Flex half, as OpenAI reports it", async () => {
+  const base = 100 * 2 + 400 * 0.1 + 500 * 2.5 + 100 * 10;
+  for (const [tier, times] of [["default", 1], ["ultrafast", 6], ["fast", 2], ["priority", 2], ["flex", 0.5]] as const) {
+    const r = await as(alice, "POST", "/proxy/openai/v1/responses", { model: "gpt-6.1-sol", input: "hi", service_tier: tier }, { "x-bops-bot": "sam", "x-bops-source": "chat" });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(openai.got.at(-1)!.json?.service_tier, tier, "the tier asked for reaches OpenAI");
+    const row = await until(() => byRef(alice, "openai.tokens", r.json.id));
+    assert.deepEqual([row.detail.tier, row.cost], [tier, Math.ceil(base * times)], tier);
+  }
+  // Asked for Ultrafast, run as Fast (OpenAI says so in the answer): priced as Fast.
+  const busy = await as(alice, "POST", "/proxy/openai/v1/responses", { model: "gpt-6.1-sol", input: "busy", service_tier: "ultrafast" });
+  const busyRow = await until(() => byRef(alice, "openai.tokens", busy.json.id));
+  assert.deepEqual([busyRow.detail.tier, busyRow.cost], ["fast", base * 2]);
 });
 
 test("a model's answer's web searches are counted once each, for its bot, streamed or not (a task on the computer tool searches in Responses)", async () => {

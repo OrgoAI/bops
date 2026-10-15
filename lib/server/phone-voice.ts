@@ -1,4 +1,5 @@
 import "server-only";
+import { speedFor, tierParam, withSpeed } from "./routing";
 import type { CallerVerdict } from "@/cloud/protocol";
 import { botChatId, live, MAX_PERSONA_CHARS, type Bot } from "@/lib/types";
 import { callEnded, callStarted } from "./attention";
@@ -172,7 +173,11 @@ async function respond(b: Bot, c: PhoneCall, instructions: string, tools: Return
   const input = c.turns.length
     ? c.turns.map((t) => ({ role: t.who === "caller" ? ("user" as const) : ("assistant" as const), content: t.text }))
     : [{ role: "user" as const, content: "(The call just connected; the caller hasn't said anything yet. Say hello.)" }];
-  const r = await client.responses.create({ model: MODEL(), reasoning: { effort: "low" }, instructions, input, tools, parallel_tool_calls: false, max_output_tokens: 1200, store: false }, usageTags("call", b.id));
+  // A caller is waiting on the line: as fast as the model goes, a tier down when OpenAI's busy (routing.ts).
+  const model = MODEL();
+  const r = await withSpeed(speedFor(model, true), (tier) =>
+    client.responses.create({ model, reasoning: { effort: "low" }, instructions, input, tools, parallel_tool_calls: false, max_output_tokens: 1200, store: false, ...tierParam(tier) }, usageTags("call", b.id)),
+  );
   recordTokens("call", r.model, r.usage, b.id, c.epoch);
   const called = r.output.flatMap((o) => {
     if (o.type !== "function_call") return [];

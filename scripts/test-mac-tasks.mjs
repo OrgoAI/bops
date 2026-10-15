@@ -43,6 +43,8 @@ const realCodex = [...(process.env.PATH ?? "").split(delimiter), join(realHome, 
 
 // No keys or settings from the shell, and the state goes to the fake Bops Cloud below, never a database or a file.
 for (const k of Object.keys(process.env)) if (/^(BOPS|OPENAI|AGENTPHONE|AGENTMAIL|HONCHO|COMPOSIO|TYPESAFE|TWILIO|ORGO|CODEX)_/.test(k)) delete process.env[k];
+// Fast task steps go over a WebSocket (lib/server/responses-ws.ts, tested in test-responses-ws.mjs); here, over HTTP to the fakes.
+process.env.BOPS_RESPONSES_WS = "0";
 // This Mac, as the user's state knows it (persist-cloud.ts deviceIdFor), without asking ioreg.
 process.env.BOPS_DEVICE_SEED = "test-mac";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");

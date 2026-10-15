@@ -1,4 +1,6 @@
 import "server-only";
+import { LIGHT } from "./routing";
+import { setting } from "./models";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -81,7 +83,8 @@ const TOMB_FACTS = 10_000;
 /** Tidying up (dreaming) on request, at most this often. */
 const DREAM_EVERY_MS = 60 * 60_000;
 
-const MODEL = process.env.BOPS_MEMORY_MODEL ?? process.env.BOPS_CHAT_MODEL ?? process.env.BOPS_SAM_MODEL ?? "gpt-6.1-sol";
+/** Sorting facts into sections: a small job of a fixed shape, for Luna (routing.ts LIGHT). */
+const MODEL = () => setting(LIGHT(), "BOPS_MEMORY_MODEL");
 
 /** What one fact said about one item, kept so the item can be worked out again when a fact goes: its name, line, date, who, done, how it was learned, private. */
 type Said = { t: string; d: string; w?: string; o?: string; x?: boolean; h: ItemSource["how"]; p?: boolean; at: number };
@@ -761,7 +764,7 @@ async function sortFacts(facts: Fresh[], known: Record<string, unknown>, epoch: 
   if (!ours()) return "gone";
   try {
     const res = await openai.responses.create(
-      { model: MODEL, reasoning: { effort: "low" }, store: false, instructions, input, text: { format: { type: "json_schema", name: "memory_items", strict: true, schema: SCHEMA } } },
+      { model: MODEL(), reasoning: { effort: "low" }, store: false, instructions, input, text: { format: { type: "json_schema", name: "memory_items", strict: true, schema: SCHEMA } } },
       { ...usageTags("memory"), timeout: 90_000, maxRetries: 1 },
     );
     recordTokens("memory", res.model, res.usage, undefined, epoch);

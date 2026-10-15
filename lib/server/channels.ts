@@ -2,7 +2,6 @@ import "server-only";
 import { randomInt, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import type { SlackLinkIn, SlackLinksBody, SlackLinksResult } from "@/cloud/protocol";
-import { plainLinks } from "@/cloud/style";
 import { pictureName } from "@/lib/mascot";
 import { botChatId, pairCodeLive, PAIR_CODE_MS, turnsOwn, type Bot, type ChannelKind, type ChannelLink, type ChannelPlace, type Message } from "@/lib/types";
 import { cloudJson, cloudOn, cloudSession, cloudSessionNow } from "./cloud";
@@ -10,6 +9,7 @@ import { deleteUserSecret, getUserSecret, setUserSecret } from "./keychain";
 import { composio, composioUser, publicUrl, runAs } from "./composio";
 import { addMessage, bot, getState, id, ownerName, patchSession, stateReady, update, watchChanges } from "./store";
 import { saveUpload } from "./uploads";
+import { plainLinks } from "./style";
 
 /**
  * Bots where the user's team already talks: Slack channels, Telegram and Discord. Like texting a bot's
@@ -429,7 +429,8 @@ function chunks(text: string, max: number) {
 async function send(l: ChannelLink, p: ChannelPlace, text: string) {
   if (l.kind === "telegram") {
     const token = await tokenOf(l);
-    for (const [i, part] of chunks(text, 4000).entries())
+    // Telegram shows a message as it is (no parse_mode), so links are written out, a web source at the end.
+    for (const [i, part] of chunks(plainLinks(text), 4000).entries())
       await tg(token, "sendMessage", { chat_id: p.chat, text: part, ...(i === 0 && p.messageId && !isDirectChat(p.chat) ? { reply_parameters: { message_id: Number(p.messageId), allow_sending_without_reply: true } } : {}) });
   } else if (l.kind === "discord") {
     const token = await tokenOf(l);

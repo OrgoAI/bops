@@ -1,10 +1,12 @@
 import "server-only";
+import { setting } from "./models";
 import { trackServerEvent } from "./analytics";
 import { fullAccessOn } from "./full-access";
 import { isSecret, learn, memoryBlock, memoryOn, recall, rememberMessage, saveToMemory, wsOf } from "./memory";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { callApi, callApiTool, usableKeys, type CallApiDone } from "./keys";
 import { appsNote, placesNote } from "./skills";
+import { workComputer } from "./screens";
 import { DATA_TOOL_NAMES, DATA_TOOLS, dataNote, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmNote, crmNowLine, runCrmTool } from "./crm";
 import { ORBIT_OWNER_ONLY, ORBIT_TOOL_NAMES, ORBIT_TOOLS, orbitNote, orbitNowLine, runOrbitTool } from "./orbit";
@@ -12,7 +14,7 @@ import { openaiClient } from "./openai-client";
 import { contactLine, createBot } from "./bots";
 import { creditsOut, noteOutOfCredit, OUT_OF_CREDIT } from "./cloud";
 import { noOwnComputer } from "./plan";
-import { botChatId, live, MAX_PERSONA_CHARS, MIN_EVERY_MINUTES, pairChatId, sharesComputer, TAPBACK_EMOJI, TAPBACKS, workBot, workspaceOf, type Bot, type ChannelKind, type Delivery, type Message, type Routine, type RoutineRun, type Schedule, type Session, type Tapback } from "@/lib/types";
+import { botChatId, live, MAX_PERSONA_CHARS, MIN_EVERY_MINUTES, pairChatId, TAPBACK_EMOJI, TAPBACKS, workspaceOf, type Bot, type ChannelKind, type Delivery, type Message, type Routine, type RoutineRun, type Schedule, type Session, type Tapback } from "@/lib/types";
 import { computerBriefing, teamBriefing } from "./briefing";
 import { ABOUT_BOPS, ASKING, tidyAnswer, WRITING } from "./style";
 import { howIWork, plainLinks } from "@/cloud/style";
@@ -29,11 +31,12 @@ import { needsMemory } from "./judgment";
 import { dataUrlOf, uploadPath } from "./uploads";
 import { makeImage, SHAPES, type Shape } from "./images";
 import { stopWatch, watchesNote, watchFromChat, watchInstead } from "./watches";
-import { addMessage, bot, chat, getState, ownerLine, ownerName, patchSession, react, sameState, setAsking, setTyping, stateEpoch, update } from "./store";
+import { addMessage, bot, chat, getState, id, ownerLine, ownerName, patchSession, react, sameState, setAsking, setTyping, stateEpoch, update } from "./store";
 import { checkEmail, emailOwner, mailOn, ownerAddresses, readEmail, replyEmail, sendEmail } from "./mail";
 import { ownerPhone, textingLine, textOwner } from "./phone";
 import { pingIfWorthIt } from "./attention";
 import { recordTokens, usageTags } from "./usage";
+import { LIGHT, logRoute, routeChat, speedFor, tierParam, withSpeed, type Config } from "./routing";
 
 /**
  * Chat engine. Every bot answers in its own chat, like texting a person: it replies, looks things up
@@ -45,9 +48,9 @@ import { recordTokens, usageTags } from "./usage";
  */
 
 const client = openaiClient();
-const CHAT_MODEL = process.env.BOPS_CHAT_MODEL ?? process.env.BOPS_SAM_MODEL ?? "gpt-6.1-sol";
+const CHAT_MODEL = setting("gpt-6.1-sol", "BOPS_CHAT_MODEL", "BOPS_SAM_MODEL");
 /** Texting should feel instant: chat turns mostly reply and route, so they think lightly. Threads think harder. */
-const CHAT_REASONING = { effort: (process.env.BOPS_CHAT_EFFORT ?? "low") as "low" | "medium" | "high" };
+const CHAT_REASONING = { effort: setting("low", "BOPS_CHAT_EFFORT") as "low" | "medium" | "high" };
 
 const SCHEDULE_PARAMS = {
   type: "object",
@@ -158,9 +161,37 @@ const fn = (name: string, description: string, properties: Record<string, unknow
   parameters: { type: "object", additionalProperties: false, properties, required: Object.keys(properties) },
 });
 
+/**
+ * OpenAI's hosted web search: it runs inside the model call (no lookup round of ours), so a question
+ * about the web is answered in the chat in seconds, not by a task on a computer. A small search
+ * context keeps a reply quick, and the user's time zone places it (OpenAI assumes the United States
+ * otherwise). It leads the tools and never changes, so the cached prefix stays the same from turn to
+ * turn. Bops Cloud counts each search (cloud/usage.ts isWebSearch).
+ */
+const WEB_SEARCH = {
+  type: "web_search" as const,
+  search_context_size: "low" as const,
+  user_location: { type: "approximate" as const, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+};
+
+/** How a bot uses WEB_SEARCH in its chat. Not on a turn someone else started, which has no web search. */
+const SEARCHING = [
+  "To look something up on the web (a fact, a price, the news, opening hours, a quick comparison), search it yourself with web_search and answer here. Don't start a task for that.",
+  "To read one page you have the address of (an article, docs, a price or status page), use web_fetch.",
+  "When you answer from the web, name your source with one link, like ([site.com](https://site.com/page)), and keep the reply short.",
+].join("\n");
+
 const TASK = {
   title: { type: "string", description: "A 2-5 word label, e.g. \"Lisbon flights\"." },
   goal: { type: "string", description: "A complete, standalone instruction. The worker sees only this." },
+};
+
+/** One of several tasks started together for one request, run side by side on different screens. */
+const PART = {
+  part_of: {
+    type: ["string", "null"],
+    description: "When this is one of several tasks you're starting now for one request, to run side by side: the same 2-5 word name for all of them (\"Four screen showcase\"). Otherwise null.",
+  },
 };
 
 /** What the bot says as it starts a task: the reply the user sees, so it fits their request. */
@@ -185,14 +216,6 @@ const WHERE = {
   },
 };
 
-/** Which cloud computer the bot works on, said truly: its own, or the one it shares (a teammate's, usually the main bot's). */
-function computerLine(b: Bot) {
-  const owner = ownerName();
-  const host = sharesComputer(b) ? workBot(b, getState().bots) : b;
-  const where = host.id === b.id ? "You have your own cloud computer with a browser" : `You work on ${host.name}'s cloud computer, with a browser, shared with ${host.name}`;
-  return `${where}: it has 4 screens, so up to 4 long tasks run at once. Each task is a thread ${owner} can open.`;
-}
-
 /**
  * Who the bot is and how it works: the same from turn to turn, so it can lead a prompt that OpenAI reads
  * from its prompt cache. What changes (the time, what's running) is in nowLines. Each rule is said once:
@@ -209,7 +232,10 @@ function persona(b: Bot, others: Bot[]) {
     WRITING,
     ASKING,
     ABOUT_BOPS,
-    computerLine(b),
+    // A bot that shares works on the main bot's computer, its four screens shared with the team (lib/screens.ts).
+    workComputer(b).id === b.id
+      ? `You have your own cloud computer with a browser and four screens, so up to 4 long tasks at once. Each task is a thread ${owner} can open.`
+      : `You work on ${workComputer(b).name}'s cloud computer, sharing its four screens with your team, so a task of yours waits when they're all in use. Each task is a thread ${owner} can open.`,
     `You're told the time, what's running and a briefing of your computer as of now. Use them to answer questions about what you're doing, what's open, or what's waiting on ${owner}. Talk about the work, not screen numbers, unless ${owner} asks about a screen.`,
     getState().mac?.ready
       ? fullAccessOn()
@@ -217,7 +243,8 @@ function persona(b: Bot, others: Bot[]) {
         : `You can also work on ${owner}'s own Mac, in a Chrome of your own there, so websites see their home internet. You can't use the apps on their Mac (Messages, Notes, Finder…) or their files for now. Most work belongs on your cloud computer; use their Mac only when the task needs it or they ask (start_task with where).`
       : "",
     // How to handle a request, then the two rules that keep the bot doing the work instead of promising it.
-    `Answer directly when you can. Look things up right here in the chat with your tools: web_search and web_fetch for the web, your apps, email and ${owner}'s memory. Call start_task (once per independent task) only for work that needs a screen, a sign-in, or long hands-on work, then say in one short sentence what you're on. For something later or on a schedule, call schedule. For waiting on something (a price, a reply, a page that changes), call watch.`,
+    `Answer directly when you can, right here in the chat with your tools: your apps, email and ${owner}'s memory. Start a task (start_task) for work on a website (signing in, filling a form, posting, booking, buying), for something to make (a document, a list, a draft), or for research across many sources. Call it once per independent task, then say in one short sentence what you're on. For something later or on a schedule, call schedule. For waiting on something (a price, a reply, a page that changes), call watch.`,
+    "Each task gets one screen of your computer, and you have four. A request with parts that can run side by side (something on each screen, several sites, several companies or people to research, several drafts) is several tasks: call start_task once for each part, up to four, all in this turn, with the same part_of name, so they run at once on different screens. Keep steps that depend on each other in one task. Give each part everything it needs: it sees only its own goal.",
     `When a request is clear and safe, do it now. Ask only when you're blocked: a missing detail, a choice only ${owner} can make, or an approval.`,
     `Never say you'll check, follow up or remind ${owner} later unless you call schedule or watch in this same turn. If you can do it now, do it now.`,
     // Said for every bot (How I work says it too, only when the user wrote one).
@@ -489,14 +516,21 @@ async function acknowledge(b: Bot | undefined, request: string, task: string, pa
   const epoch = stateEpoch();
   const plain = passTo ? `Passing that to ${passTo}.` : `Adding that to ${task.charAt(0).toLowerCase()}${task.slice(1)}.`;
   try {
+    // One short line, said while they wait: Luna (its job is a fixed shape), as fast as Luna goes.
+    const model = LIGHT();
     const res = await Promise.race([
-      client.responses
-        .create({
-          model: CHAT_MODEL,
-          reasoning: { effort: "low" },
+      withSpeed(speedFor(model, true), (tier, last) =>
+        client.responses.create(
+          {
+          model,
+          reasoning: { effort: "none" },
+          ...tierParam(tier),
           instructions: `You are ${b?.name ?? "a bot"}, texting ${ownerName()} back. They just added something to a task you're already doing${passTo ? ` (${passTo} is doing it; say you'll pass it on)` : ""}. Reply with one short, natural line about what you'll do now, in words that fit what they said, like a friend would text. The task isn't done yet: never give an answer or a result, and never say it's done. No "On it.", no quotes, no emoji, under 12 words.`,
           input: JSON.stringify({ task, owner_said: request }),
-        }, usageTags("chat", b?.id))
+          },
+          { ...usageTags("chat", b?.id), ...(last ? {} : { maxRetries: 0 }) },
+        ),
+      )
         // Counted when it arrives, even after the plain words won the race: it cost the same.
         .then((r) => (recordTokens("chat", r.model, r.usage, b?.id, epoch), r)),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
@@ -690,12 +724,10 @@ async function askTeammate(asker: Bot, toId: string, question: string, chatId: s
       `This is your conversation with ${asker.name} (${asker.role}), your teammate; ${asker.name} asks you things while helping ${owner}. Answer ${asker.name} in one to three plain sentences, from what you know. If you don't know, say so plainly and say how you'd find out. You can't start tasks or ask anyone else here.`,
     ].join("\n");
     stillOurs(ours);
-    const res = await client.responses.create({
-      model: CHAT_MODEL,
-      reasoning: CHAT_REASONING,
-      instructions,
-      input: history(pair, t.id).slice(-16),
-    }, usageTags("chat", t.id));
+    // The user is waiting on the answer this goes into: fast.
+    const res = await withSpeed(speedFor(CHAT_MODEL, true), (tier, last) =>
+      client.responses.create({ model: CHAT_MODEL, reasoning: CHAT_REASONING, instructions, input: history(pair, t.id).slice(-16), ...tierParam(tier) }, { ...usageTags("chat", t.id), ...(last ? {} : { maxRetries: 0 }) }),
+    );
     stillOurs(ours);
     recordTokens("chat", res.model, res.usage, t.id);
     const answer = tidyAnswer(res.output_text ?? "").text.trim() || "I don't know.";
@@ -1289,14 +1321,22 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // there, and still cost them, so the bot doesn't make one from there.
     const lastAsk = bg ? undefined : [...getState().messages].reverse().find((m) => m.chatId === chatId && m.role === "user");
     const relayed = !!opts.emailBack || !!lastAsk?.via;
-    // Whether a new bot could have a computer of its own on the user's Orgo plan, so the main bot doesn't promise one.
-    // Read quickly or not at all: createBot checks again anyway. Not asked when the bots work on this Mac.
     // The user's API keys it may call (keys.ts): only ones set in their Orgo vault. None on a turn someone
     // outside Bops started: a GET runs at once, and would read the user's Stripe or bank on a stranger's say.
     const keyed = opts.outside ? [] : await usableKeys(b);
+    // Someone's waiting on this reply: the user's own message, in the app, by text or in a channel (not
+    // an email, which nobody expects back in seconds, or a turn someone else started). It runs fast.
+    const waiting = !!opts.answering && !opts.outside && !opts.emailBack;
+    const base: Config = { model: CHAT_MODEL, effort: CHAT_REASONING.effort };
+    // How much thinking the message needs (routing.ts routeChat: Jev, alongside what's below). Only the user's own.
+    const routing = waiting ? routeChat(base, lastWords(chatId), botId).catch(() => ({ config: base })) : Promise.resolve({ config: base });
+    // Whether a new bot could have a computer of its own on the user's Orgo plan, so the main bot doesn't promise one.
+    // Read quickly or not at all: createBot checks again anyway. Not asked when the bots work on this Mac.
     const noOwnRoom =
       b.isMain && !bg && getState().host !== "mac" ? await Promise.race([noOwnComputer(workspaceOf(b)), new Promise<null>((r) => setTimeout(() => r(null), 1500))]) : null;
     const all = [
+      // First, so it never moves the cached prefix. Not for someone else's turn: what they wrote could send it to their site with what it read here.
+      ...(opts.outside ? [] : [WEB_SEARCH]),
       ...(answering
         ? [
             fn("react", "Tapback the message you're answering, like in iMessage: a quick acknowledgement, or instead of a reply when words would add nothing (\"thanks!\" gets a love, \"sounds good\" gets a like).", {
@@ -1308,6 +1348,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         ...TASK,
         ...SAY,
         ...WHERE,
+        ...PART,
         skill: { type: ["string", "null"], description: "The name of one of your skills the task should follow, or null." },
       }),
       fn("schedule", `Set up a routine: a job done at set times, or once later. It answers with what was set and when it next runs, or why nothing was set (fix that and call again, or tell ${owner}).`, {
@@ -1395,7 +1436,6 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       ...(opts.outside
         ? []
         : [
-            { type: "web_search" as const },
             fn("web_fetch", `Read one web page (an article, docs, a product, price or status page, a web app) and get its text. Pages that draw themselves with JavaScript or show a "checking your browser" wall are read in a browser for you, so try this first for any page that needs no sign in; find pages with web_search. Only a page that needs ${owner}'s sign in, or clicking through, is a task.`, {
               url: { type: "string", description: "The page's address, e.g. \"https://example.com/pricing\"." },
             }),
@@ -1613,6 +1653,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // every turn instead (at 1.25×), and never read back.
     const instructions = [
       persona(b, others),
+      opts.outside ? "" : SEARCHING,
       "If a tapback says it all (thanks, ok, sounds good), react instead of replying.",
       "When you start, hand off or tell a task something, or make a picture, its `say` is your reply: write no other text, and don't answer the request yourself; the task will.",
       appsNote(b, "chat"),
@@ -1663,7 +1704,14 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       ...(bg ? [{ role: "developer" as const, content: jobNote(b, bg) }] : []),
     ];
     stillOurs(ours);
-    let response = await client.responses.create({ model: CHAT_MODEL, reasoning: CHAT_REASONING, instructions, input, tools, ...include }, usageTags("chat", botId));
+    const routed = await routing;
+    if ("router" in routed && routed.router) logRoute({ kind: "chat", chatId, botId, words: lastWords(chatId).slice(0, 400), ran: routed.config, router: routed.router });
+    const { model, effort, mode } = routed.config;
+    const reasoning = { effort, ...(mode ? { mode } : {}) };
+    const speed = speedFor(model, waiting);
+    let response = await withSpeed(speed, (tier, last) =>
+      client.responses.create({ model, reasoning, instructions, input, tools, ...include, ...tierParam(tier) }, { ...usageTags("chat", botId), ...(last ? {} : { maxRetries: 0 }) }),
+    );
     stillOurs(ours);
     recordTokens("chat", response.model, response.usage, botId);
     sawWeb(response.output);
@@ -1858,15 +1906,22 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       for (const text of brought) bringIn(text);
       earlier.push(...(rest.filter((_, i) => !refused[i]) as never[]));
       stillOurs(ours);
-      response = await client.responses.create({
-        model: CHAT_MODEL,
-        reasoning: CHAT_REASONING,
-        instructions,
-        previous_response_id: response.id,
-        input: [...outputs, ...rest.map((o, i) => ({ type: "function_call_output" as const, call_id: o.call_id, output: refused[i] ?? "ok" }))],
-        tools,
-        ...include,
-      }, usageTags("chat", botId));
+      const previous = response.id;
+      response = await withSpeed(speed, (tier, last) =>
+        client.responses.create(
+          {
+            model,
+            reasoning,
+            instructions,
+            previous_response_id: previous,
+            input: [...outputs, ...rest.map((o, i) => ({ type: "function_call_output" as const, call_id: o.call_id, output: refused[i] ?? "ok" }))],
+            tools,
+            ...include,
+            ...tierParam(tier),
+          },
+          { ...usageTags("chat", botId), ...(last ? {} : { maxRetries: 0 }) },
+        ),
+      );
       stillOurs(ours);
       recordTokens("chat", response.model, response.usage, botId);
       sawWeb(response.output);
@@ -1878,6 +1933,14 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     const withImages = (goal: string) =>
       pics.length ? `${goal}\n\n${pics.length === 1 ? "An image" : `${pics.length} images`} attached by ${owner} (files on their Mac; a cloud computer can't open them): ${pics.join(", ")}` : goal;
     const sessionIds: string[] = [];
+    // Parts started together in this turn (start_task part_of), by their name: one group each.
+    const groups = new Map<string, { id: string; title: string }>();
+    const groupOf = (name?: string | null) => {
+      const t = name?.trim();
+      if (!t) return undefined;
+      if (!groups.has(t.toLowerCase())) groups.set(t.toLowerCase(), { id: id("grp"), title: t });
+      return groups.get(t.toLowerCase());
+    };
     const says: string[] = [];
     let reacted = false;
     const pages: string[] = [];
@@ -1915,7 +1978,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         }
         continue;
       }
-      const args = JSON.parse(item.arguments) as { bot_id?: string; title: string; goal: string; say?: string; where?: "auto" | "cloud" | "mac"; then_on_mac?: string | null; skill?: string | null; message?: string };
+      const args = JSON.parse(item.arguments) as { bot_id?: string; title: string; goal: string; say?: string; schedule?: RawSchedule; where?: "auto" | "cloud" | "mac"; then_on_mac?: string | null; skill?: string | null; part_of?: string | null; message?: string };
       if ((item.name === "start_task" || item.name === "hand_off" || item.name === "tell_task") && args.say?.trim()) says.push(args.say.trim());
       if (item.name === "tell_task") {
         const a = JSON.parse(item.arguments) as { thread_id: string; message: string; on_mac?: boolean };
@@ -1969,7 +2032,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           const r = getState().routines.find((x) => x.id === bg.routineId);
           const goal = bg.quiet ? `${args.goal}\n\nIf nothing needs ${owner} this time, answer exactly NOTHING and nothing else.` : args.goal;
           sessionIds.push(startSession({ botId, goal, title: args.title, chatId, sentVia: "routine", where: r?.where ?? args.where ?? "auto", fresh: true, routineId: bg.routineId, ...(procedure ? { procedure } : {}) }).id);
-        } else sessionIds.push(startSession({ botId, goal: withImages(args.goal), title: args.title, chatId, sentVia: "you", ...place, ...(procedure ? { procedure } : {}) }).id);
+        } else sessionIds.push(startSession({ botId, goal: withImages(args.goal), title: args.title, chatId, sentVia: "you", ...place, group: groupOf(args.part_of), ...(procedure ? { procedure } : {}) }).id);
       }
       if (item.name === "hand_off" && args.bot_id) {
         const s = startSession({ botId: args.bot_id, goal: withImages(args.goal), title: args.title, chatId, sentVia: botId, ...place });

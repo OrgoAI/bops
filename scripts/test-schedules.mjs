@@ -968,10 +968,10 @@ await check("a run failing the same way again isn't said or sent again; out of A
 await check("results by text or in a channel read links as words and an address; email keeps them", async () => {
   const t = R.createRoutine("bot_main", "News", "News", { kind: "daily", time: "08:00" }, { deliverTo: { kind: "text" } }).routine;
   await R.deliver(get(t.id), "Acme shipped a new [widget](https://acme.example/w).");
-  assert.equal(fake.texts.at(-1).body, "Acme shipped a new widget (https://acme.example/w).");
+  assert.equal(fake.texts.at(-1).body, "Acme shipped a new widget https://acme.example/w.");
   const c = R.createRoutine("bot_main", "Menu", "Menu", { kind: "daily", time: "08:00" }, { deliverTo: { kind: "channel", linkId: "ch_1" } }).routine;
   await R.deliver(get(c.id), "See [the menu](https://x.example/menu)");
-  assert.equal(fake.posts.at(-1).text, "See the menu (https://x.example/menu)");
+  assert.equal(fake.posts.at(-1).text, "See the menu https://x.example/menu");
   const e = R.createRoutine("bot_main", "Mail", "Mail", { kind: "daily", time: "08:00" }, { deliverTo: { kind: "email" } }).routine;
   await R.deliver(get(e.id), "See [the menu](https://x.example/menu)");
   assert.equal(fake.emails.at(-1).text, "See [the menu](https://x.example/menu)");

@@ -1,4 +1,6 @@
 import "server-only";
+import { holdAwake } from "./awake";
+import { setting } from "./models";
 import { trackServerEvent } from "./analytics";
 import type { BopsEventProps } from "@/cloud/analytics-rules";
 import { openaiClient } from "./openai-client";
@@ -7,7 +9,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "@/cloud/protocol";
-import { BLOCKER_LABEL, botChatId, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, workBot, workspaceOf, type Bot, type Effort, type Routine, type Session, type ThreadReply } from "@/lib/types";
+import { BLOCKER_LABEL, botChatId, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, workBot, workspaceOf, type Bot, type Routine, type Session, type TaskRoute, type ThreadReply } from "@/lib/types";
 import { CloudError, creditsOut, executorKey, noteOutOfCredit, OUT_OF_CREDIT, outOfCreditError, shortOfCredit } from "./cloud";
 import { appsMcp, appsSocket, browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
 import { relayNewComputer } from "./relay";
@@ -18,7 +20,8 @@ import { fullAccessOn } from "./full-access";
 import { onPostgres } from "./persist";
 import { chose, decide, yes } from "./decide";
 import { watchScreen } from "./screen-watch";
-import { forgetScreens, pageAt, sameComputer, screenEndpoint, screenPages, workComputer } from "./screens";
+import { forgetScreens, listedScreenId, pageAt, sameComputer, screenEndpoint, screenPages, workComputer } from "./screens";
+import { saveFrame } from "./frames";
 import { namesSite, onASite } from "@/lib/task-sites";
 import { siteOf } from "@/lib/watch-sites";
 import { ensureTailnet } from "./tailnet";
@@ -33,12 +36,16 @@ import { crmNote } from "./crm";
 import { memoryBlock, saveToMemory, wsOf } from "./memory";
 import { pingIfWorthIt } from "./attention";
 import { emailResult } from "./mail";
-import { textResult } from "./phone";
+import { textOwner, textResult } from "./phone";
+import { askTiming, needsYou } from "@/lib/asks";
 import { channelResult } from "./channels";
 import { asksForMac, chooseWhere } from "./where";
 import { addMessage, bot, getState, id, ownerLine, ownerName, patchSession, session, stateEpoch, stateReady, update } from "./store";
 import { recordTokens, usageTags } from "./usage";
-import { computerToolOn, computerTurn } from "./computer-task";
+import { computerToolOn, computerTurn, PAGE_RUNNER } from "./computer-task";
+import { ASKS_AGAIN, LIGHT, logRoute, routeTask, speedFor, taskConfig } from "./routing";
+import { holdsScreen, screenLabel, screenNo } from "@/lib/screens";
+import { watching } from "./presence";
 import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours";
 
 /**
@@ -55,9 +62,9 @@ import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours
  */
 
 const client = openaiClient();
-const SESSION_MODEL = process.env.BOPS_SESSION_MODEL ?? "gpt-6.1-sol";
+const SESSION_MODEL = setting("gpt-6.1-sol", "BOPS_SESSION_MODEL");
 /** For tasks Jev rates hard: GPT-6 Astra, what OpenAI's dots run on (slower and about 5× the price). */
-const HARD_MODEL = process.env.BOPS_HARD_MODEL ?? "gpt-6-astra";
+const HARD_MODEL = setting("gpt-6-astra", "BOPS_HARD_MODEL");
 /** Helpers a thread can run at once, each on its own screen (a bot has 4). */
 const MAX_HELPERS = 3;
 /**
@@ -121,6 +128,11 @@ type StartOptions = {
   routineId?: string;
   /** The procedure it follows (Session.procedure). */
   procedure?: string;
+  /** What it runs on, set here rather than routed (a benchmark run: app/api/sessions). */
+  route?: TaskRoute;
+  /** One of several parts of one request, run side by side (Session.group), and the thread that split it off. */
+  group?: Session["group"];
+  partOf?: string;
 };
 
 const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -153,7 +165,10 @@ function repoint(from: string, to: string) {
 
 /** A thread the bot is already running (or that waits on the user) for the same job as `s`, by Jev. */
 async function sameJobByMeaning(s: Session) {
-  const open = getState().sessions.filter((x) => x.id !== s.id && x.botId === s.botId && !x.dismissed && !x.replacedBy && (doing(x) || waiting(x)) && x.createdAt < s.createdAt).slice(-5);
+  // Its siblings (parts of the same request) are other jobs by design.
+  const open = getState()
+    .sessions.filter((x) => x.id !== s.id && x.botId === s.botId && !x.dismissed && !x.replacedBy && (doing(x) || waiting(x)) && x.createdAt < s.createdAt && !(s.group && x.group?.id === s.group.id) && x.id !== s.partOf)
+    .slice(-5);
   if (!open.length) return undefined;
   const brief = (g: string) => (g.length > 240 ? `${g.slice(0, 240)}…` : g);
   const a = await decide(
@@ -189,9 +204,10 @@ function foldInto(s: Session, goal: string, where: "mac" | "cloud" | "auto", opt
   return s;
 }
 
-export function startSession({ botId, goal, title, chatId, sentVia = "you", onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom, routineId, procedure }: StartOptions): Session {
+export function startSession({ botId, goal, title, chatId, sentVia = "you", onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom, routineId, procedure, route: forced, group, partOf }: StartOptions): Session {
   // Someone else's words (an email or a text from outside) never put work on the user's Mac (StartOptions.outside).
-  const where = outside && asked === "mac" ? "auto" : asked;
+  // Parts of one request run side by side on the bot's screens, in the cloud, unless the bot said where.
+  const where = outside && asked === "mac" ? "auto" : group && asked === "auto" ? "cloud" : asked;
   // One job, one thread: asking for a job that's already running (or waiting on the user) adds to it.
   const same = !fresh && !onWatch ? sameJob(botId, title?.trim() || goal.slice(0, 48)) : undefined;
   if (same) return foldInto(same, goal, where, { outside, ownerAsked });
@@ -215,6 +231,9 @@ export function startSession({ botId, goal, title, chatId, sentVia = "you", onWa
     ...(movedFrom ? { movedFrom } : {}),
     ...(routineId ? { routineId } : {}),
     ...(procedure ? { procedure } : {}),
+    ...(forced ? { route: forced, effort: forced.effort } : {}),
+    ...(group ? { group } : {}),
+    ...(partOf ? { partOf } : {}),
   };
   update((state) => state.sessions.push(s));
   trackServerEvent("bops_task_started", { task_id: s.id, sent_via: sentVia === "you" || sentVia === "routine" ? sentVia : "bot", on_watch: !!onWatch, where_asked: where });
@@ -552,6 +571,59 @@ export function stopSession(sessionId: string, reason = "Stopped by you") {
   }
   if (s.status === "running" && s.agentSessionId) void cancelTurn(s.agentSessionId);
   interrupts.get(sessionId)?.();
+  // The parts it split off (split_task) stop with it.
+  for (const p of getState().sessions.filter((x) => x.partOf === sessionId && live(x))) stopSession(p.id, reason);
+}
+
+/* ---------------- Parts: a thread's work split across the bot's screens ---------------- */
+
+/** How long one check_parts waits for the parts before it says where they are. */
+export const partsTiming = { waitMs: 10 * 60_000, pollMs: 2000 };
+/** The most parts a thread splits off at once (the bot has four screens; more wait for one). */
+const MOST_PARTS = 6;
+
+/**
+ * Split off parts of a thread's task (computer-task.ts split_task): each a thread of its own, in the
+ * same chat and group, on another screen of the bot's computer, so they run at once. Returns what the
+ * model is told.
+ */
+function splitTask(sessionId: string, parts: { title: string; goal: string }[]): string {
+  const s = session(sessionId);
+  if (!s) return "This task isn't running anymore.";
+  const group = s.group ?? { id: id("grp"), title: s.title };
+  if (!s.group) patchSession(sessionId, { group });
+  const made = parts
+    .filter((p) => p.goal?.trim())
+    .slice(0, MOST_PARTS)
+    .map((p) => startSession({ botId: s.botId, goal: p.goal, title: p.title, chatId: s.chatId, sentVia: s.botId, where: "cloud", fresh: true, group, partOf: sessionId }));
+  if (!made.length) return "No parts to start: each needs a goal.";
+  addMessage({ chatId: s.chatId, role: "system", text: `${bot(s.botId)?.name ?? "The bot"} split ${s.title} into ${made.length + 1} parts`, sessionIds: [sessionId, ...made.map((m) => m.id)] });
+  return `Started ${made.length} part${made.length === 1 ? "" : "s"} (${made.map((m) => `"${m.title}"`).join(", ")}), each a thread on a screen of its own (one waits when no screen is free). Do your own part now, if you have one, then call check_parts with wait true for their results.`;
+}
+
+/** Where a thread's parts are (check_parts): with `wait`, once none is still working (or partsTiming.waitMs went by, or it was stopped). */
+async function checkParts(sessionId: string, wait: boolean, signal: AbortSignal): Promise<string> {
+  const working = () => getState().sessions.filter((x) => x.partOf === sessionId && live(x) && !needsYou(x));
+  const end = Date.now() + partsTiming.waitMs;
+  while (wait && !signal.aborted && Date.now() < end && working().length)
+    await new Promise<void>((r) => {
+      const t = setTimeout(r, partsTiming.pollMs);
+      signal.addEventListener("abort", () => (clearTimeout(t), r()), { once: true });
+    });
+  const parts = getState().sessions.filter((x) => x.partOf === sessionId);
+  if (!parts.length) return "No parts yet: call split_task first.";
+  return parts
+    .map((x) => {
+      const said = live(x)
+        ? needsYou(x)
+          ? `waiting on ${ownerName()} (${x.blocker ?? "a question"})`
+          : `still working${x.activity ? `: ${x.activity}` : ""}`
+        : x.status === "done"
+          ? `${needsYou(x) ? "asked" : "done"}: ${x.answer ?? ""}`
+          : `failed: ${x.error ?? ""}`;
+      return `"${x.title}": ${said}`;
+    })
+    .join("\n\n");
 }
 
 /** Stop every task that's queued or running (a reset, or a hosted server about to swap in another user's state). */
@@ -573,6 +645,11 @@ export function replyToSession(sessionId: string, text: string, note?: string, f
   });
   if (!live(s)) {
     stopped.delete(sessionId);
+    // It failed, or the user says it's wrong: on the router's route, the next turn thinks a tier harder (routing.ts taskConfig).
+    if (s.route?.by === "router" && (s.status === "failed" || ASKS_AGAIN.test(text)))
+      patchSession(sessionId, (x) => {
+        if (x.route) x.route.bumps = (x.route.bumps ?? 0) + 1;
+      });
     patchSession(sessionId, { status: "queued", error: undefined, endedAt: undefined });
     void pump();
   } else steerers.get(sessionId)?.();
@@ -587,6 +664,10 @@ const notBefore = new Map<string, number>();
 const SAME_SITE_WAIT_MS = 3 * 60_000;
 /** When each queued task started waiting for the screen already on its site. */
 const siteWait = new Map<string, number>();
+/** How long a thread picked up again waits for its own screen (where it left off) while other work uses it, before moving. Tests shorten it. */
+export const screenTiming = { homeWaitMs: 60_000 };
+/** When each thread picked up again started waiting for its own screen. */
+const homeWait = new Map<string, number>();
 
 /**
  * Where a new task goes, among its computer's screens (or its bot's Chromes on the Mac): the free one
@@ -687,12 +768,27 @@ async function pump() {
       // Watched screens stay on their site; only a thread started from one runs there.
       let held = [...using, ...watched.filter((w) => w !== mine).map((w) => w.display)];
       if (!mine && held.length >= MAX_SCREENS) continue;
+      // Screens other threads keep while they wait on the user (lib/screens.ts holdsScreen): new work takes
+      // another while one is free, so an answer picks its thread up where it was.
+      const soft = softHolds(b.id, s.id).filter((d) => !held.includes(d));
+      const open = (d: number) => !held.includes(d) && (!soft.includes(d) || DISPLAYS.every((x) => held.includes(x) || soft.includes(x)));
       // A thread picked up again waits for the screen its agent was set up for (its browser tools drive
       // that screen's Chrome): on another, Bops would watch, claim and show one screen while the bot
       // works on the other, and the vault would never see its sign-in pages. Not for a watched screen,
       // which stays on its site: then it starts over on another (run: a fresh agent session).
       const own = s.agentSessionId ? s.env?.display : undefined;
       if (own !== undefined && !mine && held.includes(own) && !watched.some((w) => w.display === own)) continue;
+      // A thread picked up again waits a while for its own screen (where it left off) before moving to another.
+      const home = !mine && own === undefined ? s.lastDisplay : undefined;
+      if (home !== undefined && held.includes(home) && !watched.some((w) => w.display === home)) {
+        const since = homeWait.get(s.id) ?? Date.now();
+        if (!homeWait.has(s.id)) {
+          homeWait.set(s.id, since);
+          step(s.id, "note", `Waiting for ${screenLabel(home)}, where it left off`);
+          setTimeout(() => void pump(), screenTiming.homeWaitMs + 100);
+        }
+        if (Date.now() - since < screenTiming.homeWaitMs) continue;
+      }
       // Pick up where it left off when that screen is free.
       let display = mine
         ? mine.display
@@ -700,7 +796,7 @@ async function pump() {
           ? own
           : s.lastDisplay !== undefined && !held.includes(s.lastDisplay)
             ? s.lastDisplay
-            : DISPLAYS.find((d) => !held.includes(d))!;
+            : DISPLAYS.find(open)!;
       // A new task: the screen already on its site, if there is one (never a watched screen: those stay on theirs).
       if (!mine && own === undefined && s.lastDisplay === undefined) {
         const pages = await screenPages(b);
@@ -710,14 +806,20 @@ async function pump() {
         if (held.length >= MAX_SCREENS || session(s.id)?.status !== "queued") continue;
         const pick = pickBySite(
           s,
-          DISPLAYS.map((d, i) => ({ at: d, free: !held.includes(d), page: now.watched.some((w) => w.display === d) ? null : pages[i] })),
+          DISPLAYS.map((d, i) => ({ at: d, free: open(d) && !held.includes(d), page: now.watched.some((w) => w.display === d) ? null : pages[i] })),
         );
         if (pick === "wait" || pick === undefined) continue;
         display = pick;
       }
       siteWait.delete(s.id);
-      patchSession(s.id, { status: "starting", display, lastDisplay: display, startedAt: s.startedAt ?? Date.now() });
-      void run(s.id).finally(() => {
+      homeWait.delete(s.id);
+      // Picked up again on another screen than it left: its next turn says so, with the page it was on.
+      const moved = s.lastDisplay !== undefined && display !== s.lastDisplay && !mine && !!s.responseId ? { from: screenNo(s.lastDisplay), to: screenNo(display) } : undefined;
+      patchSession(s.id, { status: "starting", display, lastDisplay: display, startedAt: s.startedAt ?? Date.now(), ...(moved ? { screenMoved: moved } : {}) });
+      const at = display;
+      void run(s.id).finally(async () => {
+        // Where it left off (the page, a last frame) before the screen is anyone else's.
+        await leaveScreen(s.id, at).catch((e: Error) => console.warn(`[screens] ${s.id}: ${e.message}`));
         patchSession(s.id, { display: undefined });
         void pump();
       });
@@ -726,6 +828,47 @@ async function pump() {
     pumping = false;
     if (pumpAgain) void pump();
   }
+}
+
+/** Screens on `botId`'s computer that other threads keep while they wait on the user (lib/screens.ts holdsScreen). */
+function softHolds(botId: string, except: string): number[] {
+  return getState()
+    .sessions.filter((x) => x.id !== except && sameComputer(x.botId, botId) && holdsScreen(x))
+    .map((x) => x.lastDisplay!)
+    .filter((d) => d !== undefined);
+}
+
+/** What the screen watch last read on a screen (screen-watch.ts), as a page. */
+function lastRead(botId: string, display: number): { url: string; title?: string } | null {
+  const r = getState().screens?.[`${botId}:${display}`];
+  return r?.url ? { url: r.url, ...(r.title ? { title: r.title } : {}) } : null;
+}
+
+/** How long a thread letting go of its screen waits for its page and last frame before the screen is free. */
+const LEAVE_MS = 5_000;
+
+/**
+ * A thread letting go of its screen: the page it's on (its lastPage, and the screen's "left by" in
+ * screenLog) and its last frame, kept on this Mac (~/.bops, /api/frames). Read from the screen's own
+ * Chrome and Orgo, quickly or not at all: the screen frees after LEAVE_MS either way.
+ */
+async function leaveScreen(sessionId: string, display: number) {
+  const s = session(sessionId);
+  const b = s && bot(s.botId);
+  if (!s || !b || s.runsOn === "mac" || s.host !== "orgo") return;
+  const c = workComputer(b);
+  const timeout = <T>(p: Promise<T>) => Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), LEAVE_MS))]);
+  const [page, frame] = await Promise.all([
+    // Its own Chrome's page (over the tailnet), else what the screen watch last read there.
+    timeout(pageNow(s).catch(() => null)).then((p) => p ?? lastRead(s.botId, display)),
+    c.computerId ? timeout(orgo.screenshot(c.computerId, listedScreenId(c.computerId, display), 0.5, "jpeg").catch(() => null)) : Promise.resolve(null),
+  ]);
+  const kept = frame ? saveFrame(sessionId, Buffer.from(frame as Uint8Array)) : false;
+  const left = { sessionId, botId: s.botId, title: s.title, ...(page ? { page } : {}), at: Date.now() };
+  update((state) => {
+    state.screenLog = { ...(state.screenLog ?? {}), [`${c.id}:${display}`]: left };
+  });
+  patchSession(sessionId, { ...(page ? { lastPage: page } : {}), ...(kept ? { lastFrameAt: Date.now() } : {}) });
 }
 
 /**
@@ -1302,18 +1445,20 @@ function macChromeNote(owner: string) {
 function instructions(botName: string, role: string, mac: boolean, display: number, sharedWith?: string, apps = false, auto = false, full = false, computer = false, onMacChrome = false, vaultTool = false, ui = false) {
   const owner = ownerName();
   const appsLine = `For ${owner}'s email, calendar, documents, CRM and anything else they connected, use their apps (find_app_actions, then use_app; see "Your apps" below) before a website.`;
+  // The fastest tool first: each one only for what the ones before it can't do. The screen is last.
   const tools = [
     ...(apps ? [`${owner}'s apps (find_app_actions, then use_app; see "Your apps" below) for their email, calendar, documents, CRM and anything else they connected.`] : []),
     "web_search to look things up and read pages as text quickly (search, open a page, find in a page).",
+    "The shell (bash) and file edits for files, data and code: download, fetch a page or an API (curl), parse, calculate, and write documents in /workspace.",
     `The browser tools (browser_navigate, browser_snapshot, browser_click, browser_type, browser_fill_form, browser_select_option, browser_tabs…) to work in websites. They drive the Chrome on your screen, so ${owner} sees it happen. Read a page with browser_snapshot and act on its elements by ref; that's faster and surer than pixels.`,
-    "The shell (bash) and file edits for files, data and code: download, parse, calculate, and write documents in /workspace.",
     "The screen tools (screenshot, click, type_text, key, scroll, drag) for what the browser tools can't reach: native dialogs, canvas apps, drag and drop, or to check visually that something looks right. Coordinates come from the latest screenshot.",
   ].map((t, i) => `(${i + 1}) ${t}`);
   const computerTools = [
     ...(apps ? [`${owner}'s apps (find_app_actions, then use_app; see "Your apps" below) for their email, calendar, documents, CRM and anything else they connected.`] : []),
     "web_search to look things up and read pages as text quickly (search, open a page, find in a page).",
-    `The computer: you see your screen and use its mouse and keyboard, for websites in Chrome and any app on the computer, so ${owner} sees it happen. Go straight to URLs you know (ctrl+l, type it, Enter).`,
-    "run_command for files, data and code: download, parse, calculate, and write documents in /workspace.",
+    "run_command for files, data and code: download, fetch a page or an API (curl), parse, calculate, and write documents in /workspace.",
+    `page_script to read a website, and to fill in or click things you can name (a field by its label, a button by its text). It runs on the Chrome on your screen, so ${owner} sees the page change.`,
+    `The screen: you see it and use its mouse and keyboard, so ${owner} sees it happen. Go straight to URLs you know (ctrl+l, type it, Enter).`,
   ].map((t, i) => `(${i + 1}) ${t}`);
   return [
     `You are ${botName}, the ${role} bot in Bops.`,
@@ -1346,15 +1491,21 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
         ]
       : [
           sharedWith
-            ? `You work on ${screenLabel(display)} of the Linux computer you share with ${sharedWith}, where Chrome is open. ${sharedWith} and other bots may be working on its other screens: never touch a screen that isn't yours. Your screen is live for ${owner} to watch, so do the work there, in the open.`
-            : `You work on ${screenLabel(display)} of your own Linux computer, where Chrome is open. That screen is live for ${owner} to watch, so do the work there, in the open.`,
-          "Pick the right tool for each step, the way a capable person at a computer would:",
-          ...(computer ? computerTools : tools),
-          `When the task is about a website ${owner} should see (signing in, filling a form, writing a post or a draft), do it in the browser on your screen, not only through search.`,
+            ? `You work on ${screenLabel(display)} of the Linux computer you share with ${sharedWith}, where Chrome is open. ${sharedWith} and other bots may be working on its other screens: never touch a screen that isn't yours. ${owner} can watch your screen live.`
+            : `You work on ${screenLabel(display)} of your own Linux computer, where Chrome is open. ${owner} can watch that screen live.`,
+          ...(computer
+            ? [
+                "Your tools, quickest first. For each step, use the quickest one that fits it:",
+                ...computerTools,
+                "Use the screen when you need to see: menus, pop-ups, account and channel switchers, hover menus, drag and drop, a canvas, a native dialog, an app other than Chrome; when you're not sure what a page is showing; and to check that a result looks right. When two page scripts haven't got a step done, do that step on the screen.",
+              ]
+            : ["For each step, use the first tool in this list that can do it. Go further down the list only when the tools before it can't:", ...tools]),
+          `Do what ${owner} should see happen or check (signing in, filling a form, writing a post or a draft) in the Chrome on your screen. To look things up or read, don't use the screen: search, and read pages as text.`,
           `This task runs in the cloud and can't reach ${owner}'s Mac: no tool or setting here switches to it. If you're asked to carry on on their Mac, don't look for a way: say in one sentence that it has to be moved there (when ${owner} asks for their Mac, Bops moves it, with a record of what you did here), and stop.`,
           "Bops gives a task the screen that already has its site open, when one does: if yours shows the site you need, carry on from that page rather than opening it again in a new tab.",
           ...(computer
             ? [
+                `When the task splits into parts that can run side by side, each needing a browser of its own (something on each screen, several sites, several companies or people), call split_task with those parts: each runs as a thread of its own on another screen of your computer, at the same time. Do your own part meanwhile, then call check_parts with wait true and put their results together in your answer. Keep quick steps, and steps that depend on each other, yourself.`,
                 `When you talk to ${owner}, say what you're doing, never which screen it's on.`,
                 `Each message ends with a briefing of your computer: what every screen is doing right now. Yours is the one you see; never touch the others. The briefing is for you: don't repeat it or report screen status in your answer unless ${owner} asks.`,
               ]
@@ -1389,6 +1540,26 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
     WRITING,
     ASKING,
   ].join(" ");
+}
+
+/** A task's steps after the user starts or answers it that count as them waiting, wherever they look. */
+const FIRST_STEPS = 3;
+
+/**
+ * Whether someone is waiting on a task's step now, so it runs fast (routing.ts speedFor): the user is
+ * looking at it (its thread or chat open in the window in front: presence.ts), or it's one of its first
+ * steps after they started or answered it. Not a routine's, or one someone outside Bops started.
+ */
+function waitingOn(sessionId: string, calls: number): boolean {
+  const s = session(sessionId);
+  if (!s) return false;
+  return watching(s) || (calls < FIRST_STEPS && s.sentVia !== "routine" && !s.fromOutside);
+}
+
+/** A new task's route, next to what the router would have picked, for the comparison (routing.ts logRoute). */
+function logTaskRoute(sessionId: string) {
+  const s = session(sessionId);
+  if (s?.route) logRoute({ kind: "task", id: s.id, botId: s.botId, goal: s.goal.slice(0, 400), ran: { model: s.route.model, effort: s.route.effort, by: s.route.by }, router: s.route.router });
 }
 
 /**
@@ -1455,10 +1626,16 @@ function proceduresInFull(s: Session) {
 async function computerToolTurns(sessionId: string, at: { computerId: string; display: number; sharedWith?: string; resuming: boolean }) {
   const s = session(sessionId)!;
   const b = bot(s.botId)!;
-  if (!at.resuming) patchSession(sessionId, { runner: "computer", effort: await threadEffort(b.effort, s.goal, b.id) });
+  if (!at.resuming && !s.route) {
+    const route = await routeTask(b.effort, s.goal, b.id);
+    patchSession(sessionId, { runner: "computer", effort: route.effort, route });
+    logTaskRoute(sessionId);
+  }
   // Its skills and apps on its computer (capabilities/skills), for the scripts they bring.
   if (!at.resuming) await copySkillsToComputer(b.id, at.computerId, orgo.bash).catch((e: Error) => console.warn(`[skills] ${sessionId}: ${e.message}`));
-  const effort = session(sessionId)!.effort ?? "medium";
+  // What this turn runs on: the route (a tier up for each bump), or for a thread from before routes, the old rule.
+  const now = session(sessionId)!;
+  const config = taskConfig(now.route) ?? { model: now.effort === "high" ? HARD_MODEL : SESSION_MODEL, effort: now.effort ?? "medium" };
   // Its apps are tools in this process (composio.ts), so it has them wherever its computer is.
   const apps = composioOn() && accountsOf(b).length > 0;
   const memory = await memoryBlock(wsOf(s.botId), s.goal, 3000);
@@ -1486,9 +1663,8 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         sessionId,
         computerId: at.computerId,
         display: at.display,
-        // Hard tasks get the model Dots runs on; the rest the faster, cheaper one.
-        model: effort === "high" ? HARD_MODEL : SESSION_MODEL,
-        effort,
+        model: config.model,
+        effort: config.effort,
         instructions: text,
         apps,
         input,
@@ -1496,6 +1672,9 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         timeoutMs: TURN_MAX_MS,
         idleMs: TURN_IDLE_MS,
         step: (tool, detail) => step(sessionId, tool, detail),
+        speed: (calls) => now.route?.speed ?? speedFor(config.model, waitingOn(sessionId, calls)),
+        pages: () => ensureBrowserTool(at.computerId),
+        parts: { start: (parts) => splitTask(sessionId, parts), check: (wait, signal) => checkParts(sessionId, wait, signal) },
         steer: () => {
           const pending = unsent(sessionId);
           if (!pending.length || stopped.has(sessionId)) return undefined;
@@ -1526,27 +1705,6 @@ async function startOrgoExecutor(computerId: string, display: number, env: { id:
   if (started.exit_code !== 0) throw new Error(`executor failed: ${started.output.slice(0, 200)}`);
 }
 
-/**
- * How hard a thread thinks: the bot's own setting, or on "auto" Jev's read of the task. Hard tasks
- * (many steps, research across several sources, careful forms) get high effort; the rest medium.
- */
-async function threadEffort(setting: Effort | undefined, goal: string, botId?: string): Promise<Exclude<Effort, "auto">> {
-  if (setting && setting !== "auto") return setting;
-  const a = await decide(
-    { task: goal },
-    {
-      hard: {
-        type: "noul",
-        instructions: "Is `task` hard: many steps, research across several sources, comparing or judging, or careful form-filling where mistakes matter?",
-        criteria: { true: "Hard: worth thinking it through carefully", false: "Simple: a quick lookup or a few clicks" },
-      },
-    },
-    { botId },
-  );
-  // Jev is conservative here: a multi-source research task scores about 0.4, a one-page lookup about 0.03.
-  return (yes(a?.hard) ?? 0) >= 0.3 ? "high" : "medium";
-}
-
 /** Is the bot's latest answer waiting on the user? Decides whether the thread shows "needs you". */
 async function judgeWaiting(sessionId: string, answer: string) {
   const owner = ownerName();
@@ -1561,12 +1719,48 @@ async function judgeWaiting(sessionId: string, answer: string) {
           false: `The bot delivered a result or a status update and needs nothing from ${owner}`,
         },
       },
+      elsewhere: {
+        type: "noul",
+        instructions: `Is \`bot_reply\` waiting for ${owner} to approve something on their phone or another device (a sign-in prompt, a push notification, an authenticator)?`,
+        criteria: { true: "It waits on an approval on another device", false: "Anything else, or nothing" },
+      },
     },
     { botId: session(sessionId)?.botId },
   );
   const p = yes(a?.waiting);
-  if (p !== undefined) patchSession(sessionId, { waitingOnYou: p >= 0.5 });
-  if (p !== undefined && p >= 0.5) await suggestFor(sessionId);
+  const elsewhere = yes(a?.elsewhere);
+  if (p !== undefined) patchSession(sessionId, { waitingOnYou: p >= 0.5, approveElsewhere: p >= 0.5 && elsewhere !== undefined && elsewhere >= 0.5 });
+  if (p !== undefined && p >= 0.5) {
+    markNeeded(sessionId);
+    await suggestFor(sessionId);
+  }
+}
+
+/**
+ * The thread's result in the chat asks the user something: it stays in the chat when the thread moves
+ * on (store.ts addMessage), chimes, and if nobody answers within askTiming.textAfterMs, Bops texts them.
+ * Called when the result is posted and when Jev says it's waiting, whichever comes second finds both.
+ */
+function markNeeded(sessionId: string) {
+  const s = session(sessionId);
+  if (!s || !needsYou(s)) return;
+  const m = [...getState().messages].reverse().find((x) => x.resultOf === sessionId);
+  if (!m || m.needed || m.text !== (s.answer ?? m.text)) return;
+  update((st) => {
+    const x = st.messages.find((y) => y.id === m.id);
+    if (x) Object.assign(x, { needed: true, ping: true });
+  });
+  const asked = s.answer;
+  setTimeout(() => void textIfUnanswered(sessionId, asked).catch((e: Error) => console.warn(`[asks] ${sessionId}: ${e.message}`)), askTiming.textAfterMs).unref?.();
+}
+
+/** Still waiting on the same question: a text to the user, once, unless it came by text (its answer went back that way). */
+async function textIfUnanswered(sessionId: string, asked: string | undefined) {
+  const s = session(sessionId);
+  if (!s || !needsYou(s) || s.answer !== asked || s.askTexted === asked || s.textBack) return;
+  patchSession(sessionId, { askTexted: asked });
+  const words = (asked ?? "").replace(/\*\*|\[|\]\([^)]*\)/g, "").trim();
+  await textOwner(s.botId, `${s.title} needs you: ${words.length > 300 ? `${words.slice(0, 297)}…` : words}`);
 }
 
 /** A question with no ready answers leaves the user guessing what to say: suggest some. */
@@ -1583,8 +1777,9 @@ async function suggestReplies(task: string, recent: Session["replies"], question
   const owner = ownerName();
   const epoch = stateEpoch();
   const res = await client.responses.create({
-    model: process.env.BOPS_CHAT_MODEL ?? "gpt-6.1-sol",
-    reasoning: { effort: "low" },
+    // A few words of a fixed shape: Luna, without reasoning.
+    model: LIGHT(),
+    reasoning: { effort: "none" },
     instructions:
       `A bot asked ${owner} something while working on a task. Suggest 2 or 3 short replies (2 to 8 words each) that ${owner} could tap to answer it, written the way ${owner} would say them. Make them different real answers, not "I don't know". When the question shows the bot misunderstood, include a reply that clears it up. Don't suggest "never mind" or "stop": Bops already has that button. No full stops at the end.`,
     input: JSON.stringify({ task, recent: recent.map((r) => `${r.role === "user" ? owner : "Bot"}: ${r.text}`).join("\n").slice(-3000), question }),
@@ -1616,18 +1811,33 @@ export function dismissWaiting(sessionId: string) {
 const BROWSER_MCP = "/opt/bops/pw/node_modules/@playwright/mcp/cli.js";
 /** Brings the page the bot navigates to the front of its screen (vm/browser-front.cjs). */
 const BROWSER_FRONT = "/opt/bops/pw/front.cjs";
-const browserReady = new Set<string>();
-/** Install the browser tools on a computer once (same version as this copy of Bops uses). */
-async function ensureBrowserTool(computerId: string) {
-  if (browserReady.has(computerId)) return;
+/** Each computer's install of the browser tools, once per run of Bops: true once they're there. One that failed is tried again next time. */
+const browserReady = new Map<string, Promise<boolean>>();
+/**
+ * Install the browser tools on a computer once (same version as this copy of Bops uses): Playwright
+ * MCP for Agents API threads, and the page-script runner (vm/page-script.cjs, computer-task.ts
+ * page_script) next to the playwright-core it brings. True when they're there.
+ */
+function ensureBrowserTool(computerId: string): Promise<boolean> {
+  const known = browserReady.get(computerId);
+  if (known) return known;
   const v = JSON.parse(readFileSync(join(process.cwd(), "node_modules/@playwright/mcp/package.json"), "utf8")).version as string;
   const front = readFileSync(join(process.cwd(), "vm/browser-front.cjs")).toString("base64");
-  const r = await orgo.bash(
-    computerId,
-    `mkdir -p /opt/bops/pw && echo ${front} | base64 -d > ${BROWSER_FRONT} && cd /opt/bops/pw && (grep -q '"version": "${v}"' node_modules/@playwright/mcp/package.json 2>/dev/null || npm install --silent --no-audit --no-fund @playwright/mcp@${v} >/tmp/pw-install.log 2>&1) && test -f ${BROWSER_MCP} && echo ok`,
-    240,
-  );
-  if (r.output.includes("ok")) browserReady.add(computerId);
+  const runner = readFileSync(join(process.cwd(), "vm/page-script.cjs")).toString("base64");
+  const ready = orgo
+    .bash(
+      computerId,
+      `mkdir -p /opt/bops/pw && echo ${front} | base64 -d > ${BROWSER_FRONT} && echo ${runner} | base64 -d > ${PAGE_RUNNER} && cd /opt/bops/pw && (grep -q '"version": "${v}"' node_modules/@playwright/mcp/package.json 2>/dev/null || npm install --silent --no-audit --no-fund @playwright/mcp@${v} >/tmp/pw-install.log 2>&1) && test -f ${BROWSER_MCP} && test -d node_modules/playwright-core && echo ok`,
+      240,
+    )
+    .then((r) => r.output.includes("ok"))
+    .catch(() => false)
+    .then((ok) => {
+      if (!ok) browserReady.delete(computerId);
+      return ok;
+    });
+  browserReady.set(computerId, ready);
+  return ready;
 }
 
 // The screen tools every computer needs to run threads, kept matching this copy of Bops.
@@ -1711,6 +1921,8 @@ async function run(sessionId: string) {
   const onComputerTool = !mac && (s.runner === "computer" || (!s.agentSessionId && computerToolOn()));
   // Until its cleanup is done (a thread moved to the Mac waits for that: waitsForCloud).
   runs.add(sessionId);
+  // This Mac runs the task, wherever its screen is: it doesn't idle to sleep till it's done.
+  const letSleep = holdAwake();
   try {
     if (mac) folder = taskDir(sessionId);
     const workspace = folder ? join(folder, "workspace") : "/workspace";
@@ -1733,8 +1945,10 @@ async function run(sessionId: string) {
       await ensureTailnet(c).catch(() => null);
       // The computer's screen ledger: drop stale claims, then take this thread's screen.
       await ensureScreenTools(computerId, b.id);
-      // Not fatal: without them the task still has web search, the shell and the screen tools.
-      if (!onComputerTool) await ensureBrowserTool(computerId).catch(() => {});
+      // Not fatal: without them the task still has web search, the shell and the screen tools. A thread on
+      // the computer tool doesn't wait for them: its first page_script does (computerToolTurns).
+      if (!onComputerTool) await ensureBrowserTool(computerId);
+      else void ensureBrowserTool(computerId);
       // Every bot's live threads on this computer, not just this bot's: a sync that left out a bot
       // sharing it would drop that bot's claims. Thread ids are unique across bots, so claims never collide.
       const liveOwners = getState().sessions.filter((x) => sameComputer(x.botId, b.id) && live(x)).map((x) => `thread:${x.id}`);
@@ -1788,14 +2002,17 @@ async function run(sessionId: string) {
     if (onComputerTool) turn = await computerToolTurns(sessionId, { computerId, display, sharedWith: c.id !== b.id ? c.name : undefined, resuming });
     else {
       if (!resuming) {
-        const effort = await threadEffort(b.effort, s.goal, b.id);
-        patchSession(sessionId, { effort });
+        const route = s.route ?? (await routeTask(b.effort, s.goal, b.id));
+        if (!s.route) {
+          patchSession(sessionId, { effort: route.effort, route });
+          logTaskRoute(sessionId);
+        }
         // What's known about the user that bears on this task (long-term memory).
         const memory = await memoryBlock(wsOf(s.botId), s.goal, 3000);
         const created = (await client.beta.agents.sessions.create({
           agent: {
-            // Hard tasks get the model Dots runs on; the rest the faster, cheaper one.
-            model: session(sessionId)!.effort === "high" ? HARD_MODEL : SESSION_MODEL,
+            // Fixed for the session: an Agents API thread can't move to another model (a bump only reaches the computer tool's).
+            model: route.model,
             // Reasoning summaries become the thread's live caption ("checking the pricing page…").
             reasoning: { effort: session(sessionId)!.effort ?? "medium", summary: "auto" },
             instructions: [
@@ -1889,7 +2106,7 @@ async function run(sessionId: string) {
     // the cloud, with what it did there (cloudRecord).
     const moved = !resuming && s.movedFrom ? await cloudRecord(s.movedFrom, movePages.get(sessionId)) : "";
     movePages.delete(sessionId);
-    let input: string | undefined = resuming ? takeReplies(sessionId) : freshStart(sessionId, moved);
+    let input: string | undefined = resuming ? withMovedNote(sessionId, takeReplies(sessionId)) : freshStart(sessionId, moved);
     while (input) {
       if (stopped.has(sessionId)) throw new Error("Stopped by you");
       // A new turn starts clean; the screen watch raises the blocker again if it's still there.
@@ -1918,6 +2135,8 @@ async function run(sessionId: string) {
     if (!(await routineDone(sessionId))) {
       rememberTask(done);
       const result = addMessage({ chatId: done.chatId, role: "bot", botId: b.id, text: done.answer ?? "Done.", sessionIds: [sessionId], resultOf: sessionId });
+      // Asking the user something (Jev may have said so already: judgeWaiting runs alongside; else a question mark).
+      markNeeded(sessionId);
       // Worth a chime? Only what the user is waiting on, or needs them (Jev, given what they're doing).
       pingIfWorthIt(result.id, done.title, done.answer ?? "Done.");
       emailResult(done, result.id, done.answer ?? "Done.");
@@ -1991,6 +2210,7 @@ async function run(sessionId: string) {
       }
     } finally {
       runs.delete(sessionId);
+      letSleep();
     }
   }
 }
@@ -2013,10 +2233,27 @@ function freshStart(sessionId: string, moved = "") {
     moved,
     s.answer ? `You worked on this before, in an earlier session you can't see now. Your last answer was:\n${s.answer}` : "",
     replies ? `Since then ${ownerName()} said${passedOn ? " (what's marked as passed on from outside Bops is someone else's)" : ""}:\n${replies}` : "",
+    s.answer && s.lastPage ? `You left off on ${pageWords(s.lastPage)}.` : "",
     s.answer || replies ? "Look at the screen as it is now and carry on from there." : "",
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+/** A page as a bot reads it: its title and address. */
+const pageWords = (p: { url: string; title?: string }) => (p.title ? `"${p.title.slice(0, 80)}" (${p.url})` : p.url);
+
+/**
+ * A thread picked up again on another screen than it left (its own was busy past screenTiming.homeWaitMs): its turn
+ * starts by saying so, with the page it was on, so it opens that again instead of starting over. Said once.
+ */
+function withMovedNote(sessionId: string, input: string | undefined): string | undefined {
+  const s = session(sessionId);
+  const m = s?.screenMoved;
+  if (!s || !m || !input) return input;
+  patchSession(sessionId, { screenMoved: undefined });
+  const where = s.lastPage ? ` You were on ${pageWords(s.lastPage)}: open it again before you go on.` : " Pick up where you left off.";
+  return `(From Bops: you're on screen ${m.to} now; screen ${m.from}, where you left off, was busy.${where})\n\n${input}`;
 }
 
 /** The user's replies not yet sent to the agent, joined into one turn. */
@@ -2121,7 +2358,7 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
   let mainTurn: string | undefined;
   // Each turn's tokens (the thread's and its helpers'), counted once when it ends; `seen` keeps it once.
   const s = session(sessionId);
-  const model = s?.effort === "high" ? HARD_MODEL : SESSION_MODEL;
+  const model = s?.route?.model ?? (s?.effort === "high" ? HARD_MODEL : SESSION_MODEL);
   // Whose state this turn belongs to: tokens counted after a hosted server swapped users are dropped (stateEpoch).
   const epoch = stateEpoch();
   const countTurn = (turnId: string, usage: TokenCount) => {
@@ -2488,7 +2725,6 @@ export function returnControl() {
   void pump();
 }
 
-export const screenLabel = (display: number) => `screen ${DISPLAYS.indexOf(display) + 1}`;
-/** Screens are numbered 1-4 for agents and the user (displays :100, :101, :102, :99). */
-const screenNo = (display: number) => DISPLAYS.indexOf(display) + 1;
+// Screens are numbered 1-4 for agents and the user (lib/screens.ts): one numbering, everywhere.
+export { screenLabel };
 export { screenId };

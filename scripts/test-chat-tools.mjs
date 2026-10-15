@@ -236,20 +236,7 @@ await check("a routine's run going when Bops stopped is left as it was (it may b
   S.update((s) => (s.routines = s.routines.filter((r) => !r.id.startsWith("rtn_was"))));
 });
 
-/* ---------------- cloud/style.ts: links made plain, How I work ---------------- */
-
-await check("plainLinks turns markdown links into words and an address", () => {
-  const P = Style.plainLinks;
-  assert.equal(P("See [the menu](https://x.com/menu) now."), "See the menu (https://x.com/menu) now.");
-  assert.equal(P("Up 3% ([coinbase.com](https://www.coinbase.com/price/bitcoin?utm_source=openai))."), "Up 3% (https://www.coinbase.com/price/bitcoin).", "a web search citation is just the address, untagged");
-  assert.equal(P("[Foo](https://en.wikipedia.org/wiki/Foo_(bar))"), "Foo (https://en.wikipedia.org/wiki/Foo_(bar))", "parentheses in an address stay");
-  assert.equal(P("a [b](https://x.com/?a=1&utm_source=openai) c"), "a b (https://x.com/?a=1) c");
-  assert.equal(P("[x](https://x.com/?utm_source=openai#top)"), "x (https://x.com/#top)", "one letter isn't the site");
-  assert.equal(P('[docs](https://x.com/d "The docs")'), "docs (https://x.com/d)", "a title goes");
-  assert.equal(P("![logo](https://x.com/l.png)"), "logo (https://x.com/l.png)");
-  assert.equal(P("[https://x.com](https://x.com/)"), "https://x.com/");
-  assert.equal(P("No links, https://x.com stays, [brackets] too."), "No links, https://x.com stays, [brackets] too.");
-});
+/* ---------------- cloud/style.ts: How I work (plainLinks: test-chat-search.mjs) ---------------- */
 
 await check("howIWork frames the user's words as preferences under Bops' rules", () => {
   assert.equal(Style.howIWork("Alex", undefined), "");
@@ -276,7 +263,7 @@ await check("the instructions have the new rules, said once, and none of the old
   const t = typical.instructions;
   hear(t);
   // The decision rule, execution bias and promised work.
-  assert.match(t, /Answer directly when you can\. Look things up right here in the chat with your tools: web_search and web_fetch for the web, your apps, email and Alex's memory\. Call start_task \(once per independent task\) only for work that needs a screen, a sign-in, or long hands-on work/);
+  assert.match(t, /Answer directly when you can, right here in the chat with your tools: your apps, email and Alex's memory\. Start a task \(start_task\) for work on a website \(signing in, filling a form, posting, booking, buying\), for something to make \(a document, a list, a draft\), or for research across many sources\. Call it once per independent task/);
   assert.match(t, /For something later or on a schedule, call schedule\. For waiting on something \(a price, a reply, a page that changes\), call watch\./);
   assert.match(t, /When a request is clear and safe, do it now\. Ask only when you're blocked/);
   assert.match(t, /Never say you'll check, follow up or remind Alex later unless you call schedule or watch in this same turn\. If you can do it now, do it now\./);
@@ -294,7 +281,7 @@ await check("the instructions have the new rules, said once, and none of the old
   assert.match(t, /- Autopilot, in the sidebar, lists what bots do on their own: Schedules and Monitors\./);
   assert.match(t, /- Skills, in the sidebar under Autopilot: /);
   // Its own computer, truly.
-  assert.match(t, /\nYou have your own cloud computer with a browser: it has 4 screens, so up to 4 long tasks run at once\./);
+  assert.match(t, /\nYou have your own cloud computer with a browser and four screens, so up to 4 long tasks at once\./);
   // Gone: the web as a reason to start a task, every bot with its own computer, helpers, ASCII diagrams,
   // steps always in a list, duplicates of the tools' own words, by_text.
   for (const stale of [
@@ -345,7 +332,7 @@ await check("a teammate that shares the main bot's computer is told so", async (
   answers.push(reply("Hi."));
   const n = asked.length;
   await Chat.handleMessage(botChatId("max"), "hello");
-  assert.match(asked[n].instructions, /\nYou work on Boppy's cloud computer, with a browser, shared with Boppy: it has 4 screens/);
+  assert.match(asked[n].instructions, /\nYou work on Boppy's cloud computer, sharing its four screens with your team, so a task of yours waits when they're all in use\./);
   assert.ok(!asked[n].instructions.includes("How Alex wants you to work"), "no How I work when the user wrote none");
 });
 
@@ -710,13 +697,13 @@ await check("schedule: from a text, results go back by text; from Telegram, to t
   assert.deepEqual(routines().at(-1).deliverTo, { kind: "text" });
   assert.equal(last().role, "system");
   const botSaid = messages().findLast((m) => m.role === "bot");
-  assert.equal(botSaid.text, "Set. See the forecast (https://weather.example/nyc).", "markdown made plain for a text");
+  assert.equal(botSaid.text, "Set. See the forecast https://weather.example/nyc.", "markdown made plain for a text");
   // In Telegram, paired: back to that chat.
   S.update((s) => (s.channels = [{ id: "ch_tg", kind: "telegram", botId: "boppy", handle: "@boppy_bot", owner: "777", pairCode: "123456", status: "live", at: 0 }]));
   answers.push(calling(toolCall("schedule", scheduleArgs({ title: "Standup", goal: "Post the standup notes.", schedule: sched({ kind: "weekdays", time: "09:30" }), run: "chat" }))), reply("Set, see [notes](https://n.example/a)."));
   await Chat.handleMessage(chatId, "post standup notes here every weekday 9:30", undefined, undefined, "telegram", undefined, { linkId: "ch_tg", chat: "777", messageId: "55" });
   assert.deepEqual(routines().at(-1).deliverTo, { kind: "channel", linkId: "ch_tg", chat: "777" });
-  assert.equal(messages().findLast((m) => m.role === "bot").text, "Set, see notes (https://n.example/a).");
+  assert.equal(messages().findLast((m) => m.role === "bot").text, "Set, see notes https://n.example/a.");
   // From the app, deliver_to telegram: the DM with the person paired there.
   const t = await turnWith("every Monday at 9 send the report to my Telegram", [toolCall("schedule", scheduleArgs({ title: "Report", goal: "Write the weekly report.", schedule: sched({ kind: "weekly", day: 1, time: "09:00" }), run: "chat", deliver_to: "telegram" }))], "Set. [Report](https://r.example) goes to Telegram.");
   assert.match(t.out(), /^Set: Every Monday at 9 AM, results to Telegram\. Next: /);
@@ -980,7 +967,7 @@ await check("backgroundTurn: an answer is returned, never posted; links made pla
   answers.push(calling(toolCall("check_email", { query: null })), reply("Two meetings today. See [the agenda](https://cal.example/a?utm_source=openai)."));
   const n = asked.length;
   const out = await Chat.backgroundTurn("boppy", { routineId: r.id, title: r.title, goal: r.goal, quiet: false, procedureId: "proc_1" });
-  assert.deepEqual(out, { text: "Two meetings today. See the agenda (https://cal.example/a)." });
+  assert.deepEqual(out, { text: "Two meetings today. See the agenda https://cal.example/a." });
   assert.equal(messages().length, before, "returned, not posted");
   assert.match(asked[n].input.at(-1).content, /Your answer is posted in this chat and sent by text on its own: don't send it yourself\.\nIf it needs a computer, start one task \(start_task\) that does all of it\.\nFollow your skill for it:\nSkill: Weekly invoice summary\n/);
   assert.ok(!asked[n].input.at(-1).content.includes("NOTHING"), "not quiet");

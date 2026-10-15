@@ -33,6 +33,8 @@ async function until(check, what, ms = 4000) {
 // No keys or settings from the shell, a throwaway home and working folder (the state file, the
 // Keychain), and stand-ins for the programs the server runs.
 for (const k of Object.keys(process.env)) if (/^(BOPS|OPENAI|AGENTPHONE|AGENTMAIL|HONCHO|COMPOSIO|TYPESAFE|TWILIO|ORGO)_/.test(k)) delete process.env[k];
+// Fast task steps go over a WebSocket (lib/server/responses-ws.ts, tested in test-responses-ws.mjs); here, over HTTP to the fakes.
+process.env.BOPS_RESPONSES_WS = "0";
 const scratch = mkdtempSync(join(tmpdir(), "bops-test-cloud-"));
 process.chdir(scratch);
 process.env.HOME = scratch;
@@ -1060,7 +1062,7 @@ await until(() => remembered.length, "the owner's call in memory");
 assert.match(remembered[0].path, /^\/proxy\/honcho\/v3\/workspaces\/u-u1-bops\/sessions\/bops-chat-bot-boppy\/messages$/);
 assert.deepEqual(remembered.map((x) => x.said), [[["user", "Remind me to call Ana"], ["bops-boppy", "Will do."]]]);
 // And the categories look at what memory works out from it, 4 and 10 minutes later.
-await until(() => globalThis.bopsCategories?.banks.get("bops")?.timers.has("chat"), "a look after the call is saved");
+await until(() => [...(globalThis.bopsCategories?.spaces.values() ?? [])].some((s) => s.timers.has("chat")), "a look after the call is saved");
 // Anyone else got a bot that only takes a message (cloud/voice.ts): the message is in the chat, with a chime, once.
 const strangersCall = { botId: "boppy", from: "+14155550123", owner: false, message: { name: "Ana", text: "Send the deck", callback: "+14155550124" }, transcript: "Caller: Can you pass on a message?\nBot: Sure.", startedAt: "2026-10-05T11:00:00Z", endedAt: "2026-10-05T11:01:05Z" };
 for (let i = 0; i < 2; i++) {

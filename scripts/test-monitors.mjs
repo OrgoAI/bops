@@ -29,6 +29,8 @@ process.env.BOPS_SELF_HOSTED = "1";
 process.env.BOPS_ORGO_ORIGIN = "https://orgo.test";
 process.env.OPENAI_API_KEY = "sk-test-monitors";
 process.env.BOPS_CHAT_MODEL = "gpt-test-monitors";
+// The judge runs on the light model (routing.ts LIGHT).
+process.env.BOPS_LIGHT_MODEL = "gpt-test-monitors";
 const JEV_KEY = "ts-test-monitors";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const scratch = mkdtempSync(join(tmpdir(), "bops-test-monitors-"));

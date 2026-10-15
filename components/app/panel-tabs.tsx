@@ -1,14 +1,15 @@
 "use client";
 
 import { createContext, createElement, useEffect, useRef, useState } from "react";
-import { categoryOf } from "@/lib/memory-categories";
+import { GROUP_NAME } from "@/lib/memory-categories";
 import { live, type AppState } from "@/lib/types";
+import { computerOf } from "@/lib/screens";
 import { AutopilotIcon, type AutopilotSection } from "./autopilot";
 import type { Section } from "./bot-panel";
 import { CrmFileIcon } from "./crm";
 import { Mascot } from "./mascot";
 import { MacIcon } from "./mac-tab";
-import { CategoryIcon, type OrbitSection } from "./memory-categories";
+import { KnowledgeIcon, type OrbitSection } from "./memory-categories";
 import { SkillsIcon } from "./skills";
 import { KeyIcon } from "./screen-cards";
 import { MonitorIcon, teamOf } from "./ui";
@@ -124,9 +125,13 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
   const needsYou =
     // (A watched web page has no screen there: its news shows on Autopilot instead.)
     t.kind === "computer" && (state.watches?.some((w) => w.botId === t.botId && !w.page && w.alert) || state.sessions.some((s) => s.botId === t.botId && live(s) && s.blocker));
+  // The computer it works on: its own, or the main bot's it shares (lib/screens.ts), named for whose it is.
+  const host = b ? computerOf(state, b) : undefined;
   const label =
     t.kind === "computer"
-      ? `${b?.name ?? "Bot"}'s computer`
+      ? host && host.id !== b?.id
+        ? `${host.name}'s computer`
+        : `${b?.name ?? "Bot"}'s computer`
       : t.kind === "bot"
         ? (b?.name ?? "Bot")
         : t.kind === "web"
@@ -138,9 +143,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
               : t.kind === "crm"
                 ? t.file
                 : t.kind === "memory"
-                  ? t.category === "issues"
-                    ? "Issues"
-                    : (categoryOf(t.category)?.label ?? "Memory")
+                  ? GROUP_NAME
                   : t.kind === "autopilot"
                     ? "Routines"
                     : t.kind === "skills"
@@ -167,7 +170,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
       ) : t.kind === "crm" ? (
         <CrmFileIcon />
       ) : t.kind === "memory" ? (
-        <CategoryIcon id={t.category} />
+        <KnowledgeIcon />
       ) : t.kind === "autopilot" ? (
         <AutopilotIcon />
       ) : t.kind === "skills" ? (

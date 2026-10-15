@@ -18,6 +18,7 @@ import { freeHoursOutLine } from "@/lib/plan-includes";
 import { AppLogo, botApps } from "./apps";
 import { botBezel, botOnInk, botWash, MonitorIcon, post, screenNo } from "./ui";
 import { useWindowVisible } from "./window-visible";
+import { ago, onSameComputer, screenMap, teamScreens, type ScreenKind, type TeamScreen } from "@/lib/screens";
 
 /* A bot's computer, shown as the work on it: it runs up to four things at once, one per screen. */
 
@@ -85,7 +86,7 @@ const onComputerOf = (state: AppState, c: Bot) => (botId: string) => {
 /** Which screen to show: the one you picked, else where the newest work is, else screen 1. */
 export function defaultDisplay(state: AppState, botId: string, picked?: number) {
   if (picked !== undefined) return picked;
-  if (state.takeover?.botId === botId && state.takeover.display !== undefined) return state.takeover.display;
+  if (state.takeover?.display !== undefined && onSameComputer(state, state.takeover.botId, botId)) return state.takeover.display;
   const held = state.sessions.filter((s) => s.botId === botId && s.display !== undefined);
   return held[held.length - 1]?.display ?? DISPLAYS[0];
 }
@@ -110,6 +111,7 @@ export function ComputerView({
   onFocus,
   onBack,
   hidden = false,
+  onShowScreen,
 }: {
   state: AppState;
   bot: Bot;
@@ -121,8 +123,11 @@ export function ComputerView({
   onBack?: () => void;
   /** Kept connected behind another tab: the screens stay live, the director rests. */
   hidden?: boolean;
+  /** Show another computer's screen (a team tile, in the main bot's view): its bot's computer tab, on that screen. */
+  onShowScreen?: (botId: string, display: number) => void;
 }) {
-  const [showReal, setShowReal] = useState(false);
+  // The real screen or the Home screen, when you picked one (the button over an idle screen); else Bops picks.
+  const [picked, setPicked] = useState<"real" | "home" | null>(null);
   const mac = state.host === "mac";
   // The computer it works on: its own, or the main bot's when it shares. Its screens show every
   // bot's work there, since a screen another bot is using isn't free for this one either.
@@ -155,7 +160,8 @@ export function ComputerView({
     const order = [...s.helperScreens].sort((x, y) => DISPLAYS.indexOf(x) - DISPLAYS.indexOf(y));
     return order.length === s.helperNames.length ? s.helperNames[order.indexOf(d)] : undefined;
   };
-  const yours = (d: number) => state.takeover?.botId === b.id && state.takeover.display === d;
+  // You're driving a screen of this computer, whichever bot's view you took it over from.
+  const yours = (d: number) => !!state.takeover && state.takeover.display === d && here(state.takeover.botId);
   const onScreen = holding.get(display);
   /** What a screen shows, as read for whichever bot's thread is on it (screen-watch keys reads by that bot). */
   const readOn = (d: number) => state.screens?.[`${holding.get(d)?.botId ?? b.id}:${d}`];
@@ -204,6 +210,12 @@ export function ComputerView({
     return !!(r?.blocker || (r?.kind === "email_compose" && r.email) || (holding.get(d)?.blocker && holding.get(d)?.display === d) || (!holding.has(d) && watchOn(d)?.alert));
   };
   const working = DISPLAYS.filter((d) => holding.has(d) && live(holding.get(d)!));
+  // Each screen as the map says it (lib/screens.ts): its number, who's on it, a held one, who left a free one.
+  const map = screenMap(state, b.id);
+  const infoOn = (d: number) => map.find((x) => x.display === d);
+  const nameOf = (id?: string) => state.bots.find((x) => x.id === id)?.name ?? "A bot";
+  // The bots that work on this computer besides its own: the header says it's shared, and with whom.
+  const sharers = mac ? [] : state.bots.filter((x) => x.id !== c.id && here(x.id));
   const [now, setNow] = useState(() => Date.now());
   const [hovering, setHovering] = useState(false);
   // The watch setup card, for the screen it's about.
@@ -223,7 +235,7 @@ export function ComputerView({
   // How many screens are busy sets the layout: one big screen, two side by side, or all four two by
   // two. A screen that needs you gets the whole frame (its card needs the room); a screen you
   // picked stays on its own until you say Follow.
-  const auto = mode === "panel" && !!follow?.on && state.takeover?.botId !== b.id;
+  const auto = mode === "panel" && !!follow?.on && !(state.takeover?.display !== undefined && here(state.takeover.botId));
   const tiles = auto && !mac && !asleep && everyLive && !DISPLAYS.some(needsYouOn) ? (working.length >= 3 ? DISPLAYS : working.length === 2 ? working : []) : [];
   const grid = tiles.length > 1;
   const following = auto && !grid;
@@ -264,7 +276,7 @@ export function ComputerView({
   const cutNote = cut.display === display && now - cut.at < 2600 ? cut.text : null;
   /** Private pages stay sharp only when you're looking straight at them. */
   const blurred = (d: number) => !!readOn(d)?.sensitive;
-  const takeover = state.takeover?.botId === b.id && state.takeover.display === display ? state.takeover : undefined;
+  const takeover = state.takeover && here(state.takeover.botId) && state.takeover.display === display ? state.takeover : undefined;
   // This screen's control session, kept a moment after it ends so the notch can slide away, and the
   // pill that says who's driving now. Switching screens just moves on, without the animation.
   const [held, setHeld] = useState<{ since: number; display: number; leaving?: boolean } | null>(null);
@@ -437,7 +449,7 @@ export function ComputerView({
                 <span className="absolute bottom-1.5 left-1.5 z-20 flex max-w-[85%] items-center gap-1 rounded-full bg-white/95 py-[2px] pl-1 pr-2 text-[11px] leading-[14px] shadow-[0_0_0_1px_#0000000F]">
                   {s ? (
                     <>
-                      <Mascot botId={b.id} color={b.color} size={13} antenna={false} />
+                      <Mascot botId={botOn(d).id} color={botOn(d).color} size={13} antenna={false} />
                       <span className="shrink-0 font-semibold">{whoOn(d)}</span>
                       <span className="truncate text-[#3A3A38]">{doingOn(d)}</span>
                     </>
@@ -473,7 +485,9 @@ export function ComputerView({
       <LiveScreen key={`${viewKey}-v${interactive}`} bot={b} botId={b.id} display={display} interactive={interactive} onInput={sendInput} onFail={recheck} className="h-full w-full" />
     );
   // A real desktop is the computer itself, so it always shows; elsewhere a free screen shows the bot's home screen.
-  const showingReal = view === "desktop" || view === "reader" || !!takeover || busy || showReal || !!read?.blocker || card === "email";
+  // A screen a thread just left (or keeps while it asks you something) shows what it left there, not the Home screen.
+  const leftHere = !!infoOn(display)?.left || infoOn(display)?.kind === "held";
+  const showingReal = view === "desktop" || view === "reader" || !!takeover || busy || !!read?.blocker || card === "email" || (picked ? picked === "real" : leftHere);
   const screen = asleep ? <AsleepScreen bot={b} host={c} waking={inUse} hoursOut={hoursOut && time ? freeHoursOutLine(time) : undefined} /> : takeover ? real(true) : showingReal ? real(false) : <HomeScreen state={state} bot={b} />;
 
   return (
@@ -493,7 +507,9 @@ export function ComputerView({
             <Mascot botId={b.id} color={b.color} size={18} />
             <span className="text-[13px] font-medium leading-4">Back to {b.name}</span>
           </button>
-          <span className="text-[15px] font-semibold leading-5">{b.name}&apos;s computer</span>
+          <span className="text-[15px] font-semibold leading-5">
+            {c.name}&apos;s computer{sharers.length ? <span className="font-normal text-[#6B6B6B]"> · shared with {sharers.map((x) => x.name).join(", ")}</span> : null}
+          </span>
           <span className="flex-1" />
           <div className="flex gap-1">
             {DISPLAYS.map((d) => {
@@ -505,7 +521,8 @@ export function ComputerView({
                   onClick={() => onDisplay(d)}
                   className={`flex items-center gap-1.5 rounded-[9px] py-[5px] ${busy ? "pl-1.5" : "pl-2.5"} pr-2.5 ${on ? "bg-ink" : busy ? "bg-[#F2F2F0]" : "shadow-[inset_0_0_0_1.2px_#D9D9D6]"}`}
                 >
-                  {busy && <Mascot botId={b.id} color={b.color} size={14} antenna={false} />}
+                  <span className={`text-[11px] font-semibold tabular-nums leading-4 ${on ? "text-white/60" : "text-[#9A9A98]"}`}>{screenNo(d)}</span>
+                  {busy && <Mascot botId={botOn(d).id} color={botOn(d).color} size={14} antenna={false} />}
                   {busy && <span className={`text-[12px] font-medium leading-4 ${on ? "text-white" : "text-ink"}`}>{whoOn(d)}</span>}
                   <span className={`max-w-[120px] truncate text-[12px] leading-4 ${on ? "text-white/70" : "text-[#6B6B6B]"}`}>{busy ? doingOn(d) : pageOn(d)}</span>
                 </button>
@@ -720,18 +737,18 @@ export function ComputerView({
             </div>
             {onScreen && !takeover && view !== "desktop" && (
               <span className="absolute bottom-3 left-3 rounded-full bg-highlighter px-2 py-[3px] text-[11px] font-semibold leading-[14px] shadow-[0_0_0_1px_#0000001F]">
-                {b.name}
+                {whoOn(display)}
               </span>
             )}
             {!busy && !asleep && view !== "desktop" && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  setShowReal(!showReal);
+                  setPicked(showingReal ? "home" : "real");
                 }}
                 className="absolute right-3 top-3 rounded-full bg-white/85 px-2.5 py-1 text-[11px] font-medium text-[#3A3A38] shadow-[0_0_0_1px_#0000000F] hover:bg-white"
               >
-                {showReal ? "Home screen" : "Real screen"}
+                {showingReal ? "Home screen" : "Real screen"}
               </button>
             )}
           </div>
@@ -761,12 +778,12 @@ export function ComputerView({
               )}
               <button
                 onClick={() => void post("/api/takeover", {}, "DELETE")}
-                title={`${b.name} picks up from here (Esc)`}
+                title={`${(holding.get(display) ? botOn(display) : b).name} picks up from here (Esc)`}
                 className="flex shrink-0 items-center gap-2 rounded-full bg-ink py-1.5 pl-1.5 pr-4 text-[14px] font-semibold leading-[18px] transition-transform active:scale-[0.97]"
                 style={{ color: botOnInk(b) }}
               >
-                <Mascot botId={b.id} color={b.color} size={22} antenna={false} />
-                Hand back to {b.name}
+                <Mascot botId={(holding.get(display) ? botOn(display) : b).id} color={(holding.get(display) ? botOn(display) : b).color} size={22} antenna={false} />
+                Hand back to {(holding.get(display) ? botOn(display) : b).name}
                 <kbd className="rounded-[5px] bg-white/15 px-1.5 py-px font-sans text-[11px] font-medium leading-4 text-white/70">esc</kbd>
               </button>
             </div>
@@ -775,23 +792,27 @@ export function ComputerView({
         )}
       </div>
 
-      {mode === "panel" && (working.length > 1 || (follow && !follow.on)) && (
-        <div className="-mb-1 flex items-center gap-2">
+      {mode === "panel" && (
+        <div className="-mb-1 flex min-w-0 items-center gap-2 text-[12px] leading-4 text-[#6B6B6B]">
+          {/* Whose computer this is, and who else works on it: the screens below are all of theirs. */}
+          <span className="min-w-0 truncate" title={sharers.length ? `${sharers.map((x) => x.name).join(", ")} work on ${c.name}'s computer too, so its screens are theirs as well` : undefined}>
+            <span className="font-medium text-ink">{c.name}&apos;s computer</span>
+            {sharers.length ? ` · shared with ${sharers.map((x) => x.name).join(", ")}` : ""}
+          </span>
+          <span className="flex-1" />
           {follow?.on ? (
-            <span className="flex items-center gap-1.5 text-[12px] leading-4 text-[#6B6B6B]" title="Bops shows the screens being worked on. Pick one to stay on it.">
+            <span className="flex shrink-0 items-center gap-1.5" title="Bops shows the screen being worked on, and cuts to one that needs you. Pick one to stay on it.">
               <span className="size-1.5 animate-pulse rounded-full" style={{ background: botBezel(b) }} />
               {grid ? `Watching ${working.length} things at once` : "Following the action"}
             </span>
-          ) : (
-            <span className="flex items-center gap-1.5 text-[12px] leading-4 text-[#6B6B6B]">
-              Staying {onScreen ? `on ${helperOn(display) ? whoOn(display) : onScreen.title}` : "here"}
-              {follow && (
-                <button onClick={follow.resume} className="rounded-full bg-white px-2 py-[2px] font-medium text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
-                  Follow
-                </button>
-              )}
+          ) : follow ? (
+            <span className="flex shrink-0 items-center gap-1.5">
+              Pinned to screen {screenNo(display)}
+              <button onClick={follow.resume} className="rounded-full bg-white px-2 py-[2px] font-medium text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
+                Follow
+              </button>
             </span>
-          )}
+          ) : null}
         </div>
       )}
 
@@ -811,7 +832,7 @@ export function ComputerView({
                   onDisplay(d);
                   if (w?.alert) void post("/api/watches", { id: w.id, action: "seen" }, "PATCH");
                 }}
-                title={tasks.includes(d) ? `${whoOn(d)} · ${doingOn(d)}` : w ? `Watching ${w.site} for ${w.lookFor}` : pageOn(d)}
+                title={`Screen ${screenNo(d)} · ${tasks.includes(d) ? `${whoOn(d)} · ${doingOn(d)}` : w ? `watching ${w.site} for ${w.lookFor}` : pageOn(d)}`}
                 // A screen being worked on right now glows in the bot's color, even when it isn't the one on show;
                 // a watched screen with something waiting for the user gets the "needs you" yellow.
                 style={
@@ -866,9 +887,12 @@ export function ComputerView({
                   {s && live(s) && <span className={`absolute right-1 top-1 size-[9px] rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A] ${acting(d) ? "animate-pulse" : ""}`} />}
                 </div>
                 <div className="flex min-w-0 items-center gap-[5px] text-[11px] leading-[14px]">
+                  {/* Its number, and its state at a glance: the same number the bots use. */}
+                  <span className="shrink-0 font-semibold tabular-nums text-[#9A9A98]">{screenNo(d)}</span>
+                  <StatusDot kind={infoOn(d)?.kind ?? "free"} pulse={acting(d)} />
                   {tasks.includes(d) ? (
                     <>
-                      <Mascot botId={b.id} color={b.color} size={14} antenna={false} />
+                      <Mascot botId={yours(d) ? b.id : botOn(d).id} color={yours(d) ? b.color : botOn(d).color} size={14} antenna={false} />
                       <span className="shrink-0 font-semibold">{whoOn(d)}</span>
                       <span className={`truncate ${inView ? "text-ink" : "text-[#6B6B6B]"}`}>{doingOn(d)}</span>
                     </>
@@ -878,6 +902,14 @@ export function ComputerView({
                       <span className="shrink-0 font-semibold">{w.site}</span>
                       {alert && <span className="truncate rounded-[4px] bg-highlighter px-1 text-ink">{w.alert!.text}</span>}
                     </>
+                  ) : infoOn(d)?.kind === "held" ? (
+                    <span className="truncate text-[#6B6B6B]" title={`Kept for "${infoOn(d)!.title}" while it waits on you, so your answer picks it up here`}>
+                      <span className="font-semibold text-ink">{nameOf(infoOn(d)!.botId)}</span> · held for {infoOn(d)!.title}
+                    </span>
+                  ) : infoOn(d)?.left ? (
+                    <span className="truncate text-[#9A9A98]" title={`${nameOf(infoOn(d)!.left!.botId)} left "${infoOn(d)!.left!.title}" here ${ago(infoOn(d)!.left!.at)}`}>
+                      Left by {nameOf(infoOn(d)!.left!.botId)} · {infoOn(d)!.left!.title}
+                    </span>
                   ) : (
                     <span className="truncate pl-0.5 text-[#9A9A98]">{pageOn(d)}</span>
                   )}
@@ -888,18 +920,39 @@ export function ComputerView({
         </div>
       )}
 
+      {/* The team, from the main bot's view: what every other bot is doing on its own computer, needs-you first. */}
+      {mode === "panel" && b.isMain && !mac && <TeamRow state={state} mainId={b.id} hidden={hidden} onShow={onShowScreen} />}
+
       {/* Under the screen, only when something's going on: a bot at work, something waiting on you, news. Its controls are on the screen. */}
-      {!takeover && (grid || onScreen || read?.blocker || watchedHere?.alert) && (
+      {!takeover && (grid || onScreen || read?.blocker || watchedHere?.alert || infoOn(display)?.kind === "held" || infoOn(display)?.left) && (
         <div className={`flex max-w-full items-center gap-3 self-center rounded-full bg-white py-1.5 pl-3.5 ${watchedHere?.alert && !grid ? "pr-1.5" : "pr-3.5"} shadow-[0_0_0_1px_#ECECEA,0_6px_18px_-10px_#00000040]`}>
-          <span className={`size-2 shrink-0 rounded-full ${grid ? "bg-[#2BB673]" : onScreen?.blocker || read?.blocker || watchedHere?.alert ? "bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" : "bg-[#2BB673]"}`} />
+          <span
+            className={`size-2 shrink-0 rounded-full ${
+              grid
+                ? "bg-[#2BB673]"
+                : onScreen?.blocker || read?.blocker || watchedHere?.alert
+                  ? "bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]"
+                  : onScreen
+                    ? "bg-[#2BB673]"
+                    : infoOn(display)?.kind === "held"
+                      ? "bg-[#FFF7B0] shadow-[inset_0_0_0_1.5px_#C9B800]"
+                      : "shadow-[inset_0_0_0_1.2px_#C9C9C6]"
+            }`}
+          />
           <span className="min-w-0 truncate text-[13px] leading-4">
             {grid
-              ? `${b.name} is working on ${working.length} things · pick one to watch it up close`
-              : onScreen?.blocker || read?.blocker
-                ? `${botOn(display).name} needs you: ${BLOCKER_LABEL[(onScreen?.blocker ?? read?.blocker)!]}${read?.url ? ` on ${new URL(read.url).hostname}` : ""}`
-                : onScreen
-                  ? `${whoOn(display)} · ${(helperOn(display) ? stepOn(display)?.detail : lastStep?.detail) ?? onScreen.title}`
-                  : `New on ${watchedHere!.site}: ${watchedHere!.alert!.text}`}
+              ? `${working.length} things going on here · pick one to watch it up close`
+              : `Screen ${screenNo(display)} · ${
+                  onScreen?.blocker || read?.blocker
+                    ? `${botOn(display).name} needs you: ${BLOCKER_LABEL[(onScreen?.blocker ?? read?.blocker)!]}${read?.url ? ` on ${new URL(read.url).hostname}` : ""}`
+                    : onScreen
+                      ? `${whoOn(display)} · ${(helperOn(display) ? stepOn(display)?.detail : lastStep?.detail) ?? onScreen.title}`
+                      : watchedHere?.alert
+                        ? `New on ${watchedHere.site}: ${watchedHere.alert.text}`
+                        : infoOn(display)?.kind === "held"
+                          ? `held for "${infoOn(display)!.title}" while ${nameOf(infoOn(display)!.botId)} waits on you`
+                          : `free · left by ${nameOf(infoOn(display)!.left!.botId)}: "${infoOn(display)!.left!.title}" ${ago(infoOn(display)!.left!.at)}`
+                }`}
           </span>
           {!grid && watchedHere?.alert && (
             <button
@@ -1260,5 +1313,91 @@ function AddressBar({ botId, display }: { botId: string; display: number }) {
         className="w-[220px] rounded-full bg-white/70 px-3.5 py-1.5 text-[13px] leading-[18px] text-ink outline-none placeholder:text-[#6B6B6B] focus:bg-white"
       />
     </form>
+  );
+}
+
+/** A screen's state as a dot: needs you (yellow, ringed), working (green), you driving (ink), held (yellow outline), watched (blue), free (empty). */
+function StatusDot({ kind, pulse }: { kind: ScreenKind; pulse?: boolean }) {
+  const look: Record<ScreenKind, string> = {
+    needsYou: "bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]",
+    working: "bg-[#2BB673]",
+    helper: "bg-[#2BB673]",
+    driving: "bg-ink",
+    held: "shadow-[inset_0_0_0_1.5px_#C9B800] bg-[#FFF7B0]",
+    watched: "bg-[#4C7BF3]",
+    free: "shadow-[inset_0_0_0_1.2px_#C9C9C6]",
+  };
+  const words: Record<ScreenKind, string> = { needsYou: "Needs you", working: "Working", helper: "A helper is working", driving: "You're driving", held: "Held while it waits on you", watched: "Watched", free: "Free" };
+  return <span title={words[kind]} aria-label={words[kind]} className={`size-[7px] shrink-0 rounded-full ${look[kind]} ${pulse ? "animate-pulse" : ""}`} />;
+}
+
+/** The most team tiles that refresh at once; the rest show their bot until there's room. */
+const TEAM_LIVE = 9;
+
+/**
+ * The team row, in the main bot's view only: every screen another bot is working on (or needs you on,
+ * or that you drive) on its own computer, and what was left on one in the last half hour (lib/screens.ts
+ * teamScreens). A tile is a snapshot every few seconds, only while Bops is in front, and never of a
+ * screen nobody's using (a read can wake an asleep computer). Clicking one shows it up close, in that
+ * bot's computer tab: the chat stays where it is. Grid shows them bigger, all at once.
+ */
+function TeamRow({ state, mainId, hidden, onShow }: { state: AppState; mainId: string; hidden: boolean; onShow?: (botId: string, display: number) => void }) {
+  const [grid, setGrid] = useState(false);
+  const visible = useWindowVisible();
+  const team = teamScreens(state, mainId);
+  if (!team.length) return null;
+  const busy = (t: TeamScreen) => t.kind === "needsYou" || t.kind === "working" || t.kind === "helper" || t.kind === "driving";
+  const liveCount = team.filter(busy).length;
+  const leftCount = team.filter((t) => t.kind === "free").length;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2 text-[12px] leading-4 text-[#6B6B6B]">
+        <span className="font-medium text-ink">Team</span>
+        <span>{[liveCount && `${liveCount} working`, leftCount && `${leftCount} finished lately`].filter(Boolean).join(" · ") || "nothing live right now"}</span>
+        <span className="flex-1" />
+        <button onClick={() => setGrid(!grid)} className="rounded-full bg-white px-2 py-[2px] font-medium text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
+          {grid ? "Row" : "Grid"}
+        </button>
+      </div>
+      <div className={grid ? "grid grid-cols-2 gap-2.5 xl:grid-cols-3" : "flex gap-2.5 overflow-x-auto pb-1"}>
+        {team.map((t, i) => {
+          const who = state.bots.find((x) => x.id === (t.botId ?? t.left?.botId));
+          const host = state.bots.find((x) => x.id === t.computerBotId);
+          const snap = !hidden && visible && busy(t) && i < TEAM_LIVE && !!host;
+          // A screen a thread just left shows the last frame it saw there (lib/server/frames.ts), as its thread does.
+          const leftBy = t.kind === "free" && t.left ? state.sessions.find((x) => x.id === t.left!.sessionId) : undefined;
+          const words = t.kind === "free" && t.left ? `left ${t.left.title} · ${ago(t.left.at)}` : t.kind === "held" ? `held for ${t.title}` : t.kind === "watched" ? `watching ${t.title}` : t.kind === "driving" ? "you're driving" : (t.title ?? "");
+          return (
+            <button
+              key={`${t.computerBotId}-${t.display}`}
+              onClick={() => onShow?.(t.computerBotId, t.display)}
+              title={`${who?.name ?? "A bot"} · screen ${t.no} of ${host?.name ?? "its"}'s computer · ${words}${t.doing ? ` · now: ${t.doing}` : ""}`}
+              style={t.kind === "needsYou" ? { boxShadow: "0 0 0 2px #0A0A0A, 0 0 0 4px #E8FF3A" } : undefined}
+              className={`group/team relative flex min-w-0 shrink-0 flex-col gap-1.5 rounded-xl bg-[#F7F7F6] p-1.5 text-left ${grid ? "" : "w-[170px]"}`}
+            >
+              <div className={`relative shrink-0 overflow-hidden rounded-[7px] ${grid ? "h-[110px]" : "h-[52px]"}`} style={{ backgroundImage: host ? botWash(host) : undefined }}>
+                {snap ? (
+                  <LiveScreen key={`team-${t.computerBotId}-${t.display}`} bot={host} botId={host!.id} display={t.display} intervalMs={5000} scale={0.3} className="absolute inset-x-2 bottom-0 top-2 rounded-t-sm" />
+                ) : leftBy?.lastFrameAt ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- a frame Bops serves, sized by the tile
+                  <img src={`/api/frames?session=${leftBy.id}&t=${leftBy.lastFrameAt}`} alt={`The screen as ${leftBy.title} left it`} className="absolute inset-x-2 bottom-0 top-2 w-[calc(100%-1rem)] rounded-t-sm object-cover object-top opacity-80" />
+                ) : (
+                  <div className="absolute inset-x-2.5 bottom-0 top-2 flex items-center justify-center rounded-t-sm bg-white/90">
+                    {who && <Mascot botId={who.id} color={who.color} size={18} />}
+                  </div>
+                )}
+              </div>
+              <div className="flex min-w-0 items-center gap-[5px] text-[11px] leading-[14px]">
+                <StatusDot kind={t.kind} pulse={t.kind === "needsYou"} />
+                {who && <Mascot botId={who.id} color={who.color} size={14} antenna={false} />}
+                <span className="shrink-0 font-semibold">{who?.name ?? "A bot"}</span>
+                <span className="shrink-0 tabular-nums text-[#9A9A98]">{t.no}</span>
+                <span className="truncate text-[#6B6B6B]">{words}</span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }

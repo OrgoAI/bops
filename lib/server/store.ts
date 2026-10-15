@@ -305,8 +305,9 @@ export const session = (sessionId: string) => box.state.sessions.find((s) => s.i
 export function addMessage(m: Omit<Message, "id" | "at">) {
   const message: Message = { id: id("msg"), at: Date.now(), ...m };
   update((s) => {
-    // A thread reports into the chat once: its latest result replaces the one before.
-    if (m.resultOf) s.messages = s.messages.filter((x) => x.resultOf !== m.resultOf);
+    // A thread reports into the chat once: its latest result replaces the one before. One that asked
+    // the user something stays, so the chat keeps the question and how it was answered (lib/asks.ts).
+    if (m.resultOf) s.messages = s.messages.filter((x) => x.resultOf !== m.resultOf || x.needed);
     s.messages.push(message);
   });
   return message;

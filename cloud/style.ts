@@ -82,28 +82,52 @@ export function tidyAnswer(raw: string): { text: string; options?: string[] } {
         .join("\n"),
     )
     .filter((para) => para.trim() && !/^\s*(computer briefing|briefing)\s*:/i.test(para) && !/^\s*computer\s*:.*\b(screens?|idle|free|untouched|home screen)\b/i.test(para));
-  return { text: kept.join("\n\n").trim() || raw.trim(), options };
+  return { text: cleanLinks(kept.join("\n\n").trim() || raw.trim()), options };
 }
 
-/** A link's address without the tag web search adds to it ("utm_source=openai"). */
-const untagged = (url: string) => url.replace(/([?&])utm_source=openai(?=[&#]|$)&?/, "$1").replace(/[?&](?=#|$)/, "");
-/** An address as it reads, to compare with a link's words: no scheme, no "www.", no last slash, any case. */
-const readsAs = (s: string) => s.trim().replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/+$/, "").toLowerCase();
+/** A web address, with the parentheses some have inside (Wikipedia's "Foo_(film)"). */
+const URL_PART = String.raw`https?:\/\/(?:[^\s()<>]|\([^\s()<>]*\))+`;
+/** A markdown link to a web address: [label](url). */
+const LINK = new RegExp(String.raw`\[([^\]\n]+)\]\((${URL_PART})\)`, "g");
 
 /**
- * Markdown links as plain words, for a reply that leaves Bops by text or in Slack, Telegram or Discord,
- * where markdown shows as typed: "[the menu](https://x.com/menu)" reads "the menu (https://x.com/menu)".
- * A link whose words are its own address, like a web search's "[x.com](https://x.com/a?utm_source=openai)",
- * is just the address, and the tag web search adds is dropped. An image link keeps its words the same way.
+ * Links as a bot wrote them, made right for the user: without the tag OpenAI's web search adds
+ * (utm_source=openai), and with any parentheses in an address escaped, so the chat (and every app
+ * that reads markdown) doesn't end the link at the first ")".
+ */
+export function cleanLinks(text: string): string {
+  return text
+    .replace(/([?&])utm_source=openai(?![\w-])(&?)/g, (_, sep: string, more: string) => (more ? sep : ""))
+    .replace(LINK, (_, label: string, url: string) => `[${label}](${url.replace(/\(/g, "%28").replace(/\)/g, "%29")})`);
+}
+
+/** A web address's site, without "www.": "https://www.mlb.com/x" is mlb.com. */
+function siteOf(url: string): string {
+  const host = /^https?:\/\/([^/?#:]+)/i.exec(url)?.[1] ?? "";
+  return host.toLowerCase().replace(/^www\./, "");
+}
+
+/**
+ * Links for a place that shows text as it is (a text message, Telegram): a source the bot cited
+ * from the web, a link named for its own site ("([mlb.com](https://www.mlb.com/…))"), moves to one
+ * "Source:" line at the end, so the text stays short. Any other link is written out as its name
+ * and its address.
  */
 export function plainLinks(text: string): string {
-  return text.replace(/!?\[([^\]\n]*)\]\(<?((?:[^\s()<>]|\([^\s()]*\))+)>?(?:\s+"[^"\n]*")?\)/g, (_, words: string, url: string) => {
-    const href = untagged(url);
-    const said = words.trim();
-    // Words that are the address, or its site ("x.com" for https://x.com/a): the address alone says it.
-    const site = readsAs(said);
-    return !said || readsAs(href) === site || (site.includes(".") && !/\s/.test(site) && readsAs(href).startsWith(site)) ? href : `${said} (${href})`;
-  });
+  let source: string | undefined;
+  const cited = (label: string, url: string) => {
+    const site = siteOf(url);
+    const name = label.trim().toLowerCase().replace(/^www\./, "");
+    if (!site || !/^[\w-]+(\.[\w-]+)+$/.test(name) || !(site === name || site.endsWith(`.${name}`) || name.endsWith(`.${site}`))) return false;
+    source ??= url;
+    return true;
+  };
+  const out = cleanLinks(text)
+    // "(…)" around a citation goes with it, and so does the space before it.
+    .replace(new RegExp(String.raw`[ \t]?\(\[([^\]\n]+)\]\((${URL_PART})\)\)`, "g"), (all, label: string, url: string) => (cited(label, url) ? "" : all))
+    .replace(LINK, (_, label: string, url: string) => (cited(label, url) ? label.trim() : `${label} ${url}`))
+    .trim();
+  return source ? `${out}\n\nSource: ${source}` : out;
 }
 
 /**
