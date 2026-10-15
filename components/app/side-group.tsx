@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type AnimationEvent } from "react";
 import { ago } from "./ui";
 
 /*
- * What the sidebar's pinned groups share: Autopilot (autopilot.tsx) and Orbit (memory-categories.tsx).
+ * What the sidebar's pinned groups share: Routines (autopilot.tsx) and Orbit (memory-categories.tsx).
  * Counts that tick when they go up, the chevron that folds, the arrow that opens a group's page, where
  * this Mac keeps what the user folded, the small × that deletes from a row, and the marks that make only
  * what arrives after the first paint move.

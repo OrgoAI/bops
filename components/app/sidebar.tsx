@@ -50,11 +50,11 @@ export function Sidebar({
   onVault: () => void;
   /** The People sheet: who can see the bots' computers on Orgo (members.tsx). */
   onMembers: () => void;
-  /** Show a watched screen or Mac window (a watched page: its row on the Autopilot page). */
+  /** Show a watched screen or Mac window (a watched page: its row on the Routines page). */
   onOpenWatch: (watch: Watch) => void;
   /** Open a category of what Bops knows on the right, at one of its items (memory-categories.tsx). */
   onOpenMemory: (open: MemoryOpen) => void;
-  /** Open Autopilot on the right, at a section and one of its rows (autopilot.tsx). */
+  /** Open Routines on the right, at a section and one of its rows (autopilot.tsx). */
   onOpenAutopilot: (open: AutopilotOpen) => void;
   /** Open the workspace's Skills page (skills.tsx). */
   onOpenSkills: () => void;
@@ -145,7 +145,7 @@ export function Sidebar({
       </div>
 
       {/*
-        Pinned under the chats, together: Autopilot (what the bots do on their own: schedules and monitors;
+        Pinned under the chats, together: Routines (what the bots do on their own: schedules and monitors;
         every account), Skills (how they do a kind of job, and their apps) and below them Orbit (what Bops knows, categories that fill themselves from
         memory; every signed-in account, lib/memory-categories.ts), each with a page on the right. Half the
         sidebar at most between them, scrolling on its own; gone while a search matches nothing in either.

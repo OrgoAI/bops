@@ -3,12 +3,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { APP_LEVELS, appLogo, FEATURED_APPS, type AppAccount, type AppLevel, type AppState, type Bot } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
+import { hasTemplates, RoutineSuggest, usePendingSuggest } from "./routines";
 import { post, teamOf } from "./ui";
 
 /*
  * The user's apps, in the Vault. Only what's connected is listed, one row per app (however many
  * accounts it has); everything else is one search away in the app picker, so a thousand apps never
- * crowd the page. Open an app to see its accounts and set, per account, what each bot may do.
+ * crowd the page. Open an app to see its accounts and set, per account, what each bot may do. An app
+ * with routines to offer (routines.tsx) has Add routines on its row, opening them on its icon; a connect
+ * that just finished opens them there by itself, the bot it was for picked.
  */
 
 /** One app the picker can offer (from /api/apps/catalog). */
@@ -96,6 +99,11 @@ export function AppsSection({ state }: { state: AppState }) {
     before.current = new Set((state.accounts ?? []).map((a) => a.id));
     if (fresh) setOpen(fresh.app);
   }, [state.accounts]);
+  // Routines for an app: asked for from its row (the main bot picked), or offered as a connect finished.
+  const icons = useRef(new Map<string, HTMLElement>());
+  const [asked, setAsked] = useState<string | null>(null);
+  const suggest = usePendingSuggest(state, (s) => groups.some(([app, accounts]) => app === s.app && accounts.some((a) => a.status === "active")));
+  const routinesFor = asked ? { app: asked, botId: undefined } : suggest.pending ? { app: suggest.pending.app, botId: suggest.pending.botId } : null;
 
   return (
     <div className="flex flex-col gap-2">
@@ -144,11 +152,28 @@ export function AppsSection({ state }: { state: AppState }) {
               onToggle={() => setOpen(open === app ? null : app)}
               onAddAnother={() => setPicking({ app })}
               onSignIn={(replaces) => setPicking({ app, replaces })}
+              onRoutines={hasTemplates(app) && accounts.some((a) => a.status === "active") ? () => setAsked(app) : undefined}
+              iconRef={(el) => void (el ? icons.current.set(app, el) : icons.current.delete(app))}
             />
           ))}
         </div>
       ) : (
         <QuickStart onPick={(app) => setPicking({ app })} />
+      )}
+
+      {routinesFor && (
+        <RoutineSuggest
+          key={`${routinesFor.app}:${routinesFor.botId ?? ""}`}
+          state={state}
+          app={routinesFor.app}
+          botId={routinesFor.botId}
+          pickBot
+          anchor={() => icons.current.get(routinesFor.app) ?? null}
+          onClose={() => {
+            setAsked(null);
+            suggest.handled();
+          }}
+        />
       )}
 
       {picking && <AppPicker state={state} start={picking.app} replaces={picking.replaces} onClose={() => setPicking(null)} />}
@@ -185,6 +210,8 @@ function AppGroup({
   onToggle,
   onAddAnother,
   onSignIn,
+  onRoutines,
+  iconRef,
 }: {
   state: AppState;
   accounts: AppAccount[];
@@ -193,6 +220,10 @@ function AppGroup({
   onToggle: () => void;
   onAddAnother: () => void;
   onSignIn: (replaces: string) => void;
+  /** Its routines, when it has some to offer and an account that works. */
+  onRoutines?: () => void;
+  /** Its icon, where its routines open. */
+  iconRef: (el: HTMLSpanElement | null) => void;
 }) {
   const first = accounts[0];
   const team = teamOf(state);
@@ -202,27 +233,39 @@ function AppGroup({
   const summary = openApp ? "No sign-in needed" : accounts.length === 1 ? accountTitle(first) : `${accounts.length} accounts · ${accounts.map((a) => a.label ?? a.name ?? "").filter(Boolean).join(", ")}`;
   return (
     <div className={last ? "" : "border-b border-[#F0F0EE]"}>
-      <button onClick={onToggle} className="flex w-full items-center gap-3 px-3.5 py-3 text-left hover:bg-[#FCFCFB]">
-        <AppLogo app={first.app} name={first.appName} size={32} />
-        <span className="flex min-w-0 flex-1 flex-col">
-          <span className="text-[14px] font-medium leading-[18px]">{first.appName}</span>
-          <span className={`truncate text-[12.5px] leading-4 ${expired ? "text-[#B54708]" : "text-[#6B6B6B]"}`}>{expired ? `Signed out${accounts.length > 1 ? ` (${expired} of ${accounts.length})` : ""} · sign in again` : summary}</span>
-        </span>
-        {users.length ? (
-          <span className="flex shrink-0 -space-x-1.5" title={users.map((b) => b.name).join(", ")}>
-            {users.slice(0, 5).map((b) => (
-              <span key={b.id} className="rounded-full bg-white p-px">
-                <Mascot botId={b.id} color={b.color} size={20} antenna={false} />
-              </span>
-            ))}
+      <div className="flex items-center hover:bg-[#FCFCFB]">
+        <button onClick={onToggle} aria-expanded={open} className="flex min-w-0 flex-1 items-center gap-3 py-3 pl-3.5 pr-3 text-left">
+          <span ref={iconRef} className="flex shrink-0">
+            <AppLogo app={first.app} name={first.appName} size={32} />
           </span>
-        ) : (
-          <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">No bots yet</span>
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span className="text-[14px] font-medium leading-[18px]">{first.appName}</span>
+            <span className={`truncate text-[12.5px] leading-4 ${expired ? "text-[#B54708]" : "text-[#6B6B6B]"}`}>{expired ? `Signed out${accounts.length > 1 ? ` (${expired} of ${accounts.length})` : ""} · sign in again` : summary}</span>
+          </span>
+          {users.length ? (
+            <span className="flex shrink-0 -space-x-1.5" title={users.map((b) => b.name).join(", ")}>
+              {users.slice(0, 5).map((b) => (
+                <span key={b.id} className="rounded-full bg-white p-px">
+                  <Mascot botId={b.id} color={b.color} size={20} antenna={false} />
+                </span>
+              ))}
+            </span>
+          ) : (
+            <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">No bots yet</span>
+          )}
+          <svg width="10" height="10" viewBox="0 0 10 10" className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`}>
+            <path d="M2 3.5l3 3 3-3" fill="none" stroke="#9A9A98" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+        {onRoutines && (
+          <button
+            onClick={onRoutines}
+            className="mr-3 shrink-0 rounded-full bg-[#F2F2F0] px-2.5 py-1 text-[12px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-[#EAEAE7] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+          >
+            Add routines
+          </button>
         )}
-        <svg width="10" height="10" viewBox="0 0 10 10" className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`}>
-          <path d="M2 3.5l3 3 3-3" fill="none" stroke="#9A9A98" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
+      </div>
       {open && (
         <div className="flex flex-col gap-3 px-3.5 pb-3.5">
           {accounts.map((a) => (
