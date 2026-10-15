@@ -240,6 +240,8 @@ export type Message = {
   options?: string[];
   /** Worth interrupting the user for (a finished task they're waiting on): a chime, and a notification if Bops is behind. */
   ping?: boolean;
+  /** A thread's result that asked the user something (lib/asks.ts): kept in the chat when the thread moves on, with how it was answered. */
+  needed?: boolean;
   /** An email the bot got (in) or sent (out); `text` is its new text, without the quoted history. */
   email?: EmailInfo;
   /** A bot reply that also went to the user by email (they emailed the bot): the address it went to. */
@@ -408,6 +410,10 @@ export type Session = {
   activity?: string;
   /** Jev's read of the last answer: is the bot waiting on the user to answer, decide or act? */
   waitingOnYou?: boolean;
+  /** Jev's read too: what it waits on is the user approving something on another device (a sign-in prompt on their phone). */
+  approveElsewhere?: boolean;
+  /** The answer Bops texted the user about, after it waited unanswered (sessions.ts textIfUnanswered): once per question. */
+  askTexted?: string;
   /** Something on its screen only the user can get past (a sign-in, a code, a captcha). */
   blocker?: Blocker;
   error?: string;

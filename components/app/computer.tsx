@@ -126,7 +126,8 @@ export function ComputerView({
   /** Show another computer's screen (a team tile, in the main bot's view): its bot's computer tab, on that screen. */
   onShowScreen?: (botId: string, display: number) => void;
 }) {
-  const [showReal, setShowReal] = useState(false);
+  // The real screen or the Home screen, when you picked one (the button over an idle screen); else Bops picks.
+  const [picked, setPicked] = useState<"real" | "home" | null>(null);
   const mac = state.host === "mac";
   // The computer it works on: its own, or the main bot's when it shares. Its screens show every
   // bot's work there, since a screen another bot is using isn't free for this one either.
@@ -484,7 +485,9 @@ export function ComputerView({
       <LiveScreen key={`${viewKey}-v${interactive}`} bot={b} botId={b.id} display={display} interactive={interactive} onInput={sendInput} onFail={recheck} className="h-full w-full" />
     );
   // A real desktop is the computer itself, so it always shows; elsewhere a free screen shows the bot's home screen.
-  const showingReal = view === "desktop" || view === "reader" || !!takeover || busy || showReal || !!read?.blocker || card === "email";
+  // A screen a thread just left (or keeps while it asks you something) shows what it left there, not the Home screen.
+  const leftHere = !!infoOn(display)?.left || infoOn(display)?.kind === "held";
+  const showingReal = view === "desktop" || view === "reader" || !!takeover || busy || !!read?.blocker || card === "email" || (picked ? picked === "real" : leftHere);
   const screen = asleep ? <AsleepScreen bot={b} host={c} waking={inUse} hoursOut={hoursOut && time ? freeHoursOutLine(time) : undefined} /> : takeover ? real(true) : showingReal ? real(false) : <HomeScreen state={state} bot={b} />;
 
   return (
@@ -741,11 +744,11 @@ export function ComputerView({
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  setShowReal(!showReal);
+                  setPicked(showingReal ? "home" : "real");
                 }}
                 className="absolute right-3 top-3 rounded-full bg-white/85 px-2.5 py-1 text-[11px] font-medium text-[#3A3A38] shadow-[0_0_0_1px_#0000000F] hover:bg-white"
               >
-                {showReal ? "Home screen" : "Real screen"}
+                {showingReal ? "Home screen" : "Real screen"}
               </button>
             )}
           </div>

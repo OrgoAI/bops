@@ -35,7 +35,8 @@ import { crmNote } from "./crm";
 import { memoryBlock, saveToMemory, wsOf } from "./memory";
 import { pingIfWorthIt } from "./attention";
 import { emailResult } from "./mail";
-import { textResult } from "./phone";
+import { textOwner, textResult } from "./phone";
+import { askTiming, needsYou } from "@/lib/asks";
 import { channelResult } from "./channels";
 import { asksForMac, chooseWhere } from "./where";
 import { addMessage, bot, getState, id, ownerLine, ownerName, patchSession, session, stateEpoch, stateReady, update } from "./store";
@@ -1500,12 +1501,48 @@ async function judgeWaiting(sessionId: string, answer: string) {
           false: `The bot delivered a result or a status update and needs nothing from ${owner}`,
         },
       },
+      elsewhere: {
+        type: "noul",
+        instructions: `Is \`bot_reply\` waiting for ${owner} to approve something on their phone or another device (a sign-in prompt, a push notification, an authenticator)?`,
+        criteria: { true: "It waits on an approval on another device", false: "Anything else, or nothing" },
+      },
     },
     { botId: session(sessionId)?.botId },
   );
   const p = yes(a?.waiting);
-  if (p !== undefined) patchSession(sessionId, { waitingOnYou: p >= 0.5 });
-  if (p !== undefined && p >= 0.5) await suggestFor(sessionId);
+  const elsewhere = yes(a?.elsewhere);
+  if (p !== undefined) patchSession(sessionId, { waitingOnYou: p >= 0.5, approveElsewhere: p >= 0.5 && elsewhere !== undefined && elsewhere >= 0.5 });
+  if (p !== undefined && p >= 0.5) {
+    markNeeded(sessionId);
+    await suggestFor(sessionId);
+  }
+}
+
+/**
+ * The thread's result in the chat asks the user something: it stays in the chat when the thread moves
+ * on (store.ts addMessage), chimes, and if nobody answers within askTiming.textAfterMs, Bops texts them.
+ * Called when the result is posted and when Jev says it's waiting, whichever comes second finds both.
+ */
+function markNeeded(sessionId: string) {
+  const s = session(sessionId);
+  if (!s || !needsYou(s)) return;
+  const m = [...getState().messages].reverse().find((x) => x.resultOf === sessionId);
+  if (!m || m.needed || m.text !== (s.answer ?? m.text)) return;
+  update((st) => {
+    const x = st.messages.find((y) => y.id === m.id);
+    if (x) Object.assign(x, { needed: true, ping: true });
+  });
+  const asked = s.answer;
+  setTimeout(() => void textIfUnanswered(sessionId, asked).catch((e: Error) => console.warn(`[asks] ${sessionId}: ${e.message}`)), askTiming.textAfterMs).unref?.();
+}
+
+/** Still waiting on the same question: a text to the user, once, unless it came by text (its answer went back that way). */
+async function textIfUnanswered(sessionId: string, asked: string | undefined) {
+  const s = session(sessionId);
+  if (!s || !needsYou(s) || s.answer !== asked || s.askTexted === asked || s.textBack) return;
+  patchSession(sessionId, { askTexted: asked });
+  const words = (asked ?? "").replace(/\*\*|\[|\]\([^)]*\)/g, "").trim();
+  await textOwner(s.botId, `${s.title} needs you: ${words.length > 300 ? `${words.slice(0, 297)}…` : words}`);
 }
 
 /** A question with no ready answers leaves the user guessing what to say: suggest some. */
@@ -1867,6 +1904,8 @@ async function run(sessionId: string) {
     patchSession(sessionId, { status: "done", endedAt: Date.now(), activity: undefined, offerMac: undefined });
     taskEnded(done, "done", startedAt, who);
     const result = addMessage({ chatId: done.chatId, role: "bot", botId: b.id, text: done.answer ?? "Done.", sessionIds: [sessionId], resultOf: sessionId });
+    // Asking the user something (Jev may have said so already: judgeWaiting runs alongside; else a question mark).
+    markNeeded(sessionId);
     // Worth a chime? Only what the user is waiting on, or needs them (Jev, given what they're doing).
     pingIfWorthIt(result.id, done.title, done.answer ?? "Done.");
     emailResult(done, result.id, done.answer ?? "Done.");

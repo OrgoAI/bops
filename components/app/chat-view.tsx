@@ -1,8 +1,9 @@
 "use client";
 
 import { screenMap, screenNo } from "@/lib/screens";
+import { askKind, chatAsks } from "@/lib/asks";
 import { createContext, Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BLOCKER_ASK, live, pairChatId, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
+import { BLOCKER_ASK, live, pairChatId, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
 import { OpenLink } from "./panel-tabs";
@@ -225,8 +226,15 @@ export function ChatView({
     return home;
   }, [messages]);
   const members = c.botIds.map((b) => state.bots.find((x) => x.id === b)).filter(Boolean) as Bot[];
-  // App actions waiting for you, asked in this chat or by one of its threads.
-  const appAsks = (state.appApprovals ?? []).filter((a) => a.chatId === c.id || state.sessions.some((x) => x.id === a.sessionId && x.chatId === c.id));
+  // What's waiting on you, pinned over the composer: threads started here (in the main bot's chat,
+  // every bot's: lib/asks.ts chatAsks), and app actions asked here or by one of those threads.
+  const threadAsks = chatAsks(state, c.id);
+  const mainChat = c.kind === "bot" && state.bots.some((b) => b.isMain && c.botIds.includes(b.id));
+  const appAsks = (state.appApprovals ?? []).filter(
+    (a) => a.chatId === c.id || state.sessions.some((x) => x.id === a.sessionId && x.chatId === c.id) || (mainChat && workspaceOf(state.bots.find((b) => b.id === a.botId) ?? members[0]) === workspaceOf(members[0])),
+  );
+  const [allAsks, setAllAsks] = useState(false);
+  const shownAsks = allAsks ? threadAsks : threadAsks.slice(0, 2);
   const solo = c.kind === "bot" ? members[0] : undefined;
   // A bot's chat shows all its work; a group only the threads started in that group.
   const running = state.sessions.filter((s) => live(s) && (c.kind === "group" ? s.chatId === c.id : c.botIds.includes(s.botId)));
@@ -462,8 +470,25 @@ export function ChatView({
               <div className="absolute inset-0 bg-gradient-to-t from-white from-45% via-white/80 via-75% to-white/0" />
             </div>
           {state.credits?.out && <OutOfCredit onUpgrade={onUpgrade} />}
-          {appAsks.length > 0 && (
-            <div className="mb-2.5 flex flex-col gap-2">
+          {(appAsks.length > 0 || threadAsks.length > 0) && (
+            <div className="mb-2.5 flex max-h-[45vh] flex-col gap-2 overflow-y-auto">
+              {shownAsks.map((x) => (
+                <NeedsYouCard
+                  key={x.id}
+                  session={x}
+                  state={state}
+                  quote
+                  pinned
+                  onShow={() => (x.display ?? x.lastDisplay) !== undefined ? onShowScreen(x.botId, (x.display ?? x.lastDisplay)!) : onOpenThread(x)}
+                  onSomethingElse={() => onOpenThread(x)}
+                  onOpen={() => onOpenThread(x)}
+                />
+              ))}
+              {threadAsks.length > shownAsks.length && (
+                <button onClick={() => setAllAsks(true)} className="self-start pl-1 text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+                  {threadAsks.length - shownAsks.length} more waiting on you
+                </button>
+              )}
               {appAsks.map((a) => (
                 <AppApprovalCard key={a.id} state={state} approval={a} />
               ))}
@@ -925,16 +950,8 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     <div className="flex flex-col items-start gap-1.5 pt-0.5">
       {chips.map((s) => (
         <Fragment key={s.id}>
+          {/* What it waits on is pinned over the composer (NeedsYouCard), so it can't scroll away. */}
           <SessionChip session={s} state={state} onClick={() => onOpenThread(s)} />
-          {needsYou(s) && (
-            <NeedsYouCard
-              session={s}
-              state={state}
-              quote
-              onShow={() => (s.lastDisplay !== undefined || s.display !== undefined ? onShowScreen(s.botId, (s.display ?? s.lastDisplay)!) : onOpenThread(s))}
-              onSomethingElse={() => onOpenThread(s)}
-            />
-          )}
         </Fragment>
       ))}
       {runningHere.length > 1 && (
@@ -1077,6 +1094,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
           {actions}
         </div>
         {replies}
+        {m.needed && m.resultOf && <AnsweredLine message={m} session={sessionById(m.resultOf)} />}
         {newest && !!m.options?.length && (
           <div className="flex flex-wrap gap-1.5 pt-0.5">
             {m.options.map((o) => (
@@ -1852,9 +1870,28 @@ function CloudIcon() {
 
 /**
  * A bot waiting on the user, as a card they can act on in one tap: sign it in, answer with one of the
- * replies it offered, retry, or move it to their Mac, instead of working out what to type back.
+ * replies it offered, say they approved it on their phone, let a flagged step go on, retry, or move it
+ * to their Mac, instead of working out what to type back. `pinned`: over a chat's composer (lib/asks.ts
+ * chatAsks), where it names the thread and says the bot's words, since its message may be far above
+ * or in another bot's chat.
  */
-function NeedsYouCard({ session: s, state, quote, onShow, onSomethingElse }: { session: Session; state: AppState; quote?: boolean; onShow: () => void; onSomethingElse: () => void }) {
+function NeedsYouCard({
+  session: s,
+  state,
+  quote,
+  pinned,
+  onShow,
+  onSomethingElse,
+  onOpen,
+}: {
+  session: Session;
+  state: AppState;
+  quote?: boolean;
+  pinned?: boolean;
+  onShow: () => void;
+  onSomethingElse: () => void;
+  onOpen?: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const b = state.bots.find((x) => x.id === s.botId);
   const name = b?.name ?? "The bot";
@@ -1869,20 +1906,43 @@ function NeedsYouCard({ session: s, state, quote, onShow, onSomethingElse }: { s
     setBusy(true);
     void post(`/api/sessions/${s.id}`, { dismiss: true }, "PATCH");
   };
-  const failed = s.status === "failed";
-  const title = s.blocker ? `${name} needs ${BLOCKER_ASK[s.blocker]}` : failed ? `${name} couldn't finish` : `${name} is waiting on you`;
-  // The question itself, so the card says what to answer (the last sentence that asks something).
-  const question = quote && !s.blocker && !failed ? (s.answer ?? "").split(/(?<=[.!?])\s+|\n+/).reverse().find((x) => x.trim().endsWith("?"))?.trim() : undefined;
+  const kind = askKind(s);
+  const failed = kind === "failed";
+  const display = s.display ?? s.lastDisplay;
+  const title = s.blocker
+    ? `${name} needs ${BLOCKER_ASK[s.blocker]}`
+    : failed
+      ? `${name} couldn't finish`
+      : kind === "elsewhere"
+        ? `${name} needs you to approve it on your phone`
+        : kind === "safety"
+          ? `${name} needs your OK to go on`
+          : `${name} is waiting on you`;
+  const answer = withoutBriefing(s.answer ?? "").trim();
+  // The question itself, so the card says what to answer (the last sentence that asks something); pinned, the bot's words when none asks.
+  const asked = answer.split(/(?<=[.!?])\s+|\n+/).reverse().find((x) => x.trim().endsWith("?"))?.trim();
+  const question = quote && !s.blocker && !failed ? (asked ?? (pinned ? answer : undefined)) : pinned && failed ? s.error : undefined;
   const show: Record<string, string> = { sign_in: `Sign in for ${name}`, two_factor: "Enter the code", captcha: "Solve the check", payment: "Review the payment", error: "Look at the screen" };
   const primary = "rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white disabled:opacity-50";
   const plain = "rounded-full bg-white px-3.5 py-1.5 text-[13px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6] disabled:opacity-50";
+  const showScreen = display !== undefined && (
+    <button disabled={busy} onClick={onShow} className={plain}>
+      Show screen
+    </button>
+  );
   return (
     <div className="flex w-full max-w-[460px] flex-col gap-2.5 rounded-2xl bg-[#FBFFE0] px-3.5 py-3 shadow-[0_0_0_1px_#E6F57A]">
       <span className="flex items-center gap-2 text-[13.5px] font-semibold leading-[18px]">
-        <span className="size-2 shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" />
-        {title}
+        {pinned && b ? <Mascot botId={b.id} color={b.color} size={18} antenna={false} /> : <span className="size-2 shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" />}
+        <span className="min-w-0 flex-1 truncate">{title}</span>
+        {pinned && onOpen && (
+          <button onClick={onOpen} className="max-w-[45%] shrink-0 truncate text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink" title="Open the thread">
+            {s.title}
+            {display !== undefined ? ` · screen ${screenNo(display)}` : ""}
+          </button>
+        )}
       </span>
-      {question && <span className="-mt-1 pl-4 text-[13.5px] leading-[19px] text-[#3A3A38]">{question}</span>}
+      {question && <span className={`-mt-1 pl-4 text-[13.5px] leading-[19px] text-[#3A3A38] ${pinned ? "line-clamp-3 whitespace-pre-wrap" : ""}`}>{question}</span>}
       <div className="flex flex-wrap gap-1.5">
         {s.blocker ? (
           <>
@@ -1912,6 +1972,19 @@ function NeedsYouCard({ session: s, state, quote, onShow, onSomethingElse }: { s
               Dismiss
             </button>
           </>
+        ) : kind === "elsewhere" || kind === "safety" ? (
+          <>
+            <button disabled={busy} onClick={() => void reply(kind === "elsewhere" ? "I approved it. Carry on." : "Go on.")} className={primary}>
+              {kind === "elsewhere" ? "Done, I approved it" : "Go on"}
+            </button>
+            {showScreen}
+            <button disabled={busy} onClick={dismiss} className={plain}>
+              {kind === "safety" ? "Stop" : "Never mind"}
+            </button>
+            <button disabled={busy} onClick={onSomethingElse} className="px-2 py-1.5 text-[13px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+              Something else…
+            </button>
+          </>
         ) : (
           <>
             {s.options?.map((o, i) => (
@@ -1924,6 +1997,7 @@ function NeedsYouCard({ session: s, state, quote, onShow, onSomethingElse }: { s
                 Answer
               </button>
             )}
+            {pinned && showScreen}
             <button disabled={busy} onClick={dismiss} className={plain}>
               Never mind
             </button>
@@ -1936,6 +2010,22 @@ function NeedsYouCard({ session: s, state, quote, onShow, onSomethingElse }: { s
         )}
       </div>
     </div>
+  );
+}
+
+/** Under a thread's question kept in the chat: how the user answered it, once they have. */
+function AnsweredLine({ message: m, session: s }: { message: Message; session?: Session }) {
+  if (!s) return null;
+  const answer = s.replies.find((r) => r.role === "user" && r.at > m.at);
+  const said = answer ? `You answered: “${answer.text.length > 80 ? `${answer.text.slice(0, 79)}…` : answer.text}”` : s.dismissed ? "You dismissed it" : undefined;
+  if (!said) return null;
+  return (
+    <span className="flex items-center gap-1 pl-3 text-[11.5px] leading-4 text-[#9A9A98]">
+      <svg width="11" height="11" viewBox="0 0 14 14" aria-hidden className="shrink-0">
+        <path d="M3 7.5l2.5 2.5L11 4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      <span className="truncate">{said}</span>
+    </span>
   );
 }
 

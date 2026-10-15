@@ -658,6 +658,31 @@ assert.deepEqual(CT.pageLook(g, "return 3", pageRan({ value: "Agent Operators Po
 g = CT.newPageGuard();
 assert.deepEqual(CT.pageLook(g, "screenshot(); return 'x'", pageRan({ value: "x", look: true })), { look: true, note: undefined });
 
+/* ---------------- A thread that asks you something: kept in the chat, a chime, a text if nobody answers ---------------- */
+
+const AS = await import(`${root}/lib/asks.ts`);
+AS.askTiming.textAfterMs = 150;
+const QUESTION = "Which of the two hotels should I book?";
+answers.push(() => response("resp_q1", [{ ...said(QUESTION), phase: "final_answer" }]));
+const askedId = await task("Book a hotel in Spokane", "Hotel");
+const results = () => S.getState().messages.filter((m) => m.resultOf === askedId);
+await until(() => results()[0]?.needed, "the question to be marked as one");
+assert.equal(results()[0].ping, true, "it chimes");
+await until(() => S.session(askedId).askTexted, "a text once it waited unanswered");
+assert.equal(S.session(askedId).askTexted, QUESTION, "once, for this question");
+// Answered: the thread picks up, and the question stays in the chat above its next result.
+answers.push(() => response("resp_q2", [{ ...said("Booked the Davenport."), phase: "final_answer" }]));
+X.replyToSession(askedId, "The Davenport");
+await until(() => S.session(askedId).status === "done" && results().length === 2, "the next result");
+assert.deepEqual(
+  results().map((m) => [m.text, !!m.needed]),
+  [
+    [QUESTION, true],
+    ["Booked the Davenport.", false],
+  ],
+);
+assert.ok(!AS.needsYou(S.session(askedId)), "answered");
+
 /* ---------------- AI credit used up ---------------- */
 
 answers.push(() => json({ error: { message: "You're out of AI credit.", code: "ai_credit_empty" }, code: "ai_credit_empty", upgrade: true }, 402));
