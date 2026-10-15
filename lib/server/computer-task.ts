@@ -6,7 +6,7 @@ import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
 import { callApi, callApiTool, usableKeys } from "./keys";
-import { proceduresOf, readProcedure } from "./procedures";
+import { readSkill, READ_SKILL_TOOL, skillsFor } from "./workspace-skills";
 import { bot, patchSession, session, stateEpoch } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import type { Session } from "@/lib/types";
@@ -89,7 +89,7 @@ export async function computerTurn(t: ComputerTurn): Promise<string> {
   const started = Date.now();
   // Business data and the user's CRM run in this process (treg.ts, crm.ts), so the task has them wherever its computer is.
   // Not the CRM for a task someone outside Bops started (Session.fromOutside), as for a chat turn of theirs.
-  // read_procedure only when the bot has procedures to read (sessions.ts lists them in its instructions).
+  // read_skill only when the bot has skills to read (sessions.ts lists them in its instructions).
   // call_api with the user's keys (keys.ts) reads only (GET): anything that changes something is asked for in the chat.
   // Not for a task someone outside Bops started, like the CRM. Not bank, payroll or compliance keys (chatOnly):
   // the task's browser and shell can reach any site, so a page could have it type what they answer anywhere.
@@ -99,7 +99,7 @@ export async function computerTurn(t: ComputerTurn): Promise<string> {
     { type: "web_search" },
     SHELL_TOOL,
     VAULT_TOOL,
-    ...(proceduresOf(b.id).length ? [PROCEDURE_TOOL] : []),
+    ...(skillsFor(b.id).length ? [READ_SKILL_TOOL] : []),
     ...(t.apps ? APP_TOOLS(b) : []),
     ...DATA_TOOLS(b),
     ...(s.fromOutside ? [] : CRM_TOOLS(b)),
@@ -350,20 +350,6 @@ const VAULT_TOOL = {
   parameters: { type: "object", additionalProperties: false, required: [], properties: {} },
   strict: true,
 };
-/** One of the bot's procedures in full (procedures.ts readProcedure): how it does a kind of job it was shown, listed by name in its instructions. */
-const PROCEDURE_TOOL = {
-  type: "function",
-  name: "read_procedure",
-  description: "Read one of your procedures in full: its steps and pitfalls. Do it before a job that fits one listed under \"Your procedures\", then follow it.",
-  parameters: {
-    type: "object",
-    additionalProperties: false,
-    required: ["name"],
-    properties: { name: { type: "string", description: "The procedure's name, as listed." } },
-  },
-  strict: true,
-};
-
 const clip = (s: string, max = 12_000) => (s.length > max ? `${s.slice(0, max / 2)}\n… (cut) …\n${s.slice(-max / 2)}` : s);
 
 async function runFunction(t: ComputerTurn, o: OutputItem) {
@@ -385,10 +371,11 @@ async function runFunction(t: ComputerTurn, o: OutputItem) {
     } else if (o.name === "sign_in_from_vault") {
       t.step("vault", "signing in from your vault");
       output = await (await import("./vault")).vaultSignIn(s.botId, t.display, t.sessionId);
-    } else if (o.name === "read_procedure") {
+    } else if (o.name === "read_skill") {
       const name = String(args.name ?? "").trim();
-      t.step("procedure", `read the procedure "${name.slice(0, 60)}"`);
-      output = readProcedure(s.botId, name);
+      const file = typeof args.file === "string" && args.file.trim() ? args.file.trim() : null;
+      t.step("skill", file ? `read ${file.slice(0, 60)} of the skill "${name.slice(0, 60)}"` : `read the skill "${name.slice(0, 60)}"`);
+      output = readSkill(s.botId, name, file);
     } else if (o.name === "find_app_actions") {
       t.step("find_app_actions", `looked for "${String(args.query ?? "").slice(0, 60)}" in your apps`);
       output = await findAppActions(s.botId, String(args.query ?? ""));

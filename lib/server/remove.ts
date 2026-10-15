@@ -4,6 +4,8 @@ import { dropGuestKey, resetComputer, stopSession } from "./sessions";
 import { bot, getState, session, update } from "./store";
 import { stopWatch } from "./watches";
 import { deleteInboxes } from "./mail";
+import { dropBotFromSkills } from "./workspace-skills";
+import { deleteOrgoProject } from "./workspaces";
 
 /** Delete one message from a chat. */
 export function deleteMessage(messageId: string) {
@@ -28,7 +30,8 @@ export function deleteThread(sessionId: string) {
 
 /**
  * Delete a bot: stop its work, stop watching its screens, delete its own computer if it has one
- * (only ever one in the Bops workspace; a bot that shares the main bot's leaves that one alone), then remove it with its chat, threads, routines and procedures. Group chats keep their
+ * (only ever one in the Bops workspace; a bot that shares the main bot's leaves that one alone), then remove it with its chat, threads, routines and
+ * the skills only it had (a skill other bots have too stays theirs). Group chats keep their
  * history without it, unless only one bot is left in them. The main bot can't be deleted.
  */
 export async function deleteBot(botId: string, withWorkspace = false) {
@@ -44,6 +47,7 @@ export async function deleteBot(botId: string, withWorkspace = false) {
   // Its email inboxes go too (they count against the AgentMail plan).
   await deleteInboxes(b);
   const chatId = botChatId(botId);
+  dropBotFromSkills(botId, workspaceOf(b));
   update((state) => {
     state.bots = state.bots.filter((x) => x.id !== botId);
     state.chats = state.chats
@@ -61,8 +65,12 @@ export async function deleteBot(botId: string, withWorkspace = false) {
   });
 }
 
-/** Delete a workspace and its whole team (their computers too). The last workspace stays. */
+/**
+ * Delete a workspace and its whole team (their computers too), and its Orgo workspace once nothing is left in
+ * it (workspaces.ts deleteOrgoProject). The last workspace stays.
+ */
 export async function deleteWorkspace(workspaceId: string) {
+  const gone = (getState().workspaces ?? []).find((w) => w.id === workspaceId);
   const left = (getState().workspaces ?? []).filter((w) => w.id !== workspaceId);
   if (left.length === 0) throw new Error("You need at least one workspace");
   const team = getState().bots.filter((b) => workspaceOf(b) === workspaceId);
@@ -75,4 +83,5 @@ export async function deleteWorkspace(workspaceId: string) {
     state.messages = state.messages.filter((m) => chats.has(m.chatId));
     if (state.workspace === workspaceId) state.workspace = left[0].id;
   });
+  if (gone?.orgoProjectId) await deleteOrgoProject(gone).catch((e: Error) => console.warn(`[workspaces] ${e.message}`));
 }

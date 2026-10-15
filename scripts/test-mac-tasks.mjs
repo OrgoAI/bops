@@ -1238,23 +1238,32 @@ said.output = [];
 web.answer = undefined;
 Cl.cloudSessionNow().typesafe = false;
 
-// A bot's procedures go in a Mac task's skills folder as SKILL.md files, fresh each run (procedures.ts
+// A bot's skills go in a Mac task's skills folder as their folders, fresh each run (workspace-skills.ts
 // writeSkillFiles, from local.ts startExecutor): its agent session's capability directory finds them.
+// Its apps go beside them (capabilities/apps); a draft, or one for another bot, doesn't go.
 {
-  const P = await import(`${root}/lib/server/procedures.ts`);
-  const saved = P.saveProcedure(main.id, { name: "Weekly invoice summary", whenToUse: "When asked for the week's invoices", steps: "1. Open the Invoices folder\n2. Sum the totals", pitfalls: "Skip drafts" });
-  assert.ok(saved.procedure, saved.error);
+  const W = await import(`${root}/lib/server/workspace-skills.ts`);
+  const { workspaceOf } = await import(`${root}/lib/types.ts`);
+  const ws = workspaceOf(main);
+  const body = W.procedureBody({ name: "Weekly invoice summary", whenToUse: "When asked for the week's invoices", steps: "1. Open the Invoices folder\n2. Sum the totals", pitfalls: "Skip drafts" });
+  const saved = W.createSkill(ws, { name: "Weekly invoice summary", description: "When asked for the week's invoices", body, files: [{ path: "scripts/sum.sh", content: "#!/bin/sh\necho sum\n", executable: true }], botIds: [main.id], status: "published" }).ref;
+  W.createSkill(ws, { name: "Not yet", description: "A draft", body: "# Not yet\n", botIds: [main.id] });
+  W.createSkill(ws, { kind: "app", name: "Invoice checker", description: "Checks invoices", body: "# Invoice checker\n", botIds: [main.id], status: "published" });
   const id = "ses_skills";
   const child = await L.startExecutor(id, "env_skills", "wss://env.test/skills", 9, undefined, false, main.id);
   const skills = join(L.taskWorkspace(id), "capabilities", "skills");
   assert.deepEqual(readdirSync(skills), ["weekly-invoice-summary"]);
+  assert.deepEqual(readdirSync(join(L.taskWorkspace(id), "capabilities", "apps")), ["invoice-checker"]);
   const skill = readFileSync(join(skills, "weekly-invoice-summary", "SKILL.md"), "utf8");
-  assert.match(skill, /^---\nname: weekly-invoice-summary\ndescription: "When asked for the week's invoices"\n---\n/);
+  assert.match(skill, /^---\nname: weekly-invoice-summary\ndescription: "When asked for the week's invoices"\nversion: "0\.1\.0"\n---\n/);
   assert.match(skill, /Open the Invoices folder/);
+  // A script nobody approved yet isn't executable in the task.
+  assert.equal(statSync(join(skills, "weekly-invoice-summary", "scripts", "sum.sh")).mode & 0o111, 0);
   L.stopExecutor(id, child);
   await until(() => !existsSync(L.taskDir(id)), "its folder to go");
-  // No procedures: an empty skills folder.
-  P.deleteProcedure(saved.procedure.id);
+  // None: an empty skills folder.
+  for (const r of W.refsOf(ws)) await W.deleteSkill(ws, r.kind, r.slug);
+  assert.equal(W.findRef(ws, "skill", saved.slug), undefined);
   const bare = await L.startExecutor(id, "env_skills", "wss://env.test/skills", 9, undefined, false, main.id);
   assert.deepEqual(readdirSync(join(L.taskWorkspace(id), "capabilities", "skills")), []);
   L.stopExecutor(id, bare);
@@ -1264,7 +1273,9 @@ Cl.cloudSessionNow().typesafe = false;
 // The task's messages and state went to the user's Bops Cloud, not to a file on this Mac.
 assert.equal(await S.flushState(10_000), true);
 assert.ok(cloudState.messages.size > 0 && cloudState.blob, "the state is in the user's Bops Cloud");
-assert.ok(!existsSync(join(scratch, ".data", "state.json")) && !existsSync(join(scratch, ".data", "users")), "no state file");
+// (The skills' folders are the user's own files on this Mac, beside where uploads go, never the state.)
+const stateFiles = (dir) => (existsSync(dir) ? readdirSync(dir, { recursive: true }).filter((f) => /(^|\/)state[^/]*\.json$/.test(String(f))) : []);
+assert.ok(!existsSync(join(scratch, ".data", "state.json")) && !stateFiles(join(scratch, ".data", "users")).length, "no state file");
 // Signed out, there's no task folder to be had (no task runs without the user's state).
 await S.releaseSignOut();
 assert.throws(() => L.taskDir("ses_after"), /Sign in to Bops first/);

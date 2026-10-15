@@ -36,6 +36,7 @@ export function BotPanel({
   onOpenComputer,
   onOpenKeys,
   onOpenAutopilot,
+  onOpenSkills,
   onUpgrade,
   onClose,
 }: {
@@ -50,8 +51,10 @@ export function BotPanel({
   onOpenComputer: (botId: string) => void;
   /** Open Settings at Keys, to add a key for this bot. */
   onOpenKeys: (botId: string) => void;
-  /** Open the Autopilot page at a section, and at one of its rows (a procedure, schedule or monitor). */
+  /** Open the Autopilot page at a section, and at one of its rows (a schedule or monitor). */
   onOpenAutopilot: (section: AutopilotSection, item?: string) => void;
+  /** Open the Skills page, at one of them ("skill:<slug>"). */
+  onOpenSkills: (focus?: string) => void;
   /** Open the plans (Account), where Pro and Max are bought. */
   onUpgrade: () => void;
   /** Leave the profile, back to where you were (its X; Esc does it too, see bops-app.tsx). */
@@ -90,7 +93,7 @@ export function BotPanel({
         </div>
         {tabs}
       </div>
-      {tab === "skills" && <BotSkills state={state} bot={b} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenKeys={onOpenKeys} onOpenAutopilot={onOpenAutopilot} />}
+      {tab === "skills" && <BotSkills state={state} bot={b} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenKeys={onOpenKeys} onOpenAutopilot={onOpenAutopilot} onOpenSkills={onOpenSkills} />}
       {tab === "memory" && <BotMemory state={state} bot={b} onOpenThread={onOpenThread} />}
       {tab === "phone" && <Phone bot={b} />}
     </section>

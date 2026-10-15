@@ -12,7 +12,7 @@ import { AttachmentTray, MessageImages, useAttachments } from "./attachments";
 import { ComposerInput } from "./composer-input";
 import { MicButton } from "./mic-button";
 import { Fold } from "./fold";
-import { SaveProcedureDialog } from "./procedure-dialog";
+import { SaveSkillDialog } from "./skill-dialog";
 import { undash } from "./side-group";
 import { ApiAsk, apiAskOf, apiCallOf, ApiNote } from "./keys";
 import { ChatAvatar, chatName, clockTime, needsYou, post, StatusIcon, teamOf, useNow } from "./ui";
@@ -250,7 +250,7 @@ export function ChatView({
   };
   // Two bots' conversation, open over the chat ("Asked ● Sam").
   const [pair, setPair] = useState<{ id: string; focus?: string } | null>(null);
-  // "Save as procedure" from the chat's menu: the bot rereads this chat and drafts one (procedure-dialog.tsx).
+  // "Save as skill" from the chat's menu: the bot rereads this chat and drafts one (skill-dialog.tsx).
   const [saving, setSaving] = useState<{ botId: string; chatId: string } | null>(null);
   // Stable, so the dialog's own timers aren't reset by every state poll.
   const closeSaving = useCallback(() => setSaving(null), []);
@@ -378,15 +378,15 @@ export function ChatView({
         </div>
       )}
       {pair && <PairSheet state={state} pairId={pair.id} focusId={pair.focus} onClose={() => setPair(null)} />}
-      {saving && <SaveProcedureDialog botId={saving.botId} chatId={saving.chatId} onClose={closeSaving} />}
+      {saving && <SaveSkillDialog botId={saving.botId} chatId={saving.chatId} onClose={closeSaving} />}
       <div className="absolute right-5 top-[18px] z-10 flex items-center gap-2">
-        {/* The chat's own menu (a bot's chat, like Call): Save as procedure rereads this chat for how the bot did a job. */}
+        {/* The chat's own menu (a bot's chat, like Call): Save as skill rereads this chat for how the bot did a job. */}
         {solo && !call && (
           <MoreMenu
             key={c.id}
             label="More"
             size="chat"
-            items={[{ label: "Save as procedure", icon: <ProcedureIcon />, onClick: () => setSaving({ botId: solo.id, chatId: c.id }) }]}
+            items={[{ label: "Save as skill", icon: <SkillIcon />, onClick: () => setSaving({ botId: solo.id, chatId: c.id }) }]}
           />
         )}
         {solo && !call && (
@@ -803,8 +803,8 @@ function MoreMenu({ label, size, items }: { label: string; size: "chat" | "sheet
   );
 }
 
-/** "Save as procedure": steps in a list, with a mark for keeping them. */
-function ProcedureIcon() {
+/** "Save as skill": steps in a list, with a mark for keeping them. */
+function SkillIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 16 16" className="shrink-0 text-[#6B6B6B]" aria-hidden>
       <path d="M6 4h7.5M6 8h7.5M6 12h5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
@@ -1712,7 +1712,7 @@ export function ThreadSheet({ state, session: s, onClose: close, onShowComputer 
   const [draft, setDraft] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [openSteps, setOpenSteps] = useState<number[]>([]);
-  // "Save as procedure" for this thread alone (procedure-dialog.tsx), by the thread it's for.
+  // "Save as skill" for this thread alone (skill-dialog.tsx), by the thread it's for.
   const [saving, setSaving] = useState<string | null>(null);
   const closeSaving = useCallback(() => setSaving(null), []);
   const end = useRef<HTMLDivElement>(null);
@@ -1741,7 +1741,7 @@ export function ThreadSheet({ state, session: s, onClose: close, onShowComputer 
     <div onClick={onClose} className={`absolute inset-0 z-20 flex flex-col bg-white/70 px-3 pb-3 pt-[52px] backdrop-blur-[2px] ${opening ? "motion-fade-in" : ""}`}>
       <div onClick={(e) => e.stopPropagation()} className={`flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000038] ${opening ? "motion-sheet-in" : ""}`}>
         {/* Portalled over everything; inside the card, so its clicks never reach the scrim and close the sheet. */}
-        {saving === s.id && <SaveProcedureDialog botId={s.botId} chatId={s.chatId} sessionId={s.id} onClose={closeSaving} />}
+        {saving === s.id && <SaveSkillDialog botId={s.botId} chatId={s.chatId} sessionId={s.id} onClose={closeSaving} />}
         <div className="flex items-center gap-2.5 border-b border-[#F0F0EE] py-3.5 pl-4 pr-3.5">
           <Mascot botId={b.id} color={b.color} size={32} />
           <div className="flex min-w-0 flex-1 flex-col gap-px">
@@ -1776,8 +1776,8 @@ export function ThreadSheet({ state, session: s, onClose: close, onShowComputer 
               Delete
             </button>
           )}
-          {/* Save as procedure: the bot rereads this thread for how it did the job. Keyed by thread, so another one's sheet starts it shut. */}
-          <MoreMenu key={s.id} label="More" size="sheet" items={[{ label: "Save as procedure", icon: <ProcedureIcon />, onClick: () => setSaving(s.id) }]} />
+          {/* Save as skill: the bot rereads this thread for how it did the job. Keyed by thread, so another one's sheet starts it shut. */}
+          <MoreMenu key={s.id} label="More" size="sheet" items={[{ label: "Save as skill", icon: <SkillIcon />, onClick: () => setSaving(s.id) }]} />
           <button onClick={onClose} aria-label="Close thread" className="flex size-[34px] items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
             <svg width="12" height="12" viewBox="0 0 12 12">
               <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />

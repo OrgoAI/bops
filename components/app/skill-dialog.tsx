@@ -2,21 +2,27 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { MAX_PROCEDURE_CHARS, PROCEDURE_NAME_MAX, PROCEDURE_WHEN_MAX } from "@/lib/types";
 import { Spinner } from "./mascot";
 import { post } from "./ui";
 
 /*
- * "Save as procedure", from a chat's menu (or a thread's): the bot rereads the chat and the threads
- * it started (or just that thread) and drafts how it does this kind of job (lib/server/procedures.ts
- * draftProcedure). The user edits the draft and saves it, or cancels. When the bot already has a
- * procedure for the same kind of job, saving updates that one: the dialog says so, and shows what it
- * says now. Once the user has changed the draft, a click outside doesn't throw it away (Cancel does),
- * and Escape in a field just leaves the field.
+ * "Save as skill", from a chat's menu (or a thread's): the bot rereads the chat and the threads it started
+ * (or just that thread) and drafts a skill in the SKILL.md shape (lib/server/procedures.ts draftSkill): a
+ * name, a description with the user's own words, the SKILL.md text, and scripts for commands it ran (dry
+ * run unless given --apply). The user edits it and saves it as a draft, publishes it, or cancels. When the
+ * workspace already has a skill for the same kind of job, saving updates that one: the dialog says so. Once
+ * the user has changed the draft, a click outside doesn't throw it away (Cancel does), and Escape in a field
+ * just leaves the field.
  */
 
-type Draft = { name: string; whenToUse: string; steps: string; pitfalls: string; updates?: string };
-type Drafted = { draft?: Draft; updating?: string; was?: { steps: string; pitfalls: string }; from?: { chatId: string; sessionIds?: string[] }; error?: string };
+type DraftFile = { path: string; content: string; executable: boolean };
+type Draft = { name: string; description: string; body: string; files: DraftFile[]; updates?: string };
+type Drafted = { draft?: Draft; updating?: string; from?: { chatId: string; sessionIds?: string[] }; error?: string };
+type Problem = { path: string; reason: string; line?: number };
+
+/** The longest a name and a description can be (lib/server/workspace-skills.ts). */
+const NAME_MAX = 80;
+const DESCRIPTION_MAX = 1024;
 
 /**
  * Drafts asked for and not answered yet, by what they're for: a dialog mounted twice (React's dev
@@ -27,7 +33,7 @@ const drafting = new Map<string, Promise<Drafted>>();
 function draftOnce(key: string, body: { botId: string; chatId: string; sessionId?: string }): Promise<Drafted> {
   let asked = drafting.get(key);
   if (!asked) {
-    asked = fetch("/api/procedures", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "draft", ...body }) })
+    asked = post("/api/skills", { action: "draft", ...body })
       .then(async (res) => {
         const json = ((await res.json().catch(() => null)) as Drafted | null) ?? {};
         return res.ok && json.draft ? json : { error: json.error ?? "Couldn't write a draft. Try again." };
@@ -46,17 +52,17 @@ const LABEL = "flex flex-col gap-1";
 const LABEL_TEXT = "text-[12px] font-medium leading-4 text-[#6B6B6B]";
 const PILL = "rounded-full px-3.5 py-1.5 text-[13px] font-medium leading-4 disabled:opacity-50";
 
-/** "Save as procedure", over everything: reads the chat, then the draft to edit, Save and Cancel. */
-export function SaveProcedureDialog({ botId, chatId, sessionId, onClose }: { botId: string; chatId: string; sessionId?: string; onClose: () => void }) {
+/** "Save as skill", over everything: reads the chat, then the draft to edit, Save draft, Publish and Cancel. */
+export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: string; chatId: string; sessionId?: string; onClose: () => void }) {
   // Each try at a draft (Try again asks for a new one).
   const [attempt, setAttempt] = useState(0);
   const [fields, setFields] = useState<Draft | null>(null);
   const [updating, setUpdating] = useState<string | undefined>();
-  const [was, setWas] = useState<Drafted["was"]>();
   const [from, setFrom] = useState<Drafted["from"]>();
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [problems, setProblems] = useState<Problem[]>([]);
+  const [busy, setBusy] = useState<"draft" | "publish" | null>(null);
+  const [saved, setSaved] = useState<"draft" | "publish" | null>(null);
   // The user changed the draft: a stray click outside, or Escape in a field, doesn't throw that away.
   const [edited, setEdited] = useState(false);
   // Whether the press that ends in a click started on the scrim (a text selection that ends past the card doesn't).
@@ -67,9 +73,8 @@ export function SaveProcedureDialog({ botId, chatId, sessionId, onClose }: { bot
     void draftOnce(`${botId}:${chatId}:${sessionId ?? ""}:${attempt}`, { botId, chatId, sessionId }).then((r) => {
       if (gone) return;
       if (r.draft) {
-        setFields({ name: r.draft.name, whenToUse: r.draft.whenToUse, steps: r.draft.steps, pitfalls: r.draft.pitfalls, updates: r.draft.updates });
+        setFields({ name: r.draft.name, description: r.draft.description, body: r.draft.body, files: r.draft.files ?? [], updates: r.draft.updates });
         setUpdating(r.updating);
-        setWas(r.was);
         setFrom(r.from);
       } else setError(r.error ?? "Couldn't write a draft. Try again.");
     });
@@ -104,31 +109,31 @@ export function SaveProcedureDialog({ botId, chatId, sessionId, onClose }: { bot
     setError(null);
     setAttempt((n) => n + 1);
   };
-  const set = (k: keyof Omit<Draft, "updates">) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+  const set = (k: "name" | "description" | "body") => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const value = e.target.value;
     setFields((f) => (f ? { ...f, [k]: value } : f));
     setEdited(true);
   };
-  const size = fields ? fields.name.length + fields.whenToUse.length + fields.steps.length + fields.pitfalls.length : 0;
-  const tooLong = size > MAX_PROCEDURE_CHARS;
-  const ready = !!fields && !!fields.name.trim() && !!fields.whenToUse.trim() && !!fields.steps.trim() && !tooLong;
+  const ready = !!fields && !!fields.name.trim() && !!fields.description.trim() && !!fields.body.trim();
 
-  const save = async () => {
+  const save = async (how: "draft" | "publish") => {
     if (!fields || busy) return;
-    setBusy(true);
+    setBusy(how);
     setError(null);
+    setProblems([]);
     try {
-      const res = await post("/api/procedures", { action: "save", botId, draft: fields, from });
-      const json = ((await res.json().catch(() => null)) as { error?: string } | null) ?? {};
+      const res = await post("/api/skills", { action: "save-draft", botId, draft: fields, from, publish: how === "publish" });
+      const json = ((await res.json().catch(() => null)) as { error?: string; problems?: Problem[] } | null) ?? {};
       if (!res.ok || json.error) {
         setError(json.error ?? "Couldn't save it. Try again.");
-        setBusy(false);
+        setProblems(json.problems ?? []);
+        setBusy(null);
         return;
       }
-      setSaved(true);
+      setSaved(how);
     } catch {
       setError("Couldn't reach Bops. Try again.");
-      setBusy(false);
+      setBusy(null);
     }
   };
 
@@ -144,51 +149,47 @@ export function SaveProcedureDialog({ botId, chatId, sessionId, onClose }: { bot
       <div
         role="dialog"
         aria-modal="true"
-        aria-labelledby="procedure-title"
-        aria-describedby="procedure-line"
+        aria-labelledby="skill-title"
+        aria-describedby="skill-line"
         aria-busy={!fields && !error}
         onClick={(e) => e.stopPropagation()}
         className="motion-dialog-in flex max-h-full w-[520px] max-w-full flex-col overflow-hidden rounded-[18px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
       >
         <div className="flex flex-col px-5 pt-5">
-          <span id="procedure-title" className="text-[15px] font-semibold leading-5">
-            Save as procedure
+          <span id="skill-title" className="text-[15px] font-semibold leading-5">
+            Save as skill
           </span>
-          <span id="procedure-line" className="pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
-            How your bot does this kind of job. It reads it the next time a job like this comes up.
+          <span id="skill-line" className="pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
+            How this workspace does this kind of job. Once published, your bot reads it the next time a job like this comes up.
           </span>
         </div>
 
         {fields ? (
           <div className="flex min-h-0 flex-col gap-3 overflow-y-auto px-5 pt-4">
             {fields.updates && updating && <span className="text-[12.5px] leading-[18px] text-[#3A3A38]">This updates &ldquo;{updating}&rdquo;.</span>}
-            {fields.updates && updating && was && (
-              <details className="rounded-[12px] bg-[#F7F7F6] px-3 py-2 text-[12.5px] leading-[18px] text-[#3A3A38]">
-                <summary className="cursor-pointer text-[12px] font-medium text-[#6B6B6B]">What it says now</summary>
-                <div className="whitespace-pre-wrap pt-1.5">{was.steps}</div>
-                {was.pitfalls.trim() && <div className="whitespace-pre-wrap pt-1.5 text-[#6B6B6B]">Pitfalls: {was.pitfalls}</div>}
-              </details>
-            )}
             <label className={LABEL}>
               <span className={LABEL_TEXT}>Name</span>
-              <input autoFocus value={fields.name} onChange={set("name")} maxLength={PROCEDURE_NAME_MAX} placeholder="Weekly invoice summary" className={INPUT} />
+              <input autoFocus value={fields.name} onChange={set("name")} maxLength={NAME_MAX} placeholder="Weekly invoice summary" className={INPUT} />
             </label>
             <label className={LABEL}>
-              <span className={LABEL_TEXT}>When to use it</span>
-              <input value={fields.whenToUse} onChange={set("whenToUse")} maxLength={PROCEDURE_WHEN_MAX} placeholder="When you ask for a summary of the week's invoices" className={INPUT} />
+              <span className={LABEL_TEXT}>What it does and when to use it</span>
+              <textarea value={fields.description} onChange={set("description")} maxLength={DESCRIPTION_MAX} rows={2} placeholder="Sums up the week's invoices when you ask for &ldquo;the weekly invoice summary&rdquo;" className={AREA} />
             </label>
             <label className={LABEL}>
-              <span className={LABEL_TEXT}>Steps</span>
-              <textarea value={fields.steps} onChange={set("steps")} rows={9} placeholder="1. Open the invoices folder" className={AREA} />
+              <span className={LABEL_TEXT}>SKILL.md</span>
+              <textarea value={fields.body} onChange={set("body")} rows={12} className={`${AREA} font-mono text-[12px]`} />
             </label>
-            <label className={LABEL}>
-              <span className={LABEL_TEXT}>Pitfalls</span>
-              <textarea value={fields.pitfalls} onChange={set("pitfalls")} rows={4} placeholder="What to watch out for. Optional." className={AREA} />
-            </label>
-            {size > MAX_PROCEDURE_CHARS * 0.9 && (
-              <span className={`text-[12px] leading-4 ${tooLong ? "text-[#B42318]" : "text-[#9A9A98]"}`}>
-                {size} of {MAX_PROCEDURE_CHARS} characters{tooLong ? ". Make it shorter to save it." : ""}
-              </span>
+            {fields.files.length > 0 && (
+              <div className={LABEL}>
+                <span className={LABEL_TEXT}>Files</span>
+                {fields.files.map((f) => (
+                  <details key={f.path} className="rounded-[12px] bg-[#F7F7F6] px-3 py-2 text-[12px] leading-[17px] text-[#3A3A38]">
+                    <summary className="cursor-pointer font-mono">{f.path}</summary>
+                    <pre className="whitespace-pre-wrap pt-1.5 font-mono text-[11.5px]">{f.content}</pre>
+                  </details>
+                ))}
+                <span className="text-[12px] leading-4 text-[#9A9A98]">Scripts only say what they&apos;d do until run with --apply, and run once you approve them on the Skills page.</span>
+              </div>
             )}
           </div>
         ) : error ? null : (
@@ -199,13 +200,18 @@ export function SaveProcedureDialog({ botId, chatId, sessionId, onClose }: { bot
         )}
 
         {error && (
-          <span role="alert" className="px-5 pt-3 text-[12.5px] leading-[18px] text-[#B42318]">
+          <span role="alert" className="flex flex-col gap-0.5 px-5 pt-3 text-[12.5px] leading-[18px] text-[#B42318]">
             {error}
+            {problems.map((p, i) => (
+              <span key={i} className="text-[12px] text-[#6B6B6B]">
+                <span className="font-mono">{p.path}{p.line ? `:${p.line}` : ""}</span> {p.reason}
+              </span>
+            ))}
           </span>
         )}
 
         <div className="flex items-center justify-end gap-2 px-5 pb-5 pt-5">
-          <button disabled={busy} onClick={onClose} className={`${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          <button disabled={!!busy} onClick={onClose} className={`${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
             Cancel
           </button>
           {!fields && error ? (
@@ -213,9 +219,14 @@ export function SaveProcedureDialog({ botId, chatId, sessionId, onClose }: { bot
               Try again
             </button>
           ) : (
-            <button disabled={!saved && (!ready || busy)} onClick={() => void save()}className={`${PILL} flex min-w-[76px] items-center justify-center bg-ink text-white`}>
-              {saved ? "Saved" : busy ? "Saving…" : "Save"}
-            </button>
+            <>
+              <button disabled={!saved && (!ready || !!busy)} onClick={() => void save("draft")} className={`${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+                {saved === "draft" ? "Saved" : busy === "draft" ? "Saving…" : "Save draft"}
+              </button>
+              <button disabled={!saved && (!ready || !!busy)} onClick={() => void save("publish")} className={`${PILL} flex min-w-[76px] items-center justify-center bg-ink text-white`}>
+                {saved === "publish" ? "Published" : busy === "publish" ? "Publishing…" : "Publish"}
+              </button>
+            </>
           )}
         </div>
       </div>

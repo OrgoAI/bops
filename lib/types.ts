@@ -127,7 +127,63 @@ export type Workspace = {
    * bot hands work to the others. `previous` is the AgentPhone agent the number came from, for rollback.
    */
   line?: WorkspaceLine;
+  /**
+   * The Orgo workspace (an orgo-web project marked product "bops") this workspace is, once Orgo has
+   * one for it (lib/server/workspaces.ts). Unset on an Orgo without per workspace projects: every
+   * workspace's computers then live in the one "bops" project, as before.
+   */
+  orgoProjectId?: string;
+  /** Its skills and apps (lib/server/workspace-skills.ts): what each is, by slug. The files are on this Mac. */
+  skills?: SkillRef[];
+  apps?: SkillRef[];
+  /** Scripts someone approved to run in this workspace, by the content's sha256. */
+  approvals?: ScriptApproval[];
 };
+
+/** A skill (how a bot does a kind of job) or an app (a tool Bops builds and bots run). */
+export type SkillKind = "skill" | "app";
+export type SkillRisk = "read" | "write" | "destructive";
+
+/**
+ * One skill or app of a workspace: a folder in the Agent Skill shape (SKILL.md and its files) at
+ * <userDir>/workspaces/<id>/skills/<slug>/ (apps/<slug>/ for an app). This is what the app and the
+ * bots list without reading the folder; the folder holds the rest.
+ */
+export type SkillRef = {
+  slug: string;
+  kind: SkillKind;
+  name: string;
+  /** What it does and when to use it: all a bot sees until it reads it (read_skill). */
+  description: string;
+  /** draft: its bots don't see it yet; published: they do, at `version`. */
+  status: "draft" | "published";
+  /** The version its bots read (published), and every version kept, newest last. */
+  version?: string;
+  versions?: { version: string; at: number; sha256: string }[];
+  risk?: SkillRisk;
+  runsOn?: string;
+  /** The bots that have it. Empty: every bot in the workspace. */
+  botIds: string[];
+  /** Where it came from: written in Bops, imported from a folder, made in Orgo, or a procedure from before. */
+  source: "bops" | "import" | "orgo" | "procedure";
+  createdAt: number;
+  updatedAt: number;
+  /** The id it had as a procedure (Procedure.id), so routines and threads that named it still find it. */
+  legacyId?: string;
+  /** Orgo's id for it and when Orgo last changed it (lib/server/workspace-skills.ts sync). */
+  remoteId?: string;
+  remoteAt?: string;
+  /** When this Mac and Orgo last agreed on it: a change here after this goes to Orgo. */
+  syncedAt?: number;
+  /** How many times a bot read it for a job, and when it last did. */
+  uses?: number;
+  usedAt?: number;
+  /** The chat it was drafted from. */
+  from?: { chatId: string; sessionIds?: string[] };
+};
+
+/** A script someone approved to run, by its content (an unchanged script carried into a new version stays approved). */
+export type ScriptApproval = { sha256: string; path: string; at: number };
 
 export type WorkspaceLine = {
   phone: string;
@@ -515,9 +571,8 @@ export const runningNow = (r: Routine, sessions: Session[], now = Date.now()) =>
   r.last?.status === "running" && (r.last.sessionId ? sessions.some((s) => s.id === r.last!.sessionId && live(s)) : now - r.last.at < 15 * 60_000);
 
 /**
- * A procedure: how a bot does one kind of job, saved so it does it the same way next time (the user's
- * "skills"). Written by the bot from a chat ("Save as procedure") or when the user asks it to remember
- * how; read in full only when a job matches (lib/server/procedures.ts). Private to the bot, never shared.
+ * A procedure, from before skills: how a bot did one kind of job, private to it. Each is moved into its
+ * workspace's skills (lib/server/workspace-skills.ts adoptProcedures) and kept in proceduresBackup.
  */
 export type Procedure = {
   id: string;
@@ -539,14 +594,7 @@ export type Procedure = {
   usedAt?: number;
 };
 
-/** At most this many procedures per bot, and this many characters in one (name, when, steps and pitfalls together). */
-export const MAX_PROCEDURES = 40;
-export const MAX_PROCEDURE_CHARS = 6000;
-/** The longest a procedure's name and its "when to use it" line can be (the server, the save dialog and the editor). */
-export const PROCEDURE_NAME_MAX = 80;
-export const PROCEDURE_WHEN_MAX = 300;
-
-/** A procedure's name as compared: case, spacing and dashes (a bot writes them as commas) don't count. */
+/** A skill's name as compared (and a procedure's before it): case, spacing and dashes (a bot writes them as commas) don't count. */
 export const procedureKey = (s: string) =>
   s
     .replace(/[ \t]*[—–][ \t]*/g, ", ")
@@ -554,11 +602,6 @@ export const procedureKey = (s: string) =>
     .trim()
     .toLowerCase();
 
-/** One of these procedures: by id, then by its exact name, then by name as compared (procedureKey). */
-export function procedureNamed<P extends { id: string; name: string }>(list: P[], nameOrId: string): P | undefined {
-  const want = nameOrId.trim().replace(/^["“']|["”']$/g, "");
-  return list.find((p) => p.id === want) ?? list.find((p) => p.name === want) ?? list.find((p) => procedureKey(p.name) === procedureKey(want));
-}
 
 /**
  * You've taken control of a bot's screen (`display`), or of the Chrome a task of the bot's has of its
@@ -626,8 +669,19 @@ export type AppState = {
   messages: Message[];
   sessions: Session[];
   routines: Routine[];
-  /** How each bot does the kinds of jobs it was shown (Procedure). Unset on states from before. */
+  /**
+   * How each bot did the kinds of jobs it was shown, from before skills (Procedure). Each is moved into
+   * its workspace's skills (lib/server/workspace-skills.ts adoptProcedures) and the list is emptied; what was
+   * moved is kept in `proceduresBackup`.
+   */
   procedures?: Procedure[];
+  proceduresBackup?: Procedure[];
+  /**
+   * Moving each workspace onto an Orgo workspace of its own (lib/server/workspaces.ts
+   * migrateWorkspacesToOrgo): the step it got to, the computers it moved (for a rollback), the ones
+   * Orgo wouldn't move yet, and when it was done. Saved after every step, so a stop resumes.
+   */
+  orgoMigration?: OrgoMigration;
   host: Host;
   takeover?: Takeover;
   /** Latest read of each watched screen, keyed `${botId}:${display}`. */
@@ -1037,6 +1091,18 @@ export function computerCheckMs(status: string | undefined, { visible, inUse }: 
   if (!computerAsleep(status)) return 8000;
   return inUse ? 2000 : 60_000;
 }
+
+export type OrgoMigration = {
+  v: 1;
+  step: string;
+  moves: { computerId: string; from: string; to: string }[];
+  pending: string[];
+  /** Orgo workspaces made by the move, for a rollback (deleted when empty). */
+  created: string[];
+  /** A workspace renamed because the user's Orgo already had that name: shown once. */
+  renamed?: { wsId: string; from: string; to: string }[];
+  doneAt?: string;
+};
 
 /** The chat id for talking to one bot directly. */
 export const botChatId = (botId: BotId) => `bot:${botId}`;

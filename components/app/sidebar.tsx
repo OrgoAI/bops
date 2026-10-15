@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { live, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
 import { AutopilotSections, type AutopilotOpen } from "./autopilot";
+import { SkillsSideRow } from "./skills";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
@@ -35,6 +36,7 @@ export function Sidebar({
   onOpenWatch,
   onOpenMemory,
   onOpenAutopilot,
+  onOpenSkills,
 }: {
   state: AppState;
   chatId: string;
@@ -54,6 +56,8 @@ export function Sidebar({
   onOpenMemory: (open: MemoryOpen) => void;
   /** Open Autopilot on the right, at a section and one of its rows (autopilot.tsx). */
   onOpenAutopilot: (open: AutopilotOpen) => void;
+  /** Open the workspace's Skills page (skills.tsx). */
+  onOpenSkills: () => void;
 }) {
   const [query, setQuery] = useState<string | null>(null);
   const q = query?.trim().toLowerCase();
@@ -65,8 +69,7 @@ export function Sidebar({
     rememberShown(state.sessions.map((s) => s.id));
     rememberShown((state.watches ?? []).map((w) => w.id));
     rememberShown(state.routines.map((r) => r.id));
-    rememberShown((state.procedures ?? []).map((p) => p.id));
-  }, [state.sessions, state.watches, state.routines, state.procedures]);
+  }, [state.sessions, state.watches, state.routines]);
   // Gone with the sidebar (signing out), so the next sign-in's first paint has nothing new in it either.
   useEffect(() => forgetShown, []);
 
@@ -142,13 +145,14 @@ export function Sidebar({
       </div>
 
       {/*
-        Pinned under the chats, together: Autopilot (what the bots do on their own: schedules, monitors,
-        procedures; every account) and below it Orbit (what Bops knows, categories that fill themselves from
+        Pinned under the chats, together: Autopilot (what the bots do on their own: schedules and monitors;
+        every account), Skills (how they do a kind of job, and their apps) and below them Orbit (what Bops knows, categories that fill themselves from
         memory; every signed-in account, lib/memory-categories.ts), each with a page on the right. Half the
         sidebar at most between them, scrolling on its own; gone while a search matches nothing in either.
       */}
       <div className="-mx-2.5 max-h-[50%] shrink-0 overflow-y-auto border-t border-[#ECECEA] px-2.5 empty:hidden">
         <AutopilotSections state={state} query={query ?? ""} onOpen={onOpenAutopilot} onOpenWatch={onOpenWatch} />
+        {!query?.trim() && <SkillsSideRow state={state} onOpen={onOpenSkills} />}
         {categoriesOpen(state) && <MemorySections state={state} query={query ?? ""} onOpen={onOpenMemory} />}
       </div>
 
@@ -398,6 +402,9 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
   const [open, setOpen] = useState(false);
   const [naming, setNaming] = useState<null | { id?: string; name: string }>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  // What Orgo said about a name (one the user's Orgo already has), shown over the field until it changes.
+  const [problem, setProblem] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const workspaces = state.workspaces ?? [];
   const current = workspaces.find((w) => w.id === currentWorkspace(state));
@@ -418,14 +425,37 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
     setOpen(false);
     setNaming(null);
     setDeleting(null);
+    setProblem(null);
   };
+  /**
+   * New workspace or Rename: where each workspace is an Orgo workspace of its own, Orgo makes or renames it
+   * too, and a name the user's Orgo already has comes back to pick another, with one to start from.
+   */
   const save = async () => {
     const name = naming?.name.trim();
-    if (!name) return;
-    if (naming?.id) await post("/api/workspaces", { id: naming.id, name }, "PATCH");
-    else await post("/api/workspaces", { name });
-    close();
+    if (!name || busy) return;
+    setBusy(true);
+    try {
+      const res = naming?.id ? await post("/api/workspaces", { id: naming.id, name }, "PATCH") : await post("/api/workspaces", { name });
+      const j = (await res.json().catch(() => ({}))) as { error?: string; code?: string; suggestion?: string };
+      if (!res.ok) {
+        setProblem(j.error ?? "That didn't work. Try again.");
+        if (j.suggestion) setNaming({ id: naming?.id, name: j.suggestion });
+        return;
+      }
+      close();
+    } catch {
+      setProblem("Couldn't reach Bops. Try again.");
+    } finally {
+      setBusy(false);
+    }
   };
+  const editName = (id?: string) => (name: string) => {
+    setNaming({ id, name });
+    setProblem(null);
+  };
+  const renamed = state.orgoMigration?.renamed ?? [];
+  const pending = state.orgoMigration?.pending.length ?? 0;
   const count = (id: string) => state.bots.filter((b) => workspaceOf(b) === id).length;
 
   return (
@@ -445,7 +475,10 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
           <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-medium text-[#9A9A98]">Workspaces</div>
           {workspaces.map((w) =>
             naming?.id === w.id ? (
-              <NameInput key={w.id} value={naming.name} onChange={(name) => setNaming({ id: w.id, name })} onSave={save} onCancel={() => setNaming(null)} />
+              <Fragment key={w.id}>
+                {problem && <span role="alert" className="px-2.5 pt-1 text-[12px] leading-4 text-[#B42318]">{problem}</span>}
+                <NameInput value={naming.name} onChange={editName(w.id)} onSave={save} onCancel={() => setNaming(null)} />
+              </Fragment>
             ) : (
               <div key={w.id} className="group/ws flex items-center rounded-[10px] hover:bg-black/[0.04]">
                 <button
@@ -504,9 +537,27 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
               </div>
             ),
           )}
+          {/* Once, after each workspace became an Orgo workspace of its own: names Orgo already had, and computers that move later. */}
+          {(renamed.length > 0 || pending > 0) && (
+            <div className="flex flex-col gap-0.5 px-2.5 pt-1 text-[12px] leading-4 text-[#6B6B6B]">
+              {renamed.map((r) => (
+                <span key={r.wsId}>
+                  {r.from} is {r.to} in Orgo: you already had an Orgo workspace named {r.from}.
+                </span>
+              ))}
+              {pending > 0 && (
+                <span>
+                  {pending} computer{pending === 1 ? "" : "s"} move{pending === 1 ? "s" : ""} to {pending === 1 ? "its" : "their"} workspace once Orgo can.
+                </span>
+              )}
+            </div>
+          )}
           <div className="mx-2 my-1 h-px bg-[#ECECEA]" />
           {naming && !naming.id ? (
-            <NameInput value={naming.name} placeholder="Name the workspace" onChange={(name) => setNaming({ name })} onSave={save} onCancel={() => setNaming(null)} />
+            <>
+              {problem && <span role="alert" className="px-2.5 pb-1 text-[12px] leading-4 text-[#B42318]">{problem}</span>}
+              <NameInput value={naming.name} placeholder="Name the workspace" onChange={editName()} onSave={save} onCancel={() => setNaming(null)} />
+            </>
           ) : (
             <button onClick={() => setNaming({ name: "" })} className="flex h-9 items-center gap-2 rounded-[10px] pl-2.5 text-left text-[14px] font-medium hover:bg-black/[0.04]">
               <span className="flex size-[18px] items-center justify-center">

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { botChatId, isScreenWatch, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
 import { Account } from "./account";
 import { AutopilotPage, type AutopilotSection } from "./autopilot";
+import { SkillsPage } from "./skills";
 import { Members } from "./members";
 import { BotPanel, type Section } from "./bot-panel";
 import { CallBar } from "./call-bar";
@@ -283,7 +284,7 @@ function Bops({ state }: { state: AppState | null }) {
     .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)))
     .filter((t) => t.kind !== "memory" || (memory && t.ws === currentWorkspace(state)))
     // Autopilot shows its own workspace's bots only: another workspace's tab goes on a switch.
-    .filter((t) => t.kind !== "autopilot" || t.ws === currentWorkspace(state));
+    .filter((t) => (t.kind !== "autopilot" && t.kind !== "skills") || t.ws === currentWorkspace(state));
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
   if (recent.at(-1) !== active) {
     setRecent([...recent.filter((id) => id !== active), active].slice(-20));
@@ -304,6 +305,7 @@ function Bops({ state }: { state: AppState | null }) {
         tab.kind === "crm" ||
         tab.kind === "memory" ||
         tab.kind === "autopilot" ||
+        tab.kind === "skills" ||
         (tab.kind === "computer" && tab.botId !== chatBotId) ||
         (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
@@ -407,6 +409,16 @@ function Bops({ state }: { state: AppState | null }) {
       (t) => ({ ...t, section, focus: item, focusAt }) as PanelTab,
     );
   };
+  /** The workspace's Skills page (skills.tsx): its one tab, at the skill asked for ("skill:<slug>"), or opened. */
+  const openSkills = (item?: string) => {
+    const ws = currentWorkspace(state);
+    const focusAt = Date.now();
+    openTab(
+      (t) => t.kind === "skills" && t.ws === ws,
+      () => ({ id: tabId(), kind: "skills", ws, focus: item, focusAt }),
+      (t) => ({ ...t, focus: item, focusAt }) as PanelTab,
+    );
+  };
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
   // eslint-disable-next-line react-hooks/refs -- kept current for the storage listener above
   openMacRef.current = openMac;
@@ -447,7 +459,7 @@ function Bops({ state }: { state: AppState | null }) {
   // a search) stays there.
   // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
   escTab.current = (e) => {
-    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot") ? tab : undefined;
+    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot" || tab?.kind === "skills") ? tab : undefined;
     if (!page || e.defaultPrevented || thread || composing || settings || account || setup || members || document.querySelector('[role="dialog"]')) return;
     const el = e.target instanceof HTMLElement ? e.target : null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && !panelRef.current?.contains(el)) return;
@@ -486,7 +498,7 @@ function Bops({ state }: { state: AppState | null }) {
     );
     if (cutAlerts === null) return setCutAlerts(new Set(alerting.map(key)));
     const fresh = alerting.find((w) => !cutAlerts.has(key(w)));
-    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot") return;
+    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot" || tab?.kind === "skills") return;
     const el = document.activeElement as HTMLInputElement | null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && (el.value ?? el.textContent ?? "").trim()) return;
     setCutAlerts(new Set([...cutAlerts, key(fresh)]));
@@ -625,6 +637,7 @@ function Bops({ state }: { state: AppState | null }) {
             onOpenWatch={showWatch}
             onOpenMemory={openMemory}
             onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item)}
+            onOpenSkills={() => openSkills()}
           />
           {focus && crmFocus && crm ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
@@ -707,6 +720,7 @@ function Bops({ state }: { state: AppState | null }) {
                       onOpenComputer={openComputer}
                       onOpenKeys={(keysFor) => openVault(keysFor)}
                       onOpenAutopilot={openAutopilot}
+                      onOpenSkills={openSkills}
                       onUpgrade={() => {
                         trackEvent("bops_upgrade_clicked", { surface: "bot_panel" });
                         setAccount(true);
@@ -770,6 +784,10 @@ function Bops({ state }: { state: AppState | null }) {
                         onOpenWatch={showWatch}
                         onClose={() => leaveTab(tab.id)}
                       />
+                    </div>
+                  ) : tab?.kind === "skills" ? (
+                    <div key={tab.id} className="motion-fade-in flex min-h-0 flex-1 flex-col">
+                      <SkillsPage state={state} focus={tab.focus} focusAt={tab.focusAt} onClose={() => leaveTab(tab.id)} />
                     </div>
                   ) : null}
                   {/* Your Mac stays capturing, hidden, for two minutes after you leave it (restarting capture is slow). */}

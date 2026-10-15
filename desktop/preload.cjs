@@ -23,6 +23,9 @@ contextBridge.exposeInMainWorld("bopsMac", {
   relaunch: () => ipcRenderer.invoke("relaunch"),
   // Copy a key from the Vault, kept out of clipboard managers and other devices, and cleared after a minute.
   copySecret: (value) => ipcRenderer.invoke("copy-secret", value),
+  // Skills: pick a folder in Finder to import (its path only), and show a skill's folder in Finder.
+  pickFolder: () => ipcRenderer.invoke("pick-folder"),
+  revealFolder: (dir) => ipcRenderer.invoke("reveal-folder", dir),
   // The page shown when Bops can't start (desktop/trouble.html): start again, or open the logs folder.
   startup: {
     retry: () => ipcRenderer.invoke("startup-retry"),

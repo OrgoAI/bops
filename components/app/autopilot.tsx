@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useRef, useState, type AnimationEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
-import { DISPLAYS, isScreenWatch, MAX_PROCEDURE_CHARS, onceDone, PROCEDURE_NAME_MAX, PROCEDURE_WHEN_MAX, runningNow, type AppState, type Delivery, type Procedure, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
+import { DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Delivery, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
 import { Fold } from "./fold";
 import { Mascot } from "./mascot";
 import {
@@ -28,14 +28,15 @@ import { CloseButton, currentWorkspace, post, teamOf, useNow } from "./ui";
 
 /*
  * Autopilot: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
- * in the chat, or a task on a computer, at set times), Monitors (watches: a bot's screen, a window on the
- * user's Mac, or a web page with no screen) and Procedures (how a bot does one kind of job). In the
+ * in the chat, or a task on a computer, at set times) and Monitors (watches: a bot's screen, a window on the
+ * user's Mac, or a web page with no screen). How a bot does a kind of job is a skill now, on the Skills
+ * page (skills.tsx), just below in the sidebar. In the
  * sidebar, a group pinned above Orbit with a section each that folds (AutopilotSections); on the right,
  * a page with every one of them, each opening in place with what can be done to it (AutopilotPage). Both
  * read the app's state (useAppState), so they're as current as everything else.
  */
 
-export type AutopilotSection = "schedules" | "monitors" | "procedures";
+export type AutopilotSection = "schedules" | "monitors";
 
 /** Open the page on the right (bops-app.tsx): at a section, and at one of its rows. */
 export type AutopilotOpen = { section: AutopilotSection; focus?: string };
@@ -47,7 +48,6 @@ const FOLDS = "autopilot";
 const SECTIONS: { id: AutopilotSection; label: string; empty: string; how: string }[] = [
   { id: "schedules", label: "Schedules", empty: "Ask a bot to do something on a schedule", how: "Try: every weekday at 8:30, summarize my inbox" },
   { id: "monitors", label: "Monitors", empty: "Ask a bot to watch a page", how: "Try: watch this page and tell me when the price drops, with its link" },
-  { id: "procedures", label: "Procedures", empty: "Save one from a chat's menu", how: "Or tell a bot: remember how you did that, for next time" },
 ];
 
 /* ---------------- What's here ---------------- */
@@ -56,9 +56,9 @@ const SECTIONS: { id: AutopilotSection; label: string; empty: string; how: strin
 const done = (r: Routine) => onceDone(r);
 
 /**
- * The workspace's schedules, monitors and procedures (its own bots' only), in the order both lists show
- * them. Schedules: the ones on first, the soonest run first, then the rest, the latest run first.
- * Monitors: news first, then the newest. Procedures: by name. With `botId`, that bot's only (its Skills, bot-skills.tsx).
+ * The workspace's schedules and monitors (its own bots' only), in the order both lists show them.
+ * Schedules: the ones on first, the soonest run first, then the rest, the latest run first. Monitors:
+ * news first, then the newest. With `botId`, that bot's only (its Skills, bot-skills.tsx).
  */
 export function autopilotOf(state: AppState, botId?: string) {
   const team = new Set(botId ? [botId] : teamOf(state).map((b) => b.id));
@@ -66,15 +66,13 @@ export function autopilotOf(state: AppState, botId?: string) {
     .filter((r) => team.has(r.botId))
     .sort((a, b) => Number(b.enabled) - Number(a.enabled) || (a.enabled ? (a.nextRunAt ?? Infinity) - (b.nextRunAt ?? Infinity) : (b.lastRunAt ?? 0) - (a.lastRunAt ?? 0)) || a.title.localeCompare(b.title));
   const monitors = (state.watches ?? []).filter((w) => team.has(w.botId)).sort((a, b) => Number(!!b.alert) - Number(!!a.alert) || b.since - a.since);
-  const procedures = (state.procedures ?? []).filter((p) => team.has(p.botId)).sort((a, b) => a.name.localeCompare(b.name));
-  return { schedules, monitors, procedures };
+  return { schedules, monitors };
 }
 
 /** Whether any of these words has the search in it (lowercased; none: everything matches). */
 const has = (q: string, ...words: (string | undefined)[]) => !q || words.some((w) => !!w && w.toLowerCase().includes(q));
 const matchSchedule = (r: Routine, q: string) => has(q, r.title, r.goal, r.reminder);
 const matchMonitor = (w: Watch, q: string) => has(q, watchName(w), w.site, w.lookFor, w.page?.url, w.mac?.app);
-const matchProcedure = (p: Procedure, q: string) => has(q, p.name, p.whenToUse);
 
 /* ---------------- Words ---------------- */
 
@@ -183,12 +181,6 @@ const GLYPHS: Record<AutopilotSection | "autopilot", ReactNode> = {
       <circle cx="8" cy="8" r="1.9" />
     </>
   ),
-  procedures: (
-    <>
-      <path d="M6.6 4.4h6.4M6.6 8h6.4M6.6 11.6h4.2" />
-      <path d="M3 4.4h.9M3 8h.9M3 11.6h.9" />
-    </>
-  ),
 };
 
 /** Autopilot's mark, or one of its sections': in the sidebar, its tab, and on its page. */
@@ -227,7 +219,7 @@ function useFresh(id: string) {
 /* ---------------- The sidebar ---------------- */
 
 /**
- * Autopilot in the sidebar, pinned above Orbit: a section each for Schedules, Monitors and Procedures,
+ * Autopilot in the sidebar, pinned above Orbit: a section each for Schedules and Monitors,
  * from the start (blank ones say how to get one). The name folds the whole group and an arrow beside it
  * opens the page; each section counts what it has and lists its first five, open until the user folds
  * it (this Mac remembers both). Monitors keep the old Watching list's ways: the New mark (also on the
@@ -262,11 +254,8 @@ function SidebarGroup({
   const q = query.trim().toLowerCase();
   const tz = state.owner?.timeZone;
   const lists = autopilotOf(state);
-  const multi = teamOf(state).length > 1;
-  const botName = (id: string) => state.bots.find((b) => b.id === id)?.name;
   const schedules = lists.schedules.filter((r) => matchSchedule(r, q));
   const monitors = lists.monitors.filter((w) => matchMonitor(w, q));
-  const procedures = lists.procedures.filter((p) => matchProcedure(p, q));
   const news = monitors.filter((w) => w.alert).length;
   const sections = [
     {
@@ -279,11 +268,6 @@ function SidebarGroup({
       n: monitors.length,
       // A screen or a Mac window shows as it always has (bops-app.tsx showWatch); a page opens here on the right.
       rows: monitors.slice(0, FIRST).map((w) => <MonitorLine key={w.id} watch={w} onClick={() => onOpenWatch(w)} />),
-    },
-    {
-      ...SECTIONS[2],
-      n: procedures.length,
-      rows: procedures.slice(0, FIRST).map((p) => <ProcedureLine key={p.id} procedure={p} bot={multi ? botName(p.botId) : undefined} onClick={() => onOpen({ section: "procedures", focus: p.id })} />),
     },
   ].filter((s) => !q || s.n);
   if (q && !sections.length) return null;
@@ -431,29 +415,11 @@ function MonitorLine({ watch: w, onClick }: { watch: Watch; onClick: () => void 
   );
 }
 
-/** A procedure in the sidebar: its name, and its bot's in grey when the workspace has more than one. */
-function ProcedureLine({ procedure: p, bot, onClick }: { procedure: Procedure; bot?: string; onClick: () => void }) {
-  const fresh = useFresh(p.id);
-  return (
-    <button onClick={onClick} onAnimationEnd={fresh.done} title={undash(p.whenToUse)} className={`${SIDE_ROW} ${fresh.on ? "motion-new-item" : ""}`}>
-      <span className="min-w-0 flex-1 truncate text-[13.5px] leading-[18px]">
-        <span className="text-ink">{undash(p.name)}</span>
-        {bot && (
-          <span className="text-[#9A9A98]">
-            {" · "}
-            {bot}
-          </span>
-        )}
-      </span>
-    </button>
-  );
-}
-
 /* ---------------- The page ---------------- */
 
 /**
- * Autopilot as a page on the right (one tab per workspace): a section at a time, every schedule, monitor
- * or procedure in it, each opening in place to say how it works and how it went, with what can be done
+ * Autopilot as a page on the right (one tab per workspace): a section at a time, every schedule or
+ * monitor in it, each opening in place to say how it works and how it went, with what can be done
  * to it. `focus` opens one and brings it into view; `focusAt` is when it was asked for, so asking again
  * (it was closed since, or scrolled away) does it again.
  */
@@ -480,7 +446,6 @@ export function AutopilotPage({
   const s = SECTIONS.find((x) => x.id === section) ?? SECTIONS[0];
   const lists = autopilotOf(state);
   const tz = state.owner?.timeZone;
-  const multi = teamOf(state).length > 1;
   const [openId, setOpenId] = useState<string | null>(focus ?? null);
   // A new ask from the sidebar opens the row asked for.
   const [asked, setAsked] = useState({ focus, focusAt });
@@ -490,7 +455,7 @@ export function AutopilotPage({
   }
   const list = useRef<HTMLDivElement>(null);
   // ...and it comes into view, once it's there.
-  const there = !!focus && [...lists.schedules, ...lists.monitors, ...lists.procedures].some((x) => x.id === focus);
+  const there = !!focus && [...lists.schedules, ...lists.monitors].some((x) => x.id === focus);
   useEffect(() => {
     if (!there || !focus) return;
     const el = list.current?.querySelector<HTMLElement>(`[data-item="${CSS.escape(focus)}"]`);
@@ -508,7 +473,6 @@ export function AutopilotPage({
   }, [there, focus, focusAt]);
 
   const toggle = (id: string) => setOpenId(openId === id ? null : id);
-  const bot = (id: string) => state.bots.find((b) => b.id === id);
   const groups: { label?: string; rows: ReactNode[] }[] =
     s.id === "schedules"
       ? [
@@ -521,43 +485,27 @@ export function AutopilotPage({
             <ScheduleRow key={r.id} routine={r} state={state} tz={tz} last={n === g.items.length - 1} open={openId === r.id} onToggle={() => toggle(r.id)} />
           )),
         }))
-      : s.id === "monitors"
-        ? [
-            { label: "Watching", items: lists.monitors.filter((w) => !w.paused) },
-            { label: "Paused", items: lists.monitors.filter((w) => w.paused) },
-          ].map((g) => ({
-            label: g.label,
-            rows: g.items.map((w, n) => (
-              <MonitorRow
-                key={w.id}
-                watch={w}
-                state={state}
-                last={n === g.items.length - 1}
-                open={openId === w.id}
-                onToggle={() => {
-                  // Opening a page's news is seeing it (a screen's is seen where it shows: Show it).
-                  if (openId !== w.id && w.alert && w.page) void post("/api/watches", { id: w.id, action: "seen" }, "PATCH");
-                  toggle(w.id);
-                }}
-                onShow={() => onOpenWatch(w)}
-              />
-            )),
-          }))
-        : [
-            {
-              rows: lists.procedures.map((p, n) => (
-                <ProcedureRow
-                  key={p.id}
-                  procedure={p}
-                  bot={bot(p.botId)}
-                  showBot={multi}
-                  last={n === lists.procedures.length - 1}
-                  open={openId === p.id}
-                  onToggle={() => toggle(p.id)}
-                />
-              )),
-            },
-          ];
+      : [
+          { label: "Watching", items: lists.monitors.filter((w) => !w.paused) },
+          { label: "Paused", items: lists.monitors.filter((w) => w.paused) },
+        ].map((g) => ({
+          label: g.label,
+          rows: g.items.map((w, n) => (
+            <MonitorRow
+              key={w.id}
+              watch={w}
+              state={state}
+              last={n === g.items.length - 1}
+              open={openId === w.id}
+              onToggle={() => {
+                // Opening a page's news is seeing it (a screen's is seen where it shows: Show it).
+                if (openId !== w.id && w.alert && w.page) void post("/api/watches", { id: w.id, action: "seen" }, "PATCH");
+                toggle(w.id);
+              }}
+              onShow={() => onOpenWatch(w)}
+            />
+          )),
+        }));
   const shown = groups.filter((g) => g.rows.length);
 
   return (
@@ -929,164 +877,5 @@ function MonitorRow({ watch: w, state, last, open, onToggle, onShow }: { watch: 
         </span>
       )}
     </PageRow>
-  );
-}
-
-/** A procedure on the page: its bot and when to use it (its line, in full once open), its steps and pitfalls, how often it was used; Edit (in place), Delete. */
-function ProcedureRow({
-  procedure: p,
-  bot,
-  showBot,
-  last,
-  open,
-  onToggle,
-}: {
-  procedure: Procedure;
-  bot?: { id: string; name: string; color: string };
-  showBot: boolean;
-  last: boolean;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  const { busy, error, setError, sure, setSure, removeButton, run, cancelRemove } = useActions(open);
-  const [editing, setEditing] = useState(false);
-  const used = p.uses ? `${p.uses} time${p.uses === 1 ? "" : "s"}${p.usedAt ? `, last ${since(p.usedAt)}` : ""}` : "Not yet";
-  return (
-    <PageRow
-      id={p.id}
-      title={undash(p.name)}
-      line={[showBot ? bot?.name : "", undash(p.whenToUse)].filter(Boolean).join(" · ")}
-      last={last}
-      open={open}
-      onToggle={onToggle}
-      editing={
-        editing && (
-          <ProcedureForm
-            procedure={p}
-            busy={busy === "save"}
-            error={error}
-            onSave={(edit) => void run("save", "/api/procedures", { id: p.id, edit }, "PATCH").then((ok) => ok && setEditing(false))}
-            onCancel={() => {
-              setEditing(false);
-              setError(null);
-            }}
-          />
-        )
-      }
-    >
-      <Facts
-        rows={[
-          ["Bot", <BotName key="bot" bot={bot} />],
-          ["Used", used],
-        ]}
-      />
-      <Words label="Steps" text={p.steps} />
-      {!!p.pitfalls?.trim() && <Words label="Pitfalls" text={p.pitfalls} />}
-      {sure ? (
-        <InlineConfirm
-          text="Delete this procedure? Its bot won't follow it anymore."
-          action="Delete"
-          doing="Deleting…"
-          busy={busy === "remove"}
-          onConfirm={() => void run("remove", "/api/procedures", { id: p.id }, "DELETE")}
-          onCancel={cancelRemove}
-        />
-      ) : (
-        <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
-          <button
-            onClick={() => {
-              setError(null);
-              setEditing(true);
-            }}
-            disabled={!!busy}
-            className={small("plain")}
-          >
-            Edit
-          </button>
-          <button ref={removeButton} onClick={() => setSure(true)} disabled={!!busy} className={small("red")}>
-            Delete
-          </button>
-        </div>
-      )}
-      {!editing && <ErrorLine text={error} />}
-    </PageRow>
-  );
-}
-
-type ProcedureEdit = { name: string; whenToUse: string; steps: string; pitfalls: string };
-
-/**
- * A procedure changed in place: its name, when to use it, its steps and pitfalls. Enter in a one-line
- * field saves (⌘ Enter in the others), Esc cancels (not while saving).
- */
-function ProcedureForm({ procedure: p, busy, error, onSave, onCancel }: { procedure: Procedure; busy: boolean; error: string | null; onSave: (edit: ProcedureEdit) => void; onCancel: () => void }) {
-  const [name, setName] = useState(p.name);
-  const [whenToUse, setWhen] = useState(p.whenToUse);
-  const [steps, setSteps] = useState(p.steps);
-  const [pitfalls, setPitfalls] = useState(p.pitfalls ?? "");
-  const first = useRef<HTMLInputElement>(null);
-  const over = name.length + whenToUse.length + steps.length + pitfalls.length - MAX_PROCEDURE_CHARS;
-  const ready = !!name.trim() && !!whenToUse.trim() && !!steps.trim() && over <= 0;
-  const field = "w-full rounded-xl bg-[#F7F7F6] px-3 py-2 text-[13.5px] leading-[18px] outline-none placeholder:text-[#9A9A98] focus:bg-white focus:shadow-[0_0_0_1.5px_#0A0A0A]";
-  // ⌘ Enter in a box of several lines saves (Enter there is a new line).
-  const saveKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key !== "Enter" || !(e.metaKey || e.ctrlKey)) return;
-    e.preventDefault();
-    e.currentTarget.form?.requestSubmit();
-  };
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (busy || !ready) return;
-        // Save turns off while it saves, and Chrome drops focus from a button that turns off (Esc would then
-        // close the page, and a failure's error with it): the name has focus instead, unless a field has it.
-        const el = document.activeElement;
-        if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) first.current?.focus();
-        onSave({ name: name.trim(), whenToUse: whenToUse.trim(), steps: steps.trim(), pitfalls: pitfalls.trim() });
-      }}
-      // Esc cancels the edit, and only the edit (preventDefault keeps the page open); while it saves, nothing.
-      onKeyDown={(e) => {
-        if (e.key !== "Escape") return;
-        e.preventDefault();
-        if (!busy) onCancel();
-      }}
-      className="flex flex-col gap-2"
-    >
-      <input ref={first} autoFocus value={name} onChange={(e) => setName(e.target.value)} aria-label="Name" placeholder="Name" maxLength={PROCEDURE_NAME_MAX} className={`${field} font-medium`} />
-      <input value={whenToUse} onChange={(e) => setWhen(e.target.value)} aria-label="When to use it" placeholder="When to use it" maxLength={PROCEDURE_WHEN_MAX} className={field} />
-      <textarea
-        value={steps}
-        onChange={(e) => setSteps(e.target.value)}
-        onKeyDown={saveKey}
-        aria-label="Steps"
-        placeholder="Steps, one per line"
-        rows={5}
-        className={`${field} resize-y`}
-      />
-      <textarea
-        value={pitfalls}
-        onChange={(e) => setPitfalls(e.target.value)}
-        onKeyDown={saveKey}
-        aria-label="Pitfalls"
-        placeholder="Pitfalls, one per line (optional)"
-        rows={3}
-        className={`${field} resize-y`}
-      />
-      {over > 0 && <span className="text-[12.5px] leading-4 text-[#B42318]">{over.toLocaleString("en-US")} characters too long</span>}
-      {error && (
-        <span role="alert" className="text-[12.5px] leading-4 text-[#B42318]">
-          {error}
-        </span>
-      )}
-      <span className="flex items-center gap-2">
-        <button type="submit" disabled={busy || !ready} className="rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-semibold leading-4 text-white disabled:opacity-40">
-          {busy ? "Saving…" : "Save"}
-        </button>
-        <button type="button" onClick={onCancel} disabled={busy} className="rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0] disabled:opacity-40">
-          Cancel
-        </button>
-      </span>
-    </form>
   );
 }

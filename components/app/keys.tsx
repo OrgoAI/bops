@@ -9,15 +9,23 @@ import { post, teamOf } from "./ui";
 
 /*
  * Keys (lib/server/keys.ts): the user's API keys their bots may call services with. They're kept in the
- * user's Orgo vault, the same one as Orgo's Settings, Secrets (account scope, "All workspaces" there), by
- * the vault's own names (STRIPE_SECRET_KEY). A value goes to Orgo on Save, and comes back only when the
+ * user's Orgo vault, the same one as Orgo's Settings, Secrets, by the vault's own names (STRIPE_SECRET_KEY):
+ * for this workspace only, or for all workspaces, as there. A workspace's bots use both; its own wins. A value goes to Orgo on Save, and comes back only when the
  * user asks to see or copy it (KeyValue): it lives in that row while it's shown and nowhere else. Only which
  * bots may use which key (Bot.keys) is kept, in the state.
  */
 
 type Provider = { name: string; label: string; where: string; tip: string; readOnly: boolean };
-type KeyRow = Provider & { updatedAt: string | null; bots: string[] };
-type KeysInfo = { signedIn: boolean; keys: KeyRow[]; providers: Provider[]; error?: string };
+type Scope = "workspace" | "all";
+type KeyRow = Provider & { updatedAt: string | null; scope: Scope; bots: string[] };
+type KeysInfo = { signedIn: boolean; keys: KeyRow[]; providers: Provider[]; workspaceKeys?: boolean; error?: string };
+
+/** The two scopes, as Orgo's Secrets names them. */
+const SCOPES: { id: Scope; label: string; tip: string }[] = [
+  { id: "workspace", label: "This workspace", tip: "Only this workspace's bots use it. It shows in Orgo's Settings, Secrets under this workspace." },
+  { id: "all", label: "All workspaces", tip: "In your Orgo account, for all your workspaces. It shows in Orgo's Settings, Secrets too." },
+];
+const scopeLabel = (scope: Scope) => SCOPES.find((x) => x.id === scope)!;
 
 /** Every Keys list on the page, so a save or a remove in the Vault shows on a bot's profile too. */
 const readers = new Set<() => void>();
@@ -59,9 +67,9 @@ const SHOW_MS = 30_000;
 const CLIPBOARD_MS = 60_000;
 
 /** POST /api/keys/reveal: a key's value from the Orgo vault, or words for why not. Not cached, and not kept. */
-async function reveal(name: string): Promise<{ value: string } | { error: string }> {
+async function reveal(name: string, scope: Scope): Promise<{ value: string } | { error: string }> {
   try {
-    const res = await fetch("/api/keys/reveal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }), cache: "no-store" });
+    const res = await fetch("/api/keys/reveal", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, scope }), cache: "no-store" });
     const j = (await res.json().catch(() => ({}))) as { value?: unknown; error?: string };
     return res.ok && typeof j.value === "string" ? { value: j.value } : { error: undash(j.error ?? "Couldn't get the key. Try again.") };
   } catch {
@@ -102,7 +110,7 @@ function EyeIcon({ off }: { off?: boolean }) {
  * when the window loses focus, and when the row goes. Copied, the clipboard is emptied after CLIPBOARD_MS if
  * it still holds it. The value is fetched from the vault each time and kept only in this row while it shows.
  */
-function useKeyValue(name: string, onError: (e: string | null) => void) {
+function useKeyValue(name: string, scope: Scope, onError: (e: string | null) => void) {
   const [shown, setShown] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -120,7 +128,7 @@ function useKeyValue(name: string, onError: (e: string | null) => void) {
   const fetchValue = async () => {
     setBusy(true);
     onError(null);
-    const r = await reveal(name);
+    const r = await reveal(name, scope);
     setBusy(false);
     if ("error" in r) {
       onError(r.error);
@@ -198,6 +206,11 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
   const picked = keysFor && team.some((b) => b.id === keysFor) ? keysFor : main?.id;
   // The form: a new key (for these bots), or a new value for a saved one.
   const [form, setForm] = useState<{ replace?: KeyRow; bots: string[] } | null>(keysFor ? { bots: picked ? [picked] : [] } : null);
+  // This workspace or All workspaces, as Orgo's Secrets shows them; only All workspaces where this
+  // workspace has no Orgo workspace of its own (an Orgo without them).
+  const [tab, setTab] = useState<Scope>("workspace");
+  const scope: Scope = info?.workspaceKeys ? tab : "all";
+  const shown = info?.keys.filter((k) => k.scope === scope) ?? [];
   const [saved, setSaved] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const loaded = !!info;
@@ -230,19 +243,20 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
       <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">Checking</span>
     );
   else if (!info.signedIn) body = <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{undash(info.error ?? "Sign in to Orgo to use Keys.")}</span>;
-  else if (!info.keys.length && !form) body = <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{saved ?? "No keys yet. Add one for Stripe, OpenAI, GitHub and more."}</span>;
+  else if (!shown.length && !form)
+    body = <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{saved ?? (scope === "workspace" ? "No keys for this workspace yet." : "No keys yet. Add one for Stripe, OpenAI, GitHub and more.")}</span>;
   else
     body = (
       <>
-        {info.keys.map((k) => (
-          <Fragment key={k.name}>
+        {shown.map((k) => (
+          <Fragment key={`${k.scope}:${k.name}`}>
             <KeyLine k={k} team={team} onReplace={() => setForm({ replace: k, bots: [] })} />
             {/* A new value for this key, right under it. */}
-            {form?.replace?.name === k.name && <AddKey info={info} team={team} replace={k} bots={[]} first={false} onSaved={done} onCancel={() => setForm(null)} />}
+            {form?.replace?.name === k.name && form.replace.scope === k.scope && <AddKey info={info} team={team} replace={k} scope={k.scope} bots={[]} first={false} onSaved={done} onCancel={() => setForm(null)} />}
           </Fragment>
         ))}
         {form?.replace ? null : form ? (
-          <AddKey info={info} team={team} bots={form.bots} first={!info.keys.length} onSaved={done} onCancel={() => setForm(null)} />
+          <AddKey info={info} team={team} scope={scope} bots={form.bots} first={!shown.length} onSaved={done} onCancel={() => setForm(null)} />
         ) : (
           saved && <span className="motion-fade-in pt-3 text-[12px] leading-4 text-[#6B6B6B]">{saved}</span>
         )}
@@ -270,6 +284,26 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
           </button>
         )}
       </div>
+      {info?.signedIn && info.workspaceKeys && (
+        <div role="tablist" aria-label="Where the keys apply" className="flex gap-1 self-start rounded-full bg-[#F2F2F0] p-0.5">
+          {SCOPES.map((x) => (
+            <button
+              key={x.id}
+              role="tab"
+              aria-selected={scope === x.id}
+              data-tip={x.tip}
+              onClick={() => {
+                setTab(x.id);
+                if (form && !form.replace) setForm(null);
+              }}
+              className={`rounded-full px-3 py-1 text-[12.5px] font-medium leading-4 ${scope === x.id ? "bg-white text-ink shadow-[0_0_0_1px_#E6E6E3]" : "text-[#6B6B6B] hover:text-ink"}`}
+            >
+              {x.label}
+              <span className="pl-1 font-normal tabular-nums text-[#9A9A98]">{info.keys.filter((k) => k.scope === x.id).length}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="flex flex-col rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#ECECEA]">{body}</div>
     </div>
   );
@@ -280,7 +314,7 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const v = useKeyValue(k.name, setError);
+  const v = useKeyValue(k.name, k.scope, setError);
   const toggle = async (b: Bot, allowed: boolean) => {
     setBusy(true);
     setError(await grant(k.name, b.id, allowed));
@@ -290,7 +324,7 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
     setBusy(true);
     setError(null);
     try {
-      const res = await post(`/api/keys/${encodeURIComponent(k.name)}`, {}, "DELETE");
+      const res = await post(`/api/keys/${encodeURIComponent(k.name)}${k.scope === "workspace" ? "?scope=workspace" : ""}`, {}, "DELETE");
       const j = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) {
         setError(undash(j.error ?? "That didn't remove it. Try again."));
@@ -313,8 +347,8 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex flex-wrap items-center gap-1.5">
             <span className="text-[13.5px] font-medium leading-[18px]">{k.label}</span>
-            <span data-tip="In your Orgo account, for all your workspaces. It shows in Orgo's Settings, Secrets too." className="rounded-full bg-[#F2F2F0] px-2 py-px text-[11px] leading-4 text-[#6B6B6B]">
-              All workspaces
+            <span data-tip={scopeLabel(k.scope).tip} className="rounded-full bg-[#F2F2F0] px-2 py-px text-[11px] leading-4 text-[#6B6B6B]">
+              {scopeLabel(k.scope).label}
             </span>
             {k.readOnly && (
               <span data-tip={`Orgo lets bots only read from ${k.label}`} className="rounded-full bg-[#F2F2F0] px-2 py-px text-[11px] leading-4 text-[#6B6B6B]">
@@ -386,7 +420,9 @@ function KeyLine({ k, team, onReplace }: { k: KeyRow; team: Bot[]; onReplace: ()
       )}
       {sure && (
         <div className="flex flex-wrap items-center gap-2 rounded-[10px] bg-[#FEF3F2] px-3 py-2">
-          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">Remove {k.name} from your Orgo vault? Your bots stop using it, and it&apos;s gone from Orgo too.</span>
+          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">
+            Remove {k.name} ({scopeLabel(k.scope).label.toLowerCase()}) from your Orgo vault? Your bots stop using it, and it&apos;s gone from Orgo too.
+          </span>
           <button disabled={busy} onClick={() => void remove()} className={`${btn} bg-[#B42318] text-white`}>
             {busy ? "Removing…" : "Remove"}
           </button>
@@ -418,6 +454,7 @@ function AddKey({
   info,
   team,
   replace,
+  scope,
   bots: startBots,
   first,
   onSaved,
@@ -426,6 +463,8 @@ function AddKey({
   info: KeysInfo;
   team: Bot[];
   replace?: KeyRow;
+  /** This workspace's own key, or one for all workspaces. */
+  scope: Scope;
   bots: string[];
   first: boolean;
   onSaved: (label: string) => void;
@@ -434,21 +473,22 @@ function AddKey({
   // Every name Orgo can call. A service with two (Stripe) shows each one's name.
   const services = info.providers;
   const twice = (label: string) => services.filter((x) => x.label === label).length > 1;
-  const [pick, setPick] = useState(replace?.name ?? services.find((p) => !info.keys.some((k) => k.name === p.name))?.name ?? services[0]?.name ?? "");
+  const inScope = info.keys.filter((k) => k.scope === scope);
+  const [pick, setPick] = useState(replace?.name ?? services.find((p) => !inScope.some((k) => k.name === p.name))?.name ?? services[0]?.name ?? "");
   const [value, setValue] = useState("");
   const [bots, setBots] = useState(startBots);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const name = replace?.name ?? pick;
   const p = info.providers.find((x) => x.name === name);
-  const isSaved = !replace && info.keys.some((k) => k.name === name);
+  const isSaved = !replace && inScope.some((k) => k.name === name);
   const canSave = !!p && !!value.trim() && !busy;
   const save = async () => {
     if (!canSave || !p) return;
     setBusy(true);
     setError(null);
     try {
-      const res = await post("/api/keys", { name, value, botIds: replace ? [] : bots });
+      const res = await post("/api/keys", { name, value, botIds: replace ? [] : bots, scope });
       const j = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       if (!res.ok || !j.ok) return setError(undash(j.error ?? "That didn't save. Try again."));
       setValue("");
@@ -497,7 +537,7 @@ function AddKey({
                 <option key={s.name} value={s.name}>
                   {s.label}
                   {twice(s.label) ? ` (${s.name})` : ""}
-                  {info.keys.some((k) => k.name === s.name) ? " (saved)" : ""}
+                  {inScope.some((k) => k.name === s.name) ? " (saved)" : ""}
                 </option>
               ))}
             </select>
@@ -515,6 +555,7 @@ function AddKey({
           {p.tip}
           {p.readOnly ? ` Orgo lets bots only read from ${p.label}.` : ""} <span className="text-[#9A9A98]">Get one in {p.where}.</span>
           {isSaved && <span className="text-[#9A9A98]"> Saving replaces the one in your vault.</span>}
+          {info.workspaceKeys && <span className="text-[#9A9A98]"> {scope === "workspace" ? "For this workspace only." : "For all your workspaces."}</span>}
           {ORGO_USES[p.name] && <span className="text-[#9A9A98]"> Orgo computers that use your {ORGO_USES[p.name]} key use this one too.</span>}
         </span>
       ) : null}
@@ -579,6 +620,8 @@ export function BotKeys({ bot: b, onAdd, className }: { bot: Bot; onAdd: () => v
     setError(await grant(name, b.id, allowed));
     setBusy(null);
   };
+  // One row per name: this workspace's key and the account's by the same name are one to a bot (its workspace's wins).
+  const keys = info.keys.filter((k, i, all) => all.findIndex((x) => x.name === k.name) === i);
   return (
     <div className={`flex w-full flex-col rounded-2xl ${className}`}>
       <div className="flex items-center justify-between px-4 pb-1 pt-[11px]">
@@ -589,13 +632,13 @@ export function BotKeys({ bot: b, onAdd, className }: { bot: Bot; onAdd: () => v
           </button>
         )}
       </div>
-      {!info.signedIn || !info.keys.length ? (
+      {!info.signedIn || !keys.length ? (
         <div className="px-4 pb-3 pt-0.5 text-[12px] leading-4 text-[#6B6B6B]">{info.signedIn ? "No keys in your Orgo vault yet" : undash(info.error ?? "Sign in to Orgo to use Keys.")}</div>
       ) : (
-        info.keys.map((k, i) => {
+        keys.map((k, i) => {
           const on = !!b.keys?.includes(k.name);
           return (
-            <div key={k.name} className={`flex items-center gap-2.5 px-4 py-[9px] ${i === info.keys.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
+            <div key={k.name} className={`flex items-center gap-2.5 px-4 py-[9px] ${i === keys.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
               <div className="flex min-w-0 flex-1 items-baseline gap-2">
                 <span className="shrink-0 text-[14px] leading-[18px]">{k.label}</span>
                 <span className="truncate font-mono text-[11px] leading-4 text-[#9A9A98]">{k.name}</span>

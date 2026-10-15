@@ -5,15 +5,17 @@ import { categoriesOpen, GROUP_NAME as ORBIT } from "@/lib/memory-categories";
 import { AppLogo, accountTitle, botApps } from "./apps";
 import { autopilotOf, AutopilotIcon, nextWords, RAN, trouble, type AutopilotSection } from "./autopilot";
 import { BotKeys } from "./keys";
+import { botSkills } from "./skills";
 import { since, undash } from "./side-group";
 import { watchName } from "./watch-overlay";
 
 /*
- * Skills: what a bot can do, on one screen of its profile (bot-panel.tsx). Its procedures, the apps it
- * may use and how far, its API keys, what it does on its own (Autopilot), and what it can always do.
- * Everything is read from the app's state; opening a row goes where it's managed already (the Autopilot
- * page, the Vault, the chat's "Save as procedure"). A group with nothing in it isn't shown: one quiet
- * line at the end says how to add what's missing.
+ * Skills: what a bot can do, on one screen of its profile (bot-panel.tsx). Its workspace's skills and apps
+ * that it has (the same list as the Skills page, skills.tsx), the Connected Apps it may use and how far,
+ * its API keys, what it does on its own (Autopilot), and what it can always do. Everything is read from
+ * the app's state; opening a row goes where it's managed already (the Skills page, the Autopilot page, the
+ * Vault, the chat's "Save as skill"). A group with nothing in it isn't shown: one quiet line at the end
+ * says how to add what's missing.
  */
 
 const GLASS = "bg-white/60 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]";
@@ -28,6 +30,7 @@ export function BotSkills({
   onOpenVault,
   onOpenKeys,
   onOpenAutopilot,
+  onOpenSkills,
 }: {
   state: AppState;
   bot: Bot;
@@ -35,31 +38,41 @@ export function BotSkills({
   onOpenVault: () => void;
   onOpenKeys: (botId: string) => void;
   onOpenAutopilot: (section: AutopilotSection, item?: string) => void;
+  /** The Skills page, at one of them ("skill:<slug>"). */
+  onOpenSkills: (focus?: string) => void;
 }) {
-  const { schedules, monitors, procedures } = autopilotOf(state, b.id);
+  const { schedules, monitors } = autopilotOf(state, b.id);
+  const skills = botSkills(state, b);
   const apps = botApps(state, b);
   const tz = state.owner?.timeZone;
   const keyed = !!b.keys?.length;
   const chat = () => onOpenChat(botChatId(b.id));
   // What's not set up yet, said once at the end instead of an empty card each.
   const missing = [
-    !procedures.length && { label: "Save a procedure from its chat", onClick: chat },
-    !apps.length && { label: "Add apps in Vault", onClick: onOpenVault },
+    !skills.length && { label: "Save a skill from its chat", onClick: chat },
+    !apps.length && { label: "Add Connected Apps in Vault", onClick: onOpenVault },
     !keyed && { label: "Add keys in Vault", onClick: () => onOpenKeys(b.id) },
   ].filter((x): x is { label: string; onClick: () => void } => !!x);
 
   return (
     <div className="flex w-full flex-col gap-3">
-      {procedures.length > 0 && (
-        <Group title="Procedures" count={procedures.length} action={{ label: "Save from a chat ›", onClick: chat }}>
-          {procedures.map((p, i) => (
-            <Row key={p.id} title={undash(p.name)} line={undash(p.whenToUse)} last={i === procedures.length - 1} onClick={() => onOpenAutopilot("procedures", p.id)} />
+      {skills.length > 0 && (
+        <Group title="Skills" count={skills.length} action={{ label: "All skills ›", onClick: () => onOpenSkills() }}>
+          {skills.map((r, i) => (
+            <Row
+              key={`${r.kind}:${r.slug}`}
+              title={`${undash(r.name)}${r.kind === "app" ? " (app)" : ""}`}
+              line={`${r.status === "draft" ? "Draft · " : r.version ? `v${r.version} · ` : ""}${undash(r.description)}`}
+              dim={r.status === "draft"}
+              last={i === skills.length - 1}
+              onClick={() => onOpenSkills(`${r.kind}:${r.slug}`)}
+            />
           ))}
         </Group>
       )}
 
       {apps.length > 0 && (
-        <Group title="Apps" count={apps.length} action={{ label: "Manage in Vault ›", onClick: onOpenVault }}>
+        <Group title="Connected Apps" count={apps.length} action={{ label: "Manage in Vault ›", onClick: onOpenVault }}>
           {apps.map((x, i) => (
             <div key={x.app} className={`flex items-center gap-2.5 px-4 py-[9px] ${i === apps.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
               <AppLogo app={x.app} name={x.appName} size={22} />

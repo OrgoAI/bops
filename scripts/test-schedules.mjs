@@ -32,6 +32,8 @@ const FAKES = {
   mail: ["ownerAddresses", "sendEmail"],
   channels: ["postTo"],
   chat: ["backgroundTurn"],
+  // A routine follows one of its bot's skills (workspace-skills.ts), found by name or by its id from before.
+  "workspace-skills": ["findSkill", "skillRefId"],
 };
 registerHooks({
   resolve(specifier, context, next) {
@@ -50,7 +52,7 @@ registerHooks({
   load(url, context, next) {
     const name = url.match(/\/lib\/server\/([a-z-]+)\.ts$/)?.[1];
     if (!name || !FAKES[name]) return next(url, context);
-    return { format: "module", shortCircuit: true, source: FAKES[name].map((n) => `export const ${n} = (...a) => globalThis.__fake.${name}.${n}(...a);`).join("\n") };
+    return { format: "module", shortCircuit: true, source: FAKES[name].map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(name)}].${n}(...a);`).join("\n") };
   },
 });
 
@@ -275,6 +277,15 @@ const fake = {
   ownerEmail: "sam@example.com",
 };
 globalThis.__fake = {
+  "workspace-skills": {
+    // The bot's skills here are its procedures from before (state.procedures), as adoptProcedures moves them.
+    findSkill: (botId, name) => {
+      const want = String(name).trim().toLowerCase();
+      const p = (state.procedures ?? []).find((x) => x.botId === botId && (x.id === name || x.name.toLowerCase() === want));
+      return p ? { slug: p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"), name: p.name, legacyId: p.id } : undefined;
+    },
+    skillRefId: (r) => r.legacyId ?? r.slug,
+  },
   store: {
     getState: () => state,
     update: (fn) => fn(state),
@@ -362,7 +373,7 @@ await check("createRoutine: two days past is refused, and nothing is made", () =
   assert.equal(state.routines.length, before);
 });
 
-await check("createRoutine: a time that isn't one, an unknown link or procedure is refused", () => {
+await check("createRoutine: a time that isn't one, an unknown link or skill is refused", () => {
   const before = state.routines.length;
   const a = R.createRoutine("bot_main", "Bad", "Bad", { kind: "daily", time: "25:00" });
   assert.match(a.error, /isn't a time of day/);
@@ -370,13 +381,13 @@ await check("createRoutine: a time that isn't one, an unknown link or procedure 
   const b = R.createRoutine("bot_main", "Bad", "Bad", { kind: "daily", time: "09:00" }, { deliverTo: { kind: "channel", linkId: "ch_gone" } });
   assert.match(b.error, /isn't there anymore/);
   const c = R.createRoutine("bot_main", "Bad", "Bad", { kind: "daily", time: "09:00" }, { procedure: "Nope" });
-  assert.match(c.error, /No procedure called "Nope"/);
+  assert.match(c.error, /No skill called "Nope"/);
   const d = R.createRoutine("bot_none", "Bad", "Bad", { kind: "daily", time: "09:00" });
   assert.equal(d.error, "No such bot.");
   assert.equal(state.routines.length, before);
 });
 
-await check("createRoutine: every is clamped and tidied, times written HH:MM, procedure by name", () => {
+await check("createRoutine: every is clamped and tidied, times written HH:MM, skill by name", () => {
   const made = R.createRoutine("bot_main", "Check", "Check the inbox", { kind: "every", minutes: 5, hours: { from: "8 AM", to: "10 PM" }, days: [5, 1, 1, 3] }, { run: "chat", quiet: true });
   assert.deepEqual(made.routine.schedule, { kind: "every", minutes: 15, hours: { from: "08:00", to: "22:00" }, days: [1, 3, 5] });
   // Tuesday 4:30 PM isn't one of its days: Wednesday at the start of its hours.
@@ -436,7 +447,7 @@ await check("a reminder fires once, posts as the bot, and a failed legacy text i
   R.deleteRoutine(r.id);
 });
 
-await check("a task run: a fresh thread with the routine and procedure, the chip, skipped while the last is live", async () => {
+await check("a task run: a fresh thread with the routine and its skill, the chip, skipped while the last is live", async () => {
   const made = R.createRoutine("bot_main", "Invoices", "Sum up this week's invoices", { kind: "daily", time: "17:00" }, { procedure: "prc_1", where: "cloud" });
   eq(made.routine.nextRunAt, at("2026-10-13T21:00:00Z"), "5 PM today");
   clock = at("2026-10-13T21:00:10Z");

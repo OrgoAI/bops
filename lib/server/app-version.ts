@@ -35,5 +35,13 @@ export const appHeaders = (): Record<string, string> => {
  */
 export const orgoHeaders = (): Record<string, string> => {
   const v = appVersion();
-  return v ? { [APP_VERSION_HEADER]: v } : {};
+  return { ...(v ? { [APP_VERSION_HEADER]: v } : {}), [BOPS_APP_HEADER]: v ?? "dev" };
 };
+
+/**
+ * Says this Bops knows a Bops workspace is an Orgo workspace of its own (lib/server/workspaces.ts): an
+ * orgo-web with per workspace projects answers it with each project's own computers. An app before this
+ * one doesn't send it, and orgo-web lists every Bops project's computers in its "bops" one for it, so it
+ * never takes a computer moved to another workspace for gone.
+ */
+export const BOPS_APP_HEADER = "x-bops-app";

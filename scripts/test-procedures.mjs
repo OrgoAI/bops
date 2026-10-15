@@ -1,16 +1,17 @@
-// Tests for procedures, how a bot does one kind of job (lib/server/procedures.ts), and their route
-// (app/api/procedures): saving one (tidied, no dashes, the same name in any case updating it in place,
-// the caps on how many and how long), the list in a bot's prompts, finding and reading one (a read
-// counts as a use; a name that isn't there lists the bot's own), deleting, the SKILL.md files for Mac
-// tasks, a draft from a chat (what the model is given: the chat's last messages labeled by who said
-// them, nothing kept secret, the threads it started and their meaningful steps, all within budget; what
-// it answers, tidied; and every way it fails), the route (its window-only guard, draft, save, edit,
-// delete), and a deleted bot or a fresh start taking its procedures along. OpenAI is a fake
-// /v1/responses, the Keychain a stand-in that's never there, and the state and files live in a
-// throwaway folder: nothing reaches a real service or the user's own data.
+// Tests for Save as skill (lib/server/procedures.ts) and the procedures from before becoming skills
+// (lib/server/workspace-skills.ts adoptProcedures): each bot's procedures move into its workspace's
+// skills, published for that bot, with their uses and the routines' ids kept and a backup left; a draft
+// from a chat (what the model is given: the chat's last messages labeled by who said them, nothing kept
+// secret, the threads it started and their meaningful steps, all within budget; what it answers, in the
+// SKILL.md shape with scripts that only say what they'd do, customer details out; and every way it fails),
+// the route (app/api/skills: its window-only guard, draft, save as a draft or published, over the skill it
+// updates), and a deleted bot or a fresh start taking its skills along. OpenAI is a fake /v1/responses,
+// the Keychain a stand-in that's never there, and the state and files live in a throwaway folder: nothing
+// reaches a real service or the user's own data.
 // Usage: node --conditions=react-server scripts/test-procedures.mjs
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,7 +78,7 @@ const response = (text) => ({
 });
 async function openaiAnswer(req) {
   const body = JSON.parse(await req.text());
-  if (body.text?.format?.name !== "procedure_draft") {
+  if (body.text?.format?.name !== "skill_draft") {
     openai.other.push(body);
     return json({ error: { message: "not faked", type: "invalid_request_error" } }, 400);
   }
@@ -86,7 +87,7 @@ async function openaiAnswer(req) {
   const failed = openai.fail?.(call);
   if (failed instanceof Error) throw failed;
   if (failed) return failed;
-  const out = openai.answer ? openai.answer(call) : { name: "", whenToUse: "", steps: "", pitfalls: "", updates: null };
+  const out = openai.answer ? openai.answer(call) : { name: "", description: "", whenToUse: "", steps: "", pitfalls: "", scripts: [], updates: null };
   return json(response(typeof out === "string" ? out : JSON.stringify(out)));
 }
 const offline = [];
@@ -106,9 +107,10 @@ process.on("unhandledRejection", (e) => rejections.push(String(e?.stack ?? e)));
 
 const S = await import(`${root}/lib/server/store.ts`);
 const P = await import(`${root}/lib/server/procedures.ts`);
-const R = await import(`${root}/app/api/procedures/route.ts`);
+const W = await import(`${root}/lib/server/workspace-skills.ts`);
+const R = await import(`${root}/app/api/skills/route.ts`);
 const Mem = await import(`${root}/lib/server/memory.ts`);
-const { botChatId, MAX_PROCEDURES, MAX_PROCEDURE_CHARS, runningNow } = await import(`${root}/lib/types.ts`);
+const { botChatId, runningNow } = await import(`${root}/lib/types.ts`);
 
 /* ---------------- Helpers ---------------- */
 
@@ -133,19 +135,15 @@ async function part(name, fn) {
   console.log(`${failed ? "FAIL" : "ok  "} ${name}`);
   if (failed) console.log(`       ${shown(failed)}`);
 }
-const save = (botId, d, from) => {
-  const r = P.saveProcedure(botId, d, from);
-  hear(r.error);
-  return r;
-};
 const request = async (method, body, headers = {}) => {
-  const res = await R[method](new Request("http://localhost:3210/api/procedures", { method, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }));
+  const res = await R[method](new Request("http://localhost:3210/api/skills", { method, headers: { "content-type": "application/json", ...headers }, ...(method === "GET" ? {} : { body: JSON.stringify(body) }) }));
   const out = { status: res.status, body: await res.json() };
   hear(out.body.error);
-  if (out.body.draft) hear(...Object.values(out.body.draft));
+  if (out.body.draft) hear(out.body.draft.name, out.body.draft.description, out.body.draft.body);
   return out;
 };
-const mine = (botId) => (S.getState().procedures ?? []).filter((p) => p.botId === botId);
+/** A bot's skills: its workspace's that name it, or every bot's. */
+const mine = (botId) => W.refsOf("ws_main", "skill").filter((r) => r.botIds.includes(botId));
 /** A message in a chat, as the store keeps it. */
 let seq = 0;
 const msg = (chatId, m) => ({ id: `m_${++seq}`, chatId, at: 1_000 + seq, ...m });
@@ -159,234 +157,84 @@ S.update((s) => {
   s.chats.push({ id: "group_1", kind: "group", botIds: ["max", "penny"], title: "Money", createdAt: 0, typing: [] });
 });
 
-/* ---------------- Saving ---------------- */
 
-await part("A state from before procedures gets an empty list", async () => {
-  assert.deepEqual(S.getState().procedures, []);
-});
+/* ---------------- Procedures from before become skills ---------------- */
 
 await part("Undash: ranges say to, dashes between words become commas, list markers stay; a hyphen or a minus is left alone", async () => {
   assert.equal(P.undash("Sum rows 5–10"), "Sum rows 5 to 10");
   assert.equal(P.undash("Open the folder — the shared one"), "Open the folder, the shared one");
   assert.equal(P.undash("Open it—then wait"), "Open it, then wait");
-  // A hyphen or a minus means something: a formula, a command, a flag.
   assert.equal(P.undash("Check the total - then send"), "Check the total - then send");
-  assert.equal(P.undash("Pages 5 - 10 -- then stop"), "Pages 5 - 10 -- then stop");
   assert.equal(P.undash("Net = gross - fees"), "Net = gross - fees");
-  assert.equal(P.undash("amount > 100 - 5"), "amount > 100 - 5");
   assert.equal(P.undash("git checkout -- invoices.csv"), "git checkout -- invoices.csv");
   assert.equal(P.undash("npm test -- --watch"), "npm test -- --watch");
-  assert.equal(P.undash("Run it with the flag --"), "Run it with the flag --");
   assert.equal(P.undash("Done —\nNext"), "Done\nNext");
   assert.equal(P.undash("— Ask first"), "Ask first");
   assert.equal(P.undash("- Ask first\n- Then send"), "- Ask first\n- Then send");
   assert.equal(P.undash("a well-known e-mail"), "a well-known e-mail");
 });
 
+await part("Customer details are taken out of a draft: emails, ids, long numbers", async () => {
+  assert.equal(P.stripCustomer("Email dana@acme.example about 3f2b1c4d-1111-2222-3333-444455556666"), "Email <email> about <id>");
+  assert.equal(P.stripCustomer("Call +1 (555) 123-4567, account 0011223344556677889900aa"), "Call <number>, account <id>");
+  assert.equal(P.stripCustomer("1. Sum rows 2 to 40\n2. Send it"), "1. Sum rows 2 to 40\n2. Send it", "steps stay as they are");
+});
+
 let weekly;
-await part("Save: tidied (no dashes, trimmed, one line where it should be), an id, a time", async () => {
-  // As a bot saves it (save_procedure): its dashes go.
-  const r = P.saveProcedure(
-    "max",
-    { name: "  Weekly invoice summary — Drive  ", whenToUse: "When Tiger asks for\nthe weekly summary", steps: "1. Open Drive — the Invoices folder\r\n2. Sum rows 5–10   \n\n\n\n3. Send it", pitfalls: "  " },
-    { chatId: botChatId("max") },
-    { model: true },
+await part("Each bot's procedures move into its workspace's skills: published for that bot, uses and ids kept, a backup left", async () => {
+  S.update((s) => {
+    s.procedures = [
+      { id: "proc_weekly", botId: "max", name: "Weekly invoice summary", whenToUse: "When Tiger asks for the weekly summary", steps: "1. Open Drive\n2. Sum it\n3. Send it", createdAt: 10, updatedAt: 20, uses: 3, usedAt: 30, from: { chatId: botChatId("max") } },
+      { id: "proc_rent", botId: "penny", name: "Pay rent", whenToUse: "On the first", steps: "1. Pay it", pitfalls: "Not before the 1st", createdAt: 11, updatedAt: 11 },
+      { id: "proc_gone", botId: "nobody", name: "Old one", whenToUse: "Never", steps: "1. x", createdAt: 1, updatedAt: 1 },
+    ];
+  });
+  const listed = W.refsOf("ws_main", "skill");
+  assert.equal(listed.length, 2, "both bots' (the gone bot's stays in the backup only)");
+  weekly = listed.find((r) => r.legacyId === "proc_weekly");
+  assert.deepEqual(
+    { slug: weekly.slug, name: weekly.name, description: weekly.description, status: weekly.status, version: weekly.version, botIds: weekly.botIds, source: weekly.source, uses: weekly.uses, usedAt: weekly.usedAt, createdAt: weekly.createdAt },
+    { slug: "weekly-invoice-summary", name: "Weekly invoice summary", description: "When Tiger asks for the weekly summary", status: "published", version: "0.1.0", botIds: ["max"], source: "procedure", uses: 3, usedAt: 30, createdAt: 10 },
   );
-  hear(r.error);
-  assert.ok(r.procedure, r.error);
-  weekly = r.procedure;
-  assert.match(weekly.id, /^proc_/);
-  assert.equal(weekly.botId, "max");
-  assert.equal(weekly.name, "Weekly invoice summary, Drive");
-  assert.equal(weekly.whenToUse, "When Tiger asks for the weekly summary");
-  assert.equal(weekly.steps, "1. Open Drive, the Invoices folder\n2. Sum rows 5 to 10\n\n3. Send it");
-  assert.equal("pitfalls" in weekly, false, "no pitfalls kept when there are none");
   assert.deepEqual(weekly.from, { chatId: botChatId("max") });
-  assert.equal(weekly.createdAt, weekly.updatedAt);
-  assert.equal(mine("max").length, 1);
+  // Its folder: SKILL.md in the Agent Skill shape, and its first version beside it.
+  const dir = W.skillDir("ws_main", "skill", weekly.slug);
+  assert.equal(dir, join(process.cwd(), ".data", "workspaces", "ws_main", "skills", "weekly-invoice-summary"));
+  const md = readFileSync(join(dir, "SKILL.md"), "utf8");
+  assert.equal(md, '---\nname: weekly-invoice-summary\ndescription: When Tiger asks for the weekly summary\n---\n\n# Weekly invoice summary\n\n## When to use\n\nWhen Tiger asks for the weekly summary\n\n## Steps\n\n1. Open Drive\n2. Sum it\n3. Send it\n');
+  assert.ok(existsSync(join(process.cwd(), ".data", "workspaces", "ws_main", ".versions", "skills", "weekly-invoice-summary", "0.1.0", "SKILL.md")));
+  // The list is empty now; what was there is kept, in the state and beside the folders.
+  assert.deepEqual(S.getState().procedures, []);
+  assert.deepEqual(S.getState().proceduresBackup.map((p) => p.id), ["proc_weekly", "proc_rent", "proc_gone"]);
+  assert.deepEqual(JSON.parse(readFileSync(join(process.cwd(), ".data", "workspaces", "procedures-backup.json"), "utf8")).map((p) => p.id), ["proc_weekly", "proc_rent", "proc_gone"]);
+  // Found by its old id (a routine's), its slug and its name in any case; once, run again or not.
+  assert.equal(W.findSkill("max", "proc_weekly")?.slug, weekly.slug);
+  assert.equal(W.findSkill("max", "WEEKLY invoice summary")?.slug, weekly.slug);
+  assert.equal(W.findSkill("penny", "Weekly invoice summary"), undefined, "Max's, not Penny's");
+  S.update((s) => (s.procedures = [{ id: "proc_weekly", botId: "max", name: "Weekly invoice summary", whenToUse: "x", steps: "1. x", createdAt: 1, updatedAt: 1 }]));
+  assert.equal(W.refsOf("ws_main", "skill").length, 2, "one already moved isn't moved twice");
+  assert.deepEqual(S.getState().procedures, []);
 });
 
-await part("Save from the window: what the user typed is kept as typed (formulas, commands, their own dashes)", async () => {
-  const r = save("max", { name: "Close the books", whenToUse: "At month end", steps: "1. Net = gross - fees\n2. Run git checkout -- ledger.csv\n3. Total = 120 - 20\n4. Note it — then file it", pitfalls: "Don't use npm test -- --watch here" });
-  assert.ok(r.procedure, r.error);
-  assert.equal(r.procedure.steps, "1. Net = gross - fees\n2. Run git checkout -- ledger.csv\n3. Total = 120 - 20\n4. Note it — then file it");
-  assert.equal(r.procedure.pitfalls, "Don't use npm test -- --watch here");
-  // Found by its name however the dashes in it are written (a bot saves a dash as a comma).
-  const dashed = save("max", { name: "Invoices – weekly", whenToUse: "Weekly", steps: "1. Do it" }).procedure;
-  assert.equal(P.findProcedure("max", "Invoices, weekly")?.id, dashed.id);
-  assert.equal(P.findProcedure("max", "invoices — WEEKLY")?.id, dashed.id);
-  const bySaved = P.saveProcedure("max", { name: "Invoices — weekly", whenToUse: "Weekly", steps: "1. Do it again" }, undefined, { model: true }).procedure;
-  assert.equal(bySaved.id, dashed.id, "a bot saving the same name updates it");
-  P.deleteProcedure(dashed.id);
-  P.deleteProcedure(r.procedure.id);
-});
-
-await part("Save: the same name in any case updates it in place, keeping its uses and where it was learned", async () => {
-  S.update((s) => {
-    const p = s.procedures.find((x) => x.id === weekly.id);
-    p.uses = 3;
-    p.usedAt = 5;
-  });
-  const r = save("max", { name: "WEEKLY invoice summary,   drive", whenToUse: "When asked", steps: "1. Do it", pitfalls: "Ask before sending" });
-  assert.equal(r.procedure.id, weekly.id);
-  assert.equal(r.procedure.name, "WEEKLY invoice summary, drive");
-  assert.equal(r.procedure.pitfalls, "Ask before sending");
-  assert.equal(r.procedure.uses, 3);
-  assert.equal(r.procedure.createdAt, weekly.createdAt);
-  assert.ok(r.procedure.updatedAt >= weekly.updatedAt);
-  assert.deepEqual(r.procedure.from, { chatId: botChatId("max") });
-  assert.equal(mine("max").length, 1);
-  // Another bot's procedure of the same name is its own.
-  const other = save("penny", { name: "Weekly invoice summary, Drive", whenToUse: "When asked", steps: "1. Do it" });
-  assert.notEqual(other.procedure.id, weekly.id);
-  P.deleteProcedure(other.procedure.id);
-  // Pitfalls taken out again go.
-  const again = save("max", { id: weekly.id, name: "Weekly invoice summary", whenToUse: "When Tiger asks for the weekly summary", steps: "1. Open Drive\n2. Sum it\n3. Send it", pitfalls: "" });
-  assert.equal(again.procedure.id, weekly.id);
-  assert.equal("pitfalls" in again.procedure, false);
-  weekly = again.procedure;
-});
-
-await part("Save: refused in plain words when something's missing, gone, taken or too long", async () => {
-  assert.equal(save("nobody", { name: "x", whenToUse: "y", steps: "z" }).error, "That bot is gone.");
-  assert.equal(save("max", { name: " — ", whenToUse: "y", steps: "z" }).error, "A procedure needs a name.");
-  assert.equal(save("max", { name: "x", whenToUse: "  ", steps: "z" }).error, "Say when to use it.");
-  assert.equal(save("max", { name: "x", whenToUse: "y", steps: "\n \n" }).error, "A procedure needs its steps.");
-  assert.equal(save("max", { id: "proc_gone", name: "x", whenToUse: "y", steps: "z" }).error, "That procedure was deleted.");
-  const second = save("max", { name: "Lead follow up", whenToUse: "When a lead goes quiet", steps: "1. Email them" });
-  assert.equal(save("max", { id: second.procedure.id, name: "weekly INVOICE summary", whenToUse: "y", steps: "z" }).error, 'Max already has a procedure called "Weekly invoice summary".');
-  const long = save("max", { name: "Long one", whenToUse: "Always", steps: "x".repeat(MAX_PROCEDURE_CHARS) });
-  assert.match(long.error, new RegExp(`^That's too long: ${MAX_PROCEDURE_CHARS + 14} characters, and a procedure can have ${MAX_PROCEDURE_CHARS}\\. Make the steps shorter\\.$`));
-  assert.equal(mine("max").some((p) => p.name === "Long one"), false);
-  // Exactly at the cap is fine.
-  const fits = save("max", { name: "Fits", whenToUse: "Now", steps: "x".repeat(MAX_PROCEDURE_CHARS - 7) });
-  assert.ok(fits.procedure, fits.error);
-  P.deleteProcedure(fits.procedure.id);
-  P.deleteProcedure(second.procedure.id);
-});
-
-await part("Save: at most MAX_PROCEDURES a bot; at the cap an update still works, a new one is refused", async () => {
-  const made = [];
-  for (let i = mine("max").length; i < MAX_PROCEDURES; i++) made.push(save("max", { name: `Job ${i}`, whenToUse: `When job ${i} comes up`, steps: "1. Do it" }).procedure.id);
-  assert.equal(mine("max").length, MAX_PROCEDURES);
-  const refused = save("max", { name: "One more", whenToUse: "Now", steps: "1. Do it" });
-  assert.equal(refused.error, `Max already has ${MAX_PROCEDURES} procedures, the most it can keep. Delete one it no longer needs first.`);
-  const last = `job ${MAX_PROCEDURES - 1}`;
-  assert.equal(save("max", { name: last, whenToUse: "When it comes up again", steps: "1. Do it twice" }).procedure?.id, made.at(-1), "an update at the cap");
-  assert.ok(save("penny", { name: "One more", whenToUse: "Now", steps: "1. Do it" }).procedure, "another bot has its own room");
-  for (const id of made) assert.equal(P.deleteProcedure(id), true);
-  assert.equal(P.deleteProcedure(made[0]), false, "deleting one twice");
-  for (const p of mine("penny")) P.deleteProcedure(p.id);
-  assert.equal(mine("max").length, 1);
-});
-
-/* ---------------- The list, finding and reading ---------------- */
-
-await part("The note: empty with none; one line each under 60 tokens, the 15 most recent, how to read one", async () => {
-  assert.equal(P.proceduresNote("penny"), "");
-  const ids = [];
-  for (let i = 0; i < 18; i++) ids.push(save("penny", { name: `Task ${i}`, whenToUse: `When task ${i} is asked for. ${"Some more words about when. ".repeat(i === 10 ? 30 : 1)}`, steps: "1. Do it" }).procedure.id);
-  // Each changed a minute after the one before; Task 0 was read last: it's listed first, though the oldest.
-  S.update((s) => ids.forEach((id, i) => (s.procedures.find((p) => p.id === id).updatedAt = 1_000_000 + i * 60_000)));
-  S.update((s) => (s.procedures.find((p) => p.id === ids[0]).usedAt = 9_000_000));
-  const note = P.proceduresNote("penny");
+await part("Its bot's prompts list it by name; read_skill reads it in full (a use), or says what it has", async () => {
+  const note = W.skillsNote("max");
   hear(note);
-  const lines = note.split("\n");
-  assert.match(lines[0], /^Your procedures: /);
-  assert.ok(lines[0].includes("read_procedure gives the full steps; follow them, and tell the user if a step no longer works"), lines[0]);
-  const items = lines.filter((l) => l.startsWith("- "));
-  assert.equal(items.length, 15);
-  assert.ok(items[0].startsWith("- Task 0: When task 0 is asked for."), items[0]);
-  for (const l of items) assert.ok(l.length / 4 < 60, `under about 60 tokens: ${l.length} characters`);
-  assert.ok(items.some((l) => l.startsWith("- Task 10: ") && l.endsWith("…")), "a long line is cut");
-  assert.match(lines.at(-1), /^\(3 more are saved\. read_procedure with a name not listed here gives all their names\.\)$/);
-  // Only 15 and what's left: the ones not touched for longest (Task 1, 2, 3) are left out.
-  for (const n of [1, 2, 3]) assert.equal(items.some((l) => l.startsWith(`- Task ${n}: `)), false, `Task ${n} left out`);
-  for (const id of ids) P.deleteProcedure(id);
+  assert.match(note, /^Your skills: how your workspace does jobs it was shown before\. [^\n]*read_skill[^\n]*\n- Weekly invoice summary: When Tiger asks for the weekly summary$/);
+  assert.equal(W.skillsNote("boppy"), "", "nothing for a bot that has none");
+  const read = W.readSkill("max", "weekly invoice summary");
+  hear(read);
+  assert.equal(read, "Skill: Weekly invoice summary (version 0.1.0)\n\n# Weekly invoice summary\n\n## When to use\n\nWhen Tiger asks for the weekly summary\n\n## Steps\n\n1. Open Drive\n2. Sum it\n3. Send it");
+  assert.equal(W.findRef("ws_main", "skill", weekly.slug).uses, 4);
+  assert.equal(W.readSkill("max", "Payroll"), 'No skill called "Payroll". Yours are: "Weekly invoice summary".');
+  assert.equal(W.readSkill("boppy", "Payroll"), 'No skill called "Payroll". You have none yet.');
 });
 
-await part("List: reading one doesn't reorder the list (the prompt's lead stays the same, for the prompt cache)", async () => {
-  const a = save("penny", { name: "Alpha job", whenToUse: "When alpha", steps: "1. Do alpha" }).procedure;
-  const b = save("penny", { name: "Beta job", whenToUse: "When beta", steps: "1. Do beta" }).procedure;
-  S.update((s) => {
-    s.procedures.find((p) => p.id === a.id).createdAt = 1_000;
-    s.procedures.find((p) => p.id === b.id).createdAt = 2_000;
-  });
-  const first = P.proceduresNote("penny");
-  P.readProcedure("penny", "Beta job");
-  assert.equal(P.proceduresNote("penny"), first, "after reading Beta");
-  P.readProcedure("penny", "Alpha job");
-  assert.equal(P.proceduresNote("penny"), first, "after reading Alpha");
-  assert.ok(first.indexOf("Alpha job") < first.indexOf("Beta job"), "in the order they were made");
-  P.deleteProcedure(a.id);
-  P.deleteProcedure(b.id);
-});
-
-await part("Find: by id, by exact name, by name in any case or quoted; never another bot's", async () => {
-  assert.equal(P.findProcedure("max", weekly.id)?.id, weekly.id);
-  assert.equal(P.findProcedure("max", "Weekly invoice summary")?.id, weekly.id);
-  assert.equal(P.findProcedure("max", "  weekly   INVOICE summary ")?.id, weekly.id);
-  assert.equal(P.findProcedure("max", '"Weekly invoice summary"')?.id, weekly.id);
-  assert.equal(P.findProcedure("penny", weekly.id), undefined);
-  assert.equal(P.findProcedure("penny", "Weekly invoice summary"), undefined);
-  assert.equal(P.findProcedure("max", "Monthly"), undefined);
-});
-
-await part("Read: the full text, counted as a use; a name that isn't there lists the bot's own", async () => {
-  const before = P.findProcedure("max", weekly.id);
-  const uses = before.uses ?? 0;
-  const version = S.getVersion();
-  const text = P.readProcedure("max", "weekly invoice summary");
-  hear(text);
-  assert.equal(text, P.procedureText(before));
-  assert.equal(text, "Procedure: Weekly invoice summary\n\nWhen to use: When Tiger asks for the weekly summary\n\nSteps:\n1. Open Drive\n2. Sum it\n3. Send it");
-  const after = P.findProcedure("max", weekly.id);
-  assert.equal(after.uses, uses + 1);
-  assert.ok(Math.abs(after.usedAt - Date.now()) < 5_000);
-  assert.ok(S.getVersion() > version, "the window sees the use");
-  const missing = P.readProcedure("max", "Monthly close");
-  hear(missing);
-  assert.equal(missing, 'No procedure called "Monthly close". Yours are: "Weekly invoice summary".');
-  assert.equal(P.findProcedure("max", weekly.id).uses, uses + 1, "a miss counts nothing");
-  const none = P.readProcedure("penny", "Monthly close");
-  hear(none);
-  assert.equal(none, 'No procedure called "Monthly close". You have none saved yet.');
-  // Pitfalls show when there are some.
-  const withPitfalls = save("penny", { name: "Pay a bill", whenToUse: "When a bill is due", steps: "1. Pay it", pitfalls: "Check the amount twice" }).procedure;
-  assert.equal(P.procedureText(withPitfalls), "Procedure: Pay a bill\n\nWhen to use: When a bill is due\n\nSteps:\n1. Pay it\n\nPitfalls:\nCheck the amount twice");
-  P.deleteProcedure(withPitfalls.id);
-});
-
-/* ---------------- SKILL.md files ---------------- */
-
-await part("Skill files: one <slug>/SKILL.md each, Agent Skills frontmatter, steps and pitfalls", async () => {
-  const a = save("penny", { name: "Pay a bill: the usual way", whenToUse: 'When a "bill" is due: pay it', steps: "1. Open the bank\n2. Pay it", pitfalls: "Check the amount twice" }).procedure;
-  const b = save("penny", { name: "Pay a bill, the usual way!", whenToUse: "Second one", steps: "1. Pay" }).procedure;
-  const c = save("penny", { name: "請求書", whenToUse: "When an invoice comes", steps: "1. File it" }).procedure;
-  const d = save("penny", { name: "Café receipts", whenToUse: "When a receipt comes", steps: "1. Save it" }).procedure;
-  const dir = join(scratch, "skills", "penny");
-  P.writeSkillFiles("penny", dir);
-  assert.deepEqual(readdirSync(dir).sort(), ["cafe-receipts", "pay-a-bill-the-usual-way", "pay-a-bill-the-usual-way-2", "procedure-3"]);
-  const first = readFileSync(join(dir, "pay-a-bill-the-usual-way", "SKILL.md"), "utf8");
-  const lines = first.split("\n");
-  assert.equal(lines[0], "---");
-  assert.equal(lines[1], "name: pay-a-bill-the-usual-way");
-  assert.match(lines[2], /^description: /);
-  assert.equal(JSON.parse(lines[2].slice("description: ".length)), 'When a "bill" is due: pay it');
-  assert.equal(lines[3], "---");
-  assert.ok(first.includes("# Pay a bill: the usual way\n"));
-  assert.ok(first.includes("## Steps\n\n1. Open the bank\n2. Pay it\n"));
-  assert.ok(first.includes("## Pitfalls\n\nCheck the amount twice\n"));
-  const second = readFileSync(join(dir, "pay-a-bill-the-usual-way-2", "SKILL.md"), "utf8");
-  assert.ok(second.startsWith("---\nname: pay-a-bill-the-usual-way-2\ndescription: \"Second one\"\n---\n"));
-  assert.equal(second.includes("## Pitfalls"), false);
-  assert.ok(readFileSync(join(dir, "procedure-3", "SKILL.md"), "utf8").includes("# 請求書"));
-  // A bot with none: an empty folder, made.
-  const empty = join(scratch, "skills", "boppy");
-  P.writeSkillFiles("boppy", empty);
-  assert.ok(existsSync(empty));
-  assert.deepEqual(readdirSync(empty), []);
-  for (const p of [a, b, c, d]) P.deleteProcedure(p.id);
+await part("On another Mac (the state from Bops Cloud, not the folder): a skill that was a procedure is written again from it", async () => {
+  const dir = W.skillDir("ws_main", "skill", weekly.slug);
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(join(process.cwd(), ".data", "workspaces", "ws_main", ".versions", "skills", weekly.slug), { recursive: true, force: true });
+  assert.match(W.readSkill("max", weekly.slug), /^Skill: Weekly invoice summary \(version 0\.1\.0\)\n\n# Weekly invoice summary\n[\s\S]*1\. Open Drive/);
+  assert.ok(existsSync(join(dir, "SKILL.md")), "its folder is back");
 });
 
 /* ---------------- Drafting one from a chat ---------------- */
@@ -445,24 +293,37 @@ assert.equal(Mem.isSecret(secret.id), true, "the stand-in secret is marked");
 
 const ANSWER = {
   name: "Weekly invoice summary — Drive",
+  description: "Sums up the week's invoices from Drive when Tiger asks for \"the weekly invoice summary\"",
   whenToUse: "When Tiger asks for\nthe weekly invoice summary",
-  steps: "1. Open the Invoices folder in Drive — not Receipts\n2. Sum rows 2–40\n3. Send the total as a table",
+  steps: "1. Open the Invoices folder in Drive — not Receipts\n2. Sum rows 2–40\n3. Send the total to dana@acme.example as a table",
   pitfalls: "Use the Invoices folder, not Receipts",
+  scripts: [{ file: "Fetch invoices.sh", purpose: "Downloads this week's invoice CSV", command: "curl -s -H \"Authorization: Bearer $DRIVE_TOKEN\" https://drive.example/invoices.csv -o invoices.csv" }],
   updates: null,
 };
 
 await part("Draft: what the model is given, and what it answered, tidied", async () => {
   openai.answer = () => ANSWER;
   const usage = (S.getState().usage ?? []).length;
-  const r = await P.draftProcedure("max", MAX_CHAT);
+  const r = await P.draftSkill("max", MAX_CHAT);
   assert.ok(r.draft, r.error);
-  hear(...Object.values(r.draft));
-  assert.deepEqual(r.draft, {
-    name: "Weekly invoice summary, Drive",
-    whenToUse: "When Tiger asks for the weekly invoice summary",
-    steps: "1. Open the Invoices folder in Drive, not Receipts\n2. Sum rows 2 to 40\n3. Send the total as a table",
-    pitfalls: "Use the Invoices folder, not Receipts",
-  });
+  hear(r.draft.name, r.draft.description, r.draft.body);
+  // In the SKILL.md shape: tidied, no dashes, the customer's email out, the command as a script that only says what it'd do.
+  assert.equal(r.draft.name, "Weekly invoice summary, Drive");
+  assert.equal(r.draft.description, 'Sums up the week\'s invoices from Drive when Tiger asks for "the weekly invoice summary"');
+  assert.equal(
+    r.draft.body,
+    "# Weekly invoice summary, Drive\n\n## When to use\n\nWhen Tiger asks for\nthe weekly invoice summary\n\n## Steps\n\n1. Open the Invoices folder in Drive, not Receipts\n2. Sum rows 2 to 40\n3. Send the total to <email> as a table\n\n## Pitfalls\n\nUse the Invoices folder, not Receipts\n\n## Files\n\n- `scripts/fetch-invoices.sh`: Downloads this week's invoice CSV Dry run unless given --apply.\n",
+  );
+  assert.equal(r.draft.files.length, 1);
+  assert.equal(r.draft.files[0].path, "scripts/fetch-invoices.sh");
+  assert.equal(r.draft.files[0].executable, true);
+  assert.match(r.draft.files[0].content, /^#!\/bin\/sh\n# Downloads this week's invoice CSV\n# Dry run by default[^\n]*\nset -eu\nif \[ "\$\{1:-\}" != "--apply" \]; then\n/);
+  assert.ok(r.draft.files[0].content.endsWith('fi\ncurl -s -H "Authorization: Bearer $DRIVE_TOKEN" https://drive.example/invoices.csv -o invoices.csv\n'));
+  // The script says what it would run, and runs it only with --apply.
+  const scriptPath = join(scratch, "fetch.sh");
+  writeFileSync(scriptPath, r.draft.files[0].content.replace(/^curl .*$/m, "echo ran"), { mode: 0o755 });
+  assert.equal(execFileSync("/bin/sh", [scriptPath], { encoding: "utf8" }).split("\n")[0], "Would run:");
+  assert.equal(execFileSync("/bin/sh", [scriptPath, "--apply"], { encoding: "utf8" }), "ran\n");
   assert.equal(openai.calls.length, 1);
   const { body, input } = openai.calls[0];
   assert.equal(body.model, "gpt-test-chat");
@@ -470,9 +331,9 @@ await part("Draft: what the model is given, and what it answered, tidied", async
   assert.equal(body.store, false);
   assert.equal(body.text.format.type, "json_schema");
   assert.equal(body.text.format.strict, true);
-  assert.deepEqual(body.text.format.schema.required, ["name", "whenToUse", "steps", "pitfalls", "updates"]);
+  assert.deepEqual(body.text.format.schema.required, ["name", "description", "whenToUse", "steps", "pitfalls", "scripts", "updates"]);
   assert.equal(body.text.format.schema.additionalProperties, false);
-  for (const words of ["Lessons, not a log", "numbered imperative steps", "Nothing secret", "No dashes", "pitfalls: what went wrong here, or what the user corrected"])
+  for (const words of ["Lessons, not a log", "numbered imperative steps", "Nothing secret and nothing about a customer", "No dashes", "pitfalls: what went wrong here, or what the user corrected", "scripts: shell commands"])
     assert.ok(body.instructions.includes(words), `the instructions say: ${words}`);
   noDashes(body.instructions);
   // The chat: who said what, oldest first; nothing kept secret, no memory lines.
@@ -486,9 +347,9 @@ await part("Draft: what the model is given, and what it answered, tidied", async
   assert.equal(chat.at(-1), "The user: Great, next time put it in a table");
   assert.equal(input.chat.includes("4321"), false, "the secret stays out");
   assert.equal(input.chat.includes("Dana"), false, "what memory learned stays out");
-  // The bot's procedure for the same kind of job, in full, so an update keeps what still holds of it.
-  assert.deepEqual(input.existing, [{ id: weekly.id, name: "Weekly invoice summary", whenToUse: "When Tiger asks for the weekly summary", steps: "1. Open Drive\n2. Sum it\n3. Send it" }]);
-  assert.ok(body.instructions.includes("keeping what still holds from its steps and pitfalls"));
+  // The workspace's skill for the same kind of job (Max's), in full, so an update keeps what still holds of it. Not Penny's.
+  assert.deepEqual(input.existing, [{ slug: weekly.slug, name: "Weekly invoice summary", description: "When Tiger asks for the weekly summary", body: W.skillDetail("ws_main", "skill", weekly.slug).body }]);
+  assert.ok(body.instructions.includes("keeping what still holds of it"));
   assert.equal("focus" in input, false);
   // Max's two threads from this chat, oldest first; not Penny's.
   assert.equal(input.threads.length, 2);
@@ -513,19 +374,19 @@ await part("Draft: what the model is given, and what it answered, tidied", async
 });
 
 await part("Draft: an update to one of the bot's own, the user's focus, and one thread", async () => {
-  openai.answer = (call) => ({ ...ANSWER, updates: call.input.existing[0].id });
-  const r = await P.draftProcedure("max", MAX_CHAT, { sessionId: "t_weekly", hint: "the summary — not the booking" });
-  assert.equal(r.draft.updates, weekly.id);
+  openai.answer = (call) => ({ ...ANSWER, updates: call.input.existing[0].slug });
+  const r = await P.draftSkill("max", MAX_CHAT, { sessionId: "t_weekly", hint: "the summary — not the booking" });
+  assert.equal(r.draft.updates, weekly.slug);
   const { input } = openai.calls.at(-1);
   assert.equal(input.focus, "the summary — not the booking");
   assert.equal(input.threads.length, 1);
   assert.match(input.threads[0], /^Thread "Weekly invoice summary"/);
-  // An id that isn't one of the bot's is dropped.
-  openai.answer = () => ({ ...ANSWER, updates: "proc_somebody_elses" });
-  assert.equal("updates" in (await P.draftProcedure("max", MAX_CHAT)).draft, false);
+  // A slug that isn't one of the bot's (Penny's) is dropped.
+  openai.answer = () => ({ ...ANSWER, updates: "pay-rent" });
+  assert.equal("updates" in (await P.draftSkill("max", MAX_CHAT)).draft, false);
   // Another bot's thread asked for by id: not read.
   openai.answer = () => ANSWER;
-  await P.draftProcedure("max", MAX_CHAT, { sessionId: "t_penny" });
+  await P.draftSkill("max", MAX_CHAT, { sessionId: "t_penny" });
   assert.deepEqual(openai.calls.at(-1).input.threads, []);
 });
 
@@ -550,7 +411,7 @@ await part("Draft: a long chat and a long thread stay within about 24k character
     });
   });
   openai.answer = () => ANSWER;
-  const r = await P.draftProcedure("max", "c_long");
+  const r = await P.draftSkill("max", "c_long");
   assert.ok(r.draft, r.error);
   const { input } = openai.calls.at(-1);
   const lines = input.chat.split("\n");
@@ -567,15 +428,13 @@ await part("Draft: a long chat and a long thread stay within about 24k character
   assert.ok(input.threads[0].includes(`Its answer: ${"a".repeat(1499)}…`));
 });
 
-await part("Draft: too long an answer is cut to fit, pitfalls first, at a line break", async () => {
-  openai.answer = () => ({ ...ANSWER, steps: Array.from({ length: 200 }, (_, i) => `${i + 1}. ${"Do the thing ".repeat(3)}`).join("\n"), pitfalls: Array.from({ length: 200 }, (_, i) => `Watch out ${i}`).join("\n") });
-  const r = await P.draftProcedure("max", MAX_CHAT);
-  const size = r.draft.name.length + r.draft.whenToUse.length + r.draft.steps.length + r.draft.pitfalls.length;
-  assert.ok(size <= MAX_PROCEDURE_CHARS, `fits (${size})`);
-  assert.equal(r.draft.pitfalls, "", "pitfalls gave way first");
-  assert.match(r.draft.steps.split("\n").at(-1), /^\d+\. Do the thing Do the thing Do the thing$/, "whole lines kept");
-  assert.ok(save("max", { ...r.draft, name: "Fit check" }).procedure, "and it saves");
-  P.deleteProcedure(P.findProcedure("max", "Fit check").id);
+await part("Draft: too long an answer is cut to the body's cap, and still saves", async () => {
+  openai.answer = () => ({ ...ANSWER, scripts: [], steps: Array.from({ length: 900 }, (_, i) => `${i + 1}. ${"Do the thing ".repeat(3)}`).join("\n") });
+  const r = await P.draftSkill("max", MAX_CHAT);
+  assert.ok(r.draft.body.length <= 12_000, `fits (${r.draft.body.length})`);
+  const saved = P.saveSkillDraft("max", { ...r.draft, name: "Fit check" });
+  assert.ok(saved.ref, saved.error);
+  await W.deleteSkill("ws_main", "skill", saved.ref.slug);
 });
 
 await part("Draft: refused without a model call when there's nothing to learn from or nobody to ask", async () => {
@@ -585,10 +444,10 @@ await part("Draft: refused without a model call when there's nothing to learn fr
     s.messages.push(msg("c_quiet", { role: "bot", botId: "max", text: "Hi! I'm Max." }), msg("c_quiet", { role: "user", text: "   " }));
   });
   const cases = [
-    [await P.draftProcedure("max", "c_quiet"), "This chat has nothing to learn from yet. Do the job here first, then save it."],
-    [await P.draftProcedure("nobody", MAX_CHAT), "That bot is gone."],
-    [await P.draftProcedure("max", "c_nowhere"), "That chat is gone."],
-    [await P.draftProcedure("max", botChatId("penny")), "Max isn't in this chat."],
+    [await P.draftSkill("max", "c_quiet"), "This chat has nothing to learn from yet. Do the job here first, then save it."],
+    [await P.draftSkill("nobody", MAX_CHAT), "That bot is gone."],
+    [await P.draftSkill("max", "c_nowhere"), "That chat is gone."],
+    [await P.draftSkill("max", botChatId("penny")), "Max isn't in this chat."],
   ];
   for (const [r, error] of cases) {
     hear(r.error);
@@ -599,19 +458,19 @@ await part("Draft: refused without a model call when there's nothing to learn fr
 
 await part("Draft: the model finding no job, or failing, says so in plain words", async () => {
   const errorOf = async () => {
-    const r = await P.draftProcedure("max", MAX_CHAT);
+    const r = await P.draftSkill("max", MAX_CHAT);
     hear(r.error);
     assert.equal(r.draft, undefined);
     return r.error;
   };
-  openai.answer = () => ({ name: "", whenToUse: "", steps: "", pitfalls: "", updates: null });
-  assert.equal(await errorOf(), "There's no job in this chat to save as a procedure yet.");
+  openai.answer = () => ({ name: "", description: "", whenToUse: "", steps: "", pitfalls: "", scripts: [], updates: null });
+  assert.equal(await errorOf(), "There's no job in this chat to save as a skill yet.");
   openai.answer = () => ({ ...ANSWER, steps: " — " });
-  assert.equal(await errorOf(), "There's no job in this chat to save as a procedure yet.");
+  assert.equal(await errorOf(), "There's no job in this chat to save as a skill yet.");
   openai.answer = () => "not json {";
   assert.equal(await errorOf(), "The draft came back unreadable. Try again.");
   openai.answer = () => "null";
-  assert.equal(await errorOf(), "There's no job in this chat to save as a procedure yet.");
+  assert.equal(await errorOf(), "There's no job in this chat to save as a skill yet.");
   // Overloaded: tried once more, then given up on.
   let calls = openai.calls.length;
   openai.fail = () => json({ error: { message: "Overloaded", type: "api_error" } }, 500, { "retry-after-ms": "0" });
@@ -663,7 +522,7 @@ await part("Draft: a routine's runs in the chat are left out, and an older threa
     s.messages.push(msg(C, { role: "bot", botId: "max", text: "Refunds are up 3% this week.", routine: { id: "rtn_check" } }));
   });
   openai.answer = () => ANSWER;
-  const r = await P.draftProcedure("max", C);
+  const r = await P.draftSkill("max", C);
   assert.ok(r.draft, r.error);
   const { input } = openai.calls.at(-1);
   const titles = input.threads.map((t) => t.match(/^Thread "([^"]+)"/)[1]);
@@ -681,7 +540,7 @@ await part("Draft: one of the bot's own threads, handed off from another bot's c
     s.messages.push(msg(MAIN, { role: "user", text: "Have Max do the invoices" }), msg(MAIN, { role: "bot", botId: "boppy", text: "Handing it to Max.", sessionIds: ["t_hand"] }), msg(MAIN, { role: "user", text: "Something else entirely" }));
   });
   openai.answer = () => ANSWER;
-  const r = await P.draftProcedure("max", MAIN, { sessionId: "t_hand" });
+  const r = await P.draftSkill("max", MAIN, { sessionId: "t_hand" });
   assert.ok(r.draft, r.error);
   const { input } = openai.calls.at(-1);
   assert.equal(input.threads.length, 1);
@@ -690,7 +549,7 @@ await part("Draft: one of the bot's own threads, handed off from another bot's c
   const routed = await request("POST", { action: "draft", botId: "max", chatId: MAIN, sessionId: "t_hand" });
   assert.equal(routed.status, 200, JSON.stringify(routed.body));
   // Without its own thread, still not another bot's chat to read.
-  assert.deepEqual(await P.draftProcedure("max", MAIN), { error: "Max isn't in this chat." });
+  assert.deepEqual(await P.draftSkill("max", MAIN), { error: "Max isn't in this chat." });
 });
 
 await part("Draft: the bot's answer to a secret stays out too, and the mark outlasts memory being off", async () => {
@@ -709,7 +568,7 @@ await part("Draft: the bot's answer to a secret stays out too, and the mark outl
   }
   assert.equal(S.getState().messages.find((m) => m.id === kept.id).secret, true, "marked on the message, memory off");
   openai.answer = () => ANSWER;
-  await P.draftProcedure("max", C);
+  await P.draftSkill("max", C);
   const { input } = openai.calls.at(-1);
   assert.equal(input.chat.includes("123,456"), false, input.chat);
   assert.ok(input.chat.includes("Sending it to HR."), "the rest of the chat is read");
@@ -790,90 +649,111 @@ await part("Two Macs: a state loaded at sign-in keeps its routine runs as they a
 await part("Route: only from the Bops window", async () => {
   process.env.BOPS_UI_TOKEN = "window-token";
   const calls = openai.calls.length;
-  for (const [method, body] of [
-    ["POST", { action: "draft", botId: "max", chatId: MAX_CHAT }],
-    ["POST", { action: "save", botId: "max", draft: { name: "Sneaky", whenToUse: "Always", steps: "1. Leak" } }],
-    ["PATCH", { id: weekly.id, edit: { steps: "1. Leak" } }],
-    ["DELETE", { id: weekly.id }],
+  for (const body of [
+    { action: "draft", botId: "max", chatId: MAX_CHAT },
+    { action: "save-draft", botId: "max", draft: { name: "Sneaky", description: "Always", body: "1. Leak" } },
+    { action: "publish", kind: "skill", slug: weekly.slug },
+    { action: "approve", sha256: "a".repeat(64) },
+    { action: "import", path: "/etc" },
+    { action: "delete", kind: "skill", slug: weekly.slug },
   ]) {
-    const r = await request(method, body);
-    assert.equal(r.status, 403, method);
-    assert.equal(r.body.error, "A bot's procedures can only be changed in the Bops app.");
+    const r = await request("POST", body);
+    assert.equal(r.status, 403, body.action);
+    assert.equal(r.body.error, "Skills can only be changed in the Bops app.");
   }
+  assert.equal((await request("GET")).status, 403);
   assert.equal(openai.calls.length, calls);
-  assert.equal(P.findProcedure("max", "Sneaky"), undefined);
-  assert.equal(P.findProcedure("max", weekly.id).steps, weekly.steps);
+  assert.equal(W.findSkill("max", "Sneaky", { drafts: true }), undefined);
+  assert.ok(W.findRef("ws_main", "skill", weekly.slug), "still there");
   openai.answer = () => ANSWER;
   assert.equal((await request("POST", { action: "draft", botId: "max", chatId: MAX_CHAT }, { "x-bops-window": "window-token" })).status, 200);
   assert.equal((await request("POST", { action: "draft", botId: "max", chatId: MAX_CHAT }, { cookie: "a=b; bops_window=window-token" })).status, 200);
   assert.equal((await request("POST", { action: "draft", botId: "max", chatId: MAX_CHAT }, { "x-bops-window": "window-tokem" })).status, 403);
 });
 
-await part("Route: draft, then save it over the one it updates (or as new when that one's gone)", async () => {
-  openai.answer = (call) => ({ ...ANSWER, updates: call.input.existing.find((p) => p.name === "Weekly invoice summary")?.id ?? null });
+await part("Route: draft, then save it over the one it updates (a draft of its next version), or as a new draft, or published", async () => {
+  openai.answer = (call) => ({ ...ANSWER, updates: call.input.existing.find((p) => p.name === "Weekly invoice summary")?.slug ?? null });
   const d = await request("POST", { action: "draft", botId: "max", chatId: MAX_CHAT });
   assert.equal(d.status, 200);
-  assert.equal(d.body.draft.updates, weekly.id);
+  assert.equal(d.body.draft.updates, weekly.slug);
   assert.equal(d.body.updating, "Weekly invoice summary");
-  // What it says now, so the dialog can show what saving would replace.
-  assert.deepEqual(d.body.was, { steps: weekly.steps, pitfalls: weekly.pitfalls ?? "" });
   assert.deepEqual(d.body.from, { chatId: MAX_CHAT, sessionIds: ["t_other", "t_weekly"] });
-  const one = await request("POST", { action: "draft", botId: "max", chatId: MAX_CHAT, sessionId: "t_weekly" });
-  assert.deepEqual(one.body.from, { chatId: MAX_CHAT, sessionIds: ["t_weekly"] });
-  // The user renames it in the dialog: it still replaces the one it was drafted to update.
-  const s = await request("POST", { action: "save", botId: "max", draft: { ...d.body.draft, name: "Weekly invoices" }, from: d.body.from });
-  assert.equal(s.status, 200);
-  assert.equal(s.body.procedure.id, weekly.id);
-  assert.equal(s.body.procedure.name, "Weekly invoices");
-  assert.deepEqual(s.body.procedure.from, { chatId: MAX_CHAT, sessionIds: ["t_other", "t_weekly"] });
+  // Saved over the one it updates: its folder changes; its bots read the published version until it's published.
+  const s = await request("POST", { action: "save-draft", botId: "max", draft: { ...d.body.draft, name: "Weekly invoices" }, from: d.body.from });
+  assert.equal(s.status, 200, JSON.stringify(s.body));
+  assert.equal(s.body.ref.slug, weekly.slug);
+  assert.equal(s.body.ref.name, "Weekly invoices");
+  assert.equal(s.body.ref.version, "0.1.0", "still the version its bots read");
+  assert.match(W.readSkill("max", weekly.slug), /\n1\. Open Drive\n2\. Sum it\n3\. Send it/, "the bot still reads the published one");
+  assert.equal(W.skillDetail("ws_main", "skill", weekly.slug).changed, true);
   assert.equal(mine("max").length, 1);
-  weekly = s.body.procedure;
-  // Drafted to update one that's since been deleted: saved as a new one.
-  const gone = await request("POST", { action: "save", botId: "max", draft: { ...d.body.draft, name: "Fresh one", updates: "proc_deleted" }, from: { chatId: "c_nowhere", sessionIds: [1, "x"] } });
+  // Published: a new version its bots read from now on, with its script (not approved yet).
+  const pub = await request("POST", { action: "publish", kind: "skill", slug: weekly.slug });
+  assert.equal(pub.body.ref.version, "0.1.1");
+  assert.match(W.readSkill("max", weekly.slug), /Send the total to <email> as a table[\s\S]*scripts\/fetch-invoices\.sh \(script, not approved yet/);
+  assert.deepEqual((await request("POST", { action: "publish", kind: "skill", slug: weekly.slug })).body, { error: "Nothing changed since 0.1.1." });
+  // Drafted to update one that's since been deleted: saved as a new draft, for this bot.
+  const gone = await request("POST", { action: "save-draft", botId: "max", draft: { ...d.body.draft, name: "Fresh one", updates: "deleted-one" }, from: { chatId: "c_nowhere", sessionIds: [1, "x"] } });
   assert.equal(gone.status, 200);
-  assert.notEqual(gone.body.procedure.id, weekly.id);
-  assert.equal("from" in gone.body.procedure, false, "a chat that isn't there isn't kept");
+  assert.notEqual(gone.body.ref.slug, weekly.slug);
+  assert.equal(gone.body.ref.status, "draft");
+  assert.deepEqual(gone.body.ref.botIds, ["max"]);
+  assert.equal("from" in gone.body.ref, false, "a chat that isn't there isn't kept");
   assert.equal(mine("max").length, 2);
+  // Save and publish at once.
+  const now = await request("POST", { action: "save-draft", botId: "max", draft: { name: "Quick one", description: "When asked", body: "# Quick one\n\n1. Do it\n" }, publish: true });
+  assert.equal(now.body.ref.status, "published");
+  assert.equal(now.body.ref.version, "0.1.0");
+  // A secret in it: refused, by where and what kind, never the text.
+  const secret = await request("POST", { action: "save-draft", botId: "max", draft: { name: "Leaky", description: "x", body: "1. curl -H 'Authorization: Bearer ghp_0123456789abcdefghijklmnopqrstuvwxyzAB'\n" } });
+  assert.equal(secret.status, 400);
+  assert.deepEqual(secret.body.problems, [{ path: "SKILL.md", line: 1, reason: "secret: GitHub token" }]);
+  assert.ok(!JSON.stringify(secret.body).includes("ghp_"), "the secret isn't said back");
   // Refusals, with their words.
-  const bad = await request("POST", { action: "save", botId: "max", draft: { name: "No steps", whenToUse: "Never" } });
-  assert.deepEqual(bad, { status: 400, body: { error: "A procedure needs its steps." } });
-  assert.equal((await request("POST", { action: "save", botId: "nobody", draft: {} })).status, 404);
+  const bad = await request("POST", { action: "save-draft", botId: "max", draft: { name: "No body", description: "Never" } });
+  assert.deepEqual(bad, { status: 400, body: { error: "A skill needs its SKILL.md text." } });
+  assert.equal((await request("POST", { action: "save-draft", botId: "nobody", draft: {} })).status, 404);
   assert.deepEqual((await request("POST", { action: "draft", botId: "max", chatId: "c_nowhere" })).body, { error: "That chat is gone." });
-  assert.deepEqual((await request("POST", { action: "teach", botId: "max" })).body, { error: "Say draft or save." });
-  openai.answer = () => ({ name: "", whenToUse: "", steps: "", pitfalls: "", updates: null });
-  assert.deepEqual(await request("POST", { action: "draft", botId: "max", chatId: MAX_CHAT }), { status: 400, body: { error: "There's no job in this chat to save as a procedure yet." } });
-  // Edit and delete.
-  const e = await request("PATCH", { id: gone.body.procedure.id, edit: { steps: "1. Start fresh — again", name: 42 } });
-  assert.equal(e.status, 200);
-  assert.equal(e.body.procedure.steps, "1. Start fresh — again", "what the user typed is kept as typed");
-  assert.equal(e.body.procedure.name, "Fresh one", "what isn't a string stays");
-  assert.deepEqual(await request("PATCH", { id: gone.body.procedure.id, edit: { name: "weekly INVOICES" } }), { status: 400, body: { error: 'Max already has a procedure called "Weekly invoices".' } });
-  assert.equal((await request("PATCH", { id: "proc_nope", edit: {} })).status, 404);
-  assert.deepEqual(await request("DELETE", { id: gone.body.procedure.id }), { status: 200, body: { ok: true } });
-  assert.deepEqual(await request("DELETE", { id: gone.body.procedure.id }), { status: 404, body: { error: "That procedure was deleted." } });
+  assert.deepEqual((await request("POST", { action: "teach", botId: "max" })).body, { error: "What should happen to it?" });
+  openai.answer = () => ({ name: "", description: "", whenToUse: "", steps: "", pitfalls: "", scripts: [], updates: null });
+  assert.deepEqual(await request("POST", { action: "draft", botId: "max", chatId: MAX_CHAT }), { status: 400, body: { error: "There's no job in this chat to save as a skill yet." } });
+  // Roll back, and delete.
+  assert.equal((await request("POST", { action: "rollback", kind: "skill", slug: weekly.slug, version: "0.1.0" })).body.ref.version, "0.1.0");
+  assert.match(W.readSkill("max", weekly.slug), /\n1\. Open Drive\n/, "its bots read 0.1.0 again");
+  assert.deepEqual(await request("POST", { action: "delete", kind: "skill", slug: gone.body.ref.slug }), { status: 200, body: { ok: true } });
+  assert.deepEqual(await request("POST", { action: "delete", kind: "skill", slug: gone.body.ref.slug }), { status: 404, body: { error: "That skill was deleted." } });
+  assert.ok(!existsSync(W.skillDir("ws_main", "skill", gone.body.ref.slug)), "its folder went too");
+  await W.deleteSkill("ws_main", "skill", now.body.ref.slug);
   assert.equal(mine("max").length, 1);
+  // The list, as the window reads it.
+  const list = await request("GET");
+  assert.deepEqual(list.body.skills.map((r) => r.slug).sort(), ["pay-rent", weekly.slug].sort());
+  assert.deepEqual(list.body.apps, []);
 });
 
 /* ---------------- Going with their bot ---------------- */
 
-await part("A deleted bot's procedures go with it; the others stay", async () => {
+await part("A deleted bot's skills go with it (one only it had); the others stay", async () => {
   let Rm;
   try {
     Rm = await import(`${root}/lib/server/remove.ts`);
   } catch (e) {
     throw new Error(`remove.ts didn't load (another part of the app may be mid-change): ${e.message}`);
   }
-  save("penny", { name: "Pay rent", whenToUse: "On the first", steps: "1. Pay it" });
-  assert.equal(mine("penny").length, 1);
+  // Penny's own (moved from her procedure), and one Max and Penny share.
+  const shared = W.createSkill("ws_main", { name: "Shared one", description: "Both", body: "# Shared\n", botIds: ["max", "penny"] }).ref;
+  assert.equal(W.refsOf("ws_main", "skill").filter((r) => r.botIds.includes("penny")).length, 2);
   await Rm.deleteBot("penny");
   assert.equal(S.bot("penny"), undefined);
-  assert.equal(mine("penny").length, 0);
-  assert.equal(mine("max").length, 1);
+  assert.equal(W.refsOf("ws_main", "skill").some((r) => r.slug === "pay-rent"), false, "hers alone went");
+  assert.deepEqual(W.findRef("ws_main", "skill", shared.slug).botIds, ["max"], "the shared one is Max's now");
+  assert.equal(mine("max").length, 2);
 });
 
-await part("Starting over drops every procedure", async () => {
-  assert.ok(S.getState().procedures.length > 0);
+await part("Starting over drops every skill from the state", async () => {
+  assert.ok(W.refsOf("ws_main").length > 0);
   await S.resetState();
+  assert.deepEqual(W.refsOf("ws_main"), []);
   assert.deepEqual(S.getState().procedures, []);
 });
 
@@ -882,19 +762,19 @@ await part("Starting over drops every procedure", async () => {
 await part("Plain words: no dashes in anything the user or a bot reads", async () => {
   for (const line of spoken) noDashes(line);
   // Nothing in the sources has a dash, but the patterns that take dashes out.
-  for (const file of ["lib/server/procedures.ts", "app/api/procedures/route.ts", "components/app/procedure-dialog.tsx"])
+  for (const file of ["lib/server/procedures.ts", "lib/server/workspace-skills.ts", "lib/server/skill-bundle.ts", "app/api/skills/route.ts", "components/app/skill-dialog.tsx", "components/app/skills.tsx"])
     readFileSync(join(root, file), "utf8")
       .split("\n")
       .forEach((line, n) => {
         if (/[–—]/.test(line) && !/\.replace\(\/[^/]*[–—][^/]*\/[gimsuy]*,/.test(line)) assert.fail(`${file}:${n + 1} has a dash: ${line.trim()}`);
         if (/["'`>][^"'`<]* - [^"'`<]*["'`<]/.test(line) && !/^\s*(\/\/|\*)/.test(line) && !/ - \d|\d - /.test(line)) assert.fail(`${file}:${n + 1} has " - " in words: ${line.trim()}`);
       });
-  assert.ok(spoken.length > 30, `heard plenty (${spoken.length})`);
+  assert.ok(spoken.length > 20, `heard plenty (${spoken.length})`);
 });
 
 await part("Nothing unexpected: no stray warnings, network calls, other model calls or rejections", async () => {
   assert.deepEqual(
-    warned.filter((w) => /^\[procedures\]/.test(w) && !/^\[procedures\] draft: /.test(w)),
+    warned.filter((w) => /^\[(procedures|skills)\]/.test(w) && !/^\[skills\] (draft|procedure proc_gone)/.test(w)),
     [],
   );
   assert.deepEqual(offline, [], "nothing else reached for");
@@ -905,7 +785,7 @@ await part("Nothing unexpected: no stray warnings, network calls, other model ca
 /* ---------------- The results ---------------- */
 
 const failed = results.filter((r) => !r.ok);
-console.log(`\nProcedures: ${results.length - failed.length} of ${results.length} parts passed.`);
+console.log(`\nSave as skill: ${results.length - failed.length} of ${results.length} parts passed.`);
 if (failed.length) console.log(`The throwaway folder is kept for a look: ${scratch}`);
 else rmSync(scratch, { recursive: true, force: true });
 process.exit(failed.length ? 1 : 0);

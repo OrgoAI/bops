@@ -27,7 +27,7 @@ import { computerBriefing } from "./briefing";
 import { ASKING, tidyAnswer, withBriefing, WRITING } from "./style";
 import { accountsOf, appsKeyFor, bopsAddress, composioOn, serveApps } from "./composio";
 import { appsNote, placesNote } from "./skills";
-import { findProcedure, proceduresNote, proceduresOf, procedureText, readProcedure } from "./procedures";
+import { copySkillsToComputer, countUse, findSkill, skillsFor, skillsNote, skillText } from "./workspace-skills";
 import { dataNote, dataOn } from "./treg";
 import { crmNote } from "./crm";
 import { memoryBlock, saveToMemory, wsOf } from "./memory";
@@ -1404,43 +1404,44 @@ function personaNote(b: Bot) {
 }
 
 /**
- * The procedure a thread follows (Session.procedure, a routine's), in full. `count`: a use of it
- * (readProcedure), once per run rather than per turn. Empty when it has none, or it was deleted since.
+ * The skill a thread follows (Session.procedure, a routine's), in full. `count`: a use of it, once per
+ * run rather than per turn. Empty when it has none, or it was deleted since.
  */
 function procedureBlock(s: Session, count: boolean) {
-  const p = s.procedure ? findProcedure(s.botId, s.procedure) : undefined;
+  const p = s.procedure ? findSkill(s.botId, s.procedure) : undefined;
   if (!p) return "";
-  return `This task follows your procedure "${p.name}": do it that way, and say so in your answer if a step no longer works.\n\n${count ? readProcedure(s.botId, p.id) : procedureText(p)}`;
+  if (count) countUse(s.botId, p);
+  return `This task follows your skill "${p.name}": do it that way, and say so in your answer if a step no longer works.\n\n${skillText(s.botId, p)}`;
 }
 
-/** How much of a bot's procedures an Agents API thread gets in full, in characters. */
-const PROCEDURES_IN_FULL = 8000;
+/** How much of a bot's skills an Agents API thread gets in full, in characters. */
+const SKILLS_IN_FULL = 8000;
 
 /**
- * A bot's procedures for an Agents API thread, which has no read_procedure tool: each in full, the most
- * recently used or changed first, while they fit in PROCEDURES_IN_FULL, then the rest by name. (On the
- * Mac they're its skills too: local.ts startExecutor writes them as SKILL.md files.) The one the thread
- * follows isn't repeated (procedureBlock has it). Empty when it has none.
+ * A bot's skills for an Agents API thread, which has no read_skill tool: each in full, the most recently
+ * used or changed first, while they fit in SKILLS_IN_FULL, then the rest by name. (Its folders are on its
+ * computer too, in its capabilities folder, as the thread starts.) The one the thread follows isn't
+ * repeated (procedureBlock has it). Empty when it has none.
  */
 function proceduresInFull(s: Session) {
-  const following = s.procedure ? findProcedure(s.botId, s.procedure)?.id : undefined;
+  const following = s.procedure ? findSkill(s.botId, s.procedure)?.slug : undefined;
   const touched = (p: { usedAt?: number; updatedAt: number }) => Math.max(p.usedAt ?? 0, p.updatedAt);
-  const all = proceduresOf(s.botId)
-    .filter((p) => p.id !== following)
+  const all = skillsFor(s.botId)
+    .filter((p) => p.slug !== following)
     .sort((a, b) => touched(b) - touched(a));
   if (!all.length) return "";
   const full: string[] = [];
   const named: string[] = [];
-  let room = PROCEDURES_IN_FULL;
+  let room = SKILLS_IN_FULL;
   for (const p of all) {
-    const text = procedureText(p);
-    if (text.length <= room) {
+    const text = skillText(s.botId, p);
+    if (text && text.length <= room) {
       full.push(text);
       room -= text.length;
-    } else named.push(`- ${p.name}: ${p.whenToUse}`);
+    } else named.push(`- ${p.name}: ${p.description}`);
   }
   return [
-    `Your procedures: how you do jobs you were shown before, private to you. When the task fits one, do it that way, and tell ${ownerName()} if a step no longer works.`,
+    `Your skills: how your workspace does jobs it was shown before. When the task fits one, do it that way, and tell ${ownerName()} if a step no longer works. Their folders (with any scripts) are in capabilities/skills and capabilities/apps.`,
     ...full,
     ...(named.length ? [`More of yours, too long to give here (do these jobs as best you can):\n${named.join("\n")}`] : []),
   ].join("\n\n");
@@ -1455,6 +1456,8 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
   const s = session(sessionId)!;
   const b = bot(s.botId)!;
   if (!at.resuming) patchSession(sessionId, { runner: "computer", effort: await threadEffort(b.effort, s.goal, b.id) });
+  // Its skills and apps on its computer (capabilities/skills), for the scripts they bring.
+  if (!at.resuming) await copySkillsToComputer(b.id, at.computerId, orgo.bash).catch((e: Error) => console.warn(`[skills] ${sessionId}: ${e.message}`));
   const effort = session(sessionId)!.effort ?? "medium";
   // Its apps are tools in this process (composio.ts), so it has them wherever its computer is.
   const apps = composioOn() && accountsOf(b).length > 0;
@@ -1466,8 +1469,8 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
     dataNote(b, "task"),
     s.fromOutside ? "" : crmNote(b, "task"),
     placesNote(b, "task"),
-    // Its procedures by name (read_procedure reads one: computer-task.ts), and the one it follows in full.
-    proceduresNote(b.id),
+    // Its skills by name (read_skill reads one: computer-task.ts), and the one it follows in full.
+    skillsNote(b.id),
     procedureBlock(s, !at.resuming),
     memory,
   ]
@@ -1801,7 +1804,7 @@ async function run(sessionId: string) {
               appsNote(b, "task", { tools: appTools }),
               dataNote(b, "task", { tools: dataTools }),
               placesNote(b, "task"),
-              // No read_procedure here: its procedures in full, as far as they fit, and the one it follows.
+              // No read_skill here: its skills in full, as far as they fit, and the one it follows.
               proceduresInFull(s),
               procedureBlock(s, true),
               memory,
@@ -1860,12 +1863,16 @@ async function run(sessionId: string) {
       const { agentSessionId, env } = session(sessionId)! as Required<Pick<Session, "agentSessionId" | "env">>;
 
       if (folder) {
-        // Its procedures go in its skills folder as the executor makes the folders fresh.
+        // Its skills go in its skills folder as the executor makes the folders fresh.
         executor = await startExecutor(sessionId, env.id, env.remoteUrl, port, folder, full, b.id);
         // After the executor made the task's folders fresh; it calls on its first app tool.
         if (env.apps || env.data) closeApps = serveApps(sessionId, appsSocket(folder));
       }
-      else await startOrgoExecutor(computerId, display, env);
+      else {
+        // Its skills and apps go onto its computer first (capabilities/skills), so the agent finds them there.
+        await copySkillsToComputer(b.id, computerId, orgo.bash).catch((e: Error) => console.warn(`[skills] ${sessionId}: ${e.message}`));
+        await startOrgoExecutor(computerId, display, env);
+      }
       const seen = new Set<string>();
       turn = async (input) => {
         await runTurn(sessionId, agentSessionId, input, seen);

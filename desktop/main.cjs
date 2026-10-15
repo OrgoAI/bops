@@ -775,6 +775,26 @@ ipcMain.handle("copy-secret", async (_, value) => {
 });
 
 /*
+ * Skills on this Mac (lib/server/workspace-skills.ts): a folder picked in Finder to import as a skill (only
+ * its path goes to the page; Bops' own server reads it), and a skill's folder shown in Finder. Only a
+ * folder under a workspaces folder Bops keeps skills in is shown, never any other path the page names.
+ */
+ipcMain.handle("pick-folder", async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+  const r = await dialog.showOpenDialog(win, { title: "Import a skill", buttonLabel: "Import", properties: ["openDirectory"] });
+  return r.canceled || !r.filePaths[0] ? null : r.filePaths[0];
+});
+ipcMain.handle("reveal-folder", async (_, dir) => {
+  if (typeof dir !== "string" || !path.isAbsolute(dir) || !dir.split(path.sep).includes("workspaces")) return false;
+  try {
+    if (!fs.statSync(dir).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+  return (await shell.openPath(dir)) === "";
+});
+
+/*
  * Screen Recording. macOS only answers "granted" or "denied" here, never "not asked yet", and it
  * only lists an app under Screen Recording (and shows its prompt) once the app has tried to capture.
  * So Bops remembers in its data folder that it has asked, and until then reports "not-determined"

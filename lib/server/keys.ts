@@ -1,5 +1,5 @@
 import "server-only";
-import type { Bot } from "@/lib/types";
+import { MAIN_WORKSPACE, workspaceOf, type Bot } from "@/lib/types";
 import { orgoHeaders } from "./app-version";
 import { askOwner } from "./composio";
 import { apiKey } from "./orgo";
@@ -8,11 +8,17 @@ import { bot, getState, ownerName, update } from "./store";
 
 /**
  * Keys: the user's own API keys (Stripe, GitHub, Linear…) that their bots may call. The keys live in the
- * user's Orgo vault (orgo-web's /api/secrets, account scope), never in Bops: not in the state, on disk or
+ * user's Orgo vault (orgo-web's /api/secrets), never in Bops: not in the state, on disk or
  * in a log. A key's value passes through this server on its way to Orgo when it's saved, and back from Orgo
  * when the user asks to see or copy it in the Vault (revealKey, the window only). Bops keeps only which bots
  * may use which key (Bot.keys). A bot's call goes to Orgo's broker (/api/secrets/call),
  * which adds the key and sends it on to the provider's own address, so neither Bops nor the model ever sees it.
+ *
+ * A key is for all the user's workspaces (the vault's account scope, "All workspaces" in Orgo's Settings,
+ * Secrets) or for one (scoped to the workspace's Orgo project: "This workspace"), as Orgo's Secrets has them.
+ * A workspace's bots use its own keys and the account's; where both have one by a name, the workspace's
+ * wins (Orgo's broker picks it, given the workspace). "This workspace" needs the workspace's own Orgo
+ * project (Workspace.orgoProjectId): on an Orgo without per workspace projects every key is an account one.
  */
 
 export type KeyProvider = {
@@ -109,16 +115,27 @@ async function vault<T>(method: "GET" | "POST" | "DELETE", path: string, body?: 
 
 /* ---------------- The keys in the vault ---------------- */
 
-export type VaultKey = { name: string; updatedAt: string | null };
+/** A key in the vault: its name, when it was set, and the Orgo project it's scoped to (null: all workspaces). */
+export type VaultKey = { name: string; updatedAt: string | null; workspaceId: string | null };
+export type KeyScope = "workspace" | "all";
+
+/** A workspace's own Orgo project, which its keys are scoped to; undefined when it has none. */
+export const keysProject = (wsId: string = getState().workspace ?? MAIN_WORKSPACE) => getState().workspaces?.find((w) => w.id === wsId)?.orgoProjectId;
+
+/** The keys a workspace sees: the account's, and its own project's. */
+export const keysOf = (all: VaultKey[], wsId?: string) => {
+  const project = keysProject(wsId);
+  return all.filter((k) => !k.workspaceId || (!!project && k.workspaceId === project));
+};
 
 /** The vault's names, for a short while: a chat turn asks which keys are set, and that shouldn't cost a call each time. */
 const g = globalThis as unknown as { bopsKeys?: { at: number; keys: VaultKey[]; who: string } };
 const LIST_MS = 30_000;
 
 /**
- * The keys set in the user's Orgo vault that Bops can call (account scope: a key scoped to one Orgo
- * workspace, or any other secret there, a template's, isn't one of Bops' Keys). Names only: Orgo never
- * sends a value back.
+ * The keys set in the user's Orgo vault that Bops can call: account ones, and ones scoped to one of the Bops
+ * workspaces' Orgo projects (keysOf picks a workspace's). Any other secret there (a template's, one scoped to
+ * an Orgo workspace that isn't Bops') isn't one of Bops' Keys. Names only: Orgo never sends a value back.
  */
 export async function listKeys({ fresh = false } = {}): Promise<VaultKey[]> {
   const who = await apiKey().catch(() => "");
@@ -126,36 +143,57 @@ export async function listKeys({ fresh = false } = {}): Promise<VaultKey[]> {
   const c = g.bopsKeys;
   if (!fresh && c && c.who === who && Date.now() - c.at < LIST_MS) return c.keys;
   const { json } = await vault<{ secrets?: { name?: unknown; workspace_id?: unknown; updated_at?: unknown }[] }>("GET", "/api/secrets");
+  const ours = new Set((getState().workspaces ?? []).map((w) => w.orgoProjectId).filter(Boolean));
   const keys = (json.secrets ?? [])
-    .filter((s) => typeof s.name === "string" && !s.workspace_id && keyProvider(s.name))
-    .map((s) => ({ name: s.name as string, updatedAt: typeof s.updated_at === "string" ? s.updated_at : null }));
+    .filter((s) => typeof s.name === "string" && keyProvider(s.name) && (!s.workspace_id || (typeof s.workspace_id === "string" && ours.has(s.workspace_id))))
+    .map((s) => ({ name: s.name as string, updatedAt: typeof s.updated_at === "string" ? s.updated_at : null, workspaceId: typeof s.workspace_id === "string" ? s.workspace_id : null }));
   g.bopsKeys = { at: Date.now(), keys, who };
   return keys;
 }
 
 const forget = () => void (g.bopsKeys = undefined);
 
-/** Save a key to the vault (the same name replaces it), and let `botIds` use it. The value goes to Orgo and nowhere else. */
-export async function saveKey(name: string, value: string, botIds: string[] = []) {
+/** Where a key of `scope` goes for the current workspace: its project (This workspace), or null (All workspaces). */
+function scopeProject(scope: KeyScope, wsId?: string): string | null {
+  if (scope === "all") return null;
+  const project = keysProject(wsId);
+  if (!project) throw new KeysError("This workspace has no Orgo workspace of its own yet, so its keys are for all workspaces.", 400);
+  return project;
+}
+
+/**
+ * Save a key to the vault (the same name in the same scope replaces it), and let `botIds` use it: for all
+ * workspaces, or for this one only (`scope`). The value goes to Orgo and nowhere else.
+ */
+export async function saveKey(name: string, value: string, botIds: string[] = [], scope: KeyScope = "all", wsId?: string) {
   const n = keyName(name);
   if (!keyProvider(n)) throw new KeysError("Bops can't call that service yet. Pick one from the list.", 400);
   const v = value.trim();
   if (!v) throw new KeysError("Paste the key first.", 400);
   if (v.length > 8192) throw new KeysError("That key is too long.", 400);
-  await vault("POST", "/api/secrets", { name: n, value: v });
+  const project = scopeProject(scope, wsId);
+  await vault("POST", "/api/secrets", { name: n, value: v, ...(project ? { workspace_id: project } : {}) });
   forget();
   for (const botId of botIds) grantKey(n, botId, true);
   return n;
 }
 
-/** Take a key out of the vault, and from every bot that could use it. */
-export async function removeKey(name: string) {
+/**
+ * Take a key out of the vault (this workspace's, or the one for all workspaces), and from every bot that
+ * can't use one by that name any more.
+ */
+export async function removeKey(name: string, scope: KeyScope = "all", wsId?: string) {
   const n = keyName(name);
   if (!keyProvider(n)) throw new KeysError("No such key.", 404);
-  await vault("DELETE", `/api/secrets/${encodeURIComponent(n)}`);
+  const project = scopeProject(scope, wsId);
+  await vault("DELETE", `/api/secrets/${encodeURIComponent(n)}${project ? `?workspace_id=${encodeURIComponent(project)}` : ""}`);
   forget();
+  // A bot keeps a name another scope still has for its workspace.
+  const scoped = (getState().workspaces ?? []).some((w) => w.orgoProjectId);
+  const left = scoped ? await listKeys({ fresh: true }).catch(() => [] as VaultKey[]) : [];
   update((s) => {
     for (const b of s.bots) {
+      if (keysOf(left, workspaceOf(b)).some((k) => k.name === n)) continue;
       if (!b.keys?.includes(n)) continue;
       const rest = b.keys.filter((k) => k !== n);
       b.keys = rest.length ? rest : undefined;
@@ -168,11 +206,12 @@ export async function removeKey(name: string) {
  * Orgo limits how often and logs each one (POST /api/secrets/reveal). The value goes straight back to the
  * window: it isn't cached, kept in the state, logged, or offered to a bot or a model.
  */
-export async function revealKey(name: string): Promise<{ name: string; value: string }> {
+export async function revealKey(name: string, scope: KeyScope = "all", wsId?: string): Promise<{ name: string; value: string }> {
   const n = keyName(name);
   if (!keyProvider(n)) throw new KeysError("No such key.", 404);
+  const project = scopeProject(scope, wsId);
   try {
-    const { json } = await vault<{ value?: unknown }>("POST", "/api/secrets/reveal", { name: n });
+    const { json } = await vault<{ value?: unknown }>("POST", "/api/secrets/reveal", { name: n, ...(project ? { workspace_id: project } : {}) });
     if (typeof json.value !== "string") throw new KeysError("Orgo didn't send the key. Try again.", 502);
     return { name: n, value: json.value };
   } catch (e) {
@@ -210,7 +249,7 @@ export function keyGrants(): Record<string, string[]> {
 export async function usableKeys(b: Bot): Promise<KeyProvider[]> {
   if (!b.keys?.length) return [];
   const set = await Promise.race([listKeys().catch(() => [] as VaultKey[]), new Promise<VaultKey[]>((r) => setTimeout(() => r([]), 4000))]);
-  const names = new Set(set.map((k) => k.name));
+  const names = new Set(keysOf(set, workspaceOf(b)).map((k) => k.name));
   return b.keys.filter((k) => names.has(k)).map((k) => keyProvider(k)!).filter(Boolean);
 }
 
@@ -218,14 +257,19 @@ export async function usableKeys(b: Bot): Promise<KeyProvider[]> {
 
 export const KEY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 export type KeyMethod = (typeof KEY_METHODS)[number];
-export type KeyCall = { name: string; method: KeyMethod; path: string; query?: Record<string, unknown> | null; body?: unknown };
+export type KeyCall = { name: string; method: KeyMethod; path: string; query?: Record<string, unknown> | null; body?: unknown; workspaceId?: string };
 export type KeyAnswer = { status: number; contentType: string | null; body: unknown; truncated: boolean; headers: Record<string, string> };
 
 /** One call through Orgo's broker: Orgo adds the key and sends it to the provider. Throws with plain words when Orgo didn't send it. */
 export async function callKey(c: KeyCall): Promise<KeyAnswer> {
   const p = keyProvider(c.name);
   const label = p?.label ?? c.name;
-  const { status, json } = await vault<KeyAnswer & { error?: unknown }>("POST", "/api/secrets/call", { name: c.name, method: c.method, path: c.path, query: c.query ?? null, body: c.body ?? null }, 35_000);
+  const { status, json } = await vault<KeyAnswer & { error?: unknown }>(
+    "POST",
+    "/api/secrets/call",
+    { name: c.name, method: c.method, path: c.path, query: c.query ?? null, body: c.body ?? null, ...(c.workspaceId ? { workspace_id: c.workspaceId } : {}) },
+    35_000,
+  );
   if (status === 200) return json;
   const said = typeof json.error === "string" ? json.error : "";
   if (status === 404) {
@@ -341,7 +385,8 @@ export async function callApi(
   const did = `Called ${p.label} ${method} ${shown}`;
   const run = async (): Promise<CallApiDone> => {
     try {
-      const r = await callKey({ name, method, path, query: q.v as Record<string, unknown> | null, body: body.v });
+      // The bot's workspace: Orgo uses its own key by that name, else the account's.
+      const r = await callKey({ name, method, path, query: q.v as Record<string, unknown> | null, body: body.v, workspaceId: keysProject(workspaceOf(b)) });
       // Orgo sent it, but the service said no (a refund already made, a page not found): not done.
       if (r.status >= 400) return { text: answerForBot(p.label, r), brought: answerTextOf(r), failed: { did, why: `${p.label} answered ${r.status}` } };
       return { text: answerForBot(p.label, r), did, brought: answerTextOf(r) };

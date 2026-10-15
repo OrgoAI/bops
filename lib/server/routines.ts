@@ -1,13 +1,14 @@
 import "server-only";
 import { readlinkSync } from "node:fs";
 import { trackServerEvent } from "./analytics";
-import { botChatId, live, procedureNamed, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type Schedule, type Session } from "@/lib/types";
+import { botChatId, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type Schedule, type Session } from "@/lib/types";
 import { clampEvery, describeSchedule as describe, nextRun, parseClock, resolveOnce, whenText } from "@/cloud/schedule";
 import { plainLinks } from "@/cloud/style";
 import { pingIfWorthIt } from "./attention";
 import { onPostgres } from "./persist";
 import { startSession } from "./sessions";
 import { addMessage, bot, getState, id, ownerName, patchSession, session, stateReady, update } from "./store";
+import { findSkill, skillRefId } from "./workspace-skills";
 
 /**
  * Routines and scheduled asks. Each one belongs to a bot. When one comes due it's a reminder (a message
@@ -136,12 +137,11 @@ function tidy(schedule: Schedule): { schedule?: Schedule; error?: string } {
   return { error: "That isn't a schedule Bops knows." };
 }
 
-/** A procedure of the bot's, by id or name (found the way read_procedure finds one: procedureNamed): its id. */
-const procedureOf = (botId: string, nameOrId: string): string | undefined =>
-  procedureNamed(
-    (getState().procedures ?? []).filter((p) => p.botId === botId),
-    nameOrId,
-  )?.id;
+/** A skill of the bot's, by slug, its id from before as a procedure, or its name (as read_skill finds one): how the routine names it. */
+const procedureOf = (botId: string, nameOrId: string): string | undefined => {
+  const r = findSkill(botId, nameOrId);
+  return r ? skillRefId(r) : undefined;
+};
 
 /** A delivery the routine can use: a channel link that's there. */
 function checkDelivery(d: Delivery | undefined): string | undefined {
@@ -198,7 +198,7 @@ export function createRoutine(botId: string, title: string, goal: string, schedu
   const bad = checkDelivery(opts.deliverTo);
   if (bad) return { error: bad };
   const procedure = opts.procedure?.trim() ? procedureOf(botId, opts.procedure) : undefined;
-  if (opts.procedure?.trim() && !procedure) return { error: `No procedure called "${opts.procedure.trim()}".` };
+  if (opts.procedure?.trim() && !procedure) return { error: `No skill called "${opts.procedure.trim()}".` };
   const reminder = opts.reminder?.trim() || undefined;
   const r: Routine = {
     id: id("rtn"),
@@ -265,7 +265,7 @@ export function editRoutine(
   let procedure: string | undefined;
   if ("procedure" in patch && patch.procedure?.trim()) {
     procedure = procedureOf(r.botId, patch.procedure);
-    if (!procedure) return { error: `No procedure called "${patch.procedure.trim()}".` };
+    if (!procedure) return { error: `No skill called "${patch.procedure.trim()}".` };
   }
   if (patch.title !== undefined && !patch.title.trim()) return { error: "A routine needs a title." };
   if (patch.goal !== undefined && !patch.goal.trim()) return { error: "A routine needs something to do." };
@@ -755,7 +755,6 @@ export function routinesNote(botIds: string[]) {
   const owner = ownerName();
   const now = Date.now();
   const tz = routineZone();
-  const procedures = getState().procedures ?? [];
   const line = (r: Routine) =>
     [
       `${r.id}: "${r.title}"${botIds.length > 1 ? ` (${bot(r.botId)?.name ?? r.botId})` : ""}`,
@@ -767,7 +766,7 @@ export function routinesNote(botIds: string[]) {
           : `task, runs ${r.where && r.where !== "auto" ? `on ${r.where === "mac" ? `${owner}'s Mac` : "the cloud computer"}` : "where Bops picks"}`,
       r.quiet ? "quiet (posts only when something needs the user)" : "",
       deliverText(r),
-      r.procedure ? `follows procedure "${procedures.find((p) => p.id === r.procedure)?.name ?? r.procedure}"` : "",
+      r.procedure ? `follows skill "${findSkill(r.botId, r.procedure)?.name ?? r.procedure}"` : "",
       r.fromOutside ? `set up by ${r.fromOutside}, not ${owner}` : "",
       // A one-off is done once its time has passed (Run now before then doesn't finish it).
       r.enabled ? (r.nextRunAt ? `next ${inSentence(whenText(r.nextRunAt, now, tz))}` : "") : r.schedule.kind === "once" && r.schedule.at <= now ? "done" : "paused",

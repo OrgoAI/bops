@@ -71,7 +71,7 @@ function migrate(raw: Record<string, unknown>): AppState {
   }
   state.sessions ??= [];
   state.routines ??= [];
-  // Each bot's procedures (lib/server/procedures.ts): none on a state from before them.
+  // Each bot's procedures from before skills: moved into its workspace's skills when there's somewhere to keep them (workspace-skills.ts).
   state.procedures ??= [];
   state.host ??= "orgo";
   state.owner ??= { name: "" };

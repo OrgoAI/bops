@@ -1,4 +1,4 @@
-import { KEY_PROVIDERS, KeysError, grantKey, keyGrants, listKeys, saveKey } from "@/lib/server/keys";
+import { KEY_PROVIDERS, KeysError, grantKey, keyGrants, keysOf, keysProject, listKeys, saveKey } from "@/lib/server/keys";
 import { notReady } from "@/lib/server/ready";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 
@@ -12,33 +12,41 @@ const notFromWindow = (request: Request) => (fromBopsWindow(request) ? null : Re
 
 const failed = (e: unknown) => Response.json({ error: (e as Error).message }, { status: e instanceof KeysError ? e.status : 500 });
 
-/** The services Bops can call, the keys set in the user's Orgo vault (names only) and which bots may use each. */
+const scopeOf = (v: unknown) => (v === "workspace" ? "workspace" : "all");
+
+/**
+ * The services Bops can call, the keys set in the user's Orgo vault that the current workspace sees (names
+ * only: the account's, scope "all", and its own, scope "workspace") and which bots may use each.
+ * `workspaceKeys`: whether this workspace can have keys of its own (it has its own Orgo workspace).
+ */
 export async function GET(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
   if (unready) return unready;
   const providers = KEY_PROVIDERS.map(({ name, label, where, tip, readOnly }) => ({ name, label, where, tip, readOnly: !!readOnly }));
   const grants = keyGrants();
+  const workspaceKeys = !!keysProject();
   try {
-    const keys = (await listKeys({ fresh: new URL(request.url).searchParams.has("fresh") })).map((k) => ({
+    const keys = keysOf(await listKeys({ fresh: new URL(request.url).searchParams.has("fresh") })).map((k) => ({
       ...providers.find((p) => p.name === k.name)!,
       updatedAt: k.updatedAt,
+      scope: k.workspaceId ? "workspace" : "all",
       bots: grants[k.name] ?? [],
     }));
-    return Response.json({ signedIn: true, keys, providers });
+    return Response.json({ signedIn: true, keys, providers, workspaceKeys });
   } catch (e) {
-    if (e instanceof KeysError && e.status === 401) return Response.json({ signedIn: false, keys: [], providers, error: e.message });
+    if (e instanceof KeysError && e.status === 401) return Response.json({ signedIn: false, keys: [], providers, workspaceKeys, error: e.message });
     return failed(e);
   }
 }
 
-/** Save a key to the user's Orgo vault (it isn't kept here, or sent back), and let `botIds` use it. */
+/** Save a key to the user's Orgo vault (it isn't kept here, or sent back), for all workspaces or this one (`scope`), and let `botIds` use it. */
 export async function POST(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
   if (unready) return unready;
-  const b = (await request.json().catch(() => ({}))) as { name?: unknown; value?: unknown; botIds?: unknown };
+  const b = (await request.json().catch(() => ({}))) as { name?: unknown; value?: unknown; botIds?: unknown; scope?: unknown };
   const botIds = Array.isArray(b.botIds) ? b.botIds.filter((x): x is string => typeof x === "string") : [];
   try {
-    return Response.json({ ok: true, name: await saveKey(String(b.name ?? ""), typeof b.value === "string" ? b.value : "", botIds) });
+    return Response.json({ ok: true, name: await saveKey(String(b.name ?? ""), typeof b.value === "string" ? b.value : "", botIds, scopeOf(b.scope)) });
   } catch (e) {
     return failed(e);
   }

@@ -9,7 +9,7 @@ import { executorKey } from "./cloud";
 import { codexPath, findCodex } from "./codex-cli";
 import { codexInSandbox, installDir, remotePort, SANDBOX_EXEC, sandboxArgs } from "./executor-sandbox";
 import { closeMirrors, mirroredTarget } from "./mirror";
-import { writeSkillFiles } from "./procedures";
+import { writeSkillFiles } from "./workspace-skills";
 import { userChrome, userHome } from "./store";
 import { bopsHome, chromeRoot } from "./user-paths";
 
@@ -323,7 +323,7 @@ export function prepareTaskDir(sessionId: string, dir = taskDir(sessionId)) {
  * Start `codex exec-server` for one Mac task; it dials out to OpenAI and runs the agent's tools here,
  * in the sandbox (executorCommand), or without it with `fullAccess`. It runs on Bops' executor key alone (CODEX_API_KEY, from Bops Cloud),
  * so Codex never uses the user's ChatGPT sign-in or their Codex settings for it.
- * `botId`: the bot whose procedures go in the task's skills folder as SKILL.md files (procedures.ts
+ * `botId`: the bot whose skills go in the task's skills folder as their folders (workspace-skills.ts
  * writeSkillFiles), fresh each run, so Codex finds them as skills. A folder it can't write costs the task nothing.
  */
 export async function startExecutor(sessionId: string, envId: string, remoteUrl: string, port: number, dir = taskDir(sessionId), fullAccess = false, botId?: string): Promise<ChildProcess> {
