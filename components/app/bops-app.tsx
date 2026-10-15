@@ -621,6 +621,20 @@ function Bops({ state }: { state: AppState | null }) {
             onMembers={() => setMembers(true)}
             onOpenWatch={showWatch}
             onOpenMemory={openMemory}
+            menuActions={{
+              onChat: (id) => openChat(botChatId(id)),
+              onCall: (id) => {
+                openChat(botChatId(id));
+                setCall(id);
+              },
+              onComputer: openComputer,
+              onProfile: (id, section) => openProfile(id, section),
+              // Its chat, with the composer focused for the task (once the chat is on screen).
+              onNewTask: (id) => {
+                openChat(botChatId(id));
+                setTimeout(() => document.getElementById("composer")?.focus(), 60);
+              },
+            }}
           />
           {focus && crmFocus && crm ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
