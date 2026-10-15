@@ -1,8 +1,10 @@
 import "server-only";
 import { readlinkSync } from "node:fs";
 import { trackServerEvent } from "./analytics";
-import { botChatId, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type Schedule, type Session } from "@/lib/types";
-import { clampEvery, describeSchedule as describe, nextRun, parseClock, resolveOnce, whenText } from "@/cloud/schedule";
+import { botChatId, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
+import { appNameFor, tagsOf } from "@/lib/routine-catalog";
+import { describeSchedule as describe, EVENT_CHECK_MINUTES, eventWindow, nextRun, normalizeSchedule, resolveOnce, validTimeZone, whenText } from "@/cloud/schedule";
+import { cleanText, routineChanged, routineRan, syncRoutinesOnStart } from "./routine-sync";
 import { plainLinks } from "@/cloud/style";
 import { pingIfWorthIt } from "./attention";
 import { onPostgres } from "./persist";
@@ -17,8 +19,10 @@ import { findSkill, skillRefId } from "./workspace-skills";
  * result can also go to the user by text, email, or Slack, Telegram or Discord (deliverTo), and how its
  * last run went (and whether its result arrived) is kept on it (Routine.last).
  *
- * Times are the user's local time: Owner.timeZone, which this Mac keeps current, else this Mac's zone.
- * The math is in cloud/schedule.ts, so Bops Cloud can run the same schedules later.
+ * Times are wall clock times in the routine's own zone (Routine.timeZone) when it has one, else the
+ * user's: Owner.timeZone, which this Mac keeps current, else this Mac's zone. The math is in
+ * cloud/schedule.ts, so Bops Cloud can run the same schedules later. Each change and each run is also
+ * mirrored to the workspace's Orgo project when it has one (routine-sync.ts), never holding anything up.
  */
 
 /** The zone Node's dates and Intl use right now. */
@@ -43,8 +47,14 @@ function macZone(): string {
 /** The zone routines run in: the user's, as this Mac last saw it, else this Mac's own. */
 export const routineZone = () => getState().owner?.timeZone || macZone();
 
-/** A schedule in a few plain words, in the user's zone: "Weekdays at 9 AM", "Every 2 hours, 8 AM to 10 PM". */
-export const describeSchedule = (schedule: Schedule) => describe(schedule, routineZone());
+/** The zone a routine's times are in: its own (Routine.timeZone), else the user's. */
+export const zoneOf = (r: Pick<Routine, "timeZone">) => (r.timeZone && validTimeZone(r.timeZone) ? r.timeZone : routineZone());
+
+/** A schedule in a few plain words, in `tz` (else the user's zone): "Weekdays at 9 AM", "Every 2 hours, 8 AM to 10 PM". */
+export const describeSchedule = (schedule: Schedule, tz?: string) => describe(schedule, tz || routineZone());
+
+/** The gap between an "every" or meeting routine's runs, in ms; undefined for the rest. */
+const beatOf = (s: Schedule) => (s.kind === "every" ? s.minutes * 60_000 : s.kind === "before_event" ? EVENT_CHECK_MINUTES * 60_000 : undefined);
 
 /** A quiet run's answer when nothing needs the user. */
 export const isNothing = (text: string) => /^\s*NOTHING\.?\s*$/i.test(text);
@@ -82,8 +92,13 @@ const inSentence = (when: string) => when.replace(/^(Today|Tomorrow|Yesterday)\b
 function record(routineId: string, run: RoutineRun): RoutineRun {
   update((s) => {
     const r = s.routines.find((x) => x.id === routineId);
-    if (r) r.last = run;
+    if (!r) return;
+    r.last = run;
+    // A meeting routine's run that finished handled its window: the next one starts where it ended.
+    const w = run.status === "ok" || run.status === "quiet" ? eventWindow(r.schedule, run.at) : undefined;
+    if (w) r.eventsThrough = Math.max(r.eventsThrough ?? 0, w.to);
   });
+  routineRan(routineId, run);
   return run;
 }
 
@@ -99,42 +114,20 @@ function recordDelivery(routineId: string, at: number, delivery: RoutineRun["del
 /* ---------------- Making and changing them ---------------- */
 
 /**
- * A schedule as kept: times of day written "HH:MM", an "every" gap of at least MIN_EVERY_MINUTES, days
- * of the week that are days. Undefined, with what's wrong, when it can't run.
+ * A schedule as kept (cloud/schedule.ts normalizeSchedule): times of day written "HH:MM", sorted, each
+ * once, at most 6; an "every" gap of MIN_EVERY_MINUTES to a day; days of the week that are days; a
+ * day of the month; a meeting lead of 5 to 240 minutes. Undefined, with what's wrong, when it can't run.
  */
 function tidy(schedule: Schedule): { schedule?: Schedule; error?: string } {
-  const hhmm = (time: string) => {
-    const m = parseClock(time);
-    return m === undefined ? undefined : `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
-  };
-  const badTime = (time: unknown) => `"${String(time)}" isn't a time of day. Use 24 hour time, like 09:00.`;
-  if (!schedule || typeof schedule !== "object") return { error: "That isn't a schedule." };
-  if (schedule.kind === "once") return Number.isFinite(schedule.at) ? { schedule: { kind: "once", at: schedule.at } } : { error: "That isn't a time Bops can read." };
-  if (schedule.kind === "daily" || schedule.kind === "weekdays") {
-    const time = hhmm(schedule.time);
-    return time ? { schedule: { kind: schedule.kind, time } } : { error: badTime(schedule.time) };
-  }
-  if (schedule.kind === "weekly") {
-    const time = hhmm(schedule.time);
-    if (!time) return { error: badTime(schedule.time) };
-    if (!Number.isInteger(schedule.day) || schedule.day < 0 || schedule.day > 6) return { error: "The day of the week runs from 0 (Sunday) to 6 (Saturday)." };
-    return { schedule: { kind: "weekly", day: schedule.day, time } };
-  }
-  if (schedule.kind === "every") {
-    const out: Extract<Schedule, { kind: "every" }> = { kind: "every", minutes: clampEvery(schedule.minutes) };
-    if (schedule.hours) {
-      const from = hhmm(schedule.hours.from);
-      const to = hhmm(schedule.hours.to);
-      if (!from) return { error: badTime(schedule.hours.from) };
-      if (!to) return { error: badTime(schedule.hours.to) };
-      if (from !== to) out.hours = { from, to };
-    }
-    const days = [...new Set((schedule.days ?? []).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort();
-    if (schedule.days?.length && !days.length) return { error: "The days of the week run from 0 (Sunday) to 6 (Saturday)." };
-    if (days.length && days.length < 7) out.days = days;
-    return { schedule: out };
-  }
-  return { error: "That isn't a schedule Bops knows." };
+  const out = normalizeSchedule(schedule);
+  return "error" in out ? { error: out.error } : { schedule: out.schedule as Schedule };
+}
+
+/** A zone given for a routine: undefined (the user's), or one this runtime knows. */
+function checkZone(tz: string | undefined): { timeZone?: string; error?: string } {
+  const t = tz?.trim();
+  if (!t) return {};
+  return validTimeZone(t) ? { timeZone: t } : { error: `"${t}" isn't a time zone Bops knows. Use an IANA name, like America/New_York.` };
 }
 
 /** A skill of the bot's, by slug, its id from before as a procedure, or its name (as read_skill finds one): how the routine names it. */
@@ -162,6 +155,11 @@ type RoutineOpts = {
   procedure?: string;
   /** Set up on a turn someone else started: who it came from (Routine.fromOutside). */
   fromOutside?: string;
+  /** A starter it was made from (lib/server/routine-suggestions.ts), and the tags it sorts with. */
+  source?: RoutineSource;
+  tags?: string[];
+  /** The IANA zone its times are in; unset: the user's. */
+  timeZone?: string;
 };
 
 /**
@@ -179,9 +177,12 @@ export function createRoutine(botId: string, title: string, goal: string, schedu
   if (!bot(botId)) return { error: "No such bot." };
   const owner = ownerName();
   const outside = opts.fromOutside?.trim() || undefined;
-  if (outside && schedule?.kind === "every") return { error: `Only ${owner} can set up a routine that repeats through the day.` };
+  if (outside && (schedule?.kind === "every" || schedule?.kind === "before_event" || (schedule && "times" in schedule && (schedule.times?.length ?? 0) > 1)))
+    return { error: `Only ${owner} can set up a routine that repeats through the day.` };
   if (outside && opts.deliverTo) return { error: `Only ${owner} can have a routine's results sent by text, email, Slack, Telegram or Discord. Its results stay in this chat.` };
-  const tz = routineZone();
+  const zone = checkZone(opts.timeZone);
+  if (zone.error) return { error: zone.error };
+  const tz = zone.timeZone ?? routineZone();
   const now = Date.now();
   const tidied = tidy(schedule);
   if (!tidied.schedule) return { error: tidied.error };
@@ -203,9 +204,10 @@ export function createRoutine(botId: string, title: string, goal: string, schedu
   const r: Routine = {
     id: id("rtn"),
     botId,
-    title: title.trim() || goal.trim().slice(0, 40),
+    title: title.trim() || cleanText(goal.trim(), 40),
     goal,
     schedule: s,
+    ...(zone.timeZone ? { timeZone: zone.timeZone } : {}),
     enabled: true,
     nextRunAt,
     // Someone else's: in the cloud, as a task, posting every run (never quiet).
@@ -218,19 +220,23 @@ export function createRoutine(botId: string, title: string, goal: string, schedu
     ...(opts.deliverTo ? { deliverTo: opts.deliverTo } : {}),
     ...(procedure ? { procedure } : {}),
     ...(outside ? { fromOutside: outside.slice(0, 200) } : {}),
+    ...(!outside && opts.source ? { source: { app: opts.source.app, template: opts.source.template } } : {}),
+    ...(!outside && opts.tags?.length ? { tags: [...new Set(opts.tags.map((t) => t.trim()).filter(Boolean))].slice(0, 12) } : {}),
   };
   update((st) => st.routines.push(r));
   trackServerEvent("bops_routine_created", {});
+  routineChanged(r.botId);
   return { routine: r, ...(moved ? { moved: true } : {}) };
 }
 
 /**
- * Change a routine. A new schedule is checked like a new routine's ("once" times that passed are moved
- * or refused) and sets the next time; a field given as undefined clears it (deliverTo, procedure).
+ * Change a routine. A new schedule (any kind, whole) is checked like a new routine's ("once" times that
+ * passed are moved or refused) and sets the next time; so does a new zone (`timeZone`, undefined or ""
+ * for the user's). A field given as undefined clears it (deliverTo, procedure, timeZone).
  */
 export function editRoutine(
   routineId: string,
-  patch: Partial<Pick<Routine, "title" | "goal" | "schedule" | "quiet" | "deliverTo" | "run" | "procedure" | "where">>,
+  patch: Partial<Pick<Routine, "title" | "goal" | "schedule" | "quiet" | "deliverTo" | "run" | "procedure" | "where" | "timeZone">>,
 ): { routine?: Routine; error?: string; moved?: boolean } {
   const r = routine(routineId);
   if (!r) return { error: "No such routine." };
@@ -238,16 +244,21 @@ export function editRoutine(
   if (r.fromOutside && patch.run === "chat") return { error: `It was set up by ${r.fromOutside}, so it runs as a task in the cloud. Make a new routine to run it as a chat.` };
   // And in the cloud: its thread is marked as theirs, which never runs on the user's Mac (sessions.ts StartOptions.outside).
   if (r.fromOutside && patch.where === "mac") return { error: outsideStaysInCloud(r) };
-  const tz = routineZone();
+  // And at most once a day: a stranger's routine never repeats through the day (createRoutine).
+  if (r.fromOutside && (patch.schedule?.kind === "every" || patch.schedule?.kind === "before_event" || (patch.schedule && "times" in patch.schedule && (patch.schedule.times?.length ?? 0) > 1)))
+    return { error: `Only ${ownerName()} can set up a routine that repeats through the day.` };
+  const zone = "timeZone" in patch ? checkZone(patch.timeZone) : { timeZone: r.timeZone };
+  if (zone.error) return { error: zone.error };
+  const tz = zone.timeZone ?? routineZone();
   const now = Date.now();
   let schedule: Schedule | undefined;
   let nextRunAt = r.nextRunAt;
   let moved = false;
-  if (patch.schedule) {
-    const tidied = tidy(patch.schedule);
+  if (patch.schedule || ("timeZone" in patch && zone.timeZone !== r.timeZone)) {
+    const tidied = tidy(patch.schedule ?? r.schedule);
     if (!tidied.schedule) return { error: tidied.error };
     schedule = tidied.schedule;
-    if (schedule.kind === "once") {
+    if (schedule.kind === "once" && patch.schedule) {
       const at = resolveOnce(schedule.at, now, tz);
       if ("refused" in at) return { error: at.refused };
       schedule = { kind: "once", at: at.at };
@@ -276,12 +287,17 @@ export function editRoutine(
       r.schedule = schedule;
       r.nextRunAt = nextRunAt;
     }
+    if ("timeZone" in patch) {
+      if (zone.timeZone) r.timeZone = zone.timeZone;
+      else delete r.timeZone;
+    }
     if ("quiet" in patch) r.quiet = patch.quiet && !r.reminder ? true : undefined;
     if ("run" in patch) r.run = patch.run;
     if ("where" in patch) r.where = patch.where;
     if ("deliverTo" in patch) r.deliverTo = patch.deliverTo ?? undefined;
     if ("procedure" in patch) r.procedure = procedure;
   });
+  routineChanged(r.botId);
   return { routine: r, ...(moved ? { moved: true } : {}) };
 }
 
@@ -297,15 +313,17 @@ export function setRoutineEnabled(routineId: string, enabled: boolean): { error?
       r.enabled = false;
       r.nextRunAt = undefined;
     });
+    routineChanged(r.botId);
     return {};
   }
   const now = Date.now();
-  const next = r.schedule.kind === "once" ? (r.schedule.at > now ? r.schedule.at : undefined) : nextRun(r.schedule, now, routineZone(), r.lastRunAt);
+  const next = r.schedule.kind === "once" ? (r.schedule.at > now ? r.schedule.at : undefined) : nextRun(r.schedule, now, zoneOf(r), r.lastRunAt);
   if (next === undefined) return { error: r.schedule.kind === "once" ? "Its time has passed. Give it a new time to run it again." : "That schedule never comes due." };
   update(() => {
     r.enabled = true;
     r.nextRunAt = next;
   });
+  routineChanged(r.botId);
   return {};
 }
 
@@ -322,7 +340,9 @@ export function setRoutineWhere(routineId: string, where: "auto" | "cloud" | "ma
 }
 
 export function deleteRoutine(routineId: string) {
+  const botId = routine(routineId)?.botId;
   update((s) => (s.routines = s.routines.filter((x) => x.id !== routineId)));
+  if (botId) routineChanged(botId, { deleted: true });
 }
 
 /* ---------------- Running them ---------------- */
@@ -340,7 +360,7 @@ const isLate = (opts: RunOpts, at: number) => !opts.manual && opts.due !== undef
 /** "Routine · Every day at 9 AM", with "run now" when the user asked, or "late" and when it was due. */
 function chipText(r: Routine, opts: RunOpts) {
   const now = Date.now();
-  const tz = routineZone();
+  const tz = zoneOf(r);
   const how = opts.manual ? " · run now" : isLate(opts, now) ? ` · late, it was due ${inSentence(whenText(opts.due!, now, tz))}` : "";
   return `Routine · ${describe(r.schedule, tz)}${how}`;
 }
@@ -365,6 +385,9 @@ async function run(routineId: string, opts: RunOpts): Promise<RoutineRun> {
   if (!b) return record(r.id, { at, status: "skipped", error: "Its bot isn't there anymore." });
   if (opts.manual) update(() => (r.lastRunAt = at));
   if (r.reminder) return remind(r, b, at, opts);
+  // A meeting routine with no meetings left to handle (the runs before it got further, or it's outside its hours): nothing to ask.
+  const w = eventWindow(r.schedule, at, r.eventsThrough, zoneOf(r));
+  if (w && w.from >= w.to) return record(r.id, { at, status: "quiet" });
   // Someone else's routine is never a chat run (createRoutine, editRoutine), whatever its state says.
   if (r.run === "chat" && !r.fromOutside) return chatRun(r, b, at, opts);
   return taskRun(r, b, at, opts);
@@ -425,7 +448,7 @@ async function chatRun(r: Routine, b: Bot, at: number, opts: RunOpts): Promise<R
   record(r.id, { at, status: "running" });
   try {
     const { backgroundTurn } = await import("./chat");
-    const out = await backgroundTurn(b.id, { routineId: r.id, title: r.title, goal: r.goal, quiet: !!r.quiet, ...(r.procedure ? { procedureId: r.procedure } : {}) });
+    const out = await backgroundTurn(b.id, { routineId: r.id, title: r.title, goal: goalFor(r, at), quiet: !!r.quiet, ...(r.procedure ? { procedureId: r.procedure } : {}) });
     if (out.error) return failed(r, at, out.error, before);
     const answer = out.text?.trim() ?? "";
     const text = isNothing(answer) || (out.sessionId && r.quiet) ? "" : answer;
@@ -455,6 +478,23 @@ async function chatRun(r: Routine, b: Bot, at: number, opts: RunOpts): Promise<R
 }
 
 /**
+ * What a run is asked to do: the routine's goal, and for a meeting routine (before_event) the meetings
+ * this run handles: those starting in its window (cloud/schedule.ts eventWindow, from where the runs
+ * before it got to), with the clock times in the routine's zone, so every meeting is handled once.
+ */
+export function goalFor(r: Routine, at: number): string {
+  const w = eventWindow(r.schedule, at, r.eventsThrough, zoneOf(r));
+  if (!w) return r.goal;
+  const tz = zoneOf(r);
+  const clock = (ms: number) => new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" }).format(new Date(ms));
+  return [
+    r.goal,
+    `This run handles only the meetings in ${ownerName()}'s Google Calendar that start from ${clock(w.from)} up to but not including ${clock(w.to)} (${tz}; ${new Date(w.from).toISOString()} to ${new Date(w.to).toISOString()}). Earlier and later ones are handled by other runs.`,
+    "If no meeting starts then, answer exactly NOTHING and nothing else.",
+  ].join("\n\n");
+}
+
+/**
  * A run that failed: said in the bot's chat, recorded, and sent where its results go (a broken run isn't
  * silent). Failing the same way as the run before (an app still disconnected, the credit still used up)
  * is recorded, not said or sent again, so a routine every 15 minutes doesn't repeat it all day. Out of AI
@@ -476,7 +516,7 @@ function taskRun(r: Routine, b: Bot, at: number, opts: RunOpts): RoutineRun {
   const before = last?.sessionId ? session(last.sessionId) : undefined;
   if (before && live(before)) return record(r.id, { at, status: "skipped", error: "The last run was still going.", sessionId: before.id });
   const chatId = botChatId(b.id);
-  const goal = r.quiet ? `${r.goal}\n\nIf nothing needs ${ownerName()} this time, answer exactly NOTHING and nothing else.` : r.goal;
+  const goal = r.quiet ? `${goalFor(r, at)}\n\nIf nothing needs ${ownerName()} this time, answer exactly NOTHING and nothing else.` : goalFor(r, at);
   try {
     // Someone else's routine: its thread is marked as theirs (Session.fromOutside), as when they start one directly.
     const s = startSession({
@@ -519,7 +559,7 @@ export async function onRoutineTaskEnd(s: Session, answer: string | undefined, f
   const at = mine ? mine.at : Date.now();
   const chip = () => {
     if (r.quiet && !getState().messages.some((m) => m.chatId === s.chatId && m.sessionIds?.includes(s.id)))
-      addMessage({ chatId: s.chatId, role: "system", text: `Routine · ${describeSchedule(r.schedule)}`, sessionIds: [s.id] });
+      addMessage({ chatId: s.chatId, role: "system", text: `Routine · ${describeSchedule(r.schedule, zoneOf(r))}`, sessionIds: [s.id] });
   };
   if (failure) {
     const again = mine?.prevError === failure;
@@ -651,7 +691,7 @@ function keepZone() {
     // Times worked out in the old zone move to the new one; what's already due runs as it is.
     if (moved)
       for (const r of s.routines)
-        if (r.enabled && r.schedule.kind !== "once" && r.nextRunAt !== undefined && r.nextRunAt > now) r.nextRunAt = nextRun(r.schedule, now, zone, r.lastRunAt) ?? r.nextRunAt;
+        if (r.enabled && !r.timeZone && r.schedule.kind !== "once" && r.nextRunAt !== undefined && r.nextRunAt > now) r.nextRunAt = nextRun(r.schedule, now, zone, r.lastRunAt) ?? r.nextRunAt;
   });
 }
 
@@ -678,7 +718,8 @@ const LATE_NEXT_MS = 60 * 60_000;
 function skipLate(r: Routine, due: number, next: number | undefined, now: number) {
   if (r.schedule.kind === "once" || next === undefined || now - due <= 2 * 60_000) return false;
   if (r.last?.status === "skipped") return false;
-  return next - now < (r.schedule.kind === "every" ? (r.schedule.minutes * 60_000) / 2 : LATE_NEXT_MS);
+  const beat = beatOf(r.schedule);
+  return next - now < (beat !== undefined ? beat / 2 : LATE_NEXT_MS);
 }
 
 /**
@@ -690,9 +731,10 @@ function skipLate(r: Routine, due: number, next: number | undefined, now: number
 function tick() {
   if (!stateReady()) return;
   keepZone();
+  syncRoutinesOnStart();
   const now = Date.now();
-  const tz = routineZone();
   for (const r of getState().routines.filter((x) => x.enabled)) {
+    const tz = zoneOf(r);
     if (r.nextRunAt === undefined) {
       const next = r.schedule.kind === "once" ? (r.schedule.at > now ? r.schedule.at : undefined) : nextRun(r.schedule, now, tz, r.lastRunAt);
       if (next === undefined) pauseStuck(r, r.schedule.kind === "once" ? "its time had already passed when it was set, so it never ran. Give it a new time." : "its schedule never comes due.");
@@ -701,7 +743,7 @@ function tick() {
     }
     if (r.nextRunAt > now) continue;
     const due = r.nextRunAt;
-    const next = r.schedule.kind === "once" ? undefined : nextRun(r.schedule, now, tz, r.schedule.kind === "every" ? due : undefined);
+    const next = r.schedule.kind === "once" ? undefined : nextRun(r.schedule, now, tz, beatOf(r.schedule) !== undefined ? due : undefined);
     if (skipLate(r, due, next, now)) {
       update(() => (r.nextRunAt = next));
       // A thread of the routine's still going (a login it waits on) stays its run: the next run waits for it, and its end is the routine's.
@@ -754,11 +796,12 @@ export function routinesNote(botIds: string[]) {
   if (!mine.length) return "Routines: none yet.";
   const owner = ownerName();
   const now = Date.now();
-  const tz = routineZone();
-  const line = (r: Routine) =>
-    [
+  const line = (r: Routine) => {
+    const tz = zoneOf(r);
+    return [
       `${r.id}: "${r.title}"${botIds.length > 1 ? ` (${bot(r.botId)?.name ?? r.botId})` : ""}`,
       describe(r.schedule, tz),
+      r.timeZone ? `times in ${r.timeZone}` : "",
       r.reminder
         ? "reminder message"
         : r.run === "chat"
@@ -768,14 +811,26 @@ export function routinesNote(botIds: string[]) {
       deliverText(r),
       r.procedure ? `follows skill "${findSkill(r.botId, r.procedure)?.name ?? r.procedure}"` : "",
       r.fromOutside ? `set up by ${r.fromOutside}, not ${owner}` : "",
+      r.source ? `a starter for ${appWord(r.source.app)}` : "",
+      r.tags?.length ? `sorts with tags ${r.tags.join(", ")}` : "",
       // A one-off is done once its time has passed (Run now before then doesn't finish it).
       r.enabled ? (r.nextRunAt ? `next ${inSentence(whenText(r.nextRunAt, now, tz))}` : "") : r.schedule.kind === "once" && r.schedule.at <= now ? "done" : "paused",
       r.last ? lastText(r.last, now, tz) : "",
     ]
       .filter(Boolean)
       .join(" · ");
-  return `Routines (change them with manage_routine):\n${mine.map(line).join("\n")}`;
+  };
+  // The tags its routines sort with: the defaults and each workspace's own (Workspace.tags), so "what do you do every day" can say how.
+  const tagged = [...new Set(mine.filter((r) => r.tags?.length).map((r) => workspaceOf(bot(r.botId))))];
+  const tags = tagged.map((wsId) => {
+    const t = tagsOf(getState().workspaces?.find((w) => w.id === wsId));
+    return `Tags your routines sort with${tagged.length > 1 ? ` (${getState().workspaces?.find((w) => w.id === wsId)?.name ?? wsId})` : ""}: ${t.map((x) => `${x.name} (${x.description})`).join("; ")}.`;
+  });
+  return [`Routines (change them with manage_routine, its schedule and time zone too with action edit; when asked what you do on your own, say these in plain words):\n${mine.map(line).join("\n")}`, ...tags].join("\n");
 }
+
+/** A Connected App's or a key's name as the user knows it. */
+const appWord = (app: string) => appNameFor(app) ?? app;
 
 // The timer calls whatever version of tick was loaded last, so edits apply without a restart.
 g.__bopsRoutineTick = tick;

@@ -283,7 +283,7 @@ function Bops({ state }: { state: AppState | null }) {
     .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId))
     .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)))
     .filter((t) => t.kind !== "memory" || (memory && t.ws === currentWorkspace(state)))
-    // Autopilot shows its own workspace's bots only: another workspace's tab goes on a switch.
+    // Routines shows its own workspace's bots only: another workspace's tab goes on a switch.
     .filter((t) => (t.kind !== "autopilot" && t.kind !== "skills") || t.ws === currentWorkspace(state));
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
   if (recent.at(-1) !== active) {
@@ -397,7 +397,7 @@ function Bops({ state }: { state: AppState | null }) {
     );
   };
   /**
-   * What the bots do on their own (autopilot.tsx): the workspace's one Autopilot tab, switched to the
+   * What the bots do on their own (autopilot.tsx): the workspace's one Routines tab, switched to the
    * section asked for, at the row asked for, or opened.
    */
   const openAutopilot = (section: AutopilotSection, item?: string) => {
@@ -473,7 +473,7 @@ function Bops({ state }: { state: AppState | null }) {
 
   /**
    * Show a watched thing: its Mac window in Your Mac, the bot's screen it's on, or (a web page, which has
-   * no screen) its row on the Autopilot page. Seeing it clears its news.
+   * no screen) its row on the Routines page. Seeing it clears its news.
    */
   const showWatch = (w: Watch) => {
     if (w.page) openAutopilot("monitors", w.id);
@@ -721,6 +721,7 @@ function Bops({ state }: { state: AppState | null }) {
                       onOpenKeys={(keysFor) => openVault(keysFor)}
                       onOpenAutopilot={openAutopilot}
                       onOpenSkills={openSkills}
+                      onOpenWatch={showWatch}
                       onUpgrade={() => {
                         trackEvent("bops_upgrade_clicked", { surface: "bot_panel" });
                         setAccount(true);
@@ -777,11 +778,10 @@ function Bops({ state }: { state: AppState | null }) {
                     <div key={tab.id} className="motion-fade-in flex min-h-0 flex-1 flex-col">
                       <AutopilotPage
                         state={state}
-                        section={tab.section}
                         focus={tab.focus}
                         focusAt={tab.focusAt}
-                        onSection={(section) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "autopilot" ? { ...t, section, focus: undefined } : t)))}
                         onOpenWatch={showWatch}
+                        onOpenSkills={() => openSkills()}
                         onClose={() => leaveTab(tab.id)}
                       />
                     </div>

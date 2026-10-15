@@ -3,6 +3,7 @@
 import { Fragment, useEffect, useRef, useState, type AnimationEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
+import { appNameFor, canonicalApp, sameApp, templateById } from "@/lib/routine-catalog";
 import { DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Delivery, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
 import { Fold } from "./fold";
 import { Mascot } from "./mascot";
@@ -24,16 +25,19 @@ import {
   writeSectionOpen,
 } from "./side-group";
 import { watchName } from "./watch-overlay";
-import { CloseButton, currentWorkspace, post, teamOf, useNow } from "./ui";
+import { AppLogo, botApps } from "./apps";
+import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
+import { CloseButton, currentWorkspace, needsYou, post, teamOf, useNow } from "./ui";
 
 /*
- * Autopilot: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
+ * Routines: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
  * in the chat, or a task on a computer, at set times) and Monitors (watches: a bot's screen, a window on the
- * user's Mac, or a web page with no screen). How a bot does a kind of job is a skill now, on the Skills
- * page (skills.tsx), just below in the sidebar. In the
- * sidebar, a group pinned above Orbit with a section each that folds (AutopilotSections); on the right,
- * a page with every one of them, each opening in place with what can be done to it (AutopilotPage). Both
- * read the app's state (useAppState), so they're as current as everything else.
+ * user's Mac, or a web page with no screen). One bot owns each. How a bot does a kind of job is a skill
+ * now, on the Skills page (skills.tsx), just below in the sidebar. In the sidebar, a group pinned above
+ * Orbit with a section each that folds (AutopilotSections); on the right, a page with every bot's, grouped
+ * by bot and filtered by bot, Connected App or what needs the user, each opening in place with what can be
+ * done to it (AutopilotPage). A bot's own are on its profile too (routines.tsx). All read the app's state
+ * (useAppState), so they're as current as everything else. (Called Autopilot before; the code keeps the name.)
  */
 
 export type AutopilotSection = "schedules" | "monitors";
@@ -41,7 +45,7 @@ export type AutopilotSection = "schedules" | "monitors";
 /** Open the page on the right (bops-app.tsx): at a section, and at one of its rows. */
 export type AutopilotOpen = { section: AutopilotSection; focus?: string };
 
-const GROUP_NAME = "Autopilot";
+export const GROUP_NAME = "Routines";
 /** Where this Mac keeps what's folded here (side-group.tsx): each section open until folded, like the group. */
 const FOLDS = "autopilot";
 
@@ -93,6 +97,51 @@ export function trouble(r: Routine) {
   if (last?.status === "failed") return `The last run failed${last.error ? `: ${undash(last.error)}` : ""}`;
   if (last?.delivery?.status === "failed") return `Couldn't send it to ${last.delivery.to}${last.delivery.error ? `: ${undash(last.delivery.error)}` : ""}`;
   return null;
+}
+
+/**
+ * A schedule needs the user: its last run or delivery failed, or the run it started is waiting on them
+ * (an app action to approve, a sign-in, a question).
+ */
+export function scheduleNeedsYou(r: Routine, state: AppState) {
+  if (trouble(r)) return true;
+  const sid = r.last?.sessionId;
+  if (!sid) return false;
+  if (state.appApprovals?.some((a) => a.sessionId === sid)) return true;
+  const s = state.sessions.find((x) => x.id === sid);
+  return !!s && needsYou(s);
+}
+
+/** A monitor needs the user when its page couldn't be read (news is its own mark, New). */
+export const monitorNeedsYou = (w: Watch) => !!w.page?.error && !w.paused;
+
+/** A Connected App's or a key's name as the user knows it: from their accounts or the catalog ("Stripe"), else its slug, capitalized. */
+export function appNameOf(state: AppState, app: string) {
+  return state.accounts?.find((a) => a.app === app)?.appName ?? appNameFor(app) ?? app.replace(/[_-]+/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+}
+
+/** The Connected App a routine or monitor came from, as a small logo that says so on hover. */
+export function SourceMark({ state, app, size = 16 }: { state: AppState; app: string; size?: number }) {
+  const name = appNameOf(state, app);
+  return (
+    <span data-tip={`From ${name}`} aria-label={`From ${name}`} role="img" className="flex shrink-0">
+      <AppLogo app={app} name={name} size={size} />
+    </span>
+  );
+}
+
+/** Tags, as small chips. */
+export function TagChips({ tags }: { tags?: string[] }) {
+  if (!tags?.length) return null;
+  return (
+    <span className="flex flex-wrap gap-1">
+      {tags.map((t) => (
+        <span key={t} className="rounded-full bg-black/[0.05] px-2 py-0.5 text-[11.5px] leading-4 text-[#3A3A38]">
+          {t}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 const howWords = (r: Routine) => (r.reminder ? "A reminder" : r.run === "chat" ? "In the chat" : "On a computer");
@@ -417,45 +466,34 @@ function MonitorLine({ watch: w, onClick }: { watch: Watch; onClick: () => void 
 
 /* ---------------- The page ---------------- */
 
+/** Which of a list of schedules and monitors to show: one bot's, one Connected App's, only what needs the user. */
+export type RoutineFilter = { bot?: string; app?: string; needsYou?: boolean };
+
+/** The schedules and monitors a filter keeps (each list keeps its order). */
+export function filterRoutines(state: AppState, lists: { schedules: Routine[]; monitors: Watch[] }, f: RoutineFilter) {
+  return {
+    schedules: lists.schedules.filter((r) => (!f.bot || r.botId === f.bot) && (!f.app || (!!r.source && sameApp(r.source.app, f.app))) && (!f.needsYou || scheduleNeedsYou(r, state))),
+    monitors: lists.monitors.filter((w) => (!f.bot || w.botId === f.bot) && (!f.app || (!!w.source && sameApp(w.source.app, f.app))) && (!f.needsYou || monitorNeedsYou(w))),
+  };
+}
+
+/** The Connected Apps these came from, in the order first met. */
+export function sourceApps(lists: { schedules: Routine[]; monitors: Watch[] }) {
+  return [...new Set([...lists.schedules, ...lists.monitors].map((x) => x.source?.app).filter((a): a is string => !!a).map(canonicalApp))];
+}
+
 /**
- * Autopilot as a page on the right (one tab per workspace): a section at a time, every schedule or
- * monitor in it, each opening in place to say how it works and how it went, with what can be done
- * to it. `focus` opens one and brings it into view; `focusAt` is when it was asked for, so asking again
- * (it was closed since, or scrolled away) does it again.
+ * Open rows, one at a time, and the one asked for brought into view once it's there. `focus` opens one;
+ * `focusAt` is when it was asked for, so asking again (it was closed since, or scrolled away) does it again.
  */
-export function AutopilotPage({
-  state,
-  section,
-  focus,
-  focusAt,
-  onSection,
-  onOpenWatch,
-  onClose,
-}: {
-  state: AppState;
-  section: AutopilotSection;
-  focus?: string;
-  focusAt?: number;
-  onSection: (section: AutopilotSection) => void;
-  /** Show a watched screen or Mac window (bops-app.tsx showWatch). */
-  onOpenWatch: (w: Watch) => void;
-  onClose: () => void;
-}) {
-  // "Tomorrow 9 AM", "5m ago" stay current.
-  useNow(30_000);
-  const s = SECTIONS.find((x) => x.id === section) ?? SECTIONS[0];
-  const lists = autopilotOf(state);
-  const tz = state.owner?.timeZone;
+export function useOpenRow(focus: string | undefined, focusAt: number | undefined, there: boolean) {
   const [openId, setOpenId] = useState<string | null>(focus ?? null);
-  // A new ask from the sidebar opens the row asked for.
   const [asked, setAsked] = useState({ focus, focusAt });
   if (asked.focus !== focus || asked.focusAt !== focusAt) {
     setAsked({ focus, focusAt });
     if (focus) setOpenId(focus);
   }
   const list = useRef<HTMLDivElement>(null);
-  // ...and it comes into view, once it's there.
-  const there = !!focus && [...lists.schedules, ...lists.monitors].some((x) => x.id === focus);
   useEffect(() => {
     if (!there || !focus) return;
     const el = list.current?.querySelector<HTMLElement>(`[data-item="${CSS.escape(focus)}"]`);
@@ -471,42 +509,115 @@ export function AutopilotPage({
       el.removeEventListener("transitionend", opened);
     };
   }, [there, focus, focusAt]);
+  return { openId, toggle: (id: string) => setOpenId(openId === id ? null : id), list };
+}
 
-  const toggle = (id: string) => setOpenId(openId === id ? null : id);
-  const groups: { label?: string; rows: ReactNode[] }[] =
-    s.id === "schedules"
-      ? [
-          { label: "Coming up", items: lists.schedules.filter((r) => r.enabled) },
-          { label: "Paused", items: lists.schedules.filter((r) => !r.enabled && !done(r)) },
-          { label: "Done", items: lists.schedules.filter(done) },
-        ].map((g) => ({
-          label: g.label,
-          rows: g.items.map((r, n) => (
-            <ScheduleRow key={r.id} routine={r} state={state} tz={tz} last={n === g.items.length - 1} open={openId === r.id} onToggle={() => toggle(r.id)} />
-          )),
-        }))
-      : [
-          { label: "Watching", items: lists.monitors.filter((w) => !w.paused) },
-          { label: "Paused", items: lists.monitors.filter((w) => w.paused) },
-        ].map((g) => ({
-          label: g.label,
-          rows: g.items.map((w, n) => (
-            <MonitorRow
-              key={w.id}
-              watch={w}
-              state={state}
-              last={n === g.items.length - 1}
-              open={openId === w.id}
-              onToggle={() => {
-                // Opening a page's news is seeing it (a screen's is seen where it shows: Show it).
-                if (openId !== w.id && w.alert && w.page) void post("/api/watches", { id: w.id, action: "seen" }, "PATCH");
-                toggle(w.id);
-              }}
-              onShow={() => onOpenWatch(w)}
-            />
-          )),
-        }));
-  const shown = groups.filter((g) => g.rows.length);
+/** A pill that filters a page: dark while it's on. */
+export function FilterPill({ on, onClick, children }: { on: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      aria-pressed={on}
+      className={`flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 outline-none transition-colors duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] motion-reduce:transition-none ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/**
+ * Schedules then monitors, one card (on a page, or a bot's Routines): each row opens in place. Opening a
+ * page's news is seeing it (a screen's is seen where it shows: Show it).
+ */
+export function RoutineList({
+  state,
+  schedules,
+  monitors,
+  openId,
+  onToggle,
+  onOpenWatch,
+  className = "shadow-[0_0_0_1px_#ECECEA]",
+}: {
+  state: AppState;
+  schedules: Routine[];
+  monitors: Watch[];
+  openId: string | null;
+  onToggle: (id: string) => void;
+  onOpenWatch: (w: Watch) => void;
+  className?: string;
+}) {
+  const tz = state.owner?.timeZone;
+  const n = schedules.length + monitors.length;
+  if (!n) return null;
+  return (
+    <div className={`flex flex-col overflow-hidden rounded-2xl ${className}`}>
+      {schedules.map((r, i) => (
+        <ScheduleRow key={r.id} routine={r} state={state} tz={tz} last={i === n - 1} open={openId === r.id} onToggle={() => onToggle(r.id)} />
+      ))}
+      {monitors.map((w, i) => (
+        <MonitorRow
+          key={w.id}
+          watch={w}
+          state={state}
+          last={schedules.length + i === n - 1}
+          open={openId === w.id}
+          onToggle={() => {
+            if (openId !== w.id && w.alert && w.page) void post("/api/watches", { id: w.id, action: "seen" }, "PATCH");
+            onToggle(w.id);
+          }}
+          onShow={() => onOpenWatch(w)}
+        />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Routines as a page on the right (one tab per workspace): every bot's schedules and monitors, grouped
+ * by bot, each opening in place to say how it works and how it went, with what can be done to it.
+ * Filters: a bot, a Connected App they came from, and Needs you (a failed run or delivery, a run waiting
+ * on the user, a page that can't be read). How a bot does each kind of job is a skill: a link goes there.
+ */
+export function AutopilotPage({
+  state,
+  focus,
+  focusAt,
+  onOpenWatch,
+  onOpenSkills,
+  onClose,
+}: {
+  state: AppState;
+  focus?: string;
+  focusAt?: number;
+  /** Show a watched screen or Mac window (bops-app.tsx showWatch). */
+  onOpenWatch: (w: Watch) => void;
+  /** The Skills page, where procedures went. */
+  onOpenSkills: () => void;
+  onClose: () => void;
+}) {
+  // "Tomorrow 9 AM", "5m ago" stay current.
+  useNow(30_000);
+  const all = autopilotOf(state);
+  const [filter, setFilter] = useState<RoutineFilter>({});
+  const team = teamOf(state);
+  const shown = filterRoutines(state, all, filter);
+  // A row asked for that the filter hides: the filter goes, so it shows.
+  const [askedAt, setAskedAt] = useState(focusAt);
+  if (askedAt !== focusAt) {
+    setAskedAt(focusAt);
+    if (focus && ![...shown.schedules, ...shown.monitors].some((x) => x.id === focus)) setFilter({});
+  }
+  const there = !!focus && [...shown.schedules, ...shown.monitors].some((x) => x.id === focus);
+  const { openId, toggle, list } = useOpenRow(focus, focusAt, there);
+  const apps = sourceApps(all);
+  const needs = filterRoutines(state, all, { needsYou: true });
+  const needsN = needs.schedules.length + needs.monitors.length;
+  const total = all.schedules.length + all.monitors.length;
+  const owners = team.filter((b) => all.schedules.some((r) => r.botId === b.id) || all.monitors.some((w) => w.botId === b.id));
+  const groups = team
+    .map((b) => ({ bot: b, schedules: shown.schedules.filter((r) => r.botId === b.id), monitors: shown.monitors.filter((w) => w.botId === b.id) }))
+    .filter((g) => g.schedules.length + g.monitors.length);
+  const filtered = !!(filter.bot || filter.app || filter.needsYou);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
@@ -517,47 +628,74 @@ export function AutopilotPage({
           </span>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{GROUP_NAME}</span>
-            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">What your bots do on their own, and how they do it</span>
+            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
+              What your bots do on their own. How they do each kind of job is in{" "}
+              <button onClick={onOpenSkills} className="font-medium text-ink underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink">
+                Skills
+              </button>
+            </span>
           </div>
           <CloseButton onClick={onClose} className="mt-1.5" />
         </div>
 
-        <div className="flex flex-wrap gap-1.5">
-          {SECTIONS.map((x) => {
-            const on = x.id === s.id;
-            return (
-              <button
-                key={x.id}
-                onClick={() => !on && onSection(x.id)}
-                aria-pressed={on}
-                className={`flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 transition-colors duration-150 ease-out motion-reduce:transition-none ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}
-              >
-                {x.label}
-                <span className={`tabular-nums ${on ? "text-white/60" : "text-[#9A9A98]"}`}>{lists[x.id].length}</span>
-              </button>
-            );
-          })}
-        </div>
+        {total > 0 && (owners.length > 1 || apps.length > 0 || needsN > 0 || filtered) && (
+          <div className="flex flex-col gap-2">
+            {owners.length > 1 && (
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Bot">
+                <FilterPill on={!filter.bot} onClick={() => setFilter({ ...filter, bot: undefined })}>
+                  All bots
+                </FilterPill>
+                {owners.map((b) => (
+                  <FilterPill key={b.id} on={filter.bot === b.id} onClick={() => setFilter({ ...filter, bot: filter.bot === b.id ? undefined : b.id })}>
+                    <Mascot botId={b.id} color={b.color} size={14} antenna={false} />
+                    {b.name}
+                  </FilterPill>
+                ))}
+              </div>
+            )}
+            {(apps.length > 0 || needsN > 0 || filter.needsYou) && (
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Connected App and Needs you">
+                {(needsN > 0 || filter.needsYou) && (
+                  <FilterPill on={!!filter.needsYou} onClick={() => setFilter({ ...filter, needsYou: !filter.needsYou })}>
+                    Needs you
+                    <span className={`tabular-nums ${filter.needsYou ? "text-white/60" : "text-[#9A9A98]"}`}>{needsN}</span>
+                  </FilterPill>
+                )}
+                {apps.map((a) => (
+                  <FilterPill key={a} on={filter.app === a} onClick={() => setFilter({ ...filter, app: filter.app === a ? undefined : a })}>
+                    <AppLogo app={a} name={appNameOf(state, a)} size={14} />
+                    {appNameOf(state, a)}
+                  </FilterPill>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
-        {/* Another section: its list fades in (the key), not the page around it. */}
-        <div ref={list} key={s.id} className="motion-fade-in flex flex-col gap-5">
-          {!shown.length ? (
+        <div ref={list} className="flex flex-col gap-5">
+          {!total ? (
             <div className="flex flex-col items-center gap-3 py-12 text-center">
               <Mascot botId="boppy" color="#0A0A0A" size={52} />
-              <span className="flex max-w-[320px] flex-col gap-1 text-[13.5px] leading-5">
-                <span className="text-[#6B6B6B]">{s.empty}</span>
-                <span className="text-[#9A9A98]">{s.how}</span>
+              <span className="flex max-w-[340px] flex-col gap-1 text-[13.5px] leading-5">
+                <span className="text-[#6B6B6B]">Ask a bot to do something on a schedule, or to watch a page</span>
+                <span className="text-[#9A9A98]">Try: every weekday at 8:30, summarize my inbox</span>
               </span>
             </div>
+          ) : !groups.length ? (
+            <div className="flex flex-col items-center gap-2 py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">
+              Nothing matches these filters
+              <button onClick={() => setFilter({})} className={small("plain")}>
+                Show all
+              </button>
+            </div>
           ) : (
-            shown.map((g) => (
-              <div key={g.label ?? "all"} className="flex flex-col gap-2">
-                {g.label && (
-                  <span className="px-1 text-[12px] font-medium leading-4 text-[#9A9A98]">
-                    {g.label} <span className="font-normal tabular-nums text-[#B0B0AD]">{g.rows.length}</span>
-                  </span>
-                )}
-                <div className="flex flex-col overflow-hidden rounded-2xl shadow-[0_0_0_1px_#ECECEA]">{g.rows}</div>
+            groups.map((g) => (
+              <div key={g.bot.id} className="flex flex-col gap-2">
+                <span className="flex items-center gap-1.5 px-1 text-[12px] font-medium leading-4 text-[#6B6B6B]">
+                  <Mascot botId={g.bot.id} color={g.bot.color} size={14} antenna={false} />
+                  {g.bot.name} <span className="font-normal tabular-nums text-[#B0B0AD]">{g.schedules.length + g.monitors.length}</span>
+                </span>
+                <RoutineList state={state} schedules={g.schedules} monitors={g.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} />
               </div>
             ))
           )}
@@ -644,6 +782,158 @@ function Words({ label, text }: { label: string; text: string }) {
   );
 }
 
+function AppName({ state, app }: { state: AppState; app: string }) {
+  const name = appNameOf(state, app);
+  return (
+    <span className="inline-flex items-center gap-1.5 align-top">
+      <AppLogo app={app} name={name} size={14} />
+      {name}
+    </span>
+  );
+}
+
+/** The zone a routine's times are in: its own (Routine.timeZone), else the owner's. */
+export const zoneOf = (r: Routine, ownerZone?: string) => (r as Routine & { timeZone?: string }).timeZone || ownerZone;
+
+/** What the When picker needs for a routine: its starter's suggested times, and whether its bot uses Google Calendar. */
+function whenContext(r: Routine, state: AppState) {
+  const bot = state.bots.find((b) => b.id === r.botId);
+  return {
+    presets: r.source?.template ? suggestedOf(templateById(r.source.template)) : undefined,
+    calendar: !!bot && botApps(state, bot).some((x) => sameApp(x.app, "googlecalendar")),
+  };
+}
+
+/** `timeZone` null: back on the owner's zone (the routine stops having its own). */
+type WhenEdit = { schedule?: Routine["schedule"]; timeZone?: string | null };
+
+/** When it runs, as picked: what changed from the routine's own (nothing when nothing did). */
+function useWhen(r: Routine, tz?: string) {
+  const [schedule, setSchedule] = useState<Cadence>(() => asCadence(r.schedule));
+  const was = zoneOf(r, tz);
+  const [zone, setZone] = useState(was);
+  const edit: WhenEdit = {
+    ...(!sameCadence(schedule, asCadence(r.schedule)) ? { schedule: asSchedule(tidy(schedule)) } : {}),
+    // The owner's own zone picked for a routine that had its own: it follows the owner again (wherever they travel), not pinned to it.
+    ...(zone && zone !== was ? { timeZone: zone === tz && r.timeZone ? null : zone } : {}),
+  };
+  return { schedule, setSchedule, zone, setZone, edit };
+}
+
+/**
+ * Change a schedule in place: its name, what it does, when it runs (CadencePicker) and whether it's
+ * quiet. Esc cancels (and only that), Cmd+Enter saves.
+ */
+function ScheduleEdit({
+  routine: r,
+  state,
+  tz,
+  busy,
+  error,
+  onSave,
+  onCancel,
+}: {
+  routine: Routine;
+  state: AppState;
+  tz?: string;
+  busy: boolean;
+  error: string | null;
+  onSave: (edit: { title?: string; goal?: string; quiet?: boolean } & WhenEdit) => void;
+  onCancel: () => void;
+}) {
+  const [title, setTitle] = useState(r.title);
+  const [goal, setGoal] = useState(r.goal);
+  const when = useWhen(r, tz);
+  const [quiet, setQuiet] = useState(!!r.quiet);
+  const ctx = whenContext(r, state);
+  const edit = {
+    ...(title.trim() && title.trim() !== r.title ? { title: title.trim() } : {}),
+    ...(goal.trim() && goal.trim() !== r.goal ? { goal: goal.trim() } : {}),
+    ...when.edit,
+    ...(quiet !== !!r.quiet ? { quiet } : {}),
+  };
+  const changed = Object.keys(edit).length > 0;
+  const field = "w-full rounded-xl bg-[#F7F7F6] px-3 py-2 text-[13px] leading-[18px] outline-none focus:bg-white focus:shadow-[0_0_0_1.5px_#0A0A0A]";
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (changed && !busy) onSave(edit);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          if (!busy) onCancel();
+        } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && changed && !busy) {
+          e.preventDefault();
+          onSave(edit);
+        }
+      }}
+      className="flex flex-col gap-2.5"
+    >
+      <label className="flex flex-col gap-1">
+        <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">Name</span>
+        <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} className={field} />
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">What it does</span>
+        <textarea value={goal} onChange={(e) => setGoal(e.target.value)} rows={3} className={`${field} resize-none`} />
+      </label>
+      <div className="flex flex-col gap-1">
+        <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">When</span>
+        <CadencePicker value={when.schedule} onChange={when.setSchedule} zone={when.zone} ownerZone={tz} onZone={when.setZone} presets={ctx.presets} calendar={ctx.calendar} disabled={busy} />
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <label className="flex items-center gap-2 text-[12.5px] leading-4 text-[#3A3A38]">
+          <input type="checkbox" checked={quiet} onChange={(e) => setQuiet(e.target.checked)} className="size-3.5 accent-[#0A0A0A]" />
+          Quiet: post only when there&rsquo;s something for you
+        </label>
+      </div>
+      <div className="-ml-2.5 flex items-center gap-0.5">
+        <button type="submit" disabled={!changed || busy} className="rounded-full bg-ink px-3 py-1 text-[12px] font-medium leading-4 text-white disabled:opacity-40">
+          {busy ? "Saving…" : "Save"}
+        </button>
+        <button type="button" onClick={onCancel} disabled={busy} className={small("plain")}>
+          Cancel
+        </button>
+      </div>
+      <ErrorLine text={error} />
+    </form>
+  );
+}
+
+/** Just when a schedule runs, changed in place on its When: Save, Cancel, Esc cancels, Cmd+Enter saves. */
+function WhenChange({ routine: r, state, tz, busy, onSave, onCancel }: { routine: Routine; state: AppState; tz?: string; busy: boolean; onSave: (edit: WhenEdit) => void; onCancel: () => void }) {
+  const when = useWhen(r, tz);
+  const ctx = whenContext(r, state);
+  const changed = Object.keys(when.edit).length > 0;
+  return (
+    <div
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!busy) onCancel();
+        } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && changed && !busy) {
+          e.preventDefault();
+          onSave(when.edit);
+        }
+      }}
+      className="flex flex-col gap-2 pt-0.5"
+    >
+      <CadencePicker value={when.schedule} onChange={when.setSchedule} zone={when.zone} ownerZone={tz} onZone={when.setZone} presets={ctx.presets} calendar={ctx.calendar} disabled={busy} />
+      <div className="-ml-2.5 flex items-center gap-0.5">
+        <button type="button" onClick={() => onSave(when.edit)} disabled={!changed || busy} className="rounded-full bg-ink px-3 py-1 text-[12px] font-medium leading-4 text-white disabled:opacity-40">
+          {busy ? "Saving…" : "Save"}
+        </button>
+        <button type="button" onClick={onCancel} disabled={busy} className={small("plain")}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function BotName({ bot }: { bot?: { id: string; name: string; color: string } }) {
   if (!bot) return <>A bot that&rsquo;s gone</>;
   return (
@@ -693,9 +983,14 @@ function ErrorLine({ text }: { text: string | null }) {
 }
 
 /** A schedule on the page: what it asks, its bot, when and how it runs, where results go, how its last run and delivery went; Run now, Pause or Resume, Delete. */
-function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { routine: Routine; state: AppState; tz?: string; last: boolean; open: boolean; onToggle: () => void }) {
-  const { busy, error, sure, setSure, removeButton, run, cancelRemove } = useActions(open);
+export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { routine: Routine; state: AppState; tz?: string; last: boolean; open: boolean; onToggle: () => void }) {
+  const { busy, error, setError, sure, setSure, removeButton, run, cancelRemove } = useActions(open);
+  const [editing, setEditing] = useState(false);
+  // Changing only when it runs, in place on its When.
+  const [changingWhen, setChangingWhen] = useState(false);
+  if (!open && changingWhen) setChangingWhen(false);
   const bad = trouble(r);
+  const zone = zoneOf(r, tz);
   const next = nextRunText(r, tz);
   const ran = r.last;
   const delivery = ran?.delivery;
@@ -703,9 +998,32 @@ function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { routine:
     <PageRow
       id={r.id}
       title={undash(r.title)}
-      line={`${describeSchedule(r.schedule, tz)} · ${nextWords(r, state.sessions, tz)}${r.quiet ? " · quiet" : ""}`}
+      line={`${describeSchedule(r.schedule, zone)} · ${nextWords(r, state.sessions, tz)}${r.quiet ? " · quiet" : ""}`}
       dim={!r.enabled}
-      end={bad && <TroubleDot tip={bad} />}
+      end={
+        (bad || r.source) && (
+          <>
+            {r.source && <SourceMark state={state} app={r.source.app} />}
+            {bad && <TroubleDot tip={bad} />}
+          </>
+        )
+      }
+      editing={
+        editing && (
+          <ScheduleEdit
+            routine={r}
+            state={state}
+            tz={tz}
+            busy={busy === "save"}
+            error={error}
+            onSave={async (edit) => (await run("save", "/api/routines", { id: r.id, edit }, "PATCH")) && setEditing(false)}
+            onCancel={() => {
+              setError(null);
+              setEditing(false);
+            }}
+          />
+        )
+      }
       last={last}
       open={open}
       onToggle={onToggle}
@@ -714,7 +1032,35 @@ function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { routine:
       <Facts
         rows={[
           ["Bot", <BotName key="bot" bot={state.bots.find((b) => b.id === r.botId)} />],
-          ["When", `${describeSchedule(r.schedule, tz)}${next ? `. Next: ${next}` : ""}`],
+          ["From", r.source && <AppName key="from" state={state} app={r.source.app} />],
+          ["Tags", r.tags?.length ? <TagChips key="tags" tags={r.tags} /> : ""],
+          [
+            "When",
+            changingWhen ? (
+              <WhenChange
+                key="when"
+                routine={r}
+                state={state}
+                tz={tz}
+                busy={busy === "save"}
+                onSave={async (edit) => (await run("save", "/api/routines", { id: r.id, edit }, "PATCH")) && setChangingWhen(false)}
+                onCancel={() => {
+                  setError(null);
+                  setChangingWhen(false);
+                }}
+              />
+            ) : (
+              <span key="when">
+                {`${describeSchedule(r.schedule, zone)}${next ? `. Next: ${next}` : ""}`}
+                {zone && zone !== tz ? <span className="text-[#9A9A98]">{` (${zone.split("/").pop()?.replace(/_/g, " ")} time)`}</span> : null}
+                {!done(r) && (
+                  <button onClick={() => setChangingWhen(true)} disabled={!!busy} className="ml-1.5 text-[12px] font-medium leading-4 text-ink underline-offset-2 outline-none hover:underline focus-visible:underline disabled:opacity-40">
+                    Change
+                  </button>
+                )}
+              </span>
+            ),
+          ],
           ["Runs", howWords(r)],
           ["Quiet", r.quiet ? "Yes: it posts only when there's something for you" : ""],
           ["Results go to", destinations(r, state)],
@@ -764,6 +1110,11 @@ function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { routine:
               {r.enabled ? "Pause" : "Resume"}
             </button>
           )}
+          {!r.reminder && (
+            <button onClick={() => setEditing(true)} disabled={!!busy} className={small("plain")}>
+              Edit
+            </button>
+          )}
           <button ref={removeButton} onClick={() => setSure(true)} disabled={!!busy} className={small("red")}>
             Delete
           </button>
@@ -775,7 +1126,7 @@ function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { routine:
 }
 
 /** A monitor on the page: its bot, what it watches (a page opens in the browser), what for, how often and when it last looked, its news or trouble; Show it, Check now, Pause or Resume, Stop. */
-function MonitorRow({ watch: w, state, last, open, onToggle, onShow }: { watch: Watch; state: AppState; last: boolean; open: boolean; onToggle: () => void; onShow: () => void }) {
+export function MonitorRow({ watch: w, state, last, open, onToggle, onShow }: { watch: Watch; state: AppState; last: boolean; open: boolean; onToggle: () => void; onShow: () => void }) {
   const { busy, error, sure, setSure, removeButton, run, cancelRemove } = useActions(open);
   // What Check now found when there was nothing new (a failure shows as the error).
   const [found, setFound] = useState<string | null>(null);
@@ -798,7 +1149,12 @@ function MonitorRow({ watch: w, state, last, open, onToggle, onShow }: { watch: 
       title={watchName(w)}
       line={undash(w.lookFor)}
       dim={!!w.paused || !!w.away}
-      end={w.alert ? <NewPill /> : page?.error && !w.paused ? <TroubleDot tip={`Couldn't read the page: ${undash(page.error)}`} /> : null}
+      end={
+        <>
+          {w.source && <SourceMark state={state} app={w.source.app} />}
+          {w.alert ? <NewPill /> : page?.error && !w.paused ? <TroubleDot tip={`Couldn't read the page: ${undash(page.error)}`} /> : null}
+        </>
+      }
       last={last}
       open={open}
       onToggle={onToggle}
@@ -806,6 +1162,7 @@ function MonitorRow({ watch: w, state, last, open, onToggle, onShow }: { watch: 
       <Facts
         rows={[
           ["Bot", <BotName key="bot" bot={state.bots.find((b) => b.id === w.botId)} />],
+          ["From", w.source && <AppName key="from" state={state} app={w.source.app} />],
           [
             "Watching",
             url ? (

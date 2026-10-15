@@ -1,20 +1,18 @@
 "use client";
 
-import { APP_LEVELS, botChatId, workBot, workspaceOf, type AppLevel, type AppState, type Bot, type Routine, type Watch } from "@/lib/types";
+import { APP_LEVELS, botChatId, workBot, workspaceOf, type AppLevel, type AppState, type Bot } from "@/lib/types";
 import { categoriesOpen, GROUP_NAME as ORBIT } from "@/lib/memory-categories";
 import { AppLogo, accountTitle, botApps } from "./apps";
-import { autopilotOf, AutopilotIcon, nextWords, RAN, trouble, type AutopilotSection } from "./autopilot";
 import { BotKeys } from "./keys";
 import { botSkills } from "./skills";
-import { since, undash } from "./side-group";
-import { watchName } from "./watch-overlay";
+import { undash } from "./side-group";
 
 /*
  * Skills: what a bot can do, on one screen of its profile (bot-panel.tsx). Its workspace's skills and apps
  * that it has (the same list as the Skills page, skills.tsx), the Connected Apps it may use and how far,
- * its API keys, what it does on its own (Autopilot), and what it can always do. Everything is read from
- * the app's state; opening a row goes where it's managed already (the Skills page, the Autopilot page, the
- * Vault, the chat's "Save as skill"). A group with nothing in it isn't shown: one quiet line at the end
+ * its API keys, and what it can always do. What it runs on its own is its Routines tab (routines.tsx).
+ * Everything is read from the app's state; opening a row goes where it's managed already (the Skills
+ * page, the Vault, the chat's "Save as skill"). A group with nothing in it isn't shown: one quiet line at the end
  * says how to add what's missing.
  */
 
@@ -29,7 +27,6 @@ export function BotSkills({
   onOpenChat,
   onOpenVault,
   onOpenKeys,
-  onOpenAutopilot,
   onOpenSkills,
 }: {
   state: AppState;
@@ -37,14 +34,11 @@ export function BotSkills({
   onOpenChat: (chatId: string) => void;
   onOpenVault: () => void;
   onOpenKeys: (botId: string) => void;
-  onOpenAutopilot: (section: AutopilotSection, item?: string) => void;
   /** The Skills page, at one of them ("skill:<slug>"). */
   onOpenSkills: (focus?: string) => void;
 }) {
-  const { schedules, monitors } = autopilotOf(state, b.id);
   const skills = botSkills(state, b);
   const apps = botApps(state, b);
-  const tz = state.owner?.timeZone;
   const keyed = !!b.keys?.length;
   const chat = () => onOpenChat(botChatId(b.id));
   // What's not set up yet, said once at the end instead of an empty card each.
@@ -93,18 +87,7 @@ export function BotSkills({
       )}
 
       {/* Its keys: the Vault's, on or off for this bot, as on Details. */}
-      {keyed && <BotKeys bot={b} onAdd={() => onOpenKeys(b.id)} className={GLASS} />}
-
-      {schedules.length + monitors.length > 0 && (
-        <Group title="Autopilot" count={schedules.length + monitors.length} icon={<AutopilotIcon size={13} />}>
-          {schedules.map((r, i) => (
-            <ScheduleRow key={r.id} routine={r} state={state} tz={tz} last={!monitors.length && i === schedules.length - 1} onClick={() => onOpenAutopilot("schedules", r.id)} />
-          ))}
-          {monitors.map((w, i) => (
-            <MonitorRow key={w.id} watch={w} last={i === monitors.length - 1} onClick={() => onOpenAutopilot("monitors", w.id)} />
-          ))}
-        </Group>
-      )}
+      {keyed && <BotKeys state={state} bot={b} onAdd={() => onOpenKeys(b.id)} className={GLASS} />}
 
       <div className={`flex w-full flex-col gap-2 rounded-2xl px-4 py-3 ${GLASS}`}>
         <span className="text-[13px] font-semibold leading-4">Built in</span>
@@ -155,12 +138,11 @@ function builtIn(state: AppState, b: Bot): string[] {
   ].filter(Boolean);
 }
 
-function Group({ title, count, icon, action, children }: { title: string; count: number; icon?: React.ReactNode; action?: { label: string; onClick: () => void }; children: React.ReactNode }) {
+function Group({ title, count, action, children }: { title: string; count: number; action?: { label: string; onClick: () => void }; children: React.ReactNode }) {
   return (
     <div className={`flex w-full flex-col rounded-2xl ${GLASS}`}>
       <div className="flex items-center justify-between px-4 pb-1 pt-[11px]">
         <span className="flex items-center gap-1.5 text-[13px] font-semibold leading-4">
-          {icon}
           {title}
           <span className="font-normal tabular-nums text-[#9A9A98]">{count}</span>
         </span>
@@ -175,28 +157,12 @@ function Group({ title, count, icon, action, children }: { title: string; count:
   );
 }
 
-/** A row that opens where the thing is managed: a name, a grey line, and a red one when something went wrong. */
-function Row({ title, line, bad, dim, last, onClick }: { title: string; line?: string; bad?: string | null; dim?: boolean; last: boolean; onClick: () => void }) {
+/** A row that opens where the thing is managed: a name and a grey line. */
+function Row({ title, line, dim, last, onClick }: { title: string; line?: string; dim?: boolean; last: boolean; onClick: () => void }) {
   return (
     <button onClick={onClick} className={`flex w-full flex-col px-4 py-[9px] text-left hover:bg-white/50 ${last ? "rounded-b-2xl pb-3" : "border-b border-black/[0.05]"}`}>
       <span className={`truncate text-[14px] leading-[18px] ${dim ? "text-[#9A9A98]" : "text-ink"}`}>{title}</span>
       {line && <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">{line}</span>}
-      {bad && <span className="truncate text-[12px] leading-4 text-[#B42318]">{bad}</span>}
     </button>
   );
-}
-
-/** A schedule: when it runs next (or Running now, Paused, Done), and how its last run went. */
-function ScheduleRow({ routine: r, state, tz, last, onClick }: { routine: Routine; state: AppState; tz?: string; last: boolean; onClick: () => void }) {
-  const bad = trouble(r);
-  const ran = !bad && r.last && r.last.status !== "running" ? `${RAN[r.last.status]} ${since(r.last.at)}` : "";
-  return <Row title={undash(r.title)} line={[nextWords(r, state.sessions, tz), ran].filter(Boolean).join(" · ")} bad={bad} dim={!r.enabled} last={last} onClick={onClick} />;
-}
-
-/** A monitor: what it looks for, then its news, or when it last looked; red when a page couldn't be read. */
-function MonitorRow({ watch: w, last, onClick }: { watch: Watch; last: boolean; onClick: () => void }) {
-  const checked = w.page?.checkedAt ?? w.readAt;
-  const status = w.paused ? "Paused" : w.alert ? `New: ${undash(w.alert.text)}` : checked ? `Checked ${since(checked)}` : "";
-  const bad = w.page?.error && !w.paused ? `Couldn't read the page: ${undash(w.page.error)}` : null;
-  return <Row title={watchName(w)} line={[undash(w.lookFor), status].filter(Boolean).join(" · ")} bad={bad} dim={!!w.paused || !!w.away} last={last} onClick={onClick} />;
 }

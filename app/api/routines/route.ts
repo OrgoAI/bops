@@ -13,7 +13,7 @@ const notFromWindow = (request: Request) => (fromBopsWindow(request) ? null : Re
 
 const bad = (error: string) => Response.json({ error }, { status: 400 });
 
-type Edit = Partial<Pick<Routine, "title" | "goal" | "schedule" | "quiet" | "deliverTo" | "run" | "procedure" | "where">>;
+type Edit = Partial<Pick<Routine, "title" | "goal" | "schedule" | "quiet" | "deliverTo" | "run" | "procedure" | "where" | "timeZone">>;
 
 /** Make a routine. A "once" time earlier today moves to tomorrow (`moved`); one further back is refused. */
 export async function POST(request: Request) {
@@ -30,6 +30,8 @@ export async function POST(request: Request) {
     quiet?: boolean;
     deliverTo?: Delivery | null;
     procedure?: string | null;
+    /** The IANA zone its times are in; unset or null: the user's. */
+    timeZone?: string | null;
   };
   const { botId, title, goal, schedule } = body;
   if (!botId || !goal?.trim() || !schedule) return bad("botId, goal and schedule required");
@@ -40,6 +42,7 @@ export async function POST(request: Request) {
     quiet: body.quiet === true,
     deliverTo: body.deliverTo ?? undefined,
     procedure: body.procedure ?? undefined,
+    timeZone: typeof body.timeZone === "string" ? body.timeZone : undefined,
   });
   if (made.error || !made.routine) return bad(made.error ?? "Couldn't make that routine.");
   return Response.json({ routine: made.routine, ...(made.moved ? { moved: true } : {}) });
@@ -48,7 +51,7 @@ export async function POST(request: Request) {
 /**
  * Change a routine: `{ id, enabled }` pauses or resumes it, `{ id, action: "run" }` runs it now (the
  * answer is how it started: a chat run or a task goes on after), `{ id, edit }` changes its fields (a
- * null deliverTo or procedure clears it).
+ * null deliverTo, procedure or timeZone clears it; a schedule is a whole one, of any kind).
  */
 export async function PATCH(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
@@ -65,7 +68,7 @@ export async function PATCH(request: Request) {
   }
   if (edit && typeof edit === "object") {
     const patch: Edit = {};
-    const keys = ["title", "goal", "schedule", "quiet", "deliverTo", "run", "procedure", "where"] as const;
+    const keys = ["title", "goal", "schedule", "quiet", "deliverTo", "run", "procedure", "where", "timeZone"] as const;
     for (const k of keys) if (k in edit) (patch as Record<string, unknown>)[k] = edit[k] ?? undefined;
     const done = editRoutine(id, patch);
     if (done.error || !done.routine) return bad(done.error ?? "Couldn't change that routine.");

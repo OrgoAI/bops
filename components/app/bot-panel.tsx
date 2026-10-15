@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { botChatId, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, onceDone, runningNow, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Routine, type Session } from "@/lib/types";
-import { describeSchedule, whenText } from "@/cloud/schedule";
+import { botChatId, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session, type Watch } from "@/lib/types";
 import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
 import { BotMemory } from "./bot-memory";
 import { BotSkills } from "./bot-skills";
 import type { AutopilotSection } from "./autopilot";
+import { AppRoutinesButton, BotRoutines, hasTemplates, routineCount, routinesFrom, RoutineSuggest, usePendingSuggest } from "./routines";
 import { BotKeys } from "./keys";
 import { ComputerSummary } from "./computer";
 import { Mascot } from "./mascot";
@@ -22,8 +22,8 @@ import { undash } from "./side-group";
 import { BOOK_A_CALL } from "@/lib/links";
 
 /** The parts of a bot's profile. Its computer has a tab of its own (see panel-tabs.tsx). */
-export type Section = "details" | "skills" | "memory" | "phone";
-const SECTIONS: Section[] = ["details", "skills", "memory", "phone"];
+export type Section = "details" | "skills" | "routines" | "memory" | "phone";
+const SECTIONS: Section[] = ["details", "skills", "routines", "memory", "phone"];
 
 export function BotPanel({
   state,
@@ -37,6 +37,7 @@ export function BotPanel({
   onOpenKeys,
   onOpenAutopilot,
   onOpenSkills,
+  onOpenWatch,
   onUpgrade,
   onClose,
 }: {
@@ -51,15 +52,24 @@ export function BotPanel({
   onOpenComputer: (botId: string) => void;
   /** Open Settings at Keys, to add a key for this bot. */
   onOpenKeys: (botId: string) => void;
-  /** Open the Autopilot page at a section, and at one of its rows (a schedule or monitor). */
+  /** Open the workspace's Routines page at a section, and at one of its rows (a schedule or monitor). */
   onOpenAutopilot: (section: AutopilotSection, item?: string) => void;
   /** Open the Skills page, at one of them ("skill:<slug>"). */
   onOpenSkills: (focus?: string) => void;
+  /** Show a watched screen or Mac window (bops-app.tsx showWatch). */
+  onOpenWatch: (w: Watch) => void;
   /** Open the plans (Account), where Pro and Max are bought. */
   onUpgrade: () => void;
   /** Leave the profile, back to where you were (its X; Esc does it too, see bops-app.tsx). */
   onClose: () => void;
 }) {
+  // The Connected App the Routines tab shows only, when it was opened from one (Details, Uses); per bot.
+  const [only, setOnly] = useState<{ bot: string; app: string | null }>({ bot: b.id, app: null });
+  const app = only.bot === b.id ? only.app : null;
+  const openRoutines = (forApp: string | null) => {
+    setOnly({ bot: b.id, app: forApp });
+    onTab("routines");
+  };
   // The way out, top right, as on the Vault and the Account sheet.
   const close = <CloseButton onClick={onClose} className="absolute right-4 top-4 bg-white/60" />;
   const tabs = (
@@ -67,7 +77,7 @@ export function BotPanel({
       {SECTIONS.map((t) => (
         <button
           key={t}
-          onClick={() => onTab(t)}
+          onClick={() => (t === "routines" ? openRoutines(null) : onTab(t))}
           className={`rounded-[10px] px-3 py-1.5 text-[14px] capitalize leading-[18px] ${
             tab === t ? (t === "details" ? "bg-white/70 font-medium text-ink shadow-[0_0_0_1px_#0000000F]" : "bg-[#EEEEEC] font-medium text-ink") : "text-[#6B6B6B] hover:text-ink"
           }`}
@@ -80,7 +90,8 @@ export function BotPanel({
   );
 
   // Each part fades in as it opens (motion-fade-in, opacity only); another bot's profile in the same tab just changes in place.
-  if (tab === "details") return <Details state={state} bot={b} tabs={tabs} close={close} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenComputer={onOpenComputer} onOpenKeys={onOpenKeys} onUpgrade={onUpgrade} />;
+  if (tab === "details")
+    return <Details state={state} bot={b} tabs={tabs} close={close} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenComputer={onOpenComputer} onOpenKeys={onOpenKeys} onOpenRoutines={openRoutines} onUpgrade={onUpgrade} />;
 
   return (
     <section className="motion-fade-in relative flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto bg-white px-5 py-4">
@@ -93,7 +104,10 @@ export function BotPanel({
         </div>
         {tabs}
       </div>
-      {tab === "skills" && <BotSkills state={state} bot={b} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenKeys={onOpenKeys} onOpenAutopilot={onOpenAutopilot} onOpenSkills={onOpenSkills} />}
+      {tab === "skills" && <BotSkills state={state} bot={b} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenKeys={onOpenKeys} onOpenSkills={onOpenSkills} />}
+      {tab === "routines" && (
+        <BotRoutines state={state} bot={b} app={app} onApp={(a) => setOnly({ bot: b.id, app: a })} onOpenAll={() => onOpenAutopilot("schedules")} onOpenWatch={onOpenWatch} />
+      )}
       {tab === "memory" && <BotMemory state={state} bot={b} onOpenThread={onOpenThread} />}
       {tab === "phone" && <Phone bot={b} />}
     </section>
@@ -118,6 +132,7 @@ function Details({
   onOpenVault,
   onOpenComputer,
   onOpenKeys,
+  onOpenRoutines,
   onUpgrade,
 }: {
   state: AppState;
@@ -128,6 +143,8 @@ function Details({
   onOpenVault: () => void;
   onOpenComputer: (botId: string) => void;
   onOpenKeys: (botId: string) => void;
+  /** This bot's Routines tab, showing one Connected App's only, or all. */
+  onOpenRoutines: (app: string | null) => void;
   onUpgrade: () => void;
 }) {
   const plan = usePhonePlan();
@@ -137,7 +154,6 @@ function Details({
   const emailRoom = plan.room && !b.email ? emailShort(plan.room.tier, plan.room.emails, { isPlanBot: planBot }) : null;
   // Max has room for this bot's email, which it gets when the user asks (Get an email).
   const emailOnAsk = !!plan.room && plan.room.tier === "max_bops" && !planBot && !b.email && !emailRoom;
-  const routines = state.routines.filter((r) => r.botId === b.id);
   const running = state.sessions.filter((s) => s.botId === b.id && live(s)).length;
   // The workspace's number belongs to its main bot; the other bots are reached through it.
   const line = state.workspaces?.find((w) => w.id === workspaceOf(b))?.line;
@@ -205,8 +221,8 @@ function Details({
       </div>
 
       <ComputerSummary state={state} bot={b} className={`w-full ${glass}`} onOpen={() => onOpenComputer(b.id)} />
-      <Uses state={state} bot={b} onOpenVault={onOpenVault} className={glass} />
-      <BotKeys bot={b} onAdd={() => onOpenKeys(b.id)} className={glass} />
+      <Uses state={state} bot={b} onOpenVault={onOpenVault} onOpenRoutines={onOpenRoutines} className={glass} />
+      <BotKeys state={state} bot={b} onAdd={() => onOpenKeys(b.id)} className={glass} />
 
       <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
         <div className="flex min-w-0 flex-1 flex-col">
@@ -292,20 +308,6 @@ function Details({
       <HowIWork key={b.id} bot={b} className={glass} />
 
       {(!b.isMain || sharesComputer(b)) && state.host !== "mac" && <ComputerChoice state={state} bot={b} className={glass} onUpgrade={onUpgrade} />}
-
-      <div className={`flex w-full flex-col rounded-2xl ${glass}`}>
-        <div className="flex items-center justify-between px-4 pb-1 pt-[11px]">
-          <span className="text-[13px] font-semibold leading-4">Routines and scheduled</span>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">Ask {b.name} to add one</span>
-        </div>
-        {routines.length === 0 ? (
-          <div className="px-4 pb-3.5 pt-1 text-[13px] leading-5 text-[#6B6B6B]">
-            Nothing scheduled. Try texting {b.name}: &ldquo;every weekday at 9, {b.isMain ? "send me a summary of what the team did" : "check on anything waiting"}.&rdquo;
-          </div>
-        ) : (
-          routines.map((r, i) => <RoutineRow key={r.id} routine={r} sessions={state.sessions} tz={state.owner?.timeZone} last={i === routines.length - 1} />)
-        )}
-      </div>
 
       <WhereToFind state={state} bot={b} />
 
@@ -862,94 +864,58 @@ function HowIWork({ bot: b, className }: { bot: Bot; className: string }) {
   );
 }
 
-/** A one-time routine whose time has passed: it's done, not paused (Run now before its time doesn't finish it). */
-const finished = (r: Routine) => onceDone(r);
-
-/** "today 3 PM" inside a sentence; a weekday or a date reads as it is. */
-const inSentence = (when: string) => when.replace(/^(Today|Tomorrow|Yesterday)\b/, (w) => w.toLowerCase());
-
-/** " · next tomorrow 9 AM" for a routine that's on; nothing for one that's off or done. */
-const nextRun = (r: Routine, tz?: string) => (r.enabled && r.nextRunAt ? ` · next ${inSentence(whenText(r.nextRunAt, Date.now(), tz))}` : "");
-
-/**
- * How a routine's last run went, in a few words: in red when the run failed or its result didn't reach
- * where it goes, with why. A quiet run that found nothing says so.
- */
-function lastRun(r: Routine, sessions: Session[], tz?: string): { text: string; bad: boolean } | null {
-  const l = r.last;
-  if (!l) return null;
-  const when = inSentence(whenText(l.at, Date.now(), tz));
-  if (l.status === "failed") return { text: `The last run failed${l.error ? `: ${undash(l.error)}` : ""}`, bad: true };
-  if (l.delivery?.status === "failed") return { text: `Couldn't send it to ${l.delivery.to}${l.delivery.error ? `: ${undash(l.delivery.error)}` : ""}`, bad: true };
-  // Running for real (runningNow): a record a restart left behind doesn't say so.
-  if (l.status === "running") return runningNow(r, sessions) ? { text: "Running now", bad: false } : { text: `Started ${when}`, bad: false };
-  if (l.status === "quiet") return { text: `Nothing to report · ${when}`, bad: false };
-  if (l.status === "skipped") return { text: `Skipped ${when}${l.error ? `: ${undash(l.error)}` : ""}`, bad: false };
-  return { text: `Ran ${when}${l.delivery?.status === "sent" ? ` · sent to ${l.delivery.to}` : ""}`, bad: false };
-}
-
-/** A routine on its bot's profile: when it runs and next, how its last run went; Delete on hover, and on or off. */
-function RoutineRow({ routine: r, sessions, tz, last }: { routine: Routine; sessions: Session[]; tz?: string; last: boolean }) {
-  const [error, setError] = useState<string | null>(null);
-  const ran = lastRun(r, sessions, tz);
-  const toggle = async () => {
-    setError(null);
-    const res = await post("/api/routines", { id: r.id, enabled: !r.enabled }, "PATCH").catch(() => null);
-    const out = res ? ((await res.json().catch(() => ({}))) as { error?: string }) : { error: "Couldn't reach Bops. Try again." };
-    if (!res?.ok || out.error) setError(undash(out.error ?? "That didn't work. Try again."));
-  };
-  return (
-    <div className={`group flex items-center gap-2.5 px-4 py-[9px] ${last ? "" : "border-b border-black/[0.05]"}`}>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <span className="truncate text-[14px] leading-[18px]">{r.title}</span>
-        <span className="text-[12px] leading-4 text-[#6B6B6B]">
-          {describeSchedule(r.schedule, tz)}
-          {nextRun(r, tz)}
-          {r.quiet ? " · quiet" : ""}
-        </span>
-        {ran && <span className={`text-[12px] leading-4 ${ran.bad ? "text-[#B42318]" : "text-[#9A9A98]"}`}>{ran.text}</span>}
-        {r.fromOutside && <span className="truncate text-[12px] leading-4 text-[#9A9A98]">Set up by {undash(r.fromOutside)}</span>}
-        {error && (
-          <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
-            {error}
-          </span>
-        )}
-      </div>
-      <button onClick={() => void post("/api/routines", { id: r.id }, "DELETE")} className="hidden text-[12px] text-[#9A9A98] hover:text-[#B42318] group-hover:block">
-        Delete
-      </button>
-      {finished(r) ? (
-        <span className="rounded-full bg-[#F2F2F0] px-2.5 py-0.5 text-[12px] leading-4 text-[#3A3A38]">Done</span>
-      ) : (
-        <button
-          onClick={() => void toggle()}
-          aria-label={r.enabled ? "Turn off" : "Turn on"}
-          className={`flex h-[22px] w-[38px] shrink-0 items-center rounded-full p-0.5 ${r.enabled ? "justify-end bg-ink" : "justify-start bg-[#D9D9D6]"}`}
-        >
-          <span className={`size-[18px] rounded-full ${r.enabled ? "bg-highlighter" : "bg-white"}`} />
-        </button>
-      )}
-    </div>
-  );
-}
-
 /* ---------------- What the bot uses, and where to find it ---------------- */
 
-/** The apps and logins this bot can use, at a glance; they're managed together in the Vault. */
-function Uses({ state, bot: b, onOpenVault, className }: { state: AppState; bot: Bot; onOpenVault: () => void; className: string }) {
+/**
+ * The apps and logins this bot can use, at a glance; they're managed together in the Vault. A Connected
+ * App with routines to offer opens them on its icon (routines.tsx), and one the bot runs routines from
+ * says how many: that opens its Routines tab at that app. A connect that just finished for this bot
+ * opens its routines here by itself.
+ */
+function Uses({ state, bot: b, onOpenVault, onOpenRoutines, className }: { state: AppState; bot: Bot; onOpenVault: () => void; onOpenRoutines: (app: string | null) => void; className: string }) {
   const apps = botApps(state, b);
   const logins = (state.vault ?? []).filter((l) => l.bots === "all" || l.bots.includes(b.id));
+  const anchors = useRef(new Map<string, HTMLElement>());
+  const [asked, setAsked] = useState<string | null>(null);
+  const suggest = usePendingSuggest(state, (s) => s.botId === b.id && apps.some((x) => x.app === s.app));
+  const popover = asked ?? suggest.pending?.app ?? null;
+  const tip = (x: (typeof apps)[number]) => `${x.appName}: ${x.accounts.map((a) => `${accountTitle(a.account)} (${a.level === "read" ? "read only" : "read & act"})`).join(", ")}`;
   return (
-    <button onClick={onOpenVault} className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left hover:bg-white/80 ${className}`}>
+    <div className={`flex w-full items-start gap-3 rounded-2xl px-4 py-3 ${className}`}>
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <span className="text-[13px] font-semibold leading-4">Uses</span>
         {apps.length || logins.length ? (
           <span className="flex flex-wrap items-center gap-1.5">
-            {apps.map((x) => (
-              <span key={x.app} title={`${x.appName}: ${x.accounts.map((a) => `${accountTitle(a.account)} (${a.level === "read" ? "read only" : "read & act"})`).join(", ")}`}>
-                <AppLogo app={x.app} name={x.appName} size={22} />
-              </span>
-            ))}
+            {apps.map((x) => {
+              const n = routinesFrom(state, b.id, x.app);
+              return (
+                <span key={x.app} className="flex items-center gap-1">
+                  {hasTemplates(x.app) ? (
+                    <AppRoutinesButton
+                      app={x.app}
+                      name={x.appName}
+                      size={22}
+                      label={`${tip(x)}. Add routines`}
+                      onClick={() => setAsked(x.app)}
+                      anchorRef={(el) => void (el ? anchors.current.set(x.app, el) : anchors.current.delete(x.app))}
+                    />
+                  ) : (
+                    <span title={tip(x)} className="flex">
+                      <AppLogo app={x.app} name={x.appName} size={22} />
+                    </span>
+                  )}
+                  {n > 0 && (
+                    <button
+                      onClick={() => onOpenRoutines(x.app)}
+                      aria-label={`${routineCount(n)} from ${x.appName}`}
+                      className="h-[22px] rounded-full bg-black/[0.05] px-2 text-[11.5px] tabular-nums leading-4 text-[#3A3A38] outline-none hover:bg-black/[0.08] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+                    >
+                      {routineCount(n)}
+                    </button>
+                  )}
+                </span>
+              );
+            })}
             {logins.map((l) => (
               <span key={l.id} title={`${l.username} on ${l.site}`} className="flex h-[22px] items-center gap-1 rounded-full bg-black/[0.05] px-2 text-[11.5px] leading-4">
                 <KeyIcon />
@@ -961,8 +927,23 @@ function Uses({ state, bot: b, onOpenVault, className }: { state: AppState; bot:
           <span className="text-[12px] leading-4 text-[#6B6B6B]">No apps or logins yet</span>
         )}
       </div>
-      <span className="shrink-0 text-[12px] font-medium leading-4 text-ink">Manage in Vault ›</span>
-    </button>
+      <button onClick={onOpenVault} className="shrink-0 text-[12px] font-medium leading-4 text-ink">
+        Manage in Vault ›
+      </button>
+      {popover && (
+        <RoutineSuggest
+          key={popover}
+          state={state}
+          app={popover}
+          botId={b.id}
+          anchor={() => anchors.current.get(popover) ?? null}
+          onClose={() => {
+            setAsked(null);
+            suggest.handled();
+          }}
+        />
+      )}
+    </div>
   );
 }
 

@@ -7,6 +7,7 @@ import { deleteInboxes } from "./mail";
 import { dropBotFromSkills } from "./workspace-skills";
 import { DEFAULT_UNDELETABLE, deleteOrgoWorkspace, WorkspaceError } from "./workspaces";
 import { orgo as orgoApi, OrgoError, perWorkspaceProjects } from "./orgo";
+import { routinesRemovedInWorkspace } from "./routine-sync";
 
 /** Delete one message from a chat. */
 export function deleteMessage(messageId: string) {
@@ -48,6 +49,8 @@ export async function deleteBot(botId: string, withWorkspace = false) {
   // Its email inboxes go too (they count against the AgentMail plan).
   await deleteInboxes(b);
   const chatId = botChatId(botId);
+  const wsId = workspaceOf(b);
+  const hadRoutines = getState().routines.some((r) => r.botId === botId);
   dropBotFromSkills(botId, workspaceOf(b));
   update((state) => {
     state.bots = state.bots.filter((x) => x.id !== botId);
@@ -64,6 +67,8 @@ export async function deleteBot(botId: string, withWorkspace = false) {
     for (const key of Object.keys(state.screens ?? {})) if (key.startsWith(`${botId}:`)) delete state.screens![key];
     if (state.takeover?.botId === botId) state.takeover = undefined;
   });
+  // Its routines go from the workspace's Orgo copy too (the bot is gone, so by its workspace).
+  if (hadRoutines) routinesRemovedInWorkspace(wsId);
 }
 
 /**

@@ -318,12 +318,19 @@ await check("the instructions have the new rules, said once, and none of the old
   const names = toolNames(typical);
   for (const n of ["web_search", "web_fetch", "read_skill", "create_skill", "update_skill", "schedule", "manage_routine", "watch", "start_task"]) assert.ok(names.includes(n), `has ${n}`);
   const tool = (n) => typical.tools.find((x) => x.name === n);
-  assert.deepEqual(tool("schedule").parameters.properties.schedule.properties.kind.enum, ["daily", "weekdays", "weekly", "every", "once"]);
+  assert.deepEqual(tool("schedule").parameters.properties.schedule.properties.kind.enum, ["daily", "weekdays", "weekly", "monthly", "every", "before_event", "once"]);
+  for (const k of ["times", "days", "day_of_month"]) assert.ok(k in tool("schedule").parameters.properties.schedule.properties, `schedule has ${k}`);
+  assert.ok("time_zone" in tool("schedule").parameters.properties);
+  assert.match(tool("schedule").parameters.properties.schedule.description, /8 AM and 5 PM on Mon, Wed, Fri" is weekly, times \["08:00","17:00"\], days \[1,3,5\]/);
+  assert.match(tool("schedule").parameters.properties.schedule.description, /"30 minutes before each meeting" is before_event, minutes 30/);
   assert.deepEqual(tool("schedule").parameters.properties.run.enum, ["chat", "task", null]);
   assert.deepEqual(tool("schedule").parameters.properties.deliver_to.enum, ["chat", "text", "email", "slack", "telegram", "discord", null]);
   assert.deepEqual(Object.keys(tool("schedule").parameters.properties), tool("schedule").parameters.required, "strict: every field required");
   assert.deepEqual(tool("schedule").parameters.properties.schedule.required, Object.keys(tool("schedule").parameters.properties.schedule.properties));
-  assert.deepEqual(tool("manage_routine").parameters.properties.action.enum, ["run_now", "pause", "resume", "delete", "run_on_mac", "run_in_cloud"]);
+  assert.deepEqual(tool("manage_routine").parameters.properties.action.enum, ["run_now", "pause", "resume", "delete", "run_on_mac", "run_in_cloud", "edit"]);
+  assert.deepEqual(Object.keys(tool("manage_routine").parameters.properties), tool("manage_routine").parameters.required, "strict: every field required");
+  assert.deepEqual(tool("manage_routine").parameters.properties.schedule.anyOf[1], { type: "null" });
+  assert.deepEqual(tool("manage_routine").parameters.properties.schedule.anyOf[0].required, Object.keys(tool("manage_routine").parameters.properties.schedule.anyOf[0].properties));
   assert.deepEqual(tool("watch").parameters.properties.where.enum, ["mac", "computer", "web"]);
   assert.ok("every_minutes" in tool("watch").parameters.properties);
   // What a watch looks for: a few words of what counts as news, never words for Alex.
@@ -543,8 +550,8 @@ await check("web_fetch says when a long page was cut", async () => {
 
 /* ---------------- schedule ---------------- */
 
-const sched = (o) => ({ kind: "daily", time: null, day: null, at: null, minutes: null, from: null, to: null, days: null, ...o });
-const scheduleArgs = (o) => ({ title: "News check", goal: "Check the news about Acme and tell Alex what's new.", schedule: sched({}), reminder: null, run: null, quiet: null, deliver_to: null, skill: null, where: "auto", ...o });
+const sched = (o) => ({ kind: "daily", time: null, times: null, day: null, days: null, day_of_month: null, at: null, minutes: null, from: null, to: null, ...o });
+const scheduleArgs = (o) => ({ title: "News check", goal: "Check the news about Acme and tell Alex what's new.", schedule: sched({}), reminder: null, run: null, quiet: null, deliver_to: null, skill: null, where: "auto", time_zone: null, ...o });
 
 await check("schedule: every 2 hours from 8 AM to 10 PM, quiet, as a chat run", async () => {
   const before = routines().length;
@@ -575,6 +582,43 @@ await check("schedule: a time that passed today moves to tomorrow, and the bot i
   const r = routines().at(-1);
   assert.equal(r.reminder, "Time to call Bob.");
   assert.ok(r.schedule.at > Date.now() && r.schedule.at - Date.parse(at) >= 23 * 3600_000, "a day later");
+});
+
+await check("schedule: 8 AM and 5 PM on Mon, Wed and Fri; the last day of the month; 30 minutes before each meeting; another zone", async () => {
+  const before = routines().length;
+  const t = await turnWith("brief me at 8 and 5 on mon wed fri, close the books on the last day of the month, prep me 30 min before meetings, and London standup at 9", [
+    toolCall("schedule", scheduleArgs({ title: "Brief", schedule: sched({ kind: "weekly", times: ["17:00", "08:00", "8 AM"], days: [5, 1, 3] }), run: "chat" })),
+    toolCall("schedule", scheduleArgs({ title: "Books", schedule: sched({ kind: "monthly", time: "16:00", day_of_month: -1 }), run: "chat" })),
+    toolCall("schedule", scheduleArgs({ title: "Meeting prep", schedule: sched({ kind: "before_event", minutes: 30 }), run: "chat", quiet: true })),
+    toolCall("schedule", scheduleArgs({ title: "London standup", schedule: sched({ kind: "weekdays", time: "09:00" }), run: "chat", time_zone: "Europe/London" })),
+  ]);
+  assert.match(t.out(0), /^Set: Mon, Wed and Fri at 8 AM and 5 PM\. Next: .+(8 AM|5 PM)\.$/);
+  assert.match(t.out(1), /^Set: Every month on the last day at 4 PM\. Next: .+\.$/);
+  assert.match(t.out(2), /^Set: 30 minutes before each meeting, quiet\. Next: .+\.$/);
+  assert.match(t.out(3), /^Set: Weekdays at 9 AM \(Europe\/London time\)\. Next: .+ 9 AM\.$/);
+  const made = routines().slice(before);
+  assert.equal(made.length, 4);
+  assert.deepEqual(made[0].schedule, { kind: "weekly", day: 1, days: [1, 3, 5], time: "08:00", times: ["08:00", "17:00"] }, "sorted, each once");
+  assert.deepEqual(made[1].schedule, { kind: "monthly", dayOfMonth: -1, time: "16:00" });
+  assert.deepEqual(made[2].schedule, { kind: "before_event", minutes: 30, source: "googlecalendar" });
+  assert.equal(made[3].timeZone, "Europe/London");
+  assert.equal(made[0].timeZone, undefined, "the user's own zone");
+  assert.equal(messages().findLast((m) => m.text.startsWith('Scheduled "London')).text, 'Scheduled "London standup" · Weekdays at 9 AM (Europe/London time)');
+  // Refused: 7 times a day, a meeting lead past 4 hours, a zone that isn't one, a monthly day that isn't one.
+  const u = await turnWith("more", [
+    toolCall("schedule", scheduleArgs({ schedule: sched({ kind: "daily", times: ["01:00", "02:00", "03:00", "04:00", "05:00", "06:00", "07:00"] }) })),
+    toolCall("schedule", scheduleArgs({ schedule: sched({ kind: "before_event", minutes: 300 }) })),
+    toolCall("schedule", scheduleArgs({ schedule: sched({ kind: "daily", time: "09:00" }), time_zone: "Mars/Olympus" })),
+    toolCall("schedule", scheduleArgs({ schedule: sched({ kind: "monthly", time: "09:00", day_of_month: 32 }) })),
+    toolCall("schedule", scheduleArgs({ schedule: sched({ kind: "monthly", time: "09:00" }) })),
+  ]);
+  assert.equal(u.out(0), "Not set: At most 6 times a day.");
+  assert.equal(u.out(1), "Not set: A meeting routine runs 5 to 240 minutes before each meeting.");
+  assert.equal(u.out(2), 'Not set: "Mars/Olympus" isn\'t a time zone Bops knows. Use an IANA name, like America/New_York.');
+  assert.equal(u.out(3), "Not set: The day of the month runs from 1 to 31, or -1 for the last day.");
+  assert.equal(u.out(4), "Not set: A monthly routine needs its day of the month: 1 to 31, or -1 for the last day.");
+  assert.equal(routines().length, before + 4, "nothing more made");
+  for (const r of made) S.update((s) => (s.routines = s.routines.filter((x) => x.id !== r.id)));
 });
 
 await check("schedule: refusals in plain words, and nothing is made", async () => {
@@ -711,6 +755,48 @@ await check("manage_routine run_now runs a chat routine now and says how it went
   // Resume: the next time.
   const u = await turnWith("resume it", [toolCall("manage_routine", { routine_id: r.id, action: "resume" })]);
   assert.match(u.out(), /^Resumed "News check"\. Next: .+\.$/);
+});
+
+await check("manage_routine edit: a whole new schedule, a time zone, a title; nulls keep the rest; refusals change nothing", async () => {
+  const r = routines().find((x) => x.title === "News check");
+  const was = structuredClone(r);
+  const blank = { schedule: null, title: null, goal: null, quiet: null, time_zone: null };
+  const t = await turnWith("make it 8 AM and 5 PM on Mondays and Fridays, London time", [
+    toolCall("manage_routine", { routine_id: r.id, action: "edit", ...blank, schedule: sched({ kind: "weekly", times: ["17:00", "08:00"], days: [1, 5] }), time_zone: "Europe/London" }),
+  ]);
+  assert.match(t.out(), /^Changed "News check": Mon and Fri at 8 AM and 5 PM \(Europe\/London time\)(, quiet)?\. Next: .+\.$/);
+  let now = routines().find((x) => x.id === r.id);
+  assert.deepEqual(now.schedule, { kind: "weekly", day: 1, days: [1, 5], time: "08:00", times: ["08:00", "17:00"] });
+  assert.equal(now.timeZone, "Europe/London");
+  assert.equal(now.goal, was.goal, "a null goal keeps it");
+  // The next run is at 8 AM or 5 PM London time.
+  const london = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(now.nextRunAt));
+  assert.ok(["08:00", "17:00"].includes(london), `next at ${london} London`);
+  // 30 minutes before each meeting, a new title, back to the user's zone.
+  const u = await turnWith("do it 30 minutes before each meeting instead, call it Prep, and use my own time", [
+    toolCall("manage_routine", { routine_id: r.id, action: "edit", ...blank, schedule: sched({ kind: "before_event", minutes: 30 }), title: "Prep", time_zone: "user" }),
+  ]);
+  assert.match(u.out(), /^Changed "Prep": 30 minutes before each meeting(, quiet)?\./);
+  now = routines().find((x) => x.id === r.id);
+  assert.equal(now.timeZone, undefined);
+  assert.equal(now.schedule.kind, "before_event");
+  assert.equal(messages().findLast((m) => m.role === "system").text, 'Changed routine "Prep" · 30 minutes before each meeting');
+  // Refused, and nothing changes.
+  const v = await turnWith("nonsense", [
+    toolCall("manage_routine", { routine_id: r.id, action: "edit", ...blank }),
+    toolCall("manage_routine", { routine_id: r.id, action: "edit", ...blank, schedule: sched({ kind: "daily", time: "26:00" }) }),
+    toolCall("manage_routine", { routine_id: r.id, action: "edit", ...blank, time_zone: "Nowhere/Land" }),
+  ]);
+  assert.equal(v.out(0), "Not changed: give what to change (schedule, title, goal, quiet or time_zone).");
+  assert.match(v.out(1), /^Not changed: "26:00" isn't a time of day\./);
+  assert.match(v.out(2), /^Not changed: "Nowhere\/Land" isn't a time zone Bops knows\./);
+  assert.equal(routines().find((x) => x.id === r.id).schedule.kind, "before_event");
+  // Put back as it was, for the tests after.
+  S.update((s) => {
+    const x = s.routines.find((y) => y.id === r.id);
+    for (const k of Object.keys(x)) delete x[k];
+    Object.assign(x, was);
+  });
 });
 
 /* ---------------- Skills ---------------- */
@@ -899,6 +985,21 @@ await check("backgroundTurn: an answer is returned, never posted; links made pla
   assert.match(asked[n].input.at(-1).content, /Your answer is posted in this chat and sent by text on its own: don't send it yourself\.\nIf it needs a computer, start one task \(start_task\) that does all of it\.\nFollow your skill for it:\nSkill: Weekly invoice summary\n/);
   assert.ok(!asked[n].input.at(-1).content.includes("NOTHING"), "not quiet");
   assert.match(hear(outputOf(asked[n + 1])), /^\{"your_address":"boppy@bops\.bot","emails":\[\]/, "lookups run (the inbox is empty here)");
+});
+
+await check("backgroundTurn: a sample for Bops (learning tags) has only the app tools that read, and posts nothing", async () => {
+  const r = routines().find((x) => x.title === "Calendar");
+  const before = messages().length;
+  answers.push(reply('{"tags": []}'));
+  const n = asked.length;
+  const k = started.length;
+  const out = await Chat.backgroundTurn("boppy", { routineId: r.id, title: "Tags from Gmail", goal: "Read my 30 most recent emails.", quiet: false, sample: true });
+  assert.deepEqual(out, { text: '{"tags": []}' });
+  assert.deepEqual(toolNames(asked[n]).sort(), ["find_app_actions", "use_app"]);
+  assert.equal(started.length, k, "no task");
+  assert.equal(messages().length, before, "nothing posted");
+  assert.match(asked[n].input.at(-1).content, /^A job from Bops \(not Alex just now\): Read my 30 most recent emails\.\n.*Only read: never send, post, label or change anything\./);
+  noDashes(asked[n].input.at(-1).content, "sample job");
 });
 
 await check("backgroundTurn: a job that needs a computer starts the routine's own task; a quiet one says nothing yet", async () => {

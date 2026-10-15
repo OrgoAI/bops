@@ -175,6 +175,8 @@ export async function saveKey(name: string, value: string, botIds: string[] = []
   await vault("POST", "/api/secrets", { name: n, value: v, ...(project ? { workspace_id: project } : {}) });
   forget();
   for (const botId of botIds) grantKey(n, botId, true);
+  // A key a bot was given: that bot is offered the service's starter routines (Stripe, Plain).
+  if (botIds.length) await import("./routine-suggestions").then((m) => m.offerStarters(n, botIds)).catch(() => {});
   return n;
 }
 

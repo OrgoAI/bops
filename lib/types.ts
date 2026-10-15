@@ -146,7 +146,25 @@ export type Workspace = {
   apps?: SkillRef[];
   /** Scripts someone approved to run in this workspace, by the content's sha256. */
   approvals?: ScriptApproval[];
+  /**
+   * Tags this workspace sorts mail and messages with besides the defaults (lib/routine-catalog.ts
+   * DEFAULT_TAGS: Customer, Outage, Bug, Office, FYI). Proposed by a bot from a sample of recent mail
+   * or messages when a Gmail, Slack or Discord starter routine is turned on
+   * (lib/server/routine-suggestions.ts learnTags), or added by the user.
+   */
+  tags?: WorkspaceTag[];
+  /** The Connected Apps whose recent items tags were already learned from (one sample per app). */
+  tagsLearnedFrom?: string[];
 };
+
+/** A tag routines sort by: a short name and what it's for. */
+export type WorkspaceTag = { name: string; description: string };
+
+/**
+ * Where a routine or watch came from, when it was a starter (lib/routine-catalog.ts): the Connected App's
+ * slug or the vault key's name it's for, and the catalog template's id. One per template per bot.
+ */
+export type RoutineSource = { app: string; template: string };
 
 /** A skill (how a bot does a kind of job) or an app (a tool Bops builds and bots run). */
 export type SkillKind = "skill" | "app";
@@ -496,20 +514,32 @@ export type Session = {
 };
 
 /**
- * When a routine runs. Times ("HH:MM", 24h) are the user's local time: Owner.timeZone when set, else the
- * Mac's. The math lives in cloud/schedule.ts, so Bops Cloud can run the same schedules later.
+ * When a routine runs. Times ("HH:MM", 24h) are wall clock times in the routine's zone (Routine.timeZone),
+ * else the user's (Owner.timeZone), else the Mac's. The math lives in cloud/schedule.ts (ScheduleLike is
+ * the same shape), so Bops Cloud can run the same schedules later. Every older shape is still one.
  */
 export type Schedule =
-  | { kind: "daily"; time: string }
-  | { kind: "weekdays"; time: string }
-  | { kind: "weekly"; day: number; time: string }
+  /** `times`: several a day ("HH:MM", sorted, each once, at most 6); `time` is times[0]. */
+  | { kind: "daily"; time: string; times?: string[] }
+  | { kind: "weekdays"; time: string; times?: string[] }
+  /** `days`: several days (0 Sunday to 6, sorted); `day` is days[0]. */
+  | { kind: "weekly"; day: number; days?: number[]; time: string; times?: string[] }
+  /** `dayOfMonth` 1 to 31, or -1 for the last day; a day the month doesn't have runs on its last day. */
+  | { kind: "monthly"; dayOfMonth: number; time: string; times?: string[] }
   | { kind: "once"; at: number }
   /**
-   * Every `minutes` (MIN_EVERY_MINUTES at least). `hours`: only between these local times ("08:00" to
-   * "22:00"; a run that falls outside waits for the next start); `days` (0 Sunday to 6): only on these.
-   * A check-in is a quiet routine on this kind.
+   * Every `minutes` (MIN_EVERY_MINUTES at least, a day at most). `hours`: only between these local times
+   * ("08:00" to "22:00"; a run that falls outside waits for the next start); `days` (0 Sunday to 6): only
+   * on these. A check-in is a quiet routine on this kind.
    */
-  | { kind: "every"; minutes: number; hours?: { from: string; to: string }; days?: number[] };
+  | { kind: "every"; minutes: number; hours?: { from: string; to: string }; days?: number[] }
+  /**
+   * `minutes` (5 to 240) before each meeting in the user's Google Calendar (meetings inside `hours` and
+   * `days` when set): a check every 15 minutes, each run told the meetings that start in its window
+   * (cloud/schedule.ts eventWindow), which starts where the runs before it got to (Routine.eventsThrough),
+   * so every meeting is handled once.
+   */
+  | { kind: "before_event"; minutes: number; source: "googlecalendar"; hours?: { from: string; to: string }; days?: number[] };
 
 /** The shortest gap an "every" routine may have, in minutes. */
 export const MIN_EVERY_MINUTES = 15;
@@ -550,6 +580,8 @@ export type Routine = {
   title: string;
   goal: string;
   schedule: Schedule;
+  /** The IANA zone its times are in ("Europe/London"); unset: the user's (Owner.timeZone). */
+  timeZone?: string;
   enabled: boolean;
   nextRunAt?: number;
   lastRunAt?: number;
@@ -574,12 +606,21 @@ export type Routine = {
   /** How the last run went. */
   last?: RoutineRun;
   /**
+   * A meeting routine (before_event): the meetings starting before this moment (epoch ms) were handled
+   * by a run that finished. The next run starts its window here (cloud/schedule.ts eventWindow).
+   */
+  eventsThrough?: number;
+  /**
    * Set up on a turn someone else started (an email, a text or a call from outside Bops): who it came
    * from ("an email from desk@hotel.example"). Such a routine runs as a task in the cloud, marked as from
    * outside (Session.fromOutside), never as a chat run with the user's data; its reminder is a note, not
    * the bot's own words; and the user sees who set it up.
    */
   fromOutside?: string;
+  /** The starter it was made from (lib/routine-catalog.ts), when it was one. */
+  source?: RoutineSource;
+  /** Tags it sorts what it reads with (the defaults and Workspace.tags), as its bot is told. */
+  tags?: string[];
 };
 
 /** A one-off whose time has passed: done. Run now before then doesn't finish it (it can still be paused and resumed). */
@@ -778,6 +819,12 @@ export type AppState = {
    * the plan (GET /api/plan, /api/account) shows credit again. Unset otherwise.
    */
   credits?: { out: boolean; at: number };
+  /**
+   * A Connected App (or a vault key) just finished connecting for a bot, and the window offers that bot's
+   * starter routines for it (GET /api/routines/suggestions). One at a time; cleared once answered or
+   * dismissed (POST /api/routines/suggestions, /api/routines/suggestions/dismiss).
+   */
+  suggest?: { app: string; botId: BotId; at: number };
   /** What running Bops cost, as it happened (lib/server/usage.ts); the account page totals it. */
   usage?: UsageEvent[];
   /** The Orgo user whose account the bots' computers are in (lib/server/orgo-sign-in.ts adoptComputers). */
@@ -1020,6 +1067,8 @@ export type Watch = {
   target?: string;
   /** The screen shows something else right now (another conversation, page or view): no alerts until it's back. */
   away?: boolean;
+  /** The starter it was made from (lib/routine-catalog.ts), when it was one. */
+  source?: RoutineSource;
   /**
    * A web page watched with no screen (then `display` is 0): Bops fetches `url` every `everyMin` minutes,
    * keeps a fingerprint of every line with what's certainly noise taken out (a "5m ago", an "Updated 3:45

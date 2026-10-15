@@ -3,7 +3,10 @@
 // least gap, "once" times that passed, how schedules and times read), then the routines module
 // (lib/server/routines.ts: making and changing routines, the timer, reminders, chat runs, task runs,
 // quiet runs, delivery and its failures, runs missed while the Mac slept, the user's time zone, the
-// note the bots see) and its route (app/api/routines). Every user-facing line is checked for dashes.
+// note the bots see) and its route (app/api/routines). Also: several times a day and several days a week,
+// monthly (the 31st, the last day), before each meeting (its window), and a routine's own time zone,
+// across daylight saving in New York and London; and the mirror to Orgo (routine-sync.ts) wired to
+// changes and runs. Every user-facing line is checked for dashes.
 //
 // The store, sessions, phone, mail, channels and chat modules are fakes (local functions below), so
 // nothing reaches a real service, a model or the user's own data.
@@ -34,6 +37,8 @@ const FAKES = {
   chat: ["backgroundTurn"],
   // A routine follows one of its bot's skills (workspace-skills.ts), found by name or by its id from before.
   "workspace-skills": ["findSkill", "skillRefId"],
+  // The mirror to Orgo (routine-sync.ts) calls Orgo through these.
+  orgo: ["apiKey", "callOrgo"],
 };
 registerHooks({
   resolve(specifier, context, next) {
@@ -244,6 +249,175 @@ await check("a zone this runtime doesn't know falls back instead of throwing", (
   assert.ok(S.describeSchedule({ kind: "once", at: Z("2026-10-14T19:00:00Z") }, "Not/AZone").startsWith("Once, "));
 });
 
+/* ---------------- The kinds after the first five: several times, several days, monthly, meetings ---------------- */
+
+const LDN = "Europe/London";
+
+await check("several times a day: the soonest still ahead, in any order, then tomorrow's first", () => {
+  const twice = { kind: "daily", time: "08:00", times: ["08:00", "17:00"] };
+  eq(S.nextRun(twice, Z("2026-10-13T20:30:00Z"), NY), Z("2026-10-13T21:00:00Z"), "5 PM today");
+  eq(S.nextRun(twice, Z("2026-10-13T21:00:00Z"), NY), Z("2026-10-14T12:00:00Z"), "8 AM tomorrow");
+  eq(S.nextRun({ kind: "daily", time: "17:00", times: ["17:00", "08:00"] }, Z("2026-10-13T11:00:00Z"), NY), Z("2026-10-13T12:00:00Z"), "unsorted still picks 8 AM first");
+  eq(S.nextRun({ kind: "daily", time: "08:00", times: ["08:00", "12:00", "17:00"] }, Z("2026-10-13T08:30:00Z"), UTC), Z("2026-10-13T12:00:00Z"), "UTC noon");
+  eq(S.nextRun({ kind: "weekdays", time: "08:00", times: ["08:00", "17:00"] }, Z("2026-10-16T21:00:00Z"), NY), Z("2026-10-19T12:00:00Z"), "Friday 5 PM to Monday 8 AM");
+  assert.equal(S.nextRun({ kind: "daily", time: "08:00", times: ["08:00", "nope"] }, Z("2026-10-13T08:30:00Z"), UTC), undefined, "a time that isn't one");
+});
+
+await check("weekly on several days and times: 8 AM and 5 PM on Mon, Wed and Fri", () => {
+  const mwf = { kind: "weekly", day: 1, days: [1, 3, 5], time: "08:00", times: ["08:00", "17:00"] };
+  eq(S.nextRun(mwf, Z("2026-10-13T20:30:00Z"), NY), Z("2026-10-14T12:00:00Z"), "Tuesday to Wednesday 8 AM");
+  eq(S.nextRun(mwf, Z("2026-10-14T12:00:00Z"), NY), Z("2026-10-14T21:00:00Z"), "Wednesday 5 PM");
+  eq(S.nextRun(mwf, Z("2026-10-16T21:00:00Z"), NY), Z("2026-10-19T12:00:00Z"), "Friday 5 PM to Monday 8 AM");
+  assert.equal(S.nextRun({ kind: "weekly", day: 1, days: [1, 9], time: "08:00" }, Z("2026-10-13T20:30:00Z"), NY), undefined, "a day that isn't one");
+});
+
+await check("several times across daylight saving in New York: the gap, the overlap", () => {
+  // Fall back, November 1: 1:30 AM twice (the first), then 9 AM EST, then 1:30 AM EST the next day.
+  const fall = { kind: "daily", time: "01:30", times: ["01:30", "09:00"] };
+  const a = S.nextRun(fall, Z("2026-10-31T16:00:00Z"), NY);
+  eq(a, Z("2026-11-01T05:30:00Z"), "the first 1:30 AM (EDT)");
+  const b = S.nextRun(fall, a, NY);
+  eq(b, Z("2026-11-01T14:00:00Z"), "9 AM EST, not the second 1:30 AM");
+  eq(S.nextRun(fall, b, NY), Z("2026-11-02T06:30:00Z"), "1:30 AM EST the next day");
+  // Spring forward, March 8: 2:30 AM doesn't happen, so 3:30 AM EDT, then 9 AM EDT.
+  const spring = { kind: "daily", time: "02:30", times: ["02:30", "09:00"] };
+  const c = S.nextRun(spring, Z("2026-03-07T17:00:00Z"), NY);
+  eq(c, Z("2026-03-08T07:30:00Z"), "3:30 AM EDT");
+  eq(S.nextRun(spring, c, NY), Z("2026-03-08T13:00:00Z"), "9 AM EDT");
+});
+
+await check("daylight saving in Europe/London: the gap, the overlap, and several days across the change", () => {
+  // March 29, 2026: 1:00 AM GMT jumps to 2:00 AM BST, so 1:30 AM runs at 2:30 AM BST.
+  eq(S.nextRun({ kind: "daily", time: "01:30" }, Z("2026-03-28T12:00:00Z"), LDN), Z("2026-03-29T01:30:00Z"), "2:30 AM BST");
+  eq(S.nextRun({ kind: "daily", time: "09:00" }, Z("2026-03-28T12:00:00Z"), LDN), Z("2026-03-29T08:00:00Z"), "9 AM BST");
+  // October 25, 2026: 1:30 AM happens twice (BST, then GMT): the first.
+  const first = S.nextRun({ kind: "daily", time: "01:30" }, Z("2026-10-24T12:00:00Z"), LDN);
+  eq(first, Z("2026-10-25T00:30:00Z"), "the first 1:30 AM (BST)");
+  eq(S.nextRun({ kind: "daily", time: "01:30" }, first, LDN), Z("2026-10-26T01:30:00Z"), "the next day's, GMT");
+  const sunMon = { kind: "weekly", day: 0, days: [0, 1], time: "09:00" };
+  eq(S.nextRun(sunMon, Z("2026-10-17T12:00:00Z"), LDN), Z("2026-10-18T08:00:00Z"), "Sunday 9 AM BST");
+  eq(S.nextRun(sunMon, Z("2026-10-24T12:00:00Z"), LDN), Z("2026-10-25T09:00:00Z"), "Sunday 9 AM GMT, the day of the change");
+  eq(S.nextRun(sunMon, Z("2026-10-25T09:00:00Z"), LDN), Z("2026-10-26T09:00:00Z"), "Monday 9 AM GMT");
+  // An "every" across the change counts real minutes; its hours keep the wall clock.
+  eq(S.nextRun({ kind: "every", minutes: 60, hours: { from: "08:00", to: "18:00" } }, Z("2026-10-24T17:00:00Z"), LDN), Z("2026-10-25T08:00:00Z"), "after 6 PM BST: 8 AM GMT");
+});
+
+await check("monthly: a day, the 31st in a short month, the last day, several times, across daylight saving", () => {
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: 15, time: "09:00" }, Z("2026-10-13T20:30:00Z"), NY), Z("2026-10-15T13:00:00Z"), "the 15th, 9 AM EDT");
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: 31, time: "09:00" }, Z("2026-04-01T00:00:00Z"), UTC), Z("2026-04-30T09:00:00Z"), "April has 30: its last day");
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: 31, time: "09:00" }, Z("2026-04-30T09:00:00Z"), UTC), Z("2026-05-31T09:00:00Z"), "then May 31");
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: 31, time: "09:00" }, Z("2026-02-01T00:00:00Z"), UTC), Z("2026-02-28T09:00:00Z"), "February 28");
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: 30, time: "09:00" }, Z("2026-01-31T00:00:00Z"), UTC), Z("2026-02-28T09:00:00Z"), "the 30th from Jan 31: Feb 28");
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: -1, time: "09:00" }, Z("2026-02-01T00:00:00Z"), UTC), Z("2026-02-28T09:00:00Z"), "the last day, 2026");
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: -1, time: "09:00" }, Z("2028-02-01T00:00:00Z"), UTC), Z("2028-02-29T09:00:00Z"), "the last day, a leap year");
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: -1, time: "17:00" }, Z("2026-10-13T20:30:00Z"), NY), Z("2026-10-31T21:00:00Z"), "October 31, 5 PM EDT");
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: 1, time: "09:00" }, Z("2026-10-02T00:00:00Z"), NY), Z("2026-11-01T14:00:00Z"), "Nov 1 9 AM EST, the day of the change");
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: -1, time: "23:30" }, Z("2026-10-01T00:00:00Z"), LDN), Z("2026-10-31T23:30:00Z"), "London Oct 31, GMT");
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: -1, time: "23:30" }, Z("2026-03-01T00:00:00Z"), LDN), Z("2026-03-31T22:30:00Z"), "London Mar 31, BST");
+  eq(S.nextRun({ kind: "monthly", dayOfMonth: 1, time: "09:00", times: ["09:00", "17:00"] }, Z("2026-11-01T10:00:00Z"), UTC), Z("2026-11-01T17:00:00Z"), "the 1st, 5 PM");
+  assert.equal(S.nextRun({ kind: "monthly", dayOfMonth: 0, time: "09:00" }, Z("2026-10-13T20:30:00Z"), NY), undefined, "0 isn't a day");
+  assert.equal(S.nextRun({ kind: "monthly", dayOfMonth: 32, time: "09:00" }, Z("2026-10-13T20:30:00Z"), NY), undefined, "32 isn't one either");
+});
+
+await check("before_event: a check every 15 minutes inside its hours and days, and each run's window", () => {
+  const prep = { kind: "before_event", minutes: 30, source: "googlecalendar" };
+  eq(S.nextRun(prep, Z("2026-10-13T14:00:00Z"), NY), Z("2026-10-13T14:15:00Z"), "15 minutes on, whatever the lead");
+  eq(S.nextRun(prep, Z("2026-10-13T14:20:00Z"), NY, Z("2026-10-13T14:15:00Z")), Z("2026-10-13T14:30:00Z"), "on the beat");
+  const day = { ...prep, hours: { from: "08:00", to: "20:00" }, days: [1, 2, 3, 4, 5] };
+  // The hours and days are the meetings': the first check is the lead before them, so an 8 AM meeting gets its 30 minutes.
+  eq(S.nextRun(day, Z("2026-10-16T23:55:00Z"), NY), Z("2026-10-19T11:30:00Z"), "Friday after 8 PM: Monday 7:30 AM, for the 8 AM meetings");
+  eq(S.nextRun({ ...prep, hours: { from: "08:00", to: "18:00" } }, Z("2026-10-24T17:00:00Z"), LDN), Z("2026-10-25T07:30:00Z"), "London: past 6 PM BST, 7:30 AM GMT after the change");
+  eq(S.nextRun(day, Z("2026-10-19T23:20:00Z"), NY, Z("2026-10-19T23:15:00Z")), Z("2026-10-19T23:30:00Z"), "7:30 PM still checks, for the 8 PM meetings");
+  eq(S.nextRun(day, Z("2026-10-19T23:35:00Z"), NY, Z("2026-10-19T23:30:00Z")), Z("2026-10-20T11:30:00Z"), "7:45 PM doesn't: the next morning");
+  // Windows: up to 45 minutes ahead of each run, from where the runs before got to.
+  const a = S.eventWindow(prep, Z("2026-10-13T14:00:00Z"));
+  assert.deepEqual(a, { from: Z("2026-10-13T14:00:00Z"), to: Z("2026-10-13T14:45:00Z") }, "the first run: every meeting still ahead");
+  const b = S.eventWindow(prep, Z("2026-10-13T14:15:00Z"), a.to);
+  assert.deepEqual(b, { from: a.to, to: Z("2026-10-13T15:00:00Z") }, "back to back");
+  // A tick 19 seconds late, then 2 seconds late: still back to back, no gap and no overlap.
+  const l1 = S.eventWindow(prep, Z("2026-10-13T14:30:19Z"), b.to);
+  const l2 = S.eventWindow(prep, Z("2026-10-13T14:45:02Z"), l1.to);
+  assert.equal(l1.from, b.to);
+  assert.equal(l2.from, l1.to, "lag never overlaps");
+  // Asleep through two checks: the run on waking takes up every meeting still ahead, from where the last got to or now.
+  const woke = S.eventWindow(prep, Z("2026-10-13T15:40:00Z"), l2.to);
+  assert.deepEqual(woke, { from: Z("2026-10-13T15:40:00Z"), to: Z("2026-10-13T16:25:00Z") }, "nothing still ahead is dropped");
+  assert.deepEqual(S.eventWindow(prep, Z("2026-10-13T15:40:00Z"), Z("2026-10-13T15:50:00Z")).from, Z("2026-10-13T15:50:00Z"));
+  // Run now just after a check covers only what that check didn't; the next check starts after it.
+  const now1 = S.eventWindow(prep, Z("2026-10-13T14:16:00Z"), b.to);
+  assert.deepEqual(now1, { from: b.to, to: Z("2026-10-13T15:01:00Z") });
+  // Hours: the 7:30 AM check handles meetings from 8 AM, not 7:30 to 8; outside them, nothing.
+  assert.deepEqual(S.eventWindow(day, Z("2026-10-19T11:30:00Z"), undefined, NY), { from: Z("2026-10-19T12:00:00Z"), to: Z("2026-10-19T12:15:00Z") });
+  const sat = S.eventWindow(day, Z("2026-10-17T15:00:00Z"), undefined, NY);
+  assert.ok(sat.from >= sat.to, "a Saturday: empty");
+  // Across the change in New York the window is real minutes too.
+  const c = S.eventWindow({ ...prep, minutes: 15 }, Z("2026-11-01T05:50:00Z"), Z("2026-11-01T06:05:00Z"));
+  assert.deepEqual(c, { from: Z("2026-11-01T06:05:00Z"), to: Z("2026-11-01T06:20:00Z") });
+  assert.equal(S.eventWindow({ kind: "daily", time: "09:00" }, Z("2026-10-13T14:00:00Z")), undefined, "only meeting routines have one");
+});
+
+await check("normalizeSchedule: times sorted and each once, at most 6; days; monthly; every and meeting limits; old shapes the same", () => {
+  const n = (s) => S.normalizeSchedule(s);
+  assert.deepEqual(n({ kind: "daily", time: "17:00", times: ["17:00", "8 AM", "08:00"] }), { schedule: { kind: "daily", time: "08:00", times: ["08:00", "17:00"] } });
+  assert.deepEqual(n({ kind: "daily", time: "9:00", times: ["9:00"] }), { schedule: { kind: "daily", time: "09:00" } }, "one time: the shape from before");
+  assert.deepEqual(n({ kind: "weekdays", times: ["13:00", "09:00"] }), { schedule: { kind: "weekdays", time: "09:00", times: ["09:00", "13:00"] } }, "times without time");
+  assert.deepEqual(n({ kind: "daily", times: ["1:00", "2:00", "3:00", "4:00", "5:00", "6:00", "7:00"] }), { error: "At most 6 times a day." });
+  assert.deepEqual(n({ kind: "daily", times: ["1:00", "2:00", "3:00", "4:00", "5:00", "6:00", "6:00"] }).schedule.times.length, 6, "a repeat isn't one more");
+  assert.match(n({ kind: "daily", time: "25:00" }).error, /"25:00" isn't a time of day/);
+  assert.deepEqual(n({ kind: "weekly", day: 5, days: [5, 1, 1], time: "09:00" }), { schedule: { kind: "weekly", day: 1, days: [1, 5], time: "09:00" } });
+  assert.deepEqual(n({ kind: "weekly", day: 3, time: "09:00" }), { schedule: { kind: "weekly", day: 3, time: "09:00" } });
+  assert.deepEqual(n({ kind: "weekly", days: [8], time: "09:00" }), { error: "The days of the week run from 0 (Sunday) to 6 (Saturday)." });
+  assert.deepEqual(n({ kind: "weekly", time: "09:00" }), { error: "A weekly routine needs its day: 0 is Sunday, 6 is Saturday." });
+  assert.deepEqual(n({ kind: "monthly", dayOfMonth: -1, time: "5 PM" }), { schedule: { kind: "monthly", dayOfMonth: -1, time: "17:00" } });
+  for (const d of [0, 32, -2, 1.5, "1"]) assert.equal(n({ kind: "monthly", dayOfMonth: d, time: "09:00" }).error, "The day of the month runs from 1 to 31, or -1 for the last day.", `day ${d}`);
+  assert.deepEqual(n({ kind: "every", minutes: 2000 }), { schedule: { kind: "every", minutes: 1440 } }, "a day at most");
+  assert.deepEqual(n({ kind: "every", minutes: 5, hours: { from: "9:00", to: "09:00" }, days: [0, 1, 2, 3, 4, 5, 6] }), { schedule: { kind: "every", minutes: 15 } }, "all day, every day: left out");
+  assert.deepEqual(n({ kind: "every", minutes: 0 }), { error: "A repeating routine needs the minutes between runs." });
+  assert.deepEqual(n({ kind: "before_event", minutes: 10 }), { schedule: { kind: "before_event", minutes: 10, source: "googlecalendar" } }, "Google Calendar by default");
+  assert.deepEqual(n({ kind: "before_event", minutes: 30, source: "googlecalendar", hours: { from: "8 AM", to: "8 PM" }, days: [5, 1] }), { schedule: { kind: "before_event", minutes: 30, source: "googlecalendar", hours: { from: "08:00", to: "20:00" }, days: [1, 5] } });
+  for (const m of [4, 241, 12.5]) assert.equal(n({ kind: "before_event", minutes: m }).error, "A meeting routine runs 5 to 240 minutes before each meeting.", `lead ${m}`);
+  assert.equal(n({ kind: "before_event", minutes: 15, source: "outlook" }).error, "Meeting routines read Google Calendar.");
+  assert.deepEqual(n({ kind: "once", at: "2026-10-14T15:00:00-04:00" }), { schedule: { kind: "once", at: Z("2026-10-14T19:00:00Z") } });
+  assert.equal(n({ kind: "hourly" }).error, "That isn't a schedule Bops knows.");
+  assert.equal(n(null).error, "That isn't a schedule.");
+  // Every shape from before comes back as it was.
+  for (const old of [{ kind: "daily", time: "09:00" }, { kind: "weekdays", time: "08:30" }, { kind: "weekly", day: 1, time: "09:00" }, { kind: "once", at: Z("2026-10-14T19:00:00Z") }, { kind: "every", minutes: 120, hours: { from: "08:00", to: "22:00" }, days: [1, 2, 3, 4, 5] }])
+    assert.deepEqual(n(old), { schedule: old });
+  // A kept schedule normalizes to itself.
+  for (const s of [{ kind: "weekly", day: 1, days: [1, 3, 5], time: "08:00", times: ["08:00", "17:00"] }, { kind: "monthly", dayOfMonth: 31, time: "09:00" }]) assert.deepEqual(n(n(s).schedule), { schedule: s });
+  for (const bad of [{ kind: "daily", times: Array(7).fill(0).map((_, i) => `0${i}:00`) }, { kind: "weekly", time: "09:00" }, { kind: "monthly", dayOfMonth: 0, time: "09:00" }, { kind: "before_event", minutes: 1 }, { kind: "x" }]) noDashes(n(bad).error, "normalize error");
+});
+
+await check("describeSchedule: several times, several days, monthly, meetings", () => {
+  const d = (s) => S.describeSchedule(s, NY);
+  assert.equal(d({ kind: "daily", time: "08:00", times: ["08:00", "17:00"] }), "Every day at 8 AM and 5 PM");
+  assert.equal(d({ kind: "daily", time: "08:00", times: ["08:00", "12:00", "17:30"] }), "Every day at 8 AM, 12 PM and 5:30 PM");
+  assert.equal(d({ kind: "weekdays", time: "09:00", times: ["09:00", "13:00"] }), "Weekdays at 9 AM and 1 PM");
+  assert.equal(d({ kind: "weekly", day: 1, days: [1, 3, 5], time: "08:00", times: ["08:00", "17:00"] }), "Mon, Wed and Fri at 8 AM and 5 PM");
+  assert.equal(d({ kind: "weekly", day: 1, days: [1, 2, 3, 4, 5], time: "09:00" }), "Weekdays at 9 AM");
+  assert.equal(d({ kind: "weekly", day: 0, days: [0, 6], time: "10:00" }), "Weekends at 10 AM");
+  assert.equal(d({ kind: "weekly", day: 1, time: "09:00" }), "Every Monday at 9 AM", "one day reads as before");
+  assert.equal(d({ kind: "monthly", dayOfMonth: 1, time: "09:00" }), "Every month on the 1st at 9 AM");
+  assert.equal(d({ kind: "monthly", dayOfMonth: 22, time: "09:00" }), "Every month on the 22nd at 9 AM");
+  assert.equal(d({ kind: "monthly", dayOfMonth: 11, time: "09:00" }), "Every month on the 11th at 9 AM");
+  assert.equal(d({ kind: "monthly", dayOfMonth: 23, time: "09:00" }), "Every month on the 23rd at 9 AM");
+  assert.equal(d({ kind: "monthly", dayOfMonth: 31, time: "09:00" }), "Every month on the 31st (or the last day of a shorter month) at 9 AM");
+  assert.equal(d({ kind: "monthly", dayOfMonth: -1, time: "17:00", times: ["09:00", "17:00"] }), "Every month on the last day at 9 AM and 5 PM");
+  assert.equal(d({ kind: "before_event", minutes: 15, source: "googlecalendar" }), "15 minutes before each meeting");
+  assert.equal(d({ kind: "before_event", minutes: 60, source: "googlecalendar" }), "1 hour before each meeting");
+  assert.equal(d({ kind: "before_event", minutes: 30, source: "googlecalendar", hours: { from: "08:00", to: "20:00" }, days: [1, 2, 3, 4, 5] }), "30 minutes before each meeting, 8 AM to 8 PM, weekdays");
+  assert.equal(d({ kind: "every", minutes: 1440 }), "Every 24 hours");
+  for (const s of [{ kind: "monthly", dayOfMonth: 31, time: "09:00" }, { kind: "before_event", minutes: 45, source: "googlecalendar" }, { kind: "weekly", day: 1, days: [1, 3], time: "08:00", times: ["08:00", "17:00"] }]) noDashes(d(s), "describe");
+});
+
+await check("validTimeZone", () => {
+  assert.equal(S.validTimeZone("Europe/London"), true);
+  assert.equal(S.validTimeZone("America/New_York"), true);
+  assert.equal(S.validTimeZone("Mars/Olympus"), false);
+  assert.equal(S.validTimeZone(""), false);
+  assert.equal(S.validTimeZone(42), false);
+});
+
 /* ---------------- lib/server/routines.ts with fakes ---------------- */
 
 let clock = Z("2026-10-13T20:30:00Z"); // Tuesday 4:30 PM in New York
@@ -276,7 +450,16 @@ const fake = {
   ownerPhone: "+15550001111",
   ownerEmail: "sam@example.com",
 };
+const orgoCalls = [];
 globalThis.__fake = {
+  orgo: {
+    apiKey: async () => "sk_test",
+    // As orgo-web answers: a PUT with its routines' Orgo ids.
+    callOrgo: async (key, path, init = {}) => {
+      orgoCalls.push({ method: init.method ?? "GET", path, body: init.body });
+      return init.method === "PUT" ? { status: 200, json: { routines: init.body.routines.map((r) => ({ id: `orgo-${r.bopsId}`, bopsId: r.bopsId })) } } : { status: 201, json: {} };
+    },
+  },
   "workspace-skills": {
     // The bot's skills here are its procedures from before (state.procedures), as adoptProcedures moves them.
     findSkill: (botId, name) => {
@@ -1095,6 +1278,162 @@ await check("a one-off run now before its time and then paused is paused, not do
 });
 
 /* ---------------- app/api/routines ---------------- */
+
+await check("a routine's own time zone: its next time, the timer, an edit to another zone or back, a move of the Mac's zone leaves it", async () => {
+  const saved = clock;
+  try {
+    clock = Z("2026-10-13T20:30:00Z"); // 4:30 PM in New York, 9:30 PM in London
+    const bad = R.createRoutine("bot_main", "Bad", "x", { kind: "daily", time: "09:00" }, { timeZone: "Mars/Olympus" });
+    assert.equal(bad.error, '"Mars/Olympus" isn\'t a time zone Bops knows. Use an IANA name, like America/New_York.');
+    noDashes(bad.error, "zone error");
+    const r = R.createRoutine("bot_main", "London standup", "Say hi", { kind: "weekdays", time: "09:00" }, { timeZone: "Europe/London", reminder: "Standup" }).routine;
+    assert.equal(r.timeZone, "Europe/London");
+    eq(r.nextRunAt, Z("2026-10-14T08:00:00Z"), "9 AM BST tomorrow");
+    assert.match(R.routinesNote(["bot_main"]), /London standup.+Weekdays at 9 AM · times in Europe\/London/);
+    // The Mac moves to Tokyo: the user's routines follow, this one keeps London's 9 AM.
+    const mine = R.createRoutine("bot_main", "Morning", "Morning brief", { kind: "daily", time: "09:00" }).routine;
+    try {
+      process.env.TZ = "Asia/Tokyo";
+      tick();
+      eq(get(r.id).nextRunAt, Z("2026-10-14T08:00:00Z"), "still London");
+      eq(get(mine.id).nextRunAt, Z("2026-10-14T00:00:00Z"), "the user's: Tokyo");
+    } finally {
+      process.env.TZ = NY;
+    }
+    tick();
+    R.deleteRoutine(mine.id);
+    // The timer runs it at London's 9 AM, and its next is the next weekday's.
+    clock = Z("2026-10-14T08:00:30Z");
+    tick();
+    await until(() => get(r.id).last?.status === "ok", "the reminder ran");
+    eq(get(r.id).nextRunAt, Z("2026-10-15T08:00:00Z"), "Thursday 9 AM BST");
+    // Across London's change: Friday Oct 23 BST, Monday Oct 26 GMT.
+    clock = Z("2026-10-23T09:00:00Z");
+    tick();
+    eq(get(r.id).nextRunAt, Z("2026-10-26T09:00:00Z"), "Monday 9 AM GMT");
+    clock = Z("2026-10-13T20:30:00Z");
+    // Another zone, then the user's again: the next time follows each.
+    assert.equal(R.editRoutine(r.id, { timeZone: "Asia/Kolkata" }).error, undefined);
+    eq(get(r.id).nextRunAt, Z("2026-10-14T03:30:00Z"), "9 AM Kolkata");
+    assert.equal(R.editRoutine(r.id, { timeZone: undefined }).error, undefined);
+    assert.equal(get(r.id).timeZone, undefined);
+    eq(get(r.id).nextRunAt, Z("2026-10-14T13:00:00Z"), "9 AM New York, the user's");
+    assert.match(R.editRoutine(r.id, { timeZone: "Nowhere/Land" }).error, /isn't a time zone/);
+    assert.equal(get(r.id).timeZone, undefined, "a refused zone changes nothing");
+    R.deleteRoutine(r.id);
+  } finally {
+    clock = saved;
+  }
+});
+
+await check("several times a day through the timer, monthly on the last day, and a whole new schedule by edit", async () => {
+  const saved = clock;
+  try {
+    clock = Z("2026-10-13T20:30:00Z");
+    const twice = R.createRoutine("bot_main", "Digest", "Digest", { kind: "daily", times: ["17:00", "8 AM"] }, { reminder: "Digest time" }).routine;
+    assert.deepEqual(twice.schedule, { kind: "daily", time: "08:00", times: ["08:00", "17:00"] });
+    eq(twice.nextRunAt, Z("2026-10-13T21:00:00Z"), "5 PM today");
+    clock = Z("2026-10-13T21:00:10Z");
+    tick();
+    await until(() => get(twice.id).last?.status === "ok", "the 5 PM run");
+    eq(get(twice.id).nextRunAt, Z("2026-10-14T12:00:00Z"), "then 8 AM tomorrow");
+    clock = Z("2026-10-13T20:30:00Z");
+    const books = R.createRoutine("bot_main", "Books", "Close the books", { kind: "monthly", dayOfMonth: -1, time: "16:00" }).routine;
+    eq(books.nextRunAt, Z("2026-10-31T20:00:00Z"), "Oct 31, 4 PM EDT");
+    const e = R.editRoutine(books.id, { schedule: { kind: "weekly", day: 5, days: [5, 1], time: "17:00", times: ["17:00", "08:00"] } });
+    assert.equal(e.error, undefined);
+    assert.deepEqual(get(books.id).schedule, { kind: "weekly", day: 1, days: [1, 5], time: "08:00", times: ["08:00", "17:00"] });
+    eq(get(books.id).nextRunAt, Z("2026-10-16T12:00:00Z"), "Friday 8 AM");
+    assert.match(R.editRoutine(books.id, { schedule: { kind: "daily", times: ["1:00", "2:00", "3:00", "4:00", "5:00", "6:00", "7:00"] } }).error, /At most 6 times a day/);
+    // Someone else's routine is at most once a day: never several times, never every meeting.
+    const outside = R.createRoutine("bot_main", "Theirs", "x", { kind: "daily", times: ["08:00", "17:00"] }, { fromOutside: "an email from desk@hotel.example" });
+    assert.match(outside.error, /Only Sam can set up a routine that repeats through the day/);
+    assert.match(R.createRoutine("bot_main", "Theirs", "x", { kind: "before_event", minutes: 15 }, { fromOutside: "a text" }).error, /repeats through the day/);
+    for (const x of [twice, books]) R.deleteRoutine(x.id);
+  } finally {
+    clock = saved;
+  }
+});
+
+await check("a meeting routine: checks every 15 minutes, each run told only its window, quiet when there's none", async () => {
+  const saved = clock;
+  const answer = fake.chatAnswer;
+  try {
+    clock = Z("2026-10-13T20:30:00Z");
+    const r = R.createRoutine("bot_main", "Meeting prep", "Prep me for my meetings.", { kind: "before_event", minutes: 30 }, { run: "chat", quiet: true }).routine;
+    assert.deepEqual(r.schedule, { kind: "before_event", minutes: 30, source: "googlecalendar" });
+    eq(r.nextRunAt, Z("2026-10-13T20:45:00Z"), "the first check in 15 minutes");
+    assert.match(R.routinesNote(["bot_main"]), /Meeting prep.+30 minutes before each meeting/);
+    fake.chatAnswer = async () => ({ text: "NOTHING" });
+    const jobs = fake.jobs.length;
+    clock = Z("2026-10-13T20:45:05Z");
+    tick();
+    await until(() => get(r.id).last?.status === "quiet", "a quiet check");
+    const job = fake.jobs[jobs];
+    assert.equal(job.routineId, r.id);
+    assert.match(job.goal, /^Prep me for my meetings\.\n\nThis run handles only the meetings in Sam's Google Calendar that start from 4:45 PM up to but not including 5:30 PM \(America\/New_York; 2026-10-13T20:45:05\.000Z to 2026-10-13T21:30:05\.000Z\)\. Earlier and later ones are handled by other runs\.\n\nIf no meeting starts then, answer exactly NOTHING and nothing else\.$/);
+    noDashes(job.goal, "meeting goal");
+    eq(get(r.id).nextRunAt, Z("2026-10-13T21:00:00Z"), "the next check, on the beat");
+    eq(get(r.id).eventsThrough, Z("2026-10-13T21:30:05Z"), "the run that finished handled up to its window's end");
+    // The next check, 12 seconds late, starts where that one ended.
+    clock = Z("2026-10-13T21:00:12Z");
+    tick();
+    await until(() => fake.jobs.length > jobs + 1 && get(r.id).last?.at === clock && get(r.id).last?.status === "quiet", "the next check");
+    assert.match(fake.jobs[jobs + 1].goal, /2026-10-13T21:30:05\.000Z to 2026-10-13T21:45:12\.000Z/);
+    // A failed run leaves it where it was: the next run takes those meetings up.
+    const through = get(r.id).eventsThrough;
+    fake.chatAnswer = async () => ({ error: "Google Calendar isn't connected." });
+    await R.runRoutine(r.id, { manual: "app" });
+    eq(get(r.id).eventsThrough, through, "a failed run moves nothing");
+    // Nothing left to handle (Run now right where the last run got to): quiet, without asking the bot.
+    fake.chatAnswer = async () => ({ text: "NOTHING" });
+    const before = fake.jobs.length;
+    const saw = clock;
+    clock = through - 45 * 60_000;
+    const run = await R.runRoutine(r.id, { manual: "app" });
+    assert.equal(run.status, "quiet");
+    assert.equal(fake.jobs.length, before, "the bot isn't asked");
+    clock = saw;
+    // In London's zone, the window reads in London's clock.
+    R.editRoutine(r.id, { timeZone: "Europe/London" });
+    assert.match(R.goalFor({ ...get(r.id), eventsThrough: Z("2026-10-13T21:15:00Z") }, Z("2026-10-13T20:45:00Z")), /start from 10:15 PM up to but not including 10:30 PM \(Europe\/London;/);
+    assert.equal(R.goalFor({ ...get(r.id), schedule: { kind: "daily", time: "09:00" } }, clock), "Prep me for my meetings.", "other kinds: the goal alone");
+    R.deleteRoutine(r.id);
+  } finally {
+    clock = saved;
+    fake.chatAnswer = answer;
+  }
+});
+
+await check("mirrored to Orgo: a change and a run of a routine in a workspace with an Orgo project", async () => {
+  const Sync = (await import("@/lib/server/routine-sync")).routineSyncForTests;
+  const saved = clock;
+  state.workspaces = [{ id: "ws_main", name: "Main", createdAt: 0, orgoProjectId: "proj_1" }];
+  try {
+    clock = Z("2026-10-13T20:30:00Z");
+    orgoCalls.length = 0;
+    const r = R.createRoutine("bot_main", "Ping", "Ping", { kind: "weekly", day: 1, days: [1, 3], time: "09:00", times: ["09:00", "17:00"] }, { reminder: "Ping", timeZone: "Europe/London" }).routine;
+    await Sync.flushAll();
+    assert.deepEqual(orgoCalls.map((c) => `${c.method} ${c.path}`), ["PUT /api/projects/proj_1/routines"]);
+    const sent = orgoCalls[0].body.routines.find((x) => x.bopsId === r.id);
+    assert.deepEqual(sent.schedule, { kind: "weekly", day: 1, days: [1, 3], time: "09:00", times: ["09:00", "17:00"] });
+    assert.equal(sent.timeZone, "Europe/London");
+    orgoCalls.length = 0;
+    await R.runRoutine(r.id, { manual: "app" });
+    await Sync.flushAll();
+    assert.deepEqual(orgoCalls.map((c) => `${c.method} ${c.path}`), ["PUT /api/projects/proj_1/routines", `POST /api/projects/proj_1/routines/orgo-${r.id}/runs`]);
+    assert.equal(orgoCalls[1].body.status, "ok");
+    orgoCalls.length = 0;
+    R.deleteRoutine(r.id);
+    await Sync.flushAll();
+    assert.equal(orgoCalls[0].body.deleteMissing, true);
+    assert.ok(!orgoCalls[0].body.routines.some((x) => x.bopsId === r.id), "gone from the copy");
+  } finally {
+    clock = saved;
+    delete state.workspaces;
+    Sync.reset();
+  }
+});
 
 const route = await import("@/app/api/routines/route");
 const req = (method, body) => new Request("http://localhost/api/routines", { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });

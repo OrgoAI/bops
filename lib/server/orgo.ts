@@ -137,7 +137,7 @@ async function call<T>(method: string, path: string, body?: unknown, { wait = me
 export async function callOrgo<T>(
   key: string,
   path: string,
-  { method = "GET", body, headers, timeoutMs = 15_000 }: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: unknown; headers?: Record<string, string>; timeoutMs?: number } = {},
+  { method = "GET", body, headers, timeoutMs = 15_000 }: { method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; body?: unknown; headers?: Record<string, string>; timeoutMs?: number } = {},
 ): Promise<{ status: number; json: T } | null> {
   try {
     const res = await fetch(`${orgoOrigin()}${path}`, {

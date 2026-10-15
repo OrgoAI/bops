@@ -140,7 +140,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
                 : t.kind === "memory"
                   ? (categoryOf(t.category)?.label ?? "Memory")
                   : t.kind === "autopilot"
-                    ? "Autopilot"
+                    ? "Routines"
                     : t.kind === "skills"
                       ? "Skills"
                       : "New tab";
