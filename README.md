@@ -39,6 +39,11 @@
 </p>
 
 <p align="center">
+  <b>Contributions:</b> we'll open Bops up to outside contributions once the app is more settled.<br>
+  Until then, bug reports and ideas are very welcome in <a href="../../issues">issues</a>. See <a href="CONTRIBUTING.md">CONTRIBUTING.md</a>.
+</p>
+
+<p align="center">
   <a href="https://www.star-history.com/#orgoai/bops&amp;Date">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=orgoai/bops&amp;type=Date&amp;theme=dark">
@@ -271,7 +276,7 @@ The app runs with the hardened runtime and three entitlements (`build/entitlemen
 
 ## Contributing
 
-Bug reports and pull requests are welcome. For anything bigger than a small fix, open an issue first so we can agree on the approach. Read [CONTRIBUTING.md](CONTRIBUTING.md), which covers the CLA, and the [Code of Conduct](CODE_OF_CONDUCT.md).
+We'll open Bops up to outside contributions once the app is more settled. Until then, bug reports and ideas are very welcome in issues, and pull requests from outside the team may wait a while or be closed. When we open up, [CONTRIBUTING.md](CONTRIBUTING.md) (which covers the CLA) and the [Code of Conduct](CODE_OF_CONDUCT.md) are how it will work. For anything bigger than a small fix, open an issue first so we can agree on the approach.
 
 Before you open a pull request:
 
@@ -311,7 +316,7 @@ The license also gives you our patents for these uses (until you sue someone cla
 | Change it and share my version? | Yes, under the same license, with a different name and logo ([TRADEMARK.md](TRADEMARK.md)). |
 | Build my own product with it? | Yes, as long as that product doesn't compete with Bops (above). |
 | Offer a hosted Bops, or sell an app that does what Bops does? | Not under FSL. Each version allows it two years after its release, under Apache 2.0. |
-| Contribute? | Yes, see [CONTRIBUTING.md](CONTRIBUTING.md). |
+| Contribute? | Soon: we'll open up once the app is more settled. Bug reports and ideas are welcome now. See [CONTRIBUTING.md](CONTRIBUTING.md). |
 
 Some code comes from other projects, under their own licenses: `components/message-ui/` is adapted from [imessage-ui](https://github.com/theswerd/imessage-ui) (MIT). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
