@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useRef, useState } from "react";
-import { live, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
+import { live, MAIN_WORKSPACE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
 import { AutopilotSections, type AutopilotOpen } from "./autopilot";
 import { SkillsSideRow } from "./skills";
@@ -398,16 +398,31 @@ export { DeleteX };
  * The workspace name, in place of a "Messages" title. Click it to switch workspaces, rename this
  * one, or start a new one. Each workspace is its own team: its own main bot, bots, chats and threads.
  */
+/** What deleting a workspace takes with it (GET /api/workspaces?preview=), for the confirm. */
+type DeletePreview = { id: string; name: string; orgo: boolean; computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[] };
+
+/** How often a rename made on orgo.ai is looked for while the app is open. */
+const NAMES_SYNC_MS = 10 * 60_000;
+
 function WorkspaceSwitcher({ state }: { state: AppState }) {
   const [open, setOpen] = useState(false);
   const [naming, setNaming] = useState<null | { id?: string; name: string }>(null);
-  const [deleting, setDeleting] = useState<string | null>(null);
+  // The workspace whose Delete was pressed: what goes with it once Bops (and Orgo) said, and what went wrong.
+  const [deleting, setDeleting] = useState<null | { id: string; preview?: DeletePreview; error?: string; busy?: boolean }>(null);
   // What Orgo said about a name (one the user's Orgo already has), shown over the field until it changes.
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const workspaces = state.workspaces ?? [];
   const current = workspaces.find((w) => w.id === currentWorkspace(state));
+
+  // A workspace renamed on orgo.ai is renamed here too: now, and every 10 minutes while the app is open.
+  useEffect(() => {
+    const sync = () => void post("/api/workspaces", { syncNames: true }, "PATCH").catch(() => {});
+    sync();
+    const t = setInterval(sync, NAMES_SYNC_MS);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -454,8 +469,31 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
     setNaming({ id, name });
     setProblem(null);
   };
+  /** Delete pressed: ask what goes with it first; nothing is deleted until the user confirms the list. */
+  const askDelete = async (id: string) => {
+    setDeleting({ id, busy: true });
+    try {
+      const res = await fetch(`/api/workspaces?preview=${encodeURIComponent(id)}`, { cache: "no-store" });
+      const j = (await res.json().catch(() => ({}))) as DeletePreview & { error?: string };
+      setDeleting((d) => (d?.id === id ? (res.ok ? { id, preview: j } : { id, error: j.error ?? "Couldn't tell what's in it. Try again." }) : d));
+    } catch {
+      setDeleting((d) => (d?.id === id ? { id, error: "Couldn't reach Bops. Try again." } : d));
+    }
+  };
+  const confirmDelete = async () => {
+    if (!deleting?.preview || deleting.busy) return;
+    const { id, preview } = deleting;
+    setDeleting({ id, preview, busy: true });
+    try {
+      const res = await post("/api/workspaces", { id }, "DELETE");
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
+      if (res.ok) setDeleting(null);
+      else setDeleting({ id, preview, error: j.error ?? "That didn't work, so nothing was deleted. Try again." });
+    } catch {
+      setDeleting({ id, preview, error: "Couldn't reach Bops. Try again." });
+    }
+  };
   const renamed = state.orgoMigration?.renamed ?? [];
-  const pending = state.orgoMigration?.pending.length ?? 0;
   const count = (id: string) => state.bots.filter((b) => workspaceOf(b) === id).length;
 
   return (
@@ -510,35 +548,24 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
                     <path d="M3 13l1-3.5L11 2.5l2.5 2.5L6.5 12 3 13z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
                   </svg>
                 </button>
-                {workspaces.length > 1 &&
-                  (deleting === w.id ? (
-                    <button
-                      onClick={() => {
-                        void post("/api/workspaces", { id: w.id }, "DELETE");
-                        setDeleting(null);
-                      }}
-                      title={`Delete ${w.name}, its bots and their computers`}
-                      className="mr-1 h-7 shrink-0 rounded-md bg-[#B42318] px-2 text-[12px] font-medium text-white"
-                    >
-                      Delete
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => setDeleting(w.id)}
-                      title={`Delete ${w.name}`}
-                      aria-label={`Delete ${w.name}`}
-                      className="mr-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 group-hover/ws:opacity-100 group-has-[:focus-visible]/ws:opacity-100 motion-reduce:transition-none"
-                    >
-                      <svg width="9" height="9" viewBox="0 0 12 12">
-                        <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-                      </svg>
-                    </button>
-                  ))}
+                {workspaces.length > 1 && w.id !== MAIN_WORKSPACE && deleting?.id !== w.id && (
+                  <button
+                    onClick={() => void askDelete(w.id)}
+                    title={`Delete ${w.name}`}
+                    aria-label={`Delete ${w.name}`}
+                    className="mr-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 group-hover/ws:opacity-100 group-has-[:focus-visible]/ws:opacity-100 motion-reduce:transition-none"
+                  >
+                    <svg width="9" height="9" viewBox="0 0 12 12">
+                      <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                )}
               </div>
             ),
           )}
-          {/* After each workspace became an Orgo workspace of its own: names Orgo already had (until dismissed), and computers that move later. */}
-          {(renamed.length > 0 || pending > 0) && (
+          {deleting && <DeleteConfirm name={workspaces.find((w) => w.id === deleting.id)?.name ?? "this workspace"} {...deleting} onCancel={() => setDeleting(null)} onDelete={() => void confirmDelete()} />}
+          {/* After each workspace became an Orgo workspace of its own: names Orgo already had (until dismissed). */}
+          {renamed.length > 0 && (
             <div className="flex flex-col gap-0.5 px-2.5 pt-1 text-[12px] leading-4 text-[#6B6B6B]">
               {renamed.map((r) => (
                 <span key={r.wsId}>
@@ -549,11 +576,6 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
                 <button onClick={() => void post("/api/workspaces", { noticeSeen: true }, "PATCH").catch(() => {})} className="self-start text-[12px] font-medium text-[#0A0A0A] hover:underline">
                   Dismiss
                 </button>
-              )}
-              {pending > 0 && (
-                <span>
-                  {pending} computer{pending === 1 ? "" : "s"} move{pending === 1 ? "s" : ""} to {pending === 1 ? "its" : "their"} workspace once Orgo can.
-                </span>
               )}
             </div>
           )}
@@ -575,6 +597,62 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** One line of what goes with a deleted workspace: "Computers (2): Bea's computer, Max's computer". */
+function GoesWith({ label, items }: { label: string; items: string[] }) {
+  if (!items.length) return null;
+  return (
+    <li>
+      <span className="font-medium text-ink">
+        {label} ({items.length}):
+      </span>{" "}
+      {items.join(", ")}
+    </li>
+  );
+}
+
+/**
+ * Delete a workspace, confirmed: what goes with it (its computers, keys, skills and apps, here and in its Orgo
+ * workspace), then Delete. Orgo saying no keeps the workspace whole, with its words here.
+ */
+function DeleteConfirm({ name, preview, error, busy, onCancel, onDelete }: { name: string; preview?: DeletePreview; error?: string; busy?: boolean; onCancel: () => void; onDelete: () => void }) {
+  const nothing = !!preview && !preview.computers.length && !preview.keys.length && !preview.skills.length && !preview.apps.length;
+  return (
+    <div className="mx-1 my-1 flex flex-col gap-1.5 rounded-[10px] bg-[#F7F7F5] p-2.5 text-[12px] leading-4 text-[#6B6B6B]">
+      <span className="text-[13px] font-medium text-ink">Delete {name}?</span>
+      {!preview && !error && <span>Checking what&apos;s in it&hellip;</span>}
+      {preview && (
+        <>
+          <span>{nothing ? "Its bots and chats go. Nothing else is in it." : "Its bots and chats go, and with them:"}</span>
+          {!nothing && (
+            <ul className="flex flex-col gap-0.5">
+              <GoesWith label="Computers" items={preview.computers.map((c) => c.name)} />
+              <GoesWith label="Keys" items={preview.keys} />
+              <GoesWith label="Skills" items={preview.skills} />
+              <GoesWith label="Apps" items={preview.apps} />
+            </ul>
+          )}
+          {preview.orgo && <span>Its Orgo workspace is deleted too.</span>}
+        </>
+      )}
+      {error && (
+        <span role="alert" className="text-[#B42318]">
+          {error}
+        </span>
+      )}
+      <div className="flex justify-end gap-1.5 pt-0.5">
+        <button onClick={onCancel} className="h-7 rounded-md px-2 text-[12px] font-medium text-ink hover:bg-black/[0.06]">
+          Cancel
+        </button>
+        {preview && (
+          <button onClick={onDelete} disabled={busy} className="h-7 rounded-md bg-[#B42318] px-2 text-[12px] font-medium text-white disabled:opacity-50">
+            {busy ? "Deleting" : "Delete"}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,6 +1,23 @@
 import { deleteWorkspace } from "@/lib/server/remove";
-import { createWorkspace, dismissRenamedNotice, ensureMain, renameWorkspace, revertWorkspaceMigration, switchWorkspace } from "@/lib/server/workspaces";
+import { createWorkspace, deletePreview, dismissRenamedNotice, ensureMain, renameWorkspace, revertWorkspaceMigration, switchWorkspace, syncWorkspaceNames, WorkspaceError } from "@/lib/server/workspaces";
 import { notReady } from "@/lib/server/ready";
+
+/**
+ * `?preview=<id>`: what deleting that workspace takes with it, for the confirm (its computers, keys, skills
+ * and apps, Bops' and its Orgo workspace's). 400 for the default workspace, 502 when Orgo didn't say.
+ */
+export async function GET(request: Request) {
+  const unready = notReady();
+  if (unready) return unready;
+  const id = new URL(request.url).searchParams.get("preview");
+  if (!id) return Response.json({ error: "Say which workspace (?preview=<id>)." }, { status: 400 });
+  ensureMain();
+  try {
+    return Response.json(await deletePreview(id));
+  } catch (e) {
+    return Response.json({ error: (e as Error).message }, { status: e instanceof WorkspaceError ? e.status : 502 });
+  }
+}
 
 /**
  * A new workspace: its own team, starting with its own Boppy. It becomes the current one. Where Orgo has a
@@ -18,16 +35,21 @@ export async function POST(request: Request) {
 }
 
 /**
- * Switch to a workspace, or rename one (its Orgo workspace too, when it has one). `noticeSeen`: the switcher's
- * note about names Orgo already had was seen. `revertOrgoMove`: undo the move onto Orgo workspaces
+ * Switch to a workspace, or rename one (its Orgo workspace too, when it has one; the default's waits for every
+ * app on the account to be new, and says so in `waiting`). `noticeSeen`: the switcher's note about names Orgo
+ * already had was seen. `syncNames`: take renames made on orgo.ai (the sidebar asks every 10 minutes). `revertOrgoMove`: undo the move onto Orgo workspaces
  * (revertWorkspaceMigration, DESIGN.md section 8), for a rollback.
  */
 export async function PATCH(request: Request) {
   const unready = notReady();
   if (unready) return unready;
-  const { id, name, current, noticeSeen, revertOrgoMove } = (await request.json().catch(() => ({}))) as { id?: string; name?: string; current?: string; noticeSeen?: boolean; revertOrgoMove?: boolean };
+  const { id, name, current, noticeSeen, revertOrgoMove, syncNames } = (await request.json().catch(() => ({}))) as { id?: string; name?: string; current?: string; noticeSeen?: boolean; revertOrgoMove?: boolean; syncNames?: boolean };
   ensureMain();
   if (noticeSeen === true) dismissRenamedNotice();
+  if (syncNames === true) {
+    const r = await syncWorkspaceNames().catch(() => null);
+    return Response.json({ ok: true, renamed: r?.renamed ?? [] });
+  }
   if (revertOrgoMove === true) {
     try {
       return Response.json({ ok: true, ...(await revertWorkspaceMigration()) });
@@ -40,6 +62,7 @@ export async function PATCH(request: Request) {
     if (id && typeof name === "string") {
       const r = await renameWorkspace(id, name);
       if ("error" in r) return Response.json(r, { status: r.code === "name_taken" ? 409 : 502 });
+      return Response.json(r);
     }
     return Response.json({ ok: true });
   } catch (e) {
@@ -47,7 +70,10 @@ export async function PATCH(request: Request) {
   }
 }
 
-/** Delete a workspace with its team and their computers. */
+/**
+ * Delete a workspace with its team and their computers, and its Orgo workspace with what's in it (after the
+ * confirm, from GET ?preview). The default workspace can't be. A refusal leaves it whole, with Orgo's words.
+ */
 export async function DELETE(request: Request) {
   const unready = notReady();
   if (unready) return unready;
@@ -57,6 +83,6 @@ export async function DELETE(request: Request) {
     if (id) await deleteWorkspace(id);
     return Response.json({ ok: true });
   } catch (e) {
-    return Response.json({ error: (e as Error).message }, { status: 400 });
+    return Response.json({ error: (e as Error).message }, { status: e instanceof WorkspaceError ? e.status : 400 });
   }
 }

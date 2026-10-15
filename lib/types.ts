@@ -133,6 +133,14 @@ export type Workspace = {
    * workspace's computers then live in the one "bops" project, as before.
    */
   orgoProjectId?: string;
+  /**
+   * Its Orgo project's name as Orgo has it, last seen or set here; `orgoUpdatedAt` its updated_at then. A
+   * list that names the project otherwise was renamed on orgo.ai, and the name comes here too
+   * (syncWorkspaceNames). It may differ from `name`: "orgo (Bops)" for a workspace named "orgo" here, or
+   * "bops" for a default the user renamed while an older Bops app is still on the account.
+   */
+  orgoName?: string;
+  orgoUpdatedAt?: string;
   /** Its skills and apps (lib/server/workspace-skills.ts): what each is, by slug. The files are on this Mac. */
   skills?: SkillRef[];
   apps?: SkillRef[];
@@ -678,8 +686,9 @@ export type AppState = {
   proceduresBackup?: Procedure[];
   /**
    * Moving each workspace onto an Orgo workspace of its own (lib/server/workspaces.ts
-   * migrateWorkspacesToOrgo): the step it got to, the computers it moved (for a rollback), the ones
-   * Orgo wouldn't move yet, and when it was done. Saved after every step, so a stop resumes.
+   * migrateWorkspacesToOrgo): the step it got to, the Orgo workspaces it made (for a rollback), the
+   * default's name still waiting for every app to be new, and when it was done. Saved after every step,
+   * so a stop resumes.
    */
   orgoMigration?: OrgoMigration;
   /**
@@ -1098,14 +1107,19 @@ export function computerCheckMs(status: string | undefined, { visible, inUse }: 
 }
 
 export type OrgoMigration = {
-  v: 1;
+  /** 1: the first build, which moved computers (`moves`, `pending` may still be in a state from it, and are ignored). 2: nothing moves. */
+  v: number;
   step: string;
-  moves: { computerId: string; from: string; to: string }[];
-  pending: string[];
   /** Orgo workspaces made by the move, for a rollback (deleted when empty). */
   created: string[];
   /** A workspace renamed because the user's Orgo already had that name: shown until the user dismisses it. */
   renamed?: { wsId: string; from: string; to: string }[];
+  /**
+   * The default workspace is `to` here, and its Orgo project keeps the name "bops" until every Bops app on
+   * the account is new enough (orgo.ts bopsAppsGate); `reason` is the gate's last answer. Tried again at
+   * every sign-in and at every rename; gone once the project has the name, or it was renamed on orgo.ai.
+   */
+  defaultRename?: { to: string; reason: string; checkedAt: string };
   doneAt?: string;
 };
 

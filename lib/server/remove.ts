@@ -1,11 +1,12 @@
 import "server-only";
-import { botChatId, live, workspaceOf } from "@/lib/types";
+import { botChatId, live, MAIN_WORKSPACE, workspaceOf } from "@/lib/types";
 import { dropGuestKey, resetComputer, stopSession } from "./sessions";
 import { bot, getState, session, update } from "./store";
 import { stopWatch } from "./watches";
 import { deleteInboxes } from "./mail";
 import { dropBotFromSkills } from "./workspace-skills";
-import { deleteOrgoProject } from "./workspaces";
+import { DEFAULT_UNDELETABLE, deleteOrgoWorkspace, WorkspaceError } from "./workspaces";
+import { perWorkspaceProjects } from "./orgo";
 
 /** Delete one message from a chat. */
 export function deleteMessage(messageId: string) {
@@ -66,16 +67,28 @@ export async function deleteBot(botId: string, withWorkspace = false) {
 }
 
 /**
- * Delete a workspace and its whole team (their computers too), and its Orgo workspace once nothing is left in
- * it (workspaces.ts deleteOrgoProject). The last workspace stays.
+ * Delete a workspace and its whole team (their computers too), and its Orgo workspace with everything in it,
+ * once the user confirmed what goes (workspaces.ts deletePreview). The default workspace stays, and so does
+ * the last one. Orgo first, in an order that never leaves it half deleted: the team's computers (most are
+ * in the default's "bops" project, since nothing moved), then the Orgo workspace; a refusal of either throws
+ * with the workspace still here, its bots and chats whole (a computer already deleted is made again with
+ * the bot's next task), and Delete again goes on. Only then is it taken off this Mac.
  */
 export async function deleteWorkspace(workspaceId: string) {
   const gone = (getState().workspaces ?? []).find((w) => w.id === workspaceId);
+  if (!gone) return;
+  if (workspaceId === MAIN_WORKSPACE) throw new WorkspaceError(DEFAULT_UNDELETABLE);
   const left = (getState().workspaces ?? []).filter((w) => w.id !== workspaceId);
   if (left.length === 0) throw new Error("You need at least one workspace");
   const team = getState().bots.filter((b) => workspaceOf(b) === workspaceId);
   // The main bot last: the others' computers were cloned from its computer.
-  for (const b of [...team.filter((x) => !x.isMain), ...team.filter((x) => x.isMain)]) await deleteBot(b.id, true);
+  const order = [...team.filter((x) => !x.isMain), ...team.filter((x) => x.isMain)];
+  const orgo = !!gone.orgoProjectId && (await perWorkspaceProjects().catch(() => null)) === true;
+  if (orgo) {
+    for (const b of order) if (bot(b.id)?.computerId) await resetComputer(b.id);
+    await deleteOrgoWorkspace(gone);
+  }
+  for (const b of order) await deleteBot(b.id, true);
   update((state) => {
     state.workspaces = left;
     state.chats = state.chats.filter((c) => c.workspaceId !== workspaceId);
@@ -83,5 +96,4 @@ export async function deleteWorkspace(workspaceId: string) {
     state.messages = state.messages.filter((m) => chats.has(m.chatId));
     if (state.workspace === workspaceId) state.workspace = left[0].id;
   });
-  if (gone?.orgoProjectId) await deleteOrgoProject(gone).catch((e: Error) => console.warn(`[workspaces] ${e.message}`));
 }

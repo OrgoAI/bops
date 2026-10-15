@@ -182,7 +182,7 @@ export type OrgoComputer = { id: string; name: string; status: string; cpu: numb
  */
 const WORKSPACE = "bops";
 /** A workspace as GET /api/workspaces lists it. `product` and `bops_ws_id` only from an orgo-web with per workspace projects. */
-export type OrgoWorkspace = { id: string; name: string; role?: string; product?: string | null; bops_ws_id?: string | null; created_at?: string; desktops?: { id: string; name?: string }[]; member_count?: number };
+export type OrgoWorkspace = { id: string; name: string; role?: string; product?: string | null; bops_ws_id?: string | null; created_at?: string; updated_at?: string | null; desktops?: { id: string; name?: string }[]; member_count?: number };
 const g = globalThis as unknown as {
   bopsOrgoWorkspace?: Promise<string>;
   bopsComputerChanges?: number;
@@ -337,16 +337,32 @@ export async function bopsWorkspace(): Promise<string> {
 const workspaceOfId = (wsId: string): Workspace | undefined => getState().workspaces?.find((w) => w.id === wsId);
 
 /**
- * Remember a workspace's Orgo project (Workspace.orgoProjectId), and move its skills' folder to the
- * project's id (workspace-skills.ts folderKey), merging by slug with one already there.
+ * Remember a workspace's Orgo project (Workspace.orgoProjectId) and the project's name as Orgo has it
+ * (Workspace.orgoName, which tells a rename on orgo.ai apart: workspaces.ts syncWorkspaceNames), and move its
+ * skills' folder to the project's id (workspace-skills.ts folderKey), merging by slug with one already there.
  */
-export function bindProject(wsId: string, projectId: string) {
+export function bindProject(wsId: string, projectId: string, orgoName?: string, orgoUpdatedAt?: string | null) {
   const w = workspaceOfId(wsId);
-  if (!w || w.orgoProjectId === projectId) return;
+  if (!w) return;
+  if (w.orgoProjectId === projectId) {
+    if (orgoName !== undefined && w.orgoName === undefined)
+      update((s) => {
+        const x = s.workspaces?.find((y) => y.id === wsId);
+        if (x) {
+          x.orgoName = orgoName;
+          if (orgoUpdatedAt) x.orgoUpdatedAt = orgoUpdatedAt;
+        }
+      });
+    return;
+  }
   const before = folderKey(w);
   update((s) => {
     const x = s.workspaces?.find((y) => y.id === wsId);
-    if (x) x.orgoProjectId = projectId;
+    if (x) {
+      x.orgoProjectId = projectId;
+      if (orgoName !== undefined) x.orgoName = orgoName;
+      if (orgoUpdatedAt) x.orgoUpdatedAt = orgoUpdatedAt;
+    }
   });
   try {
     moveWorkspaceFolder(before, folderKey({ id: wsId, orgoProjectId: projectId }));
@@ -367,7 +383,7 @@ export const collisionNames = (name: string) => [name, `${name} (Bops)`, ...Arra
  * already has is said back (OrgoError, nameTaken) for them to pick another; otherwise the next free one
  * of collisionNames is used and noted.
  */
-export async function ensureProject(wsId: string, opts: { interactive?: boolean; name?: string } = {}): Promise<{ id: string; name: string; renamed?: boolean }> {
+export async function ensureProject(wsId: string, opts: { interactive?: boolean; name?: string } = {}): Promise<{ id: string; name: string; renamed?: boolean; created?: boolean }> {
   const w = workspaceOfId(wsId);
   const local = (opts.name ?? w?.name ?? "Workspace").trim().slice(0, 80) || "Workspace";
   const owned = await ownedWorkspaces();
@@ -375,7 +391,7 @@ export async function ensureProject(wsId: string, opts: { interactive?: boolean;
   if (tied) {
     // Tied here only once Orgo tied it too (a refusal, a 409 taken by another, or an orgo-web without the code: nothing).
     if (tied.bops_ws_id !== wsId && !(await tieProject(tied.id, wsId))) throw new Error(`Orgo didn't tie ${tied.id.slice(0, 8)} to this workspace`);
-    bindProject(wsId, tied.id);
+    bindProject(wsId, tied.id, tied.name, tied.updated_at);
     return { id: tied.id, name: tied.name };
   }
   const name = wsId === MAIN_WORKSPACE && /^main$/i.test(local) ? WORKSPACE : local;
@@ -384,22 +400,22 @@ export async function ensureProject(wsId: string, opts: { interactive?: boolean;
   for (const n of tries) {
     if (!opts.interactive && taken.has(n.toLowerCase())) continue;
     try {
-      const made = await call<{ id: string; name?: string; product?: unknown; bops_ws_id?: unknown }>("POST", "/workspaces", { name: n, product: "bops", bops_ws_id: wsId }, { wait: false });
+      const made = await call<{ id: string; name?: string; product?: unknown; bops_ws_id?: unknown; updated_at?: string | null }>("POST", "/workspaces", { name: n, product: "bops", bops_ws_id: wsId }, { wait: false });
       if (!saidBack(made, wsId)) {
         // An orgo-web without the code made a plain Orgo project: it goes again, and this workspace stays on the "bops" project.
         if (g.bopsOrgoPerWorkspace) g.bopsOrgoPerWorkspace.on = null;
-        await call("DELETE", `/workspaces/${encodeURIComponent(made.id)}`).catch((e: Error) => console.warn(`[workspaces] deleting the plain project ${made.id.slice(0, 8)}: ${e.message}`));
+        await deleteProject(made.id).catch((e: Error) => console.warn(`[workspaces] deleting the plain project ${made.id.slice(0, 8)}: ${e.message}`));
         throw new Error("Orgo didn't make it a Bops workspace");
       }
       await confirmPerWorkspace();
-      bindProject(wsId, made.id);
-      return { id: made.id, name: made.name ?? n, ...(n !== name ? { renamed: true } : {}) };
+      bindProject(wsId, made.id, made.name ?? n, made.updated_at);
+      return { id: made.id, name: made.name ?? n, created: true, ...(n !== name ? { renamed: true } : {}) };
     } catch (e) {
       if (!nameTaken(e) || opts.interactive) throw e;
       // Made meanwhile (another Mac): that's it, if it's tied to this workspace.
       const again = (await ownedWorkspaces()).find((x) => x.bops_ws_id === wsId);
       if (again) {
-        bindProject(wsId, again.id);
+        bindProject(wsId, again.id, again.name, again.updated_at);
         return { id: again.id, name: again.name };
       }
     }
@@ -783,12 +799,87 @@ async function forkTarget(wsId?: string): Promise<string | undefined> {
   return orgoProjectFor(wsId);
 }
 
-/** Move a computer to another of the user's Orgo workspaces (orgo-web's move route). */
-export const moveComputer = (computerId: string, workspaceId: string) => call<{ ok?: boolean }>("PATCH", `/computers/${encodeURIComponent(computerId)}/move`, { workspace_id: workspaceId }, { wait: false });
+/** Rename one of the user's Orgo workspaces: Orgo's answer carries the name it kept (and when, from an orgo-web that says). */
+export const renameProject = (projectId: string, name: string) =>
+  call<{ name?: string; updated_at?: string | null }>("PATCH", `/workspaces/${encodeURIComponent(projectId)}`, { name }, { wait: false });
 
-/** Rename one of the user's Orgo workspaces, or delete one (the caller makes sure it's an empty Bops one). */
-export const renameProject = (projectId: string, name: string) => call("PATCH", `/workspaces/${encodeURIComponent(projectId)}`, { name }, { wait: false });
-export const deleteProject = (projectId: string) => call("DELETE", `/workspaces/${encodeURIComponent(projectId)}`);
+/**
+ * Delete one of the user's Orgo workspaces with everything in it (orgo-web's POST /api/projects/{id}/delete:
+ * it has no DELETE). orgo-web refuses before it deletes anything (a computer whose memory is moving, a
+ * device it holds), so a refusal leaves the workspace whole. Only after the user confirmed what goes with it
+ * (deletePreview), or for a Bops workspace this app just made and that is empty.
+ */
+export const deleteProject = (projectId: string) => call<{ success?: boolean }>("POST", `/projects/${encodeURIComponent(projectId)}/delete`, undefined, { wait: false });
+
+/** What deleting an Orgo workspace takes with it, as orgo-web lists it (GET /api/workspaces/{id}/delete-preview). */
+export type OrgoDeletePreview = { computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[] };
+
+/**
+ * What orgo-web says goes with a workspace when it's deleted: its computers, its keys (vault secrets scoped
+ * to it), its skills and its apps. Each list may come as names, or as rows with a name (an id for a
+ * computer). Throws when Orgo doesn't answer it: nothing is deleted without the user seeing this first.
+ */
+export async function deletePreview(projectId: string): Promise<OrgoDeletePreview> {
+  const j = await call<Record<string, unknown>>("GET", `/workspaces/${encodeURIComponent(projectId)}/delete-preview`);
+  const rows = (x: unknown) => (Array.isArray(x) ? x : []).map((r) => (typeof r === "string" ? { name: r } : r && typeof r === "object" ? (r as Record<string, unknown>) : {}));
+  const names = (x: unknown) => rows(x).map((r) => String(r.name ?? r.slug ?? r.title ?? "")).filter(Boolean);
+  return {
+    computers: rows(j.computers ?? j.desktops)
+      .map((r) => ({ id: String(r.id ?? r.name ?? ""), name: String(r.name ?? r.id ?? "") }))
+      .filter((c) => c.id),
+    keys: names(j.keys ?? j.secrets),
+    skills: names(j.skills),
+    apps: names(j.apps),
+  };
+}
+
+/**
+ * The first Bops release that finds its default workspace by bops_ws_id rather than by the name "bops"
+ * (lib/server/workspaces.ts). An app before it looks for a project named "bops", so the default's project
+ * keeps that name until every app on the account is at least this one (bopsAppsGate).
+ */
+export const WORKSPACE_APPS_SINCE = "0.0.29";
+
+const olderVersion = (a: string, b: string) => {
+  const x = a.split(".").map(Number);
+  const y = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i];
+  return false;
+};
+
+/**
+ * Whether every Bops app on this account is new enough for the default's project to take the user's
+ * name (DECISIONS.md: only once every Bops app on the account is the new version).
+ *
+ * How it can be known: orgo-web keeps, per API key (each sign-in on a Mac gets its own key, so per Mac),
+ * the version each Bops app last sent while it used a Bops computer (public.bops_app_seen, the same record
+ * that decides whether a Bops computer may leave its host). Bops asks for it at GET /api/bops/apps:
+ * `{ apps: [{ app_version, caller, seen_at }] }`, keys seen in the last 90 days. Bops Cloud's
+ * bops.cloud_accounts.app_version is not used: it is one value per account, the last app that called
+ * wins, so an old Mac and a new one take turns and a new version there says nothing about the other Mac.
+ *
+ * Fails closed: an orgo-web that doesn't answer the route (`no_signal`, today's), no app on record
+ * (`no_record`), one that sent no version (`silent_app`), one older than WORKSPACE_APPS_SINCE (`old_app`),
+ * or Orgo not answering (`unreachable`) all keep the name "bops". Old apps are covered meanwhile by
+ * orgo-web's legacy resolver ({name:'bops'} answers the ws_main project) and the marker.
+ */
+export type AppsGateReason = "all_new" | "no_signal" | "no_record" | "silent_app" | "old_app" | "unreachable";
+export async function bopsAppsGate(): Promise<{ ok: boolean; reason: AppsGateReason; apps: number }> {
+  const key = await apiKey().catch(() => "");
+  if (!key) return { ok: false, reason: "unreachable", apps: 0 };
+  const r = await callOrgo<{ apps?: unknown }>(key, "/api/bops/apps");
+  if (!r || r.status >= 500) return { ok: false, reason: "unreachable", apps: 0 };
+  if (r.status !== 200 || !Array.isArray(r.json.apps)) return { ok: false, reason: "no_signal", apps: 0 };
+  // Bops Cloud calls for the user too; it isn't an app on a Mac.
+  const apps = (r.json.apps as { app_version?: unknown; caller?: unknown }[]).filter((a) => a && typeof a === "object" && a.caller !== "cloud");
+  if (!apps.length) return { ok: false, reason: "no_record", apps: 0 };
+  for (const a of apps) {
+    const v = typeof a.app_version === "string" ? a.app_version.trim().replace(/^v/i, "") : "";
+    if (!/^\d+\.\d+\.\d+$/.test(v)) return { ok: false, reason: "silent_app", apps: apps.length };
+    if (olderVersion(v, WORKSPACE_APPS_SINCE)) return { ok: false, reason: "old_app", apps: apps.length };
+  }
+  return { ok: true, reason: "all_new", apps: apps.length };
+}
 /** The computers in one Orgo workspace. */
 export const projectComputers = async (projectId: string) => (await call<{ desktops?: { id: string; name: string }[] }>("GET", `/workspaces/${encodeURIComponent(projectId)}`)).desktops ?? [];
 
