@@ -66,17 +66,39 @@ export function useFooterHover(initial: FooterKey | null = null) {
   const settle = useCallback(() => {
     clear();
     timer.current = setTimeout(() => {
+      timer.current = null;
       const a = typeof document !== "undefined" ? document.activeElement : null;
       setHover(a && row.current?.contains(a) && focusVisible(a) ? keyOf(a) : null);
     }, FOOTER_LEAVE_MS);
   }, []);
+  /*
+   * In the row by the page, not by React: a portal opened from a button (the account menu's Restart
+   * dialog) counts as inside the row in React's tree, so React sends its pointer events up to the row
+   * and never a leave. A pointer on anything outside the row's own elements settles it, once.
+   */
+  const inRow = (t: EventTarget | null) => t instanceof Node && !!row.current?.contains(t);
+  const away = useCallback(() => {
+    if (!timer.current) settle();
+  }, [settle]);
+  useEffect(() => {
+    if (!hover || typeof document === "undefined") return;
+    const f = (e: Event) => {
+      if (!(e.target instanceof Node && row.current?.contains(e.target))) away();
+    };
+    document.addEventListener("pointerover", f);
+    return () => document.removeEventListener("pointerover", f);
+  }, [hover, away]);
   return {
     hover,
     row: {
       ref: row,
-      onPointerOver: (e: PointerEvent) => e.pointerType !== "touch" && canHover() && enter(keyOf(e.target)),
+      onPointerOver: (e: PointerEvent) => {
+        if (e.pointerType === "touch" || !canHover()) return;
+        if (!inRow(e.target)) return away();
+        enter(keyOf(e.target));
+      },
       onPointerLeave: (e: PointerEvent) => e.pointerType !== "touch" && settle(),
-      onFocus: (e: FocusEvent) => focusVisible(e.target) && enter(keyOf(e.target)),
+      onFocus: (e: FocusEvent) => inRow(e.target) && focusVisible(e.target) && enter(keyOf(e.target)),
       onBlur: (e: FocusEvent) => !row.current?.contains(e.relatedTarget as Node | null) && settle(),
     },
   };

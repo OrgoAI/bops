@@ -155,7 +155,12 @@ await test("no hover expansion where nothing hovers (a touch screen)", () => {
   assert.equal(canHover(), true);
   globalThis.matchMedia = was;
   const src = readFileSync(`${root}/components/app/sidebar-footer.tsx`, "utf8");
-  assert.match(src, /pointerType !== "touch" && canHover\(\)/, "pointer over the row only counts with a hovering pointer");
+  assert.match(src, /pointerType === "touch" \|\| !canHover\(\)\) return/, "pointer over the row only counts with a hovering pointer");
+  // A portal opened from the row (the Restart dialog) is inside it in React's tree but not on the page:
+  // pointer and focus there count as outside, and a document listener settles the pill once it's away.
+  assert.match(src, /if \(!inRow\(e\.target\)\) return away\(\)/, "a pointer on a portal settles, not hovers");
+  assert.match(src, /onFocus: \(e: FocusEvent\) => inRow\(e\.target\)/, "focus in a portal is not the row's");
+  assert.match(src, /document\.addEventListener\("pointerover"/, "the page's pointer settles a pill React never saw leave");
   assert.match(src, /\(hover: none\)/);
 });
 
