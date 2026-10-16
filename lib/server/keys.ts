@@ -172,11 +172,15 @@ export async function saveKey(name: string, value: string, botIds: string[] = []
   if (!v) throw new KeysError("Paste the key first.", 400);
   if (v.length > 8192) throw new KeysError("That key is too long.", 400);
   const project = scopeProject(scope, wsId);
+  // Set already (any scope), or the vault can't say: a key replaced, so nothing is offered for it.
+  const existed = await listKeys()
+    .then((all) => all.some((k) => k.name === n))
+    .catch(() => true);
   await vault("POST", "/api/secrets", { name: n, value: v, ...(project ? { workspace_id: project } : {}) });
   forget();
   for (const botId of botIds) grantKey(n, botId, true);
-  // A key a bot was given: that bot is offered the service's starter routines (Stripe, Plain).
-  if (botIds.length) await import("./routine-suggestions").then((m) => m.offerStarters(n, botIds)).catch(() => {});
+  // A new key a bot was given: that bot is offered the service's starter routines (Stripe, Plain).
+  if (!existed && botIds.length) await import("./routine-suggestions").then((m) => m.offerStarters(n, botIds)).catch(() => {});
   return n;
 }
 

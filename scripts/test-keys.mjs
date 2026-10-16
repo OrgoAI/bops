@@ -268,6 +268,24 @@ await check("a save sends the value to Orgo and nowhere else: not the state, a f
   assert.ok(list.keys.some((k) => k.name === "GITHUB_TOKEN" && k.bots.includes("max")));
 });
 
+await check("a key that was set already offers no routines; a new one does", async () => {
+  S.update((s) => void delete s.suggest);
+  let res = await KeysRoute.POST(req("POST", "/api/keys", { name: "STRIPE_SECRET_KEY", value: "sk_test_again", botIds: ["max"] }));
+  assert.equal(res.status, 200);
+  assert.equal(S.getState().suggest, undefined, "Stripe was in the vault already");
+  res = await KeysRoute.POST(req("POST", "/api/keys", { name: "PLAIN_API_KEY", value: "plain_fake", botIds: ["max"] }));
+  assert.equal(res.status, 200);
+  assert.equal(S.getState().suggest?.app, "PLAIN_API_KEY", "Plain is new");
+  assert.equal(S.getState().suggest?.botId, "max");
+  // Back as the later checks expect them.
+  S.update((s) => void delete s.suggest);
+  vault.set("STRIPE_SECRET_KEY", "sk_test_fake_stripe");
+  vault.delete("PLAIN_API_KEY");
+  Keys.grantKey("STRIPE_SECRET_KEY", "max", false);
+  Keys.grantKey("PLAIN_API_KEY", "max", false);
+  await Keys.listKeys({ fresh: true });
+});
+
 await check("a save refuses what Bops can't call, an empty key, and says why", async () => {
   for (const [body, words] of [
     [{ name: "MY_THING", value: "x" }, /can't call that service/],
