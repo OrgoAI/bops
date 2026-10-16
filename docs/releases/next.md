@@ -1,0 +1,1 @@
+- Bops downloads new versions itself. Restart to update.

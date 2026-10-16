@@ -3,7 +3,7 @@
  * isn't already running, opens the window with the Mac title bar from the design, and on quit
  * stops what it started, including the bots' background browsers.
  */
-const { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, Notification, screen, session, shell, systemPreferences } = require("electron");
+const { app, autoUpdater, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, Notification, screen, session, shell, systemPreferences } = require("electron");
 const { execFile, execFileSync, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -12,6 +12,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { startRenderService } = require("./render.cjs");
+const { createUpdates } = require("./updates.cjs");
 
 const PORT = 3210;
 const URL = `http://localhost:${PORT}`;
@@ -1071,7 +1072,8 @@ ipcMain.handle("perm-settings", (_, id) => (PANES[id] ? shell.openExternal(PANES
 ipcMain.handle("perm-screen-restart", () => mac && screenAtLaunch !== "granted" && systemPreferences.getMediaAccessStatus("screen") === "granted");
 
 /*
- * Restart Bops (components/app/restart.tsx, and the Screen Recording card's Restart). A clean one:
+ * Restart Bops (components/app/restart.tsx, the Screen Recording card's Restart, and the update notice's
+ * Restart, which installs a new version downloaded meanwhile: see "New versions"). A clean one:
  * the server lets go first (POST /api/restart: the signed-in user's state saved to Bops Cloud, the cached
  * Bops Cloud session and Orgo plan dropped), then it's stopped, and Bops
  * opens again and starts a new one. Who's signed in stays (the key is in the Keychain), and so does
@@ -1082,38 +1084,49 @@ ipcMain.handle("perm-screen-restart", () => mac && screenAtLaunch !== "granted" 
  * Bops' own; a development server someone started themselves is left running.
  */
 let restarting;
+/** The clean stop a restart starts with (and a quit with a new version staged): the server let go and stopped, its port free. */
+async function stopForRestart(why = "Restart Bops") {
+  mainLog(why);
+  let pid;
+  // A server that doesn't answer isn't asked (that only waited out the 20s).
+  const who = await whoAnswers();
+  if (who.up && who.mine)
+    try {
+      const res = await fetch(`${LOCAL}/api/restart`, { method: "POST", headers: { "x-bops-window": windowToken() }, signal: AbortSignal.timeout(20_000) });
+      pid = (await res.json()).pid;
+    } catch (e) {
+      mainLog(`restart: the server didn't let go cleanly: ${e?.message ?? e}`);
+    }
+  else mainLog(`restart: ${who.up ? "the server answering isn't this Bops'" : "the server isn't answering"}`);
+  leaving = true;
+  // Wait for the port to close (its last save gets up to 5s), so the new Bops starts its own server
+  // instead of finding the old one still answering and then losing it. One that won't let go is
+  // stopped hard.
+  if (stopServer() || (await stopOtherServer(pid))) for (let i = 0; i < 28 && (await portTaken()); i++) await sleep(250);
+  if (await portTaken()) {
+    const l = await listener();
+    if (stoppable(l)) {
+      mainLog(`restart: the server (pid ${l.pid}) still holds the port: SIGKILL`);
+      try {
+        process.kill(-l.pid, "SIGKILL");
+      } catch {
+        try {
+          process.kill(l.pid, "SIGKILL");
+        } catch {}
+      }
+      for (let i = 0; i < 20 && (await portTaken()); i++) await sleep(250);
+    }
+  }
+}
 function restart() {
   restarting ??= (async () => {
-    mainLog("Restart Bops");
-    let pid;
-    // A server that doesn't answer isn't asked (that only waited out the 20s).
-    const who = await whoAnswers();
-    if (who.up && who.mine)
-      try {
-        const res = await fetch(`${LOCAL}/api/restart`, { method: "POST", headers: { "x-bops-window": windowToken() }, signal: AbortSignal.timeout(20_000) });
-        pid = (await res.json()).pid;
-      } catch (e) {
-        mainLog(`restart: the server didn't let go cleanly: ${e?.message ?? e}`);
-      }
-    else mainLog(`restart: ${who.up ? "the server answering isn't this Bops'" : "the server isn't answering"}`);
-    leaving = true;
-    // Wait for the port to close (its last save gets up to 5s), so the new Bops starts its own server
-    // instead of finding the old one still answering and then losing it. One that won't let go is
-    // stopped hard.
-    if (stopServer() || (await stopOtherServer(pid))) for (let i = 0; i < 28 && (await portTaken()); i++) await sleep(250);
-    if (await portTaken()) {
-      const l = await listener();
-      if (stoppable(l)) {
-        mainLog(`restart: the server (pid ${l.pid}) still holds the port: SIGKILL`);
-        try {
-          process.kill(-l.pid, "SIGKILL");
-        } catch {
-          try {
-            process.kill(l.pid, "SIGKILL");
-          } catch {}
-        }
-        for (let i = 0; i < 20 && (await portTaken()); i++) await sleep(250);
-      }
+    await stopForRestart();
+    // A new version staged: macOS puts it in place of this one and opens it (Squirrel.Mac's ShipIt),
+    // once the server above is gone. Otherwise this same app opens again.
+    if (updates?.ready()) {
+      mainLog(`restart: installing Bops ${updates.state().version}`);
+      autoUpdater.quitAndInstall();
+      return;
     }
     app.relaunch();
     app.exit(0);
@@ -1173,18 +1186,26 @@ ipcMain.handle("mac-pip-close", () => pipWin?.close());
 ipcMain.handle("mac-show-main", () => showMain());
 
 /*
- * New versions. Bops doesn't update itself: it asks bops.bot for the newest release
- * (download/latest.json, written by scripts/download-publish.sh) at launch and every hour, and while
- * there's a newer one than this app the page shows a notice (components/app/update-notice.tsx) that
- * sends the user to bops.bot, with what's new in it when the file says (its "notes", a few short
- * lines; an older file has none). Only release builds ask. Nothing here throws or shows an error: what
- * goes wrong is only logged, in ~/Library/Logs/Bops/updates.log (each change once, not every hour).
+ * New versions. Bops gets them itself: it asks bops.bot for the newest release (download/latest.json,
+ * written by scripts/download-publish.sh) at launch and every hour, and when there's a newer one than
+ * this app it's downloaded in the app (desktop/updates.cjs). With "Download updates automatically" on
+ * (Settings → This Mac, the default) that happens quietly; with it off the page's notice
+ * (components/app/update-notice.tsx) says it's out and the user clicks Download. Either way, once it's
+ * downloaded the notice says it's ready, with Restart: a clean restart installs it, and so does
+ * quitting Bops. What's new in it shows under that when the file says (its "notes", a few short lines;
+ * an older file has none). A copy that can't replace itself (opened from the DMG or Downloads, or in a
+ * folder this user can't write) sends the user to bops.bot instead, as before.
+ *
+ * Only release builds ask. Nothing here throws or shows an error: what goes wrong is only logged, in
+ * ~/Library/Logs/Bops/updates.log (each change once, not every hour).
  */
 const LATEST_URL = "https://bops.bot/download/latest.json";
 const SITE_URL = "https://bops.bot";
 const dismissedFile = () => path.join(app.getPath("userData"), "update-dismissed.json");
-// The newer release bops.bot offers ({ version: "0.0.11", notes: ["…"] }), if any.
+// The newer release bops.bot offers ({ version: "0.0.11", notes: ["…"] }), if any, and what's
+// getting it (desktop/updates.cjs; release builds only).
 let newer;
+let updates;
 let lastNote = "";
 
 function updateNote(text) {
@@ -1227,23 +1248,34 @@ function releaseNotes(notes) {
     .slice(0, 5);
 }
 
-/** What the page shows: the newer version and what's new in it, unless the user put its notice away. */
-const updateInfo = () => (newer && newer.version !== dismissedVersion() ? newer : null);
+/**
+ * What the page shows: the newer version, what's new in it and where it's at ({ version, notes, phase,
+ * asked, failed }), unless there's none or the user put its notice away. One put away while it's ready
+ * still installs when Bops quits.
+ */
+function updateInfo() {
+  const u = updates?.state();
+  if (!u || u.phase === "none" || u.version === dismissedVersion()) return null;
+  return { version: u.version, notes: u.notes, phase: u.phase, asked: u.asked, failed: u.failed };
+}
+const sendUpdate = () => mainWin && !mainWin.isDestroyed() && mainWin.webContents.send("update", updateInfo());
 
 async function checkForUpdate() {
   try {
-    const res = await fetch(LATEST_URL, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) return updateNote(`couldn't check: ${LATEST_URL} answered ${res.status}`);
+    // The same file the download reads (a test build may point both at this Mac: BOPS_UPDATE_FEED).
+    const feed = updates?.feedUrl() ?? LATEST_URL;
+    const res = await fetch(feed, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) return updateNote(`couldn't check: ${feed} answered ${res.status}`);
     // Caddy sends it as an attachment, which fetch doesn't mind; parsed from the text whatever its type.
     const latest = JSON.parse(await res.text());
     const version = String(latest?.version ?? "");
-    if (!versionParts(version)) return updateNote(`couldn't check: no version in ${LATEST_URL}`);
+    if (!versionParts(version)) return updateNote(`couldn't check: no version in ${feed}`);
     const found = isNewer(version, app.getVersion()) ? { version, notes: releaseNotes(latest.notes) } : undefined;
     updateNote(found ? `Bops ${version} is out (this is ${app.getVersion()})` : `up to date (${app.getVersion()}, bops.bot has ${version})`);
-    // The page hears again only when the version or what's said about it changes.
-    if (JSON.stringify(found) === JSON.stringify(newer)) return;
     newer = found;
-    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("update", updateInfo());
+    // Every hour: one that's downloading or ready is left alone, and a download that didn't finish is
+    // tried again. The page hears only when what it shows changes (updates' send).
+    if (found) updates?.found(found);
   } catch (e) {
     updateNote(`couldn't check: ${e?.message ?? e}`);
   }
@@ -1256,7 +1288,16 @@ ipcMain.handle("update-dismiss", (_, version) => {
     fs.writeFileSync(dismissedFile(), JSON.stringify({ version, at: Date.now() }));
   } catch {}
 });
-ipcMain.handle("update-download", () => shell.openExternal(SITE_URL));
+// Download: in the app, or on bops.bot for a copy that can't replace itself. Also the notice's Try again.
+ipcMain.handle("update-download", () => {
+  if (!updates || updates.state().phase === "manual") return shell.openExternal(SITE_URL);
+  if (newer) updates.download(newer.version, { asked: true });
+});
+// Restart: installs the downloaded version, the same clean restart as Restart Bops.
+ipcMain.handle("update-install", () => restart());
+// Settings → This Mac's switch. Not there (null) in a build that doesn't update.
+ipcMain.handle("update-auto", () => (updates ? { auto: updates.auto(), canSelfUpdate: updates.canSelfUpdate() } : null));
+ipcMain.handle("update-set-auto", (_, on) => updates?.setAuto(!!on) ?? null);
 
 app.setName("Bops");
 /*
@@ -1277,6 +1318,7 @@ app.whenReady().then(() => {
   if (process.platform === "darwin" && fs.existsSync(ICON)) app.dock.setIcon(nativeImage.createFromPath(ICON));
   // Release builds only: not `npm run app`, nor a build that runs the source folder (desktop/repo.json).
   if (isRelease()) {
+    updates = createUpdates({ autoUpdater, app, fs, path, note: updateNote, send: sendUpdate });
     void checkForUpdate();
     setInterval(() => void checkForUpdate(), 60 * 60_000);
   }
@@ -1291,6 +1333,19 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => app.quit());
+
+/*
+ * Quitting with a new version downloaded installs it: macOS swaps it in once Bops is gone. So the
+ * server is stopped cleanly first (as a restart does), not left exiting while the app is replaced.
+ * Once: the quit after it goes through. A restart already running did its own stop.
+ */
+let quitStopped = false;
+app.on("before-quit", (e) => {
+  if (quitStopped || restarting || !updates?.ready()) return;
+  quitStopped = true;
+  e.preventDefault();
+  void stopForRestart(`Quit: installing Bops ${updates.state().version}`).finally(() => app.quit());
+});
 
 /** Stops the server Bops started or uses (and the bots' browsers). Says whether there was one. */
 function stopServer() {

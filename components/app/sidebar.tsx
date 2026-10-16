@@ -191,7 +191,7 @@ export function Sidebar({
           <AutopilotSections state={state} query={query} onOpen={onOpenAutopilot} onOpenWatch={onOpenWatch} />
         </div>
       )}
-      {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
+      {/* A newer Bops: downloading, ready to Restart into, or out on bops.bot (the Mac app checks and downloads it). */}
       <UpdateNotice />
       {/* You, then People, your apps and logins (the Vault, with the apps you've connected), Routines and Knowledge (sidebar-footer.tsx). New bots are the + at the top. */}
       <SidebarFooter state={state} open={footer} you={(expanded) => <YouMenu state={state} expanded={expanded} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />} onMembers={onMembers} onVault={onVault} onOpenAutopilot={onOpenAutopilot} onOpenMemory={onOpenMemory} />

@@ -6,6 +6,7 @@ import { Mascot, Spinner } from "./mascot";
 import { useMacApp } from "./mac-screens";
 import { RestartConfirm, useCanRestart } from "./restart";
 import { post } from "./ui";
+import { UpdateSettings } from "./update-notice";
 
 /*
  * Everything Bops needs on this Mac, in one place (Setup). It never stands in the way: signing in goes
@@ -445,6 +446,7 @@ export function ThisMacSettings({ state }: { state: AppState }) {
       </div>
       <Cards items={items} />
       <FullAccessCard items={items} />
+      <UpdateSettings />
     </div>
   );
 }
