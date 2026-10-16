@@ -53,6 +53,13 @@ if [ -z "$zip_want" ] || [ "$(sha "$tmp/$zip")" != "$zip_want" ]; then
   echo "$zip doesn't match the release's latest-mac.yml: not publishing it." >&2
   exit 1
 fi
+# The apps install the zip's app without checking it's notarized (only its signature): checked here.
+ditto -x -k "$tmp/$zip" "$tmp/unz"
+if ! xcrun stapler validate "$tmp/unz/Bops.app" >/dev/null; then
+  echo "The app in $zip isn't notarized and stapled: not publishing it." >&2
+  exit 1
+fi
+rm -rf "$tmp/unz"
 
 # latest.json, made now, so nothing changes on the VM when it can't be: the version, where to get it, when
 # it came out, and "notes", what's new in it. Those are the "- " lines of docs/releases/<tag>.md as tagged
@@ -72,7 +79,7 @@ jq -nac --arg version "${tag#v}" --arg released "${released:-$(date -u +%Y-%m-%d
   | {version: $version, url: "https://bops.bot", dmg: "https://bops.bot/download/Bops.dmg", released: $released}
   + (if ($lines | length) > 0 then {notes: $lines} else {} end)
   + {currentRelease: $version,
-     releases: [{version: $version, updateTo: {version: $version, name: "Bops \($version)", notes: ($lines | join("\n")), pub_date: $released, url: $zip}}]}' > "$tmp/latest.json"
+     releases: [{version: $version, updateTo: {version: $version, name: $version, notes: ($lines | join("\n")), pub_date: $released, url: $zip}}]}' > "$tmp/latest.json"
 
 echo "2/4 to the VM"
 box 'install -d -m 0755 /opt/bops/download'

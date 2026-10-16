@@ -155,9 +155,13 @@ fi
 
 # 6. The zip is what installed apps update themselves from (desktop/updates.cjs): macOS installs it only
 # when the app in it is signed by the same team, with the same bundle id. Checked as it will be, from
-# the zip itself. Not with --dir (no zip) or an unsigned test build (it can't update anyone).
+# the zip itself. Not with --dir (no zip) or an unsigned test build (it can't update anyone). Squirrel
+# doesn't check notarization, so that's checked here too: the app in the zip notarized, its ticket
+# stapled. A build without notarization settings skips that, and its zip isn't fit to publish.
 dir_only=""
 for a in "$@"; do [ "$a" = --dir ] && dir_only=1; done
+notarizing=""
+[ -n "${APPLE_API_KEY:-}${APPLE_ID:-}${APPLE_KEYCHAIN_PROFILE:-}" ] && notarizing=1
 if [ -n "$signing" ] && [ -z "$dir_only" ]; then
   for z in dist-desktop/*.zip; do
     [ -e "$z" ] || continue
@@ -167,6 +171,16 @@ if [ -n "$signing" ] && [ -z "$dir_only" ]; then
       rm -rf "$unz"
       echo "$z: the zip's app isn't signed so Bops can update to it." >&2
       exit 1
+    fi
+    if [ -n "$notarizing" ]; then
+      if ! xcrun stapler validate "$unz/Bops.app" || ! spctl -a -t exec -vv "$unz/Bops.app"; then
+        rm -rf "$unz"
+        echo "$z: the zip's app isn't notarized and stapled. Not fit to publish." >&2
+        exit 1
+      fi
+      echo "$(basename "$z"): notarized."
+    else
+      echo "$(basename "$z"): no notarization settings, so not notarized. Not fit to publish." >&2
     fi
     rm -rf "$unz"
     echo "$(basename "$z"): signed so Bops can update to it."

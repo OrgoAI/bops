@@ -3,7 +3,7 @@
  * isn't already running, opens the window with the Mac title bar from the design, and on quit
  * stops what it started, including the bots' background browsers.
  */
-const { app, autoUpdater, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, Notification, screen, session, shell, systemPreferences } = require("electron");
+const { app, autoUpdater, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, Notification, powerMonitor, screen, session, shell, systemPreferences } = require("electron");
 const { execFile, execFileSync, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -1125,7 +1125,24 @@ function restart() {
     // once the server above is gone. Otherwise this same app opens again.
     if (updates?.ready()) {
       mainLog(`restart: installing Bops ${updates.state().version}`);
-      autoUpdater.quitAndInstall();
+      // Squirrel can still fail to install it (its staged copy gone, say): it then says so ("error") and
+      // Bops stays open with no server. So this same app opens again instead, when it hasn't quit within
+      // 15s or says it can't.
+      let fellBack = false;
+      const fallBack = (why) => {
+        if (fellBack) return;
+        fellBack = true;
+        mainLog(`restart: the new version didn't install (${why}): opening this one again`);
+        app.relaunch();
+        app.exit(0);
+      };
+      autoUpdater.once("error", (e) => fallBack(e?.message ?? e));
+      setTimeout(() => fallBack("Bops was still open after 15s"), 15_000).unref?.();
+      try {
+        autoUpdater.quitAndInstall();
+      } catch (e) {
+        fallBack(e?.message ?? e);
+      }
       return;
     }
     app.relaunch();
@@ -1273,9 +1290,15 @@ async function checkForUpdate() {
     const found = isNewer(version, app.getVersion()) ? { version, notes: releaseNotes(latest.notes) } : undefined;
     updateNote(found ? `Bops ${version} is out (this is ${app.getVersion()})` : `up to date (${app.getVersion()}, bops.bot has ${version})`);
     newer = found;
+    if (!found || !updates) return;
+    // The zip it names must be this version's, on bops.bot: otherwise nothing's fetched and the notice
+    // sends the user there.
+    const wrong = updates.offers(latest, version);
+    if (wrong) return updates.manual(found, `${feed}: ${wrong}`);
     // Every hour: one that's downloading or ready is left alone, and a download that didn't finish is
-    // tried again. The page hears only when what it shows changes (updates' send).
-    if (found) updates?.found(found);
+    // tried again (not every hour: see desktop/updates.cjs). The page hears only when what it shows
+    // changes (updates' send).
+    updates.found(found);
   } catch (e) {
     updateNote(`couldn't check: ${e?.message ?? e}`);
   }
@@ -1319,6 +1342,8 @@ app.whenReady().then(() => {
   // Release builds only: not `npm run app`, nor a build that runs the source folder (desktop/repo.json).
   if (isRelease()) {
     updates = createUpdates({ autoUpdater, app, fs, path, note: updateNote, send: sendUpdate });
+    // macOS logging out or shutting down quits Bops itself: that quit isn't held (see before-quit).
+    powerMonitor.on("shutdown", () => (systemQuit = true));
     void checkForUpdate();
     setInterval(() => void checkForUpdate(), 60 * 60_000);
   }
@@ -1337,14 +1362,20 @@ app.on("window-all-closed", () => app.quit());
 /*
  * Quitting with a new version downloaded installs it: macOS swaps it in once Bops is gone. So the
  * server is stopped cleanly first (as a restart does), not left exiting while the app is replaced.
- * Once: the quit after it goes through. A restart already running did its own stop.
+ * Once: the quit after it goes through. A restart already running did its own stop. At most 10s, so
+ * Cmd+Q never hangs for long; will-quit stops whatever is left.
+ *
+ * Not when macOS itself quits Bops (log out, shut down, restart): holding that quit cancels the log
+ * out ("Bops interrupted log out"). Then will-quit stops the server as on any quit, and the new
+ * version still goes in once Bops is gone.
  */
 let quitStopped = false;
+let systemQuit = false;
 app.on("before-quit", (e) => {
-  if (quitStopped || restarting || !updates?.ready()) return;
+  if (quitStopped || restarting || systemQuit || !updates?.ready()) return;
   quitStopped = true;
   e.preventDefault();
-  void stopForRestart(`Quit: installing Bops ${updates.state().version}`).finally(() => app.quit());
+  void Promise.race([stopForRestart(`Quit: installing Bops ${updates.state().version}`), sleep(10_000)]).finally(() => app.quit());
 });
 
 /** Stops the server Bops started or uses (and the bots' browsers). Says whether there was one. */

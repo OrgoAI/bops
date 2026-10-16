@@ -63,7 +63,8 @@ export function UpdateCard({ info, late, onDismiss }: { info: UpdateInfo; late: 
   return (
     <div className={`mx-1 mt-3 rounded-[12px] bg-white py-2 pl-3 pr-1.5 shadow-[0_0_0_1px_#E6E6E3] ${late ? "motion-rise-in" : ""}`}>
       <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 text-[12.5px] leading-[17px] text-[#6B6B6B]">
+        {/* Read out as it changes (ready, or the download didn't finish), without taking focus. */}
+        <span role="status" className="min-w-0 flex-1 text-[12.5px] leading-[17px] text-[#6B6B6B]">
           {phase === "ready" ? (
             <span className="font-medium text-ink">Bops {info.version} is ready.</span>
           ) : phase === "downloading" ? (

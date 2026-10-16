@@ -40,7 +40,7 @@ function shown(info) {
   const html = card(info);
   if (!html) return null;
   const buttons = [...html.matchAll(/<button[^>]*>([\s\S]*?)<\/button>/g)].map((m) => text(m[1])).filter(Boolean);
-  const line = text(/<span class="min-w-0 flex-1[^"]*">([\s\S]*?)<\/span>\s*(?:<button)/.exec(html)?.[1] ?? "");
+  const line = text(/<span role="status" class="min-w-0 flex-1[^"]*">([\s\S]*?)<\/span>\s*(?:<button)/.exec(html)?.[1] ?? "");
   return { line, button: buttons[0] ?? null, html };
 }
 const base = { version: "0.0.91", notes: [], asked: false, failed: false };
@@ -49,6 +49,7 @@ test("ready: Restart", () => {
   const s = shown({ ...base, phase: "ready" });
   assert.equal(s.line, "Bops 0.0.91 is ready.");
   assert.equal(s.button, "Restart");
+  // The line is a live region (above: role="status"), so a screen reader hears it change.
 });
 
 test("out: Download", () => {

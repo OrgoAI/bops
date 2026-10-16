@@ -7,8 +7,9 @@
  * and stages it; macOS swaps it in when Bops quits or restarts ("Restart" in the notice).
  *
  * The autoUpdater only fetches what the file names, newer or not, and every call fetches it again: so
- * it's asked only here, after main.cjs found the version newer, at most once at a time and never for a
- * version already on its way or staged. An app that can't replace itself (opened from the DMG, from
+ * it's asked only here, after main.cjs found the version newer and checked the zip the file names
+ * (offers), at most once at a time, never for a version already on its way, and not while one is staged
+ * (Restart installs that one first). An app that can't replace itself (opened from the DMG, from
  * Downloads where macOS runs it from a copy, or in a folder this user can't write) never asks: its
  * notice sends the user to bops.bot, as before.
  *
@@ -19,6 +20,13 @@
 const FEED_URL = "https://bops.bot/download/latest.json";
 // Squirrel's words for an app it can't replace (a read-only volume, a translocated copy, no write access).
 const CANT_WRITE = /read.only|translocat|can.?t write|cannot write|not writable|permission denied|EACCES|EROFS|EPERM/i;
+// Its words for a zip whose app isn't signed so this one can update to it: that zip never will be.
+const BAD_SIGNATURE = /code requirement|signature/i;
+// A download that didn't finish waits this long before the switch tries the same version again (after
+// the first failure, then the second); after the third it waits for a newer version or the user's
+// Download. Each one is the whole zip, about 155 MB: one bad release mustn't fetch it every hour.
+const RETRY_AFTER = [60 * 60_000, 4 * 60 * 60_000];
+const MAX_TRIES = 3;
 
 /**
  * What the notice shows: { phase, version, notes, asked, failed }. phase is "none", "available" (out,
@@ -26,7 +34,7 @@ const CANT_WRITE = /read.only|translocat|can.?t write|cannot write|not writable|
  * update itself: bops.bot). asked: the user clicked Download, so the download shows. failed: the last
  * download the user waited for didn't finish (Try again).
  */
-function createUpdates({ autoUpdater, app, fs, path, note, send, execPath = process.execPath, env = process.env }) {
+function createUpdates({ autoUpdater, app, fs, path, note, send, execPath = process.execPath, env = process.env, now = Date.now }) {
   const file = () => path.join(app.getPath("userData"), "updates.json");
   let state = { phase: "none", version: undefined, notes: [], asked: false, failed: false };
   // The newest release main.cjs found ({ version, notes }); what's on its way; what's staged.
@@ -36,6 +44,9 @@ function createUpdates({ autoUpdater, app, fs, path, note, send, execPath = proc
   let fed = false;
   let selfOk;
   let feed;
+  // The downloads of one version that didn't finish: { version, count, at, never } (never: its zip's
+  // signature is wrong, so it won't ever).
+  let tries;
 
   function set(next) {
     const before = JSON.stringify(state);
@@ -100,6 +111,33 @@ function createUpdates({ autoUpdater, app, fs, path, note, send, execPath = proc
     return feed;
   }
 
+  /**
+   * The zip latest.json names for `version`, checked before anything is fetched: Squirrel installs
+   * whatever the file names (an older signed build too, or over plain http), so it must be this version's
+   * zip on bops.bot (or, for a test feed, on the same Mac). Says what's wrong, or "" when it's fine.
+   */
+  function offers(file, version) {
+    if (file?.currentRelease !== version) return `its currentRelease isn't ${version}`;
+    const entry = Array.isArray(file.releases) ? file.releases.find((r) => r?.updateTo?.version === version) : undefined;
+    const url = entry?.updateTo?.url;
+    if (typeof url !== "string") return `it names no zip for ${version}`;
+    const zip = `Bops-${version}-arm64-mac.zip`;
+    if (url === `https://bops.bot/download/${zip}`) return "";
+    try {
+      const at = new URL(url);
+      const from = new URL(feedUrl());
+      if (from.href !== FEED_URL && at.host === from.host && /^https?:$/.test(at.protocol) && at.pathname.endsWith(`/${zip}`)) return "";
+    } catch {}
+    return `its zip for ${version} isn't bops.bot's: ${url}`;
+  }
+
+  /** Whether the switch leaves `version` alone for now: its last downloads didn't finish (see RETRY_AFTER). */
+  function holding(version) {
+    if (tries?.version !== version) return false;
+    if (tries.never || tries.count >= MAX_TRIES) return true;
+    return now() - tries.at < RETRY_AFTER[tries.count - 1];
+  }
+
   /** A newer release than this app (main.cjs checked). */
   function found(release) {
     const { version, notes = [] } = release;
@@ -108,11 +146,23 @@ function createUpdates({ autoUpdater, app, fs, path, note, send, execPath = proc
     // One on its way already: this one follows when it's done (downloaded or not).
     if (fetching) return;
     if (!canSelfUpdate()) return set({ phase: "manual", version, notes, asked: false, failed: false });
-    // A staged one stays what the notice shows until the newer one replaces it.
-    if (staged) return auto() && download(version);
+    // A staged one stays until it's installed: Restart installs it, and the newer one downloads after.
+    // (A second download while one is staged would race the Restart for Squirrel's staged copy.)
+    if (staged) return;
     const same = state.version === version && state.phase === "available";
+    // With the switch on it goes straight to downloading, which the notice doesn't show: it never
+    // flashes "is out" first.
+    if (auto() && !holding(version)) return download(version, { asked: same && state.asked });
     set({ phase: "available", version, notes, asked: same && state.asked, failed: same && state.failed });
-    if (auto()) download(version);
+  }
+
+  /** latest.json names a zip this app won't fetch (see offers): the notice sends the user to bops.bot. */
+  function manual(release, why) {
+    const { version, notes = [] } = release;
+    latest = { version, notes };
+    note(`won't download ${version}: ${why}`);
+    if (fetching || staged) return;
+    set({ phase: "manual", version, notes, asked: false, failed: false });
   }
 
   /** Downloads `version` in the app (the user's Download, the switch, or found with it on). */
@@ -134,7 +184,7 @@ function createUpdates({ autoUpdater, app, fs, path, note, send, execPath = proc
     }
     fetching = version;
     note(`downloading ${version} from ${feedUrl()}`);
-    if (!staged) set({ phase: "downloading", version, notes: latest.notes, failed: false });
+    if (!staged) set({ phase: "downloading", version, notes: latest.notes, asked: asked || (state.version === version && state.asked), failed: false });
     try {
       autoUpdater.checkForUpdates();
     } catch (e) {
@@ -159,16 +209,21 @@ function createUpdates({ autoUpdater, app, fs, path, note, send, execPath = proc
       if (!staged && latest) set({ phase: "manual", version: latest.version, notes: latest.notes, asked: false, failed: false });
       return;
     }
-    // Quiet with the switch on (the next hourly check tries again); Try again with it off.
+    const again = tries?.version === version;
+    tries = { version, count: again ? tries.count + 1 : 1, at: now(), never: (again && tries.never) || BAD_SIGNATURE.test(message) };
+    // Quiet with the switch on (a later hourly check tries again, see holding); Try again with it off.
     if (!staged && latest) set({ phase: "available", version: latest.version, notes: latest.notes, failed: !auto() });
     next(version);
   }
 
-  autoUpdater.on("update-downloaded", () => {
-    const version = fetching ?? latest?.version;
+  // Squirrel reads latest.json again itself, so what it staged is the version its release names ("Bops
+  // 0.0.91"), which is newer than the one asked for when a release came out in between.
+  autoUpdater.on("update-downloaded", (_e, _notes, name) => {
+    const named = /\d+\.\d+\.\d+/.exec(String(name ?? ""))?.[0];
+    const version = named ?? fetching ?? latest?.version;
     fetching = undefined;
     staged = version;
-    set({ phase: "ready", version, notes: latest?.version === version ? latest.notes : state.notes, asked: false, failed: false });
+    set({ phase: "ready", version, notes: latest?.version === version ? latest.notes : state.version === version ? state.notes : [], asked: false, failed: false });
     next(version);
   });
   autoUpdater.on("update-not-available", () => fetching && failed(new Error("the feed offered nothing to download")));
@@ -180,6 +235,8 @@ function createUpdates({ autoUpdater, app, fs, path, note, send, execPath = proc
     canSelfUpdate,
     feedUrl,
     found,
+    manual,
+    offers,
     download,
     ready: () => state.phase === "ready",
     state: () => ({ ...state }),
