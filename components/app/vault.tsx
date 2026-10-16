@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AppState, BotId, VaultLogin } from "@/lib/types";
+import type { AppState, BotId, VaultLogin, Watch } from "@/lib/types";
 import { FOLD_AFTER_MS, FOLD_OVER, isMcp, lastUsed, servicesOf, signedOut, type Service } from "@/lib/vault-services";
 import { AccountBlock, AppLogo, AppPicker, Connecting, QuickStart } from "./apps";
 import { KeysSettings } from "./keys";
 import { Mascot } from "./mascot";
-import { anchorOf, hasTemplates, RoutineSuggest, usePendingSuggest } from "./routines";
+import { anchorOf, AppRoutines, hasTemplates, routineCount, routinesOfApp, RoutineSuggest, usePendingSuggest } from "./routines";
 import { ago, CloseButton, post, teamOf } from "./ui";
 
 /*
@@ -27,7 +27,7 @@ import { ago, CloseButton, post, teamOf } from "./ui";
  * the list (keys.tsx), `keysFor` opening a new one for that bot.
  * Its X (or Esc, see bops-app.tsx) closes it, back to where you were.
  */
-export function VaultTab({ state, keysFor, onClose }: { state: AppState; keysFor?: string; onClose: () => void }) {
+export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppState; keysFor?: string; onOpenWatch: (w: Watch) => void; onClose: () => void }) {
   const [editing, setEditing] = useState<string | "new" | null>(null);
   const [picking, setPicking] = useState<{ app?: string; replaces?: string } | null>(null);
   const [adding, setAdding] = useState(false);
@@ -180,6 +180,7 @@ export function VaultTab({ state, keysFor, onClose }: { state: AppState; keysFor
                 onEdit={setEditing}
                 onPick={setPicking}
                 onRoutines={setAsked}
+                onOpenWatch={onOpenWatch}
                 iconRef={(el) => s.accounts.forEach((a) => void (el ? icons.current.set(a.app, el) : icons.current.delete(a.app)))}
               />
             ))}
@@ -204,7 +205,7 @@ export function VaultTab({ state, keysFor, onClose }: { state: AppState; keysFor
           </div>
         )}
 
-        <KeysSettings state={state} keysFor={keysFor} />
+        <KeysSettings state={state} keysFor={keysFor} onOpenWatch={onOpenWatch} />
       </div>
       {routinesFor && (
         <RoutineSuggest
@@ -250,6 +251,7 @@ function ServiceRow({
   onEdit,
   onPick,
   onRoutines,
+  onOpenWatch,
   iconRef,
 }: {
   state: AppState;
@@ -262,6 +264,8 @@ function ServiceRow({
   onPick: (p: { app?: string; replaces?: string }) => void;
   /** Open an app's routines (one of its apps with routines to offer and an account that works). */
   onRoutines: (app: string) => void;
+  /** Show a watched screen or Mac window, from one of its routines. */
+  onOpenWatch: (w: Watch) => void;
   /** Its mark, where its routines open. */
   iconRef: (el: HTMLSpanElement | null) => void;
 }) {
@@ -281,6 +285,8 @@ function ServiceRow({
         .filter(Boolean)
         .join(" · ") || (s.accounts.some((a) => a.id.startsWith("open:")) ? "No sign-in needed" : "");
   const byApp = [...new Set(s.accounts.map((a) => a.app))].map((app) => s.accounts.filter((a) => a.app === app));
+  // What bots run from it on their own (its routines, on the row's line and inside).
+  const runs = byApp.reduce((n, accounts) => n + routinesOfApp(state, accounts[0].app), 0);
   return (
     <div className={last ? "" : "border-b border-[#F0F0EE]"}>
       <button onClick={onToggle} aria-expanded={open} className="flex h-[52px] w-full items-center gap-3 px-3.5 text-left hover:bg-[#FCFCFB]">
@@ -288,7 +294,10 @@ function ServiceRow({
           <ServiceLogo service={s} size={26} />
         </span>
         <span className="w-[120px] shrink-0 truncate text-[14px] font-medium leading-[18px]">{s.name}</span>
-        <span className={`min-w-0 flex-1 truncate text-[12.5px] leading-4 ${out.length ? "text-[#B54708]" : "text-[#6B6B6B]"}`}>{line}</span>
+        <span className={`min-w-0 flex-1 truncate text-[12.5px] leading-4 ${out.length ? "text-[#B54708]" : "text-[#6B6B6B]"}`}>
+          {line}
+          {runs > 0 && <span className="text-[#9A9A98]">{line ? " · " : ""}{routineCount(runs)}</span>}
+        </span>
         {!everyone &&
           (users.length ? (
             <span className="flex shrink-0 items-center gap-1" title={`Only ${users.map((b) => b.name).join(", ")}`}>
@@ -328,6 +337,7 @@ function ServiceRow({
               {accounts.map((a) => (
                 <AccountBlock key={a.id} state={state} account={a} many={accounts.length > 1} onSignIn={() => onPick({ app: a.app, replaces: a.id })} />
               ))}
+              <AppRoutines state={state} app={accounts[0].app} onOpenWatch={onOpenWatch} />
               <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
                 {!accounts[0].id.startsWith("open:") && (
                   <button onClick={() => onPick({ app: accounts[0].app })} className="rounded-full px-2 py-1 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0]">

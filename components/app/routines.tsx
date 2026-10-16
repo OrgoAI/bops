@@ -637,3 +637,47 @@ export function routinesFrom(state: AppState, botId: string, app: string) {
 export const routineCount = (n: number) => `${n} routine${n === 1 ? "" : "s"}`;
 
 export { small };
+
+/* ---------------- An app's Routines, in the Vault ---------------- */
+
+/**
+ * What every bot runs from one Connected App or key: its schedules and monitors (when, next run, how the
+ * last went), grouped by bot when more than one runs some, each opening in place to run, pause, edit or
+ * delete it, as on the Routines page. Nothing when none came from it.
+ */
+export function AppRoutines({ state, app, onOpenWatch }: { state: AppState; app: string; onOpenWatch: (w: Watch) => void }) {
+  useNow(30_000);
+  const shown = filterRoutines(state, autopilotOf(state), { app });
+  const { openId, toggle, list } = useOpenRow(undefined, undefined, false);
+  const total = shown.schedules.length + shown.monitors.length;
+  if (!total) return null;
+  const needs = shown.schedules.filter((r) => scheduleNeedsYou(r, state)).length + shown.monitors.filter(monitorNeedsYou).length;
+  const groups = teamOf(state)
+    .map((b) => ({ bot: b, schedules: shown.schedules.filter((r) => r.botId === b.id), monitors: shown.monitors.filter((w) => w.botId === b.id) }))
+    .filter((g) => g.schedules.length + g.monitors.length);
+  return (
+    <div ref={list} className="flex flex-col gap-2">
+      <span className="flex items-center gap-1.5 px-2 text-[12px] font-medium leading-4 text-[#6B6B6B]">
+        Routines <span className="font-normal tabular-nums text-[#9A9A98]">{total}</span>
+        {needs > 0 && <span className="rounded-full bg-[#FEF3F2] px-2 py-px text-[11px] font-medium leading-4 text-[#B42318]">{needs === 1 ? "1 needs you" : `${needs} need you`}</span>}
+      </span>
+      {groups.map((g) => (
+        <div key={g.bot.id} className="flex flex-col gap-1.5">
+          {groups.length > 1 && (
+            <span className="flex items-center gap-1.5 px-2 text-[11.5px] leading-4 text-[#9A9A98]">
+              <Mascot botId={g.bot.id} color={g.bot.color} size={14} antenna={false} />
+              {g.bot.name}
+            </span>
+          )}
+          <RoutineList state={state} schedules={g.schedules} monitors={g.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** How many routines and monitors every bot runs from one Connected App or key. */
+export function routinesOfApp(state: AppState, app: string) {
+  const { schedules, monitors } = filterRoutines(state, autopilotOf(state), { app });
+  return schedules.length + monitors.length;
+}

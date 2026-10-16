@@ -832,7 +832,7 @@ function Bops({ state }: { state: AppState | null }) {
                       onMac={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "mac" } : t)))}
                     />
                   ) : tab?.kind === "vault" ? (
-                    <VaultTab state={state} keysFor={tab.keysFor} onClose={() => leaveTab(tab.id)} />
+                    <VaultTab state={state} keysFor={tab.keysFor} onOpenWatch={showWatch} onClose={() => leaveTab(tab.id)} />
                   ) : tab?.kind === "crm" ? (
                     // These two pages fade in from here (the others in their own files). The key is on the
                     // wrapper, so the page remounts exactly when it did before.

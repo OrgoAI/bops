@@ -2,9 +2,9 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { sameApp } from "@/lib/routine-catalog";
-import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type Message } from "@/lib/types";
+import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type Message, type Watch } from "@/lib/types";
 import { Mascot } from "./mascot";
-import { anchorOf, hasTemplates, RoutineSuggest, usePendingSuggest } from "./routines";
+import { anchorOf, AppRoutines, hasTemplates, RoutineSuggest, usePendingSuggest } from "./routines";
 import { KeyIcon } from "./screen-cards";
 import { undash } from "./side-group";
 import { post, teamOf } from "./ui";
@@ -210,7 +210,7 @@ async function grant(name: string, botId: string, allowed: boolean): Promise<str
  * the bots that may use it (tap to change), Replace and Remove; and Add key. `keysFor`: opened from a bot's
  * profile to add one for that bot, so it comes into view with the form open and that bot picked.
  */
-export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: string }) {
+export function KeysSettings({ state, keysFor, onOpenWatch }: { state: AppState; keysFor?: string; onOpenWatch: (w: Watch) => void }) {
   const { info, failed, retry } = useKeys(state.workspace ?? MAIN_WORKSPACE);
   const team = teamOf(state);
   const main = team.find((b) => b.isMain) ?? team[0];
@@ -249,6 +249,9 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
   const suggest = usePendingSuggest(state, (s) => shown.some((k) => sameApp(k.name, s.app)));
   const routinesFor = asked ? { app: asked, botId: undefined } : suggest.pending ? { app: suggest.pending.app, botId: suggest.pending.botId } : null;
 
+  // A service's routines show once, on its first key (STRIPE_API_KEY and STRIPE_SECRET_KEY are both Stripe).
+  const firstOfApp = (name: string) => shown.find((x) => sameApp(x.name, name))?.name === name;
+
   let body: React.ReactNode;
   if (!info)
     body = failed ? (
@@ -274,6 +277,7 @@ export function KeysSettings({ state, keysFor }: { state: AppState; keysFor?: st
               team={team}
               onReplace={() => setForm({ replace: k, bots: [] })}
               onRoutines={hasTemplates(k.name) ? () => setAsked(k.name) : undefined}
+              routines={hasTemplates(k.name) && firstOfApp(k.name) && <AppRoutines state={state} app={k.name} onOpenWatch={onOpenWatch} />}
               anchorRef={(el) => void (el ? anchors.current.set(k.name, el) : anchors.current.delete(k.name))}
             />
             {/* A new value for this key, right under it. */}
@@ -354,6 +358,7 @@ function KeyLine({
   team,
   onReplace,
   onRoutines,
+  routines,
   anchorRef,
 }: {
   k: KeyRow;
@@ -361,6 +366,8 @@ function KeyLine({
   onReplace: () => void;
   /** Opens its starter routines, when it has some; the button that does is the popover's anchor. */
   onRoutines?: () => void;
+  /** What bots run from it on their own (routines.tsx AppRoutines), under its bots. */
+  routines?: React.ReactNode;
   anchorRef: (el: HTMLSpanElement | null) => void;
 }) {
   const [sure, setSure] = useState(false);
@@ -477,6 +484,7 @@ function KeyLine({
           })}
         </div>
       )}
+      {routines}
       {sure && (
         <div className="flex flex-wrap items-center gap-2 rounded-[10px] bg-[#FEF3F2] px-3 py-2">
           <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">
