@@ -8,6 +8,9 @@
 # APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID. Without a certificate it builds an unsigned app for
 # testing on this Mac only.
 #
+# The zip is what installed apps download to update themselves (desktop/updates.cjs), so it's checked
+# to be signed by Orgo's team (A47GG9FV27) as ai.orgo.bops: a change to either stops every update.
+#
 # Usage: scripts/release.sh [extra electron-builder args, e.g. --dir]
 set -euo pipefail
 
@@ -148,5 +151,25 @@ elif [ -n "$signing" ]; then
   echo "Bops.app isn't signed with a Developer ID Application certificate:" >&2
   grep Authority <<<"$signature" >&2 || echo "  (not signed)" >&2
   exit 1
+fi
+
+# 6. The zip is what installed apps update themselves from (desktop/updates.cjs): macOS installs it only
+# when the app in it is signed by the same team, with the same bundle id. Checked as it will be, from
+# the zip itself. Not with --dir (no zip) or an unsigned test build (it can't update anyone).
+dir_only=""
+for a in "$@"; do [ "$a" = --dir ] && dir_only=1; done
+if [ -n "$signing" ] && [ -z "$dir_only" ]; then
+  for z in dist-desktop/*.zip; do
+    [ -e "$z" ] || continue
+    unz="$(mktemp -d)"
+    ditto -x -k "$z" "$unz"
+    if ! codesign --verify --deep --strict -R='identifier "ai.orgo.bops" and anchor apple generic and certificate leaf[subject.OU] = A47GG9FV27' "$unz/Bops.app"; then
+      rm -rf "$unz"
+      echo "$z: the zip's app isn't signed so Bops can update to it." >&2
+      exit 1
+    fi
+    rm -rf "$unz"
+    echo "$(basename "$z"): signed so Bops can update to it."
+  done
 fi
 ls -lh dist-desktop/*.dmg dist-desktop/*.zip 2>/dev/null || true

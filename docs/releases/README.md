@@ -7,7 +7,7 @@ Between releases, the lines collect in `next.md`: add one when something users w
 Each version's lines become:
 
 - its GitHub release notes, with the line on signing and notarization under them;
-- "What's new" in the app's notice that a newer Bops is out, and on bops.bot's download card (both read `/download/latest.json`, which `scripts/download-publish.sh` writes).
+- "What's new" in the app's notice that a newer Bops is out or ready to install, and on bops.bot's download card (both read `/download/latest.json`, which `scripts/download-publish.sh` writes).
 
 Write for the people using Bops: what they can do now, or what works better. Plain words: no branch names, pull requests, file paths or settings, and no names of people.
 
