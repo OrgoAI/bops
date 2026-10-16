@@ -33,7 +33,7 @@ import { OPEN_MAC_KEY } from "./mac-pip";
 import { MacComputer } from "./mac-computer";
 import { NoticePopup } from "./notice-popup";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
-import { chatInWorkspace, currentWorkspace, post, teamOf, useAppState, useSelfHosted } from "./ui";
+import { chatInWorkspace, currentWorkspace, post, SideToggleIcon, teamOf, useAppState, useSelfHosted } from "./ui";
 import { UsageData, useAnalytics } from "./usage-data";
 import { trackEvent } from "@/lib/analytics";
 import { OwnerEmail, useOwnerEmailInfo } from "./owner-email";
@@ -104,6 +104,13 @@ function Bops({ state }: { state: AppState | null }) {
   }, [threadId]);
   const [composing, setComposing] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
+  // The sidebar on the left, shown unless you hid it (this Mac remembers; ⌘\ or the toggle).
+  const [sidebarOpen, setSidebarOpen] = useState(() => typeof window === "undefined" || localStorage.getItem(SIDEBAR_KEY) !== "0");
+  const toggleSidebar = () =>
+    setSidebarOpen((open) => {
+      localStorage.setItem(SIDEBAR_KEY, open ? "0" : "1");
+      return !open;
+    });
   const [focus, setFocus] = useState(false);
   // Full width shows your Mac instead of a bot's computer.
   const [macFocus, setMacFocus] = useState(false);
@@ -252,6 +259,15 @@ function Bops({ state }: { state: AppState | null }) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
         setComposing(true);
+      }
+      // ⌘\ shows or hides the sidebar.
+      if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+        e.preventDefault();
+        setSidebarOpen((open) => {
+          localStorage.setItem(SIDEBAR_KEY, open ? "0" : "1");
+          return !open;
+        });
+        return;
       }
       if (e.key === "Escape" && overPeople.current) {
         setAccount(false);
@@ -617,7 +633,17 @@ function Bops({ state }: { state: AppState | null }) {
 
   const callBot = call ? state.bots.find((b) => b.id === call) : undefined;
   const callHere = !!callBot && !composing && !focus && !!callSlot && chat.kind === "bot" && chat.botIds[0] === callBot.id;
-  const columns = focus || !panelOpen ? "grid-cols-[340px_minmax(0,1fr)]" : "grid-cols-[340px_440px_minmax(0,1fr)]";
+  // The sidebar hidden, the chat (and panel) take its room; the title bar keeps a corner for the window's
+  // buttons and the toggle. (Whole class names, so Tailwind sees each one.)
+  const wide = focus || !panelOpen;
+  const columns = sidebarOpen
+    ? wide
+      ? "grid-cols-[340px_minmax(0,1fr)]"
+      : "grid-cols-[340px_440px_minmax(0,1fr)]"
+    : wide
+      ? "grid-cols-[0px_minmax(0,1fr)]"
+      : "grid-cols-[0px_440px_minmax(0,1fr)]";
+  const titleColumns = sidebarOpen ? columns : wide ? "grid-cols-[120px_minmax(0,1fr)]" : "grid-cols-[120px_440px_minmax(0,1fr)]";
   const tabBar = (panelOpen || focus) && (
     <TabBar
       state={state}
@@ -642,7 +668,9 @@ function Bops({ state }: { state: AppState | null }) {
       <ViewReporter chatId={chat.id} threadId={thread?.id ?? null} />
       <div className="flex h-screen flex-col bg-white font-sans text-ink antialiased">
         <TitleBar
-          columns={columns}
+          columns={titleColumns}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={toggleSidebar}
           wide={focus || !panelOpen}
           tabs={tabBar}
           panelOpen={panelOpen && !focus}
@@ -654,9 +682,14 @@ function Bops({ state }: { state: AppState | null }) {
           }}
         />
         <div className={`grid min-h-0 flex-1 ${columns}`}>
+          {/* Hidden, an empty cell keeps the grid's columns in place. */}
+          {!sidebarOpen ? (
+            <div />
+          ) : (
           <Sidebar
             state={state}
             chatId={chat.id}
+            onCollapse={toggleSidebar}
             onOpenChat={openChat}
             onOpenThread={openThread}
             onCompose={() => setComposing(true)}
@@ -669,7 +702,22 @@ function Bops({ state }: { state: AppState | null }) {
             onOpenMemory={openMemory}
             onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item)}
             footer={footer}
+            menuActions={{
+              onChat: (id) => openChat(botChatId(id)),
+              onCall: (id) => {
+                openChat(botChatId(id));
+                setCall(id);
+              },
+              onComputer: openComputer,
+              onProfile: (id, section) => openProfile(id, section),
+              // Its chat, with the composer focused for the task (once the chat is on screen).
+              onNewTask: (id) => {
+                openChat(botChatId(id));
+                setTimeout(() => document.getElementById("composer")?.focus(), 60);
+              },
+            }}
           />
+          )}
           {focus && crmFocus && crm ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
               <CrmView
@@ -768,6 +816,19 @@ function Bops({ state }: { state: AppState | null }) {
                       }}
                       onProfile={(id) => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "bot", botId: id, section: "details" } : t)))}
                       onVault={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "vault" } : t)))}
+                      // The workspace's one Knowledge tab: this new tab gives way to it (or becomes it).
+                      onKnowledge={
+                        categoriesOpen(state)
+                          ? () => {
+                              const ws = currentWorkspace(state);
+                              const there = tabs.find((t) => t.kind === "memory" && t.ws === ws);
+                              if (there) {
+                                closeTab(tab.id);
+                                setActive(there.id);
+                              } else setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "memory", ws, category: "all" } : t)));
+                            }
+                          : undefined
+                      }
                       onMac={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "mac" } : t)))}
                     />
                   ) : tab?.kind === "vault" ? (
@@ -900,14 +961,46 @@ function Bops({ state }: { state: AppState | null }) {
   );
 }
 
+/** Where this Mac remembers whether the sidebar is shown ("0": hidden). */
+const SIDEBAR_KEY = "bops.sidebar";
+
 /* ---------------- Title bar ---------------- */
 
 /** The window's title bar: traffic lights (in the desktop app), the right side's tabs above it, and the panel toggle. */
-function TitleBar({ columns, wide, tabs, panelOpen, onTogglePanel }: { columns: string; wide: boolean; tabs: React.ReactNode; panelOpen: boolean; onTogglePanel: () => void }) {
+function TitleBar({
+  columns,
+  wide,
+  tabs,
+  panelOpen,
+  onTogglePanel,
+  sidebarOpen,
+  onToggleSidebar,
+}: {
+  columns: string;
+  wide: boolean;
+  tabs: React.ReactNode;
+  panelOpen: boolean;
+  onTogglePanel: () => void;
+  sidebarOpen: boolean;
+  onToggleSidebar: () => void;
+}) {
   const desktop = typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
   return (
     <div className={`grid h-11 shrink-0 border-b border-[#ECECEA] bg-[#F7F7F6] [-webkit-app-region:drag] ${columns}`}>
-      <div className="flex items-center px-3.5">{desktop && <div className="w-[52px] shrink-0" />}</div>
+      <div className="flex items-center gap-3 px-3.5">
+        {desktop && <div className="w-[56px] shrink-0" />}
+        {/* The sidebar hidden: the toggle that brings it back sits here, by the window's buttons (shown, it's in the sidebar's header). */}
+        {!sidebarOpen && (
+          <button
+            onClick={onToggleSidebar}
+            title="Show the sidebar (⌘\)"
+            aria-label="Show the sidebar"
+            className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.06] [-webkit-app-region:no-drag]"
+          >
+            <SideToggleIcon side="left" open={false} />
+          </button>
+        )}
+      </div>
       {!wide && <div />}
       <div className="flex min-w-0 items-center gap-2 pl-3 pr-3.5">
         {tabs || <div className="flex-1" />}
@@ -916,11 +1009,7 @@ function TitleBar({ columns, wide, tabs, panelOpen, onTogglePanel }: { columns: 
           title={panelOpen ? "Hide the side panel" : "Show the side panel"}
           className={`flex size-7 shrink-0 items-center justify-center rounded-lg [-webkit-app-region:no-drag] ${panelOpen ? "bg-[#EEEEEC]" : "shadow-[0_0_0_1px_#E2E2DF]"}`}
         >
-          <svg width="16" height="16" viewBox="0 0 16 16">
-            <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="#3A3A38" strokeWidth="1.3" />
-            <path d="M10 2.5v11" stroke="#3A3A38" strokeWidth="1.3" />
-            {panelOpen && <rect x="10.6" y="3.1" width="3.3" height="9.8" fill="#3A3A38" opacity="0.25" />}
-          </svg>
+          <SideToggleIcon side="right" open={panelOpen} />
         </button>
       </div>
     </div>

@@ -116,7 +116,7 @@ export function BotPanel({
 
 /* ---------------- Details: the bot's contact card ---------------- */
 
-const EFFORT_HINT: Record<string, string> = {
+export const EFFORT_HINT: Record<string, string> = {
   auto: "Thinks hard on tough tasks, quick on simple ones",
   low: "Fastest; fine for quick lookups",
   medium: "Balanced for most work",

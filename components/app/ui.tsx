@@ -144,6 +144,17 @@ export function MonitorIcon({ size = 12, color = "#8A8A88" }: { size?: number; c
   );
 }
 
+/** A side's show/hide toggle: a window with that side's bar, filled while it's shown (the sidebar on the left, the panel on the right). */
+export function SideToggleIcon({ side, open }: { side: "left" | "right"; open: boolean }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+      <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="#3A3A38" strokeWidth="1.3" />
+      <path d={side === "left" ? "M6 2.5v11" : "M10 2.5v11"} stroke="#3A3A38" strokeWidth="1.3" />
+      {open && <rect x={side === "left" ? 2.1 : 10.6} y="3.1" width="3.3" height="9.8" fill="#3A3A38" opacity="0.25" />}
+    </svg>
+  );
+}
+
 export function RoundButton({ label, onClick, children, active }: { label: string; onClick: () => void; children: React.ReactNode; active?: boolean }) {
   return (
     <button
