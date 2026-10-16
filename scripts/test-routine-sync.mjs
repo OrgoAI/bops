@@ -392,7 +392,7 @@ await check("text Postgres can store: no NUL, no half an emoji, cut by code poin
   assert.ok(!("eventsThrough" in d), "only a meeting routine's");
 });
 
-await check("a batch Orgo didn't take (down, 5xx) goes again with its deleteMissing and runs; a 400 doesn't", async () => {
+await check("a batch Orgo didn't take (down, 5xx, 401, 429) goes again with its deleteMissing and runs; a 400 doesn't, but they go with the next change", async () => {
   reset();
   assert.equal(Sync.RETRY_MS, 60_000);
   state.routines = [routine({ id: "rtn_r" })];
@@ -413,9 +413,24 @@ await check("a batch Orgo didn't take (down, 5xx) goes again with its deleteMiss
     reset();
     state.routines = [routine({ id: "rtn_r" })];
     answer = () => ({ status: 400, json: {} });
-    Sync.routineChanged("bot_main");
+    Sync.routineChanged("bot_main", { deleted: true });
+    Sync.routineRan("rtn_r", { at: Date.now(), status: "ok" });
     await T.flushAll();
     assert.equal(T.pendingCount(), 0, "a refusal isn't sent again as it is");
+    answer = ORGO;
+    calls.length = 0;
+    Sync.routineChanged("bot_main");
+    await T.flushAll();
+    assert.equal(calls[0].body.deleteMissing, true, "the refused delete goes with the next change");
+    assert.deepEqual(calls.map((c) => c.method), ["PUT", "POST"], "and its run");
+    for (const status of [401, 429]) {
+      reset();
+      state.routines = [routine({ id: "rtn_r" })];
+      answer = () => ({ status, json: {} });
+      Sync.routineChanged("bot_main", { deleted: true });
+      await T.flushAll();
+      assert.equal(T.pendingCount(), 1, `${status}: back in the queue`);
+    }
   } finally {
     console.warn = warn;
   }

@@ -1,4 +1,5 @@
 import "server-only";
+import { sameApp } from "@/lib/routine-catalog";
 import { MAIN_WORKSPACE, workspaceOf, type Bot } from "@/lib/types";
 import { orgoHeaders } from "./app-version";
 import { askOwner } from "./composio";
@@ -172,9 +173,10 @@ export async function saveKey(name: string, value: string, botIds: string[] = []
   if (!v) throw new KeysError("Paste the key first.", 400);
   if (v.length > 8192) throw new KeysError("That key is too long.", 400);
   const project = scopeProject(scope, wsId);
-  // Set already (any scope), or the vault can't say: a key replaced, so nothing is offered for it.
+  // This workspace's bots had the service already (a key by any of its names, account wide or this
+  // workspace's), or the vault can't say: a key replaced, so nothing is offered for it.
   const existed = await listKeys()
-    .then((all) => all.some((k) => k.name === n))
+    .then((all) => keysOf(all, wsId).some((k) => sameApp(k.name, n)))
     .catch(() => true);
   await vault("POST", "/api/secrets", { name: n, value: v, ...(project ? { workspace_id: project } : {}) });
   forget();

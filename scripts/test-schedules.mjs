@@ -1194,8 +1194,42 @@ await check("a daily run missed while the Mac slept: once late, or at its time w
     await sleep(10);
     status.push(get(r.id).last.status);
   }
-  assert.deepEqual(status, ["skipped", "ok", "skipped", "ok"], "never skipped twice in a row");
-  assert.equal(digests(), before + 2);
+  assert.deepEqual(status, ["skipped", "ok", "ok", "ok"], "never skipped twice in a row");
+  assert.equal(digests(), before + 2, "the late run on the 23rd took that 9 AM's place, so the 24th had nothing due");
+  // On time once more (the late runs are over), then skipped, then the Mac stays open from 8:50: the late run takes 9 AM's place, not twice minutes apart.
+  clock = at("2026-10-26T13:00:30Z");
+  tick();
+  await sleep(10);
+  assert.equal(get(r.id).lateRun, undefined, "on time");
+  clock = at("2026-10-28T12:50:00Z");
+  tick();
+  await sleep(10);
+  assert.equal(get(r.id).last.status, "skipped");
+  clock = at("2026-10-29T12:50:00Z");
+  tick();
+  await sleep(10);
+  const late = digests();
+  eq(get(r.id).nextRunAt, at("2026-10-30T13:00:00Z"), "tomorrow 9 AM");
+  clock = at("2026-10-29T13:00:30Z");
+  tick();
+  await sleep(10);
+  assert.equal(digests(), late, "not again at 9");
+  R.deleteRoutine(r.id);
+  clock = saved;
+});
+
+await check("an every run missed while asleep waits when the Mac wakes outside its hours or days", async () => {
+  const saved = clock;
+  clock = at("2026-10-16T23:40:00Z"); // Friday 7:40 PM in New York
+  const r = R.createRoutine("bot_main", "Queue", "Check the queue", { kind: "every", minutes: 15, hours: { from: "08:00", to: "20:00" }, days: [1, 2, 3, 4, 5] }).routine;
+  get(r.id).nextRunAt = at("2026-10-17T00:00:00Z"); // Friday 8 PM, the last beat
+  const started = fake.started.length;
+  clock = at("2026-10-17T14:00:00Z"); // Saturday 10 AM
+  tick();
+  await sleep(10);
+  assert.equal(fake.started.length, started, "not on a Saturday");
+  assert.equal(get(r.id).last.status, "skipped");
+  eq(get(r.id).nextRunAt, at("2026-10-19T12:00:00Z"), "Monday 8 AM");
   R.deleteRoutine(r.id);
   clock = saved;
 });
@@ -1229,10 +1263,17 @@ await check("a run skipped after a long sleep keeps the thread that's still goin
   tick();
   assert.equal(get(r.id).last.status, "skipped");
   assert.equal(get(r.id).last.sessionId, run.sessionId, "still the routine's run");
+  assert.equal(get(r.id).last.threadAt, run.at, "with when it began");
   get(r.id).nextRunAt = clock - 60_000;
   tick();
   await sleep(10);
   assert.equal(fake.started.length, started, "no second thread while the first is going");
+  assert.equal(get(r.id).last.threadAt, run.at, "a second skip keeps it too");
+  // It ends: recorded as of when it began, not as of the skip.
+  const s = state.sessions.find((x) => x.id === run.sessionId);
+  s.status = "done";
+  await R.onRoutineTaskEnd(s, "NOTHING");
+  assert.equal(get(r.id).last.at, run.at);
   for (const x of state.sessions) x.status = "done";
   R.deleteRoutine(r.id);
 });

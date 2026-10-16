@@ -615,6 +615,11 @@ export type RoutineRun = {
    * way again is recorded but not said or sent again (routines.ts onRoutineTaskEnd), like a chat run.
    */
   prevError?: string;
+  /**
+   * On a skipped record whose thread is still going (it stays the routine's run): when that thread's run
+   * began, so its end records the window it handled (a meeting routine's), not the time of the skip.
+   */
+  threadAt?: number;
   /** Whether the result reached `deliverTo`; unset when there was nothing to send or nowhere besides the chat. */
   delivery?: { status: "sent" | "failed"; to: string; error?: string; at: number };
 };
@@ -631,6 +636,8 @@ export type Routine = {
   enabled: boolean;
   nextRunAt?: number;
   lastRunAt?: number;
+  /** Its last run was a late one that took the place of the time after it (routines.ts tick), so the next missed one isn't put off either. */
+  lateRun?: boolean;
   /** Where its task runs (as the user asked); auto lets Bops decide each time. */
   where?: "auto" | "cloud" | "mac";
   /** A plain reminder: this message is sent to the user at the time, and no computer is used. */

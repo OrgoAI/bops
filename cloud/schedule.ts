@@ -245,6 +245,16 @@ function nextEvery(s: Windowed, from: number, tz?: string, last?: number): numbe
   return at === undefined ? undefined : at - ahead;
 }
 
+/**
+ * Whether `t` is inside an "every" or before_event schedule's hours and days (a before_event one's are its
+ * meetings', `minutes` ahead); always for the rest, which have no hours.
+ */
+export function inHours(s: ScheduleLike, t: number, tz?: string): boolean {
+  if (s.kind !== "every" && s.kind !== "before_event") return true;
+  const at = s.kind === "before_event" ? t + leadOf(s) : t;
+  return allowedFrom(at, s, tz) === at;
+}
+
 /** A before_event schedule's lead, in ms. */
 const leadOf = (s: { minutes: number }) => Math.round(Number(s.minutes)) * MINUTE;
 

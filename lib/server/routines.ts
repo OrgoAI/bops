@@ -3,7 +3,7 @@ import { readlinkSync } from "node:fs";
 import { trackServerEvent } from "./analytics";
 import { botChatId, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
 import { appNameFor, tagsOf } from "@/lib/routine-catalog";
-import { describeSchedule as describe, EVENT_CHECK_MINUTES, eventWindow, nextRun, normalizeSchedule, resolveOnce, validTimeZone, whenText } from "@/cloud/schedule";
+import { describeSchedule as describe, EVENT_CHECK_MINUTES, eventWindow, inHours, nextRun, normalizeSchedule, resolveOnce, validTimeZone, whenText } from "@/cloud/schedule";
 import { cleanText, routineChanged, routineRan, syncRoutinesOnStart } from "./routine-sync";
 import { plainLinks } from "@/cloud/style";
 import { pingIfWorthIt } from "./attention";
@@ -442,7 +442,7 @@ async function remind(r: Routine, b: Bot, at: number, opts: RunOpts): Promise<Ro
 async function chatRun(r: Routine, b: Bot, at: number, opts: RunOpts): Promise<RoutineRun> {
   if (running.has(r.id)) return record(r.id, { at, status: "skipped", error: "The last run was still going." });
   const thread = r.last?.sessionId ? session(r.last.sessionId) : undefined;
-  if (thread && live(thread)) return record(r.id, { at, status: "skipped", error: "The last run was still going.", sessionId: thread.id });
+  if (thread && live(thread)) return record(r.id, { at, status: "skipped", error: "The last run was still going.", ...stillGoing(r.last, thread.id) });
   const before = r.last;
   running.add(r.id);
   record(r.id, { at, status: "running" });
@@ -508,13 +508,20 @@ async function failed(r: Routine, at: number, error: string, before?: RoutineRun
   return routine(r.id)?.last ?? { at, status: "failed", error };
 }
 
+/**
+ * A run skipped while the routine's thread is still going: that thread stays its run, keeping when it
+ * began (RoutineRun.threadAt) and how the run before it failed (prevError) for when it ends.
+ */
+const stillGoing = (last: RoutineRun | undefined, sessionId: string): Partial<RoutineRun> & { sessionId: string } =>
+  last?.sessionId === sessionId ? { sessionId, threadAt: last.threadAt ?? last.at, ...(last.prevError ? { prevError: last.prevError } : {}) } : { sessionId };
+
 /** How the run before failed, for a new run's running record (RoutineRun.prevError). */
 const prevError = (before?: RoutineRun) => (before?.status === "failed" && before.error ? { prevError: before.error } : before?.status === "running" && before.prevError ? { prevError: before.prevError } : {});
 
 function taskRun(r: Routine, b: Bot, at: number, opts: RunOpts): RoutineRun {
   const last = r.last;
   const before = last?.sessionId ? session(last.sessionId) : undefined;
-  if (before && live(before)) return record(r.id, { at, status: "skipped", error: "The last run was still going.", sessionId: before.id });
+  if (before && live(before)) return record(r.id, { at, status: "skipped", error: "The last run was still going.", ...stillGoing(last, before.id) });
   const chatId = botChatId(b.id);
   const goal = r.quiet ? `${goalFor(r, at)}\n\nIf nothing needs ${ownerName()} this time, answer exactly NOTHING and nothing else.` : goalFor(r, at);
   try {
@@ -556,7 +563,8 @@ export async function onRoutineTaskEnd(s: Session, answer: string | undefined, f
   const r = s.routineId ? routine(s.routineId) : undefined;
   if (!r) return { suppress: false };
   const mine = r.last?.sessionId === s.id ? r.last : undefined;
-  const at = mine ? mine.at : Date.now();
+  // When its run began: a skip since (the thread still going) keeps that (threadAt).
+  const at = mine ? (mine.threadAt ?? mine.at) : Date.now();
   const chip = () => {
     if (r.quiet && !getState().messages.some((m) => m.chatId === s.chatId && m.sessionIds?.includes(s.id)))
       addMessage({ chatId: s.chatId, role: "system", text: `Routine · ${describeSchedule(r.schedule, zoneOf(r))}`, sessionIds: [s.id] });
@@ -713,11 +721,14 @@ const LATE_NEXT_MS = 60 * 60_000;
  * weekend, with the Mac opened at 8:50 on Monday, runs once at 9, not twice), and less than half its gap
  * away for an "every" run (missed beats of a check every 15 minutes aren't made up). But never twice in a
  * row: when its last run was skipped too, it runs late, so a Mac that sleeps through 9 AM every day still
- * gets it. A one-off, and anything with its next time further off, runs once, late, and says so.
+ * gets it, and that late run takes the place of the next time when it's close (not twice minutes apart).
+ * An "every" or meeting routine outside its hours or days waits for them. A one-off, and anything with its next time further off, runs once, late, and says so.
  */
-function skipLate(r: Routine, due: number, next: number | undefined, now: number) {
+function skipLate(r: Routine, due: number, next: number | undefined, now: number, tz?: string) {
   if (r.schedule.kind === "once" || next === undefined || now - due <= 2 * 60_000) return false;
-  if (r.last?.status === "skipped") return false;
+  // Outside its hours or days now (a weekday check the Mac woke for on Saturday): it waits for them.
+  if (!inHours(r.schedule, now, tz)) return true;
+  if (r.last?.status === "skipped" || r.lateRun) return false;
   const beat = beatOf(r.schedule);
   return next - now < (beat !== undefined ? beat / 2 : LATE_NEXT_MS);
 }
@@ -744,21 +755,25 @@ function tick() {
     if (r.nextRunAt > now) continue;
     const due = r.nextRunAt;
     const next = r.schedule.kind === "once" ? undefined : nextRun(r.schedule, now, tz, beatOf(r.schedule) !== undefined ? due : undefined);
-    if (skipLate(r, due, next, now)) {
+    if (skipLate(r, due, next, now, tz)) {
       update(() => (r.nextRunAt = next));
       // A thread of the routine's still going (a login it waits on) stays its run: the next run waits for it, and its end is the routine's.
       const t = r.last?.sessionId ? session(r.last.sessionId) : undefined;
-      const still = t && live(t) ? { sessionId: t.id } : {};
+      const still = t && live(t) ? stillGoing(r.last, t.id) : {};
       record(r.id, { at: now, status: "skipped", error: `Missed while Bops was off or this Mac was asleep (it was due ${inSentence(whenText(due, now, tz))}); runs next ${inSentence(whenText(next!, now, tz))}`, ...still });
       continue;
     }
+    // A late run that ran because the last was skipped too, with its next time close: it takes that one's place, so it doesn't run twice minutes apart.
+    const then = next !== undefined && beatOf(r.schedule) === undefined && now - due > 2 * 60_000 && next - now < LATE_NEXT_MS ? nextRun(r.schedule, next, tz) : next;
     update(() => {
       r.lastRunAt = now;
-      r.nextRunAt = next;
+      r.nextRunAt = then;
+      if (then !== next) r.lateRun = true;
+      else delete r.lateRun;
       if (r.schedule.kind === "once") r.enabled = false;
     });
     void run(r.id, { due }).catch((e: Error) => console.warn(`[routines] ${r.id}: ${e.message}`));
-    if (r.schedule.kind !== "once" && next === undefined) pauseStuck(r, "its schedule never comes due.");
+    if (r.schedule.kind !== "once" && then === undefined) pauseStuck(r, "its schedule never comes due.");
   }
 }
 

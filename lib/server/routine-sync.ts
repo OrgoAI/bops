@@ -41,6 +41,7 @@ const g = globalThis as unknown as {
   __bopsRoutineSyncMissing?: Map<string, number>;
   __bopsRoutineSyncStarted?: boolean;
   __bopsRoutineSyncInFlight?: Map<string, Promise<void>>;
+  __bopsRoutineSyncHeld?: Map<string, Pick<Pending, "deleteMissing" | "runs">>;
 };
 /** What's waiting to go, by workspace. */
 const pending = (g.__bopsRoutineSync ??= new Map());
@@ -48,6 +49,8 @@ const pending = (g.__bopsRoutineSync ??= new Map());
 const missing = (g.__bopsRoutineSyncMissing ??= new Map());
 /** The flush going for a workspace: one at a time, so each PUT carries state at least as new as the one before. */
 const inFlight = (g.__bopsRoutineSyncInFlight ??= new Map());
+/** A batch Orgo refused (a 400, too big): not sent again as it is, but its deleteMissing and runs go with the next change. */
+const held = (g.__bopsRoutineSyncHeld ??= new Map());
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 /**
@@ -136,8 +139,8 @@ function orgoIds(json: unknown): Map<string, string> {
 /** Whether Orgo is being left alone for this project (it hasn't the routes), as of `now`. */
 const routesMissing = (projectId: string, now = Date.now()) => (missing.get(projectId) ?? 0) > now;
 
-/** Orgo didn't answer, or answered 5xx: worth sending again. */
-const retryable = (status: number | null) => status === null || status >= 500;
+/** Orgo didn't answer, answered 5xx, or for now (signed out, a timeout, too many at once): worth sending again. */
+const retryable = (status: number | null) => status === null || status >= 500 || status === 401 || status === 403 || status === 408 || status === 429;
 
 /** A batch that didn't get through goes back in the queue (its deleteMissing and runs too), sent again after a backoff. */
 function requeue(wsId: string, p: Pending, runs = p.runs, deleteMissing = p.deleteMissing) {
@@ -180,6 +183,10 @@ async function flush(wsId: string): Promise<void> {
   if (status === null || status >= 300) {
     if (status !== null) console.warn(`[routine-sync] ${wsId}: Orgo answered ${status} to the routines`);
     if (retryable(status)) requeue(wsId, p);
+    else {
+      const h = held.get(wsId);
+      held.set(wsId, { deleteMissing: p.deleteMissing || !!h?.deleteMissing, runs: [...(h?.runs ?? []), ...p.runs].slice(-MAX_RUNS_WAITING) });
+    }
     return;
   }
   missing.delete(projectId);
@@ -218,6 +225,12 @@ function start(wsId: string): Promise<void> {
 /** Gather a change for a workspace and send it all `wait` (SYNC_DEBOUNCE_MS) after the last one. */
 function queue(wsId: string, add: (p: Pending) => void, wait = SYNC_DEBOUNCE_MS) {
   const p: Pending = pending.get(wsId) ?? { deleteMissing: false, runs: [] };
+  const h = held.get(wsId);
+  if (h) {
+    held.delete(wsId);
+    p.deleteMissing ||= h.deleteMissing;
+    p.runs = [...h.runs, ...p.runs].slice(-MAX_RUNS_WAITING);
+  }
   add(p);
   if (p.timer) clearTimeout(p.timer);
   p.timer = setTimeout(() => {
@@ -297,6 +310,7 @@ export const routineSyncForTests = {
     pending.clear();
     missing.clear();
     inFlight.clear();
+    held.clear();
     g.__bopsRoutineSyncStarted = false;
   },
 };
