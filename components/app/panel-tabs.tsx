@@ -292,6 +292,7 @@ export function NewTab({
   onComputer,
   onProfile,
   onVault,
+  onKnowledge,
   onMac,
 }: {
   state: AppState;
@@ -299,6 +300,8 @@ export function NewTab({
   onComputer: (botId: string) => void;
   onProfile: (botId: string) => void;
   onVault: () => void;
+  /** Knowledge, what the bots know (memory-categories.tsx); none where it isn't open to this account. */
+  onKnowledge?: () => void;
   onMac: () => void;
 }) {
   const [address, setAddress] = useState("");
@@ -376,6 +379,17 @@ export function NewTab({
             </span>
           </span>
         </button>
+        {onKnowledge && (
+          <button onClick={onKnowledge} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_#ECECEA] hover:bg-[#FCFCFB]">
+            <span className="flex size-7 items-center justify-center rounded-full bg-ink text-highlighter">
+              <KnowledgeIcon size={14} />
+            </span>
+            <span className="flex flex-col">
+              <span className="text-[14px] font-medium leading-[18px]">Knowledge</span>
+              <span className="text-[12px] leading-4 text-[#6B6B6B]">What your bots know: people, plans, promises and more</span>
+            </span>
+          </button>
+        )}
         <button onClick={onMac} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_#ECECEA] hover:bg-[#FCFCFB]">
           <span className="flex size-7 items-center justify-center rounded-full bg-ink text-highlighter">
             <MacIcon />

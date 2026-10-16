@@ -9,11 +9,12 @@ import { MembersButton } from "./members";
 import { Mascot } from "./mascot";
 import { KnowledgeIcon, type MemoryOpen } from "./memory-categories";
 import { AppLogo } from "./apps";
+import { BotMenu, type BotMenuActions } from "./bot-menu";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
 import { useSetupNeedsYou } from "./setup";
 import { UpdateNotice } from "./update-notice";
 import { WATCH, WatchEye, watchName } from "./watch-overlay";
-import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, NeedsYouDot, post, RoundButton, StatusIcon, teamOf, useNow } from "./ui";
+import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, NeedsYouDot, post, RoundButton, SideToggleIcon, StatusIcon, teamOf, useNow } from "./ui";
 
 /**
  * The sidebar for one workspace (switch at the top). The list: one row per conversation (Sam pinned, then by latest activity), each with its
@@ -34,6 +35,8 @@ export function Sidebar({
   onMembers,
   onOpenWatch,
   onOpenMemory,
+  menuActions,
+  onCollapse,
 }: {
   state: AppState;
   chatId: string;
@@ -51,9 +54,21 @@ export function Sidebar({
   onOpenWatch: (watch: Watch) => void;
   /** Open Knowledge on the right, on a kind, an item or a search (memory-categories.tsx). */
   onOpenMemory: (open: MemoryOpen) => void;
+  /** What a bot's right-click menu does (bot-menu.tsx). */
+  menuActions?: BotMenuActions;
+  /** Hide the sidebar (bops-app.tsx brings it back from the title bar). */
+  onCollapse?: () => void;
 }) {
   const [query, setQuery] = useState<string | null>(null);
   const q = query?.trim().toLowerCase();
+  // A bot's right-click menu (bot-menu.tsx): which bot, and where it was asked for.
+  const [menu, setMenu] = useState<{ botId: string; x: number; y: number } | null>(null);
+  const menuBot = menu ? state.bots.find((b) => b.id === menu.botId) : undefined;
+  /** A bot's chat opens its menu on right-click; a group's has none (the browser's own is kept off it too). */
+  const openMenu = (c: Chat) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (c.kind === "bot" && menuActions) setMenu({ botId: c.botIds[0], x: e.clientX, y: e.clientY });
+  };
   // The "5m" next to each chat stays current.
   useNow(30_000);
 
@@ -95,7 +110,17 @@ export function Sidebar({
             className="mr-2 h-[34px] min-w-0 flex-1 rounded-full bg-white px-3.5 text-[13px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98]"
           />
         )}
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {onCollapse && (
+            <button
+              onClick={onCollapse}
+              title="Hide the sidebar (⌘\)"
+              aria-label="Hide the sidebar"
+              className="flex size-[34px] shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05]"
+            >
+              <SideToggleIcon side="left" open />
+            </button>
+          )}
           <RoundButton label="Search" active={query !== null} onClick={() => setQuery(query === null ? "" : null)}>
             <circle cx="7" cy="7" r="4.5" fill="none" stroke="#0A0A0A" strokeWidth="1.5" />
             <path d="M10.5 10.5L14 14" fill="none" stroke="#0A0A0A" strokeWidth="1.5" strokeLinecap="round" />
@@ -108,12 +133,12 @@ export function Sidebar({
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {/* The main bot runs the team, so it sits above it (once you type a search, everything lists together). */}
-        {!q && mainChat && <MainBot chat={mainChat} state={state} selected={mainChat.id === chatId} onClick={() => onOpenChat(mainChat.id)} last={lastMessage(mainChat)} />}
+        {!q && mainChat && <MainBot chat={mainChat} state={state} selected={mainChat.id === chatId} onClick={() => onOpenChat(mainChat.id)} onMenu={openMenu(mainChat)} last={lastMessage(mainChat)} />}
         <div className="flex flex-col gap-0.5">
           {chats
             .filter((c) => !!q || c !== mainChat)
             .map((c) => (
-              <ChatRow key={c.id} chat={c} state={state} selected={c.id === chatId} onClick={() => onOpenChat(c.id)} last={lastMessage(c)} />
+              <ChatRow key={c.id} chat={c} state={state} selected={c.id === chatId} onClick={() => onOpenChat(c.id)} onMenu={openMenu(c)} menuOpen={!!menu && c.kind === "bot" && c.botIds[0] === menu.botId} last={lastMessage(c)} />
             ))}
         </div>
 
@@ -174,6 +199,7 @@ export function Sidebar({
           </button>
         )}
       </div>
+      {menu && menuBot && menuActions && <BotMenu state={state} bot={menuBot} x={menu.x} y={menu.y} onClose={() => setMenu(null)} actions={menuActions} />}
     </aside>
   );
 }
@@ -302,7 +328,7 @@ function YouMenu({ state, onAccount, onSettings, onSetup }: { state: AppState; o
  * The main bot (Sam) as the head of the team, like Grok's: big, starred, with how the team is doing
  * at a glance. Click it to talk to Sam.
  */
-function MainBot({ chat: c, state, selected, onClick, last }: { chat: Chat; state: AppState; selected: boolean; onClick: () => void; last?: AppState["messages"][number] }) {
+function MainBot({ chat: c, state, selected, onClick, onMenu, last }: { chat: Chat; state: AppState; selected: boolean; onClick: () => void; onMenu?: (e: React.MouseEvent) => void; last?: AppState["messages"][number] }) {
   const b = state.bots.find((x) => x.id === c.botIds[0])!;
   const unread = !!last && last.role !== "user" && last.at > (c.readAt ?? 0) && !selected;
   const mine = new Set(teamOf(state).map((x) => x.id));
@@ -314,6 +340,7 @@ function MainBot({ chat: c, state, selected, onClick, last }: { chat: Chat; stat
   return (
     <button
       onClick={onClick}
+      onContextMenu={onMenu}
       className={`relative mb-2 flex flex-col items-center gap-1.5 rounded-[18px] px-3 pb-3 pt-4 text-center ${selected ? "bg-[#EEEEEC]" : "hover:bg-black/[0.03]"}`}
     >
       <span className="relative">
@@ -333,7 +360,24 @@ function MainBot({ chat: c, state, selected, onClick, last }: { chat: Chat; stat
   );
 }
 
-function ChatRow({ chat: c, state, selected, onClick, last }: { chat: Chat; state: AppState; selected: boolean; onClick: () => void; last?: AppState["messages"][number] }) {
+function ChatRow({
+  chat: c,
+  state,
+  selected,
+  onClick,
+  onMenu,
+  menuOpen,
+  last,
+}: {
+  chat: Chat;
+  state: AppState;
+  selected: boolean;
+  onClick: () => void;
+  onMenu?: (e: React.MouseEvent) => void;
+  /** Its bot's right-click menu is open: the row is outlined. */
+  menuOpen?: boolean;
+  last?: AppState["messages"][number];
+}) {
   const members = state.bots.filter((b) => c.botIds.includes(b.id));
   const solo = c.kind === "bot" ? members[0] : undefined;
   const unread = !!last && last.role !== "user" && last.at > (c.readAt ?? 0) && !selected;
@@ -353,7 +397,7 @@ function ChatRow({ chat: c, state, selected, onClick, last }: { chat: Chat; stat
         : `${members.map((m) => m.name).join(", ")} and you`;
 
   return (
-    <button onClick={onClick} className={`flex items-center gap-3 rounded-[14px] p-2.5 text-left ${selected ? "bg-[#EEEEEC]" : "hover:bg-black/[0.03]"}`}>
+    <button onClick={onClick} onContextMenu={onMenu} className={`flex items-center gap-3 rounded-[14px] p-2.5 text-left ${selected ? "bg-[#EEEEEC]" : "hover:bg-black/[0.03]"} ${menuOpen ? "shadow-[inset_0_0_0_1.5px_#0A0A0A]" : ""}`}>
       <ChatAvatar chat={c} bots={state.bots} size={44} />
       <div className="flex min-w-0 flex-1 flex-col gap-[3px]">
         <div className="flex items-center gap-1.5">
