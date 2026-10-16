@@ -265,7 +265,7 @@ function useFresh(id: string) {
  * workspace), with how many monitors have news on it while some do (it pops in when news comes). The
  * pill, with its name, while the page is open (sidebar-footer.tsx).
  */
-export function AutopilotButton({ state, expanded = false, onOpen }: { state: AppState; expanded?: boolean; onOpen: (open: AutopilotOpen) => void }) {
+export function AutopilotButton({ state, expanded = false, pressed = expanded, onOpen }: { state: AppState; expanded?: boolean; pressed?: boolean; onOpen: (open: AutopilotOpen) => void }) {
   const lists = autopilotOf(state);
   const news = lists.monitors.filter((w) => w.alert).length;
   // The page opens on monitors while one has news, else on the first section with something in it.
@@ -274,7 +274,9 @@ export function AutopilotButton({ state, expanded = false, onOpen }: { state: Ap
   const fresh = news ? lists.monitors.find((w) => w.alert) : undefined;
   return (
     <FooterButton
+      name="routines"
       expanded={expanded}
+      pressed={pressed}
       label={GROUP_NAME}
       tip={news ? `${GROUP_NAME}: ${news === 1 ? "a monitor has" : `${news} monitors have`} news` : `${GROUP_NAME}: what your bots do on their own`}
       ariaLabel={news ? `${GROUP_NAME}, ${news} with news` : GROUP_NAME}

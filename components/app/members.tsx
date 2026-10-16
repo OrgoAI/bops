@@ -79,11 +79,13 @@ export function useMembersCount(state: AppState) {
  * the user (guests too, invites not). Grey, not highlighter: nothing here needs the user. The pill, with
  * its name, while the People sheet is open (sidebar-footer.tsx).
  */
-export function MembersButton({ state, expanded = false, onClick }: { state: AppState; expanded?: boolean; onClick: () => void }) {
+export function MembersButton({ state, expanded = false, pressed = expanded, onClick }: { state: AppState; expanded?: boolean; pressed?: boolean; onClick: () => void }) {
   const count = useMembersCount(state);
   return (
     <FooterButton
+      name="people"
       expanded={expanded}
+      pressed={pressed}
       label="People"
       tip="People: who can see your bots' computers"
       ariaLabel={count ? `People, ${count} with access` : "People"}

@@ -1,7 +1,8 @@
 // Tests for the sidebar's footer (components/app/sidebar-footer.tsx and SidebarFooter in sidebar.tsx):
 // which button is the pill for each page open on the right (People's sheet, the Vault, Routines,
-// Knowledge; none: Apps & logins), that the others are round with their tooltips, that the Routines
-// badge shows in both shapes, and that the motion is a flex-grow swap the reduced-motion setting turns off.
+// Knowledge; none: Apps & logins), that the one pointed at wins over it (your account too) and leaving
+// goes back to it, that the others are round with their tooltips, that the Routines badge shows in both
+// shapes, and that the motion is a flex-grow swap the reduced-motion setting turns off and touch skips.
 //
 // The .tsx files are compiled with the TypeScript in node_modules as they load, and rendered to HTML.
 // Usage: node scripts/test-sidebar-footer.mjs   (not with --conditions=react-server: these are client components)
@@ -45,8 +46,8 @@ globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} }
 globalThis.matchMedia = () => ({ matches: false });
 globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
 
-const { footerPageOf } = await import(pathToFileURL(`${root}/components/app/sidebar-footer.tsx`).href);
-const { SidebarFooter } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
+const { footerPageOf, footerPillOf, canHover, FOOTER_LEAVE_MS } = await import(pathToFileURL(`${root}/components/app/sidebar-footer.tsx`).href);
+const { SidebarFooter, YouMenu } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { createElement: h } = await import("react");
 
@@ -68,12 +69,15 @@ const base = {
   chats: [],
   accounts: [],
 };
-const render = (state, open) =>
-  renderToStaticMarkup(h(SidebarFooter, { state, open, you: h("span", { id: "you" }, "TI"), onMembers: noop, onVault: noop, onOpenAutopilot: noop, onOpenMemory: noop }));
+const render = (state, open, hover) =>
+  renderToStaticMarkup(h(SidebarFooter, { state, open, hover, you: (expanded) => h("span", { id: "you", "data-expanded": String(expanded) }, "TI"), onMembers: noop, onVault: noop, onOpenAutopilot: noop, onOpenMemory: noop }));
+/** The same row with the real account button (YouMenu) first. */
+const renderYou = (state, open, hover) =>
+  renderToStaticMarkup(h(SidebarFooter, { state, open, hover, you: (expanded) => h(YouMenu, { state, expanded, onAccount: noop, onSettings: noop, onSetup: noop }), onMembers: noop, onVault: noop, onOpenAutopilot: noop, onOpenMemory: noop }));
 
 /** Each footer button's slot, in order: its label, whether it's the pill, and its button's title. */
 function slots(html) {
-  return [...html.matchAll(/<span data-footer-slot="([^"]+)" class="([^"]+)">\s*<button([^>]*)>/g)].map(([, label, cls, attrs]) => ({
+  return [...html.matchAll(/<(?:span|div) data-footer-slot="([^"]+)" data-footer-key="[^"]+" class="([^"]+)">\s*<button([^>]*)>/g)].map(([, label, cls, attrs]) => ({
     label: label.replace("&amp;", "&"),
     pill: /(^| )grow( |$)/.test(cls),
     round: /(^| )grow-0( |$)/.test(cls),
@@ -108,6 +112,53 @@ await test("exactly one pill, the open page's, the others round with their toolt
   }
 });
 
+await test("the button pointed at is the pill over the open page's, which stays pressed; leaving goes back", () => {
+  assert.equal(footerPillOf({ rest: "vault", hover: "knowledge" }), "knowledge", "pointed at wins");
+  assert.equal(footerPillOf({ rest: "routines", hover: "you" }), "you", "your account too");
+  assert.equal(footerPillOf({ rest: "routines", hover: null }), "routines", "left the row: the resting one");
+  assert.equal(footerPillOf({ rest: "people" }), "people");
+  assert.ok(FOOTER_LEAVE_MS > 0 && FOOTER_LEAVE_MS <= 120, "a short wait on leaving, so the pill never blinks");
+  const s = slots(render(base, "routines", "knowledge"));
+  assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["Knowledge"], "one pill, the pointed one");
+  assert.deepEqual(s.filter((x) => x.pressed).map((x) => x.label), ["Routines"], "aria-pressed stays on the open page");
+  assert.equal(s.find((x) => x.label === "Knowledge").title, undefined, "the pill needs no tooltip");
+  assert.ok(s.find((x) => x.label === "Routines").title, "the shrunk one gets its tooltip back");
+  // Pointed at Knowledge with no Knowledge in the footer: the resting one.
+  const none = slots(render({ ...base, account: undefined }, "routines", "knowledge"));
+  assert.deepEqual(none.filter((x) => x.pill).map((x) => x.label), ["Routines"]);
+});
+
+await test("your account takes part: pointed at, it's the pill with your name (or email), the rest round", () => {
+  let html = renderYou(base, "vault", "you");
+  let s = slots(html);
+  assert.deepEqual(s.map((x) => x.label), ["You", "People", "Apps & logins", "Routines", "Knowledge"]);
+  assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["You"]);
+  assert.equal(s[0].title, undefined, "the pill needs no tooltip");
+  assert.match(html, /motion-footer-label[^"]*max-w-\[160px\][^"]*opacity-100[^"]*">Tess Ito<\/span>/, "the name shown");
+  assert.match(html, /aria-expanded="false"/, "the menu's state, not the hover");
+  html = renderYou({ ...base, account: { user: { id: "u1", email: "tess@example.com" } } }, "vault", "you");
+  assert.match(html, /opacity-100[^"]*">tess@example\.com<\/span>/, "no name: the email");
+  // At rest it's round, with its tooltip, and Apps & logins is the pill.
+  html = renderYou(base, "vault");
+  s = slots(html);
+  assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["Apps & logins"]);
+  assert.ok(s[0].round && s[0].title, "round with its tooltip");
+  assert.match(html, /opacity-0[^"]*">Tess Ito<\/span>/, "the name hidden");
+  assert.equal(render(base, "vault", "you").match(/data-expanded="(\w+)"/)[1], "true", "the row tells `you` it's the pill");
+});
+
+await test("no hover expansion where nothing hovers (a touch screen)", () => {
+  const was = globalThis.matchMedia;
+  globalThis.matchMedia = (q) => ({ matches: q === "(hover: none)" });
+  assert.equal(canHover(), false);
+  globalThis.matchMedia = () => ({ matches: false });
+  assert.equal(canHover(), true);
+  globalThis.matchMedia = was;
+  const src = readFileSync(`${root}/components/app/sidebar-footer.tsx`, "utf8");
+  assert.match(src, /pointerType !== "touch" && canHover\(\)/, "pointer over the row only counts with a hovering pointer");
+  assert.match(src, /\(hover: none\)/);
+});
+
 await test("none open: Apps & logins is the pill, the key until apps are connected, then their logos", () => {
   let html = render(base, undefined);
   assert.deepEqual(slots(html).filter((x) => x.pill).map((x) => x.label), ["Apps & logins"]);
@@ -130,6 +181,7 @@ await test("none open: Apps & logins is the pill, the key until apps are connect
 await test("the label is there in both shapes, shown only on the pill; the avatar stays first", () => {
   const html = render(base, "routines");
   assert.ok(html.indexOf('id="you"') < html.indexOf("data-footer-slot"), "the initials first, as they were");
+  assert.match(html, /data-expanded="false"/, "your account round at rest");
   const labels = [...html.matchAll(/<span aria-hidden="true" class="motion-footer-label ([^"]+)">([^<]+)<\/span>/g)].map(([, cls, t]) => ({ t: t.replace("&amp;", "&"), open: /max-w-\[160px\]/.test(cls) && /opacity-100/.test(cls) }));
   assert.deepEqual(labels, [
     { t: "People", open: false },
