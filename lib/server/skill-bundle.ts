@@ -13,12 +13,12 @@ import { createHash } from "node:crypto";
 export const BUNDLE_LIMITS = {
   /** SKILL.md body, bytes. */
   body: 64 * 1024,
-  /** One file, bytes. */
-  file: 256 * 1024,
+  /** One file, bytes (a program as much as a script). */
+  file: 50 * 1024 * 1024,
   /** Files in a bundle, SKILL.md included. */
-  files: 200,
+  files: 2000,
   /** The whole bundle, bytes. */
-  total: 2 * 1024 * 1024,
+  total: 100 * 1024 * 1024,
   frontmatter: 16 * 1024,
   description: 1024,
   slug: 64,
@@ -35,10 +35,97 @@ const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\
 const VAULT_NAME_RE = /^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/;
 
 export type Problem = { path: string; reason: string; line?: number };
-export type BundleFile = { path: string; content: string; sha256: string; size: number; executable: boolean };
+/** A file of a bundle: its text (`content`), or for a binary file (a program, an image) null and its bytes in `data`. sha256 and size are over its bytes. */
+export type BundleFile = { path: string; content: string | null; data?: Buffer; sha256: string; size: number; executable: boolean };
 
-export const sha256Hex = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+export const sha256Hex = (text: string | Buffer) => (typeof text === "string" ? createHash("sha256").update(text, "utf8") : createHash("sha256").update(text)).digest("hex");
 export const byteLength = (text: string) => Buffer.byteLength(text, "utf8");
+/** A file's bytes: its data, else its text as UTF-8. */
+export const fileBytes = (f: { content: string | null; data?: Buffer }) => f.data ?? Buffer.from(f.content ?? "", "utf8");
+/** Megabytes for a cap, the way a refusal says it. */
+const mb = (n: number) => `${n / 1024 / 1024} MB`;
+
+/* ---------------- Text or bytes ---------------- */
+
+/** Media types by extension, as orgo-web reads them (lib/skills/bundle.ts there): text unless it's a known binary kind. */
+const MEDIA_TYPES: Record<string, string> = {
+  md: "text/markdown", markdown: "text/markdown", txt: "text/plain", sh: "text/x-shellscript", bash: "text/x-shellscript", zsh: "text/x-shellscript",
+  py: "text/x-python", js: "text/javascript", mjs: "text/javascript", cjs: "text/javascript", ts: "text/x-typescript", json: "application/json",
+  yaml: "application/yaml", yml: "application/yaml", toml: "application/toml", html: "text/html", htm: "text/html", css: "text/css", sql: "application/sql",
+  tsv: "text/tab-separated-values", psv: "text/plain", csv: "text/csv", xml: "application/xml", svg: "image/svg+xml", ps1: "text/plain", rb: "text/x-ruby", go: "text/x-go",
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon", icns: "image/icns", pdf: "application/pdf",
+  zip: "application/zip", gz: "application/gzip", tgz: "application/gzip", tar: "application/x-tar", wasm: "application/wasm", woff: "font/woff", woff2: "font/woff2",
+  ttf: "font/ttf", otf: "font/otf", mp3: "audio/mpeg", wav: "audio/wav", mp4: "video/mp4", mov: "video/quicktime", sqlite: "application/vnd.sqlite3",
+  db: "application/octet-stream", bin: "application/octet-stream", so: "application/octet-stream", dylib: "application/octet-stream", exe: "application/octet-stream",
+  jar: "application/java-archive", whl: "application/zip", dmg: "application/octet-stream",
+};
+const TEXT_APPLICATION = ["application/json", "application/yaml", "application/toml", "application/sql", "application/xml", "image/svg+xml", "application/javascript"];
+
+/** Whether a path names a text kind of file (an unknown extension, or none, is text). */
+export function isTextPath(path: string): boolean {
+  const name = path.split("/").pop() ?? path;
+  const dot = name.lastIndexOf(".");
+  const mt = MEDIA_TYPES[dot > 0 ? name.slice(dot + 1).toLowerCase() : ""] ?? "text/plain";
+  return mt.startsWith("text/") || TEXT_APPLICATION.includes(mt);
+}
+
+/** The text in bytes when they're UTF-8 without NUL, else null. */
+export function utf8Text(bytes: Uint8Array): string | null {
+  if (bytes.includes(0)) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/** A file's text when it's a text file (a text kind of path, UTF-8 without NUL), else null: then it's kept as bytes, as orgo-web keeps it. */
+export const textOf = (path: string, bytes: Uint8Array): string | null => (isTextPath(path) ? utf8Text(bytes) : null);
+
+/** Why the secret scan can't read these bytes (archives, databases: orgo-web refuses them), or null. */
+export function unscannableBinary(bytes: Uint8Array): string | null {
+  const starts = (...sig: number[]) => sig.every((b, i) => bytes[i] === b);
+  const reason = (kind: string) => `${kind} (its contents can't be scanned for secrets; send the files themselves)`;
+  if (starts(0x50, 0x4b, 0x03, 0x04) || starts(0x50, 0x4b, 0x05, 0x06) || starts(0x50, 0x4b, 0x07, 0x08)) return reason("zip archive");
+  if (starts(0x1f, 0x8b)) return reason("gzip archive");
+  if (starts(0x42, 0x5a, 0x68)) return reason("bzip2 archive");
+  if (starts(0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00)) return reason("xz archive");
+  if (starts(0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c)) return reason("7z archive");
+  if (starts(0x28, 0xb5, 0x2f, 0xfd)) return reason("zstd archive");
+  if (starts(0x52, 0x61, 0x72, 0x21, 0x1a, 0x07)) return reason("rar archive");
+  if (Buffer.from(bytes.subarray(0, 16)).toString("latin1") === "SQLite format 3\u0000") return reason("SQLite database");
+  return null;
+}
+
+/** UTF-16 by its BOM, or by a NUL at (nearly) every other byte of the first 4 KB. */
+function utf16Order(bytes: Uint8Array): "le" | "be" | null {
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return "le";
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return "be";
+  const n = Math.min(bytes.length, 4096) & ~1;
+  if (n < 8) return null;
+  let even = 0;
+  let odd = 0;
+  for (let i = 0; i < n; i++) {
+    if (bytes[i] !== 0) continue;
+    if (i % 2) odd++;
+    else even++;
+  }
+  const half = n / 2;
+  if (odd >= half * 0.9 && even < half * 0.1) return "le";
+  if (even >= half * 0.9 && odd < half * 0.1) return "be";
+  return null;
+}
+
+/** The text the secret scan reads in a binary file, as orgo-web reads it: UTF-16 decoded when it's UTF-16, else Latin-1 (a key block in a program is still a key block). */
+export function binaryScanText(bytes: Buffer): string {
+  const order = utf16Order(bytes);
+  if (!order) return bytes.toString("latin1");
+  const even = Buffer.from(bytes.subarray(0, bytes.length & ~1));
+  return (order === "be" ? even.swap16() : even).toString("utf16le");
+}
+
+/** Secrets in a file of either kind: its text, or what binaryScanText reads in its bytes. */
+export const scanFile = (path: string, f: { content: string | null; data?: Buffer }) => scanSecrets(path, f.content ?? binaryScanText(f.data ?? Buffer.alloc(0)));
 
 /* ---------------- Paths and junk ---------------- */
 
@@ -147,11 +234,12 @@ export function scanSecrets(path: string, text: string): Problem[] {
  * Vault names a text uses ($STRIPE_SECRET_KEY, ${GITHUB_TOKEN}) that the frontmatter doesn't declare in
  * requires_secrets: flagged, never refused (a script's own variables look the same).
  */
-export function undeclaredSecrets(files: { path: string; content: string }[], declared: string[]): Problem[] {
+export function undeclaredSecrets(files: { path: string; content: string | null }[], declared: string[]): Problem[] {
   const known = new Set(declared);
   const out: Problem[] = [];
   const looksSecret = /(?:SECRET|TOKEN|PASSWORD|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|DATABASE_URL|DSN)/;
   for (const f of files) {
+    if (f.content === null) continue;
     const seen = new Set<string>();
     for (const m of f.content.matchAll(/\$\{?([A-Z][A-Z0-9_]{2,})\}?/g)) {
       const name = m[1];
@@ -379,7 +467,8 @@ export function summarizeDoc(text: string): { title: string | null; summary: str
 
 /* ---------------- A folder ---------------- */
 
-export type FolderFile = { path: string; content: string | null; executable: boolean; size: number; link?: "outside" };
+/** A file read from a folder: its text, or null and its bytes in `data` (a binary file); neither for a link out of the folder. */
+export type FolderFile = { path: string; content: string | null; data?: Buffer; executable: boolean; size: number; link?: "outside" };
 
 export type Checked = {
   ok: true;
@@ -399,14 +488,16 @@ export type Checked = {
 /**
  * A folder's files checked as orgo-web's importer does: junk and links out of the folder are skipped, a
  * file holding a secret is left out and listed (path, line, kind), a missing SKILL.md is drafted from
- * README.md or SPEC.md. A secret in SKILL.md itself, a bad path or a cap refuses the whole folder.
- * `strict` (a save, not an import): any secret, anywhere, refuses it.
+ * README.md or SPEC.md. A binary file (a program, an image) is kept as bytes and scanned as orgo-web scans
+ * one; an archive or a database, which can't be scanned, is left out like a secret. A secret in SKILL.md
+ * itself, a bad path or a cap refuses the whole folder. `strict` (a save, not an import): any secret, or an
+ * archive, anywhere, refuses it.
  */
 export function checkFolder(input: FolderFile[], opts: { folderName?: string; strict?: boolean } = {}): Checked | { ok: false; errors: Problem[]; skipped: Problem[] } {
   const errors: Problem[] = [];
   const skipped: Problem[] = [];
   const warnings: Problem[] = [];
-  const kept = new Map<string, { content: string; executable: boolean }>();
+  const kept = new Map<string, { content: string | null; data?: Buffer; executable: boolean }>();
   for (const f of input) {
     const norm = normalizePath(f.path);
     if ("reason" in norm) {
@@ -423,17 +514,31 @@ export function checkFolder(input: FolderFile[], opts: { folderName?: string; st
       continue;
     }
     if (f.size > BUNDLE_LIMITS.file) {
-      errors.push({ path: norm.path, reason: `file is over ${BUNDLE_LIMITS.file / 1024} KB` });
+      errors.push({ path: norm.path, reason: `file is over ${mb(BUNDLE_LIMITS.file)}` });
       continue;
     }
-    if (f.content === null || f.content.includes("\u0000")) {
-      skipped.push({ path: norm.path, reason: "binary file (only text files are kept)" });
+    if (f.content === null && !f.data) {
+      skipped.push({ path: norm.path, reason: "couldn't be read" });
       continue;
     }
-    kept.set(norm.path, { content: f.content, executable: f.executable });
+    if (f.content !== null && f.content.includes("\u0000")) {
+      skipped.push({ path: norm.path, reason: "binary file read as text" });
+      continue;
+    }
+    kept.set(norm.path, f.content !== null ? { content: f.content, executable: f.executable } : { content: null, data: f.data, executable: f.executable });
   }
   for (const [path, f] of [...kept]) {
-    const found = scanSecrets(path, f.content);
+    const opaque = f.data ? unscannableBinary(f.data) : null;
+    if (opaque || (path === "SKILL.md" && f.content === null)) {
+      const why = { path, reason: opaque ?? "SKILL.md must be text" };
+      if (opts.strict || path === "SKILL.md") errors.push(why);
+      else {
+        skipped.push(why);
+        kept.delete(path);
+      }
+      continue;
+    }
+    const found = scanFile(path, f);
     if (!found.length) continue;
     if (opts.strict || path === "SKILL.md") errors.push(...found);
     else {
@@ -444,7 +549,7 @@ export function checkFolder(input: FolderFile[], opts: { folderName?: string; st
   let doc: string | null = null;
   let source = "none";
   for (const n of ["SKILL.md", "README.md", "SPEC.md"])
-    if (kept.has(n)) {
+    if (kept.has(n) && kept.get(n)!.content !== null) {
       doc = kept.get(n)!.content;
       kept.delete(n);
       source = n;
@@ -464,36 +569,46 @@ export function checkFolder(input: FolderFile[], opts: { folderName?: string; st
   }
   const files: BundleFile[] = [...kept]
     .sort(([a], [b]) => (a < b ? -1 : 1))
-    .map(([path, f]) => ({ path, content: f.content, sha256: sha256Hex(f.content), size: byteLength(f.content), executable: f.executable }));
+    .map(([path, f]) => (f.content !== null ? { path, content: f.content, sha256: sha256Hex(f.content), size: byteLength(f.content), executable: f.executable } : { path, content: null, data: f.data, sha256: sha256Hex(f.data!), size: f.data!.length, executable: f.executable }));
   const sum = summarizeDoc(body);
   const fmName = typeof frontmatter.name === "string" ? frontmatter.name.trim() : "";
   const name = (sum.title?.trim() || fmName || opts.folderName || "").slice(0, 120);
   if (!name) errors.push({ path: "SKILL.md", reason: "a skill needs a name" });
   const description = (typeof frontmatter.description === "string" ? frontmatter.description.trim() : "") || sum.summary || (name ? `${name}.` : "");
   if (description.length > BUNDLE_LIMITS.description) errors.push({ path: "SKILL.md", reason: `description is ${BUNDLE_LIMITS.description} characters at most` });
-  if (doc === null) body = `# ${name || "Skill"}\n\nDrafted on import: this folder had no SKILL.md, README.md or SPEC.md.\n\n## Files\n\n${files.map((f) => `- \`${f.path}\`${f.executable ? " (executable)" : ""}`).join("\n")}\n`;
+  if (doc === null) body = `# ${name || "Skill"}\n\nDrafted on import: this folder had no SKILL.md, README.md or SPEC.md.\n\n## Files\n\n${files.map((f) => `- \`${f.path}\`${f.executable ? " (executable)" : ""}${f.content === null ? " (binary)" : ""}`).join("\n")}\n`;
   if (byteLength(body) > BUNDLE_LIMITS.body) errors.push({ path: "SKILL.md", reason: `body is over ${BUNDLE_LIMITS.body / 1024} KB` });
   errors.push(...validateFrontmatter(frontmatter));
   const total = files.reduce((n, f) => n + f.size, 0) + byteLength(body);
   if (files.length + 1 > BUNDLE_LIMITS.files) errors.push({ path: "", reason: `a skill holds ${BUNDLE_LIMITS.files} files at most` });
-  if (total > BUNDLE_LIMITS.total) errors.push({ path: "", reason: `a skill is ${BUNDLE_LIMITS.total / 1024 / 1024} MB at most` });
+  if (total > BUNDLE_LIMITS.total) errors.push({ path: "", reason: `a skill is ${mb(BUNDLE_LIMITS.total)} at most` });
   if (errors.length) return { ok: false, errors, skipped };
   if (body.split("\n").length > 500) warnings.push({ path: "SKILL.md", reason: "body is over 500 lines; move long tables to references/" });
-  for (const f of files) if (/StrictHostKeyChecking\s*=?\s*no/.test(f.content)) warnings.push({ path: f.path, reason: "turns off SSH host key checking" });
+  for (const f of files) if (f.content !== null && /StrictHostKeyChecking\s*=?\s*no/.test(f.content)) warnings.push({ path: f.path, reason: "turns off SSH host key checking" });
   const declared = Array.isArray(frontmatter.requires_secrets) ? (frontmatter.requires_secrets as string[]) : [];
   warnings.push(...undeclaredSecrets([{ path: "SKILL.md", content: body }, ...files], declared));
   const slugBase = fmName && SLUG_RE.test(fmName) && fmName.length <= BUNDLE_LIMITS.slug ? fmName : slugify(fmName || name);
   return { ok: true, name, slugBase, description, frontmatter, body, files, skipped, warnings, drafted };
 }
 
-/** A bundle's hash: sha256 over "path NUL sha256 LF" for every file sorted by path, SKILL.md included (as orgo-web hashes it). */
-export function bundleSha(skillMd: string, files: { path: string; sha256: string }[]): string {
+/**
+ * A bundle's hash, as orgo-web hashes it (bundle_sha256): sha256 over "path NUL sha256 NUL x|- LF" for every
+ * file sorted by path (x when executable), SKILL.md included, each file's sha256 over its bytes.
+ */
+export function bundleSha(skillMd: string, files: { path: string; sha256: string; executable?: boolean }[]): string {
+  const entries = [{ path: "SKILL.md", sha256: sha256Hex(skillMd), executable: false }, ...files.map((f) => ({ path: f.path, sha256: f.sha256, executable: !!f.executable }))].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return sha256Hex(entries.map((e) => `${e.path}\u0000${e.sha256}\u0000${e.executable ? "x" : "-"}\n`).join(""));
+}
+
+/** The hash versions published before bundleSha matched orgo-web's had ("path NUL sha256 LF"): kept so "nothing changed" still knows them. */
+export function legacyBundleSha(skillMd: string, files: { path: string; sha256: string }[]): string {
   const entries = [{ path: "SKILL.md", sha256: sha256Hex(skillMd) }, ...files.map((f) => ({ path: f.path, sha256: f.sha256 }))].sort((a, b) => (a.path < b.path ? -1 : 1));
   return sha256Hex(entries.map((e) => `${e.path}\u0000${e.sha256}\n`).join(""));
 }
 
-/** Whether a file is a script someone has to approve before it runs: executable, under scripts/, or one with a #! line. */
-export const isScript = (f: { path: string; content: string; executable: boolean }) => f.executable || f.path.startsWith("scripts/") || f.content.startsWith("#!");
+/** Whether a file is a script or a program someone has to approve before it runs: executable, under scripts/, or one with a #! line. */
+export const isScript = (f: { path: string; content: string | null; data?: Buffer; executable: boolean }) =>
+  f.executable || f.path.startsWith("scripts/") || (f.content !== null ? f.content.startsWith("#!") : f.data?.subarray(0, 2).toString("latin1") === "#!");
 
 /** The next patch after the highest version (0.1.0 when there's none). */
 export function nextVersion(versions: string[]): string {

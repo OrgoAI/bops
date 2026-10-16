@@ -8,18 +8,23 @@ import {
   bundleSha,
   byteLength,
   checkFolder,
+  fileBytes,
   freeSlug,
   isScript,
   isVersion,
   junkReason,
+  legacyBundleSha,
   nextVersion,
   normalizePath,
   parseSkillMd,
   renderSkillMd,
+  scanFile,
   scanSecrets,
   sha256Hex,
   slugify,
+  textOf,
   undeclaredSecrets,
+  unscannableBinary,
   validateFrontmatter,
   type BundleFile,
   type FolderFile,
@@ -197,15 +202,16 @@ function readTree(dir: string, max = BUNDLE_LIMITS.files * 4): ReadTree {
         continue;
       }
       const buf = readFileSync(/*turbopackIgnore: true*/ full);
-      files.push({ path: rel, content: buf.includes(0) ? null : buf.toString("utf8"), executable, size: st.size });
+      const text = textOf(rel, buf);
+      files.push(text !== null ? { path: rel, content: text, executable, size: st.size } : { path: rel, content: null, data: buf, executable, size: st.size });
     }
   };
   walk(top, 0);
   return { files, tooMany };
 }
 
-/** Write a bundle into `dir` (made fresh): SKILL.md and its files, scripts executable. */
-function writeTree(dir: string, skillMd: string, files: { path: string; content: string; executable: boolean }[]) {
+/** Write a bundle into `dir` (made fresh): SKILL.md and its files (text, or a binary file's bytes), scripts executable. */
+function writeTree(dir: string, skillMd: string, files: { path: string; content: string | null; data?: Buffer; executable: boolean }[]) {
   rmSync(/*turbopackIgnore: true*/ dir, { recursive: true, force: true });
   mkdirSync(/*turbopackIgnore: true*/ dir, { recursive: true });
   writeFileSync(join(/*turbopackIgnore: true*/ dir, "SKILL.md"), skillMd);
@@ -213,7 +219,7 @@ function writeTree(dir: string, skillMd: string, files: { path: string; content:
     const to = join(/*turbopackIgnore: true*/ dir, f.path);
     if (!resolve(to).startsWith(resolve(dir) + sep)) continue;
     mkdirSync(dirname(to), { recursive: true });
-    writeFileSync(to, f.content, { mode: f.executable ? 0o755 : 0o644 });
+    writeFileSync(to, fileBytes(f), { mode: f.executable ? 0o755 : 0o644 });
     if (f.executable) chmodSync(to, 0o755);
   }
 }
@@ -226,9 +232,9 @@ function readBundle(dir: string | null): Bundle | null {
   const { files } = readTree(dir);
   const md = files.find((f) => f.path === "SKILL.md")?.content ?? "";
   const parsed = parseSkillMd(md);
-  const rest = files
-    .filter((f) => f.path !== "SKILL.md" && f.content !== null && !f.link && !junkReason(f.path))
-    .map((f) => ({ path: f.path, content: f.content!, sha256: sha256Hex(f.content!), size: byteLength(f.content!), executable: f.executable }));
+  const rest: BundleFile[] = files
+    .filter((f) => f.path !== "SKILL.md" && (f.content !== null || f.data) && !f.link && !junkReason(f.path))
+    .map((f) => (f.content !== null ? { path: f.path, content: f.content, sha256: sha256Hex(f.content), size: byteLength(f.content), executable: f.executable } : { path: f.path, content: null, data: f.data, sha256: sha256Hex(f.data!), size: f.data!.length, executable: f.executable }));
   return { frontmatter: parsed.ok ? (parsed.frontmatter ?? {}) : {}, body: parsed.ok ? parsed.body : md, skillMd: md, files: rest };
 }
 
@@ -266,9 +272,16 @@ function fromBackup(wsId: string, r: SkillRef): Bundle | null {
 
 /* ---------------- Checks ---------------- */
 
-type FileIn = { path: string; content: string; executable?: boolean };
+/** A file as a save sends it: its text, or a binary file's bytes (`data`, content null). */
+type FileIn = { path: string; content?: string | null; data?: Buffer; executable?: boolean };
 
-/** Files as a save sends them, checked strictly: a bad path, junk, a cap or any secret refuses the whole skill. */
+const mb = (n: number) => `${n / 1024 / 1024} MB`;
+
+/**
+ * Files as a save sends them, checked strictly, as orgo-web checks a save: a bad path, junk, a cap, any
+ * secret (a binary file's read the way orgo-web reads one) or an archive refuses the whole skill. Bytes
+ * that are text (a text kind of path, UTF-8 without NUL) are kept as text.
+ */
 function checkFiles(body: string, files: FileIn[]): { files: BundleFile[]; warnings: Problem[] } {
   const errors: Problem[] = [];
   const out: BundleFile[] = [];
@@ -293,21 +306,34 @@ function checkFiles(body: string, files: FileIn[]): { files: BundleFile[]; warni
       continue;
     }
     seen.add(n.path);
-    if (typeof f.content !== "string" || f.content.includes("\u0000")) {
-      errors.push({ path: n.path, reason: "only text files are kept" });
+    const bytes = Buffer.isBuffer(f.data) ? f.data : null;
+    const text = bytes ? textOf(n.path, bytes) : typeof f.content === "string" ? f.content : null;
+    if (!bytes && text === null) {
+      errors.push({ path: n.path, reason: "content must be text or bytes" });
       continue;
     }
-    if (byteLength(f.content) > BUNDLE_LIMITS.file) {
-      errors.push({ path: n.path, reason: `file is over ${BUNDLE_LIMITS.file / 1024} KB` });
+    if (text !== null && text.includes("\u0000")) {
+      errors.push({ path: n.path, reason: "binary file sent as text" });
       continue;
     }
-    errors.push(...scanSecrets(n.path, f.content));
-    out.push({ path: n.path, content: f.content, sha256: sha256Hex(f.content), size: byteLength(f.content), executable: !!f.executable });
+    const size = text !== null ? byteLength(text) : bytes!.length;
+    if (size > BUNDLE_LIMITS.file) {
+      errors.push({ path: n.path, reason: `file is over ${mb(BUNDLE_LIMITS.file)}` });
+      continue;
+    }
+    const file: BundleFile = text !== null ? { path: n.path, content: text, sha256: sha256Hex(text), size, executable: !!f.executable } : { path: n.path, content: null, data: bytes!, sha256: sha256Hex(bytes!), size, executable: !!f.executable };
+    const opaque = file.data ? unscannableBinary(file.data) : null;
+    if (opaque) {
+      errors.push({ path: n.path, reason: opaque });
+      continue;
+    }
+    errors.push(...scanFile(n.path, file));
+    out.push(file);
   }
   errors.push(...scanSecrets("SKILL.md", body));
   if (byteLength(body) > BUNDLE_LIMITS.body) errors.push({ path: "SKILL.md", reason: `body is over ${BUNDLE_LIMITS.body / 1024} KB` });
   if (out.length + 1 > BUNDLE_LIMITS.files) errors.push({ path: "", reason: `a skill holds ${BUNDLE_LIMITS.files} files at most` });
-  if (out.reduce((n, f) => n + f.size, byteLength(body)) > BUNDLE_LIMITS.total) errors.push({ path: "", reason: `a skill is ${BUNDLE_LIMITS.total / 1024 / 1024} MB at most` });
+  if (out.reduce((n, f) => n + f.size, byteLength(body)) > BUNDLE_LIMITS.total) errors.push({ path: "", reason: `a skill is ${mb(BUNDLE_LIMITS.total)} at most` });
   if (errors.length) {
     const secret = errors.some((e) => e.reason.startsWith("secret:"));
     throw new SkillError(secret ? "That has a secret in it. Use the key's vault name instead ($NAME, listed in requires_secrets)." : "Some files can't be kept.", secret ? 422 : 400, errors);
@@ -488,7 +514,8 @@ export function publishSkill(wsId: string, kind: SkillKind, slug: string, opts: 
   const skillMd = renderSkillMd({ ...fm, version }, b.body);
   const sha = bundleSha(skillMd, b.files);
   const last = versions.find((v) => v.version === r.version);
-  if (last && last.sha256 === bundleSha(renderSkillMd({ ...fm, version: last.version }, b.body), b.files)) throw new SkillError(`Nothing changed since ${last.version}.`, 409);
+  const lastMd = last && renderSkillMd({ ...fm, version: last.version }, b.body);
+  if (last && lastMd && (last.sha256 === bundleSha(lastMd, b.files) || last.sha256 === legacyBundleSha(lastMd, b.files))) throw new SkillError(`Nothing changed since ${last.version}.`, 409);
   writeTree(versionDir(wsId, kind, slug, version)!, skillMd, b.files);
   patchRef(wsId, kind, slug, (x) => {
     x.versions = [...versions, { version, at: Date.now(), sha256: sha }];
@@ -545,7 +572,7 @@ export function dropBotFromSkills(botId: string, wsId: string) {
 
 /* ---------------- Reading them ---------------- */
 
-export type SkillFileInfo = { path: string; size: number; sha256: string; executable: boolean; script: boolean; approved: boolean };
+export type SkillFileInfo = { path: string; size: number; sha256: string; executable: boolean; script: boolean; approved: boolean; binary: boolean };
 
 const approvedIn = (wsId: string) => new Set((workspaceById(wsId)?.approvals ?? []).map((a) => a.sha256));
 
@@ -556,15 +583,15 @@ export function skillDetail(wsId: string, kind: SkillKind, slug: string, version
   const dir = skillDir(wsId, kind, slug);
   const b = version ? readBundle(versionDir(wsId, kind, slug, version)) : readBundle(dir);
   const approved = approvedIn(wsId);
-  const files: SkillFileInfo[] = (b?.files ?? []).map((f) => ({ path: f.path, size: f.size, sha256: f.sha256, executable: f.executable, script: isScript(f), approved: approved.has(f.sha256) }));
+  const files: SkillFileInfo[] = (b?.files ?? []).map((f) => ({ path: f.path, size: f.size, sha256: f.sha256, executable: f.executable, script: isScript(f), approved: approved.has(f.sha256), binary: f.content === null }));
   // What changed in the folder since the version the bots read.
   const pub = r.version ? readBundle(versionDir(wsId, kind, slug, r.version)) : null;
   const changed = !!b && !!pub && !version && (pub.body !== b.body || pub.files.map((f) => `${f.path}:${f.sha256}`).join() !== b.files.map((f) => `${f.path}:${f.sha256}`).join());
   return { ref: r, body: b?.body ?? "", frontmatter: b?.frontmatter ?? {}, files, dir, missing: !b, changed };
 }
 
-/** One file's text, for the window (Approve shows the script it approves). */
-export function skillFile(wsId: string, kind: SkillKind, slug: string, path: string, version?: string): { path: string; content: string; sha256: string } {
+/** One file's text, for the window (Approve shows the script it approves); a binary file has none (content null), only its size. */
+export function skillFile(wsId: string, kind: SkillKind, slug: string, path: string, version?: string): { path: string; content: string | null; sha256: string; binary?: true; size?: number } {
   const n = normalizePath(path);
   if ("reason" in n) throw new SkillError(n.reason);
   const r = findRef(wsId, kind, slug);
@@ -572,6 +599,7 @@ export function skillFile(wsId: string, kind: SkillKind, slug: string, path: str
   const b = version ? readBundle(versionDir(wsId, kind, slug, version)) : readBundle(skillDir(wsId, kind, slug));
   const f = b?.files.find((x) => x.path === n.path);
   if (!f) throw new SkillError("That file isn't in it.", 404);
+  if (f.content === null) return { path: f.path, content: null, sha256: f.sha256, binary: true, size: f.size };
   return { path: f.path, content: f.content, sha256: f.sha256 };
 }
 
@@ -591,6 +619,9 @@ export function approveScript(wsId: string, sha256: string, on = true): ScriptAp
   });
   return workspaceById(wsId)?.approvals ?? [];
 }
+
+/** A size as a person reads it. */
+const sizeText = (n: number) => (n < 1024 ? `${n} bytes` : n < 1024 * 1024 ? `${Math.round(n / 1024)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
 
 /** Where a bot finds its skills on its computer (sessions.ts copies them there). */
 export const COMPUTER_SKILLS = "/workspace/capabilities/skills";
@@ -618,6 +649,7 @@ export function readSkill(botId: string, nameOrSlug: string, file?: string | nul
     const f = "reason" in n ? undefined : bundle.files.find((x) => x.path === n.path);
     if (!f) return `"${r.name}" has no file ${cut(oneLine(file), 120)}. Its files: ${bundle.files.map((x) => x.path).join(", ") || "none"}.`;
     if (isScript(f) && !approvedIn(wsId).has(f.sha256)) return `${r.name}, ${f.path}: a script not approved yet. Ask to have it approved in Skills, in Knowledge; its content comes once it is.`;
+    if (f.content === null) return `${r.name}, ${f.path}: a binary file (${sizeText(f.size)}), not text, so it isn't shown. On your computer it's ${r.kind === "app" ? COMPUTER_APPS : COMPUTER_SKILLS}/${r.slug}/${f.path}.`;
     return `${r.name}, ${f.path}:\n${f.content.length > FILE_CAP ? `${f.content.slice(0, FILE_CAP)}\n(cut short)` : f.content}`;
   }
   const at = Date.now();
@@ -627,7 +659,7 @@ export function readSkill(botId: string, nameOrSlug: string, file?: string | nul
   });
   const approved = approvedIn(wsId);
   const base = r.kind === "app" ? COMPUTER_APPS : COMPUTER_SKILLS;
-  const files = bundle.files.map((f) => `- ${f.path}${isScript(f) ? (approved.has(f.sha256) ? " (script, approved)" : " (script, not approved yet: ask to have it approved in Skills, in Knowledge, before running it)") : ""}`);
+  const files = bundle.files.map((f) => `- ${f.path}${f.content === null ? ` (binary, ${sizeText(f.size)})` : ""}${isScript(f) ? (approved.has(f.sha256) ? " (script, approved)" : " (script, not approved yet: ask to have it approved in Skills, in Knowledge, before running it)") : ""}`);
   return [
     `${r.kind === "app" ? "App" : "Skill"}: ${r.name}${r.version ? ` (version ${r.version})` : ""}`,
     bundle.body.trim(),
@@ -683,7 +715,7 @@ export function skillsNote(botId: string): string {
 const WAITING = "#!/bin/sh\n# This script is waiting for approval in Bops, in Skills, in Knowledge. Its content arrives once it's approved.\necho 'Not approved yet: ask to have it approved in Skills, in Knowledge.' >&2\nexit 1\n";
 /** A bundle's files as they go to a task folder or a computer: scripts approved run; others are WAITING, not executable. */
 function shipped(files: BundleFile[], approved: Set<string>) {
-  return files.map((f) => (isScript(f) && !approved.has(f.sha256) ? { ...f, content: WAITING, executable: false } : { ...f, executable: f.executable && approved.has(f.sha256) }));
+  return files.map((f) => (isScript(f) && !approved.has(f.sha256) ? { ...f, content: WAITING, data: undefined, executable: false } : { ...f, executable: f.executable && approved.has(f.sha256) }));
 }
 
 /** The tool a bot reads its skills with. */
@@ -733,7 +765,7 @@ export function importFolder(wsId: string, folder: string, kind: SkillKind = "sk
     description: checked.description,
     body: checked.body,
     frontmatter: extra,
-    files: checked.files.map((f) => ({ path: f.path, content: f.content, executable: f.executable })),
+    files: checked.files.map((f) => ({ path: f.path, content: f.content, data: f.data, executable: f.executable })),
     source: "import",
     status: "draft",
   });
@@ -865,6 +897,8 @@ export function writeSkillFiles(botId: string, dir: string): void {
 }
 
 const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+/** Bytes per piece of a file copied to a computer (its base64 stays well under a bash call's size). */
+const PIECE = 96 * 1024;
 
 /**
  * The bot's skills and apps copied to its Orgo computer, fresh: /workspace/capabilities/skills/<slug>/
@@ -878,14 +912,21 @@ export async function copySkillsToComputer(botId: string, computerId: string, ba
   const me = bot(botId);
   const approved = me ? approvedIn(workspaceOf(me)) : new Set<string>();
   const copied = (g.bopsSkillsCopied ??= new Map());
-  const sig = sha256Hex(JSON.stringify(bundles.map((x) => [x.kind, x.slug, x.bundle.skillMd, shipped(x.bundle.files, approved).map((f) => [f.path, sha256Hex(f.content), f.executable])])));
+  const sig = sha256Hex(JSON.stringify(bundles.map((x) => [x.kind, x.slug, x.bundle.skillMd, shipped(x.bundle.files, approved).map((f) => [f.path, sha256Hex(fileBytes(f)), f.executable])])));
   if ((!bundles.length && !copied.has(computerId)) || copied.get(computerId) === sig) return bundles.length;
   const lines: string[] = [`rm -rf ${COMPUTER_SKILLS} ${COMPUTER_APPS}`, `mkdir -p ${COMPUTER_SKILLS} ${COMPUTER_APPS}`];
   for (const x of bundles) {
     const base = `${x.kind === "app" ? COMPUTER_APPS : COMPUTER_SKILLS}/${x.slug}`;
     for (const f of [{ path: "SKILL.md", content: x.bundle.skillMd, executable: false }, ...shipped(x.bundle.files, approved)]) {
       const to = `${base}/${f.path}`;
-      lines.push(`mkdir -p ${shQuote(dirname(to))} && printf %s ${shQuote(Buffer.from(f.content).toString("base64"))} | base64 -d > ${shQuote(to)}${f.executable ? ` && chmod 755 ${shQuote(to)}` : ""}`);
+      const bytes = fileBytes(f);
+      // A large file (a program) goes in pieces, each its own base64, appended: no one call carries all of it.
+      const pieces: string[] = [];
+      for (let i = 0; i < bytes.length; i += PIECE) pieces.push(`printf %s ${shQuote(bytes.subarray(i, i + PIECE).toString("base64"))} | base64 -d >> ${shQuote(to)}`);
+      const head = `mkdir -p ${shQuote(dirname(to))} && : > ${shQuote(to)}`;
+      const file = pieces.length <= 1 ? [[head, ...pieces].join(" && ")] : [head, ...pieces];
+      if (f.executable) file[file.length - 1] += ` && chmod 755 ${shQuote(to)}`;
+      lines.push(...file);
     }
   }
   const chunks: string[][] = [[]];
@@ -941,7 +982,8 @@ export function moveWorkspaceFolder(fromKey: string, toKey: string) {
 
 type RemoteSkill = { id: string; slug: string; name: string; description: string | null; type: string; status: string; bot_ids?: string[]; updated_at: string; current_version?: { version?: string } | null };
 
-const remoteType = (kind: SkillKind) => (kind === "app" ? "software" : "skill");
+const remoteType = (kind: SkillKind) => (kind === "app" ? "app" : "skill");
+// "software" is what an older orgo-web called an app.
 const localKind = (type: string): SkillKind => (type === "software" || type === "app" ? "app" : "skill");
 
 /** One call to orgo-web's skills routes for a workspace, with the signed-in key. Null when Orgo didn't answer. */
@@ -962,11 +1004,14 @@ async function remoteDelete(wsId: string, remoteId: string) {
   await skillsCall(pid, `/${encodeURIComponent(remoteId)}`, { method: "DELETE" });
 }
 
-/** What a skill's folder sends Orgo: its SKILL.md text and files. */
+/** What a skill's folder sends Orgo: its SKILL.md text and files, a binary file (a program) as content_base64. */
 function payloadOf(wsId: string, r: SkillRef) {
   const b = r.version ? (readBundle(versionDir(wsId, r.kind, r.slug, r.version)) ?? readBundle(skillDir(wsId, r.kind, r.slug))) : readBundle(skillDir(wsId, r.kind, r.slug));
   if (!b) return null;
-  return { body: renderSkillMd(frontmatterOf(r.slug, r.description, b.frontmatter), b.body), files: b.files.map((f) => ({ path: f.path, content: f.content, executable: f.executable })) };
+  return {
+    body: renderSkillMd(frontmatterOf(r.slug, r.description, b.frontmatter), b.body),
+    files: b.files.map((f) => (f.content !== null ? { path: f.path, content: f.content, executable: f.executable } : { path: f.path, content_base64: f.data!.toString("base64"), executable: f.executable })),
+  };
 }
 
 export type SyncResult = { mode: "local" | "orgo"; pushed: number; pulled: number; failed: number };
@@ -1068,16 +1113,43 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
   return res;
 }
 
+type ExportFile = { content?: string; url?: string; sha256?: string; executable?: boolean };
+
+/**
+ * A file of Orgo's export as it was stored: its text inline, or its bytes from `url` (a short presigned GET,
+ * no key sent: orgo-web gives one for every binary file and for large text). Checked against its sha256;
+ * null when it can't be fetched or doesn't match, so nothing half there is ever written.
+ */
+async function exportedFile(path: string, f: ExportFile): Promise<{ path: string; content: string | null; data?: Buffer; executable: boolean } | null> {
+  let bytes: Buffer;
+  if (typeof f.content === "string") bytes = Buffer.from(f.content, "utf8");
+  else if (typeof f.url === "string" && /^https?:\/\//.test(f.url)) {
+    const res = await fetch(f.url, { signal: AbortSignal.timeout(120_000) }).catch(() => null);
+    if (!res?.ok) return null;
+    bytes = Buffer.from(await res.arrayBuffer());
+  } else return null;
+  if (f.sha256 && sha256Hex(bytes) !== f.sha256) return null;
+  const text = typeof f.content === "string" ? f.content : textOf(path, bytes);
+  return text !== null ? { path, content: text, executable: !!f.executable } : { path, content: null, data: bytes, executable: !!f.executable };
+}
+
 /** Orgo's copy of a skill (its export: SKILL.md and every file) written here, as `into` or as a new one. */
 async function pull(wsId: string, pid: string, x: RemoteSkill, into?: SkillRef): Promise<boolean> {
-  const ex = await skillsCall<{ files?: Record<string, { content?: string; executable?: boolean }>; version?: string }>(pid, `/${encodeURIComponent(x.id)}/export`);
+  const ex = await skillsCall<{ files?: Record<string, ExportFile>; version?: string }>(pid, `/${encodeURIComponent(x.id)}/export`);
   if (!ex || ex.status !== 200 || !ex.json.files) return false;
   const md = ex.json.files["SKILL.md"]?.content ?? "";
   const parsed = parseSkillMd(md);
   if (!parsed.ok) return false;
-  const files = Object.entries(ex.json.files)
-    .filter(([p]) => p !== "SKILL.md")
-    .map(([path, f]) => ({ path, content: f.content ?? "", executable: !!f.executable }));
+  const got = await Promise.all(
+    Object.entries(ex.json.files)
+      .filter(([p]) => p !== "SKILL.md")
+      .map(([path, f]) => exportedFile(path, f)),
+  );
+  if (got.some((f) => f === null)) {
+    console.warn(`[skills] bringing ${x.slug} from Orgo: a file couldn't be fetched or didn't match its sha256`);
+    return false;
+  }
+  const files = got as NonNullable<(typeof got)[number]>[];
   const kind = localKind(x.type);
   const said = ex.json.version ?? x.current_version?.version;
   // Only a version-shaped one names a folder here.
@@ -1093,7 +1165,7 @@ async function pull(wsId: string, pid: string, x: RemoteSkill, into?: SkillRef):
         r.status = x.status === "published" ? "published" : "draft";
         if (version) {
           r.version = version;
-          if (!r.versions?.some((v) => v.version === version)) r.versions = [...(r.versions ?? []), { version, at: Date.now(), sha256: bundleSha(md, files.map((f) => ({ path: f.path, sha256: sha256Hex(f.content) }))) }];
+          if (!r.versions?.some((v) => v.version === version)) r.versions = [...(r.versions ?? []), { version, at: Date.now(), sha256: bundleSha(md, files.map((f) => ({ path: f.path, sha256: sha256Hex(fileBytes(f)), executable: f.executable }))) }];
         }
         r.remoteId = x.id;
         r.remoteAt = x.updated_at;

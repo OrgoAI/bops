@@ -15,7 +15,7 @@ import { CloseButton, currentWorkspace, post, teamOf } from "./ui";
  */
 
 type Problem = { path: string; reason: string; line?: number };
-type FileInfo = { path: string; size: number; sha256: string; executable: boolean; script: boolean; approved: boolean };
+type FileInfo = { path: string; size: number; sha256: string; executable: boolean; script: boolean; approved: boolean; binary?: boolean };
 type Detail = { ref: SkillRef; body: string; frontmatter: Record<string, unknown>; files: FileInfo[]; dir: string | null; missing: boolean; changed: boolean };
 
 /** The Mac app's bridge for skills (desktop/preload.cjs): a folder picked in Finder, and a folder shown there. */
@@ -397,13 +397,14 @@ function SkillView({ state, ws, skill: r, team, onBack }: { state: AppState; ws:
   );
 }
 
-/** A file: its path and size; a script says whether it's approved, and Review shows it with Approve. */
+/** A file: its path and size; a script says whether it's approved, and Review shows it with Approve. A binary file (a program, an image) is never shown as text. */
 function FileRow({ ws, skill: r, file: f, version, last, onApproved }: { ws: string; skill: SkillRef; file: FileInfo; version?: string; last: boolean; onApproved: () => Promise<void> }) {
   const [text, setText] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const review = async () => {
     if (text !== null) return setText(null);
+    if (f.binary) return setText("");
     const res = await call<{ content: string }>({ action: "file", ws, kind: r.kind, slug: r.slug, path: f.path, ...(version ? { version } : {}) });
     if (res.ok) setText(res.json.content);
     else setError(res.error);
@@ -416,20 +417,26 @@ function FileRow({ ws, skill: r, file: f, version, last, onApproved }: { ws: str
     setText(null);
     await onApproved();
   };
-  const size = f.size < 1024 ? `${f.size} B` : `${Math.round(f.size / 1024)} KB`;
+  const size = f.size < 1024 ? `${f.size} B` : f.size < 1024 * 1024 ? `${Math.round(f.size / 1024)} KB` : `${(f.size / 1024 / 1024).toFixed(1)} MB`;
   return (
     <div className={`flex flex-col gap-1.5 px-4 py-2 ${last ? "pb-3" : "border-b border-black/[0.05]"}`}>
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] leading-4">{f.path}</span>
-        <span className="shrink-0 text-[11.5px] leading-4 text-[#9A9A98]">{size}</span>
+        <span className="shrink-0 text-[11.5px] leading-4 text-[#9A9A98]">{f.binary ? `Binary, ${size}` : size}</span>
         {f.script && (f.approved ? <span className={CHIP}>Approved</span> : <span className="rounded-full bg-[#FFF4E5] px-2 py-px text-[11px] leading-4 text-[#9A5B00]">Needs approval</span>)}
-        <button onClick={() => void review()} className="shrink-0 text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
-          {text !== null ? "Hide" : f.script && !f.approved ? "Review" : "View"}
-        </button>
+        {(!f.binary || f.script) && (
+          <button onClick={() => void review()} className="shrink-0 text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+            {text !== null ? "Hide" : f.script && !f.approved ? "Review" : "View"}
+          </button>
+        )}
       </div>
       {text !== null && (
         <div className="motion-fade-in flex flex-col gap-2">
-          <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap rounded-[10px] bg-[#F7F7F6] px-3 py-2 font-mono text-[11.5px] leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#ECECEA]">{text}</pre>
+          {f.binary ? (
+            <p className="rounded-[10px] bg-[#F7F7F6] px-3 py-2 text-[12px] leading-[17px] text-[#3A3A38] shadow-[0_0_0_1px_#ECECEA]">A program, so it can&apos;t be shown as text. Approve it only if you trust where it came from.</p>
+          ) : (
+            <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap rounded-[10px] bg-[#F7F7F6] px-3 py-2 font-mono text-[11.5px] leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#ECECEA]">{text}</pre>
+          )}
           {f.script && (
             <span className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-[11px] text-[#9A9A98]">sha256 {f.sha256.slice(0, 16)}</span>

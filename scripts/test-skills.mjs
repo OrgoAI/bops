@@ -7,11 +7,13 @@
 // listed; no SKILL.md and a README is drafted from), the folders on a computer several workspaces' bots share,
 // a workspace's folder moving to its Orgo project's id, and keeping in step with orgo-web's skills routes
 // (none on today's orgo-web: local only, nothing sent; with them: pushed, pulled, the later change winning,
-// a delete sent). orgo-web is a fake (a local server), the Keychain is never there, and the state and
+// a delete sent). Programs: a binary file kept byte for byte (on disk, on a computer, sent as content_base64,
+// brought back from a presigned url and checked by its sha256), an archive refused, the bundle hash orgo-web's. orgo-web is a fake (a local server), the Keychain is never there, and the state and
 // folders live in a throwaway folder: nothing reaches a real service. The keys in it are made up.
 // Usage: node --conditions=react-server scripts/test-skills.mjs
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
@@ -76,13 +78,22 @@ const send = (res, status, obj) => {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(obj));
 };
+const sha = (b) => createHash("sha256").update(b).digest("hex");
 const server = createServer(async (req, res) => {
   const chunks = [];
   for await (const c of req) chunks.push(c);
   const text = Buffer.concat(chunks).toString();
   const url = new URL(req.url, "http://fake");
   const body = text ? JSON.parse(text) : undefined;
-  remote.calls.push({ method: req.method, path: url.pathname, body });
+  remote.calls.push({ method: req.method, path: url.pathname, body, auth: req.headers.authorization });
+  // A presigned GET of one stored file: no key, as from the bucket.
+  const blob = url.pathname.match(/^\/blobs\/([^/]+)\/(.+)$/);
+  if (blob && req.method === "GET") {
+    const f = remote.skills.find((x) => x.id === blob[1])?.files?.find((x) => x.path === decodeURIComponent(blob[2]));
+    if (!f) return send(res, 404, { error: "NoSuchKey" });
+    res.writeHead(200, { "content-type": "application/octet-stream" });
+    return res.end(f.content_base64 !== undefined ? Buffer.from(f.content_base64, "base64") : Buffer.from(f.content));
+  }
   if (req.headers.authorization !== `Bearer ${ORGO_KEY}`) return send(res, 401, { error: "Not authenticated" });
   const m = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/skills(?:\/([^/]+))?(?:\/(versions|export))?$/);
   if (!m || !remote.routes) {
@@ -100,7 +111,13 @@ const server = createServer(async (req, res) => {
   }
   const s = remote.skills.find((x) => x.id === sid && x.pid === pid);
   if (!s) return send(res, 404, { error: "Not found", code: "skill_not_found" });
-  if (sub === "export") return send(res, 200, { slug: s.slug, name: s.name, description: s.description, type: s.type, version: s.version, files: { "SKILL.md": { content: s.body }, ...Object.fromEntries((s.files ?? []).map((f) => [f.path, { content: f.content, executable: !!f.executable }])) } });
+  // As orgo-web exports: text inline, a binary file as a url (with its sha256, which a test may spoil).
+  const exported = (f) => {
+    const bytes = f.content_base64 !== undefined ? Buffer.from(f.content_base64, "base64") : Buffer.from(f.content);
+    const where = f.content_base64 !== undefined ? { url: `${process.env.BOPS_ORGO_ORIGIN}/blobs/${s.id}/${encodeURIComponent(f.path)}` } : { content: f.content };
+    return [f.path, { ...where, sha256: f.badSha ?? sha(bytes), executable: !!f.executable }];
+  };
+  if (sub === "export") return send(res, 200, { slug: s.slug, name: s.name, description: s.description, type: s.type, version: s.version, files: { "SKILL.md": { content: s.body }, ...Object.fromEntries((s.files ?? []).map(exported)) } });
   if (sub === "versions" && req.method === "POST") {
     Object.assign(s, { body: body.body ?? s.body, files: body.files ?? s.files, version: body.version, updated_at: now() });
     return send(res, 201, { skill: view(s), version: { version: s.version } });
@@ -238,7 +255,7 @@ await check("Refused whole: a secret (by where and what kind, never the text), j
   assert.deepEqual(secret, { message: "That has a secret in it. Use the key's vault name instead ($NAME, listed in requires_secrets).", status: 422, problems: [{ path: "scripts/pay.sh", line: 1, reason: "secret: Stripe secret key" }] });
   assert.deepEqual(refused({ files: [{ path: "notes.log", content: "x" }] }).problems, [{ path: "notes.log", reason: "junk: log file" }]);
   assert.deepEqual(refused({ files: [{ path: "../x.sh", content: "x" }] }).problems, [{ path: "../x.sh", reason: "path leaves the folder (..)" }]);
-  assert.deepEqual(refused({ files: [{ path: "big.txt", content: "x".repeat(256 * 1024 + 1) }] }).problems, [{ path: "big.txt", reason: "file is over 256 KB" }]);
+  assert.deepEqual(refused({ files: [{ path: "big.bin", data: Buffer.alloc(50 * 1024 * 1024 + 1, 1) }] }).problems, [{ path: "big.bin", reason: "file is over 50 MB" }]);
   assert.deepEqual(refused({ body: `# Bad\n${FAKE_PRIVATE_KEY}\n` }).problems, [{ path: "SKILL.md", line: 2, reason: "secret: private key block" }]);
   assert.throws(() => W.createSkill("ws_main", { name: "x", description: "", body: "y" }), /Say what it does and when to use it\./);
   assert.equal(W.refsOf("ws_main").some((r) => r.name === "Bad"), false, "nothing kept");
@@ -324,11 +341,12 @@ await check("Import a folder: junk, links out of it and a file holding a secret 
   assert.equal(r.body.drafted, false);
   assert.deepEqual(
     r.body.skipped.map((p) => `${p.path}${p.line ? `:${p.line}` : ""} ${p.reason}`).sort(),
-    [".DS_Store junk: .DS_Store", "SKILL.md.bak-1 junk: backup file", "__pycache__ junk: __pycache__", "hosts link to outside the folder", "logo.bin binary file (only text files are kept)", "node_modules junk: node_modules", "scripts/fix-vnc.sh:3 secret: private key block", "sweep.log junk: log file", ".netrc credentials file: never kept", ".env credentials file: never kept"].sort(),
+    [".DS_Store junk: .DS_Store", "SKILL.md.bak-1 junk: backup file", "__pycache__ junk: __pycache__", "hosts link to outside the folder", "node_modules junk: node_modules", "scripts/fix-vnc.sh:3 secret: private key block", "sweep.log junk: log file", ".netrc credentials file: never kept", ".env credentials file: never kept"].sort(),
   );
   assert.deepEqual(r.body.warnings, [{ path: "scripts/check-health.sh", line: 3, reason: "uses GITHUB_TOKEN, which requires_secrets doesn't declare" }]);
   const d = W.skillDetail("ws_main", "skill", "vm-health");
-  assert.deepEqual(d.files.map((x) => [x.path, x.executable, x.script]), [["faults-link.md", false, false], ["references/faults.md", false, false], ["scripts/check-health.sh", true, true]]);
+  assert.deepEqual(d.files.map((x) => [x.path, x.executable, x.script, x.binary]), [["faults-link.md", false, false, false], ["logo.bin", false, false, true], ["references/faults.md", false, false, false], ["scripts/check-health.sh", true, true, false]]);
+  assert.deepEqual(readFileSync(join(dataDir(), "ws_main", "skills", "vm-health", "logo.bin")), Buffer.from([0, 1, 2, 3]), "a binary file kept byte for byte");
   assert.ok(!JSON.stringify(r.body).includes("OPENSSH PRIVATE KEY-----\nb3Bl"), "the key isn't said back");
   // A folder with only a README: drafted from it.
   const g = join(scratch, "orgo-doctor");
@@ -495,6 +513,149 @@ await check("Syncs at once (the publish's timer, the window, the sign-in move) a
   assert.deepEqual(await W.syncSkills("ws_two"), { mode: "orgo", pushed: 0, pulled: 0, failed: 0 });
   assert.equal(remote.calls.filter((x) => x.method === "POST").length, 0);
   await W.deleteSkill("ws_two", "skill", made.slug);
+});
+
+/* ---------------- Programs: binary files ---------------- */
+
+/** A small "program": an ELF header, NULs and every byte value, so no text decoder could carry it. */
+const PROGRAM = Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]), Buffer.from(Array.from({ length: 2048 }, (_, i) => i % 256))]);
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+
+await check("Programs: a binary file is kept byte for byte (checked, written, read back); bytes that are text stay text; an archive or a key inside one is refused", async () => {
+  const made = W.createSkill("ws_main", {
+    kind: "app",
+    name: "Invoice tool",
+    description: "Runs the invoice program",
+    body: "# Invoice tool\n\nRun bin/invoice.\n",
+    files: [
+      { path: "bin/invoice", data: PROGRAM, executable: true },
+      { path: "assets/logo.png", data: PNG },
+      { path: "notes.txt", data: Buffer.from("plain notes\n") },
+    ],
+  }).ref;
+  const dir = join(dataDir(), "ws_main", "apps", made.slug);
+  assert.deepEqual(readFileSync(join(dir, "bin", "invoice")), PROGRAM, "the program on disk, exact");
+  assert.notEqual(statSync(join(dir, "bin", "invoice")).mode & 0o111, 0, "and executable");
+  assert.deepEqual(readFileSync(join(dir, "assets", "logo.png")), PNG);
+  const d = W.skillDetail("ws_main", "app", made.slug);
+  assert.deepEqual(d.files.map((f) => [f.path, f.binary, f.script, f.size]), [["assets/logo.png", true, false, PNG.length], ["bin/invoice", true, true, PROGRAM.length], ["notes.txt", false, false, 12]]);
+  assert.equal(d.files.find((f) => f.path === "bin/invoice").sha256, sha(PROGRAM), "sha256 over the bytes");
+  // The window never gets a binary file as text; a bot is told where it is, never its bytes.
+  const shown = await route({ action: "file", kind: "app", slug: made.slug, path: "assets/logo.png" });
+  assert.deepEqual(shown.body, { path: "assets/logo.png", content: null, sha256: sha(PNG), binary: true, size: PNG.length });
+  W.publishSkill("ws_main", "app", made.slug);
+  const listed = W.readSkill("max", made.slug);
+  assert.match(listed, /- assets\/logo\.png \(binary, 70 bytes\)\n- bin\/invoice \(binary, 2 KB\) \(script, not approved yet/);
+  assert.match(W.readSkill("max", made.slug, "bin/invoice"), /a script not approved yet/, "a program nobody approved: never its bytes");
+  assert.equal(W.readSkill("max", made.slug, "assets/logo.png"), `Invoice tool, assets/logo.png: a binary file (70 bytes), not text, so it isn't shown. On your computer it's /workspace/capabilities/apps/${made.slug}/assets/logo.png.`);
+  // Published and changed only in its text: the program carried as it was, unchanged.
+  W.updateSkill("ws_main", "app", made.slug, { body: "# Invoice tool\n\nRun bin/invoice --all.\n" });
+  assert.equal(W.publishSkill("ws_main", "app", made.slug).version, "0.1.1");
+  assert.deepEqual(readFileSync(join(dataDir(), "ws_main", ".versions", "apps", made.slug, "0.1.1", "bin", "invoice")), PROGRAM);
+  // Refused whole: an archive (can't be scanned), a key inside a binary, a binary sent as text.
+  const refusedWhy = (files) => {
+    try {
+      W.createSkill("ws_main", { name: "Bad bytes", description: "Bad", body: "# Bad\n", files });
+    } catch (e) {
+      hear(e.message, e.problems);
+      return [e.status, e.problems];
+    }
+    assert.fail("not refused");
+  };
+  assert.deepEqual(refusedWhy([{ path: "deps.zip", data: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0]) }]), [400, [{ path: "deps.zip", reason: "zip archive (its contents can't be scanned for secrets; send the files themselves)" }]]);
+  assert.deepEqual(refusedWhy([{ path: "bin/leaky", data: Buffer.concat([Buffer.from([0, 0, 1]), Buffer.from(`\n${FAKE_PRIVATE_KEY}\n`)]) }]), [422, [{ path: "bin/leaky", line: 2, reason: "secret: private key block" }]]);
+  assert.deepEqual(refusedWhy([{ path: "x.bin", content: "a\u0000b" }]), [400, [{ path: "x.bin", reason: "binary file sent as text" }]]);
+  assert.equal(W.refsOf("ws_main").some((r) => r.name === "Bad bytes"), false);
+  // Imported from a folder: the program kept, an archive left out and listed.
+  const f = join(scratch, "invoice-cli");
+  mkdirSync(join(f, "bin"), { recursive: true });
+  writeFileSync(join(f, "SKILL.md"), "---\nname: invoice-cli\ndescription: The invoice program\n---\n# Invoice CLI\n");
+  writeFileSync(join(f, "bin", "invoice"), PROGRAM, { mode: 0o755 });
+  writeFileSync(join(f, "vendor.tgz"), Buffer.from([0x1f, 0x8b, 8, 0]));
+  const imp = await route({ action: "import", kind: "app", path: f });
+  assert.equal(imp.status, 200, JSON.stringify(imp.body));
+  assert.deepEqual(imp.body.skipped, [{ path: "vendor.tgz", reason: "gzip archive (its contents can't be scanned for secrets; send the files themselves)" }]);
+  assert.deepEqual(readFileSync(join(dataDir(), "ws_main", "apps", "invoice-cli", "bin", "invoice")), PROGRAM);
+  await W.deleteSkill("ws_main", "app", "invoice-cli");
+  // On a computer: the approved program arrives byte for byte (in pieces when large) and executable.
+  W.approveScript("ws_main", sha(PROGRAM));
+  const sent = [];
+  globalThis.bopsSkillsCopied?.clear();
+  await W.copySkillsToComputer("max", "c_free", async (id, command) => (sent.push(command), { output: "", exit_code: 0 }));
+  const to = `/workspace/capabilities/apps/${made.slug}/bin/invoice`;
+  const lines = sent.join("\n").split("\n").filter((l) => l.includes(`'${to}'`));
+  const got = Buffer.concat(lines.flatMap((l) => [...l.matchAll(/printf %s '([A-Za-z0-9+/=]*)' \| base64 -d >> /g)].map((m) => Buffer.from(m[1], "base64"))));
+  assert.deepEqual(got, PROGRAM, "the program as it was");
+  assert.match(lines.at(-1), /&& chmod 755 '\/workspace\/capabilities\/apps\/[^']+\/bin\/invoice'$/);
+  await W.deleteSkill("ws_main", "app", made.slug);
+});
+
+await check("A large program goes to a computer in pieces, none of them a call too big, and adds up to the same bytes", async () => {
+  const big = Buffer.alloc(300 * 1024);
+  for (let i = 0; i < big.length; i++) big[i] = (i * 31 + 7) % 256;
+  const made = W.createSkill("ws_main", { kind: "app", name: "Big tool", description: "A big program", body: "# Big tool\n", files: [{ path: "bin/big", data: big }], status: "published" }).ref;
+  const sent = [];
+  globalThis.bopsSkillsCopied?.clear();
+  await W.copySkillsToComputer("max", "c_free", async (id, command) => (sent.push(command), { output: "", exit_code: 0 }));
+  assert.ok(sent.every((c) => c.length < 250_000), `every call small: ${sent.map((c) => c.length).join(", ")}`);
+  const to = `'/workspace/capabilities/apps/${made.slug}/bin/big'`;
+  const pieces = sent.join("\n").split("\n").filter((l) => l.includes(to) && l.includes("base64 -d >>"));
+  assert.ok(pieces.length >= 4, `in pieces (${pieces.length})`);
+  assert.deepEqual(Buffer.concat(pieces.map((l) => Buffer.from(/printf %s '([^']*)'/.exec(l)[1], "base64"))), big);
+  await W.deleteSkill("ws_main", "app", made.slug);
+});
+
+await check("The bundle hash is orgo-web's (path NUL sha256 NUL x|- LF, sorted, SKILL.md included, file hashes over bytes)", async () => {
+  const md = "---\nname: x\ndescription: X\n---\n# X\n";
+  const files = [{ path: "bin/tool", sha256: sha(Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 1, 2])), executable: true }, { path: "a.txt", sha256: sha("hi\n"), executable: false }];
+  // Worked out on its own (python hashlib) from orgo-web's formula in lib/skills/bundle.ts finalizeBundle.
+  assert.equal(B.bundleSha(md, files), "b0f9bba1b6afb90068f592044aac57a8042e28f5f24792cd686a537c398fdfbc");
+  assert.notEqual(B.bundleSha(md, files.map((f) => ({ ...f, executable: false }))), B.bundleSha(md, files), "the executable bit counts");
+});
+
+await check("Apps with programs and Orgo: sent as type app with the program as content_base64; brought back from its url byte for byte; a file whose sha256 doesn't match isn't written", async () => {
+  remote.routes = true;
+  const made = W.createSkill("ws_two", { kind: "app", name: "Two's tool", description: "Two's program", body: "# Two's tool\n", files: [{ path: "bin/tool", data: PROGRAM, executable: true }, { path: "run.sh", content: "#!/bin/sh\n./bin/tool\n", executable: true }], status: "published" }).ref;
+  for (const t of globalThis.bopsSkillsSync?.values() ?? []) clearTimeout(t);
+  globalThis.bopsSkillsSync?.clear();
+  remote.calls = [];
+  const r = await W.syncSkills("ws_two");
+  assert.equal(r.failed, 0, JSON.stringify(r));
+  const post = remote.calls.find((c) => c.method === "POST" && c.path === "/api/workspaces/p_two/skills" && c.body.name === "Two's tool");
+  assert.ok(post, remote.calls.map((c) => `${c.method} ${c.path}`).join(", "));
+  assert.equal(post.body.type, "app", "an app, as orgo-web names it");
+  const sentTool = post.body.files.find((f) => f.path === "bin/tool");
+  assert.deepEqual([sentTool.content, sentTool.executable, Buffer.from(sentTool.content_base64, "base64").equals(PROGRAM)], [undefined, true, true]);
+  assert.deepEqual(post.body.files.find((f) => f.path === "run.sh"), { path: "run.sh", content: "#!/bin/sh\n./bin/tool\n", executable: true });
+  await W.deleteSkill("ws_two", "app", made.slug);
+  // One made on Orgo with a program: brought here from its url, without the key, exact.
+  remote.skills.push({ id: "sk_prog", pid: "p_two", slug: "orgo-tool", name: "Orgo tool", description: "From Orgo", type: "app", status: "published", bot_ids: [], source: "orgo", version: "1.0.0", body: "---\nname: orgo-tool\ndescription: From Orgo\nversion: \"1.0.0\"\n---\n# Orgo tool\n", files: [{ path: "bin/tool", content_base64: PROGRAM.toString("base64"), executable: true }, { path: "img/logo.png", content_base64: PNG.toString("base64") }], updated_at: new Date().toISOString() });
+  remote.calls = [];
+  assert.equal((await W.syncSkills("ws_two")).pulled, 1);
+  const blobCalls = remote.calls.filter((c) => c.path.startsWith("/blobs/"));
+  assert.equal(blobCalls.length, 2);
+  assert.ok(blobCalls.every((c) => c.auth === undefined), "a presigned url gets no key");
+  const pulled = W.findRef("ws_two", "app", "orgo-tool");
+  assert.deepEqual([pulled.kind, pulled.version, pulled.remoteId], ["app", "1.0.0", "sk_prog"]);
+  assert.deepEqual(readFileSync(join(dataDir(), "p_two", "apps", "orgo-tool", "bin", "tool")), PROGRAM);
+  assert.deepEqual(readFileSync(join(dataDir(), "p_two", ".versions", "apps", "orgo-tool", "1.0.0", "img", "logo.png")), PNG);
+  assert.notEqual(statSync(join(dataDir(), "p_two", "apps", "orgo-tool", "bin", "tool")).mode & 0o111, 0);
+  // A file that doesn't match its sha256: the skill isn't brought, nothing of it written.
+  remote.skills.push({ id: "sk_bad", pid: "p_two", slug: "bad-tool", name: "Bad tool", description: "Spoiled", type: "app", status: "published", bot_ids: [], source: "orgo", version: "1.0.0", body: "---\nname: bad-tool\ndescription: Spoiled\n---\n# Bad tool\n", files: [{ path: "bin/tool", content_base64: PROGRAM.toString("base64"), badSha: "0".repeat(64) }], updated_at: new Date().toISOString() });
+  const bad = await W.syncSkills("ws_two");
+  assert.deepEqual([bad.pulled, bad.failed], [0, 1]);
+  assert.equal(W.findRef("ws_two", "app", "bad-tool"), undefined);
+  assert.equal(existsSync(join(dataDir(), "p_two", "apps", "bad-tool")), false);
+  const warned = logged.findIndex((l) => l === "[skills] bringing bad-tool from Orgo: a file couldn't be fetched or didn't match its sha256");
+  assert.ok(warned >= 0, logged.join("\n"));
+  logged.splice(warned, 1);
+  // Cleared, so the route's list below is as before.
+  remote.skills = remote.skills.filter((x) => x.id !== "sk_bad" && x.id !== "sk_prog");
+  globalThis.bopsSkillsRoutes?.clear();
+  remote.routes = false;
+  await W.deleteSkill("ws_two", "app", "orgo-tool");
+  remote.routes = true;
+  globalThis.bopsSkillsRoutes?.clear();
 });
 
 await check("The route lists a workspace's skills and apps, after a sync when asked; only from the Bops window", async () => {
