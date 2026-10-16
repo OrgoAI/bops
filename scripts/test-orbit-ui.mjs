@@ -291,11 +291,11 @@ await test("All: every kind on one page, Issues still a chip", async () => {
   assert.match(t, /Select/);
 });
 
-await test("Skills and Apps, kinds in Knowledge: their chips after Issues with their counts, each its own page in the tab, and not in All", async () => {
+await test("Skills and Apps, kinds in Knowledge: Skills chip after Issues with its count (Apps chip hidden for now), each its own page in the tab, and not in All", async () => {
   const { MemoryView } = await import(pathToFileURL(`${root}/components/app/memory-categories.tsx`).href);
   const s = { on: true, ws: "w1", items: [item("aaaaaaaaaa", "people", "Priya Shah")], syncing: false };
   let t = text(renderToStaticMarkup(h(MemoryPage, { snap: s, act: async () => null, forgetting, issues: 3, skills: 2, apps: 1, category: "all", onCategory: noop, onClose: noop })));
-  assert.match(t, /All 1 Issues 3 Skills 2 Apps 1 People 1/);
+  assert.match(t, /All 1 Issues 3 Skills 2 People 1/);
   assert.ok(!/Standup post/.test(t), "All lists what memory learned, not the skills");
   // Without the count (no state), no chip.
   t = text(renderToStaticMarkup(h(MemoryPage, { snap: s, act: async () => null, forgetting, issues: 3, category: "all", onCategory: noop, onClose: noop })));
@@ -311,7 +311,7 @@ await test("Skills and Apps, kinds in Knowledge: their chips after Issues with t
   const html = renderToStaticMarkup(h(MemoryView, { state, user: "u1", ws: "w1", category: "skills", onCategory: noop, onClose: noop }));
   t = text(html);
   assert.match(t, /^ ?Skills How this workspace/);
-  assert.match(t, /All Issues Skills 1 · 1 draft Apps 1 People/, "the drafts waiting to be published, as the old sidebar row said");
+  assert.match(t, /All Issues Skills 1 · 1 draft People/, "the drafts waiting to be published, as the old sidebar row said");
   assert.match(html, /aria-pressed="true"[^>]*>Skills/);
   assert.match(t, /Standup post/);
   assert.ok(!/Invoice total/.test(t), "apps are on their own page");
@@ -320,18 +320,18 @@ await test("Skills and Apps, kinds in Knowledge: their chips after Issues with t
   const appsHtml = renderToStaticMarkup(h(MemoryView, { state, user: "u1", ws: "w1", category: "apps", onCategory: noop, onClose: noop }));
   t = text(appsHtml);
   assert.match(t, /^ ?Apps Programs and tools/);
-  assert.match(appsHtml, /aria-pressed="true"[^>]*>Apps/);
+  // The Apps chip is hidden in the prod build for now.
+  assert.ok(!/aria-pressed="[^"]*"[^>]*>Apps/.test(appsHtml));
   assert.match(t, /Invoice total/);
   assert.ok(!/Standup post/.test(t));
   // No apps: says so (an empty page, not other sections).
   const noApps = { ...state, workspaces: [{ ...state.workspaces[0], apps: [] }] };
   t = text(renderToStaticMarkup(h(MemoryView, { state: noApps, user: "u1", ws: "w1", category: "apps", onCategory: noop, onClose: noop })));
-  assert.match(t, /Apps 0/);
   assert.match(t, /No apps yet\./);
   // No drafts: only the count.
   const published = { ...state, workspaces: [{ ...state.workspaces[0], skills: [ref("skill", "standup-post", "Standup post")] }] };
   t = text(renderToStaticMarkup(h(MemoryView, { state: published, user: "u1", ws: "w1", category: "skills", onCategory: noop, onClose: noop })));
-  assert.match(t, /Skills 1 Apps 1 People/);
+  assert.match(t, /Skills 1 People/);
   assert.ok(!/draft/.test(t));
   // No account (self-hosted, or signed out): Skills still opens, without Knowledge's other kinds.
   t = text(renderToStaticMarkup(h(MemoryView, { state: { ...state, account: undefined }, ws: "w1", category: "skills", onCategory: noop, onClose: noop })));

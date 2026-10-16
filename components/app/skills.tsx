@@ -31,8 +31,9 @@ export function skillsIn(state: AppState, wsId = currentWorkspace(state)) {
 
 /** The skills and apps a bot has: its workspace's, every bot's or named for it. Drafts too (they say so). */
 export function botSkills(state: AppState, b: Bot) {
-  const { skills, apps } = skillsIn(state, workspaceOf(b));
-  return [...skills, ...apps].filter((r) => !r.botIds.length || r.botIds.includes(b.id));
+  // Apps hidden in the prod build for now.
+  const { skills /* , apps */ } = skillsIn(state, workspaceOf(b));
+  return [...skills /* , ...apps */].filter((r) => !r.botIds.length || r.botIds.includes(b.id));
 }
 
 /** The Skills mark: a folder with a spark. */

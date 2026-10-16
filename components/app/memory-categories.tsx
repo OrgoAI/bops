@@ -761,7 +761,8 @@ function KnowledgeChips({
     { id: "all", label: "All", n: snap?.on ? count("all") : undefined },
     { id: "issues", label: "Issues", n: issues },
     ...(skills !== undefined ? [{ id: "skills" as const, label: "Skills", n: skills, more: draftWords(drafts) }] : []),
-    ...(apps !== undefined ? [{ id: "apps" as const, label: "Apps", n: apps, more: draftWords(appDrafts) }] : []),
+    // Apps hidden in the prod build for now.
+    // ...(apps !== undefined ? [{ id: "apps" as const, label: "Apps", n: apps, more: draftWords(appDrafts) }] : []),
     ...CATEGORIES.map((x) => ({ id: x.id as OrbitSection, label: x.label, n: snap?.on ? count(x.id) : undefined })),
   ];
   return (
