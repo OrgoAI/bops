@@ -764,6 +764,19 @@ function Bops({ state }: { state: AppState | null }) {
                       }}
                       onProfile={(id) => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "bot", botId: id, section: "details" } : t)))}
                       onVault={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "vault" } : t)))}
+                      // The workspace's one Knowledge tab: this new tab gives way to it (or becomes it).
+                      onKnowledge={
+                        categoriesOpen(state)
+                          ? () => {
+                              const ws = currentWorkspace(state);
+                              const there = tabs.find((t) => t.kind === "memory" && t.ws === ws);
+                              if (there) {
+                                closeTab(tab.id);
+                                setActive(there.id);
+                              } else setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "memory", ws, category: "all" } : t)));
+                            }
+                          : undefined
+                      }
                       onMac={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "mac" } : t)))}
                     />
                   ) : tab?.kind === "vault" ? (
