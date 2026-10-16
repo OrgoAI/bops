@@ -257,6 +257,12 @@ await check("Refused whole: a secret (by where and what kind, never the text), j
   assert.deepEqual(refused({ files: [{ path: "../x.sh", content: "x" }] }).problems, [{ path: "../x.sh", reason: "path leaves the folder (..)" }]);
   assert.deepEqual(refused({ files: [{ path: "big.bin", data: Buffer.alloc(50 * 1024 * 1024 + 1, 1) }] }).problems, [{ path: "big.bin", reason: "file is over 50 MB" }]);
   assert.deepEqual(refused({ body: `# Bad\n${FAKE_PRIVATE_KEY}\n` }).problems, [{ path: "SKILL.md", line: 2, reason: "secret: private key block" }]);
+  // Names orgo-web refuses are refused here too, so a kept skill never fails its push.
+  assert.deepEqual(refused({ files: [{ path: "Run.sh", content: "x" }, { path: "run.sh", content: "y" }] }).problems, [{ path: "run.sh", reason: "path differs from another only by case" }]);
+  assert.deepEqual(refused({ files: [{ path: "bin", content: "x" }, { path: "bin/tool", content: "y" }] }).problems, [{ path: "bin/tool", reason: "path is inside a name that is also a file" }]);
+  assert.deepEqual(refused({ files: [{ path: "skill.md", content: "x" }] }).problems, [{ path: "skill.md", reason: "name SKILL.md in capitals (it is the skill itself)" }]);
+  for (const [path, reason] of [["notes.", "path has a name ending in a dot or a space"], ["notes:x.txt", 'path has a character Windows does not allow (: < > " | ? *)'], ["con.txt", "path has a name Windows reserves (CON, NUL, COM1 …)"], ["__proto__/x", "path has a reserved name"]])
+    assert.deepEqual(refused({ files: [{ path, content: "x" }] }).problems, [{ path, reason }]);
   assert.throws(() => W.createSkill("ws_main", { name: "x", description: "", body: "y" }), /Say what it does and when to use it\./);
   assert.equal(W.refsOf("ws_main").some((r) => r.name === "Bad"), false, "nothing kept");
   assert.equal(existsSync(join(dataDir(), "ws_main", "skills", "bad")), false, "no folder either");

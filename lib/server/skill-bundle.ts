@@ -129,7 +129,12 @@ export const scanFile = (path: string, f: { content: string | null; data?: Buffe
 
 /* ---------------- Paths and junk ---------------- */
 
-/** The normalized path, or why it's refused. Never resolves "..". */
+const WINDOWS_RESERVED_RE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.[^.]*)?$/i;
+
+/** The key two paths collide on when written to a case insensitive disk (macOS, Windows), as orgo-web folds them. */
+export const pathFoldKey = (path: string) => path.normalize("NFC").toLowerCase();
+
+/** The normalized path, or why it's refused (orgo-web's rules, so what's kept here is accepted there). Never resolves "..". */
 export function normalizePath(raw: string): { path: string } | { reason: string } {
   if (typeof raw !== "string" || !raw) return { reason: "path is empty" };
   if (/[\u0000-\u001f\u007f]/.test(raw)) return { reason: "path has a control character" };
@@ -141,6 +146,11 @@ export function normalizePath(raw: string): { path: string } | { reason: string 
   for (const s of segments) {
     if (s === "..") return { reason: "path leaves the folder (..)" };
     if (s === "" || s === ".") return { reason: "path has an empty or . segment" };
+    // Names macOS or Windows can't hold, or that a JSON map turns into its prototype.
+    if (/[. ]$/.test(s)) return { reason: "path has a name ending in a dot or a space" };
+    if (/[:<>"|?*]/.test(s)) return { reason: 'path has a character Windows does not allow (: < > " | ? *)' };
+    if (WINDOWS_RESERVED_RE.test(s)) return { reason: "path has a name Windows reserves (CON, NUL, COM1 …)" };
+    if (s === "__proto__" || s === "constructor" || s === "prototype") return { reason: "path has a reserved name" };
   }
   if (path.length > BUNDLE_LIMITS.path) return { reason: `path is over ${BUNDLE_LIMITS.path} characters` };
   if (segments.length > BUNDLE_LIMITS.pathDepth) return { reason: `path is over ${BUNDLE_LIMITS.pathDepth} folders deep` };

@@ -16,6 +16,7 @@ import {
   legacyBundleSha,
   nextVersion,
   normalizePath,
+  pathFoldKey,
   parseSkillMd,
   renderSkillMd,
   scanFile,
@@ -301,11 +302,17 @@ function checkFiles(body: string, files: FileIn[]): { files: BundleFile[]; warni
       errors.push({ path: n.path, reason: junk });
       continue;
     }
-    if (seen.has(n.path)) {
-      errors.push({ path: n.path, reason: "path appears twice" });
+    // As a case insensitive disk (and orgo-web) sees paths: two that differ only by case are one file.
+    const key = pathFoldKey(n.path);
+    if (seen.has(key)) {
+      errors.push({ path: n.path, reason: files.some((g) => g !== f && g.path === n.path) ? "path appears twice" : "path differs from another only by case" });
       continue;
     }
-    seen.add(n.path);
+    if (key === "skill.md") {
+      errors.push({ path: n.path, reason: "name SKILL.md in capitals (it is the skill itself)" });
+      continue;
+    }
+    seen.add(key);
     const bytes = Buffer.isBuffer(f.data) ? f.data : null;
     const text = bytes ? textOf(n.path, bytes) : typeof f.content === "string" ? f.content : null;
     if (!bytes && text === null) {
@@ -329,6 +336,15 @@ function checkFiles(body: string, files: FileIn[]): { files: BundleFile[]; warni
     }
     errors.push(...scanFile(n.path, file));
     out.push(file);
+  }
+  // A file "a" and a file "a/b" can't both be written to a disk.
+  for (const f of out) {
+    const parts = f.path.split("/");
+    for (let i = 1; i < parts.length; i += 1)
+      if (seen.has(pathFoldKey(parts.slice(0, i).join("/")))) {
+        errors.push({ path: f.path, reason: "path is inside a name that is also a file" });
+        break;
+      }
   }
   errors.push(...scanSecrets("SKILL.md", body));
   if (byteLength(body) > BUNDLE_LIMITS.body) errors.push({ path: "SKILL.md", reason: `body is over ${BUNDLE_LIMITS.body / 1024} KB` });
