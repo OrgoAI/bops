@@ -291,15 +291,15 @@ await test("All: every kind on one page, Issues still a chip", async () => {
   assert.match(t, /Select/);
 });
 
-await test("Skills, a kind in Knowledge: its chip after Issues with its count, its page in the tab, and not in All", async () => {
+await test("Skills and Apps, kinds in Knowledge: their chips after Issues with their counts, each its own page in the tab, and not in All", async () => {
   const { MemoryView } = await import(pathToFileURL(`${root}/components/app/memory-categories.tsx`).href);
   const s = { on: true, ws: "w1", items: [item("aaaaaaaaaa", "people", "Priya Shah")], syncing: false };
-  let t = text(renderToStaticMarkup(h(MemoryPage, { snap: s, act: async () => null, forgetting, issues: 3, skills: 2, category: "all", onCategory: noop, onClose: noop })));
-  assert.match(t, /All 1 Issues 3 Skills 2 People 1/);
+  let t = text(renderToStaticMarkup(h(MemoryPage, { snap: s, act: async () => null, forgetting, issues: 3, skills: 2, apps: 1, category: "all", onCategory: noop, onClose: noop })));
+  assert.match(t, /All 1 Issues 3 Skills 2 Apps 1 People 1/);
   assert.ok(!/Standup post/.test(t), "All lists what memory learned, not the skills");
   // Without the count (no state), no chip.
   t = text(renderToStaticMarkup(h(MemoryPage, { snap: s, act: async () => null, forgetting, issues: 3, category: "all", onCategory: noop, onClose: noop })));
-  assert.ok(!/Skills/.test(t));
+  assert.ok(!/Skills|Apps/.test(t));
   // Opened on Skills: the Skills page with Knowledge's chips under its title, Skills the one picked.
   const ref = (kind, slug, name, extra = {}) => ({ kind, slug, name, description: `${name}, step by step`, version: 1, status: "published", botIds: [], updatedAt: 1, ...extra });
   const state = {
@@ -311,20 +311,34 @@ await test("Skills, a kind in Knowledge: its chip after Issues with its count, i
   const html = renderToStaticMarkup(h(MemoryView, { state, user: "u1", ws: "w1", category: "skills", onCategory: noop, onClose: noop }));
   t = text(html);
   assert.match(t, /^ ?Skills How this workspace/);
-  assert.match(t, /All Issues Skills 2 · 1 draft/, "the drafts waiting to be published, as the old sidebar row said");
+  assert.match(t, /All Issues Skills 1 · 1 draft Apps 1 People/, "the drafts waiting to be published, as the old sidebar row said");
   assert.match(html, /aria-pressed="true"[^>]*>Skills/);
   assert.match(t, /Standup post/);
-  assert.match(t, /Invoice total/);
+  assert.ok(!/Invoice total/.test(t), "apps are on their own page");
   assert.match(t, /Draft/);
+  // Opened on Apps: only the apps, its chip the one picked.
+  const appsHtml = renderToStaticMarkup(h(MemoryView, { state, user: "u1", ws: "w1", category: "apps", onCategory: noop, onClose: noop }));
+  t = text(appsHtml);
+  assert.match(t, /^ ?Apps Programs and tools/);
+  assert.match(appsHtml, /aria-pressed="true"[^>]*>Apps/);
+  assert.match(t, /Invoice total/);
+  assert.ok(!/Standup post/.test(t));
+  // No apps: says so (an empty page, not other sections).
+  const noApps = { ...state, workspaces: [{ ...state.workspaces[0], apps: [] }] };
+  t = text(renderToStaticMarkup(h(MemoryView, { state: noApps, user: "u1", ws: "w1", category: "apps", onCategory: noop, onClose: noop })));
+  assert.match(t, /Apps 0/);
+  assert.match(t, /No apps yet\./);
   // No drafts: only the count.
   const published = { ...state, workspaces: [{ ...state.workspaces[0], skills: [ref("skill", "standup-post", "Standup post")] }] };
   t = text(renderToStaticMarkup(h(MemoryView, { state: published, user: "u1", ws: "w1", category: "skills", onCategory: noop, onClose: noop })));
-  assert.match(t, /Skills 2 People/);
+  assert.match(t, /Skills 1 Apps 1 People/);
   assert.ok(!/draft/.test(t));
   // No account (self-hosted, or signed out): Skills still opens, without Knowledge's other kinds.
   t = text(renderToStaticMarkup(h(MemoryView, { state: { ...state, account: undefined }, ws: "w1", category: "skills", onCategory: noop, onClose: noop })));
   assert.match(t, /Standup post/);
   assert.ok(!/Issues/.test(t), "no chips without an account");
+  t = text(renderToStaticMarkup(h(MemoryView, { state: { ...state, account: undefined }, ws: "w1", category: "apps", onCategory: noop, onClose: noop })));
+  assert.match(t, /Invoice total/);
 });
 
 await test("Routines in the footer: a round button, with how many monitors have news", async () => {

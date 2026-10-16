@@ -31,7 +31,7 @@ import { clockTime, CloseButton, useNow } from "./ui";
  */
 
 /** What the Knowledge page shows: All, one kind, Issues or Skills. */
-export type OrbitSection = KnowledgeFilter | "issues" | "skills";
+export type OrbitSection = KnowledgeFilter | "issues" | "skills" | "apps";
 
 /** Open Knowledge on the right (bops-app.tsx): on a kind, at one of its items, or with a search filled in (from the sidebar's search). */
 export type MemoryOpen = { category?: OrbitSection; focus?: string; query?: string };
@@ -617,7 +617,7 @@ export function MemoryView(props: Parameters<typeof KnowledgeView>[0]) {
   // No account (self-hosted, or signed out): no memory or issues, but Skills are this Mac's folders, so
   // Skills still opens here, without the kinds it would sit among.
   const { state, user, category, focus, focusAt, onClose } = props;
-  if (!user && category === "skills" && state) return <SkillsPage state={state} focus={focus} focusAt={focusAt} onClose={onClose} />;
+  if (!user && (category === "skills" || category === "apps") && state) return <SkillsPage state={state} only={category === "apps" ? "app" : "skill"} focus={focus} focusAt={focusAt} onClose={onClose} />;
   return <KnowledgeView {...props} />;
 }
 
@@ -664,9 +664,12 @@ function KnowledgeView({
     issuesSoon(user ?? "", ws);
   }, [last, user, ws]);
   const lists = state ? skillsIn(state, ws) : undefined;
-  const skills = lists ? lists.skills.length + lists.apps.length : undefined;
-  // Saved by a bot and waiting to be published: said on the Skills chip, as the sidebar's Skills row did.
-  const drafts = lists ? [...lists.skills, ...lists.apps].filter((r) => r.status === "draft").length : undefined;
+  const skills = lists?.skills.length;
+  const apps = lists?.apps.length;
+  // Saved by a bot and waiting to be published: said on the chip, as the sidebar's Skills row did.
+  const drafts = lists?.skills.filter((r) => r.status === "draft").length;
+  const appDrafts = lists?.apps.filter((r) => r.status === "draft").length;
+  const chips = (on: OrbitSection) => <KnowledgeChips on={on} snap={snap} issues={openIssues} skills={skills} apps={apps} drafts={drafts} appDrafts={appDrafts} count={count} onPick={onCategory} />;
   const count = (id: KnowledgeFilter) => (snap?.items ?? []).filter((i) => id === "all" || i.category === id).length;
   const ask = useCallback(async (question: string): Promise<Answer | string> => {
     const r = await fetch("/api/memory", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "ask", ws, question }) })
@@ -682,12 +685,12 @@ function KnowledgeView({
         focus={focus}
         focusAt={focusAt}
         tags={tags}
-        nav={<KnowledgeChips on="issues" snap={snap} issues={openIssues} skills={skills} drafts={drafts} count={count} onPick={onCategory} />}
+        nav={chips("issues")}
         onClose={onClose}
       />
     );
-  if (category === "skills" && state)
-    return <SkillsPage state={state} focus={focus} focusAt={focusAt} nav={<KnowledgeChips on="skills" snap={snap} issues={openIssues} skills={skills} drafts={drafts} count={count} onPick={onCategory} />} onClose={onClose} />;
+  if ((category === "skills" || category === "apps") && state)
+    return <SkillsPage state={state} only={category === "apps" ? "app" : "skill"} focus={focus} focusAt={focusAt} nav={chips(category)} onClose={onClose} />;
   return (
     <MemoryPage
       snap={snap}
@@ -696,8 +699,10 @@ function KnowledgeView({
       forgetting={forgetting}
       issues={openIssues}
       skills={skills}
+      apps={apps}
       drafts={drafts}
-      category={category === "skills" ? "all" : category}
+      appDrafts={appDrafts}
+      category={category === "skills" || category === "apps" ? "all" : category}
       focus={focus}
       focusAt={focusAt}
       query={query}
@@ -734,7 +739,9 @@ function KnowledgeChips({
   snap,
   issues,
   skills,
+  apps,
   drafts,
+  appDrafts,
   count,
   onPick,
 }: {
@@ -742,15 +749,19 @@ function KnowledgeChips({
   snap: MemorySnapshot | null;
   issues?: number;
   skills?: number;
+  apps?: number;
   /** How many of those are drafts waiting to be published: said after the count. */
   drafts?: number;
+  appDrafts?: number;
   count: (id: KnowledgeFilter) => number;
   onPick: (s: OrbitSection) => void;
 }) {
+  const draftWords = (n?: number) => (n ? `${n} draft${n === 1 ? "" : "s"}` : undefined);
   const chips: { id: OrbitSection; label: string; n?: number; more?: string }[] = [
     { id: "all", label: "All", n: snap?.on ? count("all") : undefined },
     { id: "issues", label: "Issues", n: issues },
-    ...(skills !== undefined ? [{ id: "skills" as const, label: "Skills", n: skills, more: drafts ? `${drafts} draft${drafts === 1 ? "" : "s"}` : undefined }] : []),
+    ...(skills !== undefined ? [{ id: "skills" as const, label: "Skills", n: skills, more: draftWords(drafts) }] : []),
+    ...(apps !== undefined ? [{ id: "apps" as const, label: "Apps", n: apps, more: draftWords(appDrafts) }] : []),
     ...CATEGORIES.map((x) => ({ id: x.id as OrbitSection, label: x.label, n: snap?.on ? count(x.id) : undefined })),
   ];
   return (
@@ -800,7 +811,9 @@ export function MemoryPage({
   forgetting,
   issues,
   skills,
+  apps,
   drafts,
+  appDrafts,
   category,
   focus,
   focusAt,
@@ -816,10 +829,12 @@ export function MemoryPage({
   forgetting: ForgetCalls;
   /** How many issues are open (the Issues chip), once known. */
   issues?: number;
-  /** How many skills and apps the workspace has (the Skills chip; none: no chip). */
+  /** How many skills, and apps, the workspace has (the Skills and Apps chips; none: no chips). */
   skills?: number;
-  /** How many of those are drafts (said on the Skills chip). */
+  apps?: number;
+  /** How many of those are drafts (said on each chip). */
   drafts?: number;
+  appDrafts?: number;
   category: KnowledgeFilter;
   focus?: string;
   focusAt?: number;
@@ -1100,7 +1115,7 @@ export function MemoryPage({
           </div>
         )}
 
-        <KnowledgeChips on={category} snap={snap} issues={issues} skills={skills} drafts={drafts} count={count} onPick={onCategory} />
+        <KnowledgeChips on={category} snap={snap} issues={issues} skills={skills} apps={apps} drafts={drafts} appDrafts={appDrafts} count={count} onPick={onCategory} />
 
         {snap?.on && (
           <div className="flex flex-col gap-2.5">

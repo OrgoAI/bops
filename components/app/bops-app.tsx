@@ -291,7 +291,7 @@ function Bops({ state }: { state: AppState | null }) {
     .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId))
     .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)))
     // Skills are this Mac's folders and need no account, so a Knowledge tab on Skills stays without one.
-    .filter((t) => t.kind !== "memory" || (t.ws === currentWorkspace(state) && (memory || t.category === "skills")))
+    .filter((t) => t.kind !== "memory" || (t.ws === currentWorkspace(state) && (memory || t.category === "skills" || t.category === "apps")))
     // Routines shows its own workspace's bots only: another workspace's tab goes on a switch.
     .filter((t) => t.kind !== "autopilot" || t.ws === currentWorkspace(state));
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
@@ -448,8 +448,8 @@ function Bops({ state }: { state: AppState | null }) {
       (t) => ({ ...t, section, focus: item, focusAt }) as PanelTab,
     );
   };
-  /** Skills (skills.tsx), a kind in Knowledge: the Knowledge tab on Skills, at the skill asked for ("skill:<slug>"). */
-  const openSkills = (item?: string) => openMemory({ category: "skills", focus: item });
+  /** Skills or Apps (skills.tsx), kinds in Knowledge: the Knowledge tab on the one asked for ("skill:<slug>" or "app:<slug>"). */
+  const openSkills = (item?: string) => openMemory({ category: item?.startsWith("app:") ? "apps" : "skills", focus: item });
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
   // eslint-disable-next-line react-hooks/refs -- kept current for the storage listener above
   openMacRef.current = openMac;

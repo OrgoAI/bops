@@ -67,11 +67,11 @@ function botsLine(r: SkillRef, team: Bot[]) {
 }
 
 /**
- * Skills, in the Knowledge tab (one per workspace): Skills and Apps as cards, Import folder, and one
- * opened in place (`focus`: "skill:<slug>" or "app:<slug>"; `focusAt` is when it was asked for). `nav` is
- * Knowledge's row of chips, under the title as on Issues.
+ * Skills or Apps, in the Knowledge tab (one per workspace; `only` picks which, its own chip): cards, Import
+ * folder, and one opened in place (`focus`: "skill:<slug>" or "app:<slug>"; `focusAt` is when it was asked
+ * for). `nav` is Knowledge's row of chips, under the title as on Issues.
  */
-export function SkillsPage({ state, focus, focusAt, nav, onClose }: { state: AppState; focus?: string; focusAt?: number; nav?: ReactNode; onClose: () => void }) {
+export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { state: AppState; only?: SkillKind; focus?: string; focusAt?: number; nav?: ReactNode; onClose: () => void }) {
   const ws = currentWorkspace(state);
   const team = teamOf(state);
   const { skills, apps } = skillsIn(state, ws);
@@ -111,6 +111,17 @@ export function SkillsPage({ state, focus, focusAt, nav, onClose }: { state: App
   };
 
   const ref = open ? [...skills, ...apps].find((r) => `${r.kind}:${r.slug}` === open) : undefined;
+  const kinds: SkillKind[] = only ? [only] : ["skill", "app"];
+  const groups = [
+    { kind: "skill" as const, label: "Skills", list: skills },
+    { kind: "app" as const, label: "Apps", list: apps },
+  ].filter((g) => kinds.includes(g.kind));
+  const about =
+    only === "app"
+      ? "Programs and tools this workspace\u2019s bots run, kept with their files exactly as they are."
+      : only === "skill"
+        ? "How this workspace\u2019s bots do a kind of job."
+        : "How this workspace\u2019s bots do a kind of job, and the apps they run.";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
@@ -120,8 +131,10 @@ export function SkillsPage({ state, focus, focusAt, nav, onClose }: { state: App
             <SkillsIcon size={20} />
           </span>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
-            <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">Skills</span>
-            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">How this workspace&apos;s bots do a kind of job, and the apps they run. {orgo ? "Kept in step with Orgo." : "Kept on this Mac."}</span>
+            <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{only === "app" ? "Apps" : "Skills"}</span>
+            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
+              {about} {orgo ? "Kept in step with Orgo." : "Kept on this Mac."}
+            </span>
           </div>
           <CloseButton onClick={onClose} className="mt-1.5" />
         </div>
@@ -135,7 +148,7 @@ export function SkillsPage({ state, focus, focusAt, nav, onClose }: { state: App
           <>
             {picker && (
               <div className="flex flex-wrap gap-2">
-                {(["skill", "app"] as const).map((k) => (
+                {kinds.map((k) => (
                   <button key={k} disabled={!!importing} onClick={() => void importFolder(k)} className={`${PILL} flex items-center gap-1.5 bg-[#F2F2F0] text-ink hover:bg-[#EAEAE7]`}>
                     {importing === k && <Spinner size={11} color="#6B6B6B" />}
                     {k === "skill" ? "Import a skill folder" : "Import an app folder"}
@@ -143,13 +156,12 @@ export function SkillsPage({ state, focus, focusAt, nav, onClose }: { state: App
                 ))}
               </div>
             )}
-            {!skills.length && !apps.length ? (
-              <span className="text-[13px] leading-[19px] text-[#6B6B6B]">No skills yet. Save one from a chat&apos;s menu{picker ? ", or import a folder" : ""}.</span>
+            {groups.every((g) => !g.list.length) ? (
+              <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
+                {only === "app" ? `No apps yet.${picker ? " Import a folder with the program and its files." : ""}` : `No skills yet. Save one from a chat\u2019s menu${picker ? ", or import a folder" : ""}.`}
+              </span>
             ) : (
-              [
-                { label: "Skills", list: skills },
-                { label: "Apps", list: apps },
-              ]
+              groups
                 .filter((g) => g.list.length)
                 .map((g) => (
                   <section key={g.label} className="flex flex-col gap-2">
