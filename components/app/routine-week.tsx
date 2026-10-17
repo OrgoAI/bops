@@ -90,22 +90,26 @@ export function weekPlan(routines: Routine[], now: number, tz?: string, zoneOf: 
   const lastKey = days[6].key;
   for (const r of routines) {
     const zone = zoneOf(r);
-    if (r.last && r.last.at <= now && dayKey(r.last.at, tz) === days[0].key) days[0].items.push({ kind: "ran", routine: r, at: r.last.at, run: r.last });
+    if (r.last && dayKey(r.last.at, tz) === days[0].key) days[0].items.push({ kind: "ran", routine: r, at: r.last.at, run: r.last });
     if (!r.enabled || r.nextRunAt === undefined) continue;
     if (r.schedule.kind === "before_event") {
       const on = r.schedule.days?.length ? r.schedule.days : [0, 1, 2, 3, 4, 5, 6];
       for (const x of days) if (on.includes(x.dow)) x.items.push({ kind: "meetings", routine: r });
       continue;
     }
-    // From its first coming time: its next, or a skipped one before that.
-    let t: number | undefined = Math.min(r.nextRunAt, ...(r.skips ?? []).filter((x) => x > now));
+    // The times it will run, from its next on (as the server works them out), and the ones it's skipping.
     const times = new Map<string, number[]>();
-    for (let i = 0; t !== undefined && i < MOST; i++) {
+    const add = (t: number) => {
       const k = dayKey(t, tz);
-      if (k > lastKey) break;
       if (byKey.has(k)) times.set(k, [...(times.get(k) ?? []), t]);
+    };
+    let t: number | undefined = r.nextRunAt;
+    for (let i = 0; t !== undefined && i < MOST && dayKey(t, tz) <= lastKey; i++) {
+      add(t);
       t = after(r, t, zone);
     }
+    for (const x of r.skips ?? []) if (x > now && x < r.nextRunAt) add(x);
+    for (const list of times.values()) list.sort((a, b) => a - b);
     for (const [k, list] of times) {
       const day = byKey.get(k)!;
       if (list.length > MANY) {
@@ -180,7 +184,7 @@ export function RoutineWeek({
 }) {
   // Worked out again only when a routine's times change, or the minute does (not on every render).
   const minute = Math.floor(now / 60_000);
-  const sig = JSON.stringify([tz, minute, routines.map((r) => [r.id, r.title, r.enabled, r.nextRunAt, r.schedule, r.skips, r.last, r.timeZone, zoneOf(r)])]);
+  const sig = JSON.stringify([tz, minute, routines.map((r) => [r.id, r.botId, r.title, r.enabled, r.nextRunAt, r.schedule, r.skips, r.last, r.timeZone, r.quiet, r.run, r.reminder, zoneOf(r)])]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const days = useMemo(() => weekPlan(routines, minute * 60_000, tz, zoneOf), [sig]);
   const [picked, setPicked] = useState<string | null>(null);
@@ -230,9 +234,11 @@ export function RoutineWeek({
               <span className={`text-[10.5px] font-medium uppercase leading-3 tracking-[0.04em] ${on ? "text-white/70" : "text-[#9A9A98]"}`}>{x.today ? "Today" : DOW[x.dow]}</span>
               <span className="text-[17px] font-semibold leading-5 tabular-nums">{x.date}</span>
               <span className="flex h-[6px] items-center gap-[3px]" aria-hidden>
-                {dots.slice(0, 4).map((it, j) => (
-                  <span key={j} style={{ background: botOf(it.routine)?.color ?? "#9A9A98" }} className={`size-[6px] rounded-full ${on ? "shadow-[0_0_0_1px_#FFFFFF66]" : ""}`} />
-                ))}
+                {dots.slice(0, 4).map((it, j) => {
+                  const c = botOf(it.routine)?.color ?? "#9A9A98";
+                  // A dark bot's dot is white on the picked (dark) day.
+                  return <span key={j} style={{ background: on && luminance(c) < 0.3 ? "#FFFFFF" : c }} className="size-[6px] rounded-full" />;
+                })}
                 {dots.length > 4 && <span className={`text-[9px] font-semibold leading-none ${on ? "text-white/70" : "text-[#9A9A98]"}`}>+{dots.length - 4}</span>}
               </span>
             </button>
@@ -360,7 +366,6 @@ function Item({
         </button>
         <span className={`text-[12px] leading-4 ${status === "failed" || needsYou ? "text-[#B42318]" : "text-[#6B6B6B]"} [overflow-wrap:anywhere]`}>
           {line}
-          {it.kind === "run" && it.next && !off && !running ? <span className="text-[#9A9A98]"> · next</span> : null}
         </span>
         {error && (
           <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
@@ -375,16 +380,16 @@ function Item({
           </button>
         ) : (
           <>
-            <button onClick={onRun} disabled={any || running} aria-label={`Run ${r.title} now`} data-tip="Run now" className={`${btn} w-[26px] text-[#3A3A38] hover:bg-[#F2F2F0]`}>
+            <button onClick={onRun} disabled={any || running} aria-label={`Run ${r.title} now`} data-tip="Run now" className={`${btn} w-[26px] text-[#9A9A98] hover:bg-[#F2F2F0] hover:text-ink`}>
               {busy === "run" ? <Spinner size={11} /> : <Icon d={PLAY} />}
             </button>
             {skipAt !== undefined && (
-              <button onClick={() => onSkip(skipAt)} disabled={any} aria-label={`Skip ${r.title} at ${clockOf(skipAt, tz)}`} data-tip={it.kind === "many" ? `Skip the next one, ${clockOf(skipAt, tz)}` : "Skip this one"} className={`${btn} w-[26px] text-[#3A3A38] hover:bg-[#F2F2F0]`}>
+              <button onClick={() => onSkip(skipAt)} disabled={any} aria-label={`Skip ${r.title} at ${clockOf(skipAt, tz)}`} data-tip={it.kind === "many" ? `Skip the next one, ${clockOf(skipAt, tz)}` : "Skip this one"} className={`${btn} w-[26px] text-[#9A9A98] hover:bg-[#F2F2F0] hover:text-ink`}>
                 {busy === "skip" ? <Spinner size={11} /> : <Icon d={SKIP} />}
               </button>
             )}
             {r.enabled && r.schedule.kind !== "once" && (
-              <button onClick={onPause} disabled={any} aria-label={`Pause ${r.title}`} data-tip="Pause it" className={`${btn} w-[26px] text-[#3A3A38] hover:bg-[#F2F2F0]`}>
+              <button onClick={onPause} disabled={any} aria-label={`Pause ${r.title}`} data-tip="Pause it" className={`${btn} w-[26px] text-[#9A9A98] hover:bg-[#F2F2F0] hover:text-ink`}>
                 {busy === "pause" ? <Spinner size={11} /> : <Icon d={PAUSE} />}
               </button>
             )}
@@ -413,14 +418,16 @@ function StatusMark({ status }: { status: "ok" | "failed" | "running" | "quiet" 
   );
 }
 
-/** Ink on a light color (the highlighter, mint), white on a dark one. */
-function textOn(color: string) {
+/** How light a color is, 0 (black) to 1 (white); 0 for one that isn't "#RRGGBB". */
+function luminance(color: string) {
   const m = /^#?([0-9a-f]{6})$/i.exec(color);
-  if (!m) return "#FFFFFF";
+  if (!m) return 0;
   const n = parseInt(m[1], 16);
-  const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
-  return lum > 0.6 ? "#0A0A0A" : "#FFFFFF";
+  return (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
 }
+
+/** Ink on a light color (the highlighter, mint), white on a dark one. */
+const textOn = (color: string) => (luminance(color) > 0.6 ? "#0A0A0A" : "#FFFFFF");
 
 /** The days of the coming week a routine runs, M T W T F S S from today, for its row. */
 export function WeekLetters({ days, routineId, color }: { days: DayPlan[]; routineId: string; color?: string }) {

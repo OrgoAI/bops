@@ -924,7 +924,7 @@ function BotName({ bot }: { bot?: { id: string; name: string; color: string } })
 }
 
 /** What a row is doing now: which action, while Bops does it. */
-type Busy = null | "run" | "toggle" | "skip" | "check" | "remove" | "save";
+type Busy = null | "run" | "toggle" | "skip" | "unskip" | "check" | "remove" | "save";
 
 /**
  * What a row's actions share: which one is on its way, what went wrong, and the remove question (asked
@@ -1056,7 +1056,7 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
                   <span key={x} className="inline-flex items-center gap-1 rounded-full bg-[#F2F2F0] py-0.5 pl-2 pr-0.5 text-[12px] leading-4">
                     <span className="line-through decoration-[#9A9A98]">{whenText(x, now, tz)}</span>
                     <button
-                      onClick={() => void run("skip", "/api/routines", { id: r.id, action: "unskip", at: x }, "PATCH")}
+                      onClick={() => void run("unskip", "/api/routines", { id: r.id, action: "unskip", at: x }, "PATCH")}
                       disabled={!!busy}
                       aria-label={`Run at ${whenText(x, now, tz)} after all`}
                       className="rounded-full px-1.5 text-[11.5px] font-medium leading-4 text-ink hover:bg-white disabled:opacity-40"

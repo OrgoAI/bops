@@ -3,7 +3,7 @@ import { readlinkSync } from "node:fs";
 import { trackServerEvent } from "./analytics";
 import { botChatId, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
 import { appNameFor, tagsOf } from "@/lib/routine-catalog";
-import { describeSchedule as describe, EVENT_CHECK_MINUTES, eventWindow, inHours, nextRun, normalizeSchedule, resolveOnce, validTimeZone, whenText } from "@/cloud/schedule";
+import { describeSchedule as describe, EVENT_CHECK_MINUTES, eventWindow, inHours, nextRun, sameWallTime, normalizeSchedule, resolveOnce, validTimeZone, whenText } from "@/cloud/schedule";
 import { cleanText, routineChanged, routineRan, syncRoutinesOnStart } from "./routine-sync";
 import { plainLinks } from "@/cloud/style";
 import { pingIfWorthIt } from "./attention";
@@ -327,18 +327,22 @@ export function skipRoutine(routineId: string, at?: number): { error?: string; s
   const r = routine(routineId);
   if (!r) return { error: "No such routine." };
   if (r.schedule.kind === "once") return { error: "It runs only once. Pause or delete it instead." };
+  // Its next check takes in the skipped one's meetings anyway (eventWindow): skipping one would do nothing.
+  if (r.schedule.kind === "before_event") return { error: "It checks before every meeting, so one check can't be skipped. Pause it to stop the prep." };
   if (!r.enabled || r.nextRunAt === undefined) return { error: "It's paused, so it has no time to skip." };
   const tz = zoneOf(r);
   const now = Date.now();
-  // Its coming times from the first one: the next, or a skipped one before it.
-  let t: number | undefined = Math.min(r.nextRunAt, ...(r.skips ?? []).filter((x) => x > now));
   const want = at ?? r.nextRunAt;
   if (!Number.isFinite(want) || want <= now) return { error: "That time has passed." };
   if (want - now > SKIP_AHEAD_MS) return { error: "Bops can skip a time up to 5 weeks ahead." };
+  // Skipped already (it's before its next, or on its list): nothing to do.
+  const already = r.skips?.find((x) => Math.abs(x - want) < 60_000);
+  if (already !== undefined) return { skipped: already, nextRunAt: r.nextRunAt };
+  // One of the times it will run: its next, or one after.
+  let t: number | undefined = r.nextRunAt;
   for (let i = 0; t !== undefined && t < want - 60_000 && i < 5000; i++) t = after(r, t, tz);
   if (t === undefined || Math.abs(t - want) >= 60_000) return { error: "It doesn't run at that time." };
   const skipAt = t;
-  if (skipping(r, skipAt)) return { skipped: skipAt, nextRunAt: r.nextRunAt };
   const skips = [...(r.skips ?? []).filter((x) => x > now), skipAt].sort((a, b) => a - b);
   const next = pastSkips({ ...r, skips }, r.nextRunAt, tz);
   if (next === undefined) return { error: "Then it would never run again." };
@@ -384,8 +388,10 @@ export function setRoutineEnabled(routineId: string, enabled: boolean): { error?
     routineChanged(r.botId);
     return {};
   }
+  // On already: nothing changes (its next time, and the times it's skipping, stay).
+  if (r.enabled && r.nextRunAt !== undefined) return {};
   const now = Date.now();
-  const next = r.schedule.kind === "once" ? (r.schedule.at > now ? r.schedule.at : undefined) : nextRun(r.schedule, now, zoneOf(r), r.lastRunAt);
+  const next = r.schedule.kind === "once" ? (r.schedule.at > now ? r.schedule.at : undefined) : pastSkips(r, nextRun(r.schedule, now, zoneOf(r), r.lastRunAt), zoneOf(r));
   if (next === undefined) return { error: r.schedule.kind === "once" ? "Its time has passed. Give it a new time to run it again." : "That schedule never comes due." };
   update(() => {
     r.enabled = true;
@@ -760,14 +766,18 @@ function keepZone() {
   // Written when this Mac's zone changes, not every time: two Macs in two zones on one account don't take turns.
   if (o.timeZone === zone || (o.timeZone && g.__bopsZoneSeen === zone)) return;
   g.__bopsZoneSeen = zone;
-  const moved = !!o.timeZone;
+  const was = o.timeZone;
   const now = Date.now();
   update((s) => {
     if (s.owner) s.owner.timeZone = zone;
-    // Times worked out in the old zone move to the new one; what's already due runs as it is.
-    if (moved)
-      for (const r of s.routines)
-        if (r.enabled && !r.timeZone && r.schedule.kind !== "once" && r.nextRunAt !== undefined && r.nextRunAt > now) r.nextRunAt = nextRun(r.schedule, now, zone, r.lastRunAt) ?? r.nextRunAt;
+    // Times worked out in the old zone move to the new one; what's already due runs as it is. A skipped
+    // time moves too: 9 AM skipped in New York is 9 AM skipped in Los Angeles.
+    if (was)
+      for (const r of s.routines) {
+        if (!r.enabled || r.timeZone || r.schedule.kind === "once" || r.nextRunAt === undefined || r.nextRunAt <= now) continue;
+        if (r.skips?.length) r.skips = r.skips.map((x) => sameWallTime(x, was, zone)).sort((a, b) => a - b);
+        r.nextRunAt = pastSkips(r, nextRun(r.schedule, now, zone, r.lastRunAt), zone) ?? r.nextRunAt;
+      }
   });
 }
 
@@ -793,6 +803,7 @@ const LATE_NEXT_MS = 60 * 60_000;
  * An "every" or meeting routine outside its hours or days waits for them. A one-off, and anything with its next time further off, runs once, late, and says so.
  */
 function skipLate(r: Routine, due: number, next: number | undefined, now: number, tz?: string) {
+  // `next` is its next time as the schedule has it, skipped or not: one the user skipped close by still means "wait".
   if (r.schedule.kind === "once" || next === undefined || now - due <= 2 * 60_000) return false;
   // Outside its hours or days now (a weekday check the Mac woke for on Saturday): it waits for them.
   if (!inHours(r.schedule, now, tz)) return true;
@@ -822,7 +833,9 @@ function tick() {
     }
     if (r.nextRunAt > now) continue;
     const due = r.nextRunAt;
-    const next = r.schedule.kind === "once" ? undefined : pastSkips(r, nextRun(r.schedule, now, tz, beatOf(r.schedule) !== undefined ? due : undefined), tz);
+    const raw = r.schedule.kind === "once" ? undefined : nextRun(r.schedule, now, tz, beatOf(r.schedule) !== undefined ? due : undefined);
+    const next = pastSkips(r, raw, tz);
+    const skippedNow = skipping(r, due);
     // Skipped times that have passed are done with.
     if (r.skips?.some((x) => x <= now))
       update(() => {
@@ -830,7 +843,13 @@ function tick() {
         if (left.length) r.skips = left;
         else delete r.skips;
       });
-    if (skipLate(r, due, next, now, tz)) {
+    // A time the user skipped came due anyway (set as its next before the skip, by any way): it doesn't run.
+    if (skippedNow) {
+      update(() => (r.nextRunAt = next));
+      if (next === undefined) pauseStuck(r, "its schedule never comes due.");
+      continue;
+    }
+    if (skipLate(r, due, raw, now, tz)) {
       update(() => (r.nextRunAt = next));
       // A thread of the routine's still going (a login it waits on) stays its run: the next run waits for it, and its end is the routine's.
       const t = r.last?.sessionId ? session(r.last.sessionId) : undefined;

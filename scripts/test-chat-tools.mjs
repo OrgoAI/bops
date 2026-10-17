@@ -314,7 +314,7 @@ await check("the instructions have the new rules, said once, and none of the old
   assert.deepEqual(tool("schedule").parameters.properties.deliver_to.enum, ["chat", "text", "email", "slack", "telegram", "discord", null]);
   assert.deepEqual(Object.keys(tool("schedule").parameters.properties), tool("schedule").parameters.required, "strict: every field required");
   assert.deepEqual(tool("schedule").parameters.properties.schedule.required, Object.keys(tool("schedule").parameters.properties.schedule.properties));
-  assert.deepEqual(tool("manage_routine").parameters.properties.action.enum, ["run_now", "pause", "resume", "skip_next", "unskip", "delete", "run_on_mac", "run_in_cloud", "edit"]);
+  assert.deepEqual(tool("manage_routine").parameters.properties.action.enum, ["run_now", "pause", "resume", "skip", "unskip", "delete", "run_on_mac", "run_in_cloud", "edit"]);
   assert.deepEqual(Object.keys(tool("manage_routine").parameters.properties), tool("manage_routine").parameters.required, "strict: every field required");
   assert.deepEqual(tool("manage_routine").parameters.properties.schedule.anyOf[1], { type: "null" });
   assert.deepEqual(tool("manage_routine").parameters.properties.schedule.anyOf[0].required, Object.keys(tool("manage_routine").parameters.properties.schedule.anyOf[0].properties));
@@ -744,16 +744,29 @@ await check("manage_routine run_now runs a chat routine now and says how it went
   assert.match(u.out(), /^Resumed "News check"\. Next: .+\.$/);
   // Skip the next run, then undo it.
   const due = routines().find((x) => x.id === r.id).nextRunAt;
-  const sk = await turnWith("skip the next one", [toolCall("manage_routine", { routine_id: r.id, action: "skip_next" })]);
+  const sk = await turnWith("skip the next one", [toolCall("manage_routine", { routine_id: r.id, action: "skip", at: null })]);
   assert.match(sk.out(), /^Skipped "News check" .+\. Next: .+\.$/);
   assert.deepEqual(routines().find((x) => x.id === r.id).skips, [due]);
   assert.ok(routines().find((x) => x.id === r.id).nextRunAt > due);
-  const un = await turnWith("actually run it", [toolCall("manage_routine", { routine_id: r.id, action: "unskip" })]);
+  const un = await turnWith("actually run it", [toolCall("manage_routine", { routine_id: r.id, action: "unskip", at: null })]);
   assert.match(un.out(), /^Done: "News check" runs at its skipped times again\. Next: .+\.$/);
   assert.equal(routines().find((x) => x.id === r.id).nextRunAt, due);
   assert.equal(routines().find((x) => x.id === r.id).skips, undefined);
-  const again = await turnWith("undo it", [toolCall("manage_routine", { routine_id: r.id, action: "unskip" })]);
+  const again = await turnWith("undo it", [toolCall("manage_routine", { routine_id: r.id, action: "unskip", at: null })]);
   assert.match(again.out(), /^Nothing to undo: It isn't skipping that time\.$/);
+  // A run of its own later on, by its time; one that isn't its time is refused; then brought back.
+  const sched = routines().find((x) => x.id === r.id);
+  const later = due + (sched.schedule.kind === "every" ? sched.schedule.minutes * 60_000 : 24 * 60 * 60_000);
+  const iso = new Date(later).toISOString();
+  const s2 = await turnWith("skip that one", [toolCall("manage_routine", { routine_id: r.id, action: "skip", at: iso }), toolCall("manage_routine", { routine_id: r.id, action: "skip", at: new Date(later + 7 * 60_000).toISOString() }), toolCall("manage_routine", { routine_id: r.id, action: "skip", at: "friday" })]);
+  assert.match(s2.out(0), /^Skipped "News check" .+\.( Next: .+\.)?$/);
+  assert.deepEqual(routines().find((x) => x.id === r.id).skips, [later]);
+  assert.equal(routines().find((x) => x.id === r.id).nextRunAt, due, "the next stays");
+  assert.equal(s2.out(1), "Not skipped: It doesn't run at that time.");
+  assert.match(s2.out(2), /isn't a time/);
+  const u2 = await turnWith("do that one after all", [toolCall("manage_routine", { routine_id: r.id, action: "unskip", at: iso })]);
+  assert.match(u2.out(), /^Done: "News check" runs .+ after all\./);
+  assert.equal(routines().find((x) => x.id === r.id).skips, undefined);
 });
 
 await check("manage_routine edit: a whole new schedule, a time zone, a title; nulls keep the rest; refusals change nothing", async () => {

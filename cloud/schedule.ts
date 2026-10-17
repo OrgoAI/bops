@@ -246,6 +246,15 @@ function nextEvery(s: Windowed, from: number, tz?: string, last?: number): numbe
 }
 
 /**
+ * The moment zone `to`'s clock shows the date and time zone `from`'s clock showed at `t`: a time of a
+ * routine's, moved with it when the user's zone changes (9 AM in New York becomes 9 AM in Los Angeles).
+ */
+export function sameWallTime(t: number, from: string | undefined, to: string | undefined): number {
+  const w = wall(t, from);
+  return instant(civil(w.y, w.mo, w.d), w.h * 60 + w.mi, to) + w.s * 1000;
+}
+
+/**
  * Whether `t` is inside an "every" or before_event schedule's hours and days (a before_event one's are its
  * meetings', `minutes` ahead); always for the rest, which have no hours.
  */

@@ -926,7 +926,9 @@ function scheduleFor(b: Bot, a: ScheduleArgs, ctx: { ask?: Message; email: boole
 
 type ManageArgs = {
   routine_id?: string;
-  action?: "run_now" | "pause" | "resume" | "skip_next" | "unskip" | "delete" | "run_on_mac" | "run_in_cloud" | "edit";
+  action?: "run_now" | "pause" | "resume" | "skip" | "unskip" | "delete" | "run_on_mac" | "run_in_cloud" | "edit";
+  /** For skip and unskip: which run, an ISO date-time with the user's UTC offset; null for the next (skip) or every skipped one (unskip). */
+  at?: string | null;
   /** For edit: each null is left as it is. */
   schedule?: RawSchedule | null;
   title?: string | null;
@@ -1021,18 +1023,20 @@ async function manageRoutine(b: Bot, others: Bot[], a: ManageArgs, notes: string
     const next = getState().routines.find((x) => x.id === r.id)?.nextRunAt;
     return `Resumed "${r.title}".${next !== undefined ? ` Next: ${inSentence(whenText(next, Date.now(), zoneOf(r)))}.` : ""}`;
   }
-  if (a.action === "skip_next") {
-    const res = skipRoutine(r.id);
+  const at = a.at ? Date.parse(a.at) : undefined;
+  if ((a.action === "skip" || a.action === "unskip") && a.at && !Number.isFinite(at)) return `"${a.at}" isn't a time. Give an ISO date-time with the UTC offset, or null.`;
+  if (a.action === "skip") {
+    const res = skipRoutine(r.id, at);
     if (res.error) return `Not skipped: ${res.error}`;
     const tz = zoneOf(r);
-    notes.push(`Skipped the next run of "${r.title}"`);
+    notes.push(`Skipped "${r.title}"${res.skipped !== undefined ? ` ${inSentence(whenText(res.skipped, Date.now(), tz))}` : ""}`);
     return `Skipped "${r.title}"${res.skipped !== undefined ? ` ${inSentence(whenText(res.skipped, Date.now(), tz))}` : ""}.${res.nextRunAt !== undefined ? ` Next: ${inSentence(whenText(res.nextRunAt, Date.now(), tz))}.` : ""}`;
   }
   if (a.action === "unskip") {
-    const res = unskipRoutine(r.id);
+    const res = unskipRoutine(r.id, at);
     if (res.error) return `Nothing to undo: ${res.error}`;
-    notes.push(`"${r.title}" runs at its skipped times again`);
-    return `Done: "${r.title}" runs at its skipped times again.${res.nextRunAt !== undefined ? ` Next: ${inSentence(whenText(res.nextRunAt, Date.now(), zoneOf(r)))}.` : ""}`;
+    notes.push(at !== undefined ? `"${r.title}" runs ${inSentence(whenText(at, Date.now(), zoneOf(r)))} again` : `"${r.title}" runs at its skipped times again`);
+    return `Done: "${r.title}" runs ${at !== undefined ? `${inSentence(whenText(at, Date.now(), zoneOf(r)))} after all` : "at its skipped times again"}.${res.nextRunAt !== undefined ? ` Next: ${inSentence(whenText(res.nextRunAt, Date.now(), zoneOf(r)))}.` : ""}`;
   }
   if (a.action === "run_on_mac" || a.action === "run_in_cloud") {
     const mac = a.action === "run_on_mac";
@@ -1388,10 +1392,11 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       }),
       fn(
         "manage_routine",
-        `Run a routine now, pause, resume, skip its next run (skip_next; unskip undoes every skip) or delete it, change where its task runs, or edit it, when ${owner} asks ("run the news check now", "pause it", "skip tomorrow's digest", "stop the water reminder", "run the calendar check on my Mac", "make the digest 8 AM and 5 PM", "move it to Mondays and Fridays", "do the prep 30 minutes before instead"). edit takes a whole new schedule, a title, a goal, quiet or a time zone; the fields it doesn't change are null. It answers with how it went.`,
+        `Run a routine now, pause, resume, skip one of its runs (skip: at is that run's time, null for its next; unskip brings one back, null for all) or delete it, change where its task runs, or edit it, when ${owner} asks ("run the news check now", "pause it", "skip Friday's digest", "do today's after all", "stop the water reminder", "run the calendar check on my Mac", "make the digest 8 AM and 5 PM", "move it to Mondays and Fridays", "do the prep 30 minutes before instead"). edit takes a whole new schedule, a title, a goal, quiet or a time zone; the fields it doesn't change are null. It answers with how it went.`,
         {
           routine_id: { type: "string", description: "The routine's id from the Routines list." },
-          action: { type: "string", enum: ["run_now", "pause", "resume", "skip_next", "unskip", "delete", "run_on_mac", "run_in_cloud", "edit"] },
+          action: { type: "string", enum: ["run_now", "pause", "resume", "skip", "unskip", "delete", "run_on_mac", "run_in_cloud", "edit"] },
+          at: { type: ["string", "null"], description: "For skip and unskip: the run's time as an ISO date-time with the user's UTC offset (e.g. 2026-10-23T09:00:00-04:00), one of the routine's own times. Null: its next run (skip), or every skipped one (unskip)." },
           schedule: { anyOf: [SCHEDULE_PARAMS, { type: "null" }], description: "For edit: the whole new schedule (every field, as for schedule). Null to keep it." },
           title: { type: ["string", "null"], description: "For edit: a new 2-5 word label. Null to keep it." },
           goal: { type: ["string", "null"], description: "For edit: a new complete instruction for each run. Null to keep it." },

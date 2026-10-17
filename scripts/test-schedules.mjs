@@ -1624,6 +1624,83 @@ await check("the Routines list tells the bot what it's skipping", () => {
   clock = saved;
 });
 
+await check("a skipped time moves with the user's zone, and doesn't run there either", async () => {
+  const saved = clock;
+  clock = at("2026-10-19T12:00:00Z"); // Monday 8 AM New York, 5 AM Los Angeles
+  const r = R.createRoutine("bot_main", "Zone digest", "", { kind: "daily", time: "09:00" }, { reminder: "Zone digest" }).routine;
+  const n = state.messages.length;
+  const said = () => msgsSince(n).filter((m) => m.text === "Zone digest").length;
+  R.skipRoutine(r.id); // today 9 AM New York
+  try {
+    process.env.TZ = "America/Los_Angeles";
+    tick();
+    assert.equal(state.owner.timeZone, "America/Los_Angeles");
+    assert.deepEqual(get(r.id).skips, [at("2026-10-19T16:00:00Z")], "9 AM Los Angeles, skipped");
+    eq(get(r.id).nextRunAt, at("2026-10-20T16:00:00Z"), "tomorrow 9 AM Los Angeles");
+    for (const t of ["2026-10-19T13:00:30Z", "2026-10-19T16:00:30Z"]) {
+      clock = at(t);
+      tick();
+      await sleep(10);
+    }
+    assert.equal(said(), 0, "not at 9 AM New York, not at 9 AM Los Angeles");
+  } finally {
+    process.env.TZ = NY;
+  }
+  tick();
+  R.deleteRoutine(r.id);
+  clock = saved;
+});
+
+await check("resume on a routine that's on keeps its skips; a skipped time that comes due anyway doesn't run", async () => {
+  const saved = clock;
+  clock = at("2026-10-19T12:00:00Z");
+  const r = R.createRoutine("bot_main", "Resume digest", "", { kind: "daily", time: "09:00" }, { reminder: "Resume digest" }).routine;
+  const n = state.messages.length;
+  const said = () => msgsSince(n).filter((m) => m.text === "Resume digest").length;
+  R.skipRoutine(r.id);
+  assert.equal(R.setRoutineEnabled(r.id, true).error, undefined);
+  eq(get(r.id).nextRunAt, at("2026-10-20T13:00:00Z"), "still tomorrow");
+  assert.equal(get(r.id).skips.length, 1);
+  // Set as its next some other way: tick still doesn't run it.
+  get(r.id).nextRunAt = at("2026-10-19T13:00:00Z");
+  clock = at("2026-10-19T13:00:30Z");
+  tick();
+  await sleep(10);
+  assert.equal(said(), 0);
+  eq(get(r.id).nextRunAt, at("2026-10-20T13:00:00Z"));
+  R.deleteRoutine(r.id);
+  clock = saved;
+});
+
+await check("a meeting routine's check can't be skipped (the next takes its meetings anyway)", () => {
+  const saved = clock;
+  clock = at("2026-10-19T12:00:00Z");
+  const r = R.createRoutine("bot_main", "Prep", "Prep for meetings", { kind: "before_event", minutes: 15, source: "googlecalendar" }).routine;
+  if (r) {
+    assert.match(R.skipRoutine(r.id).error, /can't be skipped/);
+    R.deleteRoutine(r.id);
+  }
+  clock = saved;
+});
+
+await check("missed while asleep with the next time skipped: it waits past the skip, it doesn't run just before it", async () => {
+  const saved = clock;
+  clock = at("2026-10-19T12:00:00Z"); // Monday 8 AM
+  const r = R.createRoutine("bot_main", "Asleep digest", "", { kind: "daily", time: "09:00" }, { reminder: "Asleep digest" }).routine;
+  const n = state.messages.length;
+  const said = () => msgsSince(n).filter((m) => m.text === "Asleep digest").length;
+  R.skipRoutine(r.id, at("2026-10-20T13:00:00Z")); // Tuesday 9 AM
+  // Asleep from before Monday 9 until Tuesday 8:30.
+  clock = at("2026-10-20T12:30:00Z");
+  tick();
+  await sleep(10);
+  assert.equal(said(), 0, "not at 8:30, just before the skipped 9");
+  assert.equal(get(r.id).last.status, "skipped");
+  eq(get(r.id).nextRunAt, at("2026-10-21T13:00:00Z"), "Wednesday 9 AM");
+  R.deleteRoutine(r.id);
+  clock = saved;
+});
+
 await check("no dashes in anything the user saw", () => {
   for (const m of state.messages) noDashes(m.text, `message: ${m.text}`);
   for (const r of state.routines) {

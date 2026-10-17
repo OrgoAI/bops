@@ -164,6 +164,31 @@ await test("across the clocks going back (Nov 1 in New York): 9 AM stays 9 AM, o
   for (const d of days) assert.equal(W.clockOf(d.items[0].at, NY), "9 AM", d.key);
 });
 
+await test("after a late run took its next time's place: only what will run, and the skip on its own", () => {
+  // Times 9:00, 9:30, 10:00; 9:30 skipped; the 9:00 ran late at 9:10 and took today's place: next is tomorrow 9.
+  const r = routine("late", { kind: "daily", time: "09:00", times: ["09:00", "09:30", "10:00"] }, {
+    nextRunAt: Z("2026-10-20T13:00:00Z"),
+    skips: [Z("2026-10-19T13:30:00Z")],
+    last: { at: Z("2026-10-19T13:10:00Z"), status: "ok" },
+  });
+  const days = W.weekPlan([r], Z("2026-10-19T13:15:00Z"), NY);
+  assert.deepEqual(
+    days[0].items.map((x) => [x.kind, W.clockOf(x.at, NY), x.skipped ?? null]),
+    [
+      ["ran", "9:10 AM", null],
+      ["run", "9:30 AM", true],
+    ],
+    "no 10 AM: it won't run",
+  );
+  assert.equal(days[1].items.length, 3);
+});
+
+await test("a run that started this minute shows at once", () => {
+  const r = routine("now", { kind: "daily", time: "09:00" }, { nextRunAt: Z("2026-10-20T13:00:00Z"), last: { at: now + 30_000, status: "running" } });
+  const days = W.weekPlan([r], now, NY);
+  assert.equal(days[0].items[0].kind, "ran");
+});
+
 await test("the strip and today render: dots, counts, the Now line, Run now, Skip, Undo skip and Pause", () => {
   const a = routine("a", { kind: "daily", time: "09:00" }, { nextRunAt: Z("2026-10-19T13:00:00Z") });
   const b = routine("c", { kind: "daily", time: "10:00" }, { botId: "bot_max", nextRunAt: Z("2026-10-20T14:00:00Z"), skips: [Z("2026-10-19T14:00:00Z")] });
@@ -174,7 +199,7 @@ await test("the strip and today render: dots, counts, the Now line, Run now, Ski
   assert.match(t, /Today, Oct 19 1 run/, "the skipped one isn't counted");
   assert.match(t, /7 AM R g Failed: Gmail signed out/);
   assert.match(t, /Now 8 AM/);
-  assert.match(t, /9 AM R a In the chat · next/);
+  assert.match(t, /9 AM R a In the chat /);
   assert.match(t, /10 AM R c Skipped Undo skip/);
   assert.ok(t.indexOf("R g") < t.indexOf("Now 8 AM") && t.indexOf("Now 8 AM") < t.indexOf("R a"), "what ran, Now, what's coming");
   assert.match(html, /aria-label="Run R a now"/);
