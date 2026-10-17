@@ -2,6 +2,7 @@ import "server-only";
 import { trackServerEvent } from "./analytics";
 import { botChatId, type Routine, type Schedule } from "@/lib/types";
 import { startSession } from "./sessions";
+import { InvalidRoutineScheduleError, validSchedule } from "./routine-schedule";
 import { addMessage, bot, getState, id, ownerName, patchSession, stateReady, update } from "./store";
 
 /**
@@ -55,6 +56,7 @@ export function createRoutine(
   schedule: Schedule,
   opts: { where?: Routine["where"]; reminder?: string; textTo?: Routine["textTo"] } = {},
 ): Routine {
+  if (!validSchedule(schedule)) throw new InvalidRoutineScheduleError();
   const r: Routine = { id: id("rtn"), botId, title, goal, schedule, enabled: true, nextRunAt: nextRun(schedule), where: opts.where, reminder: opts.reminder?.trim() || undefined, textTo: opts.textTo };
   update((s) => s.routines.push(r));
   trackServerEvent("bops_routine_created", {});
