@@ -1614,14 +1614,14 @@ export async function suggestFor(sessionId: string) {
   const s = session(sessionId);
   if (!s?.answer || s.options?.length) return;
   const answer = s.answer;
-  const options = await suggestReplies(s.goal, s.replies.slice(-6), answer, s.botId).catch(() => undefined);
+  const options = await suggestReplies(s.goal, s.replies.slice(-6), answer, s.botId, sessionId).catch(() => undefined);
   if (options?.length && session(sessionId)?.answer === answer) patchSession(sessionId, { options });
 }
 
 /** Two or three replies the user could tap to answer a bot's question, in their words. */
-async function suggestReplies(task: string, recent: Session["replies"], question: string, botId?: string) {
-  const owner = ownerName();
+async function suggestReplies(task: string, recent: Session["replies"], question: string, botId?: string, sessionId?: string) {
   const epoch = stateEpoch();
+  const owner = ownerName();
   const res = await client.responses.create({
     // A few words of a fixed shape: Luna, without reasoning.
     model: LIGHT(),
@@ -1638,7 +1638,7 @@ async function suggestReplies(task: string, recent: Session["replies"], question
       },
     },
   }, usageTags("session", botId));
-  recordTokens("session", res.model, res.usage, botId, epoch);
+  recordTokens("session", res.model, res.usage, botId, epoch, sessionId);
   const { replies } = JSON.parse(res.output_text) as { replies: string[] };
   return replies
     .map((r) => r.trim().replace(/\.$/, ""))
@@ -2190,7 +2190,7 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
   const countTurn = (turnId: string, usage: TokenCount) => {
     if (!usage || seen.has(`turn:${turnId}`)) return;
     seen.add(`turn:${turnId}`);
-    recordTokens("session", model, usage, s?.botId, epoch);
+    recordTokens("session", model, usage, s?.botId, epoch, sessionId);
   };
   try {
     for await (const event of stream as AsyncIterable<{
@@ -2288,7 +2288,7 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
   for (const turnId of turnOwner.keys())
     if (!seen.has(`turn:${turnId}`)) {
       seen.add(`turn:${turnId}`);
-      settleTurn(turnId, agentSessionId, model, s?.botId, epoch);
+      settleTurn(sessionId, turnId, agentSessionId, model, s?.botId, epoch);
     }
   await syncSteps(sessionId, agentSessionId, seen);
   if (creditStopped === AI_CREDIT_EMPTY) throw outOfCreditError();
@@ -2302,13 +2302,13 @@ const settling = new Set<string>();
 const SETTLE_WAITS_MS = [15_000, 30_000, 60_000, 120_000, ...Array<number>(28).fill(240_000)];
 
 /** Record a turn's tokens once it reaches its end, asking again (further apart each time) while it runs. */
-function settleTurn(turnId: string, agentSessionId: string, model: string, botId: string | undefined, epoch: number, attempt = 0) {
+function settleTurn(sessionId: string, turnId: string, agentSessionId: string, model: string, botId: string | undefined, epoch: number, attempt = 0) {
   if (attempt === 0 && settling.has(turnId)) return;
   settling.add(turnId);
   const retry = () => {
     // Another user's state is in memory now (hosted): this turn's tokens aren't theirs, so stop asking.
     if (epoch !== stateEpoch()) settling.delete(turnId);
-    else if (attempt < SETTLE_WAITS_MS.length) setTimeout(() => settleTurn(turnId, agentSessionId, model, botId, epoch, attempt + 1), SETTLE_WAITS_MS[attempt]).unref?.();
+    else if (attempt < SETTLE_WAITS_MS.length) setTimeout(() => settleTurn(sessionId, turnId, agentSessionId, model, botId, epoch, attempt + 1), SETTLE_WAITS_MS[attempt]).unref?.();
     else settling.delete(turnId);
   };
   client.beta.agents.sessions.turns
@@ -2316,7 +2316,7 @@ function settleTurn(turnId: string, agentSessionId: string, model: string, botId
     .then((t) => {
       if (!["completed", "failed", "cancelled"].includes(t.status)) return retry();
       settling.delete(turnId);
-      recordTokens("session", model, t.usage, botId, epoch);
+      recordTokens("session", model, t.usage, botId, epoch, sessionId);
     })
     .catch(retry);
 }
