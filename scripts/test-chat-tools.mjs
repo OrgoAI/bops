@@ -314,7 +314,7 @@ await check("the instructions have the new rules, said once, and none of the old
   assert.deepEqual(tool("schedule").parameters.properties.deliver_to.enum, ["chat", "text", "email", "slack", "telegram", "discord", null]);
   assert.deepEqual(Object.keys(tool("schedule").parameters.properties), tool("schedule").parameters.required, "strict: every field required");
   assert.deepEqual(tool("schedule").parameters.properties.schedule.required, Object.keys(tool("schedule").parameters.properties.schedule.properties));
-  assert.deepEqual(tool("manage_routine").parameters.properties.action.enum, ["run_now", "pause", "resume", "delete", "run_on_mac", "run_in_cloud", "edit"]);
+  assert.deepEqual(tool("manage_routine").parameters.properties.action.enum, ["run_now", "pause", "resume", "skip_next", "unskip", "delete", "run_on_mac", "run_in_cloud", "edit"]);
   assert.deepEqual(Object.keys(tool("manage_routine").parameters.properties), tool("manage_routine").parameters.required, "strict: every field required");
   assert.deepEqual(tool("manage_routine").parameters.properties.schedule.anyOf[1], { type: "null" });
   assert.deepEqual(tool("manage_routine").parameters.properties.schedule.anyOf[0].required, Object.keys(tool("manage_routine").parameters.properties.schedule.anyOf[0].properties));
@@ -742,6 +742,18 @@ await check("manage_routine run_now runs a chat routine now and says how it went
   // Resume: the next time.
   const u = await turnWith("resume it", [toolCall("manage_routine", { routine_id: r.id, action: "resume" })]);
   assert.match(u.out(), /^Resumed "News check"\. Next: .+\.$/);
+  // Skip the next run, then undo it.
+  const due = routines().find((x) => x.id === r.id).nextRunAt;
+  const sk = await turnWith("skip the next one", [toolCall("manage_routine", { routine_id: r.id, action: "skip_next" })]);
+  assert.match(sk.out(), /^Skipped "News check" .+\. Next: .+\.$/);
+  assert.deepEqual(routines().find((x) => x.id === r.id).skips, [due]);
+  assert.ok(routines().find((x) => x.id === r.id).nextRunAt > due);
+  const un = await turnWith("actually run it", [toolCall("manage_routine", { routine_id: r.id, action: "unskip" })]);
+  assert.match(un.out(), /^Done: "News check" runs at its skipped times again\. Next: .+\.$/);
+  assert.equal(routines().find((x) => x.id === r.id).nextRunAt, due);
+  assert.equal(routines().find((x) => x.id === r.id).skips, undefined);
+  const again = await turnWith("undo it", [toolCall("manage_routine", { routine_id: r.id, action: "unskip" })]);
+  assert.match(again.out(), /^Nothing to undo: It isn't skipping that time\.$/);
 });
 
 await check("manage_routine edit: a whole new schedule, a time zone, a title; nulls keep the rest; refusals change nothing", async () => {

@@ -1519,6 +1519,111 @@ await check("the route: create, refuse, run now, edit, pause, delete", async () 
   delete process.env.BOPS_UI_TOKEN;
 });
 
+await check("skip: the next time, a later one, again; it runs at the time after; undo brings one back", async () => {
+  const saved = clock;
+  clock = at("2026-10-19T12:00:00Z"); // Monday 8 AM in New York
+  const r = R.createRoutine("bot_main", "Digest", "", { kind: "daily", time: "09:00" }, { reminder: "Skip test digest" }).routine;
+  const n = state.messages.length;
+  const said = () => msgsSince(n).filter((m) => m.text === "Skip test digest").length;
+  eq(get(r.id).nextRunAt, at("2026-10-19T13:00:00Z"), "today 9 AM");
+  // The next one.
+  let res = R.skipRoutine(r.id);
+  assert.equal(res.error, undefined);
+  eq(res.skipped, at("2026-10-19T13:00:00Z"));
+  eq(get(r.id).nextRunAt, at("2026-10-20T13:00:00Z"), "tomorrow instead");
+  // A later one (Thursday): the next stays.
+  res = R.skipRoutine(r.id, at("2026-10-22T13:00:00Z"));
+  assert.equal(res.error, undefined);
+  eq(get(r.id).nextRunAt, at("2026-10-20T13:00:00Z"));
+  assert.deepEqual(get(r.id).skips, [at("2026-10-19T13:00:00Z"), at("2026-10-22T13:00:00Z")]);
+  // The same one again changes nothing.
+  R.skipRoutine(r.id, at("2026-10-22T13:00:00Z"));
+  assert.equal(get(r.id).skips.length, 2);
+  // Today 9 AM comes: nothing. Tuesday and Wednesday run; Thursday doesn't; Friday does.
+  for (const [day, want] of [
+    ["2026-10-19", 0],
+    ["2026-10-20", 1],
+    ["2026-10-21", 2],
+    ["2026-10-22", 2],
+    ["2026-10-23", 3],
+  ]) {
+    clock = at(`${day}T13:00:30Z`);
+    tick();
+    await sleep(10);
+    assert.equal(said(), want, day);
+  }
+  assert.equal(get(r.id).skips, undefined, "the skipped times went once they passed");
+  // Undo: skip Saturday and Sunday, bring Saturday back.
+  R.skipRoutine(r.id);
+  R.skipRoutine(r.id);
+  eq(get(r.id).nextRunAt, at("2026-10-26T13:00:00Z"), "Monday");
+  res = R.unskipRoutine(r.id, at("2026-10-24T13:00:00Z"));
+  assert.equal(res.error, undefined);
+  eq(get(r.id).nextRunAt, at("2026-10-24T13:00:00Z"), "Saturday again");
+  assert.deepEqual(get(r.id).skips, [at("2026-10-25T13:00:00Z")]);
+  // Undo with no time: every one.
+  R.unskipRoutine(r.id);
+  assert.equal(get(r.id).skips, undefined);
+  eq(get(r.id).nextRunAt, at("2026-10-24T13:00:00Z"));
+  assert.match(R.unskipRoutine(r.id).error, /isn't skipping/);
+  R.deleteRoutine(r.id);
+  clock = saved;
+});
+
+await check("skip says no: a time it doesn't have, one passed, too far ahead, a one-off, paused; pause and a new schedule clear them", () => {
+  const saved = clock;
+  clock = at("2026-10-19T12:00:00Z");
+  const r = R.createRoutine("bot_main", "Digest 2", "", { kind: "daily", time: "09:00" }, { reminder: "x" }).routine;
+  assert.match(R.skipRoutine(r.id, at("2026-10-20T14:00:00Z")).error, /doesn't run at that time/);
+  assert.match(R.skipRoutine(r.id, at("2026-10-19T11:00:00Z")).error, /passed/);
+  assert.match(R.skipRoutine(r.id, at("2026-12-19T14:00:00Z")).error, /5 weeks/);
+  assert.match(R.skipRoutine("rtn_nope").error, /No such routine/);
+  R.skipRoutine(r.id);
+  R.setRoutineEnabled(r.id, false);
+  assert.equal(get(r.id).skips, undefined, "pause clears them");
+  assert.match(R.skipRoutine(r.id).error, /paused/);
+  R.setRoutineEnabled(r.id, true);
+  eq(get(r.id).nextRunAt, at("2026-10-19T13:00:00Z"), "back on today 9 AM");
+  R.skipRoutine(r.id);
+  R.editRoutine(r.id, { schedule: { kind: "daily", time: "10:00" } });
+  assert.equal(get(r.id).skips, undefined, "a new schedule clears them");
+  eq(get(r.id).nextRunAt, at("2026-10-19T14:00:00Z"));
+  R.skipRoutine(r.id);
+  R.editRoutine(r.id, { title: "Digest two" });
+  assert.equal(get(r.id).skips?.length, 1, "a new name doesn't");
+  const once = R.createRoutine("bot_main", "Once", "", { kind: "once", at: at("2026-10-20T13:00:00Z") }, { reminder: "y" }).routine;
+  assert.match(R.skipRoutine(once.id).error, /only once/);
+  for (const x of [r, once]) R.deleteRoutine(x.id);
+  clock = saved;
+});
+
+await check("skip an every routine's beat: the one after, on the beat, inside its hours", () => {
+  const saved = clock;
+  clock = at("2026-10-19T12:00:00Z"); // Monday 8 AM
+  const r = R.createRoutine("bot_main", "Hourly skip", "Look", { kind: "every", minutes: 60, hours: { from: "08:00", to: "20:00" } }).routine;
+  const next = get(r.id).nextRunAt;
+  R.skipRoutine(r.id);
+  eq(get(r.id).nextRunAt, next + H, "the beat after");
+  // The last beat of the day (8 PM): the one after is tomorrow at 8.
+  const last = at("2026-10-20T00:00:00Z");
+  assert.equal(R.skipRoutine(r.id, last).error, undefined);
+  assert.ok(get(r.id).skips.includes(last));
+  assert.match(R.skipRoutine(r.id, last + 30 * 60_000).error, /doesn't run at that time/, "between beats");
+  R.deleteRoutine(r.id);
+  clock = saved;
+});
+
+await check("the Routines list tells the bot what it's skipping", () => {
+  const saved = clock;
+  clock = at("2026-10-19T12:00:00Z");
+  const r = R.createRoutine("bot_main", "Digest 3", "", { kind: "daily", time: "09:00" }, { reminder: "z" }).routine;
+  R.skipRoutine(r.id);
+  const note = R.routinesNote(["bot_main"]);
+  assert.match(note, /Digest 3.*next tomorrow 9 AM · skipping today 9 AM/);
+  R.deleteRoutine(r.id);
+  clock = saved;
+});
+
 await check("no dashes in anything the user saw", () => {
   for (const m of state.messages) noDashes(m.text, `message: ${m.text}`);
   for (const r of state.routines) {

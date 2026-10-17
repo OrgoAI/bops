@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { describeSchedule } from "@/cloud/schedule";
 import { sameApp, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
-import type { AppState, Bot, Schedule, Watch } from "@/lib/types";
+import { runningNow, type AppState, type Bot, type Routine, type Schedule, type Watch } from "@/lib/types";
 import { AppLogo, botApps } from "./apps";
-import { appNameOf, autopilotOf, FilterPill, filterRoutines, monitorNeedsYou, RoutineList, scheduleNeedsYou, sourceApps, TagChips, useOpenRow } from "./autopilot";
+import { appNameOf, autopilotOf, FilterPill, filterRoutines, monitorNeedsYou, RoutineList, scheduleNeedsYou, sourceApps, TagChips, useOpenRow, zoneOf } from "./autopilot";
+import { RoutineWeek, useClock } from "./routine-week";
 import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
 import { Mascot, Spinner } from "./mascot";
 import { Chevron, small, undash } from "./side-group";
@@ -522,10 +523,14 @@ export function BotRoutines({
   onOpenAll: () => void;
   onOpenWatch: (w: Watch) => void;
 }) {
-  useNow(30_000);
+  const now = useClock(30_000);
   const mine = autopilotOf(state, b.id);
   const shown = filterRoutines(state, mine, { app: only ?? undefined });
-  const { openId, toggle, list } = useOpenRow(undefined, undefined, false);
+  // One picked in the week opens below.
+  const [picked, setPicked] = useState<{ id: string; at: number } | null>(null);
+  const { openId, toggle, list } = useOpenRow(picked?.id, picked?.at, !!picked && shown.schedules.some((r) => r.id === picked.id));
+  const tz = state.owner?.timeZone;
+  const zone = useCallback((r: Routine) => zoneOf(r, tz), [tz]);
   const fromApps = sourceApps(mine);
   // Its Connected Apps with routines to offer, then its keys that have some (Stripe, Plain).
   const offers = [
@@ -588,6 +593,20 @@ export function BotRoutines({
                   {appNameOf(state, a)}
                 </FilterPill>
               ))}
+            </div>
+          )}
+          {shown.schedules.length > 0 && (
+            <div className="rounded-2xl bg-white/60 p-3 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]">
+              <RoutineWeek
+                routines={shown.schedules}
+                bots={[b]}
+                tz={tz}
+                now={now}
+                zoneOf={zone}
+                running={(r) => runningNow(r, state.sessions)}
+                needsYou={(r) => scheduleNeedsYou(r, state)}
+                onOpen={(id) => setPicked({ id, at: Date.now() })}
+              />
             </div>
           )}
           <div ref={list}>

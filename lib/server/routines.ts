@@ -286,6 +286,8 @@ export function editRoutine(
     if (schedule) {
       r.schedule = schedule;
       r.nextRunAt = nextRunAt;
+      // Its old times went with the old schedule.
+      delete r.skips;
     }
     if ("timeZone" in patch) {
       if (zone.timeZone) r.timeZone = zone.timeZone;
@@ -301,6 +303,71 @@ export function editRoutine(
   return { routine: r, ...(moved ? { moved: true } : {}) };
 }
 
+/** Whether `t` is one of the times the user skipped (a minute either way). */
+const skipping = (r: Routine, t: number) => !!r.skips?.some((x) => Math.abs(x - t) < 60_000);
+
+/** The time after `t` in a routine's schedule (an "every" one keeps its beat). */
+const after = (r: Routine, t: number, tz?: string) => (r.schedule.kind === "once" ? undefined : nextRun(r.schedule, t, tz, beatOf(r.schedule) !== undefined ? t : undefined));
+
+/** The first of a routine's times from `t` on (`t` itself, then each one after) that it isn't skipping. */
+function pastSkips(r: Routine, t: number | undefined, tz?: string): number | undefined {
+  for (let i = 0; t !== undefined && skipping(r, t) && i <= (r.skips?.length ?? 0); i++) t = after(r, t, tz);
+  return t;
+}
+
+/** How far ahead a time can be skipped. */
+const SKIP_AHEAD_MS = 35 * 24 * 60 * 60_000;
+
+/**
+ * Skip one of a routine's coming times (`at`, else its next): it doesn't run then, and runs at the time
+ * after instead. Only a time it really has (one of its schedule's, from its next on, within 5 weeks), and
+ * not for a one-off (pause or delete it instead). Skipping one again changes nothing.
+ */
+export function skipRoutine(routineId: string, at?: number): { error?: string; skipped?: number; nextRunAt?: number } {
+  const r = routine(routineId);
+  if (!r) return { error: "No such routine." };
+  if (r.schedule.kind === "once") return { error: "It runs only once. Pause or delete it instead." };
+  if (!r.enabled || r.nextRunAt === undefined) return { error: "It's paused, so it has no time to skip." };
+  const tz = zoneOf(r);
+  const now = Date.now();
+  // Its coming times from the first one: the next, or a skipped one before it.
+  let t: number | undefined = Math.min(r.nextRunAt, ...(r.skips ?? []).filter((x) => x > now));
+  const want = at ?? r.nextRunAt;
+  if (!Number.isFinite(want) || want <= now) return { error: "That time has passed." };
+  if (want - now > SKIP_AHEAD_MS) return { error: "Bops can skip a time up to 5 weeks ahead." };
+  for (let i = 0; t !== undefined && t < want - 60_000 && i < 5000; i++) t = after(r, t, tz);
+  if (t === undefined || Math.abs(t - want) >= 60_000) return { error: "It doesn't run at that time." };
+  const skipAt = t;
+  if (skipping(r, skipAt)) return { skipped: skipAt, nextRunAt: r.nextRunAt };
+  const skips = [...(r.skips ?? []).filter((x) => x > now), skipAt].sort((a, b) => a - b);
+  const next = pastSkips({ ...r, skips }, r.nextRunAt, tz);
+  if (next === undefined) return { error: "Then it would never run again." };
+  update(() => {
+    r.skips = skips;
+    r.nextRunAt = next;
+  });
+  routineChanged(r.botId);
+  return { skipped: skipAt, nextRunAt: next };
+}
+
+/** Run at a skipped time after all (`at`; else every one it's skipping): the soonest becomes its next time again. */
+export function unskipRoutine(routineId: string, at?: number): { error?: string; nextRunAt?: number } {
+  const r = routine(routineId);
+  if (!r) return { error: "No such routine." };
+  const now = Date.now();
+  const back = (r.skips ?? []).filter((x) => x > now && (at === undefined || Math.abs(x - at) < 60_000));
+  if (!back.length) return at !== undefined && at <= now ? { error: "That time has passed." } : { error: "It isn't skipping that time." };
+  const rest = (r.skips ?? []).filter((x) => x > now && !back.includes(x));
+  const soonest = Math.min(...back);
+  update(() => {
+    if (rest.length) r.skips = rest;
+    else delete r.skips;
+    if (r.enabled && (r.nextRunAt === undefined || soonest < r.nextRunAt)) r.nextRunAt = soonest;
+  });
+  routineChanged(r.botId);
+  return { nextRunAt: r.nextRunAt };
+}
+
 /**
  * Pause or resume a routine. Resuming works out its next time from now (an "every" one keeps its beat);
  * a "once" routine whose time has passed (it ran, or it was missed) can't resume: it needs a new time.
@@ -312,6 +379,7 @@ export function setRoutineEnabled(routineId: string, enabled: boolean): { error?
     update(() => {
       r.enabled = false;
       r.nextRunAt = undefined;
+      delete r.skips;
     });
     routineChanged(r.botId);
     return {};
@@ -747,14 +815,21 @@ function tick() {
   for (const r of getState().routines.filter((x) => x.enabled)) {
     const tz = zoneOf(r);
     if (r.nextRunAt === undefined) {
-      const next = r.schedule.kind === "once" ? (r.schedule.at > now ? r.schedule.at : undefined) : nextRun(r.schedule, now, tz, r.lastRunAt);
+      const next = r.schedule.kind === "once" ? (r.schedule.at > now ? r.schedule.at : undefined) : pastSkips(r, nextRun(r.schedule, now, tz, r.lastRunAt), tz);
       if (next === undefined) pauseStuck(r, r.schedule.kind === "once" ? "its time had already passed when it was set, so it never ran. Give it a new time." : "its schedule never comes due.");
       else update(() => (r.nextRunAt = next));
       continue;
     }
     if (r.nextRunAt > now) continue;
     const due = r.nextRunAt;
-    const next = r.schedule.kind === "once" ? undefined : nextRun(r.schedule, now, tz, beatOf(r.schedule) !== undefined ? due : undefined);
+    const next = r.schedule.kind === "once" ? undefined : pastSkips(r, nextRun(r.schedule, now, tz, beatOf(r.schedule) !== undefined ? due : undefined), tz);
+    // Skipped times that have passed are done with.
+    if (r.skips?.some((x) => x <= now))
+      update(() => {
+        const left = r.skips?.filter((x) => x > now) ?? [];
+        if (left.length) r.skips = left;
+        else delete r.skips;
+      });
     if (skipLate(r, due, next, now, tz)) {
       update(() => (r.nextRunAt = next));
       // A thread of the routine's still going (a login it waits on) stays its run: the next run waits for it, and its end is the routine's.
@@ -764,7 +839,7 @@ function tick() {
       continue;
     }
     // A late run that ran because the last was skipped too, with its next time close: it takes that one's place, so it doesn't run twice minutes apart.
-    const then = next !== undefined && beatOf(r.schedule) === undefined && now - due > 2 * 60_000 && next - now < LATE_NEXT_MS ? nextRun(r.schedule, next, tz) : next;
+    const then = next !== undefined && beatOf(r.schedule) === undefined && now - due > 2 * 60_000 && next - now < LATE_NEXT_MS ? pastSkips(r, nextRun(r.schedule, next, tz), tz) : next;
     update(() => {
       r.lastRunAt = now;
       r.nextRunAt = then;
@@ -830,6 +905,7 @@ export function routinesNote(botIds: string[]) {
       r.tags?.length ? `sorts with tags ${r.tags.join(", ")}` : "",
       // A one-off is done once its time has passed (Run now before then doesn't finish it).
       r.enabled ? (r.nextRunAt ? `next ${inSentence(whenText(r.nextRunAt, now, tz))}` : "") : r.schedule.kind === "once" && r.schedule.at <= now ? "done" : "paused",
+      r.enabled && r.skips?.some((x) => x > now) ? `skipping ${r.skips.filter((x) => x > now).map((x) => inSentence(whenText(x, now, tz))).join(", ")}` : "",
       r.last ? lastText(r.last, now, tz) : "",
     ]
       .filter(Boolean)

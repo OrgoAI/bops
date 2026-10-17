@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useRef, useState, type AnimationEvent, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type AnimationEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
 import { appNameFor, canonicalApp, sameApp, templateById } from "@/lib/routine-catalog";
@@ -21,8 +21,9 @@ import {
 import { watchName } from "./watch-overlay";
 import { AppLogo, botApps } from "./apps";
 import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
-import { CloseButton, currentWorkspace, needsYou, post, teamOf, useNow } from "./ui";
+import { CloseButton, currentWorkspace, needsYou, post, teamOf } from "./ui";
 import { FooterButton } from "./sidebar-footer";
+import { RoutineWeek, useClock, weekPlan, WeekLetters } from "./routine-week";
 
 /*
  * Routines: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
@@ -80,6 +81,9 @@ export function nextWords(r: Routine, sessions: Session[], tz?: string) {
   if (!r.enabled) return "Paused";
   return r.nextRunAt ? whenText(r.nextRunAt, Date.now(), tz) : describeSchedule(r.schedule, tz);
 }
+
+/** "today 9 AM", "Tue 9 AM": when a time is, inside a sentence. */
+const clockWords = (t: number, tz?: string) => whenText(t, Date.now(), tz).replace(/^(Today|Tomorrow|Yesterday)\b/, (w) => w.toLowerCase());
 
 /** When an on schedule runs next, in words ("Tue 9 AM"), if it does. */
 const nextRunText = (r: Routine, tz?: string) => (r.enabled && r.nextRunAt ? whenText(r.nextRunAt, Date.now(), tz) : null);
@@ -551,19 +555,25 @@ export function AutopilotPage({
   onClose: () => void;
 }) {
   // "Tomorrow 9 AM", "5m ago" stay current.
-  useNow(30_000);
+  const now = useClock(30_000);
   const all = autopilotOf(state);
   const [filter, setFilter] = useState<RoutineFilter>({});
   const team = teamOf(state);
   const shown = filterRoutines(state, all, filter);
+  // A routine picked in the week opens below, as one asked for from outside does.
+  const [picked, setPicked] = useState<{ id: string; at: number } | null>(null);
   // A row asked for that the filter hides: the filter goes, so it shows.
   const [askedAt, setAskedAt] = useState(focusAt);
   if (askedAt !== focusAt) {
     setAskedAt(focusAt);
+    setPicked(null);
     if (focus && ![...shown.schedules, ...shown.monitors].some((x) => x.id === focus)) setFilter({});
   }
-  const there = !!focus && [...shown.schedules, ...shown.monitors].some((x) => x.id === focus);
-  const { openId, toggle, list } = useOpenRow(focus, focusAt, there);
+  const want = picked ?? (focus ? { id: focus, at: focusAt } : null);
+  const there = !!want && [...shown.schedules, ...shown.monitors].some((x) => x.id === want.id);
+  const { openId, toggle, list } = useOpenRow(want?.id, want?.at, there);
+  const tz = state.owner?.timeZone;
+  const zone = useCallback((r: Routine) => zoneOf(r, tz), [tz]);
   const apps = sourceApps(all);
   const needs = filterRoutines(state, all, { needsYou: true });
   const needsN = needs.schedules.length + needs.monitors.length;
@@ -626,6 +636,19 @@ export function AutopilotPage({
               </div>
             )}
           </div>
+        )}
+
+        {shown.schedules.length > 0 && (
+          <RoutineWeek
+            routines={shown.schedules}
+            bots={team}
+            tz={tz}
+            now={now}
+            zoneOf={zone}
+            running={(r) => runningNow(r, state.sessions)}
+            needsYou={(r) => scheduleNeedsYou(r, state)}
+            onOpen={(id) => setPicked({ id, at: Date.now() })}
+          />
         )}
 
         <div ref={list} className="flex flex-col gap-5">
@@ -901,7 +924,7 @@ function BotName({ bot }: { bot?: { id: string; name: string; color: string } })
 }
 
 /** What a row is doing now: which action, while Bops does it. */
-type Busy = null | "run" | "toggle" | "check" | "remove" | "save";
+type Busy = null | "run" | "toggle" | "skip" | "check" | "remove" | "save";
 
 /**
  * What a row's actions share: which one is on its way, what went wrong, and the remove question (asked
@@ -950,6 +973,15 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
   const next = nextRunText(r, tz);
   const ran = r.last;
   const delivery = ran?.delivery;
+  // Its coming week, for the days it runs (a minute is fine enough).
+  const now = useClock(60_000);
+  const minute = Math.floor(now / 60_000);
+  const sig = JSON.stringify([minute, tz, zone, r.enabled, r.nextRunAt, r.schedule, r.skips, r.last?.at]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const week = useMemo(() => weekPlan([r], minute * 60_000, tz, () => zone), [sig]);
+  const color = state.bots.find((b) => b.id === r.botId)?.color;
+  const skips = (r.skips ?? []).filter((x) => x > now);
+  const canSkip = r.enabled && r.nextRunAt !== undefined && r.schedule.kind !== "once" && r.schedule.kind !== "before_event";
   return (
     <PageRow
       id={r.id}
@@ -957,12 +989,11 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
       line={`${describeSchedule(r.schedule, zone)} · ${nextWords(r, state.sessions, tz)}${r.quiet ? " · quiet" : ""}`}
       dim={!r.enabled}
       end={
-        (bad || r.source) && (
-          <>
-            {r.source && <SourceMark state={state} app={r.source.app} />}
-            {bad && <TroubleDot tip={bad} />}
-          </>
-        )
+        <>
+          {r.enabled && <WeekLetters days={week} routineId={r.id} color={color} />}
+          {r.source && <SourceMark state={state} app={r.source.app} />}
+          {bad && <TroubleDot tip={bad} />}
+        </>
       }
       editing={
         editing && (
@@ -1017,6 +1048,26 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
               </span>
             ),
           ],
+          [
+            "Skipping",
+            skips.length > 0 && (
+              <span key="skipping" className="flex flex-wrap items-center gap-1">
+                {skips.map((x) => (
+                  <span key={x} className="inline-flex items-center gap-1 rounded-full bg-[#F2F2F0] py-0.5 pl-2 pr-0.5 text-[12px] leading-4">
+                    <span className="line-through decoration-[#9A9A98]">{whenText(x, now, tz)}</span>
+                    <button
+                      onClick={() => void run("skip", "/api/routines", { id: r.id, action: "unskip", at: x }, "PATCH")}
+                      disabled={!!busy}
+                      aria-label={`Run at ${whenText(x, now, tz)} after all`}
+                      className="rounded-full px-1.5 text-[11.5px] font-medium leading-4 text-ink hover:bg-white disabled:opacity-40"
+                    >
+                      Undo
+                    </button>
+                  </span>
+                ))}
+              </span>
+            ),
+          ],
           ["Runs", howWords(r)],
           ["Quiet", r.quiet ? "Yes: it posts only when there's something for you" : ""],
           ["Results go to", destinations(r, state)],
@@ -1061,6 +1112,16 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
           <button onClick={() => void run("run", "/api/routines", { id: r.id, action: "run" }, "PATCH")} disabled={!!busy || runningNow(r, state.sessions)} className={small("plain")}>
             {busy === "run" ? "Running…" : "Run now"}
           </button>
+          {canSkip && (
+            <button
+              onClick={() => void run("skip", "/api/routines", { id: r.id, action: "skip", at: r.nextRunAt }, "PATCH")}
+              disabled={!!busy}
+              data-tip={r.nextRunAt !== undefined ? `It won't run ${clockWords(r.nextRunAt, tz)}` : undefined}
+              className={small("plain")}
+            >
+              {busy === "skip" ? "Skipping…" : "Skip next"}
+            </button>
+          )}
           {!done(r) && (
             <button onClick={() => void run("toggle", "/api/routines", { id: r.id, enabled: !r.enabled }, "PATCH")} disabled={!!busy} className={small("plain")}>
               {r.enabled ? "Pause" : "Resume"}

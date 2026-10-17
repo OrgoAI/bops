@@ -1,4 +1,4 @@
-import { createRoutine, deleteRoutine, editRoutine, runRoutine, setRoutineEnabled } from "@/lib/server/routines";
+import { createRoutine, deleteRoutine, editRoutine, runRoutine, setRoutineEnabled, skipRoutine, unskipRoutine } from "@/lib/server/routines";
 import { getState } from "@/lib/server/store";
 import type { Delivery, Routine, Schedule } from "@/lib/types";
 import { notReady } from "@/lib/server/ready";
@@ -50,14 +50,22 @@ export async function POST(request: Request) {
 
 /**
  * Change a routine: `{ id, enabled }` pauses or resumes it, `{ id, action: "run" }` runs it now (the
- * answer is how it started: a chat run or a task goes on after), `{ id, edit }` changes its fields (a
- * null deliverTo, procedure or timeZone clears it; a schedule is a whole one, of any kind).
+ * answer is how it started: a chat run or a task goes on after), `{ id, action: "skip", at? }` skips one
+ * of its coming times (its next when `at` isn't given), `{ id, action: "unskip", at? }` runs at a skipped
+ * time after all (every one when `at` isn't given), `{ id, edit }` changes its fields (a null deliverTo,
+ * procedure or timeZone clears it; a schedule is a whole one, of any kind).
  */
 export async function PATCH(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
   if (unready) return unready;
-  const { id, enabled, action, edit } = (await request.json()) as { id?: string; enabled?: boolean; action?: string; edit?: Record<string, unknown> };
+  const { id, enabled, action, edit, at } = (await request.json()) as { id?: string; enabled?: boolean; action?: string; edit?: Record<string, unknown>; at?: unknown };
   if (!id) return bad("id required");
+  if (action === "skip" || action === "unskip") {
+    if (at !== undefined && (typeof at !== "number" || !Number.isFinite(at))) return bad("at must be a time in milliseconds");
+    const done = action === "skip" ? skipRoutine(id, at as number | undefined) : unskipRoutine(id, at as number | undefined);
+    if (done.error) return bad(done.error);
+    return Response.json({ ok: true, ...(done.nextRunAt !== undefined ? { nextRunAt: done.nextRunAt } : {}) });
+  }
   if (action === "run") {
     if (!getState().routines.some((r) => r.id === id)) return bad("No such routine.");
     // Asked for in the app: its result goes where the routine sends it, never to a text or channel turn running meanwhile.

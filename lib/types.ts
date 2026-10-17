@@ -638,6 +638,12 @@ export type Routine = {
   lastRunAt?: number;
   /** Its last run was a late one that took the place of the time after it (routines.ts tick), so the next missed one isn't put off either. */
   lateRun?: boolean;
+  /**
+   * Its times the user skipped (routines.ts skipRoutine): each one of its own coming times, sorted. It
+   * doesn't run then; nextRunAt is the first time it isn't skipping. Pausing it, or changing when it runs,
+   * clears them; each goes once its time has passed.
+   */
+  skips?: number[];
   /** Where its task runs (as the user asked); auto lets Bops decide each time. */
   where?: "auto" | "cloud" | "mac";
   /** A plain reminder: this message is sent to the user at the time, and no computer is used. */
