@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { nextRun } from "@/cloud/schedule";
 import type { Bot, Routine, RoutineRun } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
@@ -12,8 +12,8 @@ import { post } from "./ui";
  * its bot's color, and the picked day's runs in time order (what already ran today with how it went, a
  * Now line, what's coming), each with its bot and Run now, Skip (or Undo for a skipped time) and Pause. A
  * routine that runs many times a day is one line ("Every 15 minutes, 8 AM to 8 PM"); one before meetings
- * is one line on its days. Under the strip, which bot each color is (WeekLegend), which picks one bot's
- * too. Times are in the user's zone. weekPlan is the plan as data, for tests.
+ * is one line on its days. Which bot each color is: the row of bots on the page (WeekLegend), which picks
+ * one bot's too. Times are in the user's zone. weekPlan is the plan as data, for tests.
  */
 
 /** One line in a day. */
@@ -65,6 +65,18 @@ export function dayKey(t: number, tz?: string) {
 /** "9 AM", "9:30 PM". */
 export function clockOf(t: number, tz?: string) {
   return format(tz, { hour: "numeric", minute: "2-digit" }).format(t).replace(":00", "").replace(/\s/g, " ");
+}
+
+/**
+ * When a coming run is, its day and its time to the minute, in zone `tz` as the strip: "Today 5:00 PM",
+ * "Tomorrow 8:30 AM", "Fri 9:00 AM" this week, "Nov 3 9:00 AM" after it (a bot's Coming up, routines.tsx).
+ */
+export function comingWhen(t: number, now: number, tz?: string) {
+  const [y, m, d] = dayKey(now, tz).split("-").map(Number);
+  const [ty, tm, td] = dayKey(t, tz).split("-").map(Number);
+  const ahead = Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(y, m - 1, d)) / 86_400_000);
+  const day = ahead === 0 ? "Today" : ahead === 1 ? "Tomorrow" : ahead > 1 && ahead < 7 ? DOW[new Date(Date.UTC(ty, tm - 1, td, 12)).getUTCDay()] : `${MONTH[tm - 1]} ${td}`;
+  return `${day} ${format(tz, { hour: "numeric", minute: "2-digit" }).format(t).replace(/\s/g, " ")}`;
 }
 
 /** The time after `t` in a routine's schedule (an "every" one keeps its beat), as the server works it out (routines.ts). */
@@ -163,7 +175,7 @@ type Busy = { key: string; what: "run" | "skip" | "unskip" | "pause" } | null;
 /**
  * The week strip and the picked day's runs. `onOpen` opens a routine's row below (its details, Edit, Delete).
  * `bots` colors each run, and with more than one, each line says its bot's name by its mascot; `running`
- * and `needsYou` say a routine's state as the rows do. `legend` goes under the strip (WeekLegend).
+ * and `needsYou` say a routine's state as the rows do.
  */
 export function RoutineWeek({
   routines,
@@ -174,7 +186,6 @@ export function RoutineWeek({
   running,
   needsYou,
   onOpen,
-  legend,
 }: {
   routines: Routine[];
   bots: Bot[];
@@ -184,7 +195,6 @@ export function RoutineWeek({
   running: (r: Routine) => boolean;
   needsYou: (r: Routine) => boolean;
   onOpen: (id: string) => void;
-  legend?: ReactNode;
 }) {
   // Worked out again only when a routine's times change, or the minute does (not on every render).
   const minute = Math.floor(now / 60_000);
@@ -248,8 +258,6 @@ export function RoutineWeek({
           );
         })}
       </div>
-
-      {legend}
 
       <div key={day.key} className="motion-fade-in flex flex-col gap-1.5">
         <span className="flex items-baseline gap-1.5 px-1">
@@ -471,28 +479,60 @@ export function WeekLetters({ days, routineId, color }: { days: DayPlan[]; routi
 /** Tapping a bot in the legend: only its routines, or all of them again when it's the one shown. */
 export const legendPick = (on: string | undefined, botId: string) => (on === botId ? undefined : botId);
 
+/** A pill in the row of bots (WeekLegend), as the page's other filters (autopilot.tsx FilterPill). */
+const PILL =
+  "flex h-7 items-center gap-1.5 rounded-full pr-3 text-[12.5px] font-medium leading-4 outline-none transition-[background-color,opacity] duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] motion-reduce:transition-none";
+
 /**
- * Who runs what, under the strip: each bot with routines, its dot's color, mascot and name. It's the
- * page's bot filter too: tapping one shows only its routines (`on`), tapping it again all of them.
+ * Who runs what: each bot, its dot's color (as in the strip), mascot and name, and with `counts` how many
+ * it runs (one that runs none is quieter). It's the page's bot filter too: tapping one shows only its
+ * routines (`on`), tapping it again all of them. With `all`, an All pill comes first with that count,
+ * and shows them all.
  */
-export function WeekLegend({ bots, on, onPick }: { bots: Bot[]; on?: string; onPick: (botId: string | undefined) => void }) {
+export function WeekLegend({
+  bots,
+  on,
+  onPick,
+  counts,
+  all,
+}: {
+  bots: Bot[];
+  on?: string;
+  onPick: (botId: string | undefined) => void;
+  /** How many routines and monitors each bot runs, by its id. */
+  counts?: Record<string, number>;
+  /** How many every bot runs: there's an All pill with it. */
+  all?: number;
+}) {
+  // Picked: white with an ink ring; the others quieter while one is.
+  const look = (here: boolean, none: boolean) =>
+    here ? "bg-white text-ink shadow-[0_0_0_1.5px_#0A0A0A]" : `bg-[#F2F2F0] hover:bg-[#EAEAE7] ${none ? "text-[#9A9A98]" : "text-[#3A3A38]"} ${on ? "opacity-60 hover:opacity-100" : ""}`;
   return (
     <div role="group" aria-label="Bots" className="flex flex-wrap gap-1.5">
+      {all !== undefined && (
+        <button onClick={() => onPick(undefined)} aria-pressed={!on} data-tip="Show every bot's routines" className={`${PILL} pl-3 ${look(!on, false)}`}>
+          All
+          <span className="tabular-nums text-[#9A9A98]">{all}</span>
+        </button>
+      )}
       {bots.map((b) => {
         const here = on === b.id;
+        const n = counts?.[b.id];
+        const none = n === 0;
         return (
           <button
             key={b.id}
             onClick={() => onPick(legendPick(on, b.id))}
             aria-pressed={here}
             data-tip={here ? "Show every bot's routines" : `Show only ${b.name}'s routines`}
-            className={`flex h-7 items-center gap-1.5 rounded-full pl-2.5 pr-3 text-[12.5px] font-medium leading-4 outline-none transition-[background-color,opacity] duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] motion-reduce:transition-none ${
-              here ? "bg-white text-ink shadow-[0_0_0_1.5px_#0A0A0A]" : `bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7] ${on ? "opacity-60 hover:opacity-100" : ""}`
-            }`}
+            className={`${PILL} pl-2.5 ${look(here, none)}`}
           >
-            <span aria-hidden style={{ background: dotOf(b.color, false) }} className="size-[6px] shrink-0 rounded-full" />
-            <Mascot botId={b.id} color={b.color} size={16} antenna={false} />
+            <span aria-hidden style={{ background: dotOf(b.color, false) }} className={`size-[6px] shrink-0 rounded-full ${none ? "opacity-40" : ""}`} />
+            <span className={`flex ${none ? "opacity-60" : ""}`}>
+              <Mascot botId={b.id} color={b.color} size={16} antenna={false} />
+            </span>
             {b.name}
+            {n !== undefined && <span className="tabular-nums text-[#9A9A98]">{n}</span>}
           </button>
         );
       })}

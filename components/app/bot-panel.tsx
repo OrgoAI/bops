@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { botChatId, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session, type Watch } from "@/lib/types";
+import { botChatId, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
 import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
@@ -37,7 +37,7 @@ export function BotPanel({
   onOpenKeys,
   onOpenAutopilot,
   onOpenSkills,
-  onOpenWatch,
+  onAsk,
   onUpgrade,
   onClose,
 }: {
@@ -52,12 +52,12 @@ export function BotPanel({
   onOpenComputer: (botId: string) => void;
   /** Open Settings at Keys, to add a key for this bot. */
   onOpenKeys: (botId: string) => void;
-  /** Open the workspace's Routines page at a section, and at one of its rows (a schedule or monitor). */
-  onOpenAutopilot: (section: AutopilotSection, item?: string) => void;
+  /** Open the workspace's Routines page at a section, at one of its rows (a schedule or monitor), and at one bot's. */
+  onOpenAutopilot: (section: AutopilotSection, item?: string, bot?: string) => void;
   /** Open Skills, in Knowledge, at one of them ("skill:<slug>"). */
   onOpenSkills: (focus?: string) => void;
-  /** Show a watched screen or Mac window (bops-app.tsx showWatch). */
-  onOpenWatch: (w: Watch) => void;
+  /** Ask a bot: its chat, with `text` in the message box to change and send (bops-app.tsx askBot). */
+  onAsk: (botId: string, text?: string) => void;
   /** Open the plans (Account), where Pro and Max are bought. */
   onUpgrade: () => void;
   /** Leave the profile, back to where you were (its X; Esc does it too, see bops-app.tsx). */
@@ -106,7 +106,7 @@ export function BotPanel({
       </div>
       {tab === "skills" && <BotSkills state={state} bot={b} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenKeys={onOpenKeys} onOpenSkills={onOpenSkills} />}
       {tab === "routines" && (
-        <BotRoutines state={state} bot={b} app={app} onApp={(a) => setOnly({ bot: b.id, app: a })} onOpenAll={() => onOpenAutopilot("schedules")} onOpenWatch={onOpenWatch} />
+        <BotRoutines state={state} bot={b} app={app} onApp={(a) => setOnly({ bot: b.id, app: a })} onOpenAutopilot={onOpenAutopilot} onAsk={onAsk} />
       )}
       {tab === "memory" && <BotMemory state={state} bot={b} onOpenThread={onOpenThread} />}
       {tab === "phone" && <Phone bot={b} />}

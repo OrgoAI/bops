@@ -190,6 +190,8 @@ export function ChatView({
   call,
   onCall,
   callSlot,
+  prefill,
+  onPrefilled,
 }: {
   state: AppState;
   chat: Chat;
@@ -209,8 +211,36 @@ export function ChatView({
   onCall: (botId: string) => void;
   /** Where the call bar sits while you're in the caller's chat (the app draws it there). */
   callSlot: (el: HTMLElement | null) => void;
+  /**
+   * Words asked to be in chat `chatId`'s message box (bops-app.tsx askBot), to change and send: put in
+   * once, after what's typed already, on a line of its own, and the box focused. `at` tells one ask from
+   * the next, so it's never put in again; `onPrefilled` says it's in.
+   */
+  prefill?: { chatId: string; text: string; at: number } | null;
+  onPrefilled?: () => void;
 }) {
   const [draft, setDraft] = useState("");
+  // The last ask put in the box (its prefill.at): in once, while this chat shows, then left alone.
+  const [prefilled, setPrefilled] = useState<number | null>(null);
+  if (prefill && prefill.chatId === c.id && prefilled !== prefill.at) {
+    setPrefilled(prefill.at);
+    const add = prefill.text;
+    if (add) setDraft((d) => (d.trim() ? `${d.trimEnd()}\n${add}` : add));
+  }
+  // Kept current for the effect below, which runs once for each ask.
+  const prefilledDone = useRef(onPrefilled);
+  useLayoutEffect(() => {
+    prefilledDone.current = onPrefilled;
+  });
+  useEffect(() => {
+    if (prefilled === null) return;
+    const box = document.getElementById("composer");
+    if (box instanceof HTMLTextAreaElement) {
+      box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
+    }
+    prefilledDone.current?.();
+  }, [prefilled]);
   // The message an inline reply is to (iMessage's swipe-to-reply), and the reply view that's open.
   const [replyingTo, setReplying] = useState<Message | null>(null);
   const [repliesOpen, setRepliesOpen] = useState<string | null>(null);

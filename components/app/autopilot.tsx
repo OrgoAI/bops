@@ -4,7 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type Anima
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
 import { appNameFor, canonicalApp, sameApp, templateById } from "@/lib/routine-catalog";
-import { DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
+import { botChatId, DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
 import { Fold } from "./fold";
 import { Mascot } from "./mascot";
 import {
@@ -19,7 +19,7 @@ import {
   usePop,
 } from "./side-group";
 import { watchName } from "./watch-overlay";
-import { AppLogo, botApps } from "./apps";
+import { AppLogo, BotChip, botApps } from "./apps";
 import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
 import { CloseButton, currentWorkspace, needsYou, post, teamOf } from "./ui";
 import { FooterButton } from "./sidebar-footer";
@@ -30,16 +30,18 @@ import { RoutineWeek, useClock, weekPlan, WeekLegend, WeekLetters } from "./rout
  * in the chat, or a task on a computer, at set times) and Monitors (watches: a bot's screen, a window on the
  * user's Mac, or a web page with no screen). One bot owns each. How a bot does a kind of job is a skill
  * now, in Skills, in Knowledge (skills.tsx). In the sidebar, a round button in the footer beside Knowledge
- * (AutopilotButton), and the matches while it searches (AutopilotSections); on the right, a page with every bot's, grouped
- * by bot and filtered by bot, Connected App or what needs the user, each opening in place with what can be
- * done to it (AutopilotPage). A bot's own are on its profile too (routines.tsx). All read the app's state
- * (useAppState), so they're as current as everything else. (Called Autopilot before; the code keeps the name.)
+ * (AutopilotButton), and the matches while it searches (AutopilotSections); on the right, a page with
+ * every bot's in one list, each row ending with the bot that runs it, filtered by bot, Connected App or
+ * what needs the user, each opening in place with what can be done to it (AutopilotPage), and what to ask
+ * for while there's nothing (RoutinesEmpty). A bot's own, in short, are on its profile too (routines.tsx).
+ * All read the app's state (useAppState), so they're as current as everything else. (Called Autopilot
+ * before; the code keeps the name.)
  */
 
 export type AutopilotSection = "schedules" | "monitors";
 
-/** Open the page on the right (bops-app.tsx): at a section, and at one of its rows. */
-export type AutopilotOpen = { section: AutopilotSection; focus?: string };
+/** Open the page on the right (bops-app.tsx): at a section, at one of its rows, and at one bot's. */
+export type AutopilotOpen = { section: AutopilotSection; focus?: string; bot?: string };
 
 export const GROUP_NAME = "Routines";
 
@@ -485,8 +487,10 @@ export function FilterPill({ on, onClick, children }: { on: boolean; onClick: ()
 }
 
 /**
- * Schedules then monitors, one card (on a page, or a bot's Routines): each row opens in place. Opening a
- * page's news is seeing it (a screen's is seen where it shows: Show it).
+ * Schedules then monitors, one card (on the Routines page, or an app's in the Vault): each row opens in
+ * place. Opening a page's news is seeing it (a screen's is seen where it shows: Show it). `chips`: each
+ * row ends with the bot that runs it as a chip, as a key's row says its bots (the page's one list), in
+ * place of its mascot before the name.
  */
 export function RoutineList({
   state,
@@ -495,6 +499,7 @@ export function RoutineList({
   openId,
   onToggle,
   onOpenWatch,
+  chips = false,
   className = "shadow-[0_0_0_1px_#ECECEA]",
 }: {
   state: AppState;
@@ -503,6 +508,7 @@ export function RoutineList({
   openId: string | null;
   onToggle: (id: string) => void;
   onOpenWatch: (w: Watch) => void;
+  chips?: boolean;
   className?: string;
 }) {
   const tz = state.owner?.timeZone;
@@ -511,13 +517,14 @@ export function RoutineList({
   return (
     <div className={`flex flex-col overflow-hidden rounded-2xl ${className}`}>
       {schedules.map((r, i) => (
-        <ScheduleRow key={r.id} routine={r} state={state} tz={tz} last={i === n - 1} open={openId === r.id} onToggle={() => onToggle(r.id)} />
+        <ScheduleRow key={r.id} routine={r} state={state} tz={tz} chip={chips} last={i === n - 1} open={openId === r.id} onToggle={() => onToggle(r.id)} />
       ))}
       {monitors.map((w, i) => (
         <MonitorRow
           key={w.id}
           watch={w}
           state={state}
+          chip={chips}
           last={schedules.length + i === n - 1}
           open={openId === w.id}
           onToggle={() => {
@@ -531,62 +538,141 @@ export function RoutineList({
   );
 }
 
+/** Things to ask a bot for, to start from: each goes in its message box to change before it's sent. */
+const ASKS = ["Every weekday at 8:30, summarize my inbox", "Every Friday at 5 PM, send me what we did this week", "Watch a page and tell me when the price drops"];
+
+/** The bot to ask in RoutinesEmpty, while it has a chat to put the words in (else no asks, rather than another bot's chat). */
+export const askable = (state: AppState, b?: Bot) => (b && state.chats.some((c) => c.id === botChatId(b.id)) ? b : undefined);
+
 /**
- * Routines as a page on the right (one tab per workspace): every bot's schedules and monitors, grouped
- * by bot under its mascot and name, each opening in place to say how it works and how it went, with what
- * can be done to it. Filters: a bot (the week's legend, which says whose each color is; on top when there's
- * no week), a Connected App they came from, and Needs you (a failed run or delivery, a run waiting on the
- * user, a page that can't be read). How a bot does each kind of job is a skill: a link goes there.
+ * Nothing runs yet: a bot's (its Routines tab, or the one picked on the page) or the whole workspace's.
+ * Its mascot (the workspace's: its main bot's), what to ask for, and the way to start: `children` when
+ * there's something to offer (a bot's Connected Apps with starter routines), else a few asks that open
+ * `asks`'s chat with one in the message box, not sent, and Ask <name> that opens it with nothing typed.
+ */
+export function RoutinesEmpty({ bot, asks, onAsk, children }: { bot?: Bot; asks?: Bot; onAsk?: (botId: string, text?: string) => void; children?: ReactNode }) {
+  const face = bot ?? (asks?.isMain ? asks : undefined);
+  return (
+    <div data-empty className="flex flex-col items-center gap-3 py-10 text-center">
+      <Mascot botId={face?.id ?? "boppy"} color={face?.color ?? "#0A0A0A"} size={52} />
+      <span className="flex max-w-[340px] flex-col gap-1">
+        <span className="text-[15px] font-semibold leading-5 text-ink">{bot ? `${bot.name} has no routines yet` : "No routines yet"}</span>
+        <span className="text-[13.5px] leading-5 text-[#6B6B6B]">{`Ask ${bot ? bot.name : "a bot"} to do something on a schedule, or to watch a page`}</span>
+      </span>
+      {/* What it offers, else the asks. */}
+      {children ||
+        (asks && onAsk && (
+          <div className="flex flex-col items-center gap-3 pt-1">
+            <div role="group" aria-label="Things to ask" className="flex max-w-[440px] flex-wrap justify-center gap-1.5">
+              {ASKS.map((a) => (
+                <button
+                  key={a}
+                  onClick={() => onAsk(asks.id, a)}
+                  data-tip={`Opens ${asks.name}'s chat with this typed, not sent`}
+                  className="rounded-full bg-[#F2F2F0] px-3 py-1.5 text-[12.5px] leading-4 text-[#3A3A38] outline-none transition-colors duration-150 ease-out hover:bg-[#EAEAE7] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] motion-reduce:transition-none"
+                >
+                  {a}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => onAsk(asks.id)}
+              className="rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white outline-none hover:bg-[#2A2A28] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A,0_0_0_3px_#FFFFFF_inset]"
+            >
+              Ask {asks.name}
+            </button>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+/**
+ * Routines as a page on the right (one tab per workspace): every bot's schedules and monitors in one
+ * list, as the Vault lists keys, each row ending with the bot that runs it and opening in place to say
+ * how it works and how it went, with what can be done to it. Filters: a bot (a row of every bot with how
+ * many each runs, on top, which is the week's legend too: whose each color is; `bot` picks one when the
+ * page is asked for at it, from a bot's profile), a Connected App they came from, and Needs you (a failed
+ * run or delivery, a run waiting on the user, a page that can't be read). Nothing yet, for the workspace
+ * or the bot picked: what to ask for, and a way to ask (RoutinesEmpty). How a bot does each job is a
+ * skill: a link goes there.
  */
 export function AutopilotPage({
   state,
   focus,
   focusAt,
+  bot,
+  onBot,
   onOpenWatch,
   onOpenSkills,
+  onAsk,
   onClose,
 }: {
   state: AppState;
   focus?: string;
   focusAt?: number;
+  /**
+   * The bot whose to show: the one the page was asked for at (a new one with focusAt, none for all), and
+   * after that the one the user picked, kept on the tab (onBot) so coming back to it shows the same.
+   */
+  bot?: string;
+  /** The bot shown changed on the page (picked, cleared): keep it on the tab. */
+  onBot: (bot?: string) => void;
   /** Show a watched screen or Mac window (bops-app.tsx showWatch). */
   onOpenWatch: (w: Watch) => void;
   /** Skills, in Knowledge, where procedures went. */
   onOpenSkills: () => void;
+  /** Ask a bot: its chat, with `text` in the message box to change and send (bops-app.tsx askBot). */
+  onAsk: (botId: string, text?: string) => void;
   onClose: () => void;
 }) {
   // "Tomorrow 9 AM", "5m ago" stay current.
   const now = useClock(30_000);
   const all = autopilotOf(state);
-  const [filter, setFilter] = useState<RoutineFilter>({});
   const team = teamOf(state);
-  const shown = filterRoutines(state, all, filter);
+  // The filter asked for (the bot's, or the one there was), unless it hides the row asked for: then none, so that row shows.
+  const fit = (f: RoutineFilter): RoutineFilter => {
+    if (!focus) return f;
+    const s = filterRoutines(state, all, f);
+    return [...s.schedules, ...s.monitors].some((x) => x.id === focus) ? f : {};
+  };
+  const [filter, setFilter] = useState<RoutineFilter>(() => fit(bot ? { bot } : {}));
   // A routine picked in the week opens below, as one asked for from outside does.
   const [picked, setPicked] = useState<{ id: string; at: number } | null>(null);
-  // A row asked for that the filter hides: the filter goes, so it shows.
   const [askedAt, setAskedAt] = useState(focusAt);
   if (askedAt !== focusAt) {
     setAskedAt(focusAt);
     setPicked(null);
-    if (focus && ![...shown.schedules, ...shown.monitors].some((x) => x.id === focus)) setFilter({});
+    // Asked again at the same bot (a row's link): the filters stay; at another bot, or all: just that.
+    setFilter(fit(bot === filter.bot ? filter : bot ? { bot } : {}));
   }
+  // The tab keeps the bot shown, for when the page comes back.
+  useEffect(() => {
+    if (filter.bot !== bot) onBot(filter.bot);
+  }, [filter.bot, bot, onBot]);
+  // A bot since deleted shows as none picked.
+  const botOn = team.some((b) => b.id === filter.bot) ? filter.bot : undefined;
+  const shown = filterRoutines(state, all, { ...filter, bot: botOn });
   const want = picked ?? (focus ? { id: focus, at: focusAt } : null);
   const there = !!want && [...shown.schedules, ...shown.monitors].some((x) => x.id === want.id);
   const { openId, toggle, list } = useOpenRow(want?.id, want?.at, there);
   const tz = state.owner?.timeZone;
   const zone = useCallback((r: Routine) => zoneOf(r, tz), [tz]);
-  const apps = sourceApps(all);
-  const needs = filterRoutines(state, all, { needsYou: true });
+  // The Connected Apps and Needs you for the bot shown (all of them: every bot's); one that's on stays, to turn off.
+  const ofBot = filterRoutines(state, all, { bot: botOn });
+  const apps = [...new Set([...sourceApps(ofBot), ...(filter.app ? [filter.app] : [])])];
+  const needs = filterRoutines(state, ofBot, { needsYou: true });
   const needsN = needs.schedules.length + needs.monitors.length;
   const total = all.schedules.length + all.monitors.length;
-  const owners = team.filter((b) => all.schedules.some((r) => r.botId === b.id) || all.monitors.some((w) => w.botId === b.id));
-  const groups = team
-    .map((b) => ({ bot: b, schedules: shown.schedules.filter((r) => r.botId === b.id), monitors: shown.monitors.filter((w) => w.botId === b.id) }))
-    .filter((g) => g.schedules.length + g.monitors.length);
-  // With more than one bot, whose each color is, which picks one bot's too: under the week, else on top.
-  const legend = owners.length > 1 ? <WeekLegend bots={owners} on={filter.bot} onPick={(bot) => setFilter({ ...filter, bot })} /> : null;
+  // How many each bot runs, for the row of bots.
+  const counts = Object.fromEntries(team.map((b) => [b.id, all.schedules.filter((r) => r.botId === b.id).length + all.monitors.filter((w) => w.botId === b.id).length]));
+  const pickedBot = botOn ? team.find((b) => b.id === botOn) : undefined;
+  // Asks for the whole workspace go to its main bot.
+  const main = team.find((b) => b.isMain) ?? team[0];
+  // Each row's bot as a chip only while more than one bot's are shown (one bot's: its mascot leads).
+  const chips = team.length > 1 && !pickedBot;
   const week = shown.schedules.length > 0;
-  const appFilters = apps.length > 0 || needsN > 0 || !!filter.needsYou;
+  const appFilters = total > 0 && (apps.length > 0 || needsN > 0 || !!filter.needsYou);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
@@ -598,19 +684,23 @@ export function AutopilotPage({
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{GROUP_NAME}</span>
             <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
-              What your bots do on their own. How they do each kind of job is in{" "}
-              <button onClick={onOpenSkills} className="font-medium text-ink underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink">
-                Skills
-              </button>
-              , in Knowledge.
+              What your bots do on their own. How they do each job is in{" "}
+              {/* The link and its period together, so the period never starts a line on its own. */}
+              <span className="whitespace-nowrap">
+                <button onClick={onOpenSkills} className="font-medium text-ink underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink">
+                  Skills
+                </button>
+                .
+              </span>
             </span>
           </div>
           <CloseButton onClick={onClose} className="mt-1.5" />
         </div>
 
-        {total > 0 && ((!week && legend) || appFilters) && (
+        {(team.length > 1 || appFilters) && (
           <div className="flex flex-col gap-2">
-            {!week && legend}
+            {/* Every bot, with how many each runs: whose each color in the week is, and which bot's to show. */}
+            {team.length > 1 && <WeekLegend bots={team} on={botOn} counts={counts} all={total} onPick={(bot) => setFilter({ ...filter, bot })} />}
             {appFilters && (
               <div className="flex flex-wrap gap-1.5" role="group" aria-label="Connected App and Needs you">
                 {(needsN > 0 || filter.needsYou) && (
@@ -633,27 +723,23 @@ export function AutopilotPage({
         {week && (
           <RoutineWeek
             routines={shown.schedules}
-            bots={team}
+            // One bot's: its lines needn't say its name.
+            bots={pickedBot ? [pickedBot] : team}
             tz={tz}
             now={now}
             zoneOf={zone}
             running={(r) => runningNow(r, state.sessions)}
             needsYou={(r) => scheduleNeedsYou(r, state)}
             onOpen={(id) => setPicked({ id, at: Date.now() })}
-            legend={legend}
           />
         )}
 
         <div ref={list} className="flex flex-col gap-5">
-          {!total ? (
-            <div className="flex flex-col items-center gap-3 py-12 text-center">
-              <Mascot botId="boppy" color="#0A0A0A" size={52} />
-              <span className="flex max-w-[340px] flex-col gap-1 text-[13.5px] leading-5">
-                <span className="text-[#6B6B6B]">Ask a bot to do something on a schedule, or to watch a page</span>
-                <span className="text-[#9A9A98]">Try: every weekday at 8:30, summarize my inbox</span>
-              </span>
-            </div>
-          ) : !groups.length ? (
+          {pickedBot && !counts[pickedBot.id] ? (
+            <RoutinesEmpty bot={pickedBot} asks={askable(state, pickedBot)} onAsk={onAsk} />
+          ) : !total ? (
+            <RoutinesEmpty asks={askable(state, main)} onAsk={onAsk} />
+          ) : !shown.schedules.length && !shown.monitors.length ? (
             <div className="flex flex-col items-center gap-2 py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">
               Nothing matches these filters
               <button onClick={() => setFilter({})} className={small("plain")}>
@@ -661,15 +747,8 @@ export function AutopilotPage({
               </button>
             </div>
           ) : (
-            groups.map((g) => (
-              <div key={g.bot.id} className="flex flex-col gap-2">
-                <span data-bot-head className="flex items-center gap-2 px-1 text-[13px] font-semibold leading-4 text-ink">
-                  <Mascot botId={g.bot.id} color={g.bot.color} size={20} antenna={false} />
-                  {g.bot.name} <span className="font-normal tabular-nums text-[#9A9A98]">{g.schedules.length + g.monitors.length}</span>
-                </span>
-                <RoutineList state={state} schedules={g.schedules} monitors={g.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} />
-              </div>
-            ))
+            // One list, in its order, each row with the bot that runs it (the row of bots above picks one).
+            <RoutineList state={state} schedules={shown.schedules} monitors={shown.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} chips={chips} />
           )}
         </div>
       </div>
@@ -968,8 +1047,28 @@ function ErrorLine({ text }: { text: string | null }) {
   );
 }
 
-/** A schedule on the page: what it asks, its bot, when and how it runs, where results go, how its last run and delivery went; Run now, Pause or Resume, Delete. */
-export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { routine: Routine; state: AppState; tz?: string; last: boolean; open: boolean; onToggle: () => void }) {
+/**
+ * A schedule on the page: what it asks, its bot (its mascot before the name, or with `chip` a chip at
+ * the end), when and how it runs, where results go, how its last run and delivery went; Run now, Pause
+ * or Resume, Delete.
+ */
+export function ScheduleRow({
+  routine: r,
+  state,
+  tz,
+  chip = false,
+  last,
+  open,
+  onToggle,
+}: {
+  routine: Routine;
+  state: AppState;
+  tz?: string;
+  chip?: boolean;
+  last: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
   const { busy, error, setError, sure, setSure, removeButton, run, cancelRemove } = useActions(open);
   const [editing, setEditing] = useState(false);
   // Changing only when it runs, in place on its When.
@@ -993,7 +1092,7 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
   return (
     <PageRow
       id={r.id}
-      lead={<BotMark bot={bot} />}
+      lead={chip ? undefined : <BotMark bot={bot} />}
       title={undash(r.title)}
       line={`${describeSchedule(r.schedule, zone)} · ${nextWords(r, state.sessions, tz)}${r.quiet ? " · quiet" : ""}`}
       dim={!r.enabled}
@@ -1002,6 +1101,7 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
           {r.enabled && <WeekLetters days={week} routineId={r.id} color={color} />}
           {r.source && <SourceMark state={state} app={r.source.app} />}
           {bad && <TroubleDot tip={bad} />}
+          {chip && bot && <BotChip bot={bot} tip={`Runs as ${bot.name}`} />}
         </>
       }
       editing={
@@ -1151,8 +1251,28 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
   );
 }
 
-/** A monitor on the page: its bot, what it watches (a page opens in the browser), what for, how often and when it last looked, its news or trouble; Show it, Check now, Pause or Resume, Stop. */
-export function MonitorRow({ watch: w, state, last, open, onToggle, onShow }: { watch: Watch; state: AppState; last: boolean; open: boolean; onToggle: () => void; onShow: () => void }) {
+/**
+ * A monitor on the page: its bot (its mascot before the name, or with `chip` a chip at the end), what it
+ * watches (a page opens in the browser), what for, how often and when it last looked, its news or
+ * trouble; Show it, Check now, Pause or Resume, Stop.
+ */
+export function MonitorRow({
+  watch: w,
+  state,
+  chip = false,
+  last,
+  open,
+  onToggle,
+  onShow,
+}: {
+  watch: Watch;
+  state: AppState;
+  chip?: boolean;
+  last: boolean;
+  open: boolean;
+  onToggle: () => void;
+  onShow: () => void;
+}) {
   const { busy, error, sure, setSure, removeButton, run, cancelRemove } = useActions(open);
   // What Check now found when there was nothing new (a failure shows as the error).
   const [found, setFound] = useState<string | null>(null);
@@ -1173,7 +1293,7 @@ export function MonitorRow({ watch: w, state, last, open, onToggle, onShow }: { 
   return (
     <PageRow
       id={w.id}
-      lead={<BotMark bot={bot} />}
+      lead={chip ? undefined : <BotMark bot={bot} />}
       title={watchName(w)}
       line={undash(w.lookFor)}
       dim={!!w.paused || !!w.away}
@@ -1181,6 +1301,7 @@ export function MonitorRow({ watch: w, state, last, open, onToggle, onShow }: { 
         <>
           {w.source && <SourceMark state={state} app={w.source.app} />}
           {w.alert ? <NewPill /> : page?.error && !w.paused ? <TroubleDot tip={`Couldn't read the page: ${undash(page.error)}`} /> : null}
+          {chip && bot && <BotChip bot={bot} tip={`Runs as ${bot.name}`} />}
         </>
       }
       last={last}

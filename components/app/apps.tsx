@@ -301,6 +301,19 @@ function ChipMenu({ anchor, label, onClose, children }: { anchor: () => HTMLElem
 
 const menuItem = "flex h-7 items-center gap-2 rounded-lg px-2 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F2F2F0]";
 
+/** A bot's chip: its mascot and name, small and round (BotChips, and BotChip). */
+const CHIP = "flex h-6 items-center gap-1 rounded-full bg-[#F4F4F2] pl-[3px] pr-2 text-[12px] font-medium leading-4 text-[#3A3A38]";
+
+/** A bot as a chip that only says who, nothing to open (a routine's row on the Routines page): `tip` on hover. */
+export function BotChip({ bot, tip }: { bot: Bot; tip: string }) {
+  return (
+    <span data-tip={tip} className={`${CHIP} shrink-0`}>
+      <Mascot botId={bot.id} color={bot.color} size={18} antenna={false} />
+      {bot.name}
+    </span>
+  );
+}
+
 /**
  * Who can use something (an account, or a key in keys.tsx): a chip for each bot that can (mascot, name,
  * and a quiet `note` such as "read only"), and a quiet "+N" for the rest. A chip opens a tiny menu of
@@ -350,7 +363,7 @@ export function BotChips<T extends string>({
             disabled={disabled}
             data-tip={`${b.name}: ${choices.find((c) => c.id === level(b))?.name ?? ""}`}
             onClick={() => setOpen(open === b.id ? null : b.id)}
-            className="flex h-6 items-center gap-1 rounded-full bg-[#F4F4F2] pl-[3px] pr-2 text-[12px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-[#EDEDEA] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50"
+            className={`${CHIP} outline-none hover:bg-[#EDEDEA] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50`}
           >
             <Mascot botId={b.id} color={b.color} size={18} antenna={false} />
             {b.name}

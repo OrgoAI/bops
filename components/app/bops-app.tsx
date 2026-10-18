@@ -97,6 +97,8 @@ const tabId = () => `tab_${Date.now().toString(36)}${Math.random().toString(36).
 function Bops({ state }: { state: AppState | null }) {
   // Empty until a chat is picked: the workspace's main bot's chat shows (see `chat` below).
   const [chatId, setChatId] = useState("");
+  // What to put in a chat's message box once, to change and send (askBot; ChatView prefill): until it's in.
+  const [prefill, setPrefill] = useState<{ chatId: string; text: string; at: number } | null>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
   // Closed by any way (Esc, a chat opened, its own close): the thread sheet's next opening plays its entrance again.
   useEffect(() => {
@@ -453,15 +455,16 @@ function Bops({ state }: { state: AppState | null }) {
   };
   /**
    * What the bots do on their own (autopilot.tsx): the workspace's one Routines tab, switched to the
-   * section asked for, at the row asked for, or opened.
+   * section asked for, at the row asked for and showing only the bot asked for (from its profile), or opened.
+   * `bot` null is every bot's (the sidebar: the whole workspace); left out, the bot shown stays.
    */
-  const openAutopilot = (section: AutopilotSection, item?: string) => {
+  const openAutopilot = (section: AutopilotSection, item?: string, bot?: string | null) => {
     const ws = currentWorkspace(state);
     const focusAt = Date.now();
     openTab(
       (t) => t.kind === "autopilot" && t.ws === ws,
-      () => ({ id: tabId(), kind: "autopilot", ws, section, focus: item, focusAt }),
-      (t) => ({ ...t, section, focus: item, focusAt }) as PanelTab,
+      () => ({ id: tabId(), kind: "autopilot", ws, section, focus: item, focusAt, bot: bot ?? undefined }),
+      (t) => ({ ...t, section, focus: item, focusAt, bot: bot === undefined && t.kind === "autopilot" ? t.bot : (bot ?? undefined) }) as PanelTab,
     );
   };
   /** Skills or Apps (skills.tsx), kinds in Knowledge: the Knowledge tab on the one asked for ("skill:<slug>" or "app:<slug>"). */
@@ -559,10 +562,20 @@ function Bops({ state }: { state: AppState | null }) {
   };
   const openChat = (id: string) => {
     setChatId(id);
+    setPrefill(null);
     setThreadId(null);
     setComposing(false);
     setFocus(false);
     setActive(CHAT_TAB);
+  };
+  /**
+   * Ask a bot something (an example on Routines, or Ask <name>): its chat, with `text` in the message box
+   * to change and send, never sent by itself, and the box focused.
+   */
+  const askBot = (botId: string, text?: string) => {
+    const id = botChatId(botId);
+    openChat(id);
+    if (state.chats.some((c) => c.id === id)) setPrefill({ chatId: id, text: text ?? "", at: Date.now() });
   };
   const openThread = (s: Session) => {
     const inView = s.chatId === chat.id || chat.botIds.includes(s.botId);
@@ -616,6 +629,8 @@ function Bops({ state }: { state: AppState | null }) {
         call={call}
         onCall={setCall}
         callSlot={setCallSlot}
+        prefill={prefill}
+        onPrefilled={() => setPrefill(null)}
       />
       {thread && (
         <ThreadSheet
@@ -700,7 +715,7 @@ function Bops({ state }: { state: AppState | null }) {
             onMembers={() => setMembers(true)}
             onOpenWatch={showWatch}
             onOpenMemory={openMemory}
-            onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item)}
+            onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item, null)}
             footer={footer}
             menuActions={{
               onChat: (id) => openChat(botChatId(id)),
@@ -799,7 +814,7 @@ function Bops({ state }: { state: AppState | null }) {
                       onOpenKeys={(keysFor) => openVault(keysFor)}
                       onOpenAutopilot={openAutopilot}
                       onOpenSkills={openSkills}
-                      onOpenWatch={showWatch}
+                      onAsk={askBot}
                       onUpgrade={() => {
                         trackEvent("bops_upgrade_clicked", { surface: "bot_panel" });
                         setAccount(true);
@@ -874,8 +889,11 @@ function Bops({ state }: { state: AppState | null }) {
                         state={state}
                         focus={tab.focus}
                         focusAt={tab.focusAt}
+                        bot={tab.bot}
+                        onBot={(bot) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "autopilot" ? { ...t, bot } : t)))}
                         onOpenWatch={showWatch}
                         onOpenSkills={() => openSkills()}
+                        onAsk={askBot}
                         onClose={() => leaveTab(tab.id)}
                       />
                     </div>

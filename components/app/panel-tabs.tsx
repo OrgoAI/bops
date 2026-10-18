@@ -37,9 +37,10 @@ export type PanelTab =
   | { id: string; kind: "memory"; ws: string; category: OrbitSection; focus?: string; focusAt?: number; query?: string }
   /**
    * Autopilot (autopilot.tsx): what the workspace's bots do on their own, a section at a time. One tab per
-   * workspace, at the row asked for (`focus`); `focusAt` is when it was asked for, so asking again shows it again.
+   * workspace, at the row asked for (`focus`) and the bot asked for (`bot`: only its, from its profile);
+   * `focusAt` is when they were asked for, so asking again shows them again.
    */
-  | { id: string; kind: "autopilot"; ws: string; section: AutopilotSection; focus?: string; focusAt?: number };
+  | { id: string; kind: "autopilot"; ws: string; section: AutopilotSection; focus?: string; focusAt?: number; bot?: string };
 
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";

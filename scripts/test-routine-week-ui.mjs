@@ -1,8 +1,9 @@
 // Tests for the week on the Routines page (components/app/routine-week.tsx): weekPlan puts each routine's
 // coming times on their days in the user's zone (skipped ones marked, many a day as one line, meeting
 // prep on its days, today's last run first), and the strip and a day render with Run now, Skip, Undo
-// skip and Pause, each line with its bot's name when there are several; the legend under the strip says
-// whose each color is and picks one bot, then all again; a row's day letters say the days it runs.
+// skip and Pause, each line with its bot's name when there are several; the row of bots on the page
+// (WeekLegend) says whose each color is, how many each runs with All first, and picks one bot, then all
+// again; a row's day letters say the days it runs; a coming run's day and time for a bot's Coming up.
 //
 // Nothing reaches a server. The .tsx files are compiled with the TypeScript in node_modules as they load.
 // Usage: node scripts/test-routine-week-ui.mjs   (not with --conditions=react-server: these are client components)
@@ -212,12 +213,12 @@ await test("the strip and today render: dots, counts, the Now line, Run now, Ski
   assert.ok(!/[‒–—―]/.test(t), "no dashes");
 });
 
-await test("one bot (its own tab): no name on each line, its mascot is enough; the legend goes under the strip", () => {
+await test("one bot (one picked on the page): no name on each line, its mascot is enough; no legend in the strip", () => {
   const a = routine("a", { kind: "daily", time: "09:00" }, { nextRunAt: Z("2026-10-19T13:00:00Z") });
   const props = { routines: [a], bots: [bots[0]], tz: NY, now, zoneOf: () => NY, running: () => false, needsYou: () => false, onOpen: noop };
-  assert.match(text(renderToStaticMarkup(h(W.RoutineWeek, props))), /9 AM R a In the chat /);
-  const html = renderToStaticMarkup(h(W.RoutineWeek, { ...props, legend: h("span", { id: "legend" }) }));
-  assert.ok(html.indexOf('aria-label="This week"') < html.indexOf('id="legend"') && html.indexOf('id="legend"') < html.indexOf("<ol"), "between the strip and the day");
+  const html = renderToStaticMarkup(h(W.RoutineWeek, props));
+  assert.match(text(html), /9 AM R a In the chat /);
+  assert.doesNotMatch(html, /aria-label="Bots"/, "whose each color is: the page's row of bots, not a second legend here");
 });
 
 await test("the legend: each bot's dot, mascot and name; tapping one shows only its, tapping it again all", () => {
@@ -233,6 +234,30 @@ await test("the legend: each bot's dot, mascot and name; tapping one shows only 
   html = renderToStaticMarkup(h(W.WeekLegend, { bots, on: "bot_max", onPick: noop }));
   assert.match(html, /aria-pressed="true" data-tip="Show every bot&#x27;s routines"/);
   assert.match(html, /aria-pressed="false" data-tip="Show only Boppy&#x27;s routines"[^>]*opacity-60/, "the others quieter while one is picked");
+});
+
+await test("the page's row of bots: All first with every bot's count, then each bot with its own; one with none still there, quieter", () => {
+  const three = [...bots, { id: "bot_ivy", name: "Ivy", color: "#2BB673" }];
+  let html = renderToStaticMarkup(h(W.WeekLegend, { bots: three, counts: { bot_main: 3, bot_max: 1, bot_ivy: 0 }, all: 4, onPick: noop }));
+  assert.match(text(html), /All 4 Boppy 3 Max 1 Ivy 0/, "in team order, each with how many");
+  assert.match(html, /aria-pressed="true" data-tip="Show every bot&#x27;s routines"[^>]*>All/, "All is on while no bot is picked");
+  assert.match(html, /data-tip="Show only Ivy&#x27;s routines"[^>]*text-\[#9A9A98\]/, "a bot that runs none is quieter");
+  assert.match(html, /tabular-nums/);
+  html = renderToStaticMarkup(h(W.WeekLegend, { bots: three, on: "bot_ivy", counts: { bot_main: 3, bot_max: 1, bot_ivy: 0 }, all: 4, onPick: noop }));
+  assert.match(html, /aria-pressed="false" data-tip="Show every bot&#x27;s routines"[^>]*>All/, "a bot picked: All is off");
+  assert.match(html, /aria-pressed="true" data-tip="Show every bot&#x27;s routines"[^>]*>.*Ivy/, "Ivy is on, and tapping her again shows all");
+  // Without counts (as before): no numbers, no All.
+  assert.doesNotMatch(text(renderToStaticMarkup(h(W.WeekLegend, { bots, onPick: noop }))), /All|\d/);
+});
+
+await test("a coming run, for a bot's Coming up: its day and its time to the minute, in the user's zone", () => {
+  // Monday Oct 19, 8 AM in New York.
+  assert.equal(W.comingWhen(Z("2026-10-19T21:00:00Z"), now, NY), "Today 5:00 PM");
+  assert.equal(W.comingWhen(Z("2026-10-20T12:30:00Z"), now, NY), "Tomorrow 8:30 AM");
+  assert.equal(W.comingWhen(Z("2026-10-23T13:00:00Z"), now, NY), "Fri 9:00 AM");
+  assert.equal(W.comingWhen(Z("2026-11-03T14:00:00Z"), now, NY), "Nov 3 9:00 AM", "past this week: the date");
+  assert.equal(W.comingWhen(Z("2026-10-20T03:30:00Z"), now, NY), "Today 11:30 PM", "late tonight in New York is still today");
+  assert.equal(W.comingWhen(Z("2026-10-20T03:30:00Z"), now, "Asia/Tokyo"), "Tomorrow 12:30 PM", "the day is the zone's");
 });
 
 await test("a one-off has no Pause or Skip in the day; a day after it has nothing", () => {

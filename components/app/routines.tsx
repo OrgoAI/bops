@@ -1,17 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { describeSchedule } from "@/cloud/schedule";
 import { sameApp, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
-import { runningNow, type AppState, type Bot, type Routine, type Schedule, type Watch } from "@/lib/types";
+import { onceDone, type AppState, type Bot, type Schedule, type Watch } from "@/lib/types";
 import { AppLogo, botApps } from "./apps";
-import { appNameOf, autopilotOf, FilterPill, filterRoutines, monitorNeedsYou, RoutineList, scheduleNeedsYou, sourceApps, TagChips, useOpenRow, zoneOf } from "./autopilot";
-import { RoutineWeek, useClock } from "./routine-week";
+import { appNameOf, askable, autopilotOf, filterRoutines, monitorNeedsYou, RoutineList, RoutinesEmpty, scheduleNeedsYou, SourceMark, TagChips, useOpenRow, zoneOf, type AutopilotSection } from "./autopilot";
+import { comingWhen, useClock } from "./routine-week";
 import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
 import { Mascot, Spinner } from "./mascot";
 import { Chevron, small, undash } from "./side-group";
 import { post, teamOf, useNow } from "./ui";
+import { watchName } from "./watch-overlay";
 
 /*
  * Routines from a Connected App. Once an app is connected, the bot that handles it offers what it can
@@ -20,8 +21,8 @@ import { post, teamOf, useNow } from "./ui";
  * does without asking, and the skill it follows. "Set up N" makes them, owned by that bot, marked with
  * the app they came from. It opens by itself when a connect just finished (AppState.suggest, one at a
  * time, until it's answered or put off), and again from "Add routines". In the Vault it first asks which
- * bot handles it. And a bot's Routines, on its profile (BotRoutines): what it runs on its own, with its
- * Connected Apps to add more from.
+ * bot handles it. And a bot's Routines, on its profile (BotRoutines): what it will do on its own, in
+ * short, each line opening the Routines page at it, with its Connected Apps to add more from.
  */
 
 /** A template as offered: whether this bot already runs it. */
@@ -501,37 +502,40 @@ export function AppRoutinesButton({
 
 /* ---------------- A bot's Routines, on its profile ---------------- */
 
+/** The most coming runs a bot's summary lists (the Routines page has the rest). */
+const SOON = 5;
+
 /**
- * What a bot runs on its own: its schedules and monitors (when, next run, how the last went, the
- * Connected App each came from, tags), each opening in place to run, pause, edit or delete it. Filtered
- * to one Connected App (from Details) when `app` is set. Its Connected Apps that have routines to offer
- * sit on top: one opens the popover to add more. A waiting suggestion for this bot opens there by itself.
+ * What a bot will do on its own, in short (the Routines page has the rest, and what can be done to each):
+ * its routines' next runs, soonest first (Coming up, five at most; the ones with none coming, paused or
+ * done, counted), and the pages it watches with their news (Watching), each line opening the page at it;
+ * See all opens the page at this bot. Filtered to one Connected App (from Details) when `app` is set, a
+ * pill that says so. Its Connected Apps and keys that have routines to offer sit on top: one opens the
+ * popover to add more, and a waiting suggestion for this bot opens there by itself. None yet: what to ask
+ * it for (RoutinesEmpty), with those apps as the way to start when it has some.
  */
 export function BotRoutines({
   state,
   bot: b,
   app: only,
   onApp,
-  onOpenAll,
-  onOpenWatch,
+  onOpenAutopilot,
+  onAsk,
 }: {
   state: AppState;
   bot: Bot;
   app: string | null;
   onApp: (app: string | null) => void;
-  /** The workspace's Routines page. */
-  onOpenAll: () => void;
-  onOpenWatch: (w: Watch) => void;
+  /** The workspace's Routines page: at one of its rows, or at one bot's. */
+  onOpenAutopilot: (section: AutopilotSection, item?: string, bot?: string) => void;
+  /** Ask a bot: its chat, with `text` in the message box to change and send. */
+  onAsk: (botId: string, text?: string) => void;
 }) {
+  // "Today", "Tomorrow" stay right.
   const now = useClock(30_000);
   const mine = autopilotOf(state, b.id);
   const shown = filterRoutines(state, mine, { app: only ?? undefined });
-  // One picked in the week opens below.
-  const [picked, setPicked] = useState<{ id: string; at: number } | null>(null);
-  const { openId, toggle, list } = useOpenRow(picked?.id, picked?.at, !!picked && shown.schedules.some((r) => r.id === picked.id));
   const tz = state.owner?.timeZone;
-  const zone = useCallback((r: Routine) => zoneOf(r, tz), [tz]);
-  const fromApps = sourceApps(mine);
   // Its Connected Apps with routines to offer, then its keys that have some (Stripe, Plain).
   const offers = [
     ...botApps(state, b)
@@ -544,89 +548,137 @@ export function BotRoutines({
   const suggest = usePendingSuggest(state, (s) => s.botId === b.id && offers.some((x) => sameApp(x.app, s.app)));
   const popover = asked ?? suggest.pending?.app ?? null;
   const total = mine.schedules.length + mine.monitors.length;
-  const needs = [...mine.schedules.filter((r) => scheduleNeedsYou(r, state)), ...mine.monitors.filter(monitorNeedsYou)].length;
+  // What needs the user, of what's shown (the Connected App's when one is picked): each is a line below.
+  const needs = [...shown.schedules.filter((r) => scheduleNeedsYou(r, state)), ...shown.monitors.filter(monitorNeedsYou)].length;
+  const withKeys = (b.keys ?? []).some(hasTemplates);
+  // Its apps' icons, the popover's anchors: in the Add routines row, or in the empty state while it runs none.
+  const logos = offers.map((x) => (
+    <AppRoutinesButton
+      key={x.app}
+      app={x.app}
+      name={x.appName}
+      size={26}
+      label={`Add routines for ${x.appName}`}
+      onClick={() => setAsked(x.app)}
+      anchorRef={(el) => void (el ? anchors.current.set(x.app, el) : anchors.current.delete(x.app))}
+    />
+  ));
+  const seeAll = () => onOpenAutopilot("schedules", undefined, b.id);
+  // What runs next: each routine that's on with a next time, soonest first.
+  const coming = shown.schedules.filter((r) => r.enabled && r.nextRunAt !== undefined).sort((x, y) => x.nextRunAt! - y.nextRunAt!);
+  // Paused ones that need the user are listed too, after, so the header's count points at a line.
+  const stuck = shown.schedules.filter((r) => !r.enabled && scheduleNeedsYou(r, state));
+  const lines = [...coming.slice(0, SOON), ...stuck];
+  // The rest are counted: past the first few, on but with no time yet (meeting prep with no meeting), paused, done.
+  const waiting = shown.schedules.filter((r) => r.enabled && r.nextRunAt === undefined);
+  const meetings = waiting.filter((r) => r.schedule.kind === "before_event").length;
+  const more = Math.max(0, coming.length - SOON) + waiting.length - meetings;
+  const off = shown.schedules.filter((r) => !r.enabled && !scheduleNeedsYou(r, state));
+  const done = off.filter((r) => onceDone(r, now)).length;
+  const rest = [
+    more ? `${more} more` : "",
+    meetings ? `${meetings} before meetings` : "",
+    off.length > done ? `${off.length - done} paused` : "",
+    done ? `${done} done` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const appName = only ? appNameOf(state, only) : "";
 
   return (
     <div className="flex w-full flex-col gap-3">
-      {offers.length > 0 && (
+      {offers.length > 0 && total > 0 && (
         <div className="flex w-full items-center gap-3 rounded-2xl bg-white/60 px-4 py-3 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]">
           <div className="flex min-w-0 flex-1 flex-col">
             <span className="text-[13px] font-semibold leading-4">Add routines</span>
-            <span className="text-[12px] leading-4 text-[#6B6B6B]">{(b.keys ?? []).some(hasTemplates) ? `From the Connected Apps and keys ${b.name} uses` : `From the Connected Apps ${b.name} uses`}</span>
+            <span className="text-[12px] leading-4 text-[#6B6B6B]">{withKeys ? `From the Connected Apps and keys ${b.name} uses` : `From the Connected Apps ${b.name} uses`}</span>
           </div>
-          <span className="flex shrink-0 flex-wrap justify-end gap-1.5">
-            {offers.map((x) => (
-              <AppRoutinesButton
-                key={x.app}
-                app={x.app}
-                name={x.appName}
-                size={26}
-                label={`Add routines for ${x.appName}`}
-                onClick={() => setAsked(x.app)}
-                anchorRef={(el) => void (el ? anchors.current.set(x.app, el) : anchors.current.delete(x.app))}
-              />
-            ))}
-          </span>
+          <span className="flex shrink-0 flex-wrap justify-end gap-1.5">{logos}</span>
         </div>
       )}
 
       {total > 0 && (
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-2.5">
           <div className="flex items-center gap-1.5 px-1">
             <span className="text-[13px] font-semibold leading-4">
               Routines <span className="font-normal tabular-nums text-[#9A9A98]">{only ? `${shown.schedules.length + shown.monitors.length} of ${total}` : total}</span>
             </span>
             {needs > 0 && <span className="rounded-full bg-[#FEF3F2] px-2 py-0.5 text-[11.5px] font-medium leading-4 text-[#B42318]">{needs === 1 ? "1 needs you" : `${needs} need you`}</span>}
             <span className="flex-1" />
-            <button onClick={onOpenAll} className="text-[12px] font-medium leading-4 text-ink">
-              All bots ›
+            <button
+              onClick={seeAll}
+              aria-label={`See all of ${b.name}'s routines`}
+              className="rounded-md text-[12px] font-medium leading-4 text-ink outline-none hover:text-[#3A3A38] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+            >
+              See all ›
             </button>
           </div>
-          {fromApps.length > 0 && (
-            <div className="flex flex-wrap gap-1.5" role="group" aria-label="Connected App">
-              <FilterPill on={!only} onClick={() => onApp(null)}>
-                All
-              </FilterPill>
-              {fromApps.map((a) => (
-                <FilterPill key={a} on={only === a} onClick={() => onApp(only === a ? null : a)}>
-                  <AppLogo app={a} name={appNameOf(state, a)} size={14} />
-                  {appNameOf(state, a)}
-                </FilterPill>
+          {/* Opened for one Connected App: only its, until the pill's x. */}
+          {only && (
+            <span className="flex h-7 items-center gap-1.5 self-start rounded-full bg-ink pl-3 pr-1 text-[12.5px] font-medium leading-4 text-white">
+              <AppLogo app={only} name={appName} size={14} />
+              {appName}
+              <button
+                onClick={() => onApp(null)}
+                aria-label={`Show all of ${b.name}'s routines`}
+                data-tip="Show all"
+                className="flex size-5 items-center justify-center rounded-full text-white/70 outline-none hover:bg-white/15 hover:text-white focus-visible:shadow-[0_0_0_1.5px_#FFFFFF]"
+              >
+                <svg width="9" height="9" viewBox="0 0 12 12" aria-hidden>
+                  <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                </svg>
+              </button>
+            </span>
+          )}
+          {lines.length > 0 && (
+            <Summary label="Coming up">
+              {lines.map((r) => (
+                <SummaryLine
+                  key={r.id}
+                  state={state}
+                  when={r.enabled && r.nextRunAt !== undefined ? comingWhen(r.nextRunAt, now, zoneOf(r, tz)) : "Paused"}
+                  title={undash(r.title)}
+                  app={r.source?.app}
+                  note={scheduleNeedsYou(r, state) ? "Needs you" : null}
+                  onClick={() => onOpenAutopilot("schedules", r.id)}
+                />
               ))}
-            </div>
+            </Summary>
           )}
-          {shown.schedules.length > 0 && (
-            <div className="rounded-2xl bg-white/60 p-3 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]">
-              <RoutineWeek
-                routines={shown.schedules}
-                bots={[b]}
-                tz={tz}
-                now={now}
-                zoneOf={zone}
-                running={(r) => runningNow(r, state.sessions)}
-                needsYou={(r) => scheduleNeedsYou(r, state)}
-                onOpen={(id) => setPicked({ id, at: Date.now() })}
-              />
-            </div>
+          {rest && (
+            <button onClick={seeAll} className="self-start px-1 text-[12px] leading-4 text-[#6B6B6B] outline-none hover:text-ink focus-visible:underline">
+              {rest}
+            </button>
           )}
-          <div ref={list}>
-            <RoutineList
-              state={state}
-              schedules={shown.schedules}
-              monitors={shown.monitors}
-              openId={openId}
-              onToggle={toggle}
-              onOpenWatch={onOpenWatch}
-              className="bg-white/60 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]"
-            />
-          </div>
+          {shown.monitors.length > 0 && (
+            <Summary label="Watching">
+              {shown.monitors.map((w) => (
+                <SummaryLine
+                  key={w.id}
+                  state={state}
+                  title={watchName(w)}
+                  news={w.alert ? undash(w.alert.text) : undefined}
+                  app={w.source?.app}
+                  dim={!!w.paused || !!w.away}
+                  note={monitorNeedsYou(w) ? "Needs you" : w.paused || w.away ? "Paused" : null}
+                  onClick={() => onOpenAutopilot("monitors", w.id)}
+                />
+              ))}
+            </Summary>
+          )}
+          {only && !shown.schedules.length && !shown.monitors.length && <span className="px-1 text-[12.5px] leading-4 text-[#9A9A98]">{`No routines from ${appName}`}</span>}
         </div>
       )}
 
       {!total && (
-        <span className="px-2 text-center text-[12px] leading-4 text-[#9A9A98]">
-          {offers.length ? `Pick some above, or ask ${b.name} to do something on a schedule` : `Ask ${b.name} to do something on a schedule, or to watch a page`}
-        </span>
+        <RoutinesEmpty bot={b} asks={askable(state, b)} onAsk={onAsk}>
+          {offers.length > 0 && (
+            <div className="flex flex-col items-center gap-2 pt-1">
+              <span className="text-[12.5px] leading-4 text-[#6B6B6B]">{withKeys ? `Start with the Connected Apps and keys ${b.name} uses` : `Start with the Connected Apps ${b.name} uses`}</span>
+              <span className="flex flex-wrap justify-center gap-1.5">{logos}</span>
+            </div>
+          )}
+        </RoutinesEmpty>
       )}
 
       {popover && (
@@ -643,6 +695,60 @@ export function BotRoutines({
         />
       )}
     </div>
+  );
+}
+
+/** A part of a bot's summary: its name, then its lines in one card. */
+function Summary({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="px-1 text-[12px] font-medium leading-4 text-[#6B6B6B]">{label}</span>
+      <div role="group" aria-label={label} className="flex flex-col divide-y divide-[#F0F0EE] overflow-hidden rounded-2xl bg-white/60 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A line in a bot's summary, opening the Routines page at it: when it runs next (Coming up), its name and
+ * its news (Watching), the Connected App it came from, and a quiet note when it needs the user or is paused.
+ */
+function SummaryLine({
+  state,
+  when,
+  title,
+  news,
+  app,
+  dim = false,
+  note,
+  onClick,
+}: {
+  state: AppState;
+  when?: string;
+  title: string;
+  news?: string;
+  app?: string;
+  dim?: boolean;
+  note: "Needs you" | "Paused" | null;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex min-w-0 items-center gap-3 px-3.5 py-2.5 text-left outline-none transition-colors duration-150 ease-out hover:bg-black/[0.025] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] motion-reduce:transition-none"
+    >
+      {when !== undefined && <span className="w-[116px] shrink-0 truncate text-[12.5px] tabular-nums leading-[18px] text-[#9A9A98]">{when}</span>}
+      <span className="min-w-0 flex-1 truncate text-[13.5px] leading-[18px]">
+        <span className={`font-medium ${dim ? "text-[#9A9A98]" : "text-ink"}`}>{title}</span>
+        {news && <span className="text-[#6B6B6B]">{` · ${news}`}</span>}
+      </span>
+      {app && <SourceMark state={state} app={app} />}
+      {note && <span className={`shrink-0 text-[12px] leading-4 ${note === "Needs you" ? "text-[#B42318]" : "text-[#9A9A98]"}`}>{note}</span>}
+      <span className="text-[#B0B0AD]">
+        <Chevron open={false} />
+      </span>
+    </button>
   );
 }
 
