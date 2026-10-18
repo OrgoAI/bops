@@ -630,7 +630,7 @@ async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = ne
       output = readSkill(s.botId, name, file);
     } else if (o.name === "find_app_actions") {
       t.step("find_app_actions", `looked for "${String(args.query ?? "").slice(0, 60)}" in your apps`);
-      output = await findAppActions(s.botId, String(args.query ?? ""));
+      output = await findAppActions(s.botId, String(args.query ?? ""), { sessionId: t.sessionId });
     } else if (o.name === "use_app") {
       t.step("use_app", `used ${String(args.action ?? "an app")}`);
       output = await runAppAction(s.botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId: t.sessionId }, undefined, (args.account as string | null) ?? null);

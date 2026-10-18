@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AppState, BotId, VaultLogin, Watch } from "@/lib/types";
+import { levelOf, type AppState, type BotId, type LastUses, type VaultLogin, type Watch } from "@/lib/types";
 import { FOLD_AFTER_MS, FOLD_OVER, isMcp, lastUsed, servicesOf, signedOut, type Service } from "@/lib/vault-services";
-import { AccountBlock, AppLogo, AppPicker, Connecting, QuickStart } from "./apps";
+import { AccountBlock, AppLogo, AppPicker, Connecting, QuickStart, useLastUses } from "./apps";
 import { KeysSettings } from "./keys";
 import { Mascot } from "./mascot";
 import { anchorOf, AppRoutines, hasTemplates, routineCount, routinesOfApp, RoutineSuggest, usePendingSuggest } from "./routines";
@@ -45,6 +45,8 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
   useEffect(() => {
     void post("/api/apps", {}, "PATCH");
   }, []);
+  // When each account and key was last used, and by which bot: read again each minute.
+  const uses = useLastUses(`${now}:${state.workspace ?? ""}`);
   const services = useMemo(() => servicesOf(state.accounts ?? [], state.vault ?? []), [state.accounts, state.vault]);
   // A sign-in just finished: open its service, so the user sees who can use it.
   const before = useRef(new Set((state.accounts ?? []).map((a) => a.id)));
@@ -181,6 +183,7 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
                 onPick={setPicking}
                 onRoutines={setAsked}
                 onOpenWatch={onOpenWatch}
+                uses={uses}
                 iconRef={(el) => s.accounts.forEach((a) => void (el ? icons.current.set(a.app, el) : icons.current.delete(a.app)))}
               />
             ))}
@@ -205,7 +208,7 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
           </div>
         )}
 
-        <KeysSettings state={state} keysFor={keysFor} onOpenWatch={onOpenWatch} />
+        <KeysSettings state={state} keysFor={keysFor} uses={uses} onOpenWatch={onOpenWatch} />
       </div>
       {routinesFor && (
         <RoutineSuggest
@@ -252,6 +255,7 @@ function ServiceRow({
   onPick,
   onRoutines,
   onOpenWatch,
+  uses,
   iconRef,
 }: {
   state: AppState;
@@ -266,6 +270,8 @@ function ServiceRow({
   onRoutines: (app: string) => void;
   /** Show a watched screen or Mac window, from one of its routines. */
   onOpenWatch: (w: Watch) => void;
+  /** When each account was last used, and by which bot. */
+  uses: LastUses;
   /** Its mark, where its routines open. */
   iconRef: (el: HTMLSpanElement | null) => void;
 }) {
@@ -273,7 +279,7 @@ function ServiceRow({
   const out = signedOut(s);
   const kinds = [s.accounts.some((a) => !isMcp(a)) && "App", s.accounts.some(isMcp) && "MCP", s.logins.length > 0 && "Login"].filter(Boolean) as string[];
   // Who can use any of it: every bot (said nowhere, it's the usual), some (shown), or none yet.
-  const users = team.filter((b) => s.accounts.some((a) => b.access?.[a.id]) || s.logins.some((l) => l.bots === "all" || l.bots.includes(b.id)));
+  const users = team.filter((b) => s.accounts.some((a) => levelOf(b, a)) || s.logins.some((l) => l.bots === "all" || l.bots.includes(b.id)));
   const everyone = users.length === team.length;
   // What's connected, in a few words: several apps by name ("Gmail ×3, Google Calendar"), then whose (the first account or login, and how many more).
   const apps = [...new Set(s.accounts.map((a) => a.appName))];
@@ -335,7 +341,7 @@ function ServiceRow({
                 </span>
               )}
               {accounts.map((a) => (
-                <AccountBlock key={a.id} state={state} account={a} many={accounts.length > 1} onSignIn={() => onPick({ app: a.app, replaces: a.id })} />
+                <AccountBlock key={a.id} state={state} account={a} many={accounts.length > 1} last={uses[a.id]} onSignIn={() => onPick({ app: a.app, replaces: a.id })} />
               ))}
               <AppRoutines state={state} app={accounts[0].app} onOpenWatch={onOpenWatch} />
               <div className="flex flex-wrap items-center gap-1.5 empty:hidden">

@@ -1639,16 +1639,17 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
   // What this turn runs on: the route (a tier up for each bump), or for a thread from before routes, the old rule.
   const now = session(sessionId)!;
   const config = taskConfig(now.route) ?? { model: now.effort === "high" ? HARD_MODEL : SESSION_MODEL, effort: now.effort ?? "medium" };
-  // Its apps are tools in this process (composio.ts), so it has them wherever its computer is.
-  const apps = composioOn() && accountsOf(b).length > 0;
+  const outside = s.fromOutside || (!!s.partOf && !!session(s.partOf)?.fromOutside);
+  // Its apps are tools in this process (composio.ts), so it has them wherever its computer is. Not on a
+  // task someone outside Bops started: composio.ts refuses them there, and they aren't named to it.
+  const apps = !outside && composioOn() && accountsOf(b).length > 0;
   const memory = await memoryBlock(wsOf(s.botId), s.goal, 3000);
   const splits = !routineOf(s);
-  const outside = s.fromOutside || (!!s.partOf && !!session(s.partOf)?.fromOutside);
   const text = [
     // A routine's thread splits into no parts: each would post, chime and remember on its own, so a quiet routine wouldn't be.
     instructions(b.name, b.role, false, at.display, at.sharedWith, apps, !!b.autoApprove, false, true, false, true, false, splits),
     personaNote(b),
-    appsNote(b, "task", { tools: apps }),
+    outside ? "" : appsNote(b, "task", { tools: apps }),
     dataNote(b, "task"),
     outside ? "" : crmNote(b, "task"),
     placesNote(b, "task"),
@@ -1973,8 +1974,10 @@ async function run(sessionId: string) {
     if (endpoint) unwatch = watchScreen(b.id, display, endpoint, sessionId);
     // Its apps: on the Mac through the executor (vm/apps-mcp.mjs, composio.ts serveApps); from an Orgo
     // computer over the tailnet (screen_mcp.py, when its key file went on: ensureScreenTools).
-    const macApps = mac && composioOn() && accountsOf(b).length > 0;
-    const appTools = mac ? macApps : !!appsReach.get(computerId);
+    // Not on a task someone outside Bops started: composio.ts refuses them there, and they aren't named to it.
+    const outside = s.fromOutside || (!!s.partOf && !!session(s.partOf)?.fromOutside);
+    const macApps = mac && !outside && composioOn() && accountsOf(b).length > 0;
+    const appTools = !outside && (mac ? macApps : !!appsReach.get(computerId));
     // Business data (treg.ts) the same way: through the executor on the Mac, over the tailnet from an Orgo computer.
     const macData = mac && dataOn(b);
     // With Full access, the user's own apps and browsers, through Cua Driver (local.ts MAC_UI_TOOLS), when it's installed:
@@ -2024,7 +2027,7 @@ async function run(sessionId: string) {
             instructions: [
               instructions(b.name, b.role, mac, display, c.id !== b.id ? c.name : undefined, appTools && accountsOf(b).length > 0, !!b.autoApprove, full, false, onMac, !mac && !!appsReach.get(computerId), macUi),
               personaNote(b),
-              appsNote(b, "task", { tools: appTools }),
+              outside ? "" : appsNote(b, "task", { tools: appTools }),
               dataNote(b, "task", { tools: dataTools }),
               placesNote(b, "task"),
               // No read_skill here: its skills in full, as far as they fit, and the one it follows.

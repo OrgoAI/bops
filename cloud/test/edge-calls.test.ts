@@ -305,7 +305,7 @@ test("the bot on the owner's call knows its apps, where it's in Slack, Telegram 
         { id: "ch_3", kind: "discord", botId: "iris", handle: "Iris", pairCode: "111111", status: "live", at: 1 },
       ],
     },
-    samAccess: { ca_work: "act", ca_home: "read", ca_notion: "read", ca_old: "act", "open:hackernews": "read" },
+    samAccess: { ca_work: "act", ca_home: "read", ca_notion: "read", ca_old: "act", "open:hackernews": "read", ca_iris: "none" },
     samVoice: "marin",
   });
   const samCall = `live_${randomUUID()}`;

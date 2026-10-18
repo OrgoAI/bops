@@ -699,8 +699,8 @@ assert.match(appsBody.agent.instructions, /find_app_actions, then use_app/);
 assert.match(appsBody.agent.instructions, /Use only the browser tools, your apps/);
 assert.doesNotMatch(appsBody.agent.instructions, /can't be reached from this computer/);
 assert.ok(Object.values(sandboxParams(executors.at(-1).args)).includes(appsScript), "the sandbox may read the apps script");
-// Its apps go with the access: taken away, the thread picks up without them.
-S.update((s) => (s.bots.find((b) => b.id === main.id).access = {}));
+// Its apps go with the access: taken away (no access, not the default), the thread picks up without them.
+S.update((s) => (s.bots.find((b) => b.id === main.id).access = { acc_notion: "none" }));
 X.replyToSession(next.id, "Never mind");
 await until(() => S.session(next.id).status === "done" && S.session(next.id).replies.at(-1)?.role === "bot", "the thread to finish without its apps", 30_000);
 assert.equal(S.session(next.id).env.apps, undefined);

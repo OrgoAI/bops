@@ -399,6 +399,70 @@ export function useForget(ws: string, user = "") {
 
 export type ForgetCalls = ReturnType<typeof useForget>;
 
+/* ---------------- New since Knowledge was open ---------------- */
+
+/*
+ * The footer's Knowledge button has a blue dot while there's something the user hasn't seen. Seen is
+ * the newest mention (MemoryItem.last) among what Knowledge showed while it was open, per account and
+ * workspace: an item learned or mentioned again after it is new. That's memory's time, not the clock's,
+ * since a fact is sorted minutes after it was learned (one sorted after a look would be older than it).
+ * Kept in localStorage, and here when that can't be used. Never open here: what's there counts as seen.
+ */
+const seenKey = (user: string, ws: string) => `bops.knowledge.seen.${user}.${ws}`;
+const seenHere = new Map<string, number>();
+const seenUsers = new Set<() => void>();
+
+/** The newest mention among these items (0: none). */
+export const newestOf = (items: Pick<MemoryItem, "last">[]) => items.reduce((n, i) => Math.max(n, i.last), 0);
+
+/** Whether any of these items came after `seen` (none: Knowledge never open here, so nothing to compare with yet). */
+export const newSince = (items: Pick<MemoryItem, "last">[], seen: number | undefined) => seen !== undefined && items.some((i) => i.last > seen);
+
+/** What was seen in a workspace, if Knowledge was ever open there. */
+export function seenOf(user: string, ws: string) {
+  const k = seenKey(user, ws);
+  if (!seenHere.has(k))
+    try {
+      // 0 counts: Knowledge was open there with nothing in it yet, so all that came since is new.
+      const kept = localStorage.getItem(k);
+      const v = kept === null ? NaN : Number(kept);
+      if (v >= 0) seenHere.set(k, v);
+    } catch {}
+  return seenHere.get(k);
+}
+
+/** Marks these items seen (it only goes forward). */
+export function markSeen(user: string, ws: string, items: Pick<MemoryItem, "last">[]) {
+  const k = seenKey(user, ws);
+  const was = seenOf(user, ws);
+  const at = Math.max(was ?? 0, newestOf(items));
+  if (at === was) return;
+  seenHere.set(k, at);
+  try {
+    localStorage.setItem(k, String(at));
+  } catch {}
+  for (const changed of seenUsers) changed();
+}
+
+const watchSeen = (changed: () => void) => {
+  seenUsers.add(changed);
+  return () => void seenUsers.delete(changed);
+};
+
+/**
+ * Whether Knowledge has something new for the footer's dot, from the same copy the page reads (and as
+ * often). The first copy in a workspace Knowledge was never open in is marked seen as it comes.
+ */
+export function useKnowledgeNews(ws: string, user = "") {
+  const { snap } = useMemoryCategories(ws, user);
+  const seen = useSyncExternalStore(watchSeen, () => seenOf(user, ws), () => undefined);
+  const items = snap?.on ? snap.items : null;
+  useEffect(() => {
+    if (items && seen === undefined) markSeen(user, ws, items);
+  }, [items, seen, user, ws]);
+  return !!items && newSince(items, seen);
+}
+
 /* ---------------- Order and words ---------------- */
 
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
@@ -655,6 +719,10 @@ function KnowledgeView({
   const { list } = useIssues(ws, user);
   const forgetting = useForget(ws, user);
   const openIssues = list ? list.issues.filter(isOpen).length : undefined;
+  // Open, however it was opened: what it has is seen, and what comes while it's open too (the footer's dot goes).
+  useEffect(() => {
+    if (snap?.on) markSeen(user ?? "", ws, snap.items);
+  }, [snap, user, ws]);
   // A bot may have just opened an issue or remembered something: read both again soon, not in a minute.
   const seen = useRef(last);
   useEffect(() => {

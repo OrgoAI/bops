@@ -4,7 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type Anima
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
 import { appNameFor, canonicalApp, sameApp, templateById } from "@/lib/routine-catalog";
-import { DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Delivery, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
+import { DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
 import { Fold } from "./fold";
 import { Mascot } from "./mascot";
 import {
@@ -23,7 +23,7 @@ import { AppLogo, botApps } from "./apps";
 import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
 import { CloseButton, currentWorkspace, needsYou, post, teamOf } from "./ui";
 import { FooterButton } from "./sidebar-footer";
-import { RoutineWeek, useClock, weekPlan, WeekLetters } from "./routine-week";
+import { RoutineWeek, useClock, weekPlan, WeekLegend, WeekLetters } from "./routine-week";
 
 /*
  * Routines: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
@@ -533,9 +533,10 @@ export function RoutineList({
 
 /**
  * Routines as a page on the right (one tab per workspace): every bot's schedules and monitors, grouped
- * by bot, each opening in place to say how it works and how it went, with what can be done to it.
- * Filters: a bot, a Connected App they came from, and Needs you (a failed run or delivery, a run waiting
- * on the user, a page that can't be read). How a bot does each kind of job is a skill: a link goes there.
+ * by bot under its mascot and name, each opening in place to say how it works and how it went, with what
+ * can be done to it. Filters: a bot (the week's legend, which says whose each color is; on top when there's
+ * no week), a Connected App they came from, and Needs you (a failed run or delivery, a run waiting on the
+ * user, a page that can't be read). How a bot does each kind of job is a skill: a link goes there.
  */
 export function AutopilotPage({
   state,
@@ -582,7 +583,10 @@ export function AutopilotPage({
   const groups = team
     .map((b) => ({ bot: b, schedules: shown.schedules.filter((r) => r.botId === b.id), monitors: shown.monitors.filter((w) => w.botId === b.id) }))
     .filter((g) => g.schedules.length + g.monitors.length);
-  const filtered = !!(filter.bot || filter.app || filter.needsYou);
+  // With more than one bot, whose each color is, which picks one bot's too: under the week, else on top.
+  const legend = owners.length > 1 ? <WeekLegend bots={owners} on={filter.bot} onPick={(bot) => setFilter({ ...filter, bot })} /> : null;
+  const week = shown.schedules.length > 0;
+  const appFilters = apps.length > 0 || needsN > 0 || !!filter.needsYou;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
@@ -604,22 +608,10 @@ export function AutopilotPage({
           <CloseButton onClick={onClose} className="mt-1.5" />
         </div>
 
-        {total > 0 && (owners.length > 1 || apps.length > 0 || needsN > 0 || filtered) && (
+        {total > 0 && ((!week && legend) || appFilters) && (
           <div className="flex flex-col gap-2">
-            {owners.length > 1 && (
-              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Bot">
-                <FilterPill on={!filter.bot} onClick={() => setFilter({ ...filter, bot: undefined })}>
-                  All bots
-                </FilterPill>
-                {owners.map((b) => (
-                  <FilterPill key={b.id} on={filter.bot === b.id} onClick={() => setFilter({ ...filter, bot: filter.bot === b.id ? undefined : b.id })}>
-                    <Mascot botId={b.id} color={b.color} size={14} antenna={false} />
-                    {b.name}
-                  </FilterPill>
-                ))}
-              </div>
-            )}
-            {(apps.length > 0 || needsN > 0 || filter.needsYou) && (
+            {!week && legend}
+            {appFilters && (
               <div className="flex flex-wrap gap-1.5" role="group" aria-label="Connected App and Needs you">
                 {(needsN > 0 || filter.needsYou) && (
                   <FilterPill on={!!filter.needsYou} onClick={() => setFilter({ ...filter, needsYou: !filter.needsYou })}>
@@ -638,7 +630,7 @@ export function AutopilotPage({
           </div>
         )}
 
-        {shown.schedules.length > 0 && (
+        {week && (
           <RoutineWeek
             routines={shown.schedules}
             bots={team}
@@ -648,6 +640,7 @@ export function AutopilotPage({
             running={(r) => runningNow(r, state.sessions)}
             needsYou={(r) => scheduleNeedsYou(r, state)}
             onOpen={(id) => setPicked({ id, at: Date.now() })}
+            legend={legend}
           />
         )}
 
@@ -670,9 +663,9 @@ export function AutopilotPage({
           ) : (
             groups.map((g) => (
               <div key={g.bot.id} className="flex flex-col gap-2">
-                <span className="flex items-center gap-1.5 px-1 text-[12px] font-medium leading-4 text-[#6B6B6B]">
-                  <Mascot botId={g.bot.id} color={g.bot.color} size={14} antenna={false} />
-                  {g.bot.name} <span className="font-normal tabular-nums text-[#B0B0AD]">{g.schedules.length + g.monitors.length}</span>
+                <span data-bot-head className="flex items-center gap-2 px-1 text-[13px] font-semibold leading-4 text-ink">
+                  <Mascot botId={g.bot.id} color={g.bot.color} size={20} antenna={false} />
+                  {g.bot.name} <span className="font-normal tabular-nums text-[#9A9A98]">{g.schedules.length + g.monitors.length}</span>
                 </span>
                 <RoutineList state={state} schedules={g.schedules} monitors={g.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} />
               </div>
@@ -690,6 +683,7 @@ export function AutopilotPage({
  */
 function PageRow({
   id,
+  lead,
   title,
   line,
   dim,
@@ -701,6 +695,8 @@ function PageRow({
   children,
 }: {
   id: string;
+  /** Before the name: the row's bot (BotMark). */
+  lead?: ReactNode;
   title: string;
   line?: string;
   dim?: boolean;
@@ -718,6 +714,7 @@ function PageRow({
         <div className="px-3.5 py-3">{editing}</div>
       ) : (
         <button onClick={onToggle} aria-expanded={open} className="flex items-start gap-3 px-3.5 py-3 text-left outline-none focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]">
+          {lead && <span className={`flex shrink-0 pt-px ${dim ? "opacity-50" : ""}`}>{lead}</span>}
           <span className="flex min-w-0 flex-1 flex-col gap-0.5">
             <span className={`truncate text-[14px] font-medium leading-[18px] ${dim ? "text-[#9A9A98]" : "text-ink"}`}>{title}</span>
             {line && <span className={`text-[12.5px] leading-[17px] text-[#6B6B6B] ${open ? "[overflow-wrap:anywhere]" : "truncate"}`}>{line}</span>}
@@ -913,6 +910,16 @@ function WhenChange({ routine: r, state, tz, busy, onSave, onCancel }: { routine
   );
 }
 
+/** A row's bot: its mascot, saying its name on hover (one that's gone: a grey circle). */
+function BotMark({ bot }: { bot?: Bot }) {
+  if (!bot) return <span className="size-6 rounded-full bg-[#ECECEA]" />;
+  return (
+    <span role="img" aria-label={bot.name} data-tip={bot.name} className="flex">
+      <Mascot botId={bot.id} color={bot.color} size={24} antenna={false} />
+    </span>
+  );
+}
+
 function BotName({ bot }: { bot?: { id: string; name: string; color: string } }) {
   if (!bot) return <>A bot that&rsquo;s gone</>;
   return (
@@ -979,12 +986,14 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
   const sig = JSON.stringify([minute, tz, zone, r.enabled, r.nextRunAt, r.schedule, r.skips, r.last?.at]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const week = useMemo(() => weekPlan([r], minute * 60_000, tz, () => zone), [sig]);
-  const color = state.bots.find((b) => b.id === r.botId)?.color;
+  const bot = state.bots.find((b) => b.id === r.botId);
+  const color = bot?.color;
   const skips = (r.skips ?? []).filter((x) => x > now);
   const canSkip = r.enabled && r.nextRunAt !== undefined && r.schedule.kind !== "once" && r.schedule.kind !== "before_event";
   return (
     <PageRow
       id={r.id}
+      lead={<BotMark bot={bot} />}
       title={undash(r.title)}
       line={`${describeSchedule(r.schedule, zone)} · ${nextWords(r, state.sessions, tz)}${r.quiet ? " · quiet" : ""}`}
       dim={!r.enabled}
@@ -1018,7 +1027,7 @@ export function ScheduleRow({ routine: r, state, tz, last, open, onToggle }: { r
       <Words label={r.reminder ? "The reminder" : "What it does"} text={r.reminder ?? r.goal} />
       <Facts
         rows={[
-          ["Bot", <BotName key="bot" bot={state.bots.find((b) => b.id === r.botId)} />],
+          ["Bot", <BotName key="bot" bot={bot} />],
           ["From", r.source && <AppName key="from" state={state} app={r.source.app} />],
           ["Tags", r.tags?.length ? <TagChips key="tags" tags={r.tags} /> : ""],
           [
@@ -1158,11 +1167,13 @@ export function MonitorRow({ watch: w, state, last, open, onToggle, onShow }: { 
     });
   };
   const page = w.page;
+  const bot = state.bots.find((b) => b.id === w.botId);
   const checked = page?.checkedAt ?? w.readAt;
   const url = page && /^https?:\/\//i.test(page.url) ? page.url : null;
   return (
     <PageRow
       id={w.id}
+      lead={<BotMark bot={bot} />}
       title={watchName(w)}
       line={undash(w.lookFor)}
       dim={!!w.paused || !!w.away}
@@ -1178,7 +1189,7 @@ export function MonitorRow({ watch: w, state, last, open, onToggle, onShow }: { 
     >
       <Facts
         rows={[
-          ["Bot", <BotName key="bot" bot={state.bots.find((b) => b.id === w.botId)} />],
+          ["Bot", <BotName key="bot" bot={bot} />],
           ["From", w.source && <AppName key="from" state={state} app={w.source.app} />],
           [
             "Watching",

@@ -9,7 +9,7 @@ import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
 import { FooterButton, footerPillOf, useFooterHover, type FooterKey, type FooterPage } from "./sidebar-footer";
 import { Mascot } from "./mascot";
-import { KnowledgeIcon, type MemoryOpen } from "./memory-categories";
+import { KnowledgeIcon, useKnowledgeNews, type MemoryOpen } from "./memory-categories";
 import { AppLogo } from "./apps";
 import { BotMenu, type BotMenuActions } from "./bot-menu";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
@@ -204,12 +204,14 @@ export function Sidebar({
  * The footer's row: `you` (your account: the initials and their menu, given whether it's the pill), then
  * People, Apps & logins, Routines and Knowledge. The pill (with its label) is the one pointed at or tabbed
  * to, else the one `open` names (sidebar-footer.tsx footerPageOf, footerPillOf); the others are round.
- * Picking one opens its page, and that one is the pill at rest. `hover` seeds the pointed-at one (tests).
+ * Picking one opens its page, and that one is the pill at rest. `hover` seeds the pointed-at one, and
+ * `news` whether Knowledge has something new (tests).
  */
 export function SidebarFooter({
   state,
   open = "vault",
   hover: initialHover,
+  news,
   you,
   onMembers,
   onVault,
@@ -219,6 +221,7 @@ export function SidebarFooter({
   state: AppState;
   open?: FooterPage;
   hover?: FooterKey;
+  news?: boolean;
   you: (expanded: boolean) => ReactNode;
   onMembers: () => void;
   onVault: () => void;
@@ -243,18 +246,41 @@ export function SidebarFooter({
         trail={<AppsTrail state={state} expanded={pill === "vault"} />}
       />
       <AutopilotButton state={state} expanded={pill === "routines"} pressed={page === "routines"} onOpen={onOpenAutopilot} />
-      {knowledge && (
-        <FooterButton
-          name="knowledge"
-          expanded={pill === "knowledge"}
-          pressed={page === "knowledge"}
-          label="Knowledge"
-          tip="Knowledge: what your bots know, learned as you chat"
-          onClick={() => onOpenMemory({})}
-          icon={<KnowledgeIcon size={16} />}
-        />
-      )}
+      {knowledge && <KnowledgeButton state={state} expanded={pill === "knowledge"} pressed={page === "knowledge"} news={news} onOpen={() => onOpenMemory({})} />}
     </div>
+  );
+}
+
+/**
+ * Knowledge in the footer, with a blue dot on its corner while there's something new in it (what memory
+ * learned since it was last open: memory-categories.tsx useKnowledgeNews), none while it's the open page.
+ * `news` is for the tests.
+ */
+export function KnowledgeButton({ state, expanded, pressed, news: given, onOpen }: { state: AppState; expanded: boolean; pressed: boolean; news?: boolean; onOpen: () => void }) {
+  const fresh = useKnowledgeNews(currentWorkspace(state), state.account?.user.id ?? "");
+  const news = (given ?? fresh) && !pressed;
+  return (
+    <FooterButton
+      name="knowledge"
+      expanded={expanded}
+      pressed={pressed}
+      label="Knowledge"
+      tip={news ? "Knowledge: something new your bots learned" : "Knowledge: what your bots know, learned as you chat"}
+      ariaLabel={news ? "Knowledge, something new" : undefined}
+      onClick={onOpen}
+      icon={<KnowledgeIcon size={16} />}
+      badge={news && <NewDot />}
+    />
+  );
+}
+
+/** A small blue dot with a soft ring that swells out of it and fades, over and over (with reduced motion, it keeps still). */
+function NewDot() {
+  return (
+    <span data-new-dot className="motion-dot-in pointer-events-none absolute -right-px -top-px flex size-2.5">
+      <span className="motion-new-pulse absolute inset-0 rounded-full bg-[#2F7BFF] motion-reduce:hidden" />
+      <span className="relative size-2.5 rounded-full bg-[#2F7BFF] shadow-[0_0_0_2px_#F9F9F8,0_0_0_4px_#2F7BFF2E]" />
+    </span>
   );
 }
 

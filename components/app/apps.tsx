@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { APP_LEVELS, appLogo, FEATURED_APPS, type AppAccount, type AppLevel, type AppState, type Bot } from "@/lib/types";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { APP_LEVELS, appLogo, FEATURED_APPS, levelOf, type AppAccess, type AppAccount, type AppLevel, type AppState, type Bot, type LastUses } from "@/lib/types";
 import { isKeyApp } from "@/lib/routine-catalog";
 import { Mascot, Spinner } from "./mascot";
 import { KeyIcon } from "./screen-cards";
-import { post, teamOf } from "./ui";
+import { ago, post, teamOf } from "./ui";
 
 /*
  * The user's apps, in the Vault. Only what's connected is listed, one row per app (however many
@@ -70,11 +71,11 @@ export function AppLogo({ app, name, size }: { app: string; name: string; size: 
 /** How an account reads in a list: its label and its own name, else the app's name. */
 export const accountTitle = (a: AppAccount) => [a.label, a.name].filter(Boolean).join(" · ") || a.appName;
 
-/** The bot's apps, one logo per app, for its profile and home screen. */
+/** The bot's apps, one logo per app, for its profile and home screen (levelOf: every bot has every app by default). */
 export function botApps(state: AppState, b: Bot) {
   const seen = new Map<string, { app: string; appName: string; accounts: { account: AppAccount; level: AppLevel }[] }>();
   for (const a of state.accounts ?? []) {
-    const level = b.access?.[a.id];
+    const level = levelOf(b, a);
     if (!level || a.status !== "active") continue;
     const e = seen.get(a.app) ?? { app: a.app, appName: a.appName, accounts: [] };
     e.accounts.push({ account: a, level });
@@ -132,8 +133,8 @@ export function QuickStart({ onPick }: { onPick: (app: string) => void }) {
   );
 }
 
-/** One account: its name (and the user's label for it), and each bot's access to it. */
-export function AccountBlock({ state, account: a, many, onSignIn }: { state: AppState; account: AppAccount; many: boolean; onSignIn: () => void }) {
+/** One account: its name (and the user's label for it), when it was last used, and the bots that can use it. */
+export function AccountBlock({ state, account: a, many, last, onSignIn }: { state: AppState; account: AppAccount; many: boolean; last?: LastUses[string]; onSignIn: () => void }) {
   const [naming, setNaming] = useState(false);
   const [label, setLabel] = useState(a.label ?? "");
   const [sure, setSure] = useState(false);
@@ -142,8 +143,11 @@ export function AccountBlock({ state, account: a, many, onSignIn }: { state: App
     setNaming(false);
     if (label.trim() !== (a.label ?? "")) void post("/api/apps", { account: a.id, label }, "PUT");
   };
+  const team = teamOf(state);
+  const meta = usedLine(last, team) ?? (a.usedAt ? `Used ${usedWhen(a.usedAt)}` : "Not used yet");
+  const set = (b: Bot, level: AppAccess) => void post("/api/bots", { botId: b.id, access: { account: a.id, level } }, "PATCH");
   return (
-    <div className={`flex flex-col gap-1 ${many ? "rounded-xl bg-[#FAFAF9] p-2" : ""}`}>
+    <div className={`flex flex-col gap-1.5 ${many ? "rounded-xl bg-[#FAFAF9] p-2" : ""}`}>
       <div className="flex min-h-7 items-center gap-2 px-2">
         {naming ? (
           <input
@@ -156,7 +160,10 @@ export function AccountBlock({ state, account: a, many, onSignIn }: { state: App
             className="h-7 w-[150px] rounded-lg bg-white px-2 text-[12.5px] outline-none shadow-[0_0_0_1.5px_#0A0A0A]"
           />
         ) : (
-          <span className="min-w-0 truncate text-[12.5px] font-medium leading-4 text-[#3A3A38]">{openApp ? "Ready to use" : accountTitle(a)}</span>
+          <span className="flex min-w-0 flex-col">
+            <span className="truncate text-[13.5px] font-medium leading-[18px]">{openApp ? "Ready to use" : accountTitle(a)}</span>
+            <span className="truncate text-[12px] leading-4 text-[#9A9A98]">{meta}</span>
+          </span>
         )}
         {a.status === "expired" && <span className="shrink-0 rounded-full bg-[#FEF0C7] px-1.5 py-px text-[10.5px] font-medium leading-[14px] text-[#93370D]">Signed out</span>}
         <span className="flex-1" />
@@ -185,33 +192,213 @@ export function AccountBlock({ state, account: a, many, onSignIn }: { state: App
           </button>
         )}
       </div>
-      {teamOf(state).map((b) => (
-        <BotAccess key={b.id} bot={b} account={a} />
-      ))}
+      <div className="px-2">
+        <BotChips
+          team={team}
+          choices={APP_CHOICES}
+          level={(b) => levelOf(b, a) ?? "none"}
+          note={(b) => (levelOf(b, a) === "read" ? "read only" : undefined)}
+          what={openApp ? a.appName : accountTitle(a)}
+          onSet={set}
+        />
+      </div>
     </div>
   );
 }
 
-/** A bot's access to one account: none, read only, or read and act. */
-function BotAccess({ bot: b, account: a }: { bot: Bot; account: AppAccount }) {
-  const level = b.access?.[a.id] ?? null;
-  const set = (next: AppLevel | null) => void post("/api/bots", { botId: b.id, access: { account: a.id, level: next } }, "PATCH");
+/* ---------------- Who can use it: bot chips (here, and for keys in keys.tsx) ---------------- */
+
+/** A bot's choices for an account, the most first, as its chip's menu offers them: Read & act, Read only, No access. */
+const APP_CHOICES: { id: AppAccess; name: string; hint: string }[] = [
+  ...[...APP_LEVELS].reverse().map((l) => ({ id: l.id as AppAccess, name: l.name, hint: l.hint })),
+  { id: "none", name: "No access", hint: "Can't use it." },
+];
+
+/** When, in a few words: "just now", "5m ago", "3h ago", else the day ("Oct 15"). */
+export function usedWhen(at: number) {
+  const a = ago(at);
+  if (a === "now") return "just now";
+  return /^\d/.test(a) ? `${a} ago` : new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/** "Used 2h ago by Iris", from the use log (GET /api/apps/log), when a bot of `team` used it. */
+export function usedLine(last: LastUses[string] | undefined, team: Bot[]) {
+  const b = last && team.find((x) => x.id === last.bot);
+  return last && b ? `Used ${usedWhen(last.at)} by ${b.name}` : null;
+}
+
+/**
+ * When each account and key was last used, and by which bot (GET /api/apps/log, the use log in
+ * lib/server/access-sync.ts): read again whenever `tick` changes. Empty until it's read.
+ */
+export function useLastUses(tick: unknown): LastUses {
+  const [last, setLast] = useState<LastUses>({});
+  useEffect(() => {
+    let gone = false;
+    void fetch("/api/apps/log", { cache: "no-store" })
+      .then((r) => (r.ok ? (r.json() as Promise<{ last?: LastUses }>) : null))
+      .then((j) => {
+        if (!gone && j?.last) setLast(j.last);
+      })
+      .catch(() => {});
+    return () => {
+      gone = true;
+    };
+  }, [tick]);
+  return last;
+}
+
+const MENU_W = 156;
+
+/** A tiny menu under a chip, over everything (the Vault's list clips what's inside it). Esc, a click outside or a scroll closes it. */
+function ChipMenu({ anchor, label, onClose, children }: { anchor: () => HTMLElement | null; label: string; onClose: () => void; children: React.ReactNode }) {
+  const [place, setPlace] = useState<{ left: number; top: number } | null>(null);
+  const close = useRef(onClose);
+  const get = useRef(anchor);
+  useLayoutEffect(() => {
+    close.current = onClose;
+    get.current = anchor;
+  });
+  useLayoutEffect(() => {
+    const put = () => {
+      const r = get.current()?.getBoundingClientRect();
+      if (r) setPlace({ left: Math.max(8, Math.min(r.left, window.innerWidth - MENU_W - 8)), top: r.bottom + 4 });
+    };
+    put();
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      // Only the menu closes: the Vault under it stays.
+      e.preventDefault();
+      e.stopPropagation();
+      close.current();
+    };
+    const gone = () => close.current();
+    window.addEventListener("keydown", key, true);
+    window.addEventListener("scroll", gone, true);
+    window.addEventListener("resize", gone);
+    return () => {
+      window.removeEventListener("keydown", key, true);
+      window.removeEventListener("scroll", gone, true);
+      window.removeEventListener("resize", gone);
+    };
+  }, []);
+  if (!place) return null;
+  return createPortal(
+    <>
+      <div className="fixed inset-0 z-[60]" onClick={onClose} />
+      <div
+        role="menu"
+        aria-label={label}
+        style={{ left: place.left, top: place.top, width: MENU_W }}
+        className="motion-fade-in fixed z-[61] flex flex-col rounded-xl bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040]"
+      >
+        {children}
+      </div>
+    </>,
+    document.body,
+  );
+}
+
+const menuItem = "flex h-7 items-center gap-2 rounded-lg px-2 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F2F2F0]";
+
+/**
+ * Who can use something (an account, or a key in keys.tsx): a chip for each bot that can (mascot, name,
+ * and a quiet `note` such as "read only"), and a quiet "+N" for the rest. A chip opens a tiny menu of
+ * `choices` for that bot; "+N" lists the others, and one picked there gets the first choice.
+ */
+export function BotChips<T extends string>({
+  team,
+  choices,
+  level,
+  note,
+  what,
+  disabled,
+  onSet,
+}: {
+  team: Bot[];
+  /** The choices, the most first; the last one is no access. */
+  choices: { id: T; name: string; hint: string }[];
+  /** Each bot's choice now. */
+  level: (b: Bot) => T;
+  note?: (b: Bot) => string | undefined;
+  /** What it is, for the menus' labels ("Work · maya@acme.com", STRIPE_SECRET_KEY). */
+  what: string;
+  disabled?: boolean;
+  onSet: (b: Bot, to: T) => void;
+}) {
+  const [open, setOpen] = useState<string | null>(null);
+  const anchors = useRef(new Map<string, HTMLElement>());
+  const none = choices[choices.length - 1].id;
+  const users = team.filter((b) => level(b) !== none);
+  const rest = team.filter((b) => level(b) === none);
+  const pick = (b: Bot, to: T) => {
+    setOpen(null);
+    if (to !== level(b)) onSet(b, to);
+  };
+  const chosen = users.find((b) => b.id === open);
   return (
-    <div className="flex items-center gap-2.5 rounded-xl px-2 py-1">
-      <Mascot botId={b.id} color={b.color} size={22} antenna={false} />
-      <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-4">{b.name}</span>
-      <span className="flex shrink-0 rounded-full bg-[#F2F2F0] p-0.5">
-        {([null, ...APP_LEVELS.map((l) => l.id)] as (AppLevel | null)[]).map((l) => (
+    <div className="flex flex-wrap items-center gap-1">
+      {users.map((b) => {
+        const word = note?.(b);
+        return (
           <button
-            key={l ?? "none"}
-            onClick={() => set(l)}
-            title={l ? APP_LEVELS.find((x) => x.id === l)!.hint : "Can't use it"}
-            className={`rounded-full px-2.5 py-[3px] text-[12px] leading-4 transition-colors ${level === l ? "bg-white font-medium text-ink shadow-[0_1px_2px_#0000001F]" : "text-[#6B6B6B] hover:text-ink"}`}
+            key={b.id}
+            ref={(el) => void (el ? anchors.current.set(b.id, el) : anchors.current.delete(b.id))}
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={open === b.id}
+            disabled={disabled}
+            data-tip={`${b.name}: ${choices.find((c) => c.id === level(b))?.name ?? ""}`}
+            onClick={() => setOpen(open === b.id ? null : b.id)}
+            className="flex h-6 items-center gap-1 rounded-full bg-[#F4F4F2] pl-[3px] pr-2 text-[12px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-[#EDEDEA] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50"
           >
-            {l ? APP_LEVELS.find((x) => x.id === l)!.name : "None"}
+            <Mascot botId={b.id} color={b.color} size={18} antenna={false} />
+            {b.name}
+            {word && <span className="font-normal text-[#9A9A98]">{word}</span>}
           </button>
-        ))}
-      </span>
+        );
+      })}
+      {!users.length && <span className="pr-1 text-[12px] leading-4 text-[#9A9A98]">No bot can use it</span>}
+      {rest.length > 0 && (
+        <button
+          ref={(el) => void (el ? anchors.current.set("+", el) : anchors.current.delete("+"))}
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={open === "+"}
+          disabled={disabled}
+          data-tip={`Can't use it: ${rest.map((b) => b.name).join(", ")}`}
+          onClick={() => setOpen(open === "+" ? null : "+")}
+          className="h-6 rounded-full px-2 text-[12px] font-medium leading-4 text-[#9A9A98] outline-none hover:bg-[#F4F4F2] hover:text-[#3A3A38] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50"
+        >
+          +{rest.length}
+        </button>
+      )}
+      {open === "+" && (
+        <ChipMenu anchor={() => anchors.current.get("+") ?? null} label={`Let a bot use ${what}`} onClose={() => setOpen(null)}>
+          {rest.map((b) => (
+            <button key={b.id} type="button" role="menuitem" data-tip={choices[0].hint} onClick={() => pick(b, choices[0].id)} className={menuItem}>
+              <Mascot botId={b.id} color={b.color} size={16} antenna={false} />
+              <span className="truncate">{b.name}</span>
+            </button>
+          ))}
+        </ChipMenu>
+      )}
+      {chosen && (
+        <ChipMenu anchor={() => anchors.current.get(chosen.id) ?? null} label={`${chosen.name} in ${what}`} onClose={() => setOpen(null)}>
+          {choices.map((c) => (
+            <button key={c.id} type="button" role="menuitemradio" aria-checked={level(chosen) === c.id} data-tip={c.hint} onClick={() => pick(chosen, c.id)} className={menuItem}>
+              <span className="flex w-3 shrink-0 justify-center">
+                {level(chosen) === c.id && (
+                  <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden>
+                    <path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </span>
+              <span className={c.id === none ? "text-[#B42318]" : ""}>{c.name}</span>
+            </button>
+          ))}
+        </ChipMenu>
+      )}
     </div>
   );
 }
@@ -356,7 +543,8 @@ function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }: { stat
   const team = teamOf(state);
   const old = replaces ? state.accounts?.find((x) => x.id === replaces) : undefined;
   const [label, setLabel] = useState("");
-  const [bots, setBots] = useState<string[]>(() => team.filter((b) => b.isMain).map((b) => b.id));
+  // Every bot, Read & act: the default for every account.
+  const [bots, setBots] = useState<string[]>(() => team.map((b) => b.id));
   const [level, setLevel] = useState<AppLevel>("act");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

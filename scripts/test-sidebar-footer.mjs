@@ -2,7 +2,8 @@
 // which button is the pill for each page open on the right (People's sheet, the Vault, Routines,
 // Knowledge; none: Apps & logins), that the one pointed at wins over it (your account too) and leaving
 // goes back to it, that the others are round with their tooltips, that the Routines badge shows in both
-// shapes, and that the motion is a flex-grow swap the reduced-motion setting turns off and touch skips.
+// shapes, that Knowledge's blue dot shows while it has something new (and when that is), and that the
+// motion is a flex-grow swap the reduced-motion setting turns off and touch skips.
 //
 // The .tsx files are compiled with the TypeScript in node_modules as they load, and rendered to HTML.
 // Usage: node scripts/test-sidebar-footer.mjs   (not with --conditions=react-server: these are client components)
@@ -48,6 +49,7 @@ globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({})
 
 const { footerPageOf, footerPillOf, canHover, FOOTER_LEAVE_MS } = await import(pathToFileURL(`${root}/components/app/sidebar-footer.tsx`).href);
 const { SidebarFooter, YouMenu } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
+const { newSince, newestOf, markSeen, seenOf } = await import(pathToFileURL(`${root}/components/app/memory-categories.tsx`).href);
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { createElement: h } = await import("react");
 
@@ -205,6 +207,56 @@ await test("the Routines badge shows round and as the pill", () => {
     assert.match(html, /aria-label="Routines, 1 with news"/);
     assert.match(html, /bg-highlighter[^"]*">1<\/span>/, `${open}: the badge`);
   }
+});
+
+await test("Knowledge is new when an item was learned or mentioned after the newest one seen there", () => {
+  const items = [{ last: 100 }, { last: 200 }];
+  assert.equal(newestOf(items), 200);
+  assert.equal(newestOf([]), 0);
+  assert.equal(newSince(items, 200), false, "all seen");
+  assert.equal(newSince(items, 150), true, "one came after");
+  assert.equal(newSince(items, undefined), false, "never open here: nothing to compare with yet (the first copy is marked seen)");
+  assert.equal(newSince([], 0), false);
+  // Kept per account and workspace, in localStorage, and only going forward.
+  const kept = new Map();
+  const was = globalThis.localStorage;
+  globalThis.localStorage = { getItem: (k) => kept.get(k) ?? null, setItem: (k, v) => kept.set(k, v), removeItem: (k) => kept.delete(k) };
+  assert.equal(seenOf("u1", "w1"), undefined);
+  markSeen("u1", "w1", items);
+  assert.equal(seenOf("u1", "w1"), 200);
+  assert.equal(kept.get("bops.knowledge.seen.u1.w1"), "200");
+  markSeen("u1", "w1", [{ last: 50 }]);
+  assert.equal(seenOf("u1", "w1"), 200, "an older copy (something forgotten) doesn't make old items new");
+  assert.equal(newSince([...items, { last: 250 }], seenOf("u1", "w1")), true, "learned after: new");
+  assert.equal(seenOf("u1", "w2"), undefined, "another workspace has its own");
+  // No localStorage (it throws): still works, for as long as Bops is open.
+  globalThis.localStorage = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } };
+  assert.equal(seenOf("u1", "w3"), undefined);
+  markSeen("u1", "w3", items);
+  assert.equal(seenOf("u1", "w3"), 200);
+  globalThis.localStorage = was;
+});
+
+await test("Knowledge's dot: blue on its corner, softly pulsing (not with reduced motion), said in its name; none while it's open", () => {
+  const renderNews = (open, news) => renderToStaticMarkup(h(SidebarFooter, { state: base, open, news, you: () => null, onMembers: noop, onVault: noop, onOpenAutopilot: noop, onOpenMemory: noop }));
+  for (const open of ["vault", "routines"]) {
+    const html = renderNews(open, true);
+    const dot = html.match(/<span data-new-dot="true" class="([^"]+)">([\s\S]*?)<\/span><\/span>/);
+    assert.ok(dot, `${open}: the dot`);
+    assert.match(dot[1], /absolute -right-px -top-px/, "on the top right corner, outside the clipped button");
+    assert.match(dot[2], /motion-new-pulse[^"]*motion-reduce:hidden/, "the pulse, gone with reduced motion");
+    assert.match(dot[2], /bg-\[#2F7BFF\]/);
+    assert.equal(dot[2].replace(/<[^>]+>/g, "").trim(), "", "no number");
+    assert.match(html, /aria-label="Knowledge, something new"/);
+  }
+  assert.match(renderNews("vault", true), /title="Knowledge: something new your bots learned"/, "round: the tooltip says so");
+  assert.doesNotMatch(renderNews("knowledge", true), /data-new-dot/, "open: no dot");
+  assert.match(renderNews("knowledge", true), /aria-label="Knowledge"/);
+  assert.doesNotMatch(renderNews("vault", false), /data-new-dot/, "nothing new: no dot");
+  assert.doesNotMatch(render(base, "vault"), /data-new-dot/, "on the server, before the copy is in: no dot");
+  const css = readFileSync(`${root}/app/globals.css`, "utf8");
+  assert.match(css, /\.motion-new-pulse \{\s*animation: new-pulse [^;]*infinite;/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.motion-new-pulse \{\s*animation: none;/);
 });
 
 await test("no Knowledge for the account: three buttons, and Knowledge asked for falls back to Apps & logins", () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { nextRun } from "@/cloud/schedule";
 import type { Bot, Routine, RoutineRun } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
@@ -10,9 +10,10 @@ import { post } from "./ui";
 /*
  * The week on the Routines page: seven days from today, each with a dot for every run coming that day in
  * its bot's color, and the picked day's runs in time order (what already ran today with how it went, a
- * Now line, what's coming), each with Run now, Skip (or Undo for a skipped time) and Pause. A routine that
- * runs many times a day is one line ("Every 15 minutes, 8 AM to 8 PM"); one before meetings is one line on
- * its days. Times are in the user's zone. weekPlan is the plan as data, for tests.
+ * Now line, what's coming), each with its bot and Run now, Skip (or Undo for a skipped time) and Pause. A
+ * routine that runs many times a day is one line ("Every 15 minutes, 8 AM to 8 PM"); one before meetings
+ * is one line on its days. Under the strip, which bot each color is (WeekLegend), which picks one bot's
+ * too. Times are in the user's zone. weekPlan is the plan as data, for tests.
  */
 
 /** One line in a day. */
@@ -161,7 +162,8 @@ type Busy = { key: string; what: "run" | "skip" | "unskip" | "pause" } | null;
 
 /**
  * The week strip and the picked day's runs. `onOpen` opens a routine's row below (its details, Edit, Delete).
- * `bots` colors each run; `running` and `needsYou` say a routine's state as the rows do.
+ * `bots` colors each run, and with more than one, each line says its bot's name by its mascot; `running`
+ * and `needsYou` say a routine's state as the rows do. `legend` goes under the strip (WeekLegend).
  */
 export function RoutineWeek({
   routines,
@@ -172,6 +174,7 @@ export function RoutineWeek({
   running,
   needsYou,
   onOpen,
+  legend,
 }: {
   routines: Routine[];
   bots: Bot[];
@@ -181,6 +184,7 @@ export function RoutineWeek({
   running: (r: Routine) => boolean;
   needsYou: (r: Routine) => boolean;
   onOpen: (id: string) => void;
+  legend?: ReactNode;
 }) {
   // Worked out again only when a routine's times change, or the minute does (not on every render).
   const minute = Math.floor(now / 60_000);
@@ -235,9 +239,8 @@ export function RoutineWeek({
               <span className="text-[17px] font-semibold leading-5 tabular-nums">{x.date}</span>
               <span className="flex h-[6px] items-center gap-[3px]" aria-hidden>
                 {dots.slice(0, 4).map((it, j) => {
-                  const c = botOf(it.routine)?.color ?? "#9A9A98";
                   // A dark bot's dot is white on the picked (dark) day.
-                  return <span key={j} style={{ background: on && luminance(c) < 0.3 ? "#FFFFFF" : c }} className="size-[6px] rounded-full" />;
+                  return <span key={j} style={{ background: dotOf(botOf(it.routine)?.color, on) }} className="size-[6px] rounded-full" />;
                 })}
                 {dots.length > 4 && <span className={`text-[9px] font-semibold leading-none ${on ? "text-white/70" : "text-[#9A9A98]"}`}>+{dots.length - 4}</span>}
               </span>
@@ -245,6 +248,8 @@ export function RoutineWeek({
           );
         })}
       </div>
+
+      {legend}
 
       <div key={day.key} className="motion-fade-in flex flex-col gap-1.5">
         <span className="flex items-baseline gap-1.5 px-1">
@@ -265,6 +270,7 @@ export function RoutineWeek({
                   <Item
                     item={it}
                     bot={botOf(it.routine)}
+                    named={bots.length > 1}
                     tz={tz}
                     running={running(it.routine)}
                     needsYou={needsYou(it.routine)}
@@ -299,10 +305,11 @@ function NowLine({ at, tz }: { at: number; tz?: string }) {
 
 const btn = "flex h-[26px] shrink-0 items-center justify-center gap-1 rounded-full text-[11.5px] font-medium leading-4 outline-none transition-colors focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-40";
 
-/** A line in the day: when, its bot, its name and how it runs or ran, and what can be done. */
+/** A line in the day: when, its bot (`named`: its name too), its name and how it runs or ran, and what can be done. */
 function Item({
   item: it,
   bot,
+  named,
   tz,
   running,
   needsYou,
@@ -316,6 +323,7 @@ function Item({
 }: {
   item: DayItem;
   bot?: Bot;
+  named: boolean;
   tz?: string;
   running: boolean;
   needsYou: boolean;
@@ -365,6 +373,12 @@ function Item({
           {undash(r.title)}
         </button>
         <span className={`text-[12px] leading-4 ${status === "failed" || needsYou ? "text-[#B42318]" : "text-[#6B6B6B]"} [overflow-wrap:anywhere]`}>
+          {named && bot && (
+            <>
+              <span className="font-medium text-[#3A3A38]">{bot.name}</span>
+              <span className="text-[#9A9A98]">{" · "}</span>
+            </>
+          )}
           {line}
         </span>
         {error && (
@@ -426,6 +440,12 @@ function luminance(color: string) {
   return (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
 }
 
+/** A bot's dot (grey for one that's gone); a dark one is white on a dark day. */
+const dotOf = (color: string | undefined, dark: boolean) => {
+  const c = color ?? "#9A9A98";
+  return dark && luminance(c) < 0.3 ? "#FFFFFF" : c;
+};
+
 /** Ink on a light color (the highlighter, mint), white on a dark one. */
 const textOn = (color: string) => (luminance(color) > 0.6 ? "#0A0A0A" : "#FFFFFF");
 
@@ -445,5 +465,37 @@ export function WeekLetters({ days, routineId, color }: { days: DayPlan[]; routi
         </span>
       ))}
     </span>
+  );
+}
+
+/** Tapping a bot in the legend: only its routines, or all of them again when it's the one shown. */
+export const legendPick = (on: string | undefined, botId: string) => (on === botId ? undefined : botId);
+
+/**
+ * Who runs what, under the strip: each bot with routines, its dot's color, mascot and name. It's the
+ * page's bot filter too: tapping one shows only its routines (`on`), tapping it again all of them.
+ */
+export function WeekLegend({ bots, on, onPick }: { bots: Bot[]; on?: string; onPick: (botId: string | undefined) => void }) {
+  return (
+    <div role="group" aria-label="Bots" className="flex flex-wrap gap-1.5">
+      {bots.map((b) => {
+        const here = on === b.id;
+        return (
+          <button
+            key={b.id}
+            onClick={() => onPick(legendPick(on, b.id))}
+            aria-pressed={here}
+            data-tip={here ? "Show every bot's routines" : `Show only ${b.name}'s routines`}
+            className={`flex h-7 items-center gap-1.5 rounded-full pl-2.5 pr-3 text-[12.5px] font-medium leading-4 outline-none transition-[background-color,opacity] duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] motion-reduce:transition-none ${
+              here ? "bg-white text-ink shadow-[0_0_0_1.5px_#0A0A0A]" : `bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7] ${on ? "opacity-60 hover:opacity-100" : ""}`
+            }`}
+          >
+            <span aria-hidden style={{ background: dotOf(b.color, false) }} className="size-[6px] shrink-0 rounded-full" />
+            <Mascot botId={b.id} color={b.color} size={16} antenna={false} />
+            {b.name}
+          </button>
+        );
+      })}
+    </div>
   );
 }

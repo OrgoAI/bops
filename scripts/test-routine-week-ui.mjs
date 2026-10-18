@@ -1,7 +1,8 @@
 // Tests for the week on the Routines page (components/app/routine-week.tsx): weekPlan puts each routine's
 // coming times on their days in the user's zone (skipped ones marked, many a day as one line, meeting
 // prep on its days, today's last run first), and the strip and a day render with Run now, Skip, Undo
-// skip and Pause; a row's day letters say the days it runs.
+// skip and Pause, each line with its bot's name when there are several; the legend under the strip says
+// whose each color is and picks one bot, then all again; a row's day letters say the days it runs.
 //
 // Nothing reaches a server. The .tsx files are compiled with the TypeScript in node_modules as they load.
 // Usage: node scripts/test-routine-week-ui.mjs   (not with --conditions=react-server: these are client components)
@@ -197,10 +198,10 @@ await test("the strip and today render: dots, counts, the Now line, Run now, Ski
   const t = text(html);
   assert.match(t, /Today 19/);
   assert.match(t, /Today, Oct 19 1 run/, "the skipped one isn't counted");
-  assert.match(t, /7 AM R g Failed: Gmail signed out/);
+  assert.match(t, /7 AM R g Boppy · Failed: Gmail signed out/);
   assert.match(t, /Now 8 AM/);
-  assert.match(t, /9 AM R a In the chat /);
-  assert.match(t, /10 AM R c Skipped Undo skip/);
+  assert.match(t, /9 AM R a Boppy · In the chat /);
+  assert.match(t, /10 AM R c Max · Skipped Undo skip/, "each line says its bot");
   assert.ok(t.indexOf("R g") < t.indexOf("Now 8 AM") && t.indexOf("Now 8 AM") < t.indexOf("R a"), "what ran, Now, what's coming");
   assert.match(html, /aria-label="Run R a now"/);
   assert.match(html, /aria-label="Skip R a at 9 AM"/);
@@ -209,6 +210,29 @@ await test("the strip and today render: dots, counts, the Now line, Run now, Ski
   assert.match(html, /aria-label="Tomorrow, Oct 20: 3 runs"/);
   assert.match(html, /bg-highlighter/, "today needs you");
   assert.ok(!/[‒–—―]/.test(t), "no dashes");
+});
+
+await test("one bot (its own tab): no name on each line, its mascot is enough; the legend goes under the strip", () => {
+  const a = routine("a", { kind: "daily", time: "09:00" }, { nextRunAt: Z("2026-10-19T13:00:00Z") });
+  const props = { routines: [a], bots: [bots[0]], tz: NY, now, zoneOf: () => NY, running: () => false, needsYou: () => false, onOpen: noop };
+  assert.match(text(renderToStaticMarkup(h(W.RoutineWeek, props))), /9 AM R a In the chat /);
+  const html = renderToStaticMarkup(h(W.RoutineWeek, { ...props, legend: h("span", { id: "legend" }) }));
+  assert.ok(html.indexOf('aria-label="This week"') < html.indexOf('id="legend"') && html.indexOf('id="legend"') < html.indexOf("<ol"), "between the strip and the day");
+});
+
+await test("the legend: each bot's dot, mascot and name; tapping one shows only its, tapping it again all", () => {
+  assert.equal(W.legendPick(undefined, "bot_max"), "bot_max", "a bot: only its");
+  assert.equal(W.legendPick("bot_max", "bot_max"), undefined, "the same again: all");
+  assert.equal(W.legendPick("bot_max", "bot_main"), "bot_main", "another: that one's");
+  let html = renderToStaticMarkup(h(W.WeekLegend, { bots, onPick: noop }));
+  assert.match(html, /role="group" aria-label="Bots"/);
+  assert.match(text(html), /Boppy Max/);
+  assert.match(html, /background:#E9FF3B/, "Max's dot in his color, as the strip's");
+  assert.match(html, /<svg/, "the mascots");
+  assert.equal((html.match(/aria-pressed="false"/g) ?? []).length, 2, "none picked: all shown");
+  html = renderToStaticMarkup(h(W.WeekLegend, { bots, on: "bot_max", onPick: noop }));
+  assert.match(html, /aria-pressed="true" data-tip="Show every bot&#x27;s routines"/);
+  assert.match(html, /aria-pressed="false" data-tip="Show only Boppy&#x27;s routines"[^>]*opacity-60/, "the others quieter while one is picked");
 });
 
 await test("a one-off has no Pause or Skip in the day; a day after it has nothing", () => {

@@ -1393,7 +1393,8 @@ S.update((s) => {
     // The Slack connection is how bots get into Slack, not one of their apps: it's in neither list.
     { id: "ca_slackapp", app: "slackbot", appName: "Slack", name: "Acme", status: "active", at: 1 },
   ];
-  s.bots.find((b) => b.isMain).access = { ca_gmail: "act", ca_sheets: "read" };
+  // Every bot has every account by default: Jira is taken away, so it's one the bot can't use.
+  s.bots.find((b) => b.isMain).access = { ca_gmail: "act", ca_sheets: "read", ca_jira: "none" };
 });
 // What the bot is told: each account it may use by name and level, from the user's own accounts (any
 // app), how to use the app gateway, and the user's other apps it can't use yet.
@@ -1552,7 +1553,7 @@ states.set("u3", {
 await signIn("orgo_key_3", { id: "u3", email: "ana@bakery.com" });
 let st = S.getState();
 assert.deepEqual(st.bots.map((b) => b.name), ["Sam", "Max"]);
-assert.deepEqual(JSON.parse(JSON.stringify(st.accounts)), [{ id: "ca_cal", app: "googlecalendar", appName: "Google Calendar", name: "ana@bakery.com", status: "active", at: 3 }], "an old state's apps become accounts");
+assert.deepEqual(JSON.parse(JSON.stringify(st.accounts)), [{ id: "ca_cal", app: "googlecalendar", appName: "Google Calendar", name: "ana@bakery.com", status: "active", at: 3, workspaceId: "ws_main" }], "an old state's apps become accounts, in the workspace of the bots given them");
 assert.deepEqual([st.bots[1].access, "connectors" in st.bots[1], "channels" in st.bots[1], "apps" in st], [{ ca_cal: "read" }, false, false, false], "and each bot's access is by account");
 assert.deepEqual([st.owner.name, st.installId, st.messages.map((m) => m.text)], ["Ana", "cafe1234", ["hello"]]);
 assert.equal(st.account.user.id, "u3");

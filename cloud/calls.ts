@@ -44,11 +44,11 @@ export type Bot = {
   phoneLine?: { numberId: string; agentId: string };
   /** The voice the app picked for it and kept (lib/server/call.ts voiceFor). */
   voice?: unknown;
-  /** The owner's app accounts it may use, by account id: "read" or "act". */
+  /** What the owner set for it in their app accounts, by account id: "read", "act" or "none" (levelIn). */
   access?: Record<string, unknown>;
 };
 /** One of the owner's app accounts, connected through Composio (AppAccount in lib/types.ts). */
-type Account = { id: string; app: string; appName?: unknown; name?: unknown; label?: unknown; status?: unknown };
+type Account = { id: string; app: string; appName?: unknown; name?: unknown; label?: unknown; status?: unknown; workspaceId?: unknown };
 /** A bot added to Slack, Telegram or Discord (ChannelLink in lib/types.ts). */
 type Channel = { kind: string; botId: string; handle?: unknown };
 type CallMessage = NonNullable<CloudCallPayload["message"]>;
@@ -190,6 +190,17 @@ const clip = (x: unknown, max: number) => (typeof x === "string" ? x.trim().slic
 export const and = (items: string[]) => (items.length > 1 ? `${items.slice(0, -1).join(", ")} and ${items.at(-1)}` : (items[0] ?? ""));
 
 /**
+ * What a bot may do in an account, as levelOf in lib/types.ts: what the owner set, else Read & act in an
+ * account of its own workspace; Bops' Slack app ("slackbot") only when set. Null: no access.
+ */
+function levelIn(b: Bot, a: Account): "read" | "act" | null {
+  const set = b.access?.[a.id];
+  if (set === "read" || set === "act") return set;
+  const ws = typeof a.workspaceId === "string" ? a.workspaceId : "ws_main";
+  return set === "none" || a.app === "slackbot" || ws !== workspaceOf(b) ? null : "act";
+}
+
+/**
  * What the bot can do once the computer is back, from the user's last state upload: the owner's
  * apps it may use, each account with how much it may do there ("Gmail (Work · ann@acme.com: read &
  * act)", as appList in lib/server/composio.ts writes it), and where it's been added in Slack,
@@ -199,8 +210,8 @@ export const and = (items: string[]) => (items.length > 1 ? `${items.slice(0, -1
 export function skillsOf(s: State, b: Bot) {
   const apps = new Map<string, { name: string; accounts: string[] }>();
   for (const a of s.accounts) {
-    const level = b.access?.[a.id];
-    if (a.status !== "active" || (level !== "read" && level !== "act")) continue;
+    const level = levelIn(b, a);
+    if (a.status !== "active" || !level) continue;
     const app = apps.get(a.app) ?? { name: clip(a.appName, 60) || a.app, accounts: [] };
     const title = [clip(a.label, 40), clip(a.name, 80)].filter(Boolean).join(" · ") || app.name;
     if (!a.id.startsWith("open:")) app.accounts.push(`${title}: ${level === "read" ? "read only" : "read & act"}`);

@@ -1,6 +1,7 @@
 import "server-only";
 import { sameApp } from "@/lib/routine-catalog";
-import { MAIN_WORKSPACE, workspaceOf, type Bot } from "@/lib/types";
+import { MAIN_WORKSPACE, workspaceOf, type AccessUse, type Bot } from "@/lib/types";
+import { accessChanged, logUse, placeOf, viaOf, type UseWhere } from "./access-sync";
 import { orgoHeaders } from "./app-version";
 import { askOwner } from "./composio";
 import { apiKey } from "./orgo";
@@ -180,6 +181,7 @@ export async function saveKey(name: string, value: string, botIds: string[] = []
     .catch(() => true);
   await vault("POST", "/api/secrets", { name: n, value: v, ...(project ? { workspace_id: project } : {}) });
   forget();
+  accessChanged();
   for (const botId of botIds) grantKey(n, botId, true);
   // A new key a bot was given: that bot is offered the service's starter routines (Stripe, Plain).
   if (!existed && botIds.length) await import("./routine-suggestions").then((m) => m.offerStarters(n, botIds)).catch(() => {});
@@ -196,6 +198,7 @@ export async function removeKey(name: string, scope: KeyScope = "all", wsId?: st
   const project = scopeProject(scope, wsId);
   await vault("DELETE", `/api/secrets/${encodeURIComponent(n)}${project ? `?workspace_id=${encodeURIComponent(project)}` : ""}`);
   forget();
+  accessChanged();
   // A bot keeps a name another scope still has for its workspace.
   const scoped = (getState().workspaces ?? []).some((w) => w.orgoProjectId);
   const left = scoped ? await listKeys({ fresh: true }).catch(() => [] as VaultKey[]) : [];
@@ -351,7 +354,7 @@ const SHOW_CAP = 4000;
 export async function callApi(
   botId: string,
   a: CallApiArgs,
-  where: { chatId?: string; sessionId?: string },
+  where: UseWhere,
   onAsk?: (ask: Promise<CallApiDone>, did: string) => void,
 ): Promise<CallApiDone> {
   const b = bot(botId);
@@ -359,7 +362,14 @@ export async function callApi(
   const owner = ownerName();
   const name = keyName(String(a.key ?? ""));
   const p = keyProvider(name);
-  if (!p || !b.keys?.includes(name)) return { text: `You may not use ${name || "that key"}. ${owner} can let you in Keys.` };
+  // Each use, for the Vault and Orgo (access-sync.ts): which bot, which key, what it called, where, and how it ended.
+  const used = (action: string, outcome: AccessUse["outcome"], approvedBy?: AccessUse["approvedBy"]) =>
+    logUse({ bot: b.id, kind: "key", target: name, targetName: name, action, ...viaOf(where), outcome, ...(approvedBy ? { approvedBy } : {}) });
+  const tried = () => `${String(a.method ?? "").toUpperCase()} ${String(a.path ?? "").trim().split("?")[0]}`.trim();
+  if (!p || !b.keys?.includes(name)) {
+    if (p) used(tried(), "refused");
+    return { text: `You may not use ${name || "that key"}. ${owner} can let you in Keys.` };
+  }
   const usable = await usableKeys(b);
   if (!usable.some((k) => k.name === name)) return { text: `The ${p.label} key isn't set in ${owner}'s vault. ${owner} can add it in Keys.` };
   const method = String(a.method ?? "").toUpperCase() as KeyMethod;
@@ -367,12 +377,14 @@ export async function callApi(
   // A query written into the path ("/v1/customers?email=..."; a "more pages" link) goes in the query: Orgo takes it only there.
   const [path, inPath = ""] = String(a.path ?? "").trim().split(/\?([\s\S]*)/);
   if (!path.startsWith("/") || /^\/\//.test(path) || /\s/.test(path)) return { text: "The path must start with / and be the part after the service's address, with no spaces." };
-  if (p.readOnly && method !== "GET") return { text: `${p.label} is read only in Bops: only GET.` };
-  if (p.denied?.test(path)) return { text: `Bops doesn't call ${path} in ${p.label}: it makes a new key, and keys never reach you.` };
-  if (!onAsk && p.chatOnly) return { text: `${p.label} is for the chat only, not a task.` };
+  const action = `${method} ${path}`;
+  const refused = (text: string) => (used(action, "refused"), { text });
+  if (p.readOnly && method !== "GET") return refused(`${p.label} is read only in Bops: only GET.`);
+  if (p.denied?.test(path)) return refused(`Bops doesn't call ${path} in ${p.label}: it makes a new key, and keys never reach you.`);
+  if (!onAsk && p.chatOnly) return refused(`${p.label} is for the chat only, not a task.`);
   // Slack's GETs can post and delete: only its read methods count as a GET here.
   const asks = method !== "GET" || (!!p.getReads && !p.getReads.test(path));
-  if (!onAsk && asks) return { text: "Only GET here, and only reads. Ask in the chat for anything that changes something." };
+  if (!onAsk && asks) return refused("Only GET here, and only reads. Ask in the chat for anything that changes something.");
   const parse = (v: unknown, what: string): { ok: true; v: unknown } | { ok: false; why: string } => {
     if (v === null || v === undefined || v === "") return { ok: true, v: null };
     if (typeof v !== "string") return { ok: true, v };
@@ -391,22 +403,25 @@ export async function callApi(
   if (!body.ok) return { text: body.why };
   const shown = path.length > 120 ? `${path.slice(0, 120)}…` : path;
   const did = `Called ${p.label} ${method} ${shown}`;
-  const run = async (): Promise<CallApiDone> => {
+  const run = async (approvedBy?: AccessUse["approvedBy"]): Promise<CallApiDone> => {
     try {
       // The bot's workspace: Orgo uses its own key by that name, else the account's.
       const r = await callKey({ name, method, path, query: q.v as Record<string, unknown> | null, body: body.v, workspaceId: keysProject(workspaceOf(b)) });
+      used(action, r.status >= 400 ? "failed" : "ok", approvedBy);
       // Orgo sent it, but the service said no (a refund already made, a page not found): not done.
       if (r.status >= 400) return { text: answerForBot(p.label, r), brought: answerTextOf(r), failed: { did, why: `${p.label} answered ${r.status}` } };
       return { text: answerForBot(p.label, r), did, brought: answerTextOf(r) };
     } catch (e) {
+      used(action, "failed", approvedBy);
       return { text: `Failed: ${(e as Error).message}`, failed: { did, why: (e as Error).message } };
     }
   };
   if (!asks) return run();
   const detail = [q.v ? `query: ${JSON.stringify(q.v)}` : "", body.v !== null ? `body: ${typeof body.v === "string" ? body.v : JSON.stringify(body.v, null, 1)}` : ""].filter(Boolean).join("\n");
   if (detail.length > SHOW_CAP) return { text: `That's too long to show ${owner} for a yes (${detail.length} characters, at most ${SHOW_CAP}). Send a shorter query and body.` };
-  const ask = askOwner({ botId, app: "api", action: `${name} ${method} ${path}`, title: `${method} ${shown} in ${p.label}`, detail, ...where }).then((yes) =>
-    yes ? run() : { text: `Not approved: ${owner} said no. Don't do it.` },
+  used(action, "waiting");
+  const ask = askOwner({ botId, app: "api", action: `${name} ${method} ${path}`, title: `${method} ${shown} in ${p.label}`, detail, ...placeOf(where) }).then((yes) =>
+    yes ? run("user") : refused(`Not approved: ${owner} said no. Don't do it.`),
   );
   onAsk!(ask, did);
   return { text: `This needs ${owner}'s approval first: ${method} ${shown} in ${p.label}. Bops is showing them the details. Tell them in one short line, and don't call it again.` };

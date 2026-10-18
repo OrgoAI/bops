@@ -2,7 +2,8 @@
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { sameApp } from "@/lib/routine-catalog";
-import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type Message, type Watch } from "@/lib/types";
+import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type LastUses, type Message, type Watch } from "@/lib/types";
+import { BotChips, usedLine } from "./apps";
 import { Mascot } from "./mascot";
 import { anchorOf, AppRoutines, hasTemplates, RoutineSuggest, usePendingSuggest } from "./routines";
 import { KeyIcon } from "./screen-cards";
@@ -175,7 +176,7 @@ function useKeyValue(name: string, scope: Scope, onError: (e: string | null) => 
   return { shown, busy, copied, toggle, copy };
 }
 
-/** A bot that may use a key, or may not: tap to change it. */
+/** In the add form: a bot that will use the key, or won't: tap to change it. */
 function BotChip({ bot: b, on, disabled, tip, onClick }: { bot: Bot; on: boolean; disabled?: boolean; tip: string; onClick: () => void }) {
   return (
     <button
@@ -206,11 +207,12 @@ async function grant(name: string, botId: string, allowed: boolean): Promise<str
 /* ---------------- Vault ---------------- */
 
 /**
- * API keys in the Vault: each key in the vault (its service, its vault name, where it applies, when it was set),
- * the bots that may use it (tap to change), Replace and Remove; and Add key. `keysFor`: opened from a bot's
- * profile to add one for that bot, so it comes into view with the form open and that bot picked.
+ * API keys in the Vault: each key in the vault (its vault name, where it applies, when it was set), the bots
+ * that may use it (a chip each, like a Connected App's), Replace and Remove; and Add key. `keysFor`: opened from
+ * a bot's profile to add one for that bot, so it comes into view with the form open and that bot picked.
+ * `uses`: when each key was last used, and by which bot.
  */
-export function KeysSettings({ state, keysFor, onOpenWatch }: { state: AppState; keysFor?: string; onOpenWatch: (w: Watch) => void }) {
+export function KeysSettings({ state, keysFor, uses, onOpenWatch }: { state: AppState; keysFor?: string; uses?: LastUses; onOpenWatch: (w: Watch) => void }) {
   const { info, failed, retry } = useKeys(state.workspace ?? MAIN_WORKSPACE);
   const team = teamOf(state);
   const main = team.find((b) => b.isMain) ?? team[0];
@@ -237,9 +239,9 @@ export function KeysSettings({ state, keysFor, onOpenWatch }: { state: AppState;
     setAskedFor(keysFor);
     if (keysFor && picked) setForm({ bots: [picked] });
   }
-  const done = (label: string) => {
+  const done = (name: string) => {
     setForm(null);
-    setSaved(`${label} key saved to your Orgo vault.`);
+    setSaved(`${name} saved to your Orgo vault.`);
     setTimeout(() => setSaved(null), 2500);
   };
   const add = () => setForm({ bots: main ? [main.id] : [] });
@@ -275,6 +277,7 @@ export function KeysSettings({ state, keysFor, onOpenWatch }: { state: AppState;
             <KeyLine
               k={k}
               team={team}
+              used={usedLine(uses?.[k.name], team)}
               onReplace={() => setForm({ replace: k, bots: [] })}
               onRoutines={hasTemplates(k.name) ? () => setAsked(k.name) : undefined}
               routines={hasTemplates(k.name) && firstOfApp(k.name) && <AppRoutines state={state} app={k.name} onOpenWatch={onOpenWatch} />}
@@ -352,10 +355,20 @@ export function KeysSettings({ state, keysFor, onOpenWatch }: { state: AppState;
   );
 }
 
-/** One key in the vault: what it is, who may use it (tap a bot to change), Replace, and Remove after a confirm. */
+/** Who may use a key: a bot can, or can't. */
+const KEY_CHOICES: { id: "act" | "none"; name: string; hint: string }[] = [
+  { id: "act", name: "Can use it", hint: "Calls through Orgo and never sees the key. Anything but a read asks you first." },
+  { id: "none", name: "No access", hint: "Can't use it." },
+];
+
+/**
+ * One key in the vault, as a Connected App's account reads: its name, one quiet line (where it applies, when it
+ * was set, when a bot last used it), the bots that may use it (a chip each), and Show, Copy, Replace and Remove.
+ */
 function KeyLine({
   k,
   team,
+  used,
   onReplace,
   onRoutines,
   routines,
@@ -363,6 +376,8 @@ function KeyLine({
 }: {
   k: KeyRow;
   team: Bot[];
+  /** "Used 2h ago by Iris", when a bot of this workspace did. */
+  used: string | null;
   onReplace: () => void;
   /** Opens its starter routines, when it has some; the button that does is the popover's anchor. */
   onRoutines?: () => void;
@@ -400,24 +415,14 @@ function KeyLine({
     }
   };
   const when = setOn(k.updatedAt);
+  const meta = [scopeLabel(k.scope).label, k.readOnly && "Read only", when && `Updated ${when}`, used].filter(Boolean).join(" · ");
   return (
-    <div className="flex flex-col gap-2 border-b border-[#F0F0EE] py-3 first:pt-0">
+    <div className="flex flex-col gap-1.5 border-b border-[#F0F0EE] py-3 first:pt-0">
       <div className="flex items-start gap-3">
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[13.5px] font-medium leading-[18px]">{k.label}</span>
-            <span data-tip={scopeLabel(k.scope).tip} className="rounded-full bg-[#F2F2F0] px-2 py-px text-[11px] leading-4 text-[#6B6B6B]">
-              {scopeLabel(k.scope).label}
-            </span>
-            {k.readOnly && (
-              <span data-tip={`Orgo lets bots only read from ${k.label}`} className="rounded-full bg-[#F2F2F0] px-2 py-px text-[11px] leading-4 text-[#6B6B6B]">
-                Read only
-              </span>
-            )}
-          </span>
-          <span className="flex min-w-0 items-center gap-2 text-[12px] leading-4 text-[#9A9A98]">
-            <span className="truncate font-mono text-[11.5px] text-[#6B6B6B]">{k.name}</span>
-            {when && <span className="shrink-0">Updated {when}</span>}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate font-mono text-[13px] font-medium leading-[18px]">{k.name}</span>
+          <span data-tip={`${scopeLabel(k.scope).tip}${k.readOnly ? " Orgo lets bots only read with it." : ""}`} className="truncate text-[12px] leading-4 text-[#9A9A98]">
+            {meta}
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -477,12 +482,7 @@ function KeyLine({
         </div>
       )}
       {!!team.length && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {team.map((b) => {
-            const on = !!b.keys?.includes(k.name);
-            return <BotChip key={b.id} bot={b} on={on} disabled={busy} tip={on ? `${b.name} may use it. Tap to stop` : `Let ${b.name} use it`} onClick={() => void toggle(b, !on)} />;
-          })}
-        </div>
+        <BotChips team={team} choices={KEY_CHOICES} level={(b) => (b.keys?.includes(k.name) ? "act" : "none")} what={k.name} disabled={busy} onSet={(b, to) => void toggle(b, to === "act")} />
       )}
       {routines}
       {sure && (
@@ -504,7 +504,7 @@ function KeyLine({
         </span>
       )}
       <span role="status" className="sr-only">
-        {v.copied ? `${k.label} key copied` : ""}
+        {v.copied ? `${k.name} copied` : ""}
       </span>
     </div>
   );
@@ -534,7 +534,7 @@ function AddKey({
   scope: Scope;
   bots: string[];
   first: boolean;
-  onSaved: (label: string) => void;
+  onSaved: (name: string) => void;
   onCancel: () => void;
 }) {
   // Every name Orgo can call. A service with two (Stripe) shows each one's name.
@@ -560,7 +560,7 @@ function AddKey({
       if (!res.ok || !j.ok) return setError(undash(j.error ?? "That didn't save. Try again."));
       setValue("");
       keysChanged();
-      onSaved(p.label);
+      onSaved(name);
     } catch {
       setError("Couldn't reach Bops. Try again.");
     } finally {
@@ -586,7 +586,7 @@ function AddKey({
     >
       {replace ? (
         <span className="text-[13px] leading-[18px]">
-          New key for <span className="font-medium">{replace.label}</span> <span className="font-mono text-[11.5px] text-[#6B6B6B]">{replace.name}</span>
+          New value for <span className="font-mono text-[12.5px] font-medium">{replace.name}</span>
         </span>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
@@ -712,10 +712,7 @@ export function BotKeys({ state, bot: b, onAdd, className }: { state: AppState; 
           const on = !!b.keys?.includes(k.name);
           return (
             <div key={k.name} className={`flex items-center gap-2.5 px-4 py-[9px] ${i === keys.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
-              <div className="flex min-w-0 flex-1 items-baseline gap-2">
-                <span className="shrink-0 text-[14px] leading-[18px]">{k.label}</span>
-                <span className="truncate font-mono text-[11px] leading-4 text-[#9A9A98]">{k.name}</span>
-              </div>
+              <span className="min-w-0 flex-1 truncate font-mono text-[13px] leading-[18px]">{k.name}</span>
               {routinesOn(k.name) && (
                 <span ref={(el) => void (el ? anchors.current.set(k.name, el) : anchors.current.delete(k.name))} className="flex shrink-0">
                   <button
@@ -729,7 +726,7 @@ export function BotKeys({ state, bot: b, onAdd, className }: { state: AppState; 
               <button
                 role="switch"
                 aria-checked={on}
-                aria-label={on ? `Stop ${b.name} using ${k.label}` : `Let ${b.name} use ${k.label}`}
+                aria-label={on ? `Stop ${b.name} using ${k.name}` : `Let ${b.name} use ${k.name}`}
                 disabled={busy === k.name}
                 onClick={() => void toggle(k.name, !on)}
                 className={`flex h-[22px] w-[38px] shrink-0 items-center rounded-full p-0.5 disabled:opacity-60 ${on ? "justify-end bg-ink" : "justify-start bg-[#D9D9D6]"}`}

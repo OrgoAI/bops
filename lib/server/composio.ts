@@ -5,7 +5,8 @@ import { chmodSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { Composio } from "@composio/core";
 import { USAGE_APP_HEADER, USAGE_BOT_HEADER } from "@/cloud/protocol";
-import { live as running, type AppAccount, type AppApproval, type AppConnecting, type AppLevel, type Bot } from "@/lib/types";
+import { CHANNEL_APPS, levelOf, live as running, MAIN_WORKSPACE, workspaceOf, type AccessUse, type AppAccount, type AppApproval, type AppConnecting, type AppLevel, type Bot } from "@/lib/types";
+import { logUse, placeOf, targetNameOf, viaOf, type UseWhere } from "./access-sync";
 import { trackServerEvent } from "./analytics";
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudProxy, cloudSession, cloudSessionNow, cloudUrl } from "./cloud";
@@ -229,8 +230,13 @@ async function authConfigFor(app: string) {
  * where the app has no sign-in), and the account appears here once they finish. Another account in
  * the same app is fine. `replaces` signs an expired account back in: the bots keep their access.
  */
-export async function connectApp(app: string, label?: string, replaces?: string, grant?: AppConnecting["grant"]) {
+export async function connectApp(app: string, label?: string, replaces?: string, picked?: AppConnecting["grant"]) {
   if (!composioOn()) throw new Error(cloudOn() ? "Connected apps aren't available right now." : "Add COMPOSIO_API_KEY to .env.local first");
+  // Connected in the workspace open now (ui.tsx currentWorkspace): its bots have it by default, and the
+  // bots were picked from its team, so its other bots get no access.
+  const state = getState();
+  const ws = picked?.workspaceId ?? state.workspace ?? state.workspaces?.[0]?.id ?? MAIN_WORKSPACE;
+  const grant = picked && { ...picked, workspaceId: ws };
   const info = (await catalog()).find((a) => a.app === app);
   const appName = info?.name ?? (await appNameOf(app));
   const who = getState().account?.user.id;
@@ -238,7 +244,7 @@ export async function connectApp(app: string, label?: string, replaces?: string,
     const accountId = `open:${app}`;
     const isNew = !getState().accounts?.some((a) => a.id === accountId);
     update((s) => {
-      if (!s.accounts?.some((a) => a.id === accountId)) (s.accounts ??= []).push({ id: accountId, app, appName, status: "active", at: Date.now() });
+      if (!s.accounts?.some((a) => a.id === accountId)) (s.accounts ??= []).push({ id: accountId, app, appName, status: "active", at: Date.now(), workspaceId: ws });
       give(s, accountId, grant);
     });
     if (isNew) trackServerEvent("bops_app_connected", { toolkit: app, reconnect: false });
@@ -266,13 +272,15 @@ export async function connectApp(app: string, label?: string, replaces?: string,
         const c = s.connecting?.find((x) => x.id === waitId);
         s.connecting = (s.connecting ?? []).filter((x) => x.id !== waitId);
         if (s.accounts?.some((a) => a.id === ca.id)) return;
-        (s.accounts ??= []).push({ id: ca.id, app, appName, name, label: c?.label ?? old?.label, status: "active", at: Date.now() });
+        // Signed back in: the old one's workspace, so its bots keep the default.
+        const workspaceId = old ? old.workspaceId : ws;
+        (s.accounts ??= []).push({ id: ca.id, app, appName, name, label: c?.label ?? old?.label, status: "active", at: Date.now(), ...(workspaceId ? { workspaceId } : {}) });
         give(s, ca.id, c?.grant);
         // A new account: its bot is offered the app's starter routines (signing back in isn't new).
         if (!old) suggestAfter = c?.grant?.bots;
         // Signed back in: the new account takes the old one's place, with the same access.
         if (old) {
-          for (const b of s.bots) if (b.access?.[old.id]) b.access[ca.id] = b.access[old.id];
+          for (const b of s.bots) if (b.access?.[old.id] !== undefined) b.access[ca.id] = b.access[old.id];
           // Bots in Slack through this account (the Bops Slack app) move with it.
           for (const l of s.channels ?? []) if (l.slack?.accountId === old.id) l.slack.accountId = ca.id;
           dropAccount(s, old.id);
@@ -291,9 +299,14 @@ export async function connectApp(app: string, label?: string, replaces?: string,
   return { redirectUrl: req.redirectUrl };
 }
 
-/** A new account's bot is offered the app's starter routines (lib/server/routine-suggestions.ts); a failure there never fails the connect. */
+/**
+ * A new account's bot is offered the app's starter routines (lib/server/routine-suggestions.ts), the main
+ * bot first when it's one of them; a failure there never fails the connect.
+ */
 const offerStartersFor = (app: string, botIds?: string[]) =>
-  import("./routine-suggestions").then((m) => m.offerStarters(app, botIds)).catch((e: Error) => console.warn(`[apps] starters for ${app}: ${e.message}`));
+  import("./routine-suggestions")
+    .then((m) => m.offerStarters(app, botIds && [...botIds].sort((x, y) => Number(!!bot(y)?.isMain) - Number(!!bot(x)?.isMain))))
+    .catch((e: Error) => console.warn(`[apps] starters for ${app}: ${e.message}`));
 
 /** Stop waiting on a sign-in (or clear one that failed). */
 export function cancelConnect(waitId: string) {
@@ -301,9 +314,20 @@ export function cancelConnect(waitId: string) {
   void cx().connectedAccounts.delete(waitId).catch(() => null);
 }
 
-/** Access picked while connecting, given once the account exists. */
+/**
+ * Access picked while connecting, given once the account exists: Read only is kept for the bots picked
+ * (Read & act is the default for the bots of the account's workspace, so nothing is kept for them), and
+ * the other bots of the workspace it was picked in get none. Without a grant they all have the default.
+ */
 function give(s: ReturnType<typeof getState>, accountId: string, grant?: AppConnecting["grant"]) {
-  for (const b of s.bots) if (grant?.bots.includes(b.id)) (b.access ??= {})[accountId] = grant.level;
+  if (!grant) return;
+  const a = s.accounts?.find((x) => x.id === accountId);
+  for (const b of s.bots) {
+    if (grant.bots.includes(b.id)) {
+      // A bot outside the account's workspace (an app with no sign-in, connected in another one first) keeps it set.
+      if (grant.level === "read" || workspaceOf(b) !== workspaceOf(a)) (b.access ??= {})[accountId] = grant.level;
+    } else if (workspaceOf(b) === (grant.workspaceId ?? MAIN_WORKSPACE)) (b.access ??= {})[accountId] = "none";
+  }
 }
 
 function dropAccount(s: ReturnType<typeof getState>, accountId: string) {
@@ -397,7 +421,7 @@ export async function syncApps() {
     for (const a of s.accounts ?? []) if (named.has(a.id)) a.name = named.get(a.id);
     // Gone from Composio, or signed out with no bot using it (nothing to sign back in for): off the list.
     for (const a of [...(s.accounts ?? [])])
-      if (!a.id.startsWith("open:") && (!found.has(a.id) || (a.status === "expired" && !a.label && !s.bots.some((b) => b.access?.[a.id])))) dropAccount(s, a.id);
+      if (!a.id.startsWith("open:") && (!found.has(a.id) || (a.status === "expired" && !a.label && !s.bots.some((b) => levelOf(b, a))))) dropAccount(s, a.id);
     // Two syncs at once (the Vault opening twice) find the same new accounts: add each once.
     for (const a of added) if (!s.accounts?.some((x) => x.id === a.id)) (s.accounts ??= []).push(a);
   });
@@ -408,11 +432,11 @@ export async function syncApps() {
 /** How an account reads in a list: its label and its own name, else the app's name. */
 export const accountTitle = (a: AppAccount) => [a.label, a.name].filter(Boolean).join(" · ") || a.appName;
 
-/** The accounts this bot may use (working ones only), each with how much it may do. */
+/** The accounts this bot may use (working ones only), each with how much it may do (levelOf: every bot's by default). */
 export function accountsOf(b: Bot): { account: AppAccount; level: AppLevel }[] {
   const out: { account: AppAccount; level: AppLevel }[] = [];
   for (const a of getState().accounts ?? []) {
-    const level = b.access?.[a.id];
+    const level = levelOf(b, a);
     if (level && a.status === "active") out.push({ account: a, level });
   }
   return out;
@@ -430,11 +454,8 @@ function appsOf(b: Bot) {
   return apps;
 }
 
-/**
- * Connections that put bots somewhere rather than apps they use: Bops' Slack app ("slackbot"), how
- * bots get into Slack (channels.ts). Bots aren't told about them as apps.
- */
-export const CHANNEL_APPS = new Set(["slackbot"]);
+/** Connections that put bots somewhere rather than apps they use (lib/types.ts): bots aren't told about them as apps. */
+export { CHANNEL_APPS };
 
 /**
  * The bot's apps for its instructions and tools, from the accounts the user gave it (any app in the
@@ -586,8 +607,19 @@ export const APP_TOOLS = (b: Bot) => {
 
 const clip = (s: string, n = 14_000) => (s.length > n ? `${s.slice(0, n)}… (cut short)` : s);
 
+/**
+ * A thread someone outside Bops started (an email, a text or a call to a bot), or a part of one: it gets
+ * no apps, like their turns in the chat (chat.ts), whatever access its bot has.
+ */
+function fromOutside(sessionId?: string) {
+  const s = sessionId ? threadOf(sessionId) : undefined;
+  return !!s && (!!s.fromOutside || (!!s.partOf && !!threadOf(s.partOf)?.fromOutside));
+}
+const NOT_FOR_OUTSIDE = () => `Not on this task: someone outside Bops started it, and ${ownerName()}'s apps are only for their own work.`;
+
 /** find_app_actions: Composio's search, cut down to what the model needs. */
-export async function findAppActions(botId: string, query: string) {
+export async function findAppActions(botId: string, query: string, where: { sessionId?: string } = {}) {
+  if (fromOutside(where.sessionId)) return NOT_FOR_OUTSIDE();
   const b = bot(botId);
   const session = b && (await sessionFor(b));
   if (!session) return `You have no apps; ${ownerName()} can give you access in the Vault.`;
@@ -635,13 +667,14 @@ export async function runAppAction(
   botId: string,
   action: string,
   args: Record<string, unknown>,
-  where: { chatId?: string; sessionId?: string },
+  where: UseWhere,
   onAsk?: (ask: Promise<string>) => void,
   accountHint?: string | null,
   opts: { readOnly?: boolean } = {},
 ): Promise<string> {
   const b = bot(botId);
   if (!b) return "Unknown bot.";
+  if (fromOutside(where.sessionId)) return NOT_FOR_OUTSIDE();
   const info = await toolInfo(action).catch(() => null);
   if (!info) return `Unknown action ${action}. Use find_app_actions to get the exact name.`;
   const app = info.app ?? accountsOf(b).find((x) => action.toUpperCase().startsWith(`${x.account.app.toUpperCase()}_`))?.account.app;
@@ -651,16 +684,30 @@ export async function runAppAction(
   const { account, level } = picked;
   const reads = info.tags.includes("readOnlyHint");
   const where_ = account.id.startsWith("open:") ? account.appName : `${account.appName} (${accountTitle(account)})`;
-  if (level === "read" && !reads) return `You can only read ${where_}. Ask ${ownerName()} for more access in the Vault if you need it.`;
-  const run = async () => {
-    const res = (await cxFor(b.id, app).tools.execute(action, {
-      userId: userId(),
-      ...(account.id.startsWith("open:") ? {} : { connectedAccountId: account.id }),
-      arguments: withConsts(info.input, args),
-      dangerouslySkipVersionCheck: true,
-    } as never)) as unknown as { data?: unknown; error?: string | null; successful?: boolean };
-    if (!res.error && res.successful !== false) markUsed(account.id);
-    return res.error || res.successful === false ? `Failed: ${res.error ?? "the app said no"}` : clip(JSON.stringify(res.data ?? {}));
+  // Each use, for the Vault and Orgo (access-sync.ts): which bot, which account, where, and how it ended.
+  const used = (outcome: AccessUse["outcome"], approvedBy?: AccessUse["approvedBy"]) =>
+    logUse({ bot: b.id, kind: "app", target: account.id, targetName: targetNameOf(account), action, ...viaOf(where), outcome, ...(approvedBy ? { approvedBy } : {}) });
+  if (level === "read" && !reads) {
+    used("refused");
+    return `You can only read ${where_}. Ask ${ownerName()} for more access in the Vault if you need it.`;
+  }
+  const run = async (approvedBy?: AccessUse["approvedBy"]) => {
+    let res: { data?: unknown; error?: string | null; successful?: boolean };
+    try {
+      res = (await cxFor(b.id, app).tools.execute(action, {
+        userId: userId(),
+        ...(account.id.startsWith("open:") ? {} : { connectedAccountId: account.id }),
+        arguments: withConsts(info.input, args),
+        dangerouslySkipVersionCheck: true,
+      } as never)) as unknown as typeof res;
+    } catch (e) {
+      used("failed", approvedBy);
+      throw e;
+    }
+    const ok = !res.error && res.successful !== false;
+    used(ok ? "ok" : "failed", approvedBy);
+    if (ok) markUsed(account.id);
+    return ok ? clip(JSON.stringify(res.data ?? {})) : `Failed: ${res.error ?? "the app said no"}`;
   };
   if (reads) return run();
   // A look for Bops itself (chat.ts BackgroundJob.sample) only reads.
@@ -674,15 +721,19 @@ export async function runAppAction(
   const what = `${info.name} in ${where_}`;
   const autoOk = b.autoApprove && !foundByBots(JSON.stringify(args)) && !(await movesMoney(what, describe(args)));
   if (b.autoApprove ? autoOk : !destructive && (await lowRisk(what, describe(args)))) {
-    const out = await run();
+    const out = await run("auto");
     const chatId = where.chatId ?? (where.sessionId ? getState().sessions.find((x) => x.id === where.sessionId)?.chatId : undefined);
     if (chatId && !out.startsWith("Failed")) addMessage({ chatId, role: "system", text: `${b.name}: ${info.name} in ${where_} · ${b.autoApprove ? "Just do it is on, so didn't ask" : "low risk, so didn't ask"}` });
     return out;
   }
 
-  const ask = askOwner({ botId, app, action, title: `${info.name} in ${where_}`, detail: describe(args), ...where }).then(async (yes) => {
-    if (!yes) return `Not approved: ${ownerName()} said no. Don't do it.`;
-    return run();
+  used("waiting");
+  const ask = askOwner({ botId, app, action, title: `${info.name} in ${where_}`, detail: describe(args), ...placeOf(where) }).then(async (yes) => {
+    if (!yes) {
+      used("refused");
+      return `Not approved: ${ownerName()} said no. Don't do it.`;
+    }
+    return run("user");
   });
   if (onAsk) {
     onAsk(ask);
@@ -787,7 +838,7 @@ async function threadApps(botId: string, sessionId: string, tool: string, args: 
     const b = bot(botId);
     return b && dataOn(b) ? { status: 200, text: await runDataTool(botId, tool, args, { sessionId }) } : { status: 403, text: "You don't have business data." };
   }
-  if (tool === "find_app_actions") return { status: 200, text: await findAppActions(botId, String(args.query ?? "")) };
+  if (tool === "find_app_actions") return { status: 200, text: await findAppActions(botId, String(args.query ?? ""), { sessionId }) };
   if (tool === "use_app")
     return { status: 200, text: await runAppAction(botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId }, undefined, (args.account as string | null) ?? null) };
   return { status: 404, text: `unknown tool ${tool}` };

@@ -434,7 +434,7 @@ export async function handleMessage(
     await groupTurn(chatId, mine);
     return mine;
   }
-  await botTurn(c.botIds[0], chatId, { replyTo: root, answering: mine.id });
+  await botTurn(c.botIds[0], chatId, { replyTo: root, answering: mine.id, ...(onCall ? { call: true } : {}) });
   return mine;
 }
 
@@ -779,6 +779,8 @@ type TurnOptions = {
   outside?: boolean;
   /** On an outside turn, who it came from ("an email from desk@hotel.example"). */
   from?: string;
+  /** Asked aloud on the user's call (call.ts): its app and key uses are logged as from a call (access-sync.ts). */
+  call?: boolean;
   /**
    * A routine's run (backgroundTurn), not a message from anyone: the job is a note from Bops, there are
    * no typing dots and nothing is remembered, it has the tools that look things up (and start_task) but
@@ -1341,6 +1343,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // The user's API keys it may call (keys.ts): only ones set in their Orgo vault. None on a turn someone
     // outside Bops started: a GET runs at once, and would read the user's Stripe or bank on a stranger's say.
     const keyed = opts.outside ? [] : await usableKeys(b);
+    // Where its app and key uses are logged as from (access-sync.ts): a routine's run, the user's call, or the chat.
+    const used = { chatId, ...(bg ? { via: "routine" as const, viaId: bg.routineId } : opts.call ? { via: "call" as const } : {}) };
     // Someone's waiting on this reply: the user's own message, in the app, by text or in a channel (not
     // an email, which nobody expects back in seconds, or a turn someone else started). It runs fast.
     const waiting = !!opts.answering && !opts.outside && !opts.emailBack;
@@ -1447,7 +1451,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
             ),
           ]
         : []),
-      ...APP_TOOLS(b),
+      // The user's apps (every bot has them by default): not on a turn someone else started, like the keys.
+      ...(opts.outside ? [] : APP_TOOLS(b)),
       ...(opts.outside || !keyed.length ? [] : [callApiTool(keyed)]),
       // The web, right in the chat: OpenAI's own search, and one page read here through Bops' checks. Not on a
       // turn someone else started: a page fetched for them could carry the user's data out in its address.
@@ -1674,7 +1679,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       opts.outside ? "" : SEARCHING,
       "If a tapback says it all (thanks, ok, sounds good), react instead of replying.",
       "When you start, hand off or tell a task something, or make a picture, its `say` is your reply: write no other text, and don't answer the request yourself; the task will.",
-      appsNote(b, "chat"),
+      opts.outside ? "" : appsNote(b, "chat"),
       opts.outside ? "" : dataNote(b, "chat"),
       opts.outside ? "" : crmNote(b, "chat"),
       opts.outside ? "" : orbitNote(b),
@@ -1841,7 +1846,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       if (name === "find_app_actions") return findAppActions(botId, a.query ?? "").catch(failed);
       // An API with one of the user's keys: GET at once, anything else when the user says yes (keys.ts callApi).
       if (name === "call_api")
-        return callApi(botId, a, { chatId }, (ask, did) =>
+        return callApi(botId, a, used, (ask, did) =>
           void ask
             .catch((e: Error): CallApiDone => ({ text: failed(e) }))
             .then((r) => {
@@ -1868,7 +1873,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           botId,
           a.action ?? "",
           a.arguments ?? {},
-          { chatId },
+          used,
           (ask) =>
             // The user decides later; the result lands in the chat when they do, failed or not,
             // with what the app answered for the bot's next turn.

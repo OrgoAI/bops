@@ -59,8 +59,11 @@ export type Bot = {
    * besides the plan's main bot gets an inbox only then, while the plan has room (lib/server/mail.ts).
    */
   mailWanted?: boolean;
-  /** Your app accounts this bot may use (by AppAccount id), and how much it may do in each. */
-  access?: Record<string, AppLevel>;
+  /**
+   * What the user set for this bot in your app accounts (by AppAccount id): read, act, or "none". An
+   * account with no entry gets the default (levelOf): every bot may read and act there.
+   */
+  access?: Record<string, AppAccess>;
   /** This bot's Composio session (its allowed apps and actions), and the access it was made for. */
   composio?: { sessionId: string; access: string };
   /** The secret this bot's threads use to reach its apps through Bops (/api/apps/call). */
@@ -1003,6 +1006,8 @@ export type AppAccount = {
   at: number;
   /** When a bot last used it (lib/server/composio.ts runAppAction), for the Vault's "not used lately". */
   usedAt?: number;
+  /** The workspace it was connected in: its bots have it by default (levelOf). Unset: the main one's. */
+  workspaceId?: string;
 };
 
 /** An account being connected: its sign-in page is open, and Bops waits for it to finish. */
@@ -1015,8 +1020,11 @@ export type AppConnecting = {
   error?: string;
   at: number;
   replaces?: string;
-  /** Bots that get access once it's connected (picked when connecting), and how much. */
-  grant?: { bots: BotId[]; level: AppLevel };
+  /**
+   * Who may use it once it's connected (picked when connecting), and how much: the bots picked get
+   * `level`, and the other bots of `workspaceId` (the workspace it was picked in) get none.
+   */
+  grant?: { bots: BotId[]; level: AppLevel; workspaceId?: string };
 };
 
 /** What a bot may do in an account: read, or read and act (anything that sends, changes or pays still asks the user first). */
@@ -1025,6 +1033,51 @@ export const APP_LEVELS: { id: AppLevel; name: string; hint: string }[] = [
   { id: "read", name: "Read only", hint: "Can look things up. Can't change anything." },
   { id: "act", name: "Read & act", hint: "Can also draft and make changes. Asks you before it sends, posts, deletes or pays." },
 ];
+
+/** What the user can set for one bot in one account (Bot.access): a level, or "none" for no access. */
+export type AppAccess = AppLevel | "none";
+
+/**
+ * Connections that put bots somewhere rather than apps they use: Bops' Slack app ("slackbot"), how bots
+ * get into Slack (lib/server/channels.ts). No bot gets one by default, only when the user gives it.
+ */
+export const CHANNEL_APPS = new Set(["slackbot"]);
+
+/**
+ * What a bot may do in one account: what the user set for it (Bot.access), else the default, Read & act,
+ * for every bot of the account's workspace (bots made later too). A bot of another workspace, or a channel
+ * app (CHANNEL_APPS), has no default. Null: no access.
+ */
+export function levelOf(b: Pick<Bot, "access" | "workspaceId">, a: Pick<AppAccount, "id" | "app" | "workspaceId">): AppLevel | null {
+  const set = b.access?.[a.id];
+  if (set === "read" || set === "act") return set;
+  if (set === "none" || CHANNEL_APPS.has(a.app) || workspaceOf(a) !== workspaceOf(b)) return null;
+  return "act";
+}
+
+/** Whether a bot's access to an account is the default (the user didn't set it for this bot). */
+export const accessIsDefault = (b: Pick<Bot, "access">, a: Pick<AppAccount, "id">) => b.access?.[a.id] === undefined;
+
+/**
+ * One use of an app account or an API key by a bot, or a thread of its (lib/server/access-sync.ts): which
+ * one, the action (GMAIL_SEND_EMAIL, "GET /v1/balance"), where it ran, and how it ended. `approvedBy`: who
+ * said yes to it (the user, or Bops itself for a low risk one or "Just do it"); unset when it needed no yes.
+ */
+export type AccessUse = {
+  bot: BotId;
+  kind: "app" | "key";
+  target: string;
+  targetName: string;
+  action: string;
+  via: "chat" | "thread" | "routine" | "call";
+  viaId?: string;
+  outcome: "ok" | "failed" | "refused" | "waiting";
+  approvedBy?: "user" | "auto";
+  at: number;
+};
+
+/** The last time each account or key was used (GET /api/apps/log), by its target: which bot, and when. */
+export type LastUses = Record<string, { bot: BotId; at: number }>;
 
 /** Where a bot can be added like a teammate. Slack goes through Composio; Telegram and Discord are the bot's own accounts there. */
 export type ChannelKind = "slack" | "telegram" | "discord";
