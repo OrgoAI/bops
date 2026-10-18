@@ -2100,8 +2100,11 @@ async function run(sessionId: string) {
         await startOrgoExecutor(computerId, display, env);
       }
       const seen = new Set<string>();
+      // How far this run has read the thread's own items, so each look reads only what's new. One picked
+      // back up reads on from what its agent session did before, which is in its steps already.
+      const at: ReadAt = resuming ? { root: await lastItem(agentSessionId) } : {};
       turn = async (input) => {
-        await runTurn(sessionId, agentSessionId, input, seen);
+        await runTurn(sessionId, agentSessionId, input, seen, at);
         return finalAnswer(agentSessionId);
       };
     }
@@ -2297,7 +2300,7 @@ const sendMessage = (agentSessionId: string, text: string) =>
     events: [{ type: "agent.session.input.message", input: [{ role: "user", content: [{ type: "input_text", text }] }] }],
   } as never);
 
-async function runTurn(sessionId: string, agentSessionId: string, input: string, seen: Set<string>) {
+async function runTurn(sessionId: string, agentSessionId: string, input: string, seen: Set<string>, at: ReadAt) {
   const stream = await client.beta.agents.sessions.events.stream(agentSessionId);
   interrupts.set(sessionId, () => stream.controller.abort());
   await sendMessage(agentSessionId, input);
@@ -2342,7 +2345,13 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
   // Replies that came while the turn was being set up.
   steer();
 
-  const poll = setInterval(() => void syncSteps(sessionId, agentSessionId, seen), 2500);
+  // One look at a time: a slow one isn't stacked on by the next.
+  let looking = false;
+  const poll = setInterval(() => {
+    if (looking) return;
+    looking = true;
+    void syncSteps(sessionId, agentSessionId, seen, at).finally(() => (looking = false));
+  }, 2500);
   // Why the turn was given up on: stalled (no step for a while) or out of time.
   let gaveUp: string | undefined;
   const giveUp = (why: string) => {
@@ -2473,7 +2482,7 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
       seen.add(`turn:${turnId}`);
       settleTurn(turnId, agentSessionId, model, s?.botId, epoch);
     }
-  await syncSteps(sessionId, agentSessionId, seen);
+  await syncSteps(sessionId, agentSessionId, seen, at);
   if (creditStopped === AI_CREDIT_EMPTY) throw outOfCreditError();
   if (creditStopped === AI_CREDIT_LOW) throw new CloudError(failure ?? "It needs more AI credit than you have left.", 402, AI_CREDIT_LOW);
   if (failure) throw new Error(failure);
@@ -2567,18 +2576,33 @@ function recordItem(sessionId: string, item: Item, seen: Set<string>, who?: stri
   return item.type === "mcp_call" && (item.name === "claim_screen" || item.name === "release_screen");
 }
 
-async function syncSteps(sessionId: string, agentSessionId: string, seen: Set<string>) {
+/** How far a run has read its agent session's own items: the last one it listed. */
+type ReadAt = { root?: string };
+
+/** The newest item an agent session has of its own (none yet, or it couldn't be read: undefined). */
+async function lastItem(agentSessionId: string) {
+  try {
+    for await (const item of client.beta.agents.sessions.items.list(agentSessionId, { order: "desc", limit: 1 }) as AsyncIterable<Item>) return item.id;
+  } catch {
+    /* read from the start, then */
+  }
+  return undefined;
+}
+
+async function syncSteps(sessionId: string, agentSessionId: string, seen: Set<string>, at: ReadAt) {
   try {
     const record = (item: Item, who?: string) => recordItem(sessionId, item, seen, who);
 
+    // Only what came since the last look, oldest first: the whole history each time grows with every turn.
     const items: Item[] = [];
-    for await (const item of client.beta.agents.sessions.items.list(agentSessionId) as AsyncIterable<Item>) items.push(item);
+    for await (const item of client.beta.agents.sessions.items.list(agentSessionId, { order: "asc", ...(at.root ? { after: at.root } : {}) }) as AsyncIterable<Item>) items.push(item);
     let ledgerChanged = false;
     let started = false;
-    for (const item of items.reverse().filter((i) => !seen.has(i.id))) {
+    for (const item of items.filter((i) => !seen.has(i.id))) {
       ledgerChanged = record(item) || ledgerChanged;
       started ||= item.type === "create_subagent_call";
     }
+    if (items.length) at.root = items[items.length - 1].id;
 
     // Helpers, by name, and whatever they've done since the last look.
     const known = session(sessionId)?.helperNames ?? [];

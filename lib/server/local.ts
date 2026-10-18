@@ -54,7 +54,8 @@ export const taskSockets = (dir: string) => join(/*turbopackIgnore: true*/ bopsH
 export const taskWorkspace = (sessionId: string) => join(taskDir(sessionId), "workspace");
 const CHROME_VERSION = (() => {
   try {
-    return execFileSync("defaults", ["read", "/Applications/Google Chrome.app/Contents/Info", "CFBundleShortVersionString"])
+    // Bounded: it runs as the server starts, and a stalled read would hold up everything after it.
+    return execFileSync("defaults", ["read", "/Applications/Google Chrome.app/Contents/Info", "CFBundleShortVersionString"], { timeout: 2000 })
       .toString()
       .trim();
   } catch {

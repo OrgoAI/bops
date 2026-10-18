@@ -4,7 +4,8 @@
 // through Bops Cloud on the user's Orgo key (so it's counted and priced), with `codex exec-server` on
 // Bops' executor key, in a Codex home of Bops' own, and its browser tools on a Chrome of the bot's own
 // on the Mac. A reply while a task works goes to its turn at once (steering), and one OpenAI turns away
-// is its next turn. Out of AI credit, it doesn't start. The old sign-in routes answer 410, and no source file
+// is its next turn. A thread picked back up reads its items on from where it got to, so nothing it did
+// before comes back as a new step. Out of AI credit, it doesn't start. The old sign-in routes answer 410, and no source file
 // can call Codex's sign-in. The executor runs in a macOS sandbox (lib/server/executor-sandbox.ts) that
 // leaves the agent its browser tools and nothing else: the stand-in Codex checks from inside the real
 // sandbox that it can't run a shell or osascript, read the user's files or write outside the task's
@@ -218,6 +219,7 @@ globalThis.fetch = async (input, init) => {
     ];
     return new Response(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
   }
+  if (call.method === "GET" && call.path === `${api}/as_1/items` && web.items) return json(web.items(url.searchParams));
   if (call.method === "GET" && call.path === `${api}/as_1/items`)
     return json({ data: [{ id: "it_1", type: "message", role: "assistant", phase: "final_answer", turn_id: "turn_1", content: [{ type: "output_text", text: FINAL }] }], has_more: false });
   return json({ error: "not faked" }, 404);
@@ -501,6 +503,32 @@ const sessionsNow = web.calls.filter((c) => c.method === "POST" && c.path === "/
 X.replyToSession(next.id, "And near the river?");
 await until(() => S.session(next.id).status === "done" && S.session(next.id).replies.at(-1)?.role === "bot", "the thread to finish again", 30_000);
 assert.equal(web.calls.filter((c) => c.method === "POST" && c.path === "/proxy/openai/v1/agents/sessions").length, sessionsNow, "the same agent session");
+
+// Picked back up, it reads its agent session's items on from where that got to: what it did before isn't
+// recorded again as new steps, what it does now is, once, and each look asks only for what's new.
+const commentary = (id, text) => ({ id, type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text }] });
+const finalItem = (id) => ({ id, type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: FINAL }] });
+const history = [commentary("it_a", "Checked the riverside hotels"), finalItem("it_b")];
+const looks = [];
+web.items = (q) => {
+  looks.push(q);
+  let xs = q.get("order") === "asc" ? [...history] : [...history].reverse();
+  if (q.get("after")) xs = xs.slice(xs.findIndex((x) => x.id === q.get("after")) + 1);
+  const limit = Number(q.get("limit") ?? 20);
+  return { data: xs.slice(0, limit), has_more: xs.length > limit };
+};
+web.postEvent = (e) => {
+  if (e.type === "agent.session.input.message") history.push(commentary("it_c", "Found two with a pool"), finalItem("it_d"));
+};
+const notes = (text) => S.session(next.id).steps.filter((x) => x.detail === text).length;
+X.replyToSession(next.id, "Any with a pool?");
+await until(() => S.session(next.id).status === "done" && S.session(next.id).replies.at(-1)?.text === FINAL && notes("Found two with a pool") > 0, "the thread to finish once more", 30_000);
+assert.equal(notes("Checked the riverside hotels"), 0, "what it did before isn't a new step");
+assert.equal(notes("Found two with a pool"), 1);
+assert.ok(looks.some((q) => q.get("order") === "desc" && q.get("limit") === "1"), "where it got to, read once");
+const reads = looks.filter((q) => q.get("order") === "asc");
+assert.ok(reads.length > 0 && reads.every((q) => q.get("after")), "each look from where the last left off");
+web.items = web.postEvent = undefined;
 
 /* ---------------- A reply while a Mac task works steers its turn ---------------- */
 

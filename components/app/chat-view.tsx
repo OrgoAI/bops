@@ -338,18 +338,22 @@ export function ChatView({
     const text = draft.trim();
     if (!text && !attaching.length) return;
     const items = attaching;
+    // Every preview in the tray (the failed ones too), let go once the pending copy showing them has gone.
+    const previews = attach.items.map((a) => a.preview);
     setDraft("");
     setReplying(null);
     attach.clear();
     const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now(), previews: items.length ? items.map((a) => a.preview) : undefined };
+    const drop = () => {
+      setPending((p) => p.filter((x) => x.id !== mine.id));
+      previews.forEach((u) => URL.revokeObjectURL(u));
+    };
     setPending((p) => [...p, mine]);
     setSent((s) => [...s.slice(-19), { chatId: c.id, text, at: mine.at }]);
     // Shows at once; goes once its images have finished uploading (usually they already have).
     const images = (await Promise.all(items.map((a) => a.done))).filter((x) => !!x);
-    if (!text && !images.length) return setPending((p) => p.filter((x) => x.id !== mine.id));
-    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined }).finally(() =>
-      setPending((p) => p.filter((x) => x.id !== mine.id)),
-    );
+    if (!text && !images.length) return drop();
+    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined }).finally(drop);
   };
   const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])].filter((f) => f.type.startsWith("image/"));
   // Sent messages the server's state doesn't have yet.

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { afterVncClose, STREAM_RETRY_MS, type StreamPlan } from "@/lib/rtc";
 import { Mascot } from "./mascot";
 import { RtcDesktop, rtcWorthTrying } from "./rtc-desktop";
+import { useWindowVisible } from "./window-visible";
 
 // noVNC reports a screen's connection coming and going (couldn't connect yet, dropped, didn't say
 // goodbye, data still arriving while it closes) as console errors. Bops handles all of those itself (it waits, retries, falls back), and in
@@ -43,7 +44,7 @@ export type Transport = "udp" | "vnc";
  * streamed through Orgo (?screen=) also goes by how Orgo closed it (afterVncClose): a screen Orgo can't
  * stream falls back at once and for good, one Orgo couldn't reach just then is tried again, and a
  * refused password gets one try with a fresh one. Thumbnails always use VNC: Orgo encodes at most two
- * WebRTC streams per computer.
+ * WebRTC streams per computer. While the window is hidden a while, the screen rests (nothing streams).
  */
 export function LiveDesktop({
   botId,
@@ -98,8 +99,30 @@ export function LiveDesktop({
   // VNC ended while WebRTC was still being tried (with its close code, when it had one): what follows
   // waits for WebRTC, which may yet show the screen.
   const vncDown = useRef<{ code?: number } | null>(null);
+  // The window hidden a while (a thumbnail 10 seconds, the open screen a minute): the stream is let go, and
+  // what drawing it holds with it, and a fresh plan connects again once the window is back.
+  const visible = useWindowVisible();
+  const [resting, setResting] = useState(false);
+  useEffect(() => {
+    if (visible) return;
+    const t = setTimeout(
+      () => {
+        setResting(true);
+        setVncUp(false);
+        setRtc("off");
+        setPlan(null);
+        if (ever.current) setStage("reconnecting");
+      },
+      thumbnail ? 10_000 : 60_000,
+    );
+    return () => {
+      clearTimeout(t);
+      setResting(false);
+    };
+  }, [visible, thumbnail]);
 
   useEffect(() => {
+    if (resting) return;
     let gone = false;
     void (async () => {
       const res = await fetch(`/api/vnc?bot=${botId}&display=${display}`, { cache: "no-store" });
@@ -118,7 +141,7 @@ export function LiveDesktop({
     };
     // A thumbnail's quality is fixed for its life; it never changes on a mounted view.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [botId, display, attempt]);
+  }, [botId, display, attempt, resting]);
 
   // WebRTC's picture fades in over VNC's (RtcDesktop, half a second); then VNC is let go.
   useEffect(() => {
@@ -245,28 +268,45 @@ type NoVncDisplay = {
 };
 
 /**
- * One JPEG or PNG piece of a frame, decoded off the page (createImageBitmap), as noVNC's render queue waits on
- * an image: `complete`, its size, a "load" listener, and `src = ""` once drawn, which closes the bitmap. A piece
- * that won't decode counts as loaded at its expected size and draws nothing, so the queue never waits on it.
+ * One JPEG or PNG piece of a frame, decoded in the window (ImageDecoder, else createImageBitmap), as noVNC's
+ * render queue waits on an image: `complete`, its size, a "load" listener, and `src = ""` once drawn, which
+ * closes the frame. Its size stays the piece's own (noVNC stops drawing a screen for good when they differ). A
+ * piece that won't decode counts as loaded and draws nothing, so the queue never waits on it.
  */
 class DecodedRect {
   complete = false;
-  bitmap: ImageBitmap | null = null;
+  frame: VideoFrame | ImageBitmap | null = null;
   private loads: ((this: DecodedRect) => void)[] = [];
   constructor(
-    blob: Blob,
+    bytes: Uint8Array,
+    mime: string,
     public width: number,
     public height: number,
   ) {
-    createImageBitmap(blob).then(
-      (b) => {
-        this.bitmap = b;
-        this.width = b.width;
-        this.height = b.height;
-        this.loaded();
-      },
-      () => this.loaded(),
-    );
+    const done = (f: VideoFrame | ImageBitmap | null) => {
+      this.frame = f;
+      this.loaded();
+    };
+    // The bytes are copied now: noVNC reuses the buffer they sit in.
+    const copy = bytes.slice();
+    if (typeof ImageDecoder !== "function") {
+      createImageBitmap(new Blob([copy], { type: mime })).then(done, () => done(null));
+      return;
+    }
+    let dec: ImageDecoder;
+    try {
+      dec = new ImageDecoder({ data: copy, type: mime });
+    } catch {
+      done(null);
+      return;
+    }
+    dec
+      .decode()
+      .then(
+        (r) => done(r.image),
+        () => done(null),
+      )
+      .finally(() => dec.close());
   }
   private loaded() {
     this.complete = true;
@@ -280,8 +320,8 @@ class DecodedRect {
   }
   set src(v: string) {
     if (v !== "") return;
-    this.bitmap?.close();
-    this.bitmap = null;
+    this.frame?.close();
+    this.frame = null;
   }
 }
 
@@ -289,23 +329,27 @@ class DecodedRect {
  * noVNC draws each JPEG or PNG piece of a frame through a new <img> holding it as a base64 data URL
  * (display.js imageRect), and Chromium decodes and keeps every one: with a few screens live (the sidebar's
  * thumbnails are each a whole 1280x960 screen), the window grew about 350 MB a minute, 0.6 GB to 2.5 GB in
- * four minutes, until macOS killed it (10-18). Here each piece is decoded with createImageBitmap instead, drawn
- * in order by noVNC's own queue, and closed as soon as it's drawn: no element, no data URL, nothing kept.
- * A noVNC whose display isn't the one this was written for (1.7) is left as it is. (scripts/test-vnc-decode.mjs)
+ * four minutes, until macOS killed it (10-18). Here each piece is decoded in the window with ImageDecoder
+ * instead, drawn in order by noVNC's own queue, and closed as soon as it's drawn: no element, no data URL,
+ * nothing kept. Not as a Blob for createImageBitmap, which is only the fallback: every Blob is kept track of in
+ * Bops' main process, and at the 5,000 or so pieces a second of one moving screen (open, and as its thumbnail),
+ * main and the window each grew about 60 MB a minute (10-18). A noVNC whose display isn't the one this was
+ * written for (1.7) is left as it is. (scripts/test-vnc-decode.mjs)
  */
 export function decodeOffThePage(rfb: object) {
   const display = (rfb as { _display?: Partial<NoVncDisplay> })._display;
-  if (!display || typeof display.imageRect !== "function" || typeof display.drawImage !== "function" || typeof display._renderQPush !== "function" || typeof createImageBitmap !== "function") return;
+  if (!display || typeof display.imageRect !== "function" || typeof display.drawImage !== "function" || typeof display._renderQPush !== "function") return;
+  if (typeof ImageDecoder !== "function" && typeof createImageBitmap !== "function") return;
   const d = display as NoVncDisplay;
   const draw = d.drawImage.bind(d);
   d.drawImage = (img, ...args) => {
     if (!(img instanceof DecodedRect)) return draw(img, ...args);
-    if (img.bitmap) draw(img.bitmap, ...args);
+    // Drawn with its source and size given: a VideoFrame has no width or height for noVNC to mark what changed.
+    if (img.frame) draw(img.frame, 0, 0, img.width, img.height, args[0], args[1], img.width, img.height);
   };
   d.imageRect = (x, y, width, height, mime, arr) => {
     if (!width || !height) return;
-    // The bytes are copied now: noVNC reuses the buffer they sit in.
-    d._renderQPush({ type: "img", img: new DecodedRect(new Blob([arr as BlobPart], { type: mime }), width, height), x, y, width, height });
+    d._renderQPush({ type: "img", img: new DecodedRect(arr, mime, width, height), x, y, width, height });
   };
 }
 

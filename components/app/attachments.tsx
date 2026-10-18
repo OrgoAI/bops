@@ -49,11 +49,21 @@ async function prepare(file: File): Promise<{ dataUrl: string; type: string; w: 
   }
 }
 
-/** The images about to be sent with a message: each starts uploading as soon as it's added. */
+/**
+ * The images about to be sent with a message: each starts uploading as soon as it's added. Each preview is
+ * an object URL, which holds on to its image (a pasted one's in Bops' main process) until it's let go: on
+ * taking one out, on leaving with them still there, and (ChatView.send) once its message no longer shows it.
+ */
 export function useAttachments() {
   const [items, setItems] = useState<Attachment[]>([]);
+  const live = useRef(items);
+  useEffect(() => {
+    live.current = items;
+  });
+  useEffect(() => () => live.current.forEach((a) => URL.revokeObjectURL(a.preview)), []);
   const add = useCallback((files: Iterable<File>) => {
-    const fresh = [...files].filter((f) => f.type.startsWith("image/")).slice(0, 10);
+    // Ten at most: one past that is not added, or uploaded.
+    const fresh = [...files].filter((f) => f.type.startsWith("image/")).slice(0, Math.max(0, 10 - live.current.length));
     for (const file of fresh) {
       const key = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const preview = URL.createObjectURL(file);
@@ -74,7 +84,11 @@ export function useAttachments() {
       setItems((xs) => [...xs, { key, preview, status: "uploading" as const, done }].slice(0, 10));
     }
   }, []);
-  const remove = useCallback((key: string) => setItems((xs) => xs.filter((x) => x.key !== key)), []);
+  const remove = useCallback((key: string) => {
+    const gone = live.current.find((x) => x.key === key);
+    if (gone) URL.revokeObjectURL(gone.preview);
+    setItems((xs) => xs.filter((x) => x.key !== key));
+  }, []);
   const clear = useCallback(() => setItems([]), []);
   return { items, add, remove, clear };
 }
