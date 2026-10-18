@@ -1047,7 +1047,11 @@ async function permStatus(id) {
   return "unknown";
 }
 
-ipcMain.handle("perm-status", async () => Object.fromEntries(await Promise.all(PERM_IDS.map(async (id) => [id, await permStatus(id)]))));
+// The ones the page names, else all of them: the account menu's badge leaves out Automation, whose read runs osascript.
+ipcMain.handle("perm-status", async (_, ids) => {
+  const asked = Array.isArray(ids) ? PERM_IDS.filter((id) => ids.includes(id)) : PERM_IDS;
+  return Object.fromEntries(await Promise.all(asked.map(async (id) => [id, await permStatus(id)])));
+});
 // Full access's apps, each with its Automation answer (null without Full Disk Access to read them).
 ipcMain.handle("perm-automation-apps", () => (mac ? automationApps() : null));
 ipcMain.handle("perm-request", async (_, id) => {

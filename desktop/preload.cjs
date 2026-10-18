@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld("bopsMac", {
   showMain: () => ipcRenderer.invoke("mac-show-main"),
   // What Bops may use on this Mac (screen, microphone, notifications), asked for in one place.
   permissions: {
-    status: () => ipcRenderer.invoke("perm-status"),
+    status: (ids) => ipcRenderer.invoke("perm-status", ids),
     request: (id) => ipcRenderer.invoke("perm-request", id),
     openSettings: (id) => ipcRenderer.invoke("perm-settings", id),
     // Full access's apps, each with its Automation answer (null until Bops can read them).

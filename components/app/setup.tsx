@@ -33,7 +33,8 @@ export type PermStatus = "granted" | "denied" | "not-determined" | "restricted" 
 
 type ScriptedApp = { id: string; name: string; status: PermStatus };
 type Permissions = {
-  status(): Promise<Record<PermId, PermStatus>>;
+  /** These permissions (all of them unless some are named). Automation's runs osascript. */
+  status(ids?: PermId[]): Promise<Partial<Record<PermId, PermStatus>>>;
   request(id: PermId): Promise<PermStatus>;
   openSettings(id: PermId): Promise<void>;
   /** Full access's apps, each with its Automation answer (null until Bops can read them). Older Mac apps don't have it. */
@@ -51,7 +52,10 @@ const ITEMS: Item[] = ["screen", "microphone", "notifications", "relay"];
 /** The OS permissions setup asks for. Accessibility isn't one: Bops itself never drives other apps. */
 const ASKED: PermId[] = ["microphone", "notifications", "screen"];
 
-/** Runs `fn` now, every few seconds, and whenever the window comes back (from System Settings, say). */
+/**
+ * Runs `fn` now, whenever the window comes back (from System Settings, say), and every `every` ms while
+ * it's in front (0: only then). A grant made in System Settings means leaving Bops, so coming back covers it.
+ */
 function useWhileOpen(fn: () => void, every = 3000) {
   const ref = useRef(fn);
   useEffect(() => {
@@ -61,7 +65,7 @@ function useWhileOpen(fn: () => void, every = 3000) {
     const run = () => ref.current();
     const onVisible = () => document.visibilityState === "visible" && run();
     run();
-    const t = setInterval(run, every);
+    const t = every ? setInterval(() => document.visibilityState === "visible" && document.hasFocus() && run(), every) : undefined;
     window.addEventListener("focus", run);
     document.addEventListener("visibilitychange", onVisible);
     return () => {
@@ -72,8 +76,8 @@ function useWhileOpen(fn: () => void, every = 3000) {
   }, [every]);
 }
 
-/** This Mac's permissions for Bops, read live, and whether Screen Recording waits on a restart. */
-function usePermissions(every: number) {
+/** This Mac's permissions for Bops (`ids`, else all of them), read live, and whether Screen Recording waits on a restart. */
+function usePermissions(every: number, ids?: PermId[]) {
   const inApp = useMacApp();
   const [status, setStatus] = useState<Partial<Record<PermId, PermStatus>> | null>(null);
   const [restart, setRestart] = useState(false);
@@ -81,12 +85,12 @@ function usePermissions(every: number) {
     const b = bridge();
     if (!b?.permissions) return;
     try {
-      setStatus(await b.permissions.status());
+      setStatus(await b.permissions.status(ids));
       setRestart(!!(await b.screenNeedsRestart?.()));
     } catch {
       /* the next look tries again */
     }
-  }, []);
+  }, [ids]);
   useWhileOpen(() => void refresh(), every);
   return { inApp: inApp && !!bridge()?.permissions, status, restart, refresh };
 }
@@ -126,10 +130,14 @@ function useRelay(every: number) {
   return { info, busy, error, turn };
 }
 
-/** Everything the cards need, shared by the setup screen, Settings and the account menu's badge (`slow`: it looks less often). */
-function useSetupItems(state: AppState, slow = false) {
-  const perms = usePermissions(slow ? 15_000 : 3000);
-  const relay = useRelay(slow ? 30_000 : 5000);
+/**
+ * Everything the cards need, shared by the setup screen, Settings and the account menu's badge. The badge,
+ * always there, reads the permissions only when the window comes back, and like the setup screen only the
+ * ones it counts (ASKED): Settings' Full access needs Automation's too, which runs osascript each time.
+ */
+function useSetupItems(state: AppState, use: "badge" | "setup" | "settings") {
+  const perms = usePermissions(use === "badge" ? 0 : 3000, use === "settings" ? undefined : ASKED);
+  const relay = useRelay(use === "badge" ? 30_000 : 5000);
   // Grants made in System Settings show up through the polling; this is what was opened there.
   const [sentToSettings, setSent] = useState<Set<PermId>>(new Set());
   const [asking, setAsking] = useState<PermId | null>(null);
@@ -347,7 +355,7 @@ async function allowAll(items: Items) {
  * badge away for those.
  */
 export function Setup({ state, onClose }: { state: AppState; onClose: () => void }) {
-  const items = useSetupItems(state);
+  const items = useSetupItems(state, "setup");
   const [busy, setBusy] = useState(false);
   const [allowing, setAllowing] = useState(false);
   const canRestart = useCanRestart();
@@ -424,7 +432,7 @@ export function Setup({ state, onClose }: { state: AppState; onClose: () => void
  * account menu's badge (sidebar.tsx). The same items and the same "done" as the screen's own.
  */
 export function useSetupNeedsYou(state: AppState) {
-  const items = useSetupItems(state, true);
+  const items = useSetupItems(state, "badge");
   const skipped = new Set(state.setup?.skipped ?? []);
   return items.waiting.some((i) => !skipped.has(i));
 }
@@ -433,7 +441,7 @@ export function useSetupNeedsYou(state: AppState) {
 
 /** Settings → This Mac: the same cards, to come back to any time. */
 export function ThisMacSettings({ state }: { state: AppState }) {
-  const items = useSetupItems(state);
+  const items = useSetupItems(state, "settings");
   return (
     <div className="flex flex-col gap-2 px-[22px] pt-4">
       <div className="flex items-center justify-between gap-3">

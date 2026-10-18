@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { afterVncClose, STREAM_RETRY_MS, type StreamPlan } from "@/lib/rtc";
 import { Mascot } from "./mascot";
 import { RtcDesktop, rtcWorthTrying } from "./rtc-desktop";
@@ -45,17 +45,37 @@ export type Transport = "udp" | "vnc";
  * stream falls back at once and for good, one Orgo couldn't reach just then is tried again, and a
  * refused password gets one try with a fresh one. Thumbnails always use VNC: Orgo encodes at most two
  * WebRTC streams per computer. While the window is hidden a while, the screen rests (nothing streams).
+ *
+ * A thumbnail of a screen that's also live in full on the page (the one open, or one kept warm for a cut)
+ * copies that view's picture instead (Mirror): the same screen isn't streamed and decoded twice.
  */
-export function LiveDesktop({
-  botId,
-  display,
-  interactive,
-  className,
-  onFail,
-  onSize,
-  thumbnail,
-  bot,
-}: {
+export function LiveDesktop(props: LiveDesktopProps) {
+  const { thumbnail, botId, display, className, onSize } = props;
+  const full = useFullView(thumbnail ? `${botId}:${display}` : null);
+  // The copied picture stays up under the thumbnail's own stream until that's live and faded in.
+  const [held, setHeld] = useState(false);
+  if (full && !held) setHeld(true);
+  if (!thumbnail) return <LiveStream {...props} />;
+  return (
+    <div className={`relative overflow-hidden ${className ?? ""}`}>
+      {held && <Mirror picture={full} />}
+      {!full && (
+        <LiveStream
+          {...props}
+          className="h-full w-full"
+          quiet={held}
+          // A thumbnail is only ever VNC, so its size comes once, when it's live.
+          onSize={(w, h) => {
+            onSize?.(w, h);
+            setTimeout(() => setHeld(false), 600);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+type LiveDesktopProps = {
   botId: string;
   display: number;
   interactive: boolean;
@@ -71,7 +91,20 @@ export function LiveDesktop({
   thumbnail?: boolean;
   /** Whose screen it is, for the loading state ("Opening Sam's screen…"). */
   bot?: { id: string; name: string; color: string };
-}) {
+};
+
+/** One view's own stream. `quiet`: no loading state for the first few seconds (a thumbnail's copied picture is still up). */
+function LiveStream({
+  botId,
+  display,
+  interactive,
+  className,
+  onFail,
+  onSize,
+  thumbnail,
+  bot,
+  quiet,
+}: LiveDesktopProps & { quiet?: boolean }) {
   const [plan, setPlan] = useState<StreamPlan | null>(null);
   // WebRTC for this plan: being tried (VNC shows the screen meanwhile), showing it, or not used.
   const [rtc, setRtc] = useState<"trying" | "live" | "off">("off");
@@ -87,10 +120,21 @@ export function LiveDesktop({
   const [slow, setSlow] = useState(false);
   const failed = useRef(onFail);
   const sized = useRef(onSize);
+  // What's on show right now, for a thumbnail of this screen to copy: WebRTC's video, VNC's canvas, or nothing.
+  const root = useRef<HTMLDivElement>(null);
+  const showing = useRef<"video" | "canvas" | null>(null);
   useEffect(() => {
     failed.current = onFail;
     sized.current = onSize;
+    showing.current = rtc === "live" ? "video" : vncUp ? "canvas" : null;
   });
+  // A full view, once live, lends its picture to the thumbnail of the same screen until it's gone. While
+  // it reconnects or rests there's nothing to copy, and the thumbnail keeps what it copied last.
+  const [lent, setLent] = useState(false);
+  useEffect(() => {
+    if (thumbnail || !lent) return;
+    return showLive(`${botId}:${display}`, () => (showing.current ? (root.current?.querySelector(showing.current) ?? null) : null));
+  }, [thumbnail, lent, botId, display]);
   // Live at least once on this mount: after that a drop is retried here rather than handed to onFail.
   const ever = useRef(false);
   const backoff = useRef(0);
@@ -154,6 +198,7 @@ export function LiveDesktop({
   }, [rtc]);
 
   const live = (w: number, h: number) => {
+    if (!thumbnail) setLent(true);
     ever.current = true;
     backoff.current = 0;
     refused.current = false;
@@ -221,7 +266,7 @@ export function LiveDesktop({
 
   const transport: Transport | undefined = rtc === "live" ? "udp" : vncUp ? "vnc" : undefined;
   return (
-    <div className={`relative overflow-hidden ${className ?? ""}`} data-transport={transport}>
+    <div ref={root} className={`relative overflow-hidden ${className ?? ""}`} data-transport={transport}>
       {plan?.vnc && !vncGone && (
         <VncDesktop
           key={`vnc-${attempt}`}
@@ -255,9 +300,69 @@ export function LiveDesktop({
           />
         </div>
       )}
-      {!connected && <Waking thumbnail={!!thumbnail} bot={bot} text={stage === "reconnecting" ? "Reconnecting…" : slow ? "Taking a little longer than usual…" : stage === "opening" ? "Opening the screen…" : bot ? `Reaching ${bot.name}'s computer…` : "Reaching the computer…"} />}
+      {!connected && !(quiet && !slow) && <Waking thumbnail={!!thumbnail} bot={bot} text={stage === "reconnecting" ? "Reconnecting…" : slow ? "Taking a little longer than usual…" : stage === "opening" ? "Opening the screen…" : bot ? `Reaching ${bot.name}'s computer…` : "Reaching the computer…"} />}
     </div>
   );
+}
+
+/** What a full view draws into right now (WebRTC's video or VNC's canvas), or nothing while it's not showing. */
+type Picture = () => HTMLVideoElement | HTMLCanvasElement | null;
+/** The screens live in full on the page, by `bot:display`, and who to tell when that changes. */
+const fullViews = new Map<string, Picture>();
+const fullViewsChanged = new Set<() => void>();
+
+/** A full view of `key` is up, drawing into `picture`, until the returned function is called. */
+export function showLive(key: string, picture: Picture) {
+  fullViews.set(key, picture);
+  for (const f of fullViewsChanged) f();
+  return () => {
+    if (fullViews.get(key) === picture) fullViews.delete(key);
+    for (const f of fullViewsChanged) f();
+  };
+}
+const watchFullViews = (f: () => void) => {
+  fullViewsChanged.add(f);
+  return () => void fullViewsChanged.delete(f);
+};
+const useFullView = (key: string | null) => {
+  const get = () => (key ? (fullViews.get(key) ?? null) : null);
+  return useSyncExternalStore(watchFullViews, get, get);
+};
+
+/** Draws `from` into `to`, as wide as `to` shows on screen (in device pixels) and as tall as `from`'s shape; false when there's nothing to draw. */
+export function copyPicture(to: HTMLCanvasElement, from: HTMLVideoElement | HTMLCanvasElement, scale = 1) {
+  const video = "videoWidth" in from;
+  const w = video ? from.videoWidth : from.width;
+  const h = video ? from.videoHeight : from.height;
+  if (!w || !h || !to.clientWidth) return false;
+  const cw = Math.round(to.clientWidth * scale);
+  const ch = Math.round((cw * h) / w);
+  if (to.width !== cw || to.height !== ch) {
+    to.width = cw;
+    to.height = ch;
+  }
+  to.getContext("2d")?.drawImage(from, 0, 0, cw, ch);
+  return true;
+}
+
+/**
+ * A thumbnail of a screen live in full on the page: that view's picture, copied four times a second, with
+ * no stream of its own. Cropped at the bottom like a streamed thumbnail. When there's nothing to copy (the
+ * view reconnecting, resting, or gone), what it copied last stays up.
+ */
+function Mirror({ picture }: { picture: Picture | null }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    if (!picture) return;
+    const copy = () => {
+      const from = document.visibilityState === "visible" ? picture() : null;
+      if (ref.current && from) copyPicture(ref.current, from, devicePixelRatio);
+    };
+    copy();
+    const t = setInterval(copy, 250);
+    return () => clearInterval(t);
+  }, [picture]);
+  return <canvas ref={ref} aria-hidden className="pointer-events-none absolute inset-x-0 top-0 block h-auto w-full" />;
 }
 
 /** The parts of noVNC's display (core/display.js) that decodeOffThePage takes over. */
