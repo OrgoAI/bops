@@ -237,6 +237,78 @@ export function LiveDesktop({
   );
 }
 
+/** The parts of noVNC's display (core/display.js) that decodeOffThePage takes over. */
+type NoVncDisplay = {
+  imageRect: (x: number, y: number, width: number, height: number, mime: string, arr: Uint8Array) => void;
+  drawImage: (img: CanvasImageSource | DecodedRect, ...args: number[]) => void;
+  _renderQPush: (action: object) => void;
+};
+
+/**
+ * One JPEG or PNG piece of a frame, decoded off the page (createImageBitmap), as noVNC's render queue waits on
+ * an image: `complete`, its size, a "load" listener, and `src = ""` once drawn, which closes the bitmap. A piece
+ * that won't decode counts as loaded at its expected size and draws nothing, so the queue never waits on it.
+ */
+class DecodedRect {
+  complete = false;
+  bitmap: ImageBitmap | null = null;
+  private loads: ((this: DecodedRect) => void)[] = [];
+  constructor(
+    blob: Blob,
+    public width: number,
+    public height: number,
+  ) {
+    createImageBitmap(blob).then(
+      (b) => {
+        this.bitmap = b;
+        this.width = b.width;
+        this.height = b.height;
+        this.loaded();
+      },
+      () => this.loaded(),
+    );
+  }
+  private loaded() {
+    this.complete = true;
+    for (const f of this.loads.splice(0)) f.call(this);
+  }
+  addEventListener(type: string, f: (this: DecodedRect) => void) {
+    if (type === "load") this.loads.push(f);
+  }
+  removeEventListener(type: string, f: (this: DecodedRect) => void) {
+    this.loads = this.loads.filter((x) => x !== f);
+  }
+  set src(v: string) {
+    if (v !== "") return;
+    this.bitmap?.close();
+    this.bitmap = null;
+  }
+}
+
+/**
+ * noVNC draws each JPEG or PNG piece of a frame through a new <img> holding it as a base64 data URL
+ * (display.js imageRect), and Chromium decodes and keeps every one: with a few screens live (the sidebar's
+ * thumbnails are each a whole 1280x960 screen), the window grew about 350 MB a minute, 0.6 GB to 2.5 GB in
+ * four minutes, until macOS killed it (10-18). Here each piece is decoded with createImageBitmap instead, drawn
+ * in order by noVNC's own queue, and closed as soon as it's drawn: no element, no data URL, nothing kept.
+ * A noVNC whose display isn't the one this was written for (1.7) is left as it is. (scripts/test-vnc-decode.mjs)
+ */
+export function decodeOffThePage(rfb: object) {
+  const display = (rfb as { _display?: Partial<NoVncDisplay> })._display;
+  if (!display || typeof display.imageRect !== "function" || typeof display.drawImage !== "function" || typeof display._renderQPush !== "function" || typeof createImageBitmap !== "function") return;
+  const d = display as NoVncDisplay;
+  const draw = d.drawImage.bind(d);
+  d.drawImage = (img, ...args) => {
+    if (!(img instanceof DecodedRect)) return draw(img, ...args);
+    if (img.bitmap) draw(img.bitmap, ...args);
+  };
+  d.imageRect = (x, y, width, height, mime, arr) => {
+    if (!width || !height) return;
+    // The bytes are copied now: noVNC reuses the buffer they sit in.
+    d._renderQPush({ type: "img", img: new DecodedRect(new Blob([arr as BlobPart], { type: mime }), width, height), x, y, width, height });
+  };
+}
+
 /** One screen over VNC, drawn with noVNC. `onEnd`: it couldn't connect, or it dropped, with the socket's close code when it had one. */
 function VncDesktop({
   url,
@@ -274,6 +346,7 @@ function VncDesktop({
       let code: number | undefined;
       ws.addEventListener("close", (e) => (code = e.code));
       const r = new RFB(el, ws, { shared: true, credentials: { password } });
+      decodeOffThePage(r);
       // A thumbnail fills its slot (cropped at the bottom, like a peek); the main view fits the whole screen.
       r.scaleViewport = !thumbnail;
       r.background = "transparent";
