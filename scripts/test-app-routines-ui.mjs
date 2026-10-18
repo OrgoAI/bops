@@ -190,21 +190,21 @@ await test("a bot with no chat to put the words in: its empty state has no asks"
   assert.doesNotMatch(text(tab({ ...state([]), chats: [] }, "bot_two")), /Ask Ivy\b(?! to)/);
 });
 
-await test("the workspace with nothing: No routines yet, and asks that go to the main bot", () => {
+await test("the workspace with nothing: No routines yet, and asks that go to the main bot (no Ask button: the chat is right there)", () => {
   const s = three([]);
   const t = text(page(s));
   assert.match(t, /No routines yet/);
   assert.match(t, /Ask a bot to do something on a schedule, or to watch a page/);
   assert.match(t, /Every Friday at 5 PM, send me what we did this week/);
   assert.match(t, /Watch a page and tell me when the price drops/);
-  assert.match(t, /Ask Max/);
+  assert.doesNotMatch(t, /Ask Max/);
   assert.ok(!/[‒–—―]/.test(t), "no dashes");
-  // An ask opens the main bot's chat with it typed (not sent); Ask Max with nothing typed.
+  // An ask opens the main bot's chat with it typed (not sent).
   const asked = [];
   const buttons = buttonsOf(RoutinesEmpty({ asks: s.bots[0], onAsk: (...a) => asked.push(a) }));
   buttons.find((b) => b.words === "Every weekday at 8:30, summarize my inbox").click();
-  buttons.find((b) => b.words === "Ask Max").click();
-  assert.deepEqual(asked, [["bot_main", "Every weekday at 8:30, summarize my inbox"], ["bot_main"]]);
+  assert.ok(!buttons.some((b) => b.words === "Ask Max"));
+  assert.deepEqual(asked, [["bot_main", "Every weekday at 8:30, summarize my inbox"]]);
 });
 
 await test("a bot's tab: a short summary, Coming up soonest first with its time, the paused counted, Watching with news, See all", () => {

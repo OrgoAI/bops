@@ -548,7 +548,7 @@ export const askable = (state: AppState, b?: Bot) => (b && state.chats.some((c) 
  * Nothing runs yet: a bot's (its Routines tab, or the one picked on the page) or the whole workspace's.
  * Its mascot (the workspace's: its main bot's), what to ask for, and the way to start: `children` when
  * there's something to offer (a bot's Connected Apps with starter routines), else a few asks that open
- * `asks`'s chat with one in the message box, not sent, and Ask <name> that opens it with nothing typed.
+ * `asks`'s chat with one in the message box, not sent. No Ask button: the chat is right there.
  */
 export function RoutinesEmpty({ bot, asks, onAsk, children }: { bot?: Bot; asks?: Bot; onAsk?: (botId: string, text?: string) => void; children?: ReactNode }) {
   const face = bot ?? (asks?.isMain ? asks : undefined);
@@ -562,25 +562,17 @@ export function RoutinesEmpty({ bot, asks, onAsk, children }: { bot?: Bot; asks?
       {/* What it offers, else the asks. */}
       {children ||
         (asks && onAsk && (
-          <div className="flex flex-col items-center gap-3 pt-1">
-            <div role="group" aria-label="Things to ask" className="flex max-w-[440px] flex-wrap justify-center gap-1.5">
-              {ASKS.map((a) => (
-                <button
-                  key={a}
-                  onClick={() => onAsk(asks.id, a)}
-                  data-tip={`Opens ${asks.name}'s chat with this typed, not sent`}
-                  className="rounded-full bg-[#F2F2F0] px-3 py-1.5 text-[12.5px] leading-4 text-[#3A3A38] outline-none transition-colors duration-150 ease-out hover:bg-[#EAEAE7] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] motion-reduce:transition-none"
-                >
-                  {a}
-                </button>
-              ))}
-            </div>
-            <button
-              onClick={() => onAsk(asks.id)}
-              className="rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white outline-none hover:bg-[#2A2A28] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A,0_0_0_3px_#FFFFFF_inset]"
-            >
-              Ask {asks.name}
-            </button>
+          <div role="group" aria-label="Things to ask" className="flex max-w-[440px] flex-wrap justify-center gap-1.5 pt-1">
+            {ASKS.map((a) => (
+              <button
+                key={a}
+                onClick={() => onAsk(asks.id, a)}
+                data-tip={`Opens ${asks.name}'s chat with this typed, not sent`}
+                className="rounded-full bg-[#F2F2F0] px-3 py-1.5 text-[12.5px] leading-4 text-[#3A3A38] outline-none transition-colors duration-150 ease-out hover:bg-[#EAEAE7] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] motion-reduce:transition-none"
+              >
+                {a}
+              </button>
+            ))}
           </div>
         ))}
     </div>
