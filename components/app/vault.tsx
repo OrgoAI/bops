@@ -75,7 +75,7 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
   const first = needing[0] && signedOut(needing[0])[0];
 
   return (
-    <div className="motion-fade-in flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
+    <div className="motion-fade-in relative flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
       <div className="flex w-full max-w-[600px] flex-col gap-4">
         <div className="flex items-start gap-3">
           <div className="flex min-w-0 flex-1 flex-col gap-1">

@@ -666,7 +666,7 @@ function Bops({ state }: { state: AppState | null }) {
       <TooltipLayer />
       <NoticePopup />
       <ViewReporter chatId={chat.id} threadId={thread?.id ?? null} />
-      <div className="flex h-screen flex-col bg-white font-sans text-ink antialiased">
+      <div className="flex h-screen flex-col overflow-clip bg-white font-sans text-ink antialiased">
         <TitleBar
           columns={titleColumns}
           sidebarOpen={sidebarOpen}
