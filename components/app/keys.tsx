@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { sameApp } from "@/lib/routine-catalog";
 import { MAIN_WORKSPACE, workspaceOf, type AppApproval, type AppState, type Bot, type LastUses, type Message, type Watch } from "@/lib/types";
-import { BotChips, usedLine } from "./apps";
+import { BotChips, PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon, usedLine } from "./apps";
 import { Mascot } from "./mascot";
 import { anchorOf, AppRoutines, hasTemplates, RoutineSuggest, usePendingSuggest } from "./routines";
 import { KeyIcon } from "./screen-cards";
@@ -362,8 +362,8 @@ const KEY_CHOICES: { id: "act" | "none"; name: string; hint: string }[] = [
 ];
 
 /**
- * One key in the vault, as a Connected App's account reads: its name, one quiet line (where it applies, when it
- * was set, when a bot last used it), the bots that may use it (a chip each), and Show, Copy, Replace and Remove.
+ * One key in the vault in two lines, as a Connected App's account reads: its name, when it was set, and Show,
+ * Copy, Replace and Remove as icons; then the bots that may use it (a chip each) and when one last did.
  */
 function KeyLine({
   k,
@@ -415,17 +415,19 @@ function KeyLine({
     }
   };
   const when = setOn(k.updatedAt);
-  const meta = [scopeLabel(k.scope).label, k.readOnly && "Read only", when && `Updated ${when}`, used].filter(Boolean).join(" · ");
+  // Where it applies is the tab it's under, so the line says only what's this key's own.
+  const meta = [k.readOnly && "Read only", when && `Updated ${when}`].filter(Boolean).join(" · ");
   return (
     <div className="flex flex-col gap-1.5 border-b border-[#F0F0EE] py-3 first:pt-0">
-      <div className="flex items-start gap-3">
-        <div className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate font-mono text-[13px] font-medium leading-[18px]">{k.name}</span>
-          <span data-tip={`${scopeLabel(k.scope).tip}${k.readOnly ? " Orgo lets bots only read with it." : ""}`} className="truncate text-[12px] leading-4 text-[#9A9A98]">
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 truncate font-mono text-[13px] font-medium leading-[18px]">{k.name}</span>
+        {meta && (
+          <span data-tip={`${scopeLabel(k.scope).tip}${k.readOnly ? " Orgo lets bots only read with it." : ""}`} className="min-w-0 shrink-[3] truncate text-[12px] leading-4 text-[#9A9A98]">
             {meta}
           </span>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
+        )}
+        <span className="flex-1" />
+        <div className="flex shrink-0 items-center">
           <button
             type="button"
             disabled={busy || v.busy}
@@ -459,17 +461,17 @@ function KeyLine({
             )}
           </button>
           {onRoutines && (
-            <span ref={anchorRef} className="flex">
+            <span ref={anchorRef} className="flex pl-1">
               <button disabled={busy} onClick={onRoutines} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
                 Add routines
               </button>
             </span>
           )}
-          <button disabled={busy} onClick={onReplace} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-            Replace
+          <button type="button" disabled={busy} onClick={onReplace} aria-label="Replace key" data-tip="Replace key" className={rowIconBtn}>
+            <PencilIcon />
           </button>
-          <button disabled={busy} onClick={() => setSure(true)} className={`${btn} text-[#B42318] hover:bg-[#FEF3F2]`}>
-            Remove
+          <button type="button" disabled={busy} onClick={() => setSure(true)} aria-label="Remove key" data-tip="Remove key" className={rowTrashBtn}>
+            <TrashIcon />
           </button>
         </div>
       </div>
@@ -482,7 +484,12 @@ function KeyLine({
         </div>
       )}
       {!!team.length && (
-        <BotChips team={team} choices={KEY_CHOICES} level={(b) => (b.keys?.includes(k.name) ? "act" : "none")} what={k.name} disabled={busy} onSet={(b, to) => void toggle(b, to === "act")} />
+        <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <BotChips team={team} choices={KEY_CHOICES} level={(b) => (b.keys?.includes(k.name) ? "act" : "none")} what={k.name} disabled={busy} onSet={(b, to) => void toggle(b, to === "act")} />
+          </div>
+          {used && <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{used}</span>}
+        </div>
       )}
       {routines}
       {sure && (

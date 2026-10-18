@@ -133,7 +133,32 @@ export function QuickStart({ onPick }: { onPick: (app: string) => void }) {
   );
 }
 
-/** One account: its name (and the user's label for it), when it was last used, and the bots that can use it. */
+/** A row's round icon button (Rename, Remove, Show, Copy), here and on key rows (keys.tsx). */
+export const rowIconBtn =
+  "flex size-7 shrink-0 items-center justify-center rounded-full text-[#6B6B6B] outline-none transition-colors hover:bg-black/[0.05] hover:text-ink focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50";
+/** The same, for the one that removes: red on hover. */
+export const rowTrashBtn = `${rowIconBtn} hover:!bg-[#FEF3F2] hover:!text-[#B42318]`;
+
+export function PencilIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
+      <path d="M10.6 2.9l2.5 2.5L5.8 12.7l-3.1.6.6-3.1 7.3-7.3z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function TrashIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
+      <path d="M2.5 4.5h11M6.5 4.5V3a.8.8 0 0 1 .8-.8h1.4a.8.8 0 0 1 .8.8v1.5M4 4.5l.7 8.6a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.6" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/**
+ * One account in two lines: its name (and the user's label for it) with Rename and Disconnect as icons, then
+ * the bots that can use it and when one last did.
+ */
 export function AccountBlock({ state, account: a, many, last, onSignIn }: { state: AppState; account: AppAccount; many: boolean; last?: LastUses[string]; onSignIn: () => void }) {
   const [naming, setNaming] = useState(false);
   const [label, setLabel] = useState(a.label ?? "");
@@ -160,21 +185,13 @@ export function AccountBlock({ state, account: a, many, last, onSignIn }: { stat
             className="h-7 w-[150px] rounded-lg bg-white px-2 text-[12.5px] outline-none shadow-[0_0_0_1.5px_#0A0A0A]"
           />
         ) : (
-          <span className="flex min-w-0 flex-col">
-            <span className="truncate text-[13.5px] font-medium leading-[18px]">{openApp ? "Ready to use" : accountTitle(a)}</span>
-            <span className="truncate text-[12px] leading-4 text-[#9A9A98]">{meta}</span>
-          </span>
+          <span className="min-w-0 truncate text-[13.5px] font-medium leading-[18px]">{openApp ? "Ready to use" : accountTitle(a)}</span>
         )}
         {a.status === "expired" && <span className="shrink-0 rounded-full bg-[#FEF0C7] px-1.5 py-px text-[10.5px] font-medium leading-[14px] text-[#93370D]">Signed out</span>}
         <span className="flex-1" />
         {a.status === "expired" && (
           <button onClick={onSignIn} className="shrink-0 rounded-full bg-ink px-2.5 py-1 text-[12px] font-medium leading-4 text-white">
             Sign in again
-          </button>
-        )}
-        {!openApp && !naming && (
-          <button onClick={() => setNaming(true)} className="shrink-0 rounded-full px-2 py-1 text-[12px] text-[#6B6B6B] hover:bg-[#F2F2F0]">
-            {a.label ? "Rename" : "Name it"}
           </button>
         )}
         {sure ? (
@@ -187,20 +204,30 @@ export function AccountBlock({ state, account: a, many, last, onSignIn }: { stat
             </button>
           </span>
         ) : (
-          <button onClick={() => setSure(true)} className="shrink-0 rounded-full px-2 py-1 text-[12px] text-[#B42318] hover:bg-[#FEF3F2]">
-            {openApp ? "Remove" : "Disconnect"}
-          </button>
+          <span className="flex shrink-0 items-center">
+            {!openApp && !naming && (
+              <button type="button" onClick={() => setNaming(true)} aria-label={a.label ? "Rename" : "Name it"} data-tip={a.label ? "Rename" : "Name it"} className={rowIconBtn}>
+                <PencilIcon />
+              </button>
+            )}
+            <button type="button" onClick={() => setSure(true)} aria-label={openApp ? "Remove" : "Disconnect"} data-tip={openApp ? "Remove" : "Disconnect"} className={rowTrashBtn}>
+              <TrashIcon />
+            </button>
+          </span>
         )}
       </div>
-      <div className="px-2">
-        <BotChips
-          team={team}
-          choices={APP_CHOICES}
-          level={(b) => levelOf(b, a) ?? "none"}
-          note={(b) => (levelOf(b, a) === "read" ? "read only" : undefined)}
-          what={openApp ? a.appName : accountTitle(a)}
-          onSet={set}
-        />
+      <div className="flex items-center gap-2 px-2">
+        <div className="min-w-0 flex-1">
+          <BotChips
+            team={team}
+            choices={APP_CHOICES}
+            level={(b) => levelOf(b, a) ?? "none"}
+            note={(b) => (levelOf(b, a) === "read" ? "read only" : undefined)}
+            what={openApp ? a.appName : accountTitle(a)}
+            onSet={set}
+          />
+        </div>
+        <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{meta}</span>
       </div>
     </div>
   );
