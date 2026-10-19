@@ -22,7 +22,7 @@ import {
   type CloudStateConflict,
   type CloudStateHead,
 } from "./protocol.ts";
-import { notifyMac } from "./tunnel.ts";
+import { dropOlderMac, notifyMac } from "./tunnel.ts";
 import { forgetTelemetryChoice } from "./analytics.ts";
 
 /**
@@ -43,7 +43,8 @@ import { forgetTelemetryChoice } from "./analytics.ts";
  * Each app also says which state it may be given (BOPS_STATE_LEVEL_HEADER, 3 from 0.0.29 on; none is
  * 2), and the row keeps the highest that wrote (its protocol). Once that's above an app's, every call
  * of that app's for the user's state is refused (426 STATE_TOO_NEW), reads and merges as well as
- * writes, and so is its tunnel (tunnel.ts), and its notices say to update (notices.ts): 0.0.28 runs a
+ * writes, but for its copy before Start over (postBackup), and so is its tunnel (tunnel.ts: one it
+ * holds when the row goes above it is closed), and its notices say to update (notices.ts): 0.0.28 runs a
  * routine that runs every so often or before meetings over and over, a monthly one daily, and lists a
  * bot with an app it has no access to as able to use it. What such a Mac changes meanwhile waits on it
  * (persist-cloud.ts keeps it) and goes up once it's updated. A user whose Macs are all older is never
@@ -398,6 +399,8 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
   if (!wholeNumber(base)) throw new HttpError(400, "base must be a whole number, 0 or more");
   const json = toJson(blobOf(state));
   const writer = deviceOf(req);
+  const level = stateLevelOf(req);
+  let raised = false;
   const version = await tx(async (c) => {
     const row = await lockUser(c, user.id);
     // Before the version: an older app is never handed the newer one's state to merge (409).
@@ -405,8 +408,9 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
     if (row.version !== base) return null;
     const r = await c.query<{ version: string }>(
       `UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, protocol = GREATEST(protocol, $3), writer = $4, updated_at = now() WHERE user_id = $1 RETURNING version`,
-      [user.id, json, stateLevelOf(req), writer],
+      [user.id, json, level, writer],
     );
+    raised = level > row.protocol;
     return Number(r.rows[0].version);
   });
   if (version === null) {
@@ -415,6 +419,8 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
     return sendZipped(req, res, 409, body);
   }
   sendJson(res, 200, { version });
+  // An older Mac of the user's on the tunnel now can't be given this state: off it, before it hears of it.
+  if (raised) dropOlderMac(user.id, level);
   announce(user.id);
   // A paid plan that waited to know the main bot is set up now (plans.ts).
   afterStateUpload(user.id);
@@ -503,14 +509,18 @@ const postMessages: Route = {
   },
 };
 
-/** A copy of the whole state, messages and all, before the user starts over (Settings). */
+/**
+ * A copy of the whole state, messages and all, before the user starts over (Settings). A Mac kept out of
+ * the state (stateTooNew) makes one too: the copy stays here and none of it goes back to it, and its
+ * Start over goes up once it's updated (persist-cloud.ts keeps it), so the copy is all that's left of
+ * what it cleared.
+ */
 const postBackup: Route = {
   method: "POST",
   path: "/v1/state/backups",
   auth: "user",
   handle: async (req, res, { user }) => {
     checkUser(req, user!, true);
-    await requireLevelFor(req, user!.id);
     const r = await query<{ id: string }>(
       `INSERT INTO bops.app_state_backups (user_id, state)
        SELECT s.user_id, s.state || jsonb_build_object('messages', COALESCE(

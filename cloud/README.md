@@ -451,8 +451,9 @@ verified is refused, before a text is sent and again at the check), and an addre
 
 `GET /v1/connect` upgrades to a WebSocket (Orgo key as Bearer). One per user: a newer one replaces
 the older (which gets `{"t":"replaced"}` and close code 4000). A Mac kept out of the user's state by
-a newer one is refused (426, see "The app's state"), so it never takes the tunnel from that one. Frames
-are JSON (`CloudToMac`, `MacToCloud` in `protocol.ts`).
+a newer one is refused (426, see "The app's state"), so it never takes the tunnel from that one, and
+one on it when the newer one's write keeps it out is put off it the same way. Frames are JSON
+(`CloudToMac`, `MacToCloud` in `protocol.ts`).
 
 - `req` → the Mac replays it against its own server (`http://127.0.0.1:<port><path>`), adding
   `x-bops-cloud: <token>` (`CLOUD_TUNNEL_HEADER`; the token never leaves that Mac process) after
@@ -639,8 +640,10 @@ become rows) and `GET` it back with the messages in, until a newer build writes 
 
 Each app also says which state it may be given, `X-Bops-State-Level: 3` from 0.0.29 on (with every
 call and the tunnel, `lib/server/app-version.ts`; none counts as 2), and a write keeps the highest in
-`protocol`. Once that's above an app's, every one of the calls above from it is refused (426
-`state_too_new`), reads, merges and writes alike, and so is its tunnel; its notices say to update.
+`protocol`. Once that's above an app's, every one of the calls above from it but the copy before
+"Start over" is refused (426 `state_too_new`), reads, merges and writes alike, and so is its tunnel
+(one it's on then is closed as replaced); its notices say to update. The copy is made from what's
+here and none of it goes back, and that Mac's Start over goes up once it's updated.
 0.0.28 runs a routine that runs every so often or before meetings over and over (its `nextRun` throws
 after the task started), a monthly one daily, and lists a bot with an app it has no access to as able
 to use it. What such a Mac changes meanwhile waits on it (`unsent-state.json`) and goes up merged once

@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
+import { WebSocket } from "ws";
 import { closeDb, query } from "../db.ts";
 import { STATE_CONFLICT, WRONG_USER, type CloudMessagesPage, type CloudState, type CloudStateConflict, type CloudStateHead } from "../protocol.ts";
 import { loadState, REMOVED_KEEP_DAYS, sweepRemovedMessages } from "../state.ts";
@@ -265,7 +266,15 @@ test("once a Mac on a newer Bops wrote the user's state, an older Mac is kept ou
   await refused(await putState(id, 2, { owner: { name: "Old again" }, routines: [] }, older), "its write over the newest");
   await refused(await call(id, "/v1/messages?after=0", older), "its read of the messages");
   await refused(await postMessages(id, [msg(2)], ["msg_000001"], older), "its messages");
-  await refused(await call(id, "/v1/state/backups", { method: "POST", body: {}, ...older }), "its copy before Start over");
+  // Its copy before Start over is still made: of the cloud's state, none of it back to it. Its Start over
+  // goes up once it's updated, so the copy is what's left of what it cleared.
+  const copy = await call(id, "/v1/state/backups", { method: "POST", body: {}, ...older });
+  assert.equal(copy.status, 200, "its copy before Start over");
+  const made = (await copy.json()) as { ok: boolean; id: number };
+  assert.deepEqual(Object.keys(made).sort(), ["id", "ok"], "nothing of the state with it");
+  const kept = await query<{ state: { routines: unknown[]; messages: { id: string }[] } }>("SELECT state FROM bops.app_state_backups WHERE id = $1", [made.id]);
+  assert.deepEqual(kept.rows[0].state.routines, [EVERY]);
+  assert.deepEqual(kept.rows[0].state.messages.map((m) => m.id), ["msg_000001"]);
   // A build from before the protocol gets none of it either.
   assert.equal((await fetch(`${cloud.url}/v1/state`, { headers: { Authorization: `Bearer ${keyOf(id)}` } })).status, 426);
   assert.deepEqual((await loadState(id))?.state, { owner: { name: "Old" }, routines: [EVERY] });
@@ -285,6 +294,35 @@ test("once a Mac on a newer Bops wrote the user's state, an older Mac is kept ou
     await until(() => mac.frames.find((f) => f.t === "state" && f.version === 3), "the newer Mac hearing of its write");
     got = (await (await call(id, "/v1/state", newer)).json()) as CloudState;
     assert.deepEqual([got.version, got.protocol, got.state.owner], [3, 3, { name: "New" }]);
+  } finally {
+    mac.ws.close();
+  }
+});
+
+test("an older Mac still on the tunnel when a newer Mac's write keeps it out is put off it, as when it's replaced; the newer Mac's own stays", async () => {
+  const id = user("level-tunnel");
+  const older = { device: "mac-old" };
+  const newer = { device: "mac-new", headers: NEWER };
+  assert.equal((await putState(id, 0, { owner: { name: "Old" } }, older)).status, 200);
+  // The older Mac took the tunnel before any newer one wrote (it started again after the newer one connected).
+  const old = await connectMac(cloud.url, id);
+  assert.equal((await putState(id, 1, { owner: { name: "Old again" } }, older)).status, 200);
+  await until(() => old.frames.find((f) => f.t === "state" && f.version === 2), "the older Mac hearing of its own write");
+  // The newer Mac's first write: the older one is told it was replaced (0.0.28 then stays off until it starts again, and is refused then).
+  assert.equal((await putState(id, 2, { owner: { name: "New" }, routines: [EVERY] }, newer)).status, 200);
+  assert.deepEqual(await old.closed, { code: 4000, reason: "replaced" });
+  assert.ok(old.frames.some((f) => f.t === "replaced"));
+  assert.equal(old.frames.some((f) => f.t === "state" && f.version === 3), false, "never told of the newer write");
+
+  // A newer Mac on the tunnel stays on through the write that keeps the older ones out.
+  const id2 = user("level-tunnel-own");
+  assert.equal((await putState(id2, 0, { owner: { name: "Old" } }, older)).status, 200);
+  const mac = await connectMac(cloud.url, id2, { headers: NEWER });
+  try {
+    assert.equal((await putState(id2, 1, { owner: { name: "New" }, routines: [EVERY] }, newer)).status, 200);
+    await until(() => mac.frames.find((f) => f.t === "state" && f.version === 2), "the newer Mac hearing of its write");
+    assert.equal(mac.frames.some((f) => f.t === "replaced"), false);
+    assert.equal(mac.ws.readyState, WebSocket.OPEN);
   } finally {
     mac.ws.close();
   }

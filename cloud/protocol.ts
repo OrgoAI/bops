@@ -127,9 +127,10 @@ export const STATE_PROTOCOL = 2;
  * (lib/server/app-version.ts appHeaders); an app before 0.0.29 sends none, which counts as 2. The
  * protocol header stays "2", so a cloud from before answers this app as it always did. The cloud keeps
  * the highest level that wrote each user's state (app_state.protocol); once it's above an app's, that
- * app's calls for the user's state and its tunnel are refused (426 STATE_TOO_NEW) and its notices say
- * to update (cloud/state.ts). 3: routines that run every so often, before meetings or monthly, and a
- * bot with no access to an app, which 0.0.28 runs over and over, runs daily, or lists as able to use it.
+ * app's calls for the user's state (but its copy before Start over) and its tunnel are refused (426
+ * STATE_TOO_NEW) and its notices say to update (cloud/state.ts). 3: routines that run every so often,
+ * before meetings or monthly, and a bot with no access to an app, which 0.0.28 runs over and over, runs
+ * daily, or lists as able to use it.
  */
 export const BOPS_STATE_LEVEL_HEADER = "x-bops-state-level";
 export const STATE_LEVEL = 3;
