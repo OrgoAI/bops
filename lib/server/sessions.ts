@@ -1704,7 +1704,9 @@ function agentBrief(
  * The brain a thread runs on (cli-agents.ts), when it has one: its bot's, when this build runs that CLI,
  * unless Bops agent has run any of it (threadRunner: it started there, it took over when the bot went off
  * its brain, or the user had it finish there). Its agent session or response chain is Bops agent's, and the
- * brain's CLI session knows nothing of what Bops agent did, so it stays on Bops agent. Bops agent otherwise.
+ * brain's CLI session knows nothing of what Bops agent did, so it stays on Bops agent. Bops agent otherwise,
+ * and always in a build without brains (BRAINS_ON: brainOf and cliDriver have none), where a thread a brain
+ * ran carries on with what it did there (brainRecord).
  */
 function brainFor(s: Session, b: Bot): Brain | undefined {
   if (threadRunner(s) === "agent") return undefined;
@@ -2345,6 +2347,12 @@ async function run(sessionId: string) {
   // key. Only in the cloud: on the Mac a task runs on Bops agent. The run's end lets its process go.
   const brain = mac ? undefined : brainFor(s, b);
   let closeBrain: (() => Promise<void>) | undefined;
+  // On Bops agent now (its bot is off its brain, or this build has none: BRAINS_ON), what its brain waited on
+  // the user for is over: its answers from here are the bot's own.
+  if (!brain && s.brainRun?.waits)
+    patchSession(sessionId, (x) => {
+      if (x.brainRun) delete x.brainRun.waits;
+    });
   // A cloud thread on the Responses API's computer tool (computer-task.ts): every new one (unless
   // BOPS_COMPUTER_TOOL=0), and one that started on it. A thread that started on an Agents API session stays on that.
   const onComputerTool = !mac && !brain && (s.runner === "computer" || (!s.agentSessionId && computerToolOn()));

@@ -30,6 +30,8 @@ import ts from "typescript";
 const REAL_CLAUDE = process.env.REAL_CLAUDE === "1";
 for (const k of Object.keys(process.env))
   if (/^(BOPS|OPENAI|AGENTPHONE|AGENTMAIL|HONCHO|COMPOSIO|TYPESAFE|TWILIO|ORGO|CODEX|TAILSCALE|TREG|ANTHROPIC|CLAUDE_CODE)_/.test(k) || k === "CLAUDECODE" || k === "REAL_CLAUDE") delete process.env[k];
+// A build with brains (lib/types.ts BRAINS_ON, read as it loads); scripts/test-brains-off.mjs is one without.
+process.env.NEXT_PUBLIC_BOPS_BRAINS = "1";
 process.env.BOPS_SELF_HOSTED = "1";
 process.env.BOPS_ORGO_ORIGIN = "https://orgo.test";
 process.env.BOPS_APP_VERSION = "9.9.9";

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { screenMap } from "@/lib/screens";
-import { botChatId, BRAIN_KEYS, BRAIN_NAMES, planName, workspaceOf, type Brain, type BrainAuth, type BrainKind, type BrainSignIn } from "@/lib/types";
+import { botChatId, BRAIN_KEYS, BRAIN_NAMES, BRAINS_ON, planName, workspaceOf, type Brain, type BrainAuth, type BrainKind, type BrainSignIn } from "@/lib/types";
 import { keysOf, listKeys, revealKey, type KeyScope } from "./keys";
 import { orgo } from "./orgo";
 import { sameComputer, workComputer } from "./screens";
@@ -36,6 +36,9 @@ export const CODEX_VERSION = "0.160.0";
 /** Each brain's folder on a computer: Claude Code's CLAUDE_CONFIG_DIR, Codex's CODEX_HOME. */
 export const BRAINS_DIR = "/root/.bops/brains";
 export const brainDir = (brainId: string) => `${BRAINS_DIR}/${brainId}`;
+
+/** What a brain route answers in a build without brains (BRAINS_ON): there's nothing there. Null in one with them. */
+export const brainsOff = () => (BRAINS_ON ? null : Response.json({ error: "This version of Bops has no brains." }, { status: 404 }));
 
 /** A brain call turned down, with its HTTP status and words for the user. */
 export class BrainError extends Error {

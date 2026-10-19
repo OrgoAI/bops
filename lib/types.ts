@@ -297,6 +297,15 @@ export function workBot(b: Bot, bots: Bot[]): Bot {
  * own account, never on Bops' AI credit.
  */
 export type BrainKind = "claude" | "codex";
+/**
+ * Whether this build has brains: NEXT_PUBLIC_BOPS_BRAINS=1 where it's built (or where `next dev` starts,
+ * .env.local too). Next writes the value into the server and the window alike as it builds them, and a
+ * release builds with it 0 (scripts/release.sh). Without brains nothing about them shows (Settings, a bot's
+ * profile, a thread's badge and Open in terminal), every bot is on Bops agent (brainOf) and every task runs
+ * there, a thread a brain ran included (sessions.ts brainRecord), and the brain routes answer 404. The brains
+ * saved in the state stay as they are, for a build that has them.
+ */
+export const BRAINS_ON = process.env.NEXT_PUBLIC_BOPS_BRAINS === "1";
 export const BRAIN_NAMES: Record<BrainKind, string> = { claude: "Claude Code", codex: "Codex" };
 /** The Vault key a key brain runs on (lib/server/keys.ts KEY_PROVIDERS): the user's own Anthropic or OpenAI key. */
 export const BRAIN_KEYS: Record<BrainKind, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY" };
@@ -346,9 +355,9 @@ export type Brain = {
 /** "Max plan", "Pro plan": a Claude plan as Claude Code names it (BrainSignIn's plan); "Claude plan" when it didn't say. */
 export const planName = (plan?: string) => (plan ? `${plan.charAt(0).toUpperCase()}${plan.slice(1)} plan` : "Claude plan");
 
-/** A bot's brain, or undefined for Bops agent: one it picked that still lets it in, and is still there. */
+/** A bot's brain, or undefined for Bops agent: one it picked that still lets it in, and is still there, in a build with brains (BRAINS_ON). */
 export function brainOf(b: Pick<Bot, "id" | "brain">, state: Pick<AppState, "brains">): Brain | undefined {
-  if (!b.brain) return undefined;
+  if (!BRAINS_ON || !b.brain) return undefined;
   const x = state.brains?.find((y) => y.id === b.brain);
   return x && x.bots.includes(b.id) ? x : undefined;
 }

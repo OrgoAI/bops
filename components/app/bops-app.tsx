@@ -3,7 +3,7 @@
 import { screenMap } from "@/lib/screens";
 import { chatAsks } from "@/lib/asks";
 import { useEffect, useRef, useState } from "react";
-import { botChatId, isScreenWatch, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
+import { botChatId, BRAINS_ON, isScreenWatch, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
 import { Account } from "./account";
 import { AutopilotPage, type AutopilotSection } from "./autopilot";
 import { Members } from "./members";
@@ -1398,9 +1398,9 @@ function SelfHosting({ state }: { state: AppState }) {
 
 /**
  * Settings, over the app. `onShowScreen`: a brain's sign-in started on a bot's screen, so Settings closes and
- * that screen shows; `onOpenVault`: to add a key there (brains.tsx).
+ * that screen shows; `onOpenVault`: to add a key there (brains.tsx). Exported for the tests.
  */
-function Settings({ state, onClose, onShowScreen, onOpenVault }: { state: AppState; onClose: () => void; onShowScreen: (botId: string, display: number) => void; onOpenVault: () => void }) {
+export function Settings({ state, onClose, onShowScreen, onOpenVault }: { state: AppState; onClose: () => void; onShowScreen: (botId: string, display: number) => void; onOpenVault: () => void }) {
   const setHost = (host: Host) => void post("/api/host", { host });
   const selfHosted = useSelfHosted();
   return (
@@ -1409,7 +1409,9 @@ function Settings({ state, onClose, onShowScreen, onOpenVault }: { state: AppSta
         <div className="flex items-center justify-between border-b border-[#F0F0EE] px-[22px] py-[18px]">
           <div className="flex flex-col gap-0.5">
             <span className="text-[18px] font-semibold leading-[22px]">Settings</span>
-            <span className="text-[13px] leading-[17px] text-[#6B6B6B]">You, how your bots reach you, this Mac, where your bots work and their brain</span>
+            <span className="text-[13px] leading-[17px] text-[#6B6B6B]">
+              {BRAINS_ON ? "You, how your bots reach you, this Mac, where your bots work and their brain" : "You, how your bots reach you, this Mac, and where your bots work"}
+            </span>
           </div>
           <button onClick={onClose} aria-label="Close" className="flex size-8 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3]">
             <svg width="12" height="12" viewBox="0 0 12 12">
@@ -1441,7 +1443,7 @@ function Settings({ state, onClose, onShowScreen, onOpenVault }: { state: AppSta
           </div>
         </div>
 
-        <BrainSettings state={state} onShowScreen={onShowScreen} onOpenVault={onOpenVault} />
+        {BRAINS_ON && <BrainSettings state={state} onShowScreen={onShowScreen} onOpenVault={onOpenVault} />}
 
         <div className={`flex flex-col px-[22px] pt-4 ${selfHosted ? "" : "pb-5"}`}>
           <span className="pb-1 text-[13px] font-semibold">Your bots&apos; computers</span>

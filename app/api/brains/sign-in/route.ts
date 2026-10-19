@@ -1,4 +1,4 @@
-import { BrainError, cancelSignIn, signInStatus, startSignIn } from "@/lib/server/brains";
+import { BrainError, brainsOff, cancelSignIn, signInStatus, startSignIn } from "@/lib/server/brains";
 import { notReady } from "@/lib/server/ready";
 import { workComputer } from "@/lib/server/screens";
 import { bot } from "@/lib/server/store";
@@ -18,7 +18,7 @@ const failed = (e: unknown) => Response.json({ error: (e as Error).message }, { 
  * there, so it wakes a computer that's asleep: the app asks only when the user does).
  */
 export async function GET(request: Request) {
-  const unready = notReady() ?? notFromWindow(request);
+  const unready = brainsOff() ?? notReady() ?? notFromWindow(request);
   if (unready) return unready;
   const q = new URL(request.url).searchParams;
   const b = bot(q.get("bot") ?? "");
@@ -33,7 +33,7 @@ export async function GET(request: Request) {
 
 /** Start signing `brainId` in on the computer `botId` works on: the screen it's on comes back at once ({ botId, display }). */
 export async function POST(request: Request) {
-  const unready = notReady() ?? notFromWindow(request);
+  const unready = brainsOff() ?? notReady() ?? notFromWindow(request);
   if (unready) return unready;
   const b = (await request.json().catch(() => ({}))) as { brainId?: unknown; botId?: unknown };
   if (typeof b.brainId !== "string" || typeof b.botId !== "string") return Response.json({ error: "which brain, on which bot's computer?" }, { status: 400 });
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
 
 /** Stop a sign-in: its terminal closes and the screen goes back to the bot. */
 export async function DELETE(request: Request) {
-  const unready = notReady() ?? notFromWindow(request);
+  const unready = brainsOff() ?? notReady() ?? notFromWindow(request);
   if (unready) return unready;
   const b = (await request.json().catch(() => ({}))) as { brainId?: unknown };
   if (typeof b.brainId !== "string") return Response.json({ error: "which brain?" }, { status: 400 });

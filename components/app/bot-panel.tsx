@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { botChatId, BRAIN_NAMES, brainOf, brainRuns, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
+import { botChatId, BRAIN_NAMES, BRAINS_ON, brainOf, brainRuns, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
 import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
@@ -135,7 +135,7 @@ export function BotPanel({
   );
 }
 
-/** By the bot's role: the brain its cloud tasks run on, when it's one the user brought (brains.tsx BotBrain picks it). Nothing for Bops agent, or where its tasks all run on this Mac (brainRuns). */
+/** By the bot's role: the brain its cloud tasks run on, when it's one the user brought (brains.tsx BotBrain picks it). Nothing for Bops agent (every bot, in a build without brains: brainOf), or where its tasks all run on this Mac (brainRuns). */
 function BotBrainBadge({ state, bot: b, className }: { state: AppState; bot: Bot; className?: string }) {
   const x = brainRuns(b, state) === "none" ? undefined : brainOf(b, state);
   return x ? <BrainBadge kind={x.kind} title={`${b.name}'s tasks on its computer run on ${BRAIN_NAMES[x.kind]}`} className={className} /> : null;
@@ -256,7 +256,7 @@ function Details({
       <Uses state={state} bot={b} onOpenVault={onOpenVault} onOpenRoutines={onOpenRoutines} className={glass} />
       <BotKeys state={state} bot={b} onAdd={() => onOpenKeys(b.id)} className={glass} />
 
-      <BotBrain state={state} bot={b} onShowScreen={onShowScreen} className={glass} />
+      {BRAINS_ON && <BotBrain state={state} bot={b} onShowScreen={onShowScreen} className={glass} />}
 
       <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
         <div className="flex min-w-0 flex-1 flex-col">

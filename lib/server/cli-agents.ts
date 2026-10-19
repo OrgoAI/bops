@@ -1,5 +1,5 @@
 import "server-only";
-import { BRAIN_NAMES, live, planName, type Brain, type BrainKind } from "@/lib/types";
+import { BRAIN_NAMES, BRAINS_ON, live, planName, type Brain, type BrainKind } from "@/lib/types";
 import { brainById, ensureBrainTools, ensureClaudeCode, ensureCodex, revealBrainKey } from "./brains";
 import { answerApp, askOwner } from "./composio";
 import { orgo } from "./orgo";
@@ -260,7 +260,8 @@ export const codexDriver: CliDriver = {
   },
 };
 
-const DRIVERS: Partial<Record<BrainKind, CliDriver>> = { claude: claudeDriver, codex: codexDriver };
+/** None in a build without brains (BRAINS_ON): every thread runs on Bops agent, one a brain ran too. */
+const DRIVERS: Partial<Record<BrainKind, CliDriver>> = BRAINS_ON ? { claude: claudeDriver, codex: codexDriver } : {};
 /** The driver for a brain's CLI, when this build runs it (one without runs on Bops agent). */
 export const cliDriver = (kind: BrainKind) => DRIVERS[kind];
 
@@ -601,7 +602,7 @@ export async function approveTool(botId: string, sessionId: string, args: Record
   const tool = cut(str(args.tool) ?? "a tool", 80);
   const input = args.input && typeof args.input === "object" && !Array.isArray(args.input) ? (args.input as Record<string, unknown>) : {};
   const owner = ownerName();
-  if (!session(sessionId)?.brainRun) return JSON.stringify({ behavior: "deny", message: "Only a thread a brain runs asks this way." });
+  if (!BRAINS_ON || !session(sessionId)?.brainRun) return JSON.stringify({ behavior: "deny", message: "Only a thread a brain runs asks this way." });
   // Claude Code asks about one of its own tools by its name (NotebookEdit), never Bops' screen and browser
   // ones (it uses those by itself) or words of its own: anything else isn't its question (the approve tool is
   // one the model can call too), so the user is never shown a card for something made up.

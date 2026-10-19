@@ -1,3 +1,4 @@
+import { brainsOff } from "@/lib/server/brains";
 import { openInTerminal } from "@/lib/server/sessions";
 import { notReady } from "@/lib/server/ready";
 import { fromBopsWindow } from "@/lib/server/ui-token";
@@ -10,7 +11,7 @@ export const dynamic = "force-dynamic";
  * ({ botId, display }). Their next reply in the thread, or handing the screen back, closes it.
  */
 export async function POST(request: Request, ctx: RouteContext<"/api/sessions/[sessionId]/terminal">) {
-  const unready = notReady();
+  const unready = brainsOff() ?? notReady();
   if (unready) return unready;
   if (!fromBopsWindow(request)) return Response.json({ error: "A thread opens in a terminal only from the Bops app." }, { status: 403 });
   const { sessionId } = await ctx.params;

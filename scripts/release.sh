@@ -32,8 +32,10 @@ fi
 [ -x "$relay" ] || { echo "Missing $relay (scripts/fetch-relay.sh puts it there)." >&2; exit 1; }
 file "$relay" | grep -q "arm64" || { echo "$relay is not an arm64 Mac binary." >&2; exit 1; }
 
-# 2. The server. Keys stay out of the app: .env files are never bundled.
-npx next build
+# 2. The server. Keys stay out of the app: .env files are never bundled. A release has no brains
+# (lib/types.ts BRAINS_ON): set here, so a .env file that turns them on for development can't, and
+# built into the server and the window alike, so nothing at run time can either.
+NEXT_PUBLIC_BOPS_BRAINS=0 npx next build
 rm -f .next/standalone/.env*
 rm -rf .next/standalone/.data
 [ -f .next/standalone/server.js ] || { echo "No .next/standalone/server.js: is output \"standalone\" set in next.config.ts?" >&2; exit 1; }

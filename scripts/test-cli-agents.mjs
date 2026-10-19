@@ -44,6 +44,8 @@ const REAL_HOME = homedir();
 const REAL_PATH = process.env.PATH ?? "";
 for (const k of Object.keys(process.env))
   if (/^(BOPS|OPENAI|AGENTPHONE|AGENTMAIL|HONCHO|COMPOSIO|TYPESAFE|TWILIO|ORGO|CODEX|TAILSCALE|TREG|ANTHROPIC|CLAUDE_CODE)_/.test(k) || k === "CLAUDECODE" || k === "REAL_CLAUDE") delete process.env[k];
+// A build with brains (lib/types.ts BRAINS_ON, read as it loads), the --render child too; scripts/test-brains-off.mjs is one without.
+process.env.NEXT_PUBLIC_BOPS_BRAINS = "1";
 process.env.BOPS_DEVICE_SEED = "test-cli-agents";
 process.env.BOPS_RESPONSES_WS = "0";
 // Bops listens on this Mac only, as the Mac app does by default: computers get no address for it, and

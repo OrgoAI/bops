@@ -3,7 +3,7 @@
 import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BLOCKER_ASK, brainOf, live, pairChatId, threadRunner, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
+import { BLOCKER_ASK, BRAINS_ON, brainOf, live, pairChatId, threadRunner, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
 import { OpenLink } from "./panel-tabs";
@@ -2048,7 +2048,7 @@ export function ThreadSheet({
                   ? "Reply in thread · closes the terminal and carries on"
                   : live(s)
                     ? // Codex takes a reply as its next turn, once it's done with this one (cli-agents.ts codexDriver).
-                      s.brainRun?.kind === "codex" && runner !== "agent"
+                      BRAINS_ON && s.brainRun?.kind === "codex" && runner !== "agent"
                       ? "Reply in thread · it takes this next"
                       : "Reply in thread · it sees this as it works"
                     : "Reply in thread · picks it back up"

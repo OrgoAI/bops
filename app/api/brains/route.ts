@@ -1,4 +1,4 @@
-import { addBrain, BrainError, brainsOf, removeBrain, setBrainBot, updateBrain } from "@/lib/server/brains";
+import { addBrain, BrainError, brainsOf, brainsOff, removeBrain, setBrainBot, updateBrain } from "@/lib/server/brains";
 import { notReady } from "@/lib/server/ready";
 import { getState } from "@/lib/server/store";
 import { fromBopsWindow } from "@/lib/server/ui-token";
@@ -8,7 +8,8 @@ export const dynamic = "force-dynamic";
 
 /**
  * Brains (lib/server/brains.ts) change only from the Bops window (ui-token.ts): a page a bot's Chrome reached
- * this server with mustn't add one, move a bot onto one, or sign one in.
+ * this server with mustn't add one, move a bot onto one, or sign one in. A build without brains has none of
+ * these routes (brainsOff).
  */
 const notFromWindow = (request: Request) => (fromBopsWindow(request) ? null : Response.json({ error: "Brains can only be changed in the Bops app." }, { status: 403 }));
 
@@ -16,14 +17,14 @@ const failed = (e: unknown) => Response.json({ error: (e as Error).message }, { 
 
 /** The current workspace's brains (the same as the state has: nothing secret is in them). */
 export async function GET(request: Request) {
-  const unready = notReady() ?? notFromWindow(request);
+  const unready = brainsOff() ?? notReady() ?? notFromWindow(request);
   if (unready) return unready;
   return Response.json({ brains: brainsOf(getState().workspace ?? MAIN_WORKSPACE) });
 }
 
 /** Add a brain: `kind` claude or codex, `auth` plan or key, the bots that may use it and, with `use`, use it now. */
 export async function POST(request: Request) {
-  const unready = notReady() ?? notFromWindow(request);
+  const unready = brainsOff() ?? notReady() ?? notFromWindow(request);
   if (unready) return unready;
   const b = (await request.json().catch(() => ({}))) as { kind?: unknown; auth?: unknown; name?: unknown; keyScope?: unknown; bots?: unknown; use?: unknown };
   try {
@@ -46,7 +47,7 @@ export async function POST(request: Request) {
  * (`botId` with `level`: use, may, none).
  */
 export async function PATCH(request: Request) {
-  const unready = notReady() ?? notFromWindow(request);
+  const unready = brainsOff() ?? notReady() ?? notFromWindow(request);
   if (unready) return unready;
   const b = (await request.json().catch(() => ({}))) as { id?: unknown; name?: unknown; bots?: unknown; keyScope?: unknown; botId?: unknown; level?: unknown };
   if (typeof b.id !== "string") return Response.json({ error: "which brain?" }, { status: 400 });
@@ -68,7 +69,7 @@ export async function PATCH(request: Request) {
 
 /** Take a brain away: its bots go back to Bops agent, and it signs out on the computers it was signed in on. */
 export async function DELETE(request: Request) {
-  const unready = notReady() ?? notFromWindow(request);
+  const unready = brainsOff() ?? notReady() ?? notFromWindow(request);
   if (unready) return unready;
   const b = (await request.json().catch(() => ({}))) as { id?: unknown };
   if (typeof b.id !== "string") return Response.json({ error: "which brain?" }, { status: 400 });

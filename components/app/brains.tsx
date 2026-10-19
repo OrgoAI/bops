@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { BRAIN_KEYS, BRAIN_NAMES, brainOf, brainRuns, planName, signInOn, threadRunner, workBot, type AppState, type Bot, type Brain, type BrainAuth, type BrainKind, type Session } from "@/lib/types";
+import { BRAIN_KEYS, BRAIN_NAMES, BRAINS_ON, brainOf, brainRuns, planName, signInOn, threadRunner, workBot, type AppState, type Bot, type Brain, type BrainAuth, type BrainKind, type Session } from "@/lib/types";
 import { BotChip, BotChips, PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon } from "./apps";
 import { Mascot } from "./mascot";
 import { undash } from "./side-group";
@@ -39,9 +39,10 @@ export function BrainBadge({ kind, title, className = "bg-[#F2F2F0]" }: { kind: 
 /**
  * A thread's badge (BrainBadge, chat-view.tsx): the brain that runs it (threadRunner), or Bops agent for one
  * that stays there while its bot's tasks run on a brain now (it started on Bops agent, or Bops agent took it
- * over), so the user can tell it's on AI credit. Nothing for the rest.
+ * over), so the user can tell it's on AI credit. Nothing for the rest, nor in a build without brains (BRAINS_ON).
  */
 export function threadBadge(s: Session, state: AppState): { kind: BrainKind | "agent"; title: string } | undefined {
+  if (!BRAINS_ON) return undefined;
   const who = threadRunner(s);
   if (who && who !== "agent") return { kind: who, title: `${BRAIN_NAMES[who]} ran this` };
   const b = state.bots.find((x) => x.id === s.botId);
