@@ -342,6 +342,23 @@ test("a bot with no apps or channels yet is told only what's true", async () => 
   assert.match(instructions, /texts sent to you meanwhile wait there for the computer\./);
 });
 
+test("an account from before every bot had every app (no workspace, as v0.0.28 uploads it, or onlyGiven once the app loaded it) is only the bots' it was given", () => {
+  const s = calls.view({
+    bots: [
+      { id: "sam", name: "Sam", isMain: true, access: { ca_kept: "read" } },
+      { id: "iris", name: "Iris", access: {} },
+    ],
+    accounts: [
+      { id: "ca_new", app: "gmail", appName: "Gmail", name: "alex@acme.com", status: "active", at: 1, workspaceId: "ws_main" },
+      { id: "ca_before", app: "stripe", appName: "Stripe", name: "Acme", status: "active", at: 1 },
+      { id: "ca_kept", app: "notion", appName: "Notion", status: "active", at: 1, workspaceId: "ws_main", onlyGiven: true },
+      { id: "ca_moved", app: "linear", appName: "Linear", status: "active", at: 1, workspaceId: "ws_main", onlyGiven: true },
+    ],
+  });
+  assert.deepEqual(calls.skillsOf(s, s.bots[0]).apps, ["Gmail (alex@acme.com: read & act)", "Notion (Notion: read only)"]);
+  assert.deepEqual(calls.skillsOf(s, s.bots[1]).apps, ["Gmail (alex@acme.com: read & act)"], "only the account connected since");
+});
+
 test("the called number comes from To first, and never from the caller's own headers", () => {
   const a = "+14155550101";
   const b = "+16285550102";

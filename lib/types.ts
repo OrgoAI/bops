@@ -61,7 +61,8 @@ export type Bot = {
   mailWanted?: boolean;
   /**
    * What the user set for this bot in your app accounts (by AppAccount id): read, act, or "none". An
-   * account with no entry gets the default (levelOf): every bot may read and act there.
+   * account with no entry gets the default (levelOf): every bot may read and act there, except in one
+   * from before that default (AppAccount.onlyGiven), where it has none.
    */
   access?: Record<string, AppAccess>;
   /** This bot's Composio session (its allowed apps and actions), and the access it was made for. */
@@ -1122,8 +1123,16 @@ export type AppAccount = {
   at: number;
   /** When a bot last used it (lib/server/composio.ts runAppAction), for the Vault's "not used lately". */
   usedAt?: number;
-  /** The workspace it was connected in: its bots have it by default (levelOf). Unset: the main one's. */
+  /**
+   * The workspace it was connected in: its bots have it by default (levelOf). Unset: written by a build
+   * from before that default (v0.0.28 and older, or a Mac still on one), so only the bots given it have it.
+   */
   workspaceId?: string;
+  /**
+   * Connected before every bot had every app by default (lib/server/store.ts set its workspace when it
+   * loaded it): only the bots the user gave it may use it, as there.
+   */
+  onlyGiven?: boolean;
 };
 
 /** An account being connected: its sign-in page is open, and Bops waits for it to finish. */
@@ -1160,14 +1169,20 @@ export type AppAccess = AppLevel | "none";
 export const CHANNEL_APPS = new Set(["slackbot"]);
 
 /**
- * What a bot may do in one account: what the user set for it (Bot.access), else the default, Read & act,
- * for every bot of the account's workspace (bots made later too). A bot of another workspace, or a channel
- * app (CHANNEL_APPS), has no default. Null: no access.
+ * Whether the bots of an account's workspace have it by default: not one from before that default (no
+ * workspace, or AppAccount.onlyGiven), which is only the bots' the user gave it.
  */
-export function levelOf(b: Pick<Bot, "access" | "workspaceId">, a: Pick<AppAccount, "id" | "app" | "workspaceId">): AppLevel | null {
+export const openToTeam = (a: Pick<AppAccount, "workspaceId" | "onlyGiven">) => !!a.workspaceId && !a.onlyGiven;
+
+/**
+ * What a bot may do in one account: what the user set for it (Bot.access), else the default, Read & act,
+ * for every bot of the account's workspace (bots made later too). A bot of another workspace, a channel
+ * app (CHANNEL_APPS), or an account from before that default (openToTeam) has no default. Null: no access.
+ */
+export function levelOf(b: Pick<Bot, "access" | "workspaceId">, a: Pick<AppAccount, "id" | "app" | "workspaceId" | "onlyGiven">): AppLevel | null {
   const set = b.access?.[a.id];
   if (set === "read" || set === "act") return set;
-  if (set === "none" || CHANNEL_APPS.has(a.app) || workspaceOf(a) !== workspaceOf(b)) return null;
+  if (set === "none" || CHANNEL_APPS.has(a.app) || !openToTeam(a) || workspaceOf(a) !== workspaceOf(b)) return null;
   return "act";
 }
 

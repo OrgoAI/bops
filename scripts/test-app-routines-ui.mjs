@@ -269,7 +269,7 @@ await test("a bot with none: its empty state; with Connected Apps to offer, thos
   assert.match(t, /Ask Ivy to do something on a schedule, or to watch a page/);
   assert.match(t, /Every weekday at 8:30, summarize my inbox/);
   assert.match(t, /Ask Ivy/);
-  const html = tab({ ...state([]), accounts: [{ id: "acc_1", app: "gmail", appName: "Gmail", status: "active", at: now }] }, "bot_two");
+  const html = tab({ ...state([]), accounts: [{ id: "acc_1", app: "gmail", appName: "Gmail", status: "active", at: now, workspaceId: "ws_main" }] }, "bot_two");
   t = text(html);
   assert.match(t, /Ivy has no routines yet/);
   assert.match(t, /Start with the Connected Apps Ivy uses/);

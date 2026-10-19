@@ -3,7 +3,8 @@
 // for a bot wins (read, act, or none), and a channel app (Bops' Slack app) has no default; a bot's Composio session holds the apps it has by default, read
 // only where it was set so, and nothing it may not use; a task someone outside Bops started gets no apps; each
 // workspace's whole set goes to its Orgo project as the PUT orgo-web takes, a use goes to the log, and an Orgo
-// without the routes (404) is left alone.
+// without the routes (404) is left alone. After an upgrade from v0.0.28 every bot has exactly what it had
+// there in an account from before (only where it was given it), while one connected from now on is every bot's.
 //
 // The store, Bops Cloud, the vault's keys, Orgo and Composio are fakes: nothing reaches a real service.
 // Usage: node --conditions=react-server scripts/test-access.mjs
@@ -29,6 +30,7 @@ const FAKES = {
   "app-version": "export const appHeaders = () => ({}); export const orgoHeaders = () => ({});",
   judgment: "export const lowRisk = async () => false; export const movesMoney = async () => false;",
   treg: "export const DATA_TOOL_NAMES = new Set(); export const dataOn = () => false; export const foundByBots = () => false; export const runDataTool = async () => '';",
+  "routine-suggestions": "export const offerStarters = async () => {};",
 };
 const COMPOSIO = `export class Composio { constructor(o) { globalThis.__fake.composio.made(o); return globalThis.__fake.composio.client; } }`;
 registerHooks({
@@ -80,11 +82,11 @@ const state = {
     { id: "lo", name: "Lo", workspaceId: "ws_local" },
   ],
   accounts: [
-    { id: "ca_gmail", app: "gmail", appName: "Gmail", name: "sam@acme.com", status: "active", at: 1 },
-    { id: "ca_notion", app: "notion", appName: "Notion", label: "Work", status: "active", at: 1 },
-    { id: "ca_hubspot", app: "hubspot", appName: "HubSpot", status: "active", at: 1 },
-    { id: "ca_old", app: "linear", appName: "Linear", status: "expired", at: 1 },
-    { id: "ca_slack", app: "slackbot", appName: "Slack", name: "Acme", status: "active", at: 1 },
+    { id: "ca_gmail", app: "gmail", appName: "Gmail", name: "sam@acme.com", status: "active", at: 1, workspaceId: "ws_main" },
+    { id: "ca_notion", app: "notion", appName: "Notion", label: "Work", status: "active", at: 1, workspaceId: "ws_main" },
+    { id: "ca_hubspot", app: "hubspot", appName: "HubSpot", status: "active", at: 1, workspaceId: "ws_main" },
+    { id: "ca_old", app: "linear", appName: "Linear", status: "expired", at: 1, workspaceId: "ws_main" },
+    { id: "ca_slack", app: "slackbot", appName: "Slack", name: "Acme", status: "active", at: 1, workspaceId: "ws_main" },
     { id: "ca_lo", app: "gmail", appName: "Gmail", name: "lo@acme.com", status: "active", at: 1, workspaceId: "ws_local" },
   ],
   vault: [{ id: "vl_x", site: "x.com", username: "sam", hasPassword: true, hasTotp: false, bots: ["iris"], auto: false, addedAt: 1 }],
@@ -268,6 +270,104 @@ await check("the use log on this Mac keeps the last uses", async () => {
   assert.ok(kept.length >= 3);
   assert.deepEqual(Object.keys(kept.at(-1)).sort(), ["action", "at", "bot", "kind", "outcome", "target", "targetName", "via", "viaId"]);
   assert.deepEqual([kept.at(-1).via, kept.at(-1).viaId], ["thread", "ses_mine"]);
+});
+
+/* ---------------- After an upgrade from v0.0.28 ---------------- */
+
+// On v0.0.28 a bot had an account only where the user gave it to that bot (its accountsOf read Bot.access
+// alone). A team from then, as this build has it in memory: some accounts as v0.0.28 wrote them (a Mac
+// still on it, merged in), the rest as this build keeps them once it loaded them (lib/server/store.ts).
+const had = (b, a) => b.access?.[a.id] ?? null;
+const fromV028 = () => ({
+  bots: [
+    { id: "boppy", name: "Boppy", isMain: true, access: { ca_gmail: "act" } },
+    { id: "iris", name: "Iris", access: { ca_gmail: "read", ca_stripe: "act" } },
+    { id: "penny", name: "Penny", autoApprove: true },
+    { id: "otto", name: "Otto", access: { ca_linear: "act" } },
+    { id: "lo", name: "Lo", workspaceId: "ws_local", access: { ca_notion: "read" } },
+  ],
+  accounts: [
+    { id: "ca_gmail", app: "gmail", appName: "Gmail", name: "sam@acme.com", status: "active", at: 1 },
+    { id: "ca_stripe", app: "stripe", appName: "Stripe", name: "Acme", status: "active", at: 1 },
+    { id: "open:hackernews", app: "hackernews", appName: "Hacker News", status: "active", at: 1 },
+    { id: "ca_notion", app: "notion", appName: "Notion", status: "active", at: 1, workspaceId: "ws_local", onlyGiven: true },
+    { id: "ca_linear", app: "linear", appName: "Linear", status: "active", at: 1, workspaceId: "ws_main", onlyGiven: true },
+  ],
+});
+
+await check("an account from before is only the bots' it was given: each has what it had on v0.0.28, Just do it acts nowhere else, a bot made since has none", async () => {
+  Object.assign(state, fromV028());
+  for (const b of state.bots) for (const a of state.accounts) assert.equal(T.levelOf(b, a), had(b, a), `${b.name} in ${a.appName}`);
+  assert.equal(T.levelOf({ id: "new" }, account("ca_gmail")), null, "a bot made since");
+  assert.equal(T.levelOf({ id: "new" }, account("ca_linear")), null);
+  assert.deepEqual(C.accountsOf(bot("penny")), []);
+  assert.equal(C.appList(bot("iris")), "Gmail (sam@acme.com: read only), Stripe (Acme: read & act)");
+  const n = executed.length;
+  assert.match(await C.runAppAction("penny", "STRIPE_CREATE_REFUND", { charge: "ch_1" }, { chatId: "bot:penny" }), /^You don't have that app/);
+  assert.match(await C.runAppAction("penny", "GMAIL_SEND_EMAIL", { to: "a@b.c" }, { chatId: "bot:penny" }), /^You don't have that app/);
+  assert.equal(executed.length, n, "Just do it did nothing");
+  assert.deepEqual(
+    A.accessPayload("ws_main")
+      .filter((r) => r.target === "ca_stripe")
+      .map((r) => [r.bot, r.level]),
+    [
+      ["boppy", "none"],
+      ["iris", "act"],
+      ["penny", "none"],
+      ["otto", "none"],
+    ],
+    "Orgo is told the same",
+  );
+});
+
+await check("accounts connected from now on are every bot's of their workspace; one from before given to a bot, or signed back in, stays only its bots'", async () => {
+  Object.assign(state, fromV028());
+  const meta = { description: "", categories: [], tools_count: 1 };
+  let connected;
+  Object.assign(globalThis.__fake.composio.client, {
+    getClient: () => ({
+      toolkits: {
+        list: async () => ({
+          items: [
+            { slug: "hackernews", name: "Hacker News", no_auth: true, meta },
+            { slug: "weathermap", name: "Weather", no_auth: true, meta },
+            { slug: "gmail", name: "Gmail", auth_schemes: ["OAUTH2"], meta },
+            { slug: "linear", name: "Linear", auth_schemes: ["OAUTH2"], meta },
+          ],
+          next_cursor: null,
+        }),
+      },
+    }),
+    authConfigs: { list: async () => ({ items: [{ id: "ac_1", status: "ENABLED" }] }) },
+    connectedAccounts: {
+      list: async () => ({
+        items: [...state.accounts.filter((a) => !a.id.startsWith("open:")).map((a) => ({ id: a.id, status: "ACTIVE", toolkit: { slug: a.app } })), { id: "ca_found", status: "ACTIVE", toolkit: { slug: "gmail" } }],
+        nextCursor: null,
+      }),
+      get: async (id) => ({ data: { email: `${id}@acme.com` } }),
+      link: async () => ({ id: "wait_1", waitForConnection: () => new Promise((r) => (connected = r)) }),
+      delete: async () => null,
+    },
+  });
+  const levels = (a) => state.bots.map((b) => T.levelOf(b, a));
+  // Connected somewhere else (found in Composio): the main workspace's, as before.
+  await C.syncApps();
+  assert.equal(account("ca_found")?.workspaceId, "ws_main");
+  assert.deepEqual(levels(account("ca_found")), ["act", "act", "act", "act", null]);
+  // Connected here.
+  await C.connectApp("weathermap");
+  assert.deepEqual(levels(account("open:weathermap")), ["act", "act", "act", "act", null]);
+  // Hacker News from before, given to Penny now: hers, and still nobody else's.
+  await C.connectApp("hackernews", undefined, undefined, { bots: ["penny"], level: "act" });
+  assert.deepEqual(levels(account("open:hackernews")), [null, null, "act", null, null]);
+  // Linear from before, signed back in: the new account takes its place, still only Otto's.
+  await C.connectApp("linear", undefined, "ca_linear");
+  connected({ id: "ca_linear2" });
+  await new Promise((r) => setTimeout(r, 50));
+  const relinked = account("ca_linear2");
+  assert.ok(relinked && !account("ca_linear"), "signed back in");
+  assert.deepEqual([relinked.workspaceId, relinked.onlyGiven], ["ws_main", true]);
+  assert.deepEqual(levels(relinked), [null, null, null, "act", null]);
 });
 
 rmSync(scratch, { recursive: true, force: true });

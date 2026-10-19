@@ -280,7 +280,7 @@ const SE = await import(`${root}/app/api/channels/slack/events/route.ts`);
 const K = await import(`${root}/lib/server/skills.ts`);
 const U = await import(`${root}/lib/server/usage.ts`);
 const ACCOUNT = await import(`${root}/app/api/account/route.ts`);
-const { MAIN_WORKSPACE, PAIR_CODE_MS, botChatId } = await import(`${root}/lib/types.ts`);
+const { MAIN_WORKSPACE, PAIR_CODE_MS, botChatId, levelOf } = await import(`${root}/lib/types.ts`);
 const { buildURL: sidebandURL } = await import(`${root}/node_modules/openai/resources/live/sideband/internal-base.mjs`);
 
 const KEY = "orgo_test_key";
@@ -1553,7 +1553,7 @@ states.set("u3", {
 await signIn("orgo_key_3", { id: "u3", email: "ana@bakery.com" });
 let st = S.getState();
 assert.deepEqual(st.bots.map((b) => b.name), ["Sam", "Max"]);
-assert.deepEqual(JSON.parse(JSON.stringify(st.accounts)), [{ id: "ca_cal", app: "googlecalendar", appName: "Google Calendar", name: "ana@bakery.com", status: "active", at: 3, workspaceId: "ws_main" }], "an old state's apps become accounts, in the workspace of the bots given them");
+assert.deepEqual(JSON.parse(JSON.stringify(st.accounts)), [{ id: "ca_cal", app: "googlecalendar", appName: "Google Calendar", name: "ana@bakery.com", status: "active", at: 3, workspaceId: "ws_main", onlyGiven: true }], "an old state's apps become accounts, in the workspace of the bots given them and only theirs");
 assert.deepEqual([st.bots[1].access, "connectors" in st.bots[1], "channels" in st.bots[1], "apps" in st], [{ ca_cal: "read" }, false, false, false], "and each bot's access is by account");
 assert.deepEqual([st.owner.name, st.installId, st.messages.map((m) => m.text)], ["Ana", "cafe1234", ["hello"]]);
 assert.equal(st.account.user.id, "u3");
@@ -1567,6 +1567,80 @@ assert.equal(u3.accounts[0].id, "ca_cal");
 await signIn();
 assert.equal(S.getState().owner.about, "written offline");
 assert.equal(S.getState().bots.some((b) => b.name === "Max"), false);
+
+// A state v0.0.28 uploaded, where a bot had an account only where it was given it: each bot keeps exactly
+// what it had there (one set to Just do it too) and a bot made since gets none of those accounts; loaded
+// again, nothing changes; an account a Mac still on v0.0.28 adds later is only its bots' too; one connected
+// from now on (with its workspace, lib/server/composio.ts) is every bot's of that workspace.
+const U4 = { id: "u4", email: "kim@shop.com" };
+const v028 = {
+  workspaces: [
+    { id: MAIN_WORKSPACE, name: "Main", createdAt: 1 },
+    { id: "ws_side", name: "Side", createdAt: 2 },
+  ],
+  workspace: MAIN_WORKSPACE,
+  bots: [
+    { id: "boppy", name: "Boppy", role: "Chief of Staff", color: "#0A0A0A", isMain: true, computerStatus: "none", access: { ca_gmail: "act" } },
+    { id: "iris", name: "Iris", role: "Inbox", color: "#5B8CFF", isMain: false, computerStatus: "none", access: { ca_gmail: "read", ca_stripe: "act" } },
+    { id: "penny", name: "Penny", role: "Finance", color: "#FF6FB5", isMain: false, computerStatus: "none", autoApprove: true },
+    { id: "otto", name: "Otto", role: "Outbound", color: "#E9FF3B", isMain: false, computerStatus: "none", access: {} },
+    { id: "sid", name: "Sid", role: "Chief of Staff", color: "#0A0A0A", isMain: true, computerStatus: "none", workspaceId: "ws_side", access: { ca_notion: "read" } },
+  ],
+  accounts: [
+    { id: "ca_gmail", app: "gmail", appName: "Gmail", name: "kim@shop.com", status: "active", at: 1 },
+    { id: "ca_stripe", app: "stripe", appName: "Stripe", name: "Shop", status: "active", at: 1 },
+    { id: "ca_notion", app: "notion", appName: "Notion", status: "active", at: 1 },
+    { id: "ca_linear", app: "linear", appName: "Linear", status: "expired", at: 1 },
+    { id: "open:hackernews", app: "hackernews", appName: "Hacker News", status: "active", at: 1 },
+  ],
+  sessions: [],
+  routines: [],
+  owner: { name: "Kim" },
+};
+states.set("u4", { version: 4, writer: null, blob: structuredClone(v028), rows: new Map() });
+await signIn("orgo_key_4", U4);
+const kim = (id) => S.getState().bots.find((b) => b.id === id);
+const levelsNow = () => S.getState().bots.flatMap((b) => S.getState().accounts.map((a) => `${b.name} in ${a.appName}: ${levelOf(b, a) ?? "none"}`));
+const levels028 = () => S.getState().bots.flatMap((b) => S.getState().accounts.map((a) => `${b.name} in ${a.appName}: ${v028.bots.find((x) => x.id === b.id)?.access?.[a.id] ?? "none"}`));
+assert.deepEqual(levelsNow(), levels028(), "each bot has what it had on v0.0.28, no more");
+assert.deepEqual(C.accountsOf(kim("penny")), [], "Just do it, with nothing to do it in");
+assert.deepEqual(C.accountsOf(kim("iris")).map((x) => [x.account.id, x.level]), [["ca_gmail", "read"], ["ca_stripe", "act"]]);
+assert.deepEqual(
+  S.getState().accounts.map((a) => [a.id, a.workspaceId, a.onlyGiven]),
+  [
+    ["ca_gmail", MAIN_WORKSPACE, true],
+    ["ca_stripe", MAIN_WORKSPACE, true],
+    ["ca_notion", "ws_side", true],
+    ["ca_linear", MAIN_WORKSPACE, true],
+    ["open:hackernews", MAIN_WORKSPACE, true],
+  ],
+  "each in the workspace of the bots given it, and only theirs",
+);
+assert.deepEqual(S.getState().bots.map((b) => b.access), v028.bots.map((b) => b.access), "no bot's own settings change");
+assert.equal(levelOf({ id: "new" }, S.getState().accounts[0]), null, "a bot made since");
+assert.equal(await S.flushState(5000), true);
+const loaded = JSON.stringify([S.getState().accounts, S.getState().bots.map((b) => b.access)]);
+await signIn();
+await signIn("orgo_key_4", U4);
+assert.equal(JSON.stringify([S.getState().accounts, S.getState().bots.map((b) => b.access)]), loaded, "loaded again: nothing changes");
+// A Mac still on v0.0.28 connects Shopify for Otto, read only: merged in here, it's Otto's alone.
+const u4 = states.get("u4");
+u4.blob = {
+  ...u4.blob,
+  accounts: [...u4.blob.accounts, { id: "ca_shopify", app: "shopify", appName: "Shopify", status: "active", at: 5 }],
+  bots: u4.blob.bots.map((b) => (b.id === "otto" ? { ...b, access: { ...b.access, ca_shopify: "read" } } : b)),
+};
+u4.version++;
+S.update((s) => (s.owner.about = "after the v0.0.28 Mac"));
+assert.equal(await S.flushState(5000), true);
+const shopify = S.getState().accounts.find((a) => a.id === "ca_shopify");
+assert.ok(shopify, "the other Mac's account came in");
+assert.deepEqual(S.getState().bots.map((b) => [b.id, levelOf(b, shopify)]), [["boppy", null], ["iris", null], ["penny", null], ["otto", "read"], ["sid", null]], "only the bot it was given there");
+S.update((s) => s.accounts.push({ id: "ca_new", app: "airtable", appName: "Airtable", status: "active", at: 6, workspaceId: MAIN_WORKSPACE }));
+assert.deepEqual(S.getState().bots.map((b) => [b.id, levelOf(b, S.getState().accounts.at(-1))]), [["boppy", "act"], ["iris", "act"], ["penny", "act"], ["otto", "act"], ["sid", null]], "connected from now on: every bot's of its workspace");
+assert.equal(await S.flushState(5000), true);
+await signIn();
+assert.equal(S.getState().owner.about, "written offline");
 console.log("state: in the cloud per user, one write per burst and one at a time, each message on its own, merged with another Mac's");
 
 /* ---------------- Routing through this Mac: on by default, the user's "off" sticks ---------------- */

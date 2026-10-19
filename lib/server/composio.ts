@@ -5,7 +5,7 @@ import { chmodSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { Composio } from "@composio/core";
 import { USAGE_APP_HEADER, USAGE_BOT_HEADER } from "@/cloud/protocol";
-import { CHANNEL_APPS, levelOf, live as running, MAIN_WORKSPACE, workspaceOf, type AccessUse, type AppAccount, type AppApproval, type AppConnecting, type AppLevel, type Bot } from "@/lib/types";
+import { CHANNEL_APPS, levelOf, live as running, MAIN_WORKSPACE, openToTeam, workspaceOf, type AccessUse, type AppAccount, type AppApproval, type AppConnecting, type AppLevel, type Bot } from "@/lib/types";
 import { logUse, placeOf, targetNameOf, viaOf, type UseWhere } from "./access-sync";
 import { trackServerEvent } from "./analytics";
 import { appHeaders } from "./app-version";
@@ -272,9 +272,9 @@ export async function connectApp(app: string, label?: string, replaces?: string,
         const c = s.connecting?.find((x) => x.id === waitId);
         s.connecting = (s.connecting ?? []).filter((x) => x.id !== waitId);
         if (s.accounts?.some((a) => a.id === ca.id)) return;
-        // Signed back in: the old one's workspace, so its bots keep the default.
+        // Signed back in: the old one's workspace, so its bots keep the default (one from before stays only its bots').
         const workspaceId = old ? old.workspaceId : ws;
-        (s.accounts ??= []).push({ id: ca.id, app, appName, name, label: c?.label ?? old?.label, status: "active", at: Date.now(), ...(workspaceId ? { workspaceId } : {}) });
+        (s.accounts ??= []).push({ id: ca.id, app, appName, name, label: c?.label ?? old?.label, status: "active", at: Date.now(), ...(workspaceId ? { workspaceId } : {}), ...(old?.onlyGiven ? { onlyGiven: true } : {}) });
         give(s, ca.id, c?.grant);
         // A new account: its bot is offered the app's starter routines (signing back in isn't new).
         if (!old) suggestAfter = c?.grant?.bots;
@@ -318,15 +318,17 @@ export function cancelConnect(waitId: string) {
  * Access picked while connecting, given once the account exists: Read only is kept for the bots picked
  * (Read & act is the default for the bots of the account's workspace, so nothing is kept for them), and
  * the other bots of the workspace it was picked in get none. Without a grant they all have the default.
+ * An app with no sign-in from before that default (openToTeam) has none: the bots picked keep theirs.
  */
 function give(s: ReturnType<typeof getState>, accountId: string, grant?: AppConnecting["grant"]) {
   if (!grant) return;
   const a = s.accounts?.find((x) => x.id === accountId);
+  const shared = !!a && openToTeam(a);
   for (const b of s.bots) {
     if (grant.bots.includes(b.id)) {
       // A bot outside the account's workspace (an app with no sign-in, connected in another one first) keeps it set.
-      if (grant.level === "read" || workspaceOf(b) !== workspaceOf(a)) (b.access ??= {})[accountId] = grant.level;
-    } else if (workspaceOf(b) === (grant.workspaceId ?? MAIN_WORKSPACE)) (b.access ??= {})[accountId] = "none";
+      if (grant.level === "read" || !shared || workspaceOf(b) !== workspaceOf(a)) (b.access ??= {})[accountId] = grant.level;
+    } else if (shared && workspaceOf(b) === (grant.workspaceId ?? MAIN_WORKSPACE)) (b.access ??= {})[accountId] = "none";
   }
 }
 
@@ -408,7 +410,8 @@ export async function syncApps() {
     if (known.has(accountId) || x.status !== "active") continue;
     // Being connected right now: the sign-in finishing adds it, with its label.
     if (getState().connecting?.some((c) => c.app === x.app && c.status === "waiting")) continue;
-    added.push({ id: accountId, app: x.app, appName: await appNameOf(x.app), name: await accountName(accountId).catch(() => undefined), status: x.status, at: Date.now() });
+    // Connected somewhere else: the main workspace's bots have it by default.
+    added.push({ id: accountId, app: x.app, appName: await appNameOf(x.app), name: await accountName(accountId).catch(() => undefined), status: x.status, at: Date.now(), workspaceId: MAIN_WORKSPACE });
   }
   // Accounts whose name wasn't known when they came in.
   const named = new Map<string, string>();

@@ -171,12 +171,14 @@ function appAccounts(state: AppState) {
     delete ob.connectors;
     if (!Array.isArray(ob.channels)) delete ob.channels;
   }
-  // An account from before each kept the workspace it was connected in (its bots have it by default:
-  // levelOf): the one whose bots were given it, else the main one. Kept, so the default stays put.
+  // An account from before every bot had every app by default (no workspace: v0.0.28 and older wrote
+  // none) is kept in the workspace it was connected in, the one whose bots were given it, else the main
+  // one, and stays only the bots' it was given there (onlyGiven, levelOf): no bot gets one it didn't have.
   for (const a of state.accounts ?? []) {
     if (a.workspaceId) continue;
     const given = new Set(state.bots.filter((b) => b.access?.[a.id] === "read" || b.access?.[a.id] === "act").map((b) => workspaceOf(b)));
     a.workspaceId = given.size === 1 ? [...given][0] : MAIN_WORKSPACE;
+    a.onlyGiven = true;
   }
 }
 

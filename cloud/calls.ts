@@ -48,7 +48,7 @@ export type Bot = {
   access?: Record<string, unknown>;
 };
 /** One of the owner's app accounts, connected through Composio (AppAccount in lib/types.ts). */
-type Account = { id: string; app: string; appName?: unknown; name?: unknown; label?: unknown; status?: unknown; workspaceId?: unknown };
+type Account = { id: string; app: string; appName?: unknown; name?: unknown; label?: unknown; status?: unknown; workspaceId?: unknown; onlyGiven?: unknown };
 /** A bot added to Slack, Telegram or Discord (ChannelLink in lib/types.ts). */
 type Channel = { kind: string; botId: string; handle?: unknown };
 type CallMessage = NonNullable<CloudCallPayload["message"]>;
@@ -191,13 +191,15 @@ export const and = (items: string[]) => (items.length > 1 ? `${items.slice(0, -1
 
 /**
  * What a bot may do in an account, as levelOf in lib/types.ts: what the owner set, else Read & act in an
- * account of its own workspace; Bops' Slack app ("slackbot") only when set. Null: no access.
+ * account of its own workspace; Bops' Slack app ("slackbot") only when set, and an account from before
+ * every bot had every app by default (no workspace, as v0.0.28 uploads it, or onlyGiven) only where given.
+ * Null: no access.
  */
 function levelIn(b: Bot, a: Account): "read" | "act" | null {
   const set = b.access?.[a.id];
   if (set === "read" || set === "act") return set;
-  const ws = typeof a.workspaceId === "string" ? a.workspaceId : "ws_main";
-  return set === "none" || a.app === "slackbot" || ws !== workspaceOf(b) ? null : "act";
+  if (set === "none" || a.app === "slackbot" || typeof a.workspaceId !== "string" || !a.workspaceId || !!a.onlyGiven) return null;
+  return a.workspaceId === workspaceOf(b) ? "act" : null;
 }
 
 /**
