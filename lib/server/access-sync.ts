@@ -3,7 +3,8 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { accessIsDefault, levelOf, workspaceOf, type AccessUse, type AppAccount, type LastUses } from "@/lib/types";
-import { cleanText } from "./routine-sync";
+import { onRunner } from "./persist";
+import { cleanText, fit } from "./routine-sync";
 import { bot, getState, session, stateReady, userDir, watchChanges } from "./store";
 
 /**
@@ -21,7 +22,8 @@ import { bot, getState, session, stateReady, userDir, watchChanges } from "./sto
  * take for now (no answer, 401, 403, 408, 429, 5xx) is sent again after a backoff; one it refused (a 400)
  * is held and goes with the next change. One flush per workspace at a time. An Orgo without the routes
  * (404 or 405) is asked again at most once every 6 hours. Runs on the signed-in Orgo key; signed out,
- * nothing is sent.
+ * nothing is sent. The set is the Mac's to send: a computer's Bops runner (runner.ts) sends only the uses
+ * its routines' threads made.
  */
 
 export const SYNC_DEBOUNCE_MS = 2_000;
@@ -63,14 +65,6 @@ const held = (g.__bopsAccessSyncHeld ??= new Map());
 const seen = (g.__bopsAccessSeen ??= new Map());
 
 /* ---------------- The set ---------------- */
-
-/** Text cut to `max` UTF-16 units, as orgo-web counts (cleanText counts characters), never leaving half an emoji. */
-function fit(text: string, max: number) {
-  const t = cleanText(text, max);
-  if (t.length <= max) return t;
-  const end = t.charCodeAt(max - 1) >= 0xd800 && t.charCodeAt(max - 1) <= 0xdbff ? max - 1 : max;
-  return t.slice(0, end);
-}
 
 /** An account as the user sees it: "Gmail, tiger@orgo.ai" (its label and name), else the app's name. */
 export function targetNameOf(a: AppAccount) {
@@ -251,7 +245,7 @@ function queue(wsId: string, add: (p: Pending) => void, wait = SYNC_DEBOUNCE_MS)
  * login): a workspace whose set changed is sent shortly. The first look after start sends every one.
  */
 function look() {
-  if (!stateReady()) return;
+  if (!stateReady() || onRunner()) return;
   for (const w of getState().workspaces ?? []) {
     if (!w.orgoProjectId || routesMissing(w.orgoProjectId)) continue;
     const sig = `${w.orgoProjectId}\n${JSON.stringify(accessPayload(w.id))}`;
@@ -277,6 +271,7 @@ watchChanges("access-sync", () => {
 
 /** The vault's keys changed (one saved or removed, keys.ts), which the state doesn't show: every workspace's set goes again. */
 export function accessChanged() {
+  if (onRunner()) return;
   try {
     for (const w of getState().workspaces ?? []) if (w.orgoProjectId && !routesMissing(w.orgoProjectId)) queue(w.id, (p) => (p.grants = true));
   } catch (e) {

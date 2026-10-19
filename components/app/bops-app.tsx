@@ -34,7 +34,8 @@ import { OPEN_MAC_KEY } from "./mac-pip";
 import { MacComputer } from "./mac-computer";
 import { NoticePopup } from "./notice-popup";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
-import { chatInWorkspace, currentWorkspace, post, SideToggleIcon, teamOf, useAppState, useSelfHosted } from "./ui";
+import { RunsOnSettings } from "./runs-on";
+import { chatInWorkspace, currentWorkspace, option, post, radio, SideToggleIcon, teamOf, useAppState, useSelfHosted } from "./ui";
 import { UsageData, useAnalytics } from "./usage-data";
 import { trackEvent } from "@/lib/analytics";
 import { OwnerEmail, useOwnerEmailInfo } from "./owner-email";
@@ -1323,16 +1324,6 @@ function OwnerSettings({ owner }: { owner: AppState["owner"] }) {
   );
 }
 
-const option = (on: boolean) => (on ? "bg-[#FBFFE0] shadow-[0_0_0_1.5px_#0A0A0A]" : "shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]");
-const radio = (on: boolean) =>
-  on ? (
-    <span className="flex size-4 items-center justify-center rounded-full bg-ink">
-      <span className="size-1.5 rounded-full bg-highlighter" />
-    </span>
-  ) : (
-    <span className="size-4 rounded-full shadow-[inset_0_0_0_1.5px_#C9C9C6]" />
-  );
-
 /** A bot's computer, in plain words. A bot that shares says whose computer it works on. */
 const computerNow = (state: AppState, b: AppState["bots"][number]) => {
   const c = workBot(b, state.bots);
@@ -1442,6 +1433,9 @@ export function Settings({ state, onClose, onShowScreen, onOpenVault }: { state:
             ))}
           </div>
         </div>
+
+        {/* Bots in browsers on this Mac have no computer to run routines on; a self-hosted Bops has no Bops Cloud for a runner to share the state through. */}
+        {!selfHosted && state.host !== "mac" && <RunsOnSettings state={state} />}
 
         {BRAINS_ON && <BrainSettings state={state} onShowScreen={onShowScreen} onOpenVault={onOpenVault} />}
 

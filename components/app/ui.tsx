@@ -22,6 +22,17 @@ export const post = async (url: string, body: unknown = {}, method = "POST") => 
 
 export const screenNo = (display?: number) => (display === undefined ? undefined : screenNumber(display));
 
+/** A choice card in Settings (Where your bots work, Where routines run): picked, or not; and its radio. */
+export const option = (on: boolean) => (on ? "bg-[#FBFFE0] shadow-[0_0_0_1.5px_#0A0A0A]" : "shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]");
+export const radio = (on: boolean) =>
+  on ? (
+    <span className="flex size-4 items-center justify-center rounded-full bg-ink">
+      <span className="size-1.5 rounded-full bg-highlighter" />
+    </span>
+  ) : (
+    <span className="size-4 rounded-full shadow-[inset_0_0_0_1.5px_#C9C9C6]" />
+  );
+
 export function ago(t: number) {
   const s = Math.max(0, Math.round((Date.now() - t) / 1000));
   if (s < 60) return "now";

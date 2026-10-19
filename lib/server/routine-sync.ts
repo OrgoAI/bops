@@ -68,6 +68,14 @@ export function cleanText(s: string, max: number): string {
   return t.length <= max ? t : Array.from(t).slice(0, max).join("");
 }
 
+/** Text cut to `max` UTF-16 units, as orgo-web counts (cleanText counts characters), never leaving half an emoji. */
+export function fit(text: string, max: number) {
+  const t = cleanText(text, max);
+  if (t.length <= max) return t;
+  const end = t.charCodeAt(max - 1) >= 0xd800 && t.charCodeAt(max - 1) <= 0xdbff ? max - 1 : max;
+  return t.slice(0, end);
+}
+
 /** The workspace a routine's bot is in, and its Orgo project; undefined without one. */
 function projectOfBot(botId: string): { wsId: string; projectId: string } | undefined {
   const wsId = workspaceOf(bot(botId));
