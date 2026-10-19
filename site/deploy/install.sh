@@ -3,7 +3,8 @@
 # it gets and renews the certificates) and a firewall that lets in SSH, HTTP and HTTPS only. The VM is
 # "bops-prod-ash" (vm.small, Ashburn, Ubuntu 24.04) in Latitude's "bops" project. Run as root:
 #   scp -r site/deploy root@<vm>:/tmp/ && ssh root@<vm> bash /tmp/deploy/install.sh
-# Then scripts/site-deploy.sh puts the page and the Caddyfile in place.
+# Then Orgo's site-deploy.sh (OrgoAI/bops-secrets; from a bops checkout) puts the page and the Caddyfile
+# in place.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -26,4 +27,4 @@ ufw default allow outgoing >/dev/null
 for p in 22/tcp 80/tcp 443/tcp 443/udp; do ufw allow "$p" >/dev/null; done
 ufw --force enable >/dev/null
 
-echo "VM ready ($(caddy version | cut -d' ' -f1), firewall on). Now run scripts/site-deploy.sh."
+echo "VM ready ($(caddy version | cut -d' ' -f1), firewall on). Now run Orgo's site-deploy.sh (OrgoAI/bops-secrets) from a bops checkout."
