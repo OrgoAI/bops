@@ -46,6 +46,7 @@ next-env.d.ts
 
 # desktop app
 /dist-desktop
+/dist-runner
 /desktop/repo.json
 
 # relay agent (scripts/fetch-relay.sh)

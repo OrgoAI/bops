@@ -17,7 +17,7 @@ import { computerAsleepError, computerWakingError, madeByThisServer, madeReady, 
 import { forgetPlan, holdFreeAgain, limitText, makeMainComputer, makeOwnComputer, orgoPlan, PlanLimit } from "./plan";
 import { signedInUser } from "./orgo-auth";
 import { fullAccessOn } from "./full-access";
-import { onPostgres } from "./persist";
+import { loopHere, onPostgres } from "./persist";
 import { chose, decide, yes } from "./decide";
 import { watchScreen } from "./screen-watch";
 import { forgetScreens, listedScreenId, pageAt, sameComputer, screenEndpoint, screenPages, workComputer } from "./screens";
@@ -40,6 +40,7 @@ import { textOwner, textResult } from "./phone";
 import { askTiming, needsYou } from "@/lib/asks";
 import { channelResult } from "./channels";
 import { asksForMac, chooseWhere } from "./where";
+import { RUNNER_SCRUB } from "./runner";
 import { addMessage, bot, getState, id, ownerLine, ownerName, ownSession, patchSession, sameState, session, stateDevice, stateEpoch, stateReady, update } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { computerToolOn, computerTurn, PAGE_RUNNER } from "./computer-task";
@@ -1036,6 +1037,13 @@ export async function ensureComputer(botId: string): Promise<void> {
       if (Date.now() >= setupWaitUntil(startedAt, firstWakeAt)) break;
       await new Promise((r) => setTimeout(r, setupWait.pollMs));
     }
+    // A copy made just now brings along the main computer's Bops runner, with its key and that computer's
+    // id: taken off first, before anything else runs there, so it never runs the main computer's routines
+    // a second time (runner.ts RUNNER_SCRUB). A runner is set up on it afresh (runner-install.ts).
+    if (!b.isMain && (!had || b.computerNeverReady === clone.id)) {
+      const off = await orgo.bash(clone.id, RUNNER_SCRUB, 30).catch((e: Error) => ({ output: e.message, exit_code: 1 }));
+      if (off.exit_code !== 0) throw new Error(`the copy of the main computer couldn't be cleaned up (${off.output.trim().slice(0, 120) || "no answer"})`);
+    }
     await orgo.growDisk(clone.id).catch((e: Error) => console.warn(`[disk] ${b.id}: ${e.message}`));
     // Its screen streams over UDP (Orgo's WebRTC) where Orgo can; the app falls back to VNC where it can't.
     await orgo.webrtc(clone.id).catch((e: Error) => console.warn(`[webrtc] ${b.id}: ${e.message}`));
@@ -1263,7 +1271,7 @@ gh.bopsComputerCheckTick = checkComputers;
  * 10 minutes. Not on a hosted server, where users' states come and go.
  */
 export function startComputerChecks() {
-  if (gh.bopsComputerCheck || onPostgres()) return;
+  if (gh.bopsComputerCheck || onPostgres() || !loopHere("computer-checks")) return;
   const tick = () => void gh.bopsComputerCheckTick?.().catch((e: Error) => console.warn(`[computer] check: ${e.message}`));
   gh.bopsComputerCheck = setInterval(tick, 10 * 60_000);
   tick();
@@ -1282,6 +1290,7 @@ const reattaching = (gh.bopsReattaching ??= new Map());
  * another account is in (signed out, someone else signed in, or a hosted server swapped states).
  */
 export function reattachFreeComputer(userId: string): Promise<void> {
+  if (!loopHere("free-computer")) return Promise.resolve();
   const running = reattaching.get(userId);
   if (running) return running;
   // Never rejects: a sign-in doesn't wait for it.

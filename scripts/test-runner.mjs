@@ -4,14 +4,18 @@
 // sets the default, Cloud, once, and goes by it only once Orgo took it; a runner never sets it and runs
 // nothing on an answer a minute old, or from before a nap), the routines timer (routines.ts tick: each
 // Bops its own, a runner only once it's read the state and Orgo again, none once a newer Bops wrote the
-// state) and the routines mirror (routine-sync.ts: how each runs and whether it needs the Mac; a runner
+// state), making sure it's on its own computer (checkIdentity: a copy of the computer takes its runner
+// off) and the routines mirror (routine-sync.ts: how each runs and whether it needs the Mac; a runner
 // sends only its own, never with deleteMissing).
 //
 // The store, Orgo, the nap detector and the modules a run talks to are fakes (below), so nothing reaches a
 // real service or the user's data.
 // Usage: node --conditions=react-server scripts/test-runner.mjs
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 process.env.TZ = "America/New_York";
@@ -20,7 +24,7 @@ const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 const FAKES = {
   store: ["addMessage", "bot", "getState", "id", "ownerName", "patchSession", "pullState", "session", "statePulledAt", "stateReady", "stateTooNew", "update"],
-  orgo: ["apiKey", "callOrgo"],
+  orgo: ["apiKey", "callOrgo", "orgo"],
   awake: ["sleptSince"],
   sessions: ["startSession"],
   analytics: ["trackServerEvent"],
@@ -48,7 +52,12 @@ registerHooks({
   load(url, context, next) {
     const name = url.match(/\/lib\/server\/([a-z-]+)\.ts$/)?.[1];
     if (!name || !FAKES[name]) return next(url, context);
-    return { format: "module", shortCircuit: true, source: FAKES[name].map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(name)}].${n}(...a);`).join("\n") };
+    // `orgo` is an object of calls (orgo.bash): each goes to the fake's of the same name.
+    const one = (n) =>
+      n === "orgo"
+        ? `export const orgo = new Proxy({}, { get: (_, k) => (...a) => globalThis.__fake[${JSON.stringify(name)}].orgo[k](...a) });`
+        : `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(name)}].${n}(...a);`;
+    return { format: "module", shortCircuit: true, source: FAKES[name].map(one).join("\n") };
   },
 });
 
@@ -104,8 +113,11 @@ let pulledAt = 0;
 let napped = false;
 let tooNew = false;
 const fake = { started: [], pulls: 0 };
-// Orgo, faked: every call is kept, and `orgo.answer` says what it answers (null: no answer).
-const orgo = { calls: [], answer: () => null };
+// Orgo, faked: every call is kept, and `orgo.answer` says what it answers (null: no answer). A command
+// on a computer reads back the runner's word from `nonceDir` when it's the computer `orgo.here` (the
+// one this runner is really on), and says nothing from any other.
+const nonceDir = mkdtempSync(join(tmpdir(), "bops-runner-nonce-"));
+const orgo = { calls: [], answer: () => null, here: null, bash: [] };
 globalThis.__fake = {
   store: {
     getState: () => state,
@@ -135,6 +147,17 @@ globalThis.__fake = {
       orgo.calls.push(c);
       if (path.endsWith("/routines")) return { status: 200, json: { routines: init.body.routines.map((r) => ({ id: `orgo-${r.bopsId}`, bopsId: r.bopsId })) } };
       return orgo.answer(c);
+    },
+    orgo: {
+      bash: async (computer, command) => {
+        orgo.bash.push({ computer, command });
+        if (orgo.here === "down") throw new Error("Orgo didn't answer");
+        let word = "";
+        try {
+          word = computer === (orgo.here ?? process.env.BOPS_RUNNER_COMPUTER) ? readFileSync(join(nonceDir, "nonce"), "utf8") : "";
+        } catch {}
+        return { output: `${word}\n`, exit_code: 0 };
+      },
     },
   },
   awake: { sleptSince: () => napped },
@@ -169,10 +192,15 @@ const asRunner = (computer = C1) => {
   process.env.BOPS_RUNNER = "1";
   process.env.BOPS_RUNNER_COMPUTER = computer;
 };
+let left = 0;
 function reset() {
   asMac();
   fresh();
   R.runnerForTests.reset();
+  R.runnerForTests.identity({ nonceDir, leave: () => void left++ });
+  left = 0;
+  orgo.here = null;
+  orgo.bash.length = 0;
   T.reset();
   orgo.calls.length = 0;
   orgo.answer = () => null;
@@ -502,5 +530,69 @@ await check("a runner sends only its own routines, never deleteMissing; the Mac 
   assert.equal(mac[0].body.routines.length, 7, "every routine of the workspace");
 });
 
+/* ---------------- Which computer it's on ---------------- */
+
+await check("a runner makes sure it's on its own computer: the same word back runs, another (a copy) takes it off, no answer waits", async () => {
+  reset();
+  asRunner(C1);
+  assert.equal(await R.checkIdentity(), "same", "the word it wrote, read back from its computer");
+  assert.match(orgo.bash[0].command, /cat \/run\/bops-runner\/nonce/);
+  assert.equal(orgo.bash[0].computer, C1, "read from the computer it was set up on");
+  assert.equal(left, 0);
+  // A copy: the computer it names has another word (its own runner's), or none.
+  orgo.here = C2;
+  assert.equal(await R.checkIdentity(), "copy");
+  assert.equal(left, 1, "a copy takes its runner off");
+  orgo.here = "down";
+  assert.equal(await R.checkIdentity(), "unknown", "no answer proves nothing");
+  assert.equal(left, 1, "and takes nothing off");
+});
+
+await check("a runner runs nothing until it's sure which computer it's on, and looks again after a nap", async () => {
+  reset();
+  asRunner(C1);
+  orgo.answer = () => ({ status: 200, json: { runsOn: "cloud" } });
+  pulledAt = Date.now();
+  R.runnerForTests.hear("u1", "cloud");
+  orgo.here = "down";
+  let again = 0;
+  assert.equal(R.runnerReady(() => again++), false, "not sure yet");
+  await sleep(20);
+  assert.equal(again, 0, "Orgo didn't answer: still not");
+  orgo.here = null;
+  assert.equal(R.runnerReady(() => again++), false);
+  await sleep(20);
+  assert.equal(again, 1, "sure now: the timer goes again");
+  assert.equal(R.runnerReady(), true);
+  const looks = orgo.bash.length;
+  napped = true;
+  assert.equal(R.runnerReady(), false, "a nap since: not sure any more");
+  await sleep(20);
+  assert.equal(orgo.bash.length, looks + 1, "and it looks again");
+  napped = false;
+  R.runnerForTests.reset();
+});
+
+await check("an idle runner's timer asks nothing: no command on its computer (that would keep it up), no read of the state or Orgo", async () => {
+  reset();
+  asRunner(C1);
+  state.routines = [routine("r_boppy", "boppy", { nextRunAt: Date.now() + 3_600_000 }), routine("r_rook", "rook", { nextRunAt: Date.now() - 1000 })];
+  napped = true;
+  tick();
+  await sleep(20);
+  assert.equal(orgo.bash.length, 0, "no look at its computer");
+  assert.equal(fake.pulls, 0);
+  assert.ok(!orgo.calls.some((c) => c.path === "/api/bops/settings"), "Orgo not asked");
+  // One of its own comes due: then it makes sure of all three.
+  byId("r_boppy").nextRunAt = Date.now() - 1000;
+  napped = false;
+  tick();
+  await sleep(20);
+  assert.equal(orgo.bash.length, 1, "its computer looked at");
+  assert.equal(fake.pulls, 1);
+  R.runnerForTests.reset();
+});
+
+rmSync(nonceDir, { recursive: true, force: true });
 console.log(`runner: ${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

@@ -1,5 +1,7 @@
 import "server-only";
+import { readFile, stat } from "node:fs/promises";
 import { deleteSecret, getSecret, setSecret } from "./keychain";
+import { onRunner } from "./persist";
 import { bindSignIn, getState, releaseSignOut, update } from "./store";
 
 /**
@@ -7,6 +9,9 @@ import { bindSignIn, getState, releaseSignOut, update } from "./store";
  * flow (the same one the Orgo CLI and Orgo for Mac use), and the Orgo API key it gets back lives in
  * the Mac's Keychain. Everything Bops does on Orgo (the "bops" workspace, the bots' computers, the
  * account page) runs on that key, so it all lands in the user's own Orgo account and plan.
+ *
+ * A computer's runner (lib/server/runner.ts) never signs in: its key is the one Orgo wrote for it on
+ * its computer (BOPS_ORGO_KEY_FILE, root's alone), and is read from there.
  *
  * BOPS_ORGO_ORIGIN points Bops at another Orgo (staging, local); the default is production.
  */
@@ -29,11 +34,30 @@ const g = globalThis as unknown as {
 /** How long a failed Keychain read stands before it's tried again (it may have been locked, or a prompt turned down). */
 const RETRY_MS = 10_000;
 
-/** Read the signed-in key from the Keychain: once per server process, and again a little later if it wasn't there. */
+/**
+ * A runner's key, from its file: only when it's root's alone (no one else may read or write it), else
+ * none. Never logged.
+ */
+async function keyFile(): Promise<string | null> {
+  const file = process.env.BOPS_ORGO_KEY_FILE;
+  if (!file) return null;
+  try {
+    const st = await stat(file);
+    if (!st.isFile() || (st.mode & 0o077) !== 0) {
+      console.warn("[runner] the key file can be read by others: not used");
+      return null;
+    }
+    return (await readFile(file, "utf8")).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read the signed-in key from the Keychain (a runner: its key file): once per server process, and again a little later if it wasn't there. */
 export function loadOrgoKey(): Promise<string | null> {
   if (g.bopsOrgoKey) return Promise.resolve(g.bopsOrgoKey);
   if (g.bopsOrgoKey === null && Date.now() - (g.bopsOrgoKeyMissAt ?? 0) < RETRY_MS) return Promise.resolve(null);
-  const load = (g.bopsOrgoKeyLoad ??= getSecret(KEY_ACCOUNT).then((k) => {
+  const load = (g.bopsOrgoKeyLoad ??= (onRunner() ? keyFile() : getSecret(KEY_ACCOUNT)).then((k) => {
     // A sign-in or sign-out while this read was out has the last word.
     if (g.bopsOrgoKeyLoad !== load) return g.bopsOrgoKey ?? null;
     g.bopsOrgoKeyLoad = undefined;
@@ -58,6 +82,7 @@ export const orgoKey = (): string | null => g.bopsOrgoKey ?? null;
 export const signedInUser = (): OrgoUser | null => getState().account?.user ?? null;
 
 export async function signIn(apiKey: string, user: OrgoUser) {
+  if (onRunner()) throw new Error("Sign in from the Bops app on your Mac.");
   const before = signedInUser();
   const was = keyNow();
   // First this user's own state is loaded (from Bops Cloud, their file, or Postgres): the sign-in is refused if it can't be.
@@ -107,6 +132,7 @@ async function giveBack(before: OrgoUser | null, was: ReturnType<typeof keyNow>)
 }
 
 export async function signOut() {
+  if (onRunner()) throw new Error("Sign out from the Bops app on your Mac.");
   await releaseSignOut();
   await deleteSecret(KEY_ACCOUNT);
   setKey(null);

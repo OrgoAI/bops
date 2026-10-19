@@ -1,5 +1,6 @@
 import { askRunsOn, runsOn, runsOnMissing, setRunsOn } from "@/lib/server/runner";
 import { orgo } from "@/lib/server/orgo";
+import { runnersSoon } from "@/lib/server/runner-install";
 import { notReady } from "@/lib/server/ready";
 import { getState, stateReady } from "@/lib/server/store";
 import { computerAsleep } from "@/lib/types";
@@ -22,7 +23,7 @@ export async function GET() {
   return Response.json({ runsOn: runsOn(), missing: runsOnMissing(), asleep: asleep.filter((id) => id !== null) });
 }
 
-/** Set where routines run from now on, for every Mac and computer of the user's (PUT orgo-web /api/bops/settings). */
+/** Set where routines run from now on, for every Mac and computer of the user's (PUT orgo-web /api/bops/settings): the runners are set up or stopped in a moment. */
 export async function POST(request: Request) {
   const unready = notReady();
   if (unready) return unready;
@@ -30,5 +31,6 @@ export async function POST(request: Request) {
   if (body.runsOn !== "cloud" && body.runsOn !== "mac") return Response.json({ error: "runsOn: cloud or mac" }, { status: 400 });
   const res = await setRunsOn(body.runsOn);
   if (res.error) return Response.json({ error: res.error, missing: !!res.missing, runsOn: runsOn() }, { status: res.missing ? 409 : 502 });
+  runnersSoon();
   return Response.json({ runsOn: runsOn(), missing: false });
 }

@@ -6,6 +6,7 @@ import { onTab, openPages } from "./local";
 import { readScreen } from "./screen-watch";
 import { screenEndpoint } from "./screens";
 import { submitSignIn, type SignInValues } from "./sign-in";
+import { onRunner } from "./persist";
 import { addStep } from "./sessions";
 import { bot, getState, id, ownerName, session, stateUser, update } from "./store";
 
@@ -39,8 +40,9 @@ const patchLogin = (loginId: string, patch: Partial<VaultLogin>) =>
     if (l) Object.assign(l, patch);
   });
 
-/** The logins a bot may use on a page, best match first. */
+/** The logins a bot may use on a page, best match first. None on a computer's runner: their passwords are in the Mac's Keychain. */
 export function loginsFor(botId: string, url: string) {
+  if (onRunner()) return [];
   let host = "";
   try {
     host = new URL(url).hostname.replace(/^www\./, "");
@@ -123,6 +125,7 @@ export async function signInWith(botId: string, display: number, loginId: string
   const b = bot(botId);
   const l = logins().find((x) => x.id === loginId);
   if (!b || !l) throw new Error("no such login");
+  if (onRunner()) throw new Error("saved logins work only from the Bops app on your Mac");
   if (l.bots !== "all" && !l.bots.includes(botId)) throw new Error(`${b.name} isn't allowed to use this login`);
   const lock = `${botId}:${display}`;
   if (signingIn.has(lock)) return { signedIn: false, busy: true, read: getState().screens?.[lock] };

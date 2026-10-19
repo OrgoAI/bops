@@ -358,7 +358,9 @@ await check("every brain route, and a thread's terminal, answers 404", async () 
 });
 
 await check("a release builds without brains, whatever a .env file says", () => {
-  assert.match(readFileSync(join(root, "scripts/release.sh"), "utf8"), /^NEXT_PUBLIC_BOPS_BRAINS=0 npx next build$/m);
+  // The server (and the bundle for the bots' computers' runners) is built by scripts/server-bundle.sh, which the release runs.
+  assert.match(readFileSync(join(root, "scripts/release.sh"), "utf8"), /^scripts\/server-bundle\.sh$/m);
+  assert.match(readFileSync(join(root, "scripts/server-bundle.sh"), "utf8"), /^\s*NEXT_PUBLIC_BOPS_BRAINS=0 npx next build$/m);
 });
 
 /* ---------------- A copy of the main computer ---------------- */

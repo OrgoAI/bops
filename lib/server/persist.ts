@@ -73,6 +73,40 @@ export const selfHosted = () => process.env.BOPS_SELF_HOSTED === "1";
 /** A computer's Bops runner (BOPS_RUNNER=1, lib/server/runner.ts): the server on one of the bots' computers that runs its routines while the user's Mac is closed. */
 export const onRunner = () => process.env.BOPS_RUNNER === "1";
 
+/**
+ * What runs by itself in Bops (a timer, a listener, a look that starts on import or from the state
+ * route). On a computer's runner only RUNNER_LOOPS do: the routines timer, the mirror of its own
+ * routines to Orgo, the threads it started, and saying its computer is in use while one runs. The rest
+ * is the Mac's (MAC_LOOPS): the bots' watches, the digest, the access set and the map sent to Orgo
+ * (access-sync.ts, bops-sync.ts), email, texts and calls, Telegram, Discord and Slack, the look at the
+ * bots' computers, routing through home internet, the Mac's zone, Codex on the Mac, the free computer
+ * found again, the cloud tunnel (one per user: a runner's would take the Mac's), the Mac's own check,
+ * memory sorting and Orbit, and setting up runners.
+ */
+export const RUNNER_LOOPS = ["routines", "routine-sync", "sessions", "in-use"] as const;
+export const MAC_LOOPS = [
+  "watches",
+  "digest",
+  "access-sync",
+  "bops-sync",
+  "mail",
+  "phone",
+  "channels",
+  "computer-checks",
+  "relay",
+  "zone",
+  "codex",
+  "free-computer",
+  "tunnel",
+  "mac-check",
+  "categories",
+  "orbit",
+  "runner-install",
+] as const;
+export type Loop = (typeof RUNNER_LOOPS)[number] | (typeof MAC_LOOPS)[number];
+/** Whether `loop` runs on this server: everywhere but a runner, where only RUNNER_LOOPS do. */
+export const loopHere = (loop: Loop) => !onRunner() || (RUNNER_LOOPS as readonly string[]).includes(loop);
+
 const gx = globalThis as unknown as { __bopsExitWork?: Map<string, () => Promise<unknown>>; __bopsExitHooked?: boolean; __bopsStopping?: boolean };
 const exitWork = (gx.__bopsExitWork ??= new Map());
 

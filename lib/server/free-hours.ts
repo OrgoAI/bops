@@ -3,9 +3,9 @@ import { live } from "@/lib/types";
 import { cloudOn } from "./cloud";
 import { orgo, OrgoError } from "./orgo";
 import { orgoKey } from "./orgo-auth";
-import { onPostgres } from "./persist";
+import { onPostgres, onRunner } from "./persist";
 import { postOrgo } from "./plan";
-import { getState, stateTooNew } from "./store";
+import { getState, ownSession, stateTooNew } from "./store";
 
 /**
  * Free's Bops computer runs 10 hours a month, and Orgo suspends it after 15 minutes nobody uses it
@@ -16,16 +16,20 @@ import { getState, stateTooNew } from "./store";
  * screens, then every few minutes while either goes on. A task waking it brings it back, while its
  * hours last. Asleep for want of use, Orgo may leave it asleep for a read of its screens (the app's
  * views, a task's first look) until it's said to be in use again; an action always wakes it.
+ *
+ * A computer's Bops runner (runner.ts) says it only while a routine's task of its own runs, as the
+ * runner's (via 'runner'): Orgo then suspends it 5 minutes after, not 15. Each Bops says it for its
+ * own tasks only (Session.by).
  */
 const EVERY_MS = 4 * 60_000;
 /** How long a task or a takeover waits, as it starts, for Orgo to hear the computer is in use. */
 export const START_SAY_MS = 5000;
 const g = globalThis as unknown as { bopsActivityBeat?: NodeJS.Timeout; bopsActivitySaid?: string };
 
-/** Something is using the bots' computer in the cloud right now: a task working there, or the user driving one of its screens. */
+/** Something of this Bops's is using the bots' computer in the cloud right now: a task of its own working there, or the user driving one of its screens. */
 function inUse(): boolean {
   const s = getState();
-  return s.sessions.some((x) => live(x) && x.runsOn !== "mac" && (x.status === "starting" || x.status === "running")) || s.takeover?.display !== undefined;
+  return s.sessions.some((x) => live(x) && x.runsOn !== "mac" && (x.status === "starting" || x.status === "running") && ownSession(x)) || s.takeover?.display !== undefined;
 }
 
 /**
@@ -36,8 +40,9 @@ function inUse(): boolean {
 export async function sayInUse(timeoutMs?: number) {
   const key = orgoKey();
   if (!key || !cloudOn() || stateTooNew()) return;
-  if (g.bopsActivitySaid === key && !inUse()) return;
-  await postOrgo(key, "/api/bops/computer/active", {}, undefined, timeoutMs).then(
+  // A runner never says it for nothing: an opening word would keep its computer up 15 minutes.
+  if ((g.bopsActivitySaid === key || onRunner()) && !inUse()) return;
+  await postOrgo(key, "/api/bops/computer/active", onRunner() ? { via: "runner" } : {}, undefined, timeoutMs).then(
     () => void (g.bopsActivitySaid = key),
     () => {},
   );

@@ -58,9 +58,12 @@ const done = (got: Got) => !!got && got.status >= 200 && got.status < 300;
 /**
  * Whether Bops puts keys of its own on the bots' computers, which someone with Full access (root there)
  * could read: the apps key and this Mac's tailnet address in /opt/bops/apps.json when the server listens
- * beyond this Mac (BOPS_LISTEN_ALL=1), the executor's key (BOPS_COMPUTER_TOOL=0), Tailscale's auth key.
+ * beyond this Mac (BOPS_LISTEN_ALL=1), the executor's key (BOPS_COMPUTER_TOOL=0), Tailscale's auth key,
+ * a Bops runner's key (an Orgo key for the whole account, runner-install.ts) on a computer that has one.
  */
-const keysOnComputers = () => reachableFromComputers() || !computerToolOn() || !!process.env.TAILSCALE_AUTH_KEY;
+const keysOnComputers = () => reachableFromComputers() || !computerToolOn() || !!process.env.TAILSCALE_AUTH_KEY || runnerKeys();
+/** A computer has a Bops runner, or is getting one, or still has its key (being stopped). */
+const runnerKeys = () => Object.values(getState().runners ?? {}).some((x) => x.status === "running" || x.status === "installing" || !!x.keyId);
 
 /**
  * Whether the sheet offers Full access: not yet (FULL_ACCESS_IN_BOPS, or BOPS_MEMBERS_FULL_ACCESS=1 to
@@ -268,6 +271,17 @@ export async function membersCount(): Promise<Answer> {
   }
   g.bopsMembersCount = { key, at: Date.now(), count: n };
   return ok({ count: n });
+}
+
+/**
+ * Whether someone besides the owner has Full access to an Orgo workspace of the user's (root on its
+ * computers): a Bops runner, whose key is the whole account's, is never set up there (runner-install.ts).
+ * Null when Orgo didn't say.
+ */
+export async function othersWithFullAccess(key: string, projectId: string): Promise<boolean | null> {
+  const got = (await orgoMembers.list(key, projectId)) as Got;
+  if (!got || got.status !== 200) return null;
+  return listOf(got.json, projectId).people.some((p) => p.role === "admin");
 }
 
 /* ---------------- Changes (from the Bops window only: app/api/members) ---------------- */

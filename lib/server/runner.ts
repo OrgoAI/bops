@@ -1,4 +1,7 @@
 import "server-only";
+import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { workBot, type Bot, type Routine, type RunnerState } from "@/lib/types";
 import { sleptSince } from "./awake";
 import { onRunner } from "./persist";
@@ -19,12 +22,27 @@ import { getState, pullState, statePulledAt } from "./store";
  * read under 40 seconds ago, neither from before a nap (its computer suspended in between). No routine
  * runs on two Bops at once: each decides from the same shared state, and after a switch to This Mac the
  * Mac takes a computer's routines only once its runner's stop is confirmed, or HANDOVER_MS after it
- * heard of the switch (a runner asks again at least every minute).
+ * heard of the switch (a runner asks again at least every minute). Nor on a copy of a computer: a runner
+ * makes sure it's on its own (checkIdentity) before it runs anything.
+ *
+ * What a runner runs at all is an allow-list (persist.ts RUNNER_LOOPS); it's set up and stopped from
+ * the Mac (runner-install.ts), and docs/cloud-runner.md says the rest.
  */
 
 /** The computer this runner is on (BOPS_RUNNER_COMPUTER, its Orgo id): it runs the routines of the bots that work there. */
 export const runnerComputer = () => process.env.BOPS_RUNNER_COMPUTER || undefined;
 export { onRunner };
+
+/** Where a runner lives on its computer (runner-install.ts writes them): its supervisord program, the script that starts it, and its key (written by Orgo). */
+export const RUNNER_CONF = "/etc/supervisor/conf.d/bops-runner.conf";
+export const RUNNER_WRAPPER = "/opt/bops/runner/run.sh";
+export const RUNNER_KEY_FILE = "/root/.bops/runner/key";
+/**
+ * The first command on a new copy of a computer (sessions.ts ensureComputer, for a bot's own computer
+ * made from its main bot's): the copied runner stopped and taken off, with its key, so the copy never
+ * runs the other computer's routines as that computer. A runner is set up there afresh, with its own.
+ */
+export const RUNNER_SCRUB = `supervisorctl stop bops-runner >/dev/null 2>&1; rm -f ${RUNNER_CONF} ${RUNNER_WRAPPER} ${RUNNER_KEY_FILE}; supervisorctl update >/dev/null 2>&1; true`;
 
 /** A new task's words that put it on the user's Mac (where.ts chooseWhere), and a routine's (pinnedToMac). */
 export const MAC_WORDS = /\b(on|from|using|use|with) my (mac|macbook|laptop|computer)\b|\blocally\b|\bon this mac\b/i;
@@ -67,7 +85,19 @@ type Heard = {
   missingUntil?: number;
 };
 const g = globalThis as unknown as {
-  __bopsRunsOn?: { heard?: Heard; asking?: Promise<void>; claimed?: string; timer?: ReturnType<typeof setInterval>; freshening?: Promise<unknown> };
+  __bopsRunsOn?: {
+    heard?: Heard;
+    asking?: Promise<void>;
+    claimed?: string;
+    timer?: ReturnType<typeof setInterval>;
+    freshening?: Promise<unknown>;
+    /** When this runner last made sure it's on its own computer (checkIdentity), and the look under way. */
+    sureAt?: number;
+    checking?: Promise<IdentityLook>;
+    /** Tests: where the word is written, and what a copy does instead of leaving. */
+    nonceDir?: string;
+    leave?: () => void;
+  };
 };
 const box = (g.__bopsRunsOn ??= {});
 
@@ -90,6 +120,9 @@ export const runsOn = (): RunsOn => heard()?.runsOn ?? "mac";
 
 /** Orgo can't keep where the bots work yet (an Orgo from before the setting): Settings says so. */
 export const runsOnMissing = () => !!heard()?.missingUntil;
+
+/** What Orgo said, and only that: undefined when it hasn't answered yet (runsOn says "mac" then), "mac" too when it hasn't the setting. */
+export const heardRunsOn = (): RunsOn | undefined => heard()?.runsOn;
 
 /**
  * Ask Orgo where the user's bots work. It never set (an app from before this one wrote nothing): the Mac
@@ -166,13 +199,77 @@ const fresh = (at: number, ms: number, now: number) => at > 0 && now - at < ms &
 export function runnerReady(again?: () => void): boolean {
   startRunsOn();
   const now = Date.now();
-  const ready = (t: number) => fresh(heard()?.at ?? 0, MODE_FRESH_MS, t) && fresh(statePulledAt(), PULL_FRESH_MS, t);
+  const sure = (t: number) => fresh(box.sureAt ?? 0, SURE_FRESH_MS, t);
+  const ready = (t: number) => sure(t) && fresh(heard()?.at ?? 0, MODE_FRESH_MS, t) && fresh(statePulledAt(), PULL_FRESH_MS, t);
   if (ready(now)) return true;
-  box.freshening ??= Promise.all([fresh(statePulledAt(), PULL_FRESH_MS, now) ? undefined : pullState(), fresh(heard()?.at ?? 0, MODE_FRESH_MS, now) ? undefined : askRunsOn()]).finally(() => {
+  box.freshening ??= Promise.all([
+    fresh(statePulledAt(), PULL_FRESH_MS, now) ? undefined : pullState(),
+    fresh(heard()?.at ?? 0, MODE_FRESH_MS, now) ? undefined : askRunsOn(),
+    sure(now) ? undefined : checkIdentity(),
+  ]).finally(() => {
     box.freshening = undefined;
     if (ready(Date.now())) again?.();
   });
   return false;
+}
+
+/* ---------------- Which computer a runner is on ---------------- */
+
+export type IdentityLook = "same" | "copy" | "unknown";
+/** How often a runner makes sure it's on its own computer, and how long one look stands (without a nap since). */
+export const IDENTITY_EVERY_MS = 5 * 60_000;
+const SURE_FRESH_MS = 2 * IDENTITY_EVERY_MS + 60_000;
+const NONCE_DIR = "/run/bops-runner";
+
+/**
+ * On a runner: whether it's on the computer it was set up on (runnerComputer). A bot's own computer is
+ * made as a copy of its main bot's (a fork, running, or a clone), and a copy of a computer with a runner
+ * comes up with that runner, its key and its computer's id: it would run that computer's routines a
+ * second time, as that computer. So at start, before it runs anything after a nap, and every
+ * IDENTITY_EVERY_MS while a task of its own runs (never while idle: the read is a command on the
+ * computer, which counts as using it), it writes a fresh random word here and reads it back through
+ * Orgo from runnerComputer(). Its word there: it's there. Another, or none: this is a copy, which takes
+ * its runner off (leaveCopy) and stops. No answer from Orgo proves nothing either way; until a look
+ * says it's there, it runs nothing (runnerReady).
+ */
+export function checkIdentity(): Promise<IdentityLook> {
+  box.checking ??= lookIdentity()
+    .catch((e: Error) => {
+      console.warn(`[runner] which computer this is: ${e.message}`);
+      return "unknown" as const;
+    })
+    .finally(() => (box.checking = undefined));
+  return box.checking;
+}
+
+async function lookIdentity(): Promise<IdentityLook> {
+  const computer = runnerComputer();
+  if (!onRunner() || !computer) return "unknown";
+  const word = randomBytes(16).toString("hex");
+  const dir = box.nonceDir ?? NONCE_DIR;
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(`${dir}/nonce`, word, { mode: 0o600 });
+  const asked = Date.now();
+  const { orgo } = await import("./orgo");
+  const got = await orgo.bash(computer, `cat ${NONCE_DIR}/nonce 2>/dev/null; true`, 20);
+  if (!got.output.split(/\s+/).includes(word)) {
+    leaveCopy();
+    return "copy";
+  }
+  box.sureAt = asked;
+  return "same";
+}
+
+/** A copy of a runner's computer: its runner taken off (its program, the script that starts it, its key), then gone, saving nothing. */
+function leaveCopy() {
+  console.error("[runner] this computer is a copy of the one this runner was set up on: taking the runner off it");
+  if (box.leave) return box.leave();
+  for (const f of [RUNNER_CONF, RUNNER_WRAPPER, process.env.BOPS_ORGO_KEY_FILE || RUNNER_KEY_FILE]) rmSync(f, { force: true });
+  try {
+    spawn("supervisorctl", ["update"], { detached: true, stdio: "ignore" }).unref();
+  } catch {}
+  // Straight out: no last save, which would go up as the computer it was copied from.
+  process.exit(1);
 }
 
 /** The computer the routine's bot works on (its own, or its main bot's when it shares), if it has one. */
@@ -194,6 +291,16 @@ function runnerMayRun(x: RunnerState | undefined, now: number): boolean {
   }
   if (x?.status === "stopping") return now - x.at < HANDOVER_MS;
   return false;
+}
+
+/**
+ * On a runner: whether one of its own routines needs the routines timer now (due, or its next time not
+ * set yet). Only then does it make sure of the state, of Orgo's word and of its computer (runnerReady):
+ * a command on its computer counts as using it (orgo-web lib/bops-free-hours.ts), so an idle runner
+ * that looked every tick would keep its computer from ever sleeping.
+ */
+export function runnerHasWork(now = Date.now()): boolean {
+  return getState().routines.some((r) => r.enabled && (r.nextRunAt === undefined || r.nextRunAt <= now) && runnerRoutine(r));
 }
 
 /** On a runner: the routine is this one's, its bot working on this computer and the Mac not needed (whether or not it may run it right now). */
@@ -221,8 +328,10 @@ export function runsHere(r: Routine, now = Date.now()): boolean {
   return !runnerMayRun(s.runners?.[computer], now);
 }
 
-/** Tests: what Orgo said, as if it said it (`at` back in time to make it older), and forgetting it. */
+/** Tests: what Orgo said, as if it said it (`at` back in time to make it older), and forgetting it; which computer this is. */
 export const runnerForTests = {
+  sure: (at = Date.now()) => void (box.sureAt = at),
+  identity: (o: { nonceDir?: string; leave?: () => void }) => Object.assign(box, o),
   hear: (user: string, to: RunsOn, opts: { ago?: number; macAgo?: number } = {}) => {
     hear(user, to);
     if (box.heard && opts.ago) box.heard.at -= opts.ago;

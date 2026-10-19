@@ -570,7 +570,8 @@ export async function noMainComputer(main: Bot) {
  * A computer of its own for `b`, copied from its main bot's (a fork, else a clone), when the plan has
  * room for it: one more computer, as big as the main bot's. When it hasn't, or Orgo turns the copy down
  * for the plan, `b` works on the main bot's computer instead and its chat says why: null then. Its task
- * still runs, and no copy is tried again.
+ * still runs, and no copy is tried again. A copy comes with the main computer's Bops runner, if it has
+ * one: the first command on it, once it's up, takes that off (sessions.ts ensureComputer, RUNNER_SCRUB).
  */
 export async function makeOwnComputer(b: Bot, main: Bot, name: string, epoch = stateEpoch()) {
   const from = main.computerId;

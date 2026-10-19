@@ -1,0 +1,364 @@
+// Tests for a computer's Bops runner mode (BOPS_RUNNER=1, lib/server/runner.ts): the allow-list of what
+// runs by itself there (persist.ts RUNNER_LOOPS: the routines timer, the mirror of its own routines, its
+// own threads, the in-use beat; every other loop or timer of lib/server returns early, checked in each
+// module that has one), what it starts with (runner-start.ts: refusing to start without a window token,
+// on anything but loopback, on a Postgres or file store, without its computer or its key file; then the
+// state, the look at which computer it's on, and only the allowed loops), its key from its file (only
+// when it's root's alone), no Keychain, the in-use beat as the runner's and only for its own tasks, and
+// chooseWhere never picking the Mac there.
+//
+// The modules each one talks to are fakes (below), so nothing reaches Orgo, Bops Cloud or the Keychain.
+// Usage: node --conditions=react-server scripts/test-runner-mode.mjs
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { registerHooks } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+for (const k of Object.keys(process.env)) if (/^(BOPS|ORGO)_/.test(k)) delete process.env[k];
+const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const scratch = mkdtempSync(join(tmpdir(), "bops-runner-mode-"));
+
+// Run again with --start, this checks how a runner starts on its own: there what it starts with is faked
+// too (runner.ts, orgo-auth.ts, free-hours.ts), so only what it loads is seen.
+const START = process.argv.includes("--start");
+
+// Each faked module: its exports, each a call to globalThis.__fake[module][name] (or a value when it's one).
+const FAKES = {
+  store: ["getState", "update", "stateReady", "stateTooNew", "ownSession", "bot", "ownerName", "addMessage", "stateUser", "bindSignIn", "releaseSignOut", "pullState", "statePulledAt"],
+  decide: ["decide", "chose"],
+  "full-access": ["fullAccessOn"],
+  cloud: ["cloudOn"],
+  orgo: ["orgo", "OrgoError"],
+  plan: ["postOrgo"],
+  local: ["CHROME"],
+  "orgo-sign-in": ["authStatus"],
+  routines: [],
+  ...(START ? { runner: ["checkIdentity", "IDENTITY_EVERY_MS", "runnerComputer", "startRunsOn"], "orgo-auth": ["loadOrgoKey"], "free-hours": ["startActivityBeat"] } : {}),
+};
+const VALUES = { local: { CHROME: "/nonexistent/Chrome" }, runner: { IDENTITY_EVERY_MS: 300000 } };
+const loaded = [];
+registerHooks({
+  resolve(specifier, context, next) {
+    if (specifier === "server-only") return { url: "data:text/javascript,", shortCircuit: true };
+    if (specifier.startsWith("@/")) specifier = pathToFileURL(`${root}/${specifier.slice(2)}`).href;
+    try {
+      return next(specifier, context);
+    } catch (e) {
+      if (/^(\.{1,2}\/|\/|file:)/.test(specifier))
+        for (const ext of [".ts", ".tsx"])
+          try {
+            return next(specifier + ext, context);
+          } catch {}
+      throw e;
+    }
+  },
+  load(url, context, next) {
+    const name = url.match(/\/lib\/server\/([a-z-]+)\.ts$/)?.[1];
+    if (name) loaded.push(name);
+    if (!name || !FAKES[name]) return next(url, context);
+    const one = (n) => {
+      if (VALUES[name]?.[n] !== undefined) return `export const ${n} = ${JSON.stringify(VALUES[name][n])};`;
+      if (n === "orgo") return `export const orgo = new Proxy({}, { get: (_, k) => (...a) => globalThis.__fake.orgo.orgo[k](...a) });`;
+      if (n === "OrgoError") return `export class OrgoError extends Error {}`;
+      return `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(name)}].${n}(...a);`;
+    };
+    // routines.ts faked: importing it is the routines timer starting (noted).
+    if (name === "routines") return { format: "module", shortCircuit: true, source: `globalThis.__fake.started.push("routines");` };
+    return { format: "module", shortCircuit: true, source: FAKES[name].map(one).join("\n") };
+  },
+});
+
+let failures = 0;
+let passed = 0;
+async function check(name, fn) {
+  try {
+    await fn();
+    passed++;
+  } catch (e) {
+    failures++;
+    console.error(`FAIL ${name}\n  ${e.message.split("\n").join("\n  ")}`);
+  }
+}
+
+const C1 = "c1c1c1c1-0000-4000-8000-000000000001";
+const state = { account: { user: { id: "u1" } }, bots: [{ id: "boppy", name: "Boppy", isMain: true, runsOn: "mac" }], sessions: [], routines: [], mac: { ready: true, rules: ["Notes"] } };
+const posts = [];
+let ready = true;
+globalThis.__fake = {
+  started: [],
+  store: {
+    getState: () => state,
+    update: (fn) => fn(state),
+    stateReady: () => ready,
+    stateTooNew: () => false,
+    ownSession: (s) => (s.by ? s.by === "me" : process.env.BOPS_RUNNER !== "1"),
+    bot: (id) => state.bots.find((b) => b.id === id),
+    ownerName: () => "Sam",
+    addMessage: () => {},
+    stateUser: () => "u1",
+    bindSignIn: async () => {},
+    releaseSignOut: async () => {},
+    pullState: async () => {},
+    statePulledAt: () => 0,
+  },
+  decide: { decide: async () => ({ where: { choice: "mac", confidence: 0.99 } }), chose: (x) => x },
+  "full-access": { fullAccessOn: () => false },
+  cloud: { cloudOn: () => true },
+  orgo: { orgo: { computer: async () => ({ status: "running" }), resume: async () => ({}) } },
+  plan: {
+    postOrgo: async (key, path, body) => {
+      posts.push({ path, body });
+      return { status: 200, json: {} };
+    },
+  },
+  "orgo-sign-in": { authStatus: async () => ({}) },
+};
+
+const asMac = () => {
+  for (const k of ["BOPS_RUNNER", "BOPS_RUNNER_COMPUTER", "BOPS_DEVICE_SEED", "BOPS_ORGO_KEY_FILE", "BOPS_UI_TOKEN", "HOSTNAME"]) delete process.env[k];
+};
+const asRunner = () => {
+  process.env.BOPS_RUNNER = "1";
+  process.env.BOPS_RUNNER_COMPUTER = C1;
+};
+
+/* ---------------- Starting (run on its own: node … --start) ---------------- */
+
+const good = () => ({
+  BOPS_RUNNER: "1",
+  BOPS_UI_TOKEN: "a".repeat(64),
+  HOSTNAME: "127.0.0.1",
+  BOPS_RUNNER_COMPUTER: C1,
+  BOPS_DEVICE_SEED: C1,
+  BOPS_ORGO_KEY_FILE: "/root/.bops/runner/key",
+});
+
+if (START) {
+  await check("a runner starts the state, makes sure of its computer, then only the loops it runs; refused, it stops", async () => {
+    const calls = [];
+    let tries = 0;
+    ready = false;
+    globalThis.__fake.runner = { checkIdentity: async () => (calls.push("identity"), "same"), runnerComputer: () => C1, startRunsOn: () => calls.push("runs-on") };
+    globalThis.__fake["orgo-auth"] = { loadOrgoKey: async () => (calls.push("key"), "sk_runner") };
+    globalThis.__fake["free-hours"] = { startActivityBeat: () => calls.push("in-use") };
+    globalThis.__fake["orgo-sign-in"] = { authStatus: async () => (calls.push("state"), (ready = ++tries >= 2), {}) };
+    Object.assign(process.env, good());
+    const S = await import(`${root}/lib/server/runner-start.ts`);
+    loaded.length = 0;
+    const log = console.log;
+    console.log = () => {};
+    await S.startRunner();
+    console.log = log;
+    assert.deepEqual(calls, ["key", "state", "state", "identity", "runs-on", "in-use"], "key, the state (again until it loads), which computer, then its loops");
+    assert.deepEqual(globalThis.__fake.started, ["routines"], "the routines timer");
+    for (const m of ["mail", "phone", "channels", "cloud-tunnel", "bops-sync", "access-sync", "watches", "relay", "runner-install", "mac", "attention", "orbit-sync", "memory-categories", "sessions"])
+      assert.ok(!loaded.includes(m), `${m} isn't started`);
+    clearInterval(globalThis.__bopsRunnerIdentity);
+    // Refused: out, before anything.
+    const exit = process.exit;
+    const err = console.error;
+    let code;
+    process.exit = (c) => {
+      code = c;
+      throw new Error("exited");
+    };
+    console.error = () => {};
+    delete globalThis.__bopsRunnerStarted;
+    calls.length = 0;
+    process.env.HOSTNAME = "0.0.0.0";
+    await assert.rejects(S.startRunner(), /exited/);
+    assert.equal(code, 1);
+    assert.deepEqual(calls, [], "nothing started");
+    // No key in its file: out too, before the state.
+    delete globalThis.__bopsRunnerStarted;
+    process.env.HOSTNAME = "127.0.0.1";
+    globalThis.__fake["orgo-auth"].loadOrgoKey = async () => (calls.push("key"), null);
+    await assert.rejects(S.startRunner(), /exited/);
+    assert.deepEqual(calls, ["key"]);
+    process.exit = exit;
+    console.error = err;
+  });
+  console.log(`runner start: ${passed} passed, ${failures} failed`);
+  process.exit(failures ? 1 : 0);
+}
+
+const P = await import(`${root}/lib/server/persist.ts`);
+
+/* ---------------- The allow-list ---------------- */
+
+await check("on a runner only the routines timer, its own routines' mirror, its own threads and the in-use beat run; on the Mac, all", () => {
+  asMac();
+  for (const l of [...P.RUNNER_LOOPS, ...P.MAC_LOOPS]) assert.equal(P.loopHere(l), true, `${l} on the Mac`);
+  asRunner();
+  assert.deepEqual([...P.RUNNER_LOOPS].sort(), ["in-use", "routine-sync", "routines", "sessions"]);
+  for (const l of P.RUNNER_LOOPS) assert.equal(P.loopHere(l), true, `${l} on a runner`);
+  for (const l of P.MAC_LOOPS) assert.equal(P.loopHere(l), false, `${l} not on a runner`);
+  for (const l of ["watches", "digest", "access-sync", "bops-sync", "mail", "phone", "channels", "computer-checks", "relay", "zone", "codex", "free-computer", "tunnel", "runner-install"])
+    assert.ok(P.MAC_LOOPS.includes(l), `${l} is the Mac's`);
+  asMac();
+});
+
+// Every loop or timer in lib/server (an interval, a timeout at the top of a module, a watch on every
+// change), by module: the Mac's are gated (loopHere("<name>"), or onRunner() in
+// those that had it first), and the rest run on a runner only because they're its own or work for one
+// request, task or view. A module with a new one fails here until it's in this list.
+const GATED = {
+  "watches.ts": ['loopHere("watches")'],
+  "attention.ts": ['loopHere("digest")'],
+  "mac.ts": ['loopHere("mac-check")'],
+  "codex-cli.ts": ['loopHere("codex")'],
+  "relay.ts": ['loopHere("relay")'],
+  "mail.ts": ['loopHere("mail")'],
+  "phone.ts": ['loopHere("phone")'],
+  "channels.ts": ['loopHere("channels")'],
+  "sessions.ts": ['loopHere("computer-checks")', 'loopHere("free-computer")'],
+  "orgo-sign-in.ts": ['loopHere("free-computer")'],
+  "cloud-tunnel.ts": ['loopHere("tunnel")'],
+  "memory-categories.ts": ['loopHere("categories")'],
+  "orbit-sync.ts": ['loopHere("orbit")'],
+  "runner-install.ts": ['loopHere("runner-install")'],
+  "access-sync.ts": ["onRunner()"],
+  "bops-sync.ts": ["onRunner()"],
+  "routines.ts": ["onPostgres() || onRunner()"],
+};
+/** Run on a runner, and why. */
+const ALLOWED = {
+  "routines.ts": "the routines timer",
+  "free-hours.ts": "the in-use beat (its own tasks)",
+  "runner.ts": "asking Orgo where the bots work",
+  "runner-start.ts": "the look at which computer it's on",
+  "persist-cloud.ts": "the store: reading what changed elsewhere",
+  "awake.ts": "the nap detector",
+  "sessions.ts": "its own threads (each thread's own timers)",
+  "cli-agents.ts": "one turn's",
+  "mirror.ts": "one view's",
+  "desktop.ts": "a page's script",
+  "phone.ts": "one call's (the loop is startPhone's)",
+  "channels.ts": "one link's (the listeners are startChannels')",
+};
+await check("every loop and timer in lib/server is the Mac's behind its gate, or one a runner runs", () => {
+  const dir = `${root}/lib/server`;
+  for (const f of readdirSync(dir).filter((x) => x.endsWith(".ts"))) {
+    const src = readFileSync(`${dir}/${f}`, "utf8");
+    if (/setInterval\(|^setTimeout\(|watchChanges\(/m.test(src)) assert.ok(GATED[f] || ALLOWED[f], `${f} has a timer: gate it on a runner (persist.ts loopHere) or say here why a runner runs it`);
+  }
+  for (const [f, gates] of Object.entries(GATED)) {
+    const src = readFileSync(`${dir}/${f}`, "utf8");
+    for (const gate of gates) assert.ok(src.includes(gate), `${f} keeps it off a runner with ${gate}`);
+  }
+});
+
+await check("on a runner the digest timer isn't set, Codex isn't installed, the Mac isn't looked at, and routing does nothing", async () => {
+  asRunner();
+  delete globalThis.bopsDigestTimer;
+  await import(`${root}/lib/server/attention.ts`);
+  assert.equal(globalThis.bopsDigestTimer, undefined, "no digest timer");
+  const codex = await import(`${root}/lib/server/codex-cli.ts`);
+  codex.installCodex();
+  assert.equal(codex.installStatus(), undefined, "Codex never installed");
+  let changed = 0;
+  const was = globalThis.__fake.store.update;
+  globalThis.__fake.store.update = (fn) => (changed++, fn(state));
+  const mac = await import(`${root}/lib/server/mac.ts`);
+  assert.equal(await mac.checkMac(), false);
+  assert.equal(changed, 0, "no look at a Mac kept in the state");
+  globalThis.__fake.store.update = was;
+  asMac();
+});
+
+/* ---------------- Starting ---------------- */
+
+const R = await import(`${root}/lib/server/runner-start.ts`);
+
+await check("a runner refuses to start without a window token, off loopback, on Postgres or a file, or without its computer or key file", () => {
+  assert.equal(R.runnerRefusal(good()), null);
+  assert.equal(R.runnerRefusal({ ...good(), HOSTNAME: "::1" }), null);
+  const no = (env, re) => assert.match(R.runnerRefusal({ ...good(), ...env }) ?? "", re, JSON.stringify(env));
+  no({ BOPS_UI_TOKEN: undefined }, /BOPS_UI_TOKEN/);
+  no({ BOPS_UI_TOKEN: "short" }, /BOPS_UI_TOKEN/);
+  no({ HOSTNAME: undefined }, /HOSTNAME/);
+  no({ HOSTNAME: "0.0.0.0" }, /HOSTNAME/);
+  no({ HOSTNAME: "10.0.0.5" }, /HOSTNAME/);
+  no({ HOSTNAME: "bops-computer" }, /HOSTNAME/);
+  no({ BOPS_LISTEN_ALL: "1" }, /loopback only/);
+  no({ BOPS_DATABASE_URL: "postgres://x" }, /Bops Cloud/);
+  no({ BOPS_SELF_HOSTED: "1" }, /Bops Cloud/);
+  no({ BOPS_RUNNER_COMPUTER: "not-an-id" }, /BOPS_RUNNER_COMPUTER/);
+  no({ BOPS_DEVICE_SEED: "c2c2c2c2-0000-4000-8000-000000000002" }, /BOPS_DEVICE_SEED/);
+  no({ BOPS_ORGO_KEY_FILE: undefined }, /BOPS_ORGO_KEY_FILE/);
+});
+
+await check("started on its own, a runner starts only what it runs", () => {
+  const run = spawnSync(process.execPath, ["--conditions=react-server", new URL(import.meta.url).pathname, "--start"], { encoding: "utf8" });
+  assert.equal(run.status, 0, `${run.stdout}${run.stderr}`.split("\n").filter((l) => /FAIL|passed|^\s{2}/.test(l)).join("\n"));
+});
+
+/* ---------------- Its key, and no Keychain ---------------- */
+
+await check("a runner's key is its file's, only when it's root's alone; it has no Keychain and never signs in", async () => {
+  asRunner();
+  const file = join(scratch, "key");
+  writeFileSync(file, "sk_runner_key\n");
+  chmodSync(file, 0o644);
+  process.env.BOPS_ORGO_KEY_FILE = file;
+  const warn = console.warn;
+  console.warn = () => {};
+  const A = await import(`${root}/lib/server/orgo-auth.ts`);
+  assert.equal(await A.loadOrgoKey(), null, "readable by others: not used");
+  console.warn = warn;
+  chmodSync(file, 0o600);
+  delete globalThis.bopsOrgoKey;
+  delete globalThis.bopsOrgoKeyMissAt;
+  assert.equal(await A.loadOrgoKey(), "sk_runner_key");
+  await assert.rejects(A.signIn("sk_other", { id: "u2" }), /Bops app on your Mac/);
+  await assert.rejects(A.signOut(), /Bops app on your Mac/);
+  const K = await import(`${root}/lib/server/keychain.ts`);
+  assert.equal(await K.getSecret("anything"), null);
+  await assert.rejects(K.setSecret("anything", "x"), /only in the Bops app on your Mac/);
+  asMac();
+});
+
+/* ---------------- In use, and where ---------------- */
+
+await check("a runner says its computer is in use as the runner's, only while a task of its own runs", async () => {
+  const F = await import(`${root}/lib/server/free-hours.ts`);
+  globalThis.__fake.orgo.orgo = {};
+  delete globalThis.bopsOrgoKey;
+  // orgoKey comes from orgo-auth (real): the key in memory.
+  globalThis.bopsOrgoKey = "sk_runner_key";
+  asRunner();
+  posts.length = 0;
+  await F.sayInUse();
+  assert.equal(posts.length, 0, "nothing running: nothing said (not even once)");
+  state.sessions = [{ id: "s1", status: "running", runsOn: "cloud", by: "mac-device" }];
+  await F.sayInUse();
+  assert.equal(posts.length, 0, "another Bops's task isn't this one's to say");
+  state.sessions = [{ id: "s2", status: "running", runsOn: "cloud", by: "me" }];
+  await F.sayInUse();
+  assert.deepEqual(posts, [{ path: "/api/bops/computer/active", body: { via: "runner" } }]);
+  asMac();
+  posts.length = 0;
+  state.sessions = [];
+  delete globalThis.bopsActivitySaid;
+  await F.sayInUse();
+  assert.deepEqual(posts, [{ path: "/api/bops/computer/active", body: {} }], "the Mac says it once as it opens, as before");
+});
+
+await check("chooseWhere never picks the Mac on a runner", async () => {
+  const W = await import(`${root}/lib/server/where.ts`);
+  asMac();
+  assert.equal(await W.chooseWhere("boppy", "Write it in Notes on my Mac"), "mac", "the Mac picks it there");
+  asRunner();
+  assert.equal(await W.chooseWhere("boppy", "Write it in Notes on my Mac"), "cloud", "the words");
+  assert.equal(await W.chooseWhere("boppy", "Check the news", "mac"), "cloud", "asked for outright");
+  assert.equal(await W.chooseWhere("boppy", "Check the news"), "cloud", "a bot set to work on the Mac");
+  assert.equal(await W.chooseWhere("boppy", "Check the news", "auto", { outside: true }), "cloud");
+  asMac();
+});
+
+rmSync(scratch, { recursive: true, force: true });
+console.log(`runner mode: ${passed} passed, ${failures} failed`);
+process.exit(failures ? 1 : 0);

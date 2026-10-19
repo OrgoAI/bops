@@ -5,7 +5,7 @@ import { CLOUD_TUNNEL_HEADER, type CloudToMac, type MacToCloud } from "@/cloud/p
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudSession, cloudUrl, forgetCloudSession } from "./cloud";
 import { orgoKey } from "./orgo-auth";
-import { onExit } from "./persist";
+import { loopHere, onExit } from "./persist";
 import { pullState, stateReady, stateUser } from "./store";
 
 /**
@@ -243,7 +243,8 @@ function closeTunnel() {
  * has loaded: what comes down the tunnel lands in the user's state.
  */
 export async function startCloud({ signedIn = false } = {}) {
-  if (!cloudOn() || !stateReady()) return;
+  // One tunnel per user: a computer's runner opening one would take the Mac's webhooks from it.
+  if (!cloudOn() || !stateReady() || !loopHere("tunnel")) return;
   if (signedIn) tunnel.replaced = false;
   if (signedIn || (!tunnel.want && !tunnel.replaced)) openTunnel();
   try {
@@ -255,7 +256,7 @@ export async function startCloud({ signedIn = false } = {}) {
 
 /** Bops Cloud running whenever it should be, even with a key the Keychain only gave later. The state route calls it on every poll, so it's cheap when it already is. */
 export function ensureCloud() {
-  if (cloudOn() && stateReady() && !tunnel.want && !tunnel.replaced) void startCloud();
+  if (cloudOn() && stateReady() && loopHere("tunnel") && !tunnel.want && !tunnel.replaced) void startCloud();
 }
 
 /** At a sign-out, while the key is still here: the tunnel closes, and the session is forgotten. (The state was saved first: app/api/auth/signout.) */

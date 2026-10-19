@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Builds Bops.app for release: the orgo-relay agent, the production server (Next standalone) and
-# the signed, notarized DMG + zip in dist-desktop/. See "Releasing the Mac app" in README.md.
+# Builds Bops.app for release: the orgo-relay agent, the production server (Next standalone, and its
+# bundle for the bots' computers: scripts/server-bundle.sh) and the signed, notarized DMG + zip in
+# dist-desktop/. See "Releasing the Mac app" in README.md.
 #
 # Signing uses a "Developer ID Application" certificate: from the keychain, or CSC_LINK (a .p12,
 # path or base64) + CSC_KEY_PASSWORD, or CSC_NAME to pick one. Notarization runs when one of these
@@ -32,50 +33,10 @@ fi
 [ -x "$relay" ] || { echo "Missing $relay (scripts/fetch-relay.sh puts it there)." >&2; exit 1; }
 file "$relay" | grep -q "arm64" || { echo "$relay is not an arm64 Mac binary." >&2; exit 1; }
 
-# 2. The server. Keys stay out of the app: .env files are never bundled. A release has no brains
-# (lib/types.ts BRAINS_ON): set here, so a .env file that turns them on for development can't, and
-# built into the server and the window alike, so nothing at run time can either.
-NEXT_PUBLIC_BOPS_BRAINS=0 npx next build
-rm -f .next/standalone/.env*
-rm -rf .next/standalone/.data
-[ -f .next/standalone/server.js ] || { echo "No .next/standalone/server.js: is output \"standalone\" set in next.config.ts?" >&2; exit 1; }
-# Only the built server ships: the compiled .next, its node_modules, public, server.js and the files
-# it reads at run time (vm/, cloud/, slack/). A file read through process.cwd() with a name known only
-# at run time makes the build's tracer copy parts of the project too (it once took .git, envs/,
-# docs/internal and scripts/), and the source is compiled into .next anyway, so anything else at the
-# top of the standalone folder is removed here, by name, before the app is built from it.
-for f in .next/standalone/* .next/standalone/.[!.]*; do
-  [ -e "$f" ] || continue
-  case "$(basename "$f")" in
-    .next | cloud | LICENSE | node_modules | package.json | public | server.js | slack | vm) ;;
-    *) echo "Not shipping $(basename "$f") (traced from the project, not part of the server)."; rm -rf "$f" ;;
-  esac
-done
-for f in .git .github envs docs scripts .sops.yaml .data; do
-  [ ! -e ".next/standalone/$f" ] || { echo ".next/standalone/$f is still there. Not shipping." >&2; exit 1; }
-done
-# No secret from the .env files next build reads may end up in what ships (only the setting names
-# are printed). Settings named like secrets are checked (plain URLs and names would match the code's
-# own defaults), written as KEY=v, KEY="v", KEY='v' or with `export ` in front.
-leaked=""
-for envfile in .env .env.local .env.production .env.production.local; do
-  [ -f "$envfile" ] || continue
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line#export }"
-    [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]] || continue
-    key="${BASH_REMATCH[1]}"; value="${BASH_REMATCH[2]}"
-    [[ "$(tr '[:lower:]' '[:upper:]' <<<"$key")" =~ (KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|DATABASE_URL) ]] || continue
-    value="${value%"${value##*[![:space:]]}"}"
-    case "$value" in
-      \"*\") value="${value:1:${#value}-2}" ;;
-      \'*\') value="${value:1:${#value}-2}" ;;
-    esac
-    [ "${#value}" -ge 12 ] || continue
-    if grep -rqsF -- "$value" .next/standalone .next/static public; then leaked="$leaked $key ($envfile)"; fi
-  done < "$envfile"
-done
-[ -z "$leaked" ] || { echo "Values of these settings are in the build output:$leaked. Not shipping." >&2; exit 1; }
+# 2. The server, built, stripped and checked for leaked secrets, and packed for the bots' computers'
+# Bops runners (dist-runner/bops-server-<version>-<BUILD_ID>.tgz, which the app ships in Resources/runner):
+# scripts/server-bundle.sh.
+scripts/server-bundle.sh
 
 # 3. Signing and notarization.
 signing=""
@@ -142,6 +103,13 @@ if [ -z "$ok" ] || grep -qE "Cannot find module|MODULE_NOT_FOUND|ENOENT" "$smoke
 fi
 rm -rf "$smoke"
 echo "Bundled server smoke test passed."
+# The bots' computers' runners are set up from the bundle the app carries (lib/server/runner-install.ts):
+# exactly one, with its sha256.
+bundles=("$app/Contents/Resources/runner/"bops-server-*.tgz)
+if [ "${#bundles[@]}" -ne 1 ] || [ ! -f "${bundles[0]}" ] || [ ! -f "${bundles[0]}.sha256" ]; then
+  echo "The app doesn't carry one server bundle for the bots' computers (Resources/runner)." >&2
+  exit 1
+fi
 
 # -dvv: plain -dv never prints the Authority lines. Read into a variable first: with pipefail, grep -q
 # stopping at the first match makes codesign fail on the closed pipe, and the check with it.

@@ -12,7 +12,7 @@ import { delegate, endCall, rememberVoices, voiceFor, voicePrompt } from "./call
 import { appHeaders } from "./app-version";
 import { CloudError, cloudOn, cloudProxy, cloudSession, cloudSessionNow, noteOutOfCredit } from "./cloud";
 import { installId } from "./mail";
-import { onPostgres } from "./persist";
+import { loopHere, onPostgres } from "./persist";
 import { ownerPhoneTable } from "./persist-pg";
 import { forgetOwnerNumber, syncCloudLines, tellCloudLine } from "./phone-lines";
 import { saveToMemory, wsOf } from "./memory";
@@ -760,7 +760,7 @@ gp.bopsPhoneTick = () => (stateReady() ? Promise.all([phoneCatchUp(), cloudOn() 
  * or another account signing in on this Mac) a look right away and their numbers' upkeep (lineUpkeep).
  */
 export function startPhone() {
-  if (!phoneOn() || !stateReady()) return;
+  if (!phoneOn() || !stateReady() || !loopHere("phone")) return;
   gp.bopsPhoneCatchUp ??= setInterval(() => void gp.bopsPhoneTick?.().catch(() => {}), 2 * 60_000);
   const who = stateUser() ?? "";
   if (gp.bopsPhoneUpkeepFor === who) return;

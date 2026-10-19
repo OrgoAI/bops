@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import type { MacState } from "@/lib/types";
 import { findCodex, installCodex, installStatus } from "./codex-cli";
 import { CHROME } from "./local";
-import { onPostgres } from "./persist";
+import { loopHere, onPostgres } from "./persist";
 import { getState, stateReady, update } from "./store";
 
 /**
@@ -36,7 +36,8 @@ const onTheMac = () => process.platform === "darwin" && !onPostgres();
 export async function checkMac() {
   // This Mac's readiness is kept in the signed-in user's state (state.mac, this Mac's own: state.macs):
   // none to keep it in signed out. A sign-in looks again once their state has loaded (orgo-sign-in.ts).
-  if (!stateReady()) return false;
+  // A computer's runner is no Mac, and keeps no look at one.
+  if (!stateReady() || !loopHere("mac-check")) return false;
   let ready = false;
   let reason: string | undefined;
   let next: MacState["next"];

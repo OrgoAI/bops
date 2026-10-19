@@ -101,6 +101,14 @@
       {
         "from": "vendor/orgo-relay/orgo-relay",
         "to": "bin/orgo-relay"
+      },
+      {
+        "from": "dist-runner",
+        "to": "runner",
+        "filter": [
+          "bops-server-*.tgz",
+          "bops-server-*.tgz.sha256"
+        ]
       }
     ],
     "npmRebuild": false,

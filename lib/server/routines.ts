@@ -8,7 +8,7 @@ import { cleanText, routineChanged, routineRan, syncRoutinesOnStart } from "./ro
 import { plainLinks } from "@/cloud/style";
 import { pingIfWorthIt } from "./attention";
 import { onPostgres } from "./persist";
-import { onRunner, runnerReady, runsHere } from "./runner";
+import { onRunner, runnerHasWork, runnerReady, runsHere } from "./runner";
 import { startSession } from "./sessions";
 import { addMessage, bot, getState, id, ownerName, patchSession, session, stateReady, stateTooNew, update } from "./store";
 import { findSkill, skillRefId } from "./workspace-skills";
@@ -847,12 +847,13 @@ function skipLate(r: Routine, due: number, next: number | undefined, now: number
  * missed while the Mac slept runs once, late, and says so, unless it waits for its next time, which is
  * close (skipLate), where a thread of the routine's still going stays its run. Each run's next time is set before it
  * starts, so a slow run never runs twice. Only this Bops's routines (runner.ts runsHere); a runner also
- * waits until it's sure of where the bots work and of the state (runnerReady), and a Bops whose state a
- * newer one wrote (it can't be given it now) runs none. Every new next time goes to Orgo (routineChanged).
+ * waits until it's sure of where the bots work, of the state and of its computer (runnerReady), only once
+ * one of its own needs the timer (runnerHasWork), and a Bops whose state a newer one wrote (it can't be
+ * given it now) runs none. Every new next time goes to Orgo (routineChanged).
  */
 function tick() {
   if (!stateReady() || stateTooNew()) return;
-  if (onRunner() && !runnerReady(() => g.__bopsRoutineTick?.())) return;
+  if (onRunner() && (!runnerHasWork() || !runnerReady(() => g.__bopsRoutineTick?.()))) return;
   keepZone();
   syncRoutinesOnStart();
   const now = Date.now();

@@ -7,7 +7,7 @@ import { live, workBot, type RelayRoute } from "@/lib/types";
 import { getSecret, setSecret } from "./keychain";
 import { loadOrgoKey, orgoKey, signedInUser } from "./orgo-auth";
 import { egress, orgo, orgoUnavailable } from "./orgo";
-import { onPostgres } from "./persist";
+import { loopHere, onPostgres } from "./persist";
 import { getState, stateEpoch, stateReady, update } from "./store";
 
 /**
@@ -478,7 +478,8 @@ const due = (r?: RelayRoute) => !r?.retryAt || Date.now() >= r.retryAt;
  * switch is read again before each computer, and a run that finds it flipped runs once more after.
  */
 export function reconcile(): Promise<void> {
-  if (sup.stopping || !stateReady()) return Promise.resolve();
+  // Routing goes through the Mac's home internet: a computer's runner never pairs itself as a device.
+  if (sup.stopping || !stateReady() || !loopHere("relay")) return Promise.resolve();
   if (sup.reconciling) return sup.reconciling;
   const wasOn = !!getState().relay?.on;
   const stillOn = () => !!getState().relay?.on && !sup.stopping;

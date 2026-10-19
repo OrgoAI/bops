@@ -1072,15 +1072,16 @@ export type AppState = {
  * A computer's Bops runner (AppState.runners). `status`: being set up, up (its health check passed: it
  * runs that computer's routines, and the Mac leaves them to it), couldn't start (`error` says why: those
  * routines stay on the Mac), or being stopped (where the bots work switched to This Mac, the computer was
- * deleted, its bots moved off). `version` and `buildId`: the Bops it runs. `keyId`: the Orgo key made for
- * it (orgo-web /api/computers/{id}/bops-runner-key), which only the Mac that made it (`by`, its device id)
- * revokes. `at`: when the status was set.
+ * deleted, its bots moved off). `version` and `buildId`: the Bops it runs, set up by the Mac `by` (its
+ * device id). `keyId`: the Orgo key made for it (orgo-web /api/computers/{id}/bops-runner-key), which
+ * other Macs use too and only the Mac that made it (`keyBy`) revokes. `at`: when the status was set.
  */
 export type RunnerState = {
   status: "installing" | "running" | "failed" | "stopping";
   version: string;
   buildId: string;
   keyId?: string;
+  keyBy?: string;
   by: string;
   error?: string;
   at: number;

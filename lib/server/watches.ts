@@ -11,6 +11,7 @@ import { appWindows, findWindow, listWindows, mainWindow, windowText } from "./m
 import { orgo } from "./orgo";
 import { sameComputer, screenEndpoint, workComputer } from "./screens";
 import { ensureScreenTools, startSession, stopSession } from "./sessions";
+import { loopHere } from "./persist";
 import { addMessage, bot, getState, id, ownerName, patchSession, session, stateEpoch, stateReady, stateUser, touchState, update } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { openaiClient } from "./openai-client";
@@ -831,10 +832,11 @@ async function macPage(w: Watch) {
 }
 
 // One loop for every watched screen; importing this module (the state route does) starts it. The
-// loop calls whatever version of `look` was loaded last, so edits apply without a restart.
+// loop calls whatever version of `look` was loaded last, so edits apply without a restart. Watches are
+// the Mac's: a computer's runner never looks (persist.ts loopHere).
 const g = globalThis as typeof globalThis & { __bopsWatches?: ReturnType<typeof setInterval>; __bopsLook?: typeof look };
 g.__bopsLook = look;
-g.__bopsWatches ??= setInterval(() => {
+if (loopHere("watches")) g.__bopsWatches ??= setInterval(() => {
   if (!stateReady()) return;
   for (const w of getState().watches ?? []) void g.__bopsLook?.(w.id);
 }, LOOK_MS);

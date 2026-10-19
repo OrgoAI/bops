@@ -9,7 +9,7 @@ import { checkMac } from "./mac";
 import { quitBotChromes } from "./local";
 import { orgo } from "./orgo";
 import { loadOrgoKey, orgoKey, orgoOrigin, signedInUser, signIn, type OrgoUser } from "./orgo-auth";
-import { onPostgres, StateLoadError } from "./persist";
+import { loopHere, onPostgres, StateLoadError } from "./persist";
 import { relayAfterSignIn, stopRelay } from "./relay";
 import { reattachFreeComputer, stopAllSessions } from "./sessions";
 import { bindSignIn, getState, stateInCloud, stateUser, update } from "./store";
@@ -218,7 +218,8 @@ async function finish(p: Pending, apiKey: string, user: OrgoUser): Promise<SignI
  * sign-in until it's done. On an Orgo without them it does nothing and says nothing.
  */
 async function moveOntoOrgoWorkspaces(userId: string) {
-  if (signedInUser()?.id !== userId) return;
+  // The Mac's to do: a computer's runner never moves the workspaces.
+  if (signedInUser()?.id !== userId || !loopHere("free-computer")) return;
   const { migrateWorkspacesToOrgo } = await import("./workspaces");
   await migrateWorkspacesToOrgo().catch((e: Error) => console.warn(`[sign-in] moving onto Orgo workspaces: ${e.message}`));
 }

@@ -1,6 +1,7 @@
 import "server-only";
 import { chose, decide } from "./decide";
 import { fullAccessOn } from "./full-access";
+import { onRunner } from "./persist";
 import { MAC_WORDS } from "./runner";
 import { bot, getState, ownerName } from "./store";
 
@@ -61,6 +62,8 @@ const BUT_ANYWHERE = /\b(?:anywhere|anything|everywhere|everything|nowhere|all|n
  * there may have their files, apps and a shell, and its goal was written from someone else's words.
  */
 export async function chooseWhere(botId: string, goal: string, asked: "mac" | "cloud" | "auto" = "auto", opts: { outside?: boolean } = {}): Promise<Where> {
+  // A computer's runner is on the bot's computer, with no Mac and nobody to ask: it runs only what needs no Mac (runner.ts pinnedToMac).
+  if (onRunner()) return "cloud";
   const state = getState();
   const mac = state.mac;
   // Full access is kept on this Mac, not in the state (full-access.ts).

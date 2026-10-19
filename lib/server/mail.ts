@@ -9,6 +9,7 @@ import { cloudJson, cloudOn, cloudSessionNow } from "./cloud";
 import { askOwner } from "./composio";
 import { foundByBots } from "./treg";
 import { saveUpload } from "./uploads";
+import { loopHere } from "./persist";
 import { addMessage, bot, getState, installId, ofThisUser, ownerName, sameState, stateEpoch, stateReady, update } from "./store";
 import { recordUsage } from "./usage";
 
@@ -675,8 +676,8 @@ export function startMail() {
     live.socket.close();
     live.socket = undefined;
   }
-  // (Signed out on the Mac app there's no state for mail to land in.)
-  if (!key || live.socket || live.starting || !stateReady()) return;
+  // (Signed out on the Mac app there's no state for mail to land in.) Email is the Mac's to listen for, never a computer's runner's.
+  if (!key || live.socket || live.starting || !stateReady() || !loopHere("mail")) return;
   live.starting = true;
   void (async () => {
     try {

@@ -10,7 +10,7 @@ import { MAIN_WORKSPACE } from "@/lib/types";
 import { bankOf, bankOwner, bindingOf, cardOf, dream as askToDream, existingFacts, factSource, factsByIds, memoryOn, privateLines, purgeMemory, saidSince, scanFacts, sessionWorkspace, type FactRow } from "./memory";
 import { openaiClient } from "./openai-client";
 import { orbitChanged, orbitOpened, orbitPreview } from "./orbit-sync";
-import { onPostgres } from "./persist";
+import { loopHere, onPostgres } from "./persist";
 import { getState, ownerName, sameState, stateEpoch, update, userDir } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { currentWorkspaceId } from "./workspaces";
@@ -1063,6 +1063,7 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
 
 /** A look later, once per reason: a newer ask replaces it, or (`keep`) leaves one already set. Never for an account that signed in since. */
 function later(ws: string, why: string, ms: number, opts: SyncOpts, keep = false) {
+  if (!loopHere("categories")) return;
   const b = space(ws);
   if (keep && b.timers.has(why)) return;
   clearTimeout(b.timers.get(why));
@@ -1077,7 +1078,8 @@ function later(ws: string, why: string, ms: number, opts: SyncOpts, keep = false
 
 /** While Bops is open: every 15 minutes, a look at the workspace in use, unless one ran meanwhile. */
 function ensureTimer() {
-  if (live.timer) return;
+  // Memory is sorted on the Mac: a computer's runner leaves it for when the Mac is open.
+  if (live.timer || !loopHere("categories")) return;
   live.timer = setInterval(() => {
     if (!categoriesOn()) return;
     const ws = currentWorkspaceId();

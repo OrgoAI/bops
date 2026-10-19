@@ -199,7 +199,8 @@ const access: StateAccess = {
     box.version++;
   },
 };
-const store: Persistence = onPostgres() ? pgStore(access) : selfHosted() ? fileStore(access) : cloudStore(access);
+// A computer's runner keeps the user's state where their Mac does, in Bops Cloud, whatever else is set (instrumentation.ts refuses to start one that sets it).
+const store: Persistence = onRunner() ? cloudStore(access) : onPostgres() ? pgStore(access) : selfHosted() ? fileStore(access) : cloudStore(access);
 // The version starts somewhere random each boot, so a page that polled before a restart can't mistake a new state for its own.
 g.__bops2 ??= { state: migrate(store.initial() ?? {}), version: Math.floor(Math.random() * 1e9) };
 const box = g.__bops2;

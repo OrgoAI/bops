@@ -1,6 +1,7 @@
 import "server-only";
 import { botChatId, MAIN_WORKSPACE, workspaceOf } from "@/lib/types";
 import { chose, decide } from "./decide";
+import { loopHere } from "./persist";
 import { addMessage, getState, ownerName, stateReady, update } from "./store";
 
 /**
@@ -96,8 +97,9 @@ function flush() {
   }
 }
 
+// The Mac sends the digest: what a computer's runner holds waits in the state for it.
 if (g.bopsDigestTimer) clearInterval(g.bopsDigestTimer);
-g.bopsDigestTimer = setInterval(() => stateReady() && flush(), 60_000);
+if (loopHere("digest")) g.bopsDigestTimer = setInterval(() => stateReady() && flush(), 60_000);
 
 /** A finished task's result: if Jev says it's worth interrupting the user for, it chimes (and notifies, if Bops is behind). */
 export function pingIfWorthIt(messageId: string, title: string, answer: string) {
