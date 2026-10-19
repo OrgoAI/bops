@@ -410,8 +410,9 @@ export async function syncApps() {
     if (known.has(accountId) || x.status !== "active") continue;
     // Being connected right now: the sign-in finishing adds it, with its label.
     if (getState().connecting?.some((c) => c.app === x.app && c.status === "waiting")) continue;
-    // Connected somewhere else: the main workspace's bots have it by default.
-    added.push({ id: accountId, app: x.app, appName: await appNameOf(x.app), name: await accountName(accountId).catch(() => undefined), status: x.status, at: Date.now(), workspaceId: MAIN_WORKSPACE });
+    // Connected where this Mac didn't see who was picked for it (a Mac still on an older Bops, which Bops
+    // Cloud keeps out of your state until it's updated): only the bots you give it, never every bot.
+    added.push({ id: accountId, app: x.app, appName: await appNameOf(x.app), name: await accountName(accountId).catch(() => undefined), status: x.status, at: Date.now(), workspaceId: MAIN_WORKSPACE, onlyGiven: true });
   }
   // Accounts whose name wasn't known when they came in.
   const named = new Map<string, string>();

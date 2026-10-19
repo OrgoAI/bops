@@ -1130,7 +1130,8 @@ export type AppAccount = {
   workspaceId?: string;
   /**
    * Connected before every bot had every app by default (lib/server/store.ts set its workspace when it
-   * loaded it): only the bots the user gave it may use it, as there.
+   * loaded it), or found in Composio connected where Bops didn't see who was picked for it (syncApps): only
+   * the bots the user gave it may use it, as there.
    */
   onlyGiven?: boolean;
 };

@@ -320,7 +320,7 @@ await check("an account from before is only the bots' it was given: each has wha
   );
 });
 
-await check("accounts connected from now on are every bot's of their workspace; one from before given to a bot, or signed back in, stays only its bots'", async () => {
+await check("accounts connected from now on are every bot's of their workspace; one from before given to a bot, or signed back in, or one found in Composio, stays only its bots'", async () => {
   Object.assign(state, fromV028());
   const meta = { description: "", categories: [], tools_count: 1 };
   let connected;
@@ -350,10 +350,16 @@ await check("accounts connected from now on are every bot's of their workspace; 
     },
   });
   const levels = (a) => state.bots.map((b) => T.levelOf(b, a));
-  // Connected somewhere else (found in Composio): the main workspace's, as before.
+  // Found in Composio, connected where this Mac didn't see who was picked (a Mac still on v0.0.28, whose
+  // state Bops Cloud keeps out until it's updated): nobody's until given, Just do it can't use it either.
   await C.syncApps();
-  assert.equal(account("ca_found")?.workspaceId, "ws_main");
-  assert.deepEqual(levels(account("ca_found")), ["act", "act", "act", "act", null]);
+  assert.deepEqual([account("ca_found")?.workspaceId, account("ca_found")?.onlyGiven], ["ws_main", true]);
+  assert.deepEqual(levels(account("ca_found")), [null, null, null, null, null]);
+  const n = executed.length;
+  assert.match(await C.runAppAction("penny", "GMAIL_SEND_EMAIL", { to: "a@b.c" }, { chatId: "bot:penny" }), /^You don't have that app/);
+  assert.equal(executed.length, n, "Just do it did nothing");
+  bot("otto").access.ca_found = "read";
+  assert.deepEqual(levels(account("ca_found")), [null, null, null, "read", null], "given to a bot: its alone");
   // Connected here.
   await C.connectApp("weathermap");
   assert.deepEqual(levels(account("open:weathermap")), ["act", "act", "act", "act", null]);
