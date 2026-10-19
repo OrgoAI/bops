@@ -1,7 +1,7 @@
 import "server-only";
 import { readlinkSync } from "node:fs";
 import { trackServerEvent } from "./analytics";
-import { botChatId, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
+import { botChatId, levelOf, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
 import { appNameFor, CHECK_TEMPLATE, tagsOf } from "@/lib/routine-catalog";
 import { describeSchedule as describe, EVENT_CHECK_MINUTES, eventWindow, inHours, nextRun, sameWallTime, normalizeSchedule, resolveOnce, validTimeZone, whenText } from "@/cloud/schedule";
 import { cleanText, routineChanged, routineRan, syncRoutinesOnStart } from "./routine-sync";
@@ -459,12 +459,29 @@ async function run(routineId: string, opts: RunOpts): Promise<RoutineRun> {
   if (!b) return record(r.id, { at, status: "skipped", error: "Its bot isn't there anymore." });
   if (opts.manual) update(() => (r.lastRunAt = at));
   if (r.reminder) return remind(r, b, at, opts);
+  const blocked = checkBlocked(r, b);
+  if (blocked) return failed(r, at, blocked, r.last);
   // A meeting routine with no meetings left to handle (the runs before it got further, or it's outside its hours): nothing to ask.
   const w = eventWindow(r.schedule, at, r.eventsThrough, zoneOf(r));
   if (w && w.from >= w.to) return record(r.id, { at, status: "quiet" });
   // Someone else's routine is never a chat run (createRoutine, editRoutine), whatever its state says.
   if (r.run === "chat" && !r.fromOutside) return chatRun(r, b, at, opts);
   return taskRun(r, b, at, opts);
+}
+
+/**
+ * Why a Connected App's check (CHECK_TEMPLATE) can't run now, else undefined: its account isn't connected
+ * anymore (gone from Composio), is signed out, or its bot can't use it now. Not run then: use_app would
+ * take another account the bot has in the app (its only one when the name it's given matches none) and
+ * tell what's new there as this one's.
+ */
+function checkBlocked(r: Routine, b: Bot): string | undefined {
+  if (r.source?.template !== CHECK_TEMPLATE || !r.source.account) return undefined;
+  const a = getState().accounts?.find((x) => x.id === r.source!.account);
+  if (!a) return `That ${appWord(r.source.app)} account isn't connected anymore. Delete this routine, or connect it again in the Vault.`;
+  if (a.status !== "active") return `${checkWord(r.source)} is signed out. Sign in again in the Vault.`;
+  if (!levelOf(b, a)) return `${b.name} can't use ${checkWord(r.source)} now. Give it access in the Vault, or delete this routine.`;
+  return undefined;
 }
 
 /**

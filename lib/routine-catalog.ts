@@ -440,9 +440,11 @@ export const checkTitle = (appName: string, label?: string) => `Check ${appName}
 /**
  * What a check does each run, as the user would ask it, for the access its bot has there. Read only: look
  * at what's new since the last check and say only what matters. Read & act: handle it too, and anything
- * that sends, posts, deletes or pays asks the user first (use_app asks them). The account is named when
- * it has a name (the user's label first), so a bot with several in the app uses this one. Quiet (a check
- * through the day): NOTHING when nothing matters; a morning one says so in a line.
+ * that sends, posts, deletes or pays asks the user first (use_app asks them); a bot set to Just do it,
+ * which use_app doesn't ask for, leaves those and says what it would do, so the How often line holds for
+ * it too. The account is named when it has a name (the user's label first), so a bot with several in the
+ * app uses this one. Quiet (a check through the day): NOTHING when nothing matters; a morning one says so
+ * in a line.
  */
 export function checkGoal(a: { appName: string; label?: string; name?: string; open?: boolean }, level: AppLevel, quiet: boolean): string {
   const which = a.open ? undefined : a.label?.trim() || a.name?.trim();
@@ -451,7 +453,7 @@ export function checkGoal(a: { appName: string; label?: string; name?: string; o
     `Check ${where} for what's new since the last check, or the last 24 hours the first time (find_app_actions, then use_app${which ? ` with account "${which}"` : ""}).`,
     level === "read"
       ? `Tell me only what matters: what needs me, and what changed that I'd want to know, the most urgent first. Read only: don't send, post, reply, change or delete anything in ${a.appName}.`
-      : `Handle what's new that you can within your access: draft a reply, sort, label, update or file it. Anything that sends, posts, deletes or pays asks me first (use_app asks me), so leave those for me to approve. Then tell me what you did and what still needs me.`,
+      : `Handle what's new that you can within your access: draft a reply, sort, label, update or file it. Anything that sends, posts, deletes or pays asks me first (use_app asks me), so leave those for me to approve. If you're set to "Just do it", use_app won't ask, so don't do those here: say what you'd do. Then tell me what you did and what still needs me.`,
     quiet ? "If nothing new matters, answer NOTHING." : "If nothing new matters, say so in one line.",
   ].join(" ");
 }

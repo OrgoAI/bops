@@ -431,6 +431,7 @@ await check("each How often makes one routine on the right bot: its schedule, a 
   assert.match(wiki.goal, /^Check my Notion account "Acme wiki"/);
   assert.match(wiki.goal, /Handle what's new that you can within your access/);
   assert.match(wiki.goal, /Anything that sends, posts, deletes or pays asks me first \(use_app asks me\)/);
+  assert.match(wiki.goal, /If you're set to "Just do it", use_app won't ask, so don't do those here: say what you'd do\./, "asks before it sends on Just do it too");
   assert.match(wiki.goal, /Then tell me what you did and what still needs me\./);
   assert.doesNotMatch(wiki.goal, /Read only/);
 
@@ -507,6 +508,40 @@ await check("a check is a routine like any other: the bot sees it with its accou
   assert.deepEqual(checksOf("ca_work"), []);
   assert.equal(state.routines.length, others, "only that account's");
   assert.equal(checksOf("ca_notion").length, 1);
+});
+
+await check("a check whose account went, is signed out or its bot can't use now doesn't run (use_app would take another account of the app), and says why once", async () => {
+  const work = state.accounts.find((a) => a.id === "ca_work");
+  state.accounts.push({ id: "ca_home", app: "gmail", appName: "Gmail", label: "Personal", status: "active", at: 1, workspaceId: "ws_main" });
+  const r = S.makeCheck("ca_work", { bots: ["bot_main"], level: "read", check: hourly }).routine;
+  const answer = fake.answer;
+  fake.answer = async () => ({ text: "NOTHING" });
+  const jobs = fake.jobs.length;
+  const said = () => state.messages.filter((m) => m.role === "system" && m.text.startsWith('"Check Gmail (Work)" didn\'t run:')).map((m) => m.text);
+  try {
+    assert.equal((await R.runRoutine(r.id)).status, "quiet", "runs while it can");
+    assert.equal(fake.jobs.length, jobs + 1);
+    work.status = "expired";
+    let run = await R.runRoutine(r.id);
+    assert.deepEqual([run.status, run.error], ["failed", "Gmail (Work · sam@acme.com) is signed out. Sign in again in the Vault."]);
+    await R.runRoutine(r.id);
+    assert.equal(said().length, 1, "said once, not every hour");
+    work.status = "active";
+    state.bots.find((b) => b.id === "bot_main").access.ca_work = "none";
+    run = await R.runRoutine(r.id);
+    assert.equal(run.error, "Jev can't use Gmail (Work · sam@acme.com) now. Give it access in the Vault, or delete this routine.");
+    state.accounts = state.accounts.filter((a) => a.id !== "ca_work");
+    run = await R.runRoutine(r.id);
+    assert.equal(run.error, "That Gmail account isn't connected anymore. Delete this routine, or connect it again in the Vault.");
+    assert.equal(fake.jobs.length, jobs + 1, "never run on Personal instead");
+    for (const t of said()) noDashes(t, "a check that can't run");
+  } finally {
+    fake.answer = answer;
+    if (!state.accounts.includes(work)) state.accounts.push(work);
+    state.accounts = state.accounts.filter((a) => a.id !== "ca_home");
+    state.bots.find((b) => b.id === "bot_main").access.ca_work = "read";
+    R.deleteRoutine(r.id);
+  }
 });
 
 /* ---------------- The routes ---------------- */
