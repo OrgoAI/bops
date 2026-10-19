@@ -602,8 +602,8 @@ function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }: { stat
     a.auth === "open"
       ? `${a.name} needs no sign-in: your bots can use it straight away.`
       : a.auth === "key"
-        ? `${a.name} connects with an API key. A secure Composio page opens in your browser and asks for it; Bops never sees it.`
-        : `${a.name}'s own sign-in opens in your browser. Composio keeps the access; Bops never sees your password.`;
+        ? `${a.name} connects with an API key. A secure page opens in your browser and asks for it. Bops never sees it.`
+        : `${a.name}'s own sign-in opens in your browser. Bops never sees your password.`;
   return (
     <div className="flex flex-col gap-4 p-5">
       <div className="flex items-start gap-3">
