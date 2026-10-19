@@ -61,8 +61,8 @@ export function brainLine(state: AppState, x: Brain, keys?: string[]): string {
   return "Not signed in";
 }
 
-/** Start a plan brain's sign-in on the computer `botId` works on; the app shows that screen. Null, or why not. */
-async function signIn(brainId: string, botId: string, onShowScreen: Shown): Promise<string | null> {
+/** Start a plan brain's sign-in on the computer `botId` works on; the app shows that screen. Null, or why not. Also a waiting thread's Sign in (chat-view.tsx NeedsYouCard). */
+export async function brainSignIn(brainId: string, botId: string, onShowScreen: Shown): Promise<string | null> {
   try {
     const res = await post("/api/brains/sign-in", { brainId, botId });
     const j = (await res.json().catch(() => ({}))) as { botId?: string; display?: number; error?: string };
@@ -217,7 +217,7 @@ function BrainRow({ state, brain: x, keys, onShowScreen }: { state: AppState; br
             </>
           )}
           {next && (
-            <button disabled={busy} onClick={() => void run(() => signIn(x.id, next.id, onShowScreen))} className={dark}>
+            <button disabled={busy} onClick={() => void run(() => brainSignIn(x.id, next.id, onShowScreen))} className={dark}>
               Sign in on {computerOf(state, next)}
             </button>
           )}
@@ -354,7 +354,7 @@ export function AddBrain({
         setMade(brainId);
       }
       if (auth === "plan" && first) {
-        const why = await signIn(brainId, first.id, onShowScreen);
+        const why = await brainSignIn(brainId, first.id, onShowScreen);
         if (why) return setError(why);
       }
       onDone();
@@ -512,7 +512,7 @@ export function BotBrain({ state, bot: b, onShowScreen, className }: { state: Ap
               disabled={busy}
               onClick={async () => {
                 setBusy(true);
-                setError(await signIn(now.id, b.id, onShowScreen));
+                setError(await brainSignIn(now.id, b.id, onShowScreen));
                 setBusy(false);
               }}
               className={dark}

@@ -20,12 +20,13 @@ export function needsYou(s: Session) {
   return s.status === "failed" && !!s.error && !/stopped by you|paused/i.test(s.error);
 }
 
-/** What a thread waits on, for its card's buttons. */
-export type AskKind = "where" | "blocker" | "safety" | "elsewhere" | "failed" | "question";
+/** What a thread waits on, for its card's buttons. "brain": its brain signed in on its bot's computer (Session.brainRun). */
+export type AskKind = "where" | "blocker" | "brain" | "safety" | "elsewhere" | "failed" | "question";
 
 export function askKind(s: Session): AskKind {
   if (s.askWhere && live(s)) return "where";
   if (s.blocker) return "blocker";
+  if (s.brainRun?.waits === "sign_in" && !live(s)) return "brain";
   if (s.status === "failed") return "failed";
   if (s.owed?.some((o) => o.checks)) return "safety";
   if (s.approveElsewhere) return "elsewhere";

@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# A thread a brain runs (lib/server/cli-agents.ts): one Claude Code process per thread on this computer,
+# started detached and pinned to the thread's screen, that Bops talks to through files, since Bops reaches
+# the computer one command at a time (Orgo's bash) and has no stream back. Each thread has a folder,
+# /root/.bops/agents/<thread>:
+#   in.jsonl   what Bops sends, one stream-json user line per message, which Claude Code reads as it comes
+#   out.jsonl  what Claude Code says (stream-json events), which Bops reads on from where it got to (read)
+#   mcp.json   its tools besides its own: Bops' screen and browser MCP servers, as a Bops agent thread has them
+#   prompt.md  Bops' briefing for it (the bot, how it works, its skills, apps and memory), after Claude Code's own
+#   key        a key brain's key, for a moment: bops-brain run reads it into the environment and deletes it
+# Claude Code runs through bops-brain run: from an empty environment, in the brain's own folder, with no
+# Anthropic key or token but the brain's own key, if it has one.
+#
+# Usage:
+#   bops-agent put <thread> mcp.json|prompt.md|key
+#       write stdin to that file, readable by root only
+#   bops-agent start <thread> <brain> claude <display> <computer> <session> [-- <more claude args>...]
+#       stop the thread's process left from before, if there is one, and start Claude Code on that screen,
+#       in /workspace. It picks <session> back up when the brain's folder has it, else starts it fresh as
+#       <session>. Prints "started resumed" or "started fresh".
+#   bops-agent send <thread>
+#       append stdin (one line) to in.jsonl while its process runs; "gone" and exit 3 when it doesn't
+#   bops-agent read <thread> <offset> [bytes]
+#       a header line ("@@bops-agent@@ " and JSON: the offset to read on from, whether it runs, whether
+#       there's more to read, its last error words when it doesn't run), then out.jsonl's whole lines from
+#       <offset>, each made small (no pictures, long text cut), about [bytes] of them at most
+#   bops-agent stop <thread>    Stop: SIGINT, then harder if it doesn't go
+#   bops-agent close <thread>   the end of a run: its input ends and it exits once it's done (SIGINT after a few seconds)
+set -euo pipefail
+AGENTS="${BOPS_AGENTS:-/root/.bops/agents}"
+BRAINS="${BOPS_BRAINS:-/root/.bops/brains}"
+WORK="${BOPS_WORKSPACE:-/workspace}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# What Claude Code may do without asking: what a Bops agent does on its own computer (the shell, files,
+# search and reading pages, a to-do list, helpers) and Bops' screen and browser tools. Anything else asks
+# the user in Bops first (the screen MCP's approve tool).
+ALLOWED="Bash,BashOutput,KillShell,Read,Edit,MultiEdit,Write,Glob,Grep,LS,WebFetch,WebSearch,TodoWrite,Task,Agent,mcp__screen,mcp__browser"
+usage() { echo "usage: bops-agent put|start|send|read|stop|close <thread> ..." >&2; exit 2; }
+CMD="${1:-}"; T="${2:-}"
+[[ "$T" =~ ^[A-Za-z0-9_-]+$ ]] || usage
+DIR="$AGENTS/$T"
+
+# Its Claude Code is running: the process Bops started, as its pid file says, and still that one (its
+# arguments name this thread's folder), not another that took the number after a restart.
+alive() {
+  local p
+  p="$(cat "$DIR/pid" 2>/dev/null || true)"
+  [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null || return 1
+  case "$(ps -ww -o args= -p "$p" 2>/dev/null || true)" in *"$DIR/"*) return 0 ;; esac
+  return 1
+}
+# Wait up to $1 tenths of a second for it to be gone.
+gone_within() {
+  local i
+  for i in $(seq 1 "$1"); do alive || return 0; sleep 0.1; done
+  ! alive
+}
+untail() { pkill -f "[t]ail .*$DIR/in.jsonl" 2>/dev/null || true; }
+signal() { local p; p="$(cat "$DIR/pid" 2>/dev/null || true)"; [[ "$p" =~ ^[0-9]+$ ]] && kill "-$1" "$p" 2>/dev/null || true; }
+halt() {
+  if alive; then
+    signal INT
+    gone_within 30 || { untail; gone_within 20; } || { signal TERM; gone_within 20; } || signal KILL
+  fi
+  untail
+  rm -f "$DIR/key"
+}
+
+case "$CMD" in
+  put)
+    NAME="${3:-}"
+    case "$NAME" in mcp.json|prompt.md|key) ;; *) usage ;; esac
+    mkdir -p "$DIR" && chmod 700 "$AGENTS" "$DIR"
+    (umask 077; cat > "$DIR/$NAME.tmp")
+    mv -f "$DIR/$NAME.tmp" "$DIR/$NAME"
+    echo ok
+    ;;
+  start)
+    B="${3:-}"; KIND="${4:-}"; N="${5:-}"; C="${6:-}"; SID="${7:-}"
+    [[ "$B" =~ ^[A-Za-z0-9_-]+$ && "$C" =~ ^[A-Za-z0-9_-]+$ && "$N" =~ ^[0-9]+$ && "$SID" =~ ^[0-9a-f-]{36}$ ]] || usage
+    [ "$KIND" = claude ] || { echo "no $KIND here yet" >&2; exit 2; }
+    shift 7
+    [ "${1:-}" = -- ] && shift
+    [ -f "$DIR/mcp.json" ] && [ -f "$DIR/prompt.md" ] || { echo "its tools or briefing aren't there" >&2; exit 1; }
+    # A key file that came with this start is kept for the new process; anything else from the last one goes.
+    [ -f "$DIR/key" ] && mv -f "$DIR/key" "$DIR/key.next"
+    halt
+    [ -f "$DIR/key.next" ] && mv -f "$DIR/key.next" "$DIR/key"
+    rm -f "$DIR/pid"
+    : > "$DIR/in.jsonl"; : > "$DIR/out.jsonl"; : > "$DIR/err.log"
+    chmod 600 "$DIR/in.jsonl" "$DIR/out.jsonl" "$DIR/err.log"
+    mkdir -p "$WORK"
+    # Claude Code keeps each session in its folder (projects/<the folder it ran in>/<session>.jsonl).
+    MODE=fresh
+    if [ -d "$BRAINS/$B/projects" ] && [ -n "$(find "$BRAINS/$B/projects" -name "$SID.jsonl" -print -quit 2>/dev/null)" ]; then MODE=resumed; fi
+    DISPLAY=":$N" setsid nohup "$HERE/bops-agent" _run "$T" "$B" "$C" "$MODE" "$SID" "$@" < /dev/null > /dev/null 2>> "$DIR/err.log" &
+    for _ in $(seq 1 50); do [ -s "$DIR/pid" ] && break; sleep 0.1; done
+    [ -s "$DIR/pid" ] || { echo "it didn't start: $(tail -c 300 "$DIR/err.log")" >&2; exit 1; }
+    echo "started $MODE"
+    ;;
+  _run)
+    # Behind start, detached: Claude Code reading in.jsonl as it grows, through a pipe from a tail of it
+    # (its input ends when the tail goes: close), then a last line in out.jsonl once it's gone.
+    B="$3"; C="$4"; MODE="$5"; SID="$6"; shift 6
+    cd "$WORK"
+    KEY=()
+    [ -f "$DIR/key" ] && KEY=(--key-file "$DIR/key")
+    ARGS=(-p --input-format stream-json --output-format stream-json --verbose
+      --mcp-config "$DIR/mcp.json" --strict-mcp-config
+      --append-system-prompt-file "$DIR/prompt.md"
+      --allowedTools "$ALLOWED")
+    # What isn't allowed asks the user, through the screen MCP (none when it has no screen tools: it's turned down).
+    if grep -q '"screen"' "$DIR/mcp.json"; then ARGS+=(--permission-prompt-tool mcp__screen__approve); fi
+    if [ "$MODE" = resumed ]; then ARGS+=(--resume "$SID"); else ARGS+=(--session-id "$SID"); fi
+    "$HERE/bops-brain" run "$B" claude --computer "$C" ${KEY[@]+"${KEY[@]}"} -- "${ARGS[@]}" "$@" < <(exec tail -n +1 -F "$DIR/in.jsonl" 2>/dev/null) > "$DIR/out.jsonl" 2>> "$DIR/err.log" &
+    echo $! > "$DIR/pid"
+    set +e; wait $!; CODE=$?; set -e
+    untail
+    rm -f "$DIR/key"
+    printf '{"type":"bops","subtype":"exited","code":%d}\n' "$CODE" >> "$DIR/out.jsonl"
+    ;;
+  send)
+    alive || { echo gone; exit 3; }
+    cat >> "$DIR/in.jsonl"
+    echo sent
+    ;;
+  read)
+    OFF="${3:-0}"; MOST="${4:-262144}"
+    [[ "$OFF" =~ ^[0-9]+$ && "$MOST" =~ ^[0-9]+$ ]] || usage
+    UP=0; alive && UP=1
+    python3 - "$DIR" "$OFF" "$MOST" "$UP" <<'PY'
+import json, os, sys
+
+d, off, most, up = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4] == "1"
+LONG = 2000
+
+
+def small(v, depth=0):
+    """A value as Bops needs it: pictures and signatures out, long text cut."""
+    if isinstance(v, str):
+        return v if len(v) <= LONG else v[:LONG] + "…"
+    if isinstance(v, list):
+        return [small(x, depth + 1) for x in v[:200]]
+    if isinstance(v, dict):
+        if v.get("type") in ("image", "document"):
+            return {"type": v["type"]}
+        return {k: small(x, depth + 1) for k, x in v.items() if k != "signature" and depth < 12}
+    return v
+
+
+lines, size, at, more = [], 0, off, False
+try:
+    with open(os.path.join(d, "out.jsonl"), "rb") as f:
+        f.seek(0, 2)
+        end = f.tell()
+        f.seek(min(off, end))
+        read = 0
+        while size < most and read < 8 * 1024 * 1024:
+            raw = f.readline()
+            if not raw or not raw.endswith(b"\n"):
+                break
+            at += len(raw)
+            read += len(raw)
+            text = raw.decode("utf-8", "replace").strip()
+            if not text:
+                continue
+            try:
+                ev = small(json.loads(text))
+            except ValueError:
+                ev = {"type": "bops", "subtype": "text", "text": small(text)}
+            line = json.dumps(ev, ensure_ascii=False)
+            lines.append(line)
+            size += len(line)
+        more = f.tell() < end and at < end
+except FileNotFoundError:
+    pass
+err = ""
+if not up:
+    try:
+        with open(os.path.join(d, "err.log"), "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 600))
+            err = f.read().decode("utf-8", "replace").strip()[-400:]
+    except OSError:
+        pass
+print("@@bops-agent@@ " + json.dumps({"next": at, "alive": up, "more": more, "err": err}))
+for line in lines:
+    print(line)
+PY
+    ;;
+  stop)
+    halt
+    echo stopped
+    ;;
+  close)
+    # Its input ends (the tail goes), so it finishes what it has and exits; one that doesn't is stopped.
+    untail
+    gone_within 50 || halt
+    rm -f "$DIR/key"
+    echo closed
+    ;;
+  *)
+    usage
+    ;;
+esac

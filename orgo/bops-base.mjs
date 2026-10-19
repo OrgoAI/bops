@@ -58,9 +58,11 @@ const template = {
     { to: "/usr/local/bin/bops-exec", inline: read("vm/bin/bops-exec"), mode: "0755" },
     { to: "/usr/local/bin/bops-tailnet", inline: read("vm/bin/bops-tailnet"), mode: "0755" },
     { to: "/usr/local/bin/bops-screens", inline: read("vm/bin/bops-screens"), mode: "0755" },
-    // Brains: Claude Code's own sign-in on a screen, its status and sign-out, and runs with a clean environment.
+    // Brains: Claude Code's own sign-in on a screen, its status and sign-out, and runs with a clean environment;
+    // a thread's Claude Code process, which Bops talks to through files (lib/server/cli-agents.ts).
     { to: "/usr/local/bin/bops-brain", inline: read("vm/bin/bops-brain"), mode: "0755" },
     { to: "/usr/local/bin/bops-brain-browser", inline: read("vm/bin/bops-brain-browser"), mode: "0755" },
+    { to: "/usr/local/bin/bops-agent", inline: read("vm/bin/bops-agent"), mode: "0755" },
     // The bot's own desktop (wallpaper, Chrome theme, home screen, dock); Bops supplies the bot's pages.
     { to: "/usr/local/bin/bops-desktop", inline: read("vm/bin/bops-desktop"), mode: "0755" },
     { to: "/opt/bops/bops-home.py", inline: read("vm/bops-home.py"), mode: "0755" },

@@ -642,6 +642,7 @@ function Bops({ state }: { state: AppState | null }) {
             setPanelOpen(true);
             setActive(CHAT_TAB);
           }}
+          onShowScreen={showScreen}
         />
       )}
     </div>

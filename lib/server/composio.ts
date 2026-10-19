@@ -772,8 +772,9 @@ export const composioUser = userId;
 
 /* ---------------- Asking the user ---------------- */
 
-export function askOwner(a: Omit<AppApproval, "id" | "at">) {
-  const approval: AppApproval = { ...a, id: id("apr"), at: Date.now() };
+/** Show the user an app approval card and wait for their yes or no. `approvalId`: its id, for a caller that may take the card back (answerApp). */
+export function askOwner(a: Omit<AppApproval, "id" | "at">, approvalId = id("apr")) {
+  const approval: AppApproval = { ...a, id: approvalId, at: Date.now() };
   update((s) => (s.appApprovals ??= []).push(approval));
   return new Promise<boolean>((resolve) => live.waiting.set(approval.id, resolve));
 }
@@ -829,6 +830,8 @@ export async function appCall(sessionId: string, key: string, tool: string, args
   if (!s || !running(s) || !b || !want || want.length !== Buffer.byteLength(key) || !timingSafeEqual(want, Buffer.from(key))) return { status: 403, text: "not allowed" };
   // Signing in on one of its computer's screens from the vault (the screen tools' sign_in_from_vault).
   if (tool === "vault_sign_in") return { status: 200, text: await (await import("./vault")).vaultSignIn(b.id, Number(args.display), sessionId) };
+  // A thread its brain runs asking the user before a tool it may not use by itself (the screen tools' approve: cli-agents.ts).
+  if (tool === "approve") return { status: 200, text: await (await import("./cli-agents")).approveTool(b.id, sessionId, args) };
   return threadApps(b.id, sessionId, tool, args);
 }
 

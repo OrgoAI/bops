@@ -589,6 +589,18 @@ export type Session = {
    * `ui`: it had the Mac tools (Cua Driver), through Bops' own MCP server ("bops"; true was Cua's own, which a thread doesn't pick up again).
    */
   env?: { id: string; remoteUrl: string; workspace?: string; fullAccess?: boolean; sockets?: string; apps?: boolean; data?: boolean; ui?: boolean | "bops"; display?: number };
+  /**
+   * Run by its bot's brain (Brain, lib/server/cli-agents.ts) rather than Bops agent: which brain, on which
+   * computer, and the CLI's own session there (`cli`: Claude Code's session id), which a later turn, or a
+   * restart of the CLI, picks back up. `started`: the CLI has that session (it said so as it began).
+   * `waits`: it can't go on until the user does something: sign the brain in on that computer ("sign_in"),
+   * or say what's next after the CLI stopped at its plan's usage limit or its sign-in or key was turned
+   * down ("limit": Finish on Bops agent, or Wait). `said` is what Bops told them then (not the bot's own
+   * answer). The replies that turn took are marked not delivered again, so they go in when it carries on.
+   */
+  brainRun?: { brainId: string; kind: BrainKind; computerId: string; cli: string; started?: true; waits?: "sign_in" | "limit"; said?: string };
+  /** The user had Bops agent finish it after its brain stopped (brainRun.waits "limit"): it runs on Bops agent from then on. */
+  onBopsAgent?: true;
   steps: SessionStep[];
   replies: ThreadReply[];
   answer?: string;

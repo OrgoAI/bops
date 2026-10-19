@@ -17,6 +17,7 @@ import { Fold } from "./fold";
 import { SaveSkillDialog } from "./skill-dialog";
 import { undash } from "./side-group";
 import { ApiAsk, apiAskOf, apiCallOf, ApiNote } from "./keys";
+import { brainSignIn } from "./brains";
 import { ChatAvatar, chatName, clockTime, needsYou, post, StatusIcon, teamOf, useNow } from "./ui";
 
 /** Light markdown for bot text: **bold** and [links](url). */
@@ -564,6 +565,7 @@ export function ChatView({
                   quote
                   pinned
                   onShow={() => (x.display ?? x.lastDisplay) !== undefined ? onShowScreen(x.botId, (x.display ?? x.lastDisplay)!) : onOpenThread(x)}
+                  onShowScreen={onShowScreen}
                   onSomethingElse={() => onOpenThread(x)}
                   onOpen={() => onOpenThread(x)}
                 />
@@ -1769,7 +1771,20 @@ export function forgetSheet() {
   sheetShown = null;
 }
 
-export function ThreadSheet({ state, session: s, onClose: close, onShowComputer }: { state: AppState; session: Session; onClose: () => void; onShowComputer: () => void }) {
+export function ThreadSheet({
+  state,
+  session: s,
+  onClose: close,
+  onShowComputer,
+  onShowScreen,
+}: {
+  state: AppState;
+  session: Session;
+  onClose: () => void;
+  onShowComputer: () => void;
+  /** Show one of a bot's screens up close: where its brain's sign-in opened (NeedsYouCard). */
+  onShowScreen?: (botId: string, display: number) => void;
+}) {
   // "Working for 1m 23s" counts up while it's open.
   useNow(live(s) ? 1000 : 60_000);
   // Opening it plays its entrance; coming back to it (the chat column is drawn again after a
@@ -1967,7 +1982,7 @@ export function ThreadSheet({ state, session: s, onClose: close, onShowComputer 
 
         {needsYou(s) && (
           <div className={`px-3 pb-2 ${askedAtOpen.asked ? "" : "motion-rise-in"}`}>
-            <NeedsYouCard session={s} state={state} onShow={onShowComputer} onSomethingElse={() => document.getElementById("thread-reply")?.focus()} />
+            <NeedsYouCard session={s} state={state} onShow={onShowComputer} onShowScreen={onShowScreen} onSomethingElse={() => document.getElementById("thread-reply")?.focus()} />
           </div>
         )}
         <form
@@ -2179,7 +2194,8 @@ function CloudIcon() {
  * replies it offered, say they approved it on their phone, let a flagged step go on, retry, or move it
  * to their Mac, instead of working out what to type back. `pinned`: over a chat's composer (lib/asks.ts
  * chatAsks), where it names the thread and says the bot's words, since its message may be far above
- * or in another bot's chat.
+ * or in another bot's chat. A thread waiting for its brain to sign in (Session.brainRun) has Sign in, which
+ * opens Claude Code's own sign-in on a screen of the bot's computer and shows it (`onShowScreen`).
  */
 function NeedsYouCard({
   session: s,
@@ -2187,6 +2203,7 @@ function NeedsYouCard({
   quote,
   pinned,
   onShow,
+  onShowScreen,
   onSomethingElse,
   onOpen,
 }: {
@@ -2195,10 +2212,12 @@ function NeedsYouCard({
   quote?: boolean;
   pinned?: boolean;
   onShow: () => void;
+  onShowScreen?: (botId: string, display: number) => void;
   onSomethingElse: () => void;
   onOpen?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const b = state.bots.find((x) => x.id === s.botId);
   const name = b?.name ?? "The bot";
   const reply = async (text: string) => {
@@ -2215,9 +2234,18 @@ function NeedsYouCard({
   const kind = askKind(s);
   const failed = kind === "failed";
   const display = s.display ?? s.lastDisplay;
+  const brain = kind === "brain" ? state.brains?.find((x) => x.id === s.brainRun?.brainId) : undefined;
+  const signIn = async () => {
+    if (!brain) return;
+    setBusy(true);
+    setError(await brainSignIn(brain.id, s.botId, onShowScreen ?? (() => onShow())));
+    setBusy(false);
+  };
   const title = s.blocker
     ? `${name} needs ${BLOCKER_ASK[s.blocker]}`
-    : failed
+    : kind === "brain"
+      ? `${name} needs ${brain?.name ?? "Claude Code"} signed in`
+      : failed
       ? `${name} couldn't finish`
       : kind === "elsewhere"
         ? `${name} needs you to approve it on your phone`
@@ -2260,6 +2288,15 @@ function NeedsYouCard({
                 Try on your Mac
               </button>
             )}
+            <button disabled={busy} onClick={dismiss} className={plain}>
+              Dismiss
+            </button>
+          </>
+        ) : kind === "brain" ? (
+          <>
+            <button disabled={busy || !brain} onClick={() => void signIn()} className={primary}>
+              Sign in
+            </button>
             <button disabled={busy} onClick={dismiss} className={plain}>
               Dismiss
             </button>
@@ -2315,6 +2352,11 @@ function NeedsYouCard({
           </>
         )}
       </div>
+      {error && (
+        <span role="alert" className="pl-1 text-[12px] leading-4 text-[#B42318]">
+          {error}
+        </span>
+      )}
     </div>
   );
 }
@@ -2342,7 +2384,10 @@ const withoutBriefing = (text: string) =>
     .filter((p) => !/^\s*(computer briefing|briefing)\s*:/i.test(p) && !/^\s*computer\s*:.*\b(screens?|idle|free|untouched|home screen)\b/i.test(p))
     .join("\n\n") || text;
 
-/** A bot wants to do something in one of your apps that changes it (send, create, pay): you see what, and say yes or no. */
+/**
+ * A bot wants to do something in one of your apps that changes it (send, create, pay), or its brain wants to
+ * use a tool it may not use by itself (app "brain": cli-agents.ts approveTool): you see what, and say yes or no.
+ */
 const CHANNEL_NAME: Record<string, string> = { slack: "Slack", telegram: "Telegram", discord: "Discord" };
 
 function AppApprovalCard({ state, approval: a, className = "" }: { state: AppState; approval: AppApproval; className?: string }) {
@@ -2362,7 +2407,7 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
         {b && <Mascot botId={b.id} color={b.color} size={26} />}
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="text-[13.5px] font-semibold leading-[18px]">
-            {api ? `${b?.name ?? "A bot"} wants to call ${api.label}` : `${b?.name ?? "A bot"} wants to: ${a.title}`}
+            {api ? `${b?.name ?? "A bot"} wants to call ${api.label}` : a.app === "brain" ? `${b?.name ?? "A bot"} wants to run: ${a.title}` : `${b?.name ?? "A bot"} wants to: ${a.title}`}
           </span>
           {s && <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">For &ldquo;{s.title}&rdquo;</span>}
         </div>

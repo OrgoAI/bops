@@ -203,14 +203,15 @@ export function ensureClaudeCode(computerId: string): Promise<void> {
   return ready;
 }
 
-/** The brain scripts every computer needs, kept matching this copy of Bops. */
+/** The brain scripts every computer needs, kept matching this copy of Bops: sign-ins and runs, and a thread's process (bops-agent: cli-agents.ts). */
 const BRAIN_TOOLS = [
   ["vm/bin/bops-brain", "/usr/local/bin/bops-brain"],
   ["vm/bin/bops-brain-browser", "/usr/local/bin/bops-brain-browser"],
+  ["vm/bin/bops-agent", "/usr/local/bin/bops-agent"],
 ] as const;
 const toolsChecked = new Map<string, string>();
 
-/** Put the brain scripts (vm/bin/bops-brain, bops-brain-browser) on a computer that's missing them or behind, as sessions.ts does the screen tools. */
+/** Put the brain scripts (vm/bin/bops-brain, bops-brain-browser, bops-agent) on a computer that's missing them or behind, as sessions.ts does the screen tools. */
 export async function ensureBrainTools(computerId: string) {
   const files = BRAIN_TOOLS.map(([src, dst]) => {
     const body = readFileSync(join(/*turbopackIgnore: true*/ process.cwd(), src));
@@ -402,6 +403,9 @@ async function signIn(brainId: string, botId: string, computerId: string, displa
       await handBack(botId, display);
       const x = brainById(brainId);
       addMessage({ chatId: botChatId(botId), role: "system", text: `${x?.name ?? "Claude Code"} is signed in on ${name()}'s computer with your ${planName(st.account?.plan)}.` });
+      // Threads that waited for it there carry on.
+      const { brainSignedIn } = await import("./sessions");
+      brainSignedIn(brainId, computerId);
       return;
     }
     if (driving(botId, display)) gaveBack = 0;
