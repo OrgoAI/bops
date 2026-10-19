@@ -2,9 +2,11 @@
 // against a fake Orgo: which computers get one (each a bot works on, as Orgo's map and this Mac both have
 // it), what goes to a computer (no command ever carries a key, the window token or the upload's link), the
 // version rules (never an older one over a newer; the same version again only from the Mac that set it up
-// last), none where someone else has Full access, the health check (loopback only), and the stop (This
-// Mac, the bots in browsers on the Mac, a computer deleted, no bot on it any more: taken off, its key
-// revoked by the Mac that had it made, its threads ended). The commands it sends are checked as shell too.
+// last; one that's up stays up while it's set up again), a copy of a computer that has the build already,
+// none where someone else has Full access, the health check (loopback only), a runner marked up that's
+// gone from its computer, Orgo's copy of the routines following each runner up or down, and the stop
+// (This Mac, the bots in browsers on the Mac, a computer deleted, no bot on it any more: taken off, its
+// key revoked by any Mac, its threads ended). The commands it sends are checked as shell too.
 //
 // The store, Orgo, storage and the modules it talks to are fakes (below): nothing reaches a real service.
 // Usage: node --conditions=react-server scripts/test-runner-install.mjs
@@ -28,8 +30,9 @@ const FAKES = {
   orgo: ["apiKey", "callOrgo", "orgo"],
   "orgo-auth": ["orgoOrigin"],
   "persist-cloud": ["deviceIdFor"],
-  runner: ["heardRunsOn", "runsOnMissing", "RUNNER_CONF", "RUNNER_KEY_FILE", "RUNNER_WRAPPER"],
+  runner: ["heardRunsOn", "overdueOn", "runsOnMissing", "RUNNER_CONF", "RUNNER_KEY_FILE", "RUNNER_WRAPPER"],
   sessions: ["computerGone", "endSessionsOf"],
+  "routine-sync": ["routineChanged"],
 };
 const VALUES = { runner: { RUNNER_CONF: "/etc/supervisor/conf.d/bops-runner.conf", RUNNER_KEY_FILE: "/root/.bops/runner/key", RUNNER_WRAPPER: "/opt/bops/runner/run.sh" } };
 registerHooks({
@@ -125,6 +128,11 @@ function freshOrgo() {
     keys: 0,
     computers: { [C1]: { status: "running", current: "", key: false, have: new Set(), program: false } },
     ended: [],
+    changed: [],
+    overdue: false,
+    uploadFails: false,
+    duringInstall: null,
+    supervisor: "bops-runner                      RUNNING   pid 812, uptime 1:02:03",
   });
 }
 const pc = (c) => orgo.computers[c];
@@ -141,7 +149,8 @@ globalThis.__fake = {
   members: { othersWithFullAccess: async () => orgo.full },
   "orgo-auth": { orgoOrigin: () => process.env.BOPS_ORGO_ORIGIN },
   "persist-cloud": { deviceIdFor: (user, seed) => `device:${user}:${seed}` },
-  runner: { heardRunsOn: () => orgo.mode, runsOnMissing: () => orgo.missing },
+  runner: { heardRunsOn: () => orgo.mode, runsOnMissing: () => orgo.missing, overdueOn: () => orgo.overdue },
+  "routine-sync": { routineChanged: (botId) => orgo.changed.push(botId) },
   sessions: {
     computerGone: (e) => e?.status === 404,
     endSessionsOf: (device, why) => orgo.ended.push({ device, why }),
@@ -159,7 +168,7 @@ globalThis.__fake = {
         return { status: 200, json: { keyId: `key-${++orgo.keys}` } };
       }
       if (k && c.method === "DELETE") return { status: 200, json: { revoked: true } };
-      if (path === "/api/files/uploads") return { status: 200, json: { upload_url: UPLOAD_URL, upload_token: UPLOAD_TOKEN } };
+      if (path === "/api/files/uploads") return orgo.uploadFails ? { status: 503, json: {} } : { status: 200, json: { upload_url: UPLOAD_URL, upload_token: UPLOAD_TOKEN } };
       if (path === "/api/files/uploads/complete") {
         assert.equal(init.body.upload_token, UPLOAD_TOKEN);
         pc(init.body.desktopId).incoming = true;
@@ -184,8 +193,12 @@ globalThis.__fake = {
           return { output: `current=${x.current}\nkey=${x.key ? "yes" : "no"}\nhave=${x.have.has(dir) ? "yes" : "no"}\nsup=yes\n`, exit_code: 0 };
         }
         if (command.includes("__BOPS_INSTALLED__")) {
+          orgo.duringInstall?.();
           const dir = /mv -Tf "\$d\/current\.next"/.test(command) && /ln -sfn '([^']+)'/.exec(command)[1];
-          assert.ok(x.incoming || x.have.has(dir), "unpacked only once its files are there");
+          // As the script does: the upload unpacked when it's there (and gone after), else the build there already, else nothing.
+          const usesBuildThere = command.includes(`elif [ ! -f "$d/${dir}/server.js" ]; then`);
+          if (!x.incoming && !(usesBuildThere && x.have.has(dir))) return { output: usesBuildThere ? "__BOPS_NO_FILES__\n" : "sha256sum: bops-server.tgz: No such file or directory\n", exit_code: usesBuildThere ? 3 : 1 };
+          x.incoming = false;
           x.have.add(dir);
           x.current = dir;
           x.program = true;
@@ -201,6 +214,7 @@ globalThis.__fake = {
           x.program = false;
           return { output: "", exit_code: 0 };
         }
+        if (/^supervisorctl status bops-runner/.test(command)) return { output: `${orgo.supervisor}\n__BOPS_STATUS_END__\n`, exit_code: 0 };
         return { output: "", exit_code: 0 };
       },
     },
@@ -410,7 +424,7 @@ await check("This Mac: the runner is taken off its computer, its key revoked, it
   noSecrets();
 });
 
-await check("stopping: an asleep computer isn't woken (its key is revoked), a deleted one just goes, another Mac's key is theirs to revoke", async () => {
+await check("stopping: an asleep computer isn't woken (its key is revoked), a deleted one just goes, another Mac's key is revoked too", async () => {
   reset();
   await I.lookAtRunners();
   pc(C1).status = "suspended";
@@ -434,17 +448,16 @@ await check("stopping: an asleep computer isn't woken (its key is revoked), a de
   orgo.map = [C2];
   await I.lookAtRunners();
   assert.equal(runner(C1), undefined, "the deleted one's gone");
-  assert.deepEqual(orgo.ended[0], { device: `device:u1:${C1}`, why: "Stopped: no bot works on this computer anymore." });
+  assert.deepEqual(orgo.ended[0], { device: `device:u1:${C1}`, why: "Stopped: its computer was deleted." }, "its threads say why");
   assert.equal(runner(C2)?.status, "running", "and its bot's new computer has one");
-  // Another Mac had its key made: not revoked here; it stays until that Mac does.
+  // Another Mac had its key made: revoked here all the same (Orgo revokes only the user's own runner keys for that computer).
   reset();
   state.runners = { [C1]: { status: "running", version: "0.0.29", buildId: "buildA1", by: "other", keyId: "key-other", keyBy: "other", at: Date.now() } };
   orgo.mode = "mac";
   await I.lookAtRunners();
-  assert.ok(!orgo.calls.some((c) => c.method === "DELETE"), "not this Mac's to revoke");
-  assert.equal(runner().status, "stopping");
-  assert.equal(runner().keyId, "key-other");
-  assert.equal(pc(C1).program, false, "but taken off its computer");
+  assert.ok(orgo.calls.some((c) => c.method === "DELETE" && c.path === `/api/computers/${C1}/bops-runner-key?keyId=key-other`), "its key revoked");
+  assert.equal(runner(), undefined, "and it's out of the state");
+  assert.equal(pc(C1).program, false, "taken off its computer");
 });
 
 await check("the bots in browsers on this Mac stops the runners too", async () => {
@@ -454,6 +467,96 @@ await check("the bots in browsers on this Mac stops the runners too", async () =
   await I.lookAtRunners();
   assert.equal(runner(), undefined);
   assert.equal(orgo.ended[0].why, "Stopped: your bots work in browsers on your Mac now.");
+});
+
+/* ---------------- Set up again, copies, gone ---------------- */
+
+await check("a copy of a computer with the build there already (no upload, no key file): set up from what's there, with a key of its own", async () => {
+  reset();
+  // As a bot's own computer copied from its main bot's: the build and `current` stay, its runner and key were taken off.
+  Object.assign(pc(C1), { current: "0.0.29-buildA1", have: new Set(["0.0.29-buildA1"]), key: false });
+  await I.lookAtRunners();
+  assert.equal(runner().status, "running", JSON.stringify(runner()));
+  assert.equal(runner().keyId, "key-1", "a key of its own");
+  assert.ok(!orgo.calls.some((c) => c.path.startsWith("/api/files/")), "nothing uploaded");
+  assert.equal(orgo.puts.length, 0);
+  // Its own try again later, with the upload gone: the same.
+  reset();
+  Object.assign(pc(C1), { have: new Set(["0.0.29-buildA1"]) });
+  state.runners = { [C1]: { status: "failed", version: "0.0.29", buildId: "buildA1", by: ME, error: "it didn't answer on its computer", at: Date.now() - 60 * 60_000 } };
+  await I.lookAtRunners();
+  assert.equal(runner().status, "running");
+});
+
+await check("one that's up set up again stays up, with its routines, until the new one starts; a try that doesn't get that far leaves it as it was", async () => {
+  reset();
+  pc(C1).key = true;
+  pc(C1).current = "0.0.28-old";
+  pc(C1).have = new Set(["0.0.28-old"]);
+  state.runners = { [C1]: { status: "running", version: "0.0.28", buildId: "old", by: ME, keyId: "key-0", keyBy: ME, at: Date.now() - 86_400_000 } };
+  let during;
+  orgo.duringInstall = () => (during = structuredClone(runner()));
+  await I.lookAtRunners();
+  assert.equal(during.status, "running", "still up while the new one goes in: the Mac doesn't take its routines");
+  assert.deepEqual([during.upgrading?.version, during.upgrading?.buildId, during.upgrading?.by], ["0.0.29", "buildA1", ME]);
+  assert.deepEqual([runner().status, runner().version, runner().upgrading], ["running", "0.0.29", undefined]);
+  assert.deepEqual(orgo.changed, [], "up all along: Orgo's copy of the routines needn't change");
+  // The upload fails: left up as it was (not Couldn't start), and tried again later.
+  reset();
+  pc(C1).key = true;
+  pc(C1).current = "0.0.28-old";
+  state.runners = { [C1]: { status: "running", version: "0.0.28", buildId: "old", by: ME, keyId: "key-0", keyBy: ME, at: Date.now() } };
+  orgo.uploadFails = true;
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().version, runner().upgrading, runner().error], ["running", "0.0.28", undefined, undefined]);
+  assert.ok(!bashText().includes("__BOPS_INSTALLED__"), "the computer's runner untouched");
+  assert.ok(T.retryAt(C1) > Date.now(), "tried again later");
+  orgo.uploadFails = false;
+  orgo.bash.length = 0;
+  await I.lookAtRunners();
+  assert.equal(orgo.bash.length, 0, "not before then");
+  // Another Mac setting it up again right now: this one waits.
+  const x = { status: "running", version: "0.0.28", buildId: "old", by: "other", at: Date.now() };
+  assert.equal(I.installPlan({ ...x, upgrading: { version: "0.0.29", buildId: "b9", by: "other", at: Date.now() } }, { version: "0.0.29", buildId: "buildA1" }, ME), "wait");
+  assert.equal(I.installPlan({ ...x, upgrading: { version: "0.0.29", buildId: "b9", by: "other", at: Date.now() - 21 * 60_000 } }, { version: "0.0.29", buildId: "buildA1" }, ME), "install", "one at it 20 minutes stopped");
+});
+
+await check("Orgo's copy of the routines follows each runner going up or down", async () => {
+  reset();
+  await I.lookAtRunners();
+  assert.deepEqual(orgo.changed.sort(), ["boppy", "otto"], "up: the bots on that computer (Otto shares it)");
+  orgo.changed.length = 0;
+  orgo.mode = "mac";
+  await I.lookAtRunners();
+  assert.deepEqual(orgo.changed.sort(), ["boppy", "otto"], "down");
+});
+
+await check("a runner marked up that left a routine well past its time, and is gone from its computer: its routines go back to the Mac", async () => {
+  reset();
+  await I.lookAtRunners();
+  orgo.bash.length = 0;
+  // Overdue, but its program is there: left as it is.
+  orgo.overdue = true;
+  await I.lookAtRunners();
+  assert.ok(orgo.bash.some((b) => /^supervisorctl status bops-runner/.test(b.command)));
+  assert.equal(runner().status, "running");
+  // Gone (it took itself off as if a copy, say): Couldn't start.
+  reset();
+  await I.lookAtRunners();
+  orgo.overdue = true;
+  orgo.supervisor = "bops-runner: ERROR (no such process)";
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().error], ["failed", "it stopped on its computer"]);
+  // Asleep: never woken to ask.
+  reset();
+  await I.lookAtRunners();
+  orgo.overdue = true;
+  orgo.supervisor = "bops-runner: ERROR (no such process)";
+  pc(C1).status = "suspended";
+  orgo.bash.length = 0;
+  await I.lookAtRunners();
+  assert.equal(orgo.bash.length, 0);
+  assert.equal(runner().status, "running");
 });
 
 /* ---------------- The commands as shell ---------------- */

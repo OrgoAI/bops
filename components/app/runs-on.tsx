@@ -6,8 +6,8 @@ import { Mascot } from "./mascot";
 import { undash } from "./side-group";
 import { option, post, radio, teamOf } from "./ui";
 
-/** What /api/runs-on says: where routines run, whether Orgo can keep it yet, and which computers with a runner up are asleep. */
-export type RunsOnInfo = { runsOn: "cloud" | "mac"; missing: boolean; asleep: string[] };
+/** What /api/runs-on says: where routines run (null: Orgo didn't answer), whether Orgo can keep it yet, and which computers with a runner up are asleep. */
+export type RunsOnInfo = { runsOn: "cloud" | "mac" | null; missing: boolean; asleep: string[] };
 
 const CHOICES = [
   { id: "cloud", name: "Cloud", line: "Keeps working when your Mac is closed." },
@@ -36,11 +36,13 @@ function computersOf(state: AppState): { id: string; host: Bot }[] {
 /**
  * Settings, Where routines run: Cloud (the default: each computer's own Bops runs its bots' routines, so
  * they keep running with the Mac closed) or This Mac, as Orgo keeps it for every Mac of the user's. An
- * Orgo that can't keep it yet shows This Mac and says so. In the Cloud, each computer's runner and how
- * it is. `info` is null until /api/runs-on answers: nothing is picked yet. Exported for the tests.
+ * Orgo that can't keep it yet shows This Mac and says so; one that didn't answer shows neither picked,
+ * and says so. In the Cloud, each computer's runner and how it is. `info` is null until /api/runs-on
+ * answers: nothing is picked yet. Exported for the tests.
  */
-export function RunsOnChoice({ state, info, busy, error, onPick }: { state: AppState; info: RunsOnInfo | null; busy: boolean; error: string | null; onPick: (to: RunsOnInfo["runsOn"]) => void }) {
-  const on = info?.missing ? "mac" : info?.runsOn;
+export function RunsOnChoice({ state, info, busy, error, onPick }: { state: AppState; info: RunsOnInfo | null; busy: boolean; error: string | null; onPick: (to: "cloud" | "mac") => void }) {
+  const on = info?.missing ? "mac" : (info?.runsOn ?? undefined);
+  const unheard = !!info && !info.missing && !info.runsOn;
   const computers = computersOf(state);
   const shown = computers.filter((c) => on === "cloud" || state.runners?.[c.id]);
   return (
@@ -63,6 +65,7 @@ export function RunsOnChoice({ state, info, busy, error, onPick }: { state: AppS
         ))}
       </div>
       {info?.missing && <span className="text-[12px] leading-4 text-[#6B6B6B]">Cloud isn&apos;t available yet.</span>}
+      {unheard && !error && <span className="text-[12px] leading-4 text-[#B42318]">Couldn&apos;t reach Orgo. Try again.</span>}
       {error && <span className="text-[12px] leading-4 text-[#B42318]">{error}</span>}
       {!!shown.length && (
         <div className="flex flex-col">
@@ -104,13 +107,13 @@ export function RunsOnSettings({ state }: { state: AppState }) {
       stop = true;
     };
   }, []);
-  const pick = async (to: RunsOnInfo["runsOn"]) => {
+  const pick = async (to: "cloud" | "mac") => {
     setBusy(true);
     setError(null);
     try {
       const res = await post("/api/runs-on", { runsOn: to });
       const j = (await res.json().catch(() => ({}))) as { runsOn?: RunsOnInfo["runsOn"]; missing?: boolean; error?: string };
-      if (j.runsOn) setInfo((i) => ({ asleep: i?.asleep ?? [], runsOn: j.runsOn!, missing: !!j.missing }));
+      if (j.runsOn !== undefined) setInfo((i) => ({ asleep: i?.asleep ?? [], runsOn: j.runsOn ?? null, missing: !!j.missing }));
       if (!res.ok && !j.missing) setError(undash(j.error ?? "Couldn't change it. Try again."));
     } catch {
       setError("Couldn't change it. Try again.");

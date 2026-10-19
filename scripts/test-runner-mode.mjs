@@ -137,11 +137,12 @@ const good = () => ({
 });
 
 if (START) {
-  await check("a runner starts the state, makes sure of its computer, then only the loops it runs; refused, it stops", async () => {
+  await check("a runner makes sure of its computer, then starts the state, then only the loops it runs; refused or a copy, it stops", async () => {
     const calls = [];
     let tries = 0;
+    let looks = ["unknown", "same"];
     ready = false;
-    globalThis.__fake.runner = { checkIdentity: async () => (calls.push("identity"), "same"), runnerComputer: () => C1, startRunsOn: () => calls.push("runs-on") };
+    globalThis.__fake.runner = { checkIdentity: async () => (calls.push("identity"), looks.shift() ?? "same"), runnerComputer: () => C1, startRunsOn: () => calls.push("runs-on") };
     globalThis.__fake["orgo-auth"] = { loadOrgoKey: async () => (calls.push("key"), "sk_runner") };
     globalThis.__fake["free-hours"] = { startActivityBeat: () => calls.push("in-use") };
     globalThis.__fake["orgo-sign-in"] = { authStatus: async () => (calls.push("state"), (ready = ++tries >= 2), {}) };
@@ -152,7 +153,7 @@ if (START) {
     console.log = () => {};
     await S.startRunner();
     console.log = log;
-    assert.deepEqual(calls, ["key", "state", "state", "identity", "runs-on", "in-use"], "key, the state (again until it loads), which computer, then its loops");
+    assert.deepEqual(calls, ["key", "identity", "identity", "state", "state", "runs-on", "in-use"], "key, which computer (again until Orgo says), the state (again until it loads), then its loops");
     assert.deepEqual(globalThis.__fake.started, ["routines"], "the routines timer");
     for (const m of ["mail", "phone", "channels", "cloud-tunnel", "bops-sync", "access-sync", "watches", "relay", "runner-install", "mac", "attention", "orbit-sync", "memory-categories", "sessions"])
       assert.ok(!loaded.includes(m), `${m} isn't started`);
@@ -178,6 +179,14 @@ if (START) {
     globalThis.__fake["orgo-auth"].loadOrgoKey = async () => (calls.push("key"), null);
     await assert.rejects(S.startRunner(), /exited/);
     assert.deepEqual(calls, ["key"]);
+    // A copy of another computer: out before it reads the state, so it never signs in or saves as that computer's runner.
+    delete globalThis.__bopsRunnerStarted;
+    calls.length = 0;
+    looks = ["copy"];
+    ready = false;
+    globalThis.__fake["orgo-auth"].loadOrgoKey = async () => (calls.push("key"), "sk_runner");
+    await assert.rejects(S.startRunner(), /exited/);
+    assert.deepEqual(calls, ["key", "identity"], "no state read, no sign-in");
     process.exit = exit;
     console.error = err;
   });

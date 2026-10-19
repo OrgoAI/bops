@@ -183,7 +183,12 @@ function appAccounts(state: AppState) {
   }
 }
 
-const g = globalThis as unknown as { __bops2?: { state: AppState; version: number; swaps?: number; arrivals?: number }; __bopsWatchers?: Map<string, () => void> };
+const g = globalThis as unknown as {
+  __bops2?: { state: AppState; version: number; swaps?: number; arrivals?: number };
+  __bopsWatchers?: Map<string, () => void>;
+  __bopsArrivalWatchers?: Map<string, () => void>;
+};
+const arrivalWatchers = (g.__bopsArrivalWatchers ??= new Map());
 const access: StateAccess = {
   get: () => box.state,
   replace(raw) {
@@ -197,6 +202,7 @@ const access: StateAccess = {
   touch() {
     box.arrivals = (box.arrivals ?? 0) + 1;
     box.version++;
+    for (const fn of arrivalWatchers.values()) fn();
   },
 };
 // A computer's runner keeps the user's state where their Mac does, in Bops Cloud, whatever else is set (instrumentation.ts refuses to start one that sets it).
@@ -326,6 +332,8 @@ export const getVersion = () => box.version;
 const watchers = (g.__bopsWatchers ??= new Map());
 /** Run `fn` after every change, by name so a code reload replaces it. */
 export const watchChanges = (name: string, fn: () => void) => void watchers.set(name, fn);
+/** Run `fn` after changes made elsewhere come in (another Mac's or a runner's, merged in), by name so a code reload replaces it. */
+export const watchArrivals = (name: string, fn: () => void) => void arrivalWatchers.set(name, fn);
 
 /** A change: saved behind, and passed on to whatever watches for one. */
 function changed() {

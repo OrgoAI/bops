@@ -41,7 +41,7 @@ import { askTiming, needsYou } from "@/lib/asks";
 import { channelResult } from "./channels";
 import { asksForMac, chooseWhere } from "./where";
 import { RUNNER_SCRUB } from "./runner";
-import { addMessage, bot, getState, id, ownerLine, ownerName, ownSession, patchSession, sameState, session, stateDevice, stateEpoch, stateReady, update } from "./store";
+import { addMessage, bot, getState, id, ownerLine, ownerName, ownSession, patchSession, sameState, session, stateDevice, stateEpoch, stateReady, update, watchArrivals } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { computerToolOn, computerTurn, PAGE_RUNNER } from "./computer-task";
 import { ASKS_AGAIN, LIGHT, logRoute, routeTask, speedFor, taskConfig } from "./routing";
@@ -571,11 +571,20 @@ const cancelTurn = (agentSessionId: string) =>
 /** Whether the user stopped a thread (or paused it by taking over) and hasn't set it going again. */
 export const stoppedByUser = (sessionId: string) => stopped.has(sessionId);
 
-/** Stop a session: a queued one never starts; a running one ends its turn (at OpenAI too) and frees its screen. */
+/**
+ * Stop a session: a queued one never starts; a running one ends its turn (at OpenAI too) and frees its
+ * screen. Another Bops's thread (Session.by: another Mac's, a computer's runner's) is that one's to stop,
+ * as this server has no hold on its turn: it's asked to (stopAsked), and stops it when it hears
+ * (stopAskedHere).
+ */
 export function stopSession(sessionId: string, reason = "Stopped by you") {
   const s = session(sessionId);
-  // Another Bops's thread (Session.by) is that one's to stop: this server has no hold on its turn.
-  if (!s || !live(s) || !ownSession(s)) return;
+  if (!s || !live(s)) return;
+  if (!ownSession(s)) {
+    if (s.stopAsked !== reason) patchSession(sessionId, { stopAsked: reason });
+    for (const p of getState().sessions.filter((x) => x.partOf === sessionId && live(x))) stopSession(p.id, reason);
+    return;
+  }
   stopped.add(sessionId);
   siteWait.delete(sessionId);
   if (s.status === "queued") {
@@ -644,6 +653,16 @@ async function checkParts(sessionId: string, wait: boolean, signal: AbortSignal)
     .join("\n\n");
 }
 
+/** The threads this server runs that another Bops asked to stop (stopSession there): stopped here, saying why. */
+export function stopAskedHere() {
+  for (const s of getState().sessions.filter((x) => x.stopAsked && live(x) && ownSession(x))) {
+    const why = s.stopAsked!;
+    patchSession(s.id, { stopAsked: undefined });
+    stopSession(s.id, why);
+  }
+}
+watchArrivals("stop-asked", stopAskedHere);
+
 /** Stop every task that's queued or running (a reset, or a hosted server about to swap in another user's state). */
 export function stopAllSessions(reason: string) {
   for (const s of getState().sessions.filter(live)) stopSession(s.id, reason);
@@ -656,7 +675,8 @@ export function stopAllSessions(reason: string) {
  */
 export function endSessionsOf(device: string, reason: string) {
   for (const s of getState().sessions.filter((x) => live(x) && x.by === device)) {
-    patchSession(s.id, { status: "failed", error: reason, endedAt: Date.now(), display: undefined });
+    // Ended here, as this Bops's now: a last save from that runner never brings it back as running (state-merge.ts mergeSession).
+    patchSession(s.id, { status: "failed", error: reason, endedAt: Date.now(), display: undefined, stopAsked: undefined, by: stateDevice() ?? undefined });
     taskEnded(s, "stopped");
     void routineFailed(s.id, reason);
   }
@@ -702,7 +722,7 @@ export function replyToSession(sessionId: string, text: string, note?: string, f
         if (x.route) x.route.bumps = (x.route.bumps ?? 0) + 1;
       });
     // Picked up again here, whichever Bops ran it before: it isn't running there anymore (Session.by).
-    patchSession(sessionId, { status: "queued", error: undefined, endedAt: undefined, by: stateDevice() ?? undefined });
+    patchSession(sessionId, { status: "queued", error: undefined, endedAt: undefined, stopAsked: undefined, by: stateDevice() ?? undefined });
     void pump();
   } else steerers.get(sessionId)?.();
 }
@@ -1952,7 +1972,7 @@ export function brainSignedIn(brainId: string, computerId: string) {
     stopped.delete(s.id);
     patchSession(s.id, (x) => {
       if (x.brainRun) delete x.brainRun.waits;
-      Object.assign(x, { status: "queued", waitingOnYou: false, error: undefined, endedAt: undefined, by: stateDevice() ?? undefined });
+      Object.assign(x, { status: "queued", waitingOnYou: false, error: undefined, endedAt: undefined, stopAsked: undefined, by: stateDevice() ?? undefined });
     });
   }
   void pump();

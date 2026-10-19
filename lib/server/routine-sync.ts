@@ -2,7 +2,7 @@ import "server-only";
 import { normalizeSchedule } from "@/cloud/schedule";
 import { templateById } from "@/lib/routine-catalog";
 import { workspaceOf, type Routine, type RoutineRun } from "@/lib/types";
-import { onRunner, pinnedToMac, runnerRoutine } from "./runner";
+import { onRunner, runnerRoutine, runnerRuns } from "./runner";
 import { bot, getState } from "./store";
 
 /**
@@ -22,8 +22,9 @@ import { bot, getState } from "./store";
  * Runs on the signed-in Orgo key (orgo.ts apiKey); signed out, nothing is sent.
  *
  * Orgo wakes a computer for its runner by these (runner.ts): each routine says how it runs (`run`) and
- * whether it needs the Mac (`onMac`, runner.ts pinnedToMac), and every new next time is sent
- * (routines.ts). A computer's runner sends only its own routines (runnerRoutine), never with
+ * whether the Mac runs it (`onMac`: it needs the Mac, runner.ts pinnedToMac, or its computer has no
+ * runner up, runnerRuns), and every new next time is sent (routines.ts), as is every change to whether
+ * a computer's runner is up (runner-install.ts). A computer's runner sends only its own routines (runnerRoutine), never with
  * deleteMissing: the whole set, and what's gone from it, are the Mac's to send.
  */
 
@@ -105,9 +106,9 @@ export function routinePayload(r: Routine) {
     bopsId: r.id,
     botId: r.botId,
     kind: kind === "monitor" ? "monitor" : "schedule",
-    // How it runs (routines.ts run): someone else's is never a chat run. Orgo wakes no computer for one that needs the Mac.
+    // How it runs (routines.ts run): someone else's is never a chat run. Orgo wakes no computer for one the Mac runs.
     run: r.reminder ? "reminder" : r.run === "chat" && !r.fromOutside ? "chat" : "task",
-    onMac: pinnedToMac(r, bot(r.botId)),
+    onMac: !runnerRuns(r),
     title: cleanText(r.title.trim(), 200).trim() || cleanText(r.goal.trim(), 200).trim() || "Routine",
     goal: cleanText(r.goal, 8000),
     enabled: r.enabled,

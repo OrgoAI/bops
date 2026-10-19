@@ -152,11 +152,13 @@ globalThis.__fake = {
       bash: async (computer, command) => {
         orgo.bash.push({ computer, command });
         if (orgo.here === "down") throw new Error("Orgo didn't answer");
+        // The guest's own time limit: Orgo answers 200 with what it said.
+        if (orgo.here === "slow") return { output: "Command timed out after 20s", exit_code: 124 };
         let word = "";
         try {
           word = computer === (orgo.here ?? process.env.BOPS_RUNNER_COMPUTER) ? readFileSync(join(nonceDir, "nonce"), "utf8") : "";
         } catch {}
-        return { output: `${word}\n`, exit_code: 0 };
+        return { output: `${word}\n${command.includes("echo __BOPS_NONCE_END__") ? "\n__BOPS_NONCE_END__\n" : ""}`, exit_code: 0 };
       },
     },
   },
@@ -257,15 +259,70 @@ await check("the Mac leaves a computer's routines to its runner while it's up, a
   assert.equal(here("r_nova"), true, "no computer yet");
   assert.equal(R.runsHere(routine("r_gone", "nobody")), true, "its bot gone: the Mac says so when it comes due");
   for (const status of ["installing", "failed"]) {
+    R.runnerForTests.seen("r_boppy");
     state.runners[C1] = up(status);
-    assert.equal(here("r_boppy"), true, `a runner ${status}: the Mac's`);
+    assert.equal(here("r_boppy"), true, `a runner ${status} the Mac never saw up: the Mac's`);
   }
   state.runners[C1] = up("stopping", { at: Date.now() - 10_000 });
   assert.equal(here("r_boppy"), false, "being stopped, not confirmed: still the runner's");
   state.runners[C1] = up("stopping", { at: Date.now() - R.HANDOVER_MS - 1000 });
+  R.runnerForTests.seen("r_boppy", R.HANDOVER_MS + 1000);
   assert.equal(here("r_boppy"), true, "not confirmed after the hand-over time: the Mac's");
   delete state.runners[C1];
   assert.equal(here("r_boppy"), true, "stopped (no runner): the Mac's");
+});
+
+await check("a routine that leaves a runner waits the hand-over time on the Mac, while that runner hears of it", () => {
+  reset();
+  seedRoutines();
+  const moves = [
+    ["the runner set up again", () => (state.runners[C1] = up("installing"))],
+    ["the runner couldn't start", () => (state.runners[C1] = up("failed", { error: "it didn't answer on its computer" }))],
+    ["its bot moved to a computer with no runner", () => Object.assign(state.bots[0], { computerId: C2 })],
+    ["the routine set to run on the Mac", () => (byId("r_boppy").where = "mac")],
+    ["its bot set to work on the Mac", () => (state.bots[0].runsOn = "mac")],
+  ];
+  for (const [what, move] of moves) {
+    reset();
+    seedRoutines();
+    assert.equal(here("r_boppy"), false, "the runner's, as the Mac last saw it");
+    move();
+    assert.equal(here("r_boppy"), false, `${what}: not the Mac's at once`);
+    R.runnerForTests.seen("r_boppy", R.HANDOVER_MS + 1000);
+    assert.equal(here("r_boppy"), true, `${what}: the Mac's after the hand-over time`);
+  }
+  // Never with a runner (as this Mac saw it): the Mac's at once.
+  reset();
+  seedRoutines();
+  assert.equal(here("r_rook"), true);
+});
+
+await check("a routine due on both sides during a hand-over runs on one: the Mac waits, the runner on its last copy runs it", async () => {
+  reset();
+  seedRoutines();
+  // As the Mac sees it: C1's runner up, then being set up again (an upgrade that marks it so) as the routine comes due.
+  assert.equal(here("r_boppy"), false);
+  state.runners[C1] = up("installing");
+  byId("r_boppy").nextRunAt = Date.now() - 1000;
+  tick();
+  assert.ok(!fake.started.some((x) => x.routineId === "r_boppy"), "the Mac leaves it to the runner, which hasn't heard");
+  assert.ok(byId("r_boppy").nextRunAt < Date.now(), "not advanced here");
+  T.reset();
+});
+
+await check("on a runner, a routine that comes from another computer's runner waits the hand-over time", () => {
+  reset();
+  seedRoutines();
+  asRunner(C2);
+  state.runners[C2] = up("running");
+  R.runnerForTests.hear("u1", "cloud");
+  assert.equal(here("r_rook"), true, "its own from the start");
+  // Boppy moves from C1 (its runner up) to C2.
+  R.runnerHasWork();
+  state.bots[0].computerId = C2;
+  assert.equal(here("r_boppy"), false, "just came here: C1's runner may not have heard");
+  R.runnerForTests.seen("r_boppy", R.HANDOVER_MS + 1000);
+  assert.equal(here("r_boppy"), true, "after the hand-over time: this runner's");
 });
 
 await check("after a switch to This Mac the Mac waits for the runner's stop, at most the hand-over time", () => {
@@ -278,8 +335,10 @@ await check("after a switch to This Mac the Mac waits for the runner's stop, at 
   assert.equal(here("r_boppy"), false, "just switched, its stop not confirmed: still the runner's");
   assert.equal(here("r_rook"), true);
   R.runnerForTests.hear("u1", "mac", { macAgo: R.HANDOVER_MS + 1000 });
+  R.runnerForTests.seen("r_boppy", R.HANDOVER_MS + 1000);
   assert.equal(here("r_boppy"), true, "after the hand-over time: the Mac's");
   R.runnerForTests.hear("u1", "mac", { macAgo: 5_000 });
+  assert.equal(here("r_boppy"), false);
   delete state.runners[C1];
   assert.equal(here("r_boppy"), true, "its stop confirmed (the runner's gone): the Mac's at once");
 });
@@ -458,6 +517,18 @@ await check("the Mac's timer runs its own routines and leaves the runner's", asy
   T.reset();
 });
 
+await check("a next time that's a skipped one (a skip and a run on two Bops put together) is moved past it before it's due", async () => {
+  reset();
+  const at = Date.now() + 3_600_000;
+  state.routines = [routine("r_rook", "rook", { schedule: { kind: "every", minutes: 60 }, nextRunAt: at, lastRunAt: at - 3_600_000, skips: [at] }), routine("r_boppy", "boppy", { schedule: { kind: "every", minutes: 60 }, nextRunAt: at, lastRunAt: at - 3_600_000, skips: [at] })];
+  tick();
+  assert.equal(byId("r_rook").nextRunAt, at + 3_600_000, "the Mac's own: the time after");
+  assert.equal(byId("r_boppy").nextRunAt, at + 3_600_000, "a runner's too, so Orgo doesn't wake its computer for nothing");
+  assert.equal(fake.started.length, 0, "nothing run");
+  await sleep(10);
+  T.reset();
+});
+
 await check("a newer Bops wrote the state: no routine runs", () => {
   reset();
   seedRoutines();
@@ -507,6 +578,13 @@ await check("the mirror says how each routine runs and whether it needs the Mac"
   assert.equal(p(routine("a", "boppy", { where: "mac" })).onMac, true);
   assert.equal(p(routine("a", "penny")).onMac, true, "its bot works on the Mac");
   assert.equal(p(routine("a", "boppy", { goal: "Sort my files locally" })).onMac, true);
+  // The Mac runs it when its computer has no runner up: Orgo wakes nothing for it, a reminder or a chat run neither.
+  assert.equal(p(routine("a", "rook")).onMac, true, "C2 has no runner");
+  assert.equal(p(routine("a", "nova", { reminder: "Stand up" })).onMac, true, "no computer");
+  for (const status of ["installing", "failed", "stopping"]) {
+    state.runners[C1] = up(status);
+    assert.equal(p(routine("a", "otto", { reminder: "Stand up" })).onMac, true, `C1's runner ${status}`);
+  }
 });
 
 await check("a runner sends only its own routines, never deleteMissing; the Mac the whole set", async () => {
@@ -546,6 +624,11 @@ await check("a runner makes sure it's on its own computer: the same word back ru
   orgo.here = "down";
   assert.equal(await R.checkIdentity(), "unknown", "no answer proves nothing");
   assert.equal(left, 1, "and takes nothing off");
+  // A slow computer: the command timed out there (Orgo answers 200, exit 124, no word): proves nothing either.
+  orgo.here = "slow";
+  assert.equal(await R.checkIdentity(), "unknown");
+  assert.equal(left, 1, "the real runner stays");
+  assert.match(orgo.bash.at(-1).command, /echo __BOPS_NONCE_END__/, "a read that ran to its end says so");
 });
 
 await check("a runner runs nothing until it's sure which computer it's on, and looks again after a nap", async () => {
@@ -563,6 +646,11 @@ await check("a runner runs nothing until it's sure which computer it's on, and l
   assert.equal(R.runnerReady(() => again++), false);
   await sleep(20);
   assert.equal(again, 1, "sure now: the timer goes again");
+  assert.equal(R.runnerReady(), true);
+  // A look stands under a minute for starting a run: a live copy (a fork) carrying on from the same memory looks again first.
+  R.runnerForTests.sure(Date.now() - 50_000);
+  assert.equal(R.runnerReady(), false, "a look 50 seconds old: not sure enough to start a run");
+  await sleep(20);
   assert.equal(R.runnerReady(), true);
   const looks = orgo.bash.length;
   napped = true;

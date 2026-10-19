@@ -660,6 +660,8 @@ export type Session = {
    * stops it, or marks it failed when it restarts. Unset on threads from before: the Mac's, never a runner's.
    */
   by?: string;
+  /** Stop asked for on another Bops than the one that runs it (sessions.ts stopSession), and why: that one stops it when it hears. */
+  stopAsked?: string;
   /** Bops is still deciding where it runs. */
   routing?: boolean;
   /** Bops couldn't tell where it should run, so it's asking the user. */
@@ -1074,7 +1076,9 @@ export type AppState = {
  * routines stay on the Mac), or being stopped (where the bots work switched to This Mac, the computer was
  * deleted, its bots moved off). `version` and `buildId`: the Bops it runs, set up by the Mac `by` (its
  * device id). `keyId`: the Orgo key made for it (orgo-web /api/computers/{id}/bops-runner-key), which
- * other Macs use too and only the Mac that made it (`keyBy`) revokes. `at`: when the status was set.
+ * other Macs use too and any of them revokes; `keyBy`, the Mac that had it made. `at`: when the status
+ * was set. `upgrading`: one that's up being set up again with a newer Bops by the Mac `by` since `at`:
+ * it stays up and keeps its routines meanwhile (runner-install.ts).
  */
 export type RunnerState = {
   status: "installing" | "running" | "failed" | "stopping";
@@ -1085,6 +1089,7 @@ export type RunnerState = {
   by: string;
   error?: string;
   at: number;
+  upgrading?: { version: string; buildId: string; by: string; at: number };
 };
 
 /**

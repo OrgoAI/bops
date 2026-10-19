@@ -10,7 +10,8 @@ import { apiKey, callOrgo, orgo } from "./orgo";
 import { orgoOrigin } from "./orgo-auth";
 import { loopHere } from "./persist";
 import { deviceIdFor } from "./persist-cloud";
-import { heardRunsOn, RUNNER_CONF, RUNNER_KEY_FILE, RUNNER_WRAPPER, runsOnMissing } from "./runner";
+import { routineChanged } from "./routine-sync";
+import { heardRunsOn, overdueOn, RUNNER_CONF, RUNNER_KEY_FILE, RUNNER_WRAPPER, runsOnMissing } from "./runner";
 import { computerGone, endSessionsOf } from "./sessions";
 import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNew, update } from "./store";
 
@@ -32,16 +33,20 @@ import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNe
  * and no command sent carries a key or a token. Never on a computer whose workspace has someone else
  * with Full access (root there; the key is the whole account's). A newer Bops is never replaced by an
  * older one; the same version built again replaces it only when this Mac set it up last (a dev Mac).
+ * One that's up and set up again (a new release) stays up, with its routines, until the new one starts
+ * in its place (RunnerState.upgrading); a try that doesn't get that far leaves it as it was.
  *
  * Stopping one (the bots work on This Mac now, or in browsers on the Mac; its computer was deleted; no
- * bot works on it): its program is stopped and taken off with its key, its key revoked (by the Mac that
- * had it made: other Macs use it too, and only that one revokes it), its threads end, and it's taken out
- * of the state. A computer asleep isn't woken for that: its runner can't run anything without its key,
- * and it's taken off the next time the computer is up.
+ * bot works on it): its program is stopped and taken off with its key, its key revoked (by any Mac of
+ * the user's: Orgo revokes only the user's own runner keys for that computer), its threads end, and it's
+ * taken out of the state. A computer asleep isn't woken for that: its runner can't run anything without
+ * its key, and it's taken off the next time the computer is up.
  *
  * Looked at once a minute; a full look (and a change: where the bots work, which computers they're on)
  * goes through each computer. Nothing here asks a computer that's asleep anything unless it sets a
- * runner up, which wakes it once.
+ * runner up, which wakes it once. One that's up whose runner is marked up but left a routine well past
+ * its time is asked whether its runner is still there (stillRuns). Orgo's copy of the routines follows
+ * each runner going up or down (routine-sync.ts onMac), so it wakes a computer only for a runner that's up.
  */
 
 const ROOT = "/opt/bops/runner";
@@ -65,6 +70,8 @@ const RETRY_MIN_MS = 30 * 60_000;
 const RETRY_MAX_MS = 12 * 60 * 60_000;
 /** Another Mac setting one up this long is taken to have stopped (quit mid-way). */
 const INSTALLING_STALE_MS = 20 * 60_000;
+/** How often at most a computer is asked whether its runner is still there (stillRuns): a command keeps it awake a while. */
+const STILL_RUNS_EVERY_MS = 60 * 60_000;
 
 /* ---------------- The bundle ---------------- */
 
@@ -131,6 +138,7 @@ export function installPlan(x: RunnerState | undefined, mine: Pick<Bundle, "vers
   const cmp = compareVersions(mine.version, x.version);
   if (cmp < 0) return "keep";
   if (x.status === "installing" && x.by !== me && now - x.at < INSTALLING_STALE_MS) return "wait";
+  if (x.status === "running" && x.upgrading && x.upgrading.by !== me && now - x.upgrading.at < INSTALLING_STALE_MS) return "wait";
   if (cmp > 0) return "install";
   if (mine.buildId === x.buildId) return x.status === "running" ? "keep" : "install";
   return x.by === me ? "install" : "keep";
@@ -192,9 +200,11 @@ export const SUPERVISOR_CONF = [
 ].join("\n");
 
 /**
- * One command, under the runners' lock: the bundle checked against its sha256, unpacked beside the other
- * builds, `current` switched to it in one rename, older builds gone, the program and its script written,
- * and it (re)started. Says __BOPS_INSTALLED__ when it got that far.
+ * One command, under the runners' lock: the bundle checked against its sha256 and unpacked beside the
+ * other builds (when it was just uploaded: a build already unpacked there, as on a copy of a computer
+ * with a runner or a try again after it was unpacked, is used as it is), `current` switched to it in one
+ * rename, older builds gone, the program and its script written, and it (re)started. Says
+ * __BOPS_INSTALLED__ when it got that far, __BOPS_NO_FILES__ when neither the upload nor the build is there.
  */
 export function installScript(b: Pick<Bundle, "name" | "sha256" | "version" | "buildId">, wrapper: string): string {
   const dirName = `${b.version}-${b.buildId}`;
@@ -205,16 +215,21 @@ export function installScript(b: Pick<Bundle, "name" | "sha256" | "version" | "b
     `exec 9>"$d/.lock"`,
     "flock -w 120 9",
     `cd "$d/incoming"`,
-    `printf '%s  %s\\n' ${q(b.sha256)} ${q(b.name)} | sha256sum -c --status`,
-    `rm -rf "$d/${dirName}.part"`,
-    `mkdir "$d/${dirName}.part"`,
-    `tar -xzf ${q(b.name)} -C "$d/${dirName}.part" --no-same-owner`,
-    `test -f "$d/${dirName}.part/server.js"`,
-    `rm -rf "$d/${dirName}"`,
-    `mv "$d/${dirName}.part" "$d/${dirName}"`,
+    `if [ -f ${q(b.name)} ]; then`,
+    `  printf '%s  %s\\n' ${q(b.sha256)} ${q(b.name)} | sha256sum -c --status`,
+    `  rm -rf "$d/${dirName}.part"`,
+    `  mkdir "$d/${dirName}.part"`,
+    `  tar -xzf ${q(b.name)} -C "$d/${dirName}.part" --no-same-owner`,
+    `  test -f "$d/${dirName}.part/server.js"`,
+    `  rm -rf "$d/${dirName}"`,
+    `  mv "$d/${dirName}.part" "$d/${dirName}"`,
+    `  rm -f ${q(b.name)}`,
+    `elif [ ! -f "$d/${dirName}/server.js" ]; then`,
+    "  echo __BOPS_NO_FILES__",
+    "  exit 3",
+    "fi",
     `ln -sfn ${q(dirName)} "$d/current.next"`,
     `mv -Tf "$d/current.next" "$d/current"`,
-    `rm -f ${q(b.name)}`,
     `for v in "$d"/*/; do v="\${v%/}"; case "\${v##*/}" in incoming|current|${dirName}) ;; *) rm -rf "$v" ;; esac; done`,
     `cat > ${RUNNER_WRAPPER} <<'BOPS_EOF'\n${wrapper}BOPS_EOF`,
     `chmod 700 ${RUNNER_WRAPPER}`,
@@ -274,30 +289,51 @@ type Box = {
   retry: Map<string, { at: number; wait: number }>;
   /** Computers this server is setting up right now. */
   busy: Set<string>;
+  /** When each computer was last asked whether its runner is still there (stillRuns). */
+  asked?: Map<string, number>;
 };
 const g = globalThis as unknown as { __bopsRunnerInstall?: Box };
 const box: Box = (g.__bopsRunnerInstall ??= { lookedAt: 0, retry: new Map(), busy: new Set() });
 
 const userNow = () => getState().account?.user.id;
 const runnerOf = (id: string) => getState().runners?.[id];
+/** Computer `id`'s runner as it is now; one going up or down has Orgo's copy of its bots' routines follow (whether Orgo wakes it for them). */
 function mark(id: string, x: RunnerState) {
+  const was = runnerOf(id)?.status === "running";
   update((s) => void ((s.runners ??= {})[id] = x));
+  if (was !== (x.status === "running")) routinesFollow(id);
 }
 function forget(id: string) {
+  const was = runnerOf(id)?.status === "running";
   update((s) => {
     if (!s.runners?.[id]) return;
     delete s.runners[id];
     if (!Object.keys(s.runners).length) s.runners = undefined;
   });
+  if (was) routinesFollow(id);
+}
+function routinesFollow(id: string) {
+  const s = getState();
+  for (const b of s.bots) if (workBot(b, s.bots).computerId?.toLowerCase() === id.toLowerCase()) routineChanged(b.id);
 }
 
 /** Couldn't start, and why; tried again later (a wait that grows), but at once when it was the bundle or Full access. */
 function failed(id: string, error: string, b: Pick<Bundle, "version" | "buildId"> | null, me: string, backoff = true) {
   const x = runnerOf(id);
   mark(id, { status: "failed", version: b?.version ?? x?.version ?? "", buildId: b?.buildId ?? x?.buildId ?? "", by: me, error, at: Date.now(), ...keyOf(x) });
-  if (!backoff) return;
+  if (backoff) later(id);
+}
+/** Tried again after a wait that grows. */
+function later(id: string) {
   const wait = Math.min(RETRY_MAX_MS, (box.retry.get(id)?.wait ?? RETRY_MIN_MS / 2) * 2);
   box.retry.set(id, { at: Date.now() + wait, wait });
+}
+/** A runner that's up, set up again without getting as far as its computer's files: left up as it was, and tried again later. */
+function keptAsIs(id: string, error: string) {
+  const x = runnerOf(id);
+  if (x?.status === "running") mark(id, { ...x, upgrading: undefined });
+  console.warn(`[runner-install] ${id}: kept as it was (${error})`);
+  later(id);
 }
 const keyOf = (x: RunnerState | undefined) => (x?.keyId ? { keyId: x.keyId, ...(x.keyBy ? { keyBy: x.keyBy } : {}) } : {});
 
@@ -380,9 +416,9 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
     const full = await othersWithFullAccess(key, p);
     if (full === null) return;
     if (!full) continue;
-    // Stopped (and its key revoked, when it's this Mac's to revoke), then said why. Once: a computer isn't asked again for nothing.
+    // Stopped (and its key revoked), then said why. Once: a computer isn't asked again for nothing.
     const x = runnerOf(id);
-    if (x && (x.status !== "failed" || (x.keyId && (x.keyBy ?? x.by) === me))) await stop(id, key, STOPPED.full);
+    if (x && (x.status !== "failed" || x.keyId)) await stop(id, key, STOPPED.full);
     if (runnerOf(id)?.error !== FULL_ACCESS) failed(id, FULL_ACCESS, null, me, false);
     return;
   }
@@ -393,10 +429,11 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
     return;
   }
   const plan = installPlan(x, bundle, me);
+  if (plan === "keep" && x?.status === "running" && overdueOn(id)) return stillRuns(id, me);
   if (plan !== "install") return;
-  // One that didn't start waits its turn (not when it was Full access or the bundle, which are looked at each time).
+  // One that didn't start, or one up that wasn't set up again, waits its turn (not when it was Full access or the bundle, which are looked at each time).
   const retry = box.retry.get(id);
-  if (x?.status === "failed" && x.error !== FULL_ACCESS && x.error !== NO_BUNDLE && retry && retry.at > Date.now()) return;
+  if (retry && retry.at > Date.now() && (x?.status === "running" || (x?.status === "failed" && x.error !== FULL_ACCESS && x.error !== NO_BUNDLE))) return;
   box.busy.add(id);
   try {
     await install(id, w, bundle, key, me);
@@ -405,15 +442,24 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
   }
 }
 
-/** Set a runner up on computer `id` (this wakes it, if it's asleep: once, for this). */
+/**
+ * Set a runner up on computer `id` (this wakes it, if it's asleep: once, for this). One that's up stays
+ * up, and keeps its routines, until the new one is started in its place: a try that goes wrong before
+ * that (its computer didn't answer, the files didn't upload) leaves it as it was, to be tried again later.
+ */
 async function install(id: string, w: Wanted, bundle: Bundle, key: string, me: string) {
   const s = getState();
   const orgoAt = orgoOrigin();
   const cloudAt = cloudUrl();
-  const fail = (error: string) => failed(id, error, bundle, me);
+  const before = runnerOf(id);
+  const upgrade = before?.status === "running";
+  // Whether the runner that was up is changed yet (its key replaced, its files swapped): past that, one that goes wrong couldn't start.
+  let touched = false;
+  const fail = (error: string) => (upgrade && !touched ? keptAsIs(id, error) : failed(id, error, bundle, me));
   // A runner reaches what this Mac does: an Orgo or a Bops Cloud on this Mac it never could.
   if (!ORIGIN.test(orgoAt) || !ORIGIN.test(cloudAt) || LOOPBACK_URL.test(orgoAt) || LOOPBACK_URL.test(cloudAt)) return fail("Orgo or Bops Cloud runs on this Mac, which the computer can't reach");
-  mark(id, { status: "installing", version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now(), ...keyOf(runnerOf(id)) });
+  if (upgrade) mark(id, { ...before, upgrading: { version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now() } });
+  else mark(id, { status: "installing", version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now(), ...keyOf(before) });
   const dirName = `${bundle.version}-${bundle.buildId}`;
   const probe = await orgo.bash(id, probeScript(dirName), 60).catch(() => null);
   if (!probe) return fail("its computer didn't answer");
@@ -425,13 +471,14 @@ async function install(id: string, w: Wanted, bundle: Bundle, key: string, me: s
     const up = await health(id);
     const x = runnerOf(id);
     if (up === "ok") mark(id, { status: "running", version: there[1], buildId: there[2], by: x?.by ?? me, at: Date.now(), ...keyOf(x) });
-    else fail(UNHEALTHY[up]);
+    else failed(id, UNHEALTHY[up], bundle, me);
     return;
   }
-  // Its key: the one made for it before while its file is there (another Mac's too), else a new one.
+  // Its key: the one made for it before while its file is there (another Mac's too), else a new one, and
+  // the one before revoked, whichever Mac had it made (Orgo revokes the computer's earlier ones too).
   let x = runnerOf(id);
   if (!x?.keyId || said("key") !== "yes") {
-    const old = x?.keyId && (x.keyBy ?? x.by) === me ? x.keyId : undefined;
+    const old = x?.keyId;
     const got = await callOrgo<{ keyId?: unknown; code?: unknown }>(key, `/api/computers/${encodeURIComponent(id)}/bops-runner-key`, {
       method: "PUT",
       body: { name: w.botName },
@@ -442,6 +489,8 @@ async function install(id: string, w: Wanted, bundle: Bundle, key: string, me: s
     if (got?.status === 422) return fail("a runner needs a Linux computer");
     const keyId = got?.status === 200 && typeof got.json.keyId === "string" ? got.json.keyId : null;
     if (!keyId) return fail("Orgo didn't make its key");
+    // The file has this key now: a runner still up on the one before can't go on.
+    touched = true;
     x = { ...(x ?? { status: "installing", version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now() }), keyId, keyBy: me };
     mark(id, x);
     if (old && old !== keyId) await revoke(id, old, key);
@@ -451,8 +500,9 @@ async function install(id: string, w: Wanted, bundle: Bundle, key: string, me: s
     if (sent) return fail(sent);
   }
   const wrapper = wrapperScript({ computerId: id, timeZone: ZONE.test(s.owner?.timeZone ?? "") ? s.owner?.timeZone : undefined, orgo: orgoAt, cloud: cloudAt });
+  touched = true;
   const put = await orgo.bash(id, installScript(bundle, wrapper), 240).catch(() => null);
-  if (!put?.output.includes("__BOPS_INSTALLED__")) return fail("its files couldn't be put in place");
+  if (!put?.output.includes("__BOPS_INSTALLED__")) return fail(put?.output.includes("__BOPS_NO_FILES__") ? "its files weren't on its computer" : "its files couldn't be put in place");
   const up = await health(id);
   if (up !== "ok") {
     // Never left half up: a runner that answered beyond its computer, or not at all, is stopped (its routines stay on the Mac).
@@ -522,29 +572,49 @@ async function revoke(id: string, keyId: string, key: string): Promise<boolean> 
 }
 
 /**
- * Stop computer `id`'s runner, saying `why` in its threads (they end). It's taken off a computer that's
- * up or gone; one asleep keeps it until it's up again (it can't run without its key). Its key is revoked
- * by the Mac that had it made; it goes from the state once both are done.
+ * Stop computer `id`'s runner, saying `why` in its threads (they end; a computer deleted says so). It's
+ * taken off a computer that's up or gone; one asleep keeps it until it's up again (it can't run without
+ * its key). Its key is revoked, whichever Mac had it made; it goes from the state once both are done.
  */
 async function stop(id: string, key: string, why: string) {
   const user = userNow();
   const me = stateDevice();
   let x = runnerOf(id);
   if (!x || !user || !me) return;
+  const c = await orgo.computer(id).catch((e: unknown) => (computerGone(e) ? ("gone" as const) : null));
   if (x.status !== "stopping") {
     x = { ...x, status: "stopping", at: Date.now() };
     mark(id, x);
-    endSessionsOf(deviceIdFor(user, id), why);
+    endSessionsOf(deviceIdFor(user, id), c === "gone" ? STOPPED.gone : why);
   }
   let off = false;
-  const c = await orgo.computer(id).catch((e: unknown) => (computerGone(e) ? ("gone" as const) : null));
   if (c === "gone") off = true;
   else if (c?.status === "running") off = !!(await orgo.bash(id, UNINSTALL_SCRIPT, 180).catch(() => null))?.output.includes("__BOPS_OFF__");
-  if (x.keyId && (x.keyBy ?? x.by) === me && (await revoke(id, x.keyId, key))) {
+  if (x.keyId && (await revoke(id, x.keyId, key))) {
     x = { ...x, keyId: undefined, keyBy: undefined };
     mark(id, Object.fromEntries(Object.entries(x).filter(([, v]) => v !== undefined)) as RunnerState);
   }
   if (off && !x.keyId) forget(id);
+}
+
+/**
+ * A computer whose runner is marked up but left one of its routines well past its time (a runner that
+ * runs advances it before it starts): whether its program is still there, asked only when the computer
+ * is up (one asleep isn't woken for it) and at most once an hour. Gone or stopped (it left as a copy by
+ * mistake, or kept failing): it couldn't start, so its routines go back to the Mac, and it's set up
+ * again later.
+ */
+async function stillRuns(id: string, me: string) {
+  const asked = (box.asked ??= new Map());
+  if (Date.now() - (asked.get(id) ?? 0) < STILL_RUNS_EVERY_MS) return;
+  const c = await orgo.computer(id).catch(() => null);
+  if (c?.status !== "running") return;
+  asked.set(id, Date.now());
+  const got = await orgo.bash(id, "supervisorctl status bops-runner 2>&1; echo __BOPS_STATUS_END__", 30).catch(() => null);
+  // Only a read that ran to its end says anything.
+  if (got?.exit_code !== 0 || !got.output.includes("__BOPS_STATUS_END__")) return;
+  if (/\b(RUNNING|STARTING|BACKOFF)\b/.test(got.output)) return;
+  if (runnerOf(id)?.status === "running") failed(id, "it stopped on its computer", null, me);
 }
 
 /* ---------------- When ---------------- */
@@ -593,6 +663,7 @@ export const runnerInstallForTests = {
     box.lookedAt = 0;
     box.retry.clear();
     box.busy.clear();
+    box.asked?.clear();
   },
   retryAt: (id: string) => box.retry.get(id)?.at,
 };

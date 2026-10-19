@@ -152,7 +152,8 @@ async function flush(wsId: string): Promise<void> {
   if (p.timer) clearTimeout(p.timer);
   pending.delete(wsId);
   const projectId = projectOf(wsId);
-  if (!projectId || routesMissing(projectId) || onRunner() || !stateReady() || stateTooNew()) return;
+  // Not sent now: looked at again on the next change, as if never sent (look's `seen`).
+  if (!projectId || routesMissing(projectId) || onRunner() || !stateReady() || stateTooNew()) return void seen.delete(wsId);
   const res = await send(`/api/projects/${encodeURIComponent(projectId)}/bops`, bopsMapPayload(wsId));
   const status = res?.status ?? null;
   if (status === 404 || status === 405) {

@@ -20,10 +20,12 @@ import { getState, pullState, statePulledAt } from "./store";
  * Orgo id, and so is BOPS_DEVICE_SEED, which makes its device id: persist-cloud.ts deviceIdFor). It
  * runs nothing it isn't sure of: where the bots work as Orgo said under a minute ago, and the state as
  * read under 40 seconds ago, neither from before a nap (its computer suspended in between). No routine
- * runs on two Bops at once: each decides from the same shared state, and after a switch to This Mac the
- * Mac takes a computer's routines only once its runner's stop is confirmed, or HANDOVER_MS after it
- * heard of the switch (a runner asks again at least every minute). Nor on a copy of a computer: a runner
- * makes sure it's on its own (checkIdentity) before it runs anything.
+ * runs on two Bops at once: each decides from the same shared state, and a routine that leaves one Bops
+ * for another (a switch to This Mac, a runner being set up again or stopped, its bot moved to another
+ * computer, the routine set to run on the Mac) waits HANDOVER_MS on the one it goes to, or until the
+ * runner's stop is confirmed, while the one it leaves hears of it (a runner reads the state at least
+ * every 40 seconds before it runs anything). Nor on a copy of a computer: a runner makes sure it's on its
+ * own (checkIdentity) right before it runs anything.
  *
  * What a runner runs at all is an allow-list (persist.ts RUNNER_LOOPS); it's set up and stopped from
  * the Mac (runner-install.ts), and docs/cloud-runner.md says the rest.
@@ -93,6 +95,8 @@ const g = globalThis as unknown as {
     freshening?: Promise<unknown>;
     /** When this runner last made sure it's on its own computer (checkIdentity), and the look under way. */
     sureAt?: number;
+    /** By routine: on the Mac, when it was last seen with a computer's runner, and which; on a runner, when it was last seen as not its own (handedOver). */
+    seen?: Map<string, { at: number; from?: string }>;
     checking?: Promise<IdentityLook>;
     /** Tests: where the word is written, and what a copy does instead of leaving. */
     nonceDir?: string;
@@ -190,11 +194,12 @@ export async function setRunsOn(to: RunsOn): Promise<{ error?: string; missing?:
 const fresh = (at: number, ms: number, now: number) => at > 0 && now - at < ms && !sleptSince(at);
 
 /**
- * On a runner: whether it may run routines now. It goes by where the bots work as Orgo said under a
- * minute ago and by the state as read under 40 seconds ago, neither from before a nap: while its
+ * On a runner, with one of its own routines due (runnerHasWork): whether it may run routines now. It
+ * goes by where the bots work as Orgo said under a minute ago, by the state as read under 40 seconds
+ * ago and by a look at which computer it's on under 45 seconds old, none from before a nap: while its
  * computer was suspended anything may have changed (a routine paused, set to This Mac, its bot moved).
- * When either is older it reads both again, runs nothing meanwhile, and then calls `again` (the tick)
- * if they're fresh now.
+ * When any is older it reads it again, runs nothing meanwhile, and then calls `again` (the tick) if
+ * they're fresh now.
  */
 export function runnerReady(again?: () => void): boolean {
   startRunsOn();
@@ -216,20 +221,28 @@ export function runnerReady(again?: () => void): boolean {
 /* ---------------- Which computer a runner is on ---------------- */
 
 export type IdentityLook = "same" | "copy" | "unknown";
-/** How often a runner makes sure it's on its own computer, and how long one look stands (without a nap since). */
+/** How often a runner makes sure it's on its own computer while a task of its own runs. */
 export const IDENTITY_EVERY_MS = 5 * 60_000;
-const SURE_FRESH_MS = 2 * IDENTITY_EVERY_MS + 60_000;
+/**
+ * How long one look stands for starting a run (without a nap since): a look right before each, so a live
+ * copy of the computer (a fork, which carries on from the same memory) never starts one. Its computer is
+ * about to be used by that run anyway, so the look doesn't keep it from sleeping.
+ */
+const SURE_FRESH_MS = 45_000;
 const NONCE_DIR = "/run/bops-runner";
+/** What the read prints after the word, so a read that was cut short (the computer's own time limit) is never taken for a copy. */
+const NONCE_END = "__BOPS_NONCE_END__";
 
 /**
  * On a runner: whether it's on the computer it was set up on (runnerComputer). A bot's own computer is
  * made as a copy of its main bot's (a fork, running, or a clone), and a copy of a computer with a runner
  * comes up with that runner, its key and its computer's id: it would run that computer's routines a
- * second time, as that computer. So at start, before it runs anything after a nap, and every
- * IDENTITY_EVERY_MS while a task of its own runs (never while idle: the read is a command on the
+ * second time, as that computer. So at start (before it reads the state), right before it starts a run,
+ * and every IDENTITY_EVERY_MS while a task of its own runs (never while idle: the read is a command on the
  * computer, which counts as using it), it writes a fresh random word here and reads it back through
- * Orgo from runnerComputer(). Its word there: it's there. Another, or none: this is a copy, which takes
- * its runner off (leaveCopy) and stops. No answer from Orgo proves nothing either way; until a look
+ * Orgo from runnerComputer(). Its word there: it's there. Another, or none, in a read that ran to its
+ * end: this is a copy, which takes its runner off (leaveCopy) and stops. No answer from Orgo, or a read
+ * that didn't finish (a slow computer's command timing out), proves nothing either way; until a look
  * says it's there, it runs nothing (runnerReady).
  */
 export function checkIdentity(): Promise<IdentityLook> {
@@ -251,8 +264,10 @@ async function lookIdentity(): Promise<IdentityLook> {
   writeFileSync(`${dir}/nonce`, word, { mode: 0o600 });
   const asked = Date.now();
   const { orgo } = await import("./orgo");
-  const got = await orgo.bash(computer, `cat ${NONCE_DIR}/nonce 2>/dev/null; true`, 20);
-  if (!got.output.split(/\s+/).includes(word)) {
+  const got = await orgo.bash(computer, `cat ${NONCE_DIR}/nonce 2>/dev/null; echo; echo ${NONCE_END}`, 20);
+  const said = got.output.split(/\s+/);
+  if (got.exit_code !== 0 || !said.includes(NONCE_END)) return "unknown";
+  if (!said.includes(word)) {
     leaveCopy();
     return "copy";
   }
@@ -297,10 +312,41 @@ function runnerMayRun(x: RunnerState | undefined, now: number): boolean {
  * On a runner: whether one of its own routines needs the routines timer now (due, or its next time not
  * set yet). Only then does it make sure of the state, of Orgo's word and of its computer (runnerReady):
  * a command on its computer counts as using it (orgo-web lib/bops-free-hours.ts), so an idle runner
- * that looked every tick would keep its computer from ever sleeping.
+ * that looked every tick would keep its computer from ever sleeping. Each tick it also notes which
+ * routines aren't its own (handedOver).
  */
 export function runnerHasWork(now = Date.now()): boolean {
+  const seen = (box.seen ??= new Map());
+  for (const [id, x] of seen) if (now - x.at >= HANDOVER_MS) seen.delete(id);
+  for (const r of getState().routines) if (!runnerRoutine(r)) seen.set(r.id, { at: now });
   return getState().routines.some((r) => r.enabled && (r.nextRunAt === undefined || r.nextRunAt <= now) && runnerRoutine(r));
+}
+
+/**
+ * Whether a routine just came to this Bops from another that may still run it, which hasn't heard yet:
+ * on the Mac, one seen with a computer's runner under HANDOVER_MS ago (that runner being set up again
+ * or failing, its bot moved to a computer with none, the routine set to run on the Mac), unless that
+ * runner's stop is confirmed (it's out of the state); on a runner, one seen as not its own under
+ * HANDOVER_MS ago (its bot moved here from another computer's runner). It waits that long here: the
+ * other reads the state again well before.
+ */
+function handedOver(r: Routine, now: number): boolean {
+  const x = box.seen?.get(r.id);
+  return !!x && now - x.at < HANDOVER_MS && (!x.from || !!getState().runners?.[x.from]);
+}
+
+/** Whether a computer's runner that's up runs the routine (its bot works there, and it doesn't need the Mac): Orgo wakes that computer for it, and for no other (routine-sync.ts onMac). */
+export function runnerRuns(r: Routine): boolean {
+  const s = getState();
+  const computer = computerOf(r);
+  return !!computer && s.runners?.[computer]?.status === "running" && !pinnedToMac(r, s.bots.find((x) => x.id === r.botId));
+}
+
+/** How long past its time a routine of a runner that's up may be before the Mac looks whether that runner still runs (runner-install.ts). */
+const OVERDUE_MS = 10 * 60_000;
+/** Whether a routine computer `id`'s runner runs is that long past its time: a runner that runs advances it before it starts. */
+export function overdueOn(id: string, now = Date.now()): boolean {
+  return getState().routines.some((r) => r.enabled && r.nextRunAt !== undefined && now - r.nextRunAt > OVERDUE_MS && computerOf(r)?.toLowerCase() === id.toLowerCase() && runnerRuns(r));
 }
 
 /** On a runner: the routine is this one's, its bot working on this computer and the Mac not needed (whether or not it may run it right now). */
@@ -316,21 +362,33 @@ export function runnerRoutine(r: Routine): boolean {
  * - The Mac: the rest. One that needs the Mac, one whose bot has no computer, and one whose computer has
  *   no runner up (none, being set up, couldn't start, or stopped, or the switch to This Mac is
  *   HANDOVER_MS old). Until Orgo answers, a computer whose runner is up keeps its routines.
+ * Either way, one that just came from another Bops waits HANDOVER_MS first (handedOver).
  */
 export function runsHere(r: Routine, now = Date.now()): boolean {
   const s = getState();
   const computer = computerOf(r);
   if (onRunner()) {
     const h = heard();
-    return !!computer && runnerRoutine(r) && h?.runsOn === "cloud" && fresh(h.at, MODE_FRESH_MS, now) && s.runners?.[computer]?.status === "running";
+    return !!computer && runnerRoutine(r) && h?.runsOn === "cloud" && fresh(h.at, MODE_FRESH_MS, now) && s.runners?.[computer]?.status === "running" && !handedOver(r, now);
   }
-  if (!computer || pinnedToMac(r, s.bots.find((x) => x.id === r.botId))) return true;
-  return !runnerMayRun(s.runners?.[computer], now);
+  if (computer && !pinnedToMac(r, s.bots.find((x) => x.id === r.botId)) && runnerMayRun(s.runners?.[computer], now)) {
+    (box.seen ??= new Map()).set(r.id, { at: now, from: computer });
+    return false;
+  }
+  if (handedOver(r, now)) return false;
+  box.seen?.delete(r.id);
+  return true;
 }
 
 /** Tests: what Orgo said, as if it said it (`at` back in time to make it older), and forgetting it; which computer this is. */
 export const runnerForTests = {
   sure: (at = Date.now()) => void (box.sureAt = at),
+  /** A routine seen with a runner (on the Mac), or not as its own (on a runner), `ago` ms back; undefined: never. */
+  seen: (routineId: string, ago?: number) => {
+    const x = box.seen?.get(routineId);
+    if (ago === undefined) box.seen?.delete(routineId);
+    else (box.seen ??= new Map()).set(routineId, { ...x, at: Date.now() - ago });
+  },
   identity: (o: { nonceDir?: string; leave?: () => void }) => Object.assign(box, o),
   hear: (user: string, to: RunsOn, opts: { ago?: number; macAgo?: number } = {}) => {
     hear(user, to);

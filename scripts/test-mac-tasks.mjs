@@ -1172,6 +1172,17 @@ assert.equal(S.session("ses_queued").offerMac, true);
 X.stopSession("ses_queued");
 assert.equal(S.session("ses_queued").offerMac, undefined);
 
+// Stop on another Bops's thread (a computer's runner's, Session.by): asked for, not done here; the Bops that runs it
+// stops it when it hears (stopAskedHere, on changes from elsewhere), and the ask goes.
+S.update((s) => s.sessions.push({ ...cloudThread("ses_runner", "Inbox sweep", "Sort my inbox"), status: "queued", by: "dev_runner_c1" }));
+X.stopSession("ses_runner", "Stopped by you");
+assert.deepEqual([S.session("ses_runner").status, S.session("ses_runner").stopAsked], ["queued", "Stopped by you"], "asked for, not done here");
+X.stopAskedHere();
+assert.equal(S.session("ses_runner").status, "queued", "another Bops's: still not this one's to stop");
+S.patchSession("ses_runner", { by: undefined });
+X.stopAskedHere();
+assert.deepEqual([S.session("ses_runner").status, S.session("ses_runner").error, S.session("ses_runner").stopAsked], ["failed", "Stopped by you", undefined], "stopped where it runs");
+
 // In the chat, words about the Mac for a cloud thread go to the bot, even as a reply to the thread's message: the bot
 // moves it (tell_task on_mac) when the user's words name the Mac, and otherwise passes them on with the move offered.
 S.update((s) => s.sessions.push(cloudThread("ses_flight", "Flight search", "Find flights to Lisbon in May")));

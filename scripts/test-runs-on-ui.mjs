@@ -1,5 +1,5 @@
 // Tests for Settings, Where routines run (components/app/runs-on.tsx): Cloud and This Mac, a line each,
-// nothing picked until Bops says which, the one Orgo keeps picked; an Orgo that can't keep it yet shows
+// nothing picked until Bops says which (nor when Orgo didn't answer, which it says), the one Orgo keeps picked; an Orgo that can't keep it yet shows
 // This Mac with "Cloud isn't available yet." and Cloud can't be picked; in the Cloud, each computer of the
 // workspace's bots once (a bot that shares is on its main bot's), with how its runner is: Running, Asleep,
 // Setting up, Stopping, Couldn't start and why, or not set up yet; a pick calls back; no dashes anywhere.
@@ -150,6 +150,18 @@ await test("an Orgo that can't keep it yet: This Mac, Cloud can't be picked, and
   const t = text(html);
   assert.ok(t.endsWith("Cloud isn't available yet."), t);
   assert.ok(!t.includes("computer"), "no runners to show");
+});
+
+await test("Orgo didn't answer: neither picked (never This Mac by default), and it says so", () => {
+  const runners = { [C1]: { status: "running", version: "0.0.30", buildId: "b1", by: "dev_1", at: Date.now() } };
+  const html = render({ state: state({ runners }), info: { runsOn: null, missing: false, asleep: [] } });
+  assert.deepEqual(cards(html), [
+    { name: "Cloud", picked: false, disabled: false },
+    { name: "This Mac", picked: false, disabled: false },
+  ]);
+  const t = text(html);
+  assert.match(t, /on this Mac\. Couldn't reach Orgo\. Try again\. Boppy's computer Running$/, t);
+  assert.ok(!DASHES.test(t), t);
 });
 
 await test("busy: neither can be picked; an error shows under the cards", () => {

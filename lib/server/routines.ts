@@ -858,6 +858,15 @@ function tick() {
   syncRoutinesOnStart();
   const now = Date.now();
   for (const r of getState().routines.filter((x) => x.enabled)) {
+    // A next time it's skipping that isn't due yet (a skip and a run on two Bops put together:
+    // state-merge.ts): the time after it now, whichever Bops runs it, so Orgo wakes nothing for it.
+    if (!onRunner() && r.nextRunAt !== undefined && r.nextRunAt > now && skipping(r, r.nextRunAt)) {
+      const next = pastSkips(r, r.nextRunAt, zoneOf(r));
+      update(() => (r.nextRunAt = next));
+      if (next === undefined) pauseStuck(r, "its schedule never comes due.");
+      else routineChanged(r.botId);
+      continue;
+    }
     if (!runsHere(r, now)) continue;
     const tz = zoneOf(r);
     if (r.nextRunAt === undefined) {

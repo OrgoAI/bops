@@ -68,32 +68,39 @@ export function fromShared(blob: Blob, device: string): Blob {
  *   go thing by thing: one changed here keeps this Mac's copy, one removed on either side (and not
  *   changed on the other) goes, one added on either side stays; this Mac's order, the others' new
  *   ones after. A routine changed on both sides goes field by field, its clock as one (mergeRoutine);
+ *   a thread is the copy of the Bops that runs it, with the replies and steps of both (mergeSession);
  *   anything else changed on both keeps this Mac's copy whole, as its fields go together (a watch's
- *   alert and what it was told, a thread's status and its screen);
+ *   alert and what it was told);
  * - usage is both ledgers together; macs, and any other object, key by key;
  * - anything else is this Mac's.
+ * `me`: which Bops is merging (its device id, and whether it's a computer's runner), so a thread
+ * changed on both sides goes by the one that runs it (Session.by); without it, by this Mac's copy.
  */
-export function merge3(base: Blob | null, mine: Blob, theirs: Blob): Blob {
-  return mergeObject(base ?? {}, mine, theirs, true);
+export function merge3(base: Blob | null, mine: Blob, theirs: Blob, me?: Me): Blob {
+  return mergeObject(base ?? {}, mine, theirs, true, me);
 }
 
-function mergeObject(base: Blob, mine: Blob, theirs: Blob, top = false): Blob {
+type Me = { device: string; runner?: boolean };
+
+function mergeObject(base: Blob, mine: Blob, theirs: Blob, top = false, me?: Me): Blob {
   const out: Blob = {};
   for (const k of new Set([...Object.keys(mine), ...Object.keys(theirs), ...Object.keys(base)])) {
-    const v = mergeValue(k, base[k], mine[k], theirs[k], top);
+    const v = mergeValue(k, base[k], mine[k], theirs[k], top, me);
     if (v !== undefined) out[k] = v;
   }
   return out;
 }
 
-function mergeValue(key: string, b: unknown, m: unknown, t: unknown, top: boolean): unknown {
+function mergeValue(key: string, b: unknown, m: unknown, t: unknown, top: boolean, me?: Me): unknown {
   if (same(m, t)) return m;
   if (same(m, b)) return t;
   if (same(t, b)) return m;
   // Both changed it.
   if (top && key === "usage" && Array.isArray(m) && Array.isArray(t)) return usageOf(m, t);
-  if ((withIds(m) || withIds(t) || withIds(b)) && (Array.isArray(m) || m === undefined) && (Array.isArray(t) || t === undefined))
-    return mergeById(Array.isArray(b) ? b : [], (m as { id: string }[]) ?? [], (t as { id: string }[]) ?? [], top && key === "routines" ? mergeRoutine : undefined);
+  if ((withIds(m) || withIds(t) || withIds(b)) && (Array.isArray(m) || m === undefined) && (Array.isArray(t) || t === undefined)) {
+    const both = top && key === "routines" ? mergeRoutine : top && key === "sessions" ? (was: Blob, x: Blob, y: Blob) => mergeSession(was, x, y, me) : undefined;
+    return mergeById(Array.isArray(b) ? b : [], (m as { id: string }[]) ?? [], (t as { id: string }[]) ?? [], both);
+  }
   if (isObject(m) && isObject(t)) return mergeObject(isObject(b) ? b : {}, m, t);
   return m;
 }
@@ -118,15 +125,18 @@ function mergeById(base: { id: string }[], mine: { id: string }[], theirs: { id:
 
 /**
  * A routine's clock (routines.ts tick and record): its next and last times, how its last run went, a late
- * run, the times it's skipping, how far a meeting routine got.
+ * run, how far a meeting routine got.
  */
-const CLOCK = ["nextRunAt", "lastRunAt", "last", "lateRun", "skips", "eventsThrough"] as const;
+const CLOCK = ["nextRunAt", "lastRunAt", "last", "lateRun", "eventsThrough"] as const;
 
 /**
  * A routine changed on both sides (a pause or an edit on this Mac while a computer's runner ran it, or
  * the other way): field by field, and the clock as one, from the side that ran it last (the later
  * lastRunAt), so the edit stays and so does the run, and an edit made offline never brings back a time
- * that already ran. Paused on either side: no next time, nothing skipped (routines.ts setRoutineEnabled).
+ * that already ran. The times it's skipping are the user's: one skipped on either side stays (one taken
+ * back on either side goes), until it has passed; a next time that's one of them is moved past it by the
+ * routines timer before it comes due (routines.ts tick). Paused on either side: no next time, nothing
+ * skipped (routines.ts setRoutineEnabled).
  */
 function mergeRoutine(base: Blob, mine: Blob, theirs: Blob): Blob {
   const out = mergeObject(base, mine, theirs);
@@ -138,11 +148,54 @@ function mergeRoutine(base: Blob, mine: Blob, theirs: Blob): Blob {
       else out[k] = from[k];
     }
   }
+  const times = (x: Blob) => new Set(Array.isArray(x.skips) ? (x.skips as unknown[]).filter((t): t is number => typeof t === "number") : []);
+  const [b, m, t] = [times(base), times(mine), times(theirs)];
+  const skips = [...new Set([...m, ...t])].filter((x) => !(b.has(x) && (!m.has(x) || !t.has(x))) && x > ran(out)).sort((x, y) => x - y);
+  if (skips.length) out.skips = skips;
+  else delete out.skips;
   if (out.enabled === false) {
     delete out.nextRunAt;
     delete out.skips;
   }
   return out;
+}
+
+/** What another Bops than the one that runs a thread may change in it and keep: a stop it asked for (sessions.ts stopSession). */
+const ASKED_ELSEWHERE = ["stopAsked"] as const;
+
+/**
+ * A thread changed on both sides (the user replied on the Mac while a computer's runner worked on it, or
+ * the other way): the copy of the Bops that runs it (Session.by, or the side that just picked it up), as
+ * its fields go together (its status and its screen, its answer, what it waits on), with the replies of
+ * both, each reply field by field (the one that runs it marks them taken in), the steps of both, and a
+ * stop asked from elsewhere (stopAsked).
+ */
+function mergeSession(base: Blob, mine: Blob, theirs: Blob, me?: Me): Blob {
+  const [runs, other] = runsIt(base, mine, theirs, me) ? [mine, theirs] : [theirs, mine];
+  const out: Blob = { ...runs };
+  const list = (x: Blob, k: string) => (Array.isArray(x[k]) ? (x[k] as Blob[]) : []);
+  if (!same(other.replies, base.replies))
+    out.replies = mergeById(list(base, "replies") as { id: string }[], list(runs, "replies") as { id: string }[], list(other, "replies") as { id: string }[], (was, a, b) => mergeObject(was, a, b));
+  const seen = new Set([...list(base, "steps"), ...list(runs, "steps")].map((x) => canonical(x)));
+  const added = list(other, "steps").filter((x) => !seen.has(canonical(x)));
+  if (added.length) out.steps = [...list(runs, "steps"), ...added].sort((x, y) => (Number(x.at) || 0) - (Number(y.at) || 0));
+  for (const k of ASKED_ELSEWHERE) {
+    if (same(other[k], base[k]) || !same(runs[k], base[k])) continue;
+    if (other[k] === undefined) delete out[k];
+    else out[k] = other[k];
+  }
+  return out;
+}
+
+/** Whether this side's copy of a thread is the one that runs it: this Bops's own (store.ts ownSession), unless the other side picked it up since. */
+function runsIt(base: Blob, mine: Blob, theirs: Blob, me?: Me): boolean {
+  const by = (x: Blob) => (typeof x.by === "string" ? x.by : undefined);
+  const [b, m, t] = [by(base), by(mine), by(theirs)];
+  // Picked up again on one side since (a reply to a thread that had ended): that side runs it now.
+  if (m !== b && t === b) return true;
+  if (t !== b && m === b) return false;
+  if (!me || m !== t) return true;
+  return m ? m === me.device : !me.runner;
 }
 
 /** Both usage ledgers, each event once, oldest first, the newest MAX_USAGE kept. */

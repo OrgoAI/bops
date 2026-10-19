@@ -23,7 +23,7 @@ import {
 import type { AppState, Message } from "@/lib/types";
 import { appHeaders } from "./app-version";
 import { cloudUrl } from "./cloud-url";
-import { hookExit, onExit, StateLoadError, type Persistence, type StateAccess } from "./persist";
+import { hookExit, onExit, onRunner, StateLoadError, type Persistence, type StateAccess } from "./persist";
 import { applyShared, fromShared, merge3, same, toShared, type Blob } from "./state-merge";
 import { moveLegacyState, userDataDir } from "./user-paths";
 
@@ -307,7 +307,7 @@ function buildKept(who: Who, loaded: Loaded, kept: Kept) {
   const rows = loaded.rows.map((r) => r.json as unknown as Message);
   const cloud = loaded.got?.state ?? null;
   const sync: Sync = { ...who, version: loaded.version, base: cloud ? structuredClone(cloud) : null, blobHash: "", msgHashes: new Map(rows.map((m) => [m.id, fp(m)])), seq: loaded.seq, pulledAt: Date.now(), blobAt: 0 };
-  const blob = cloud ? merge3(kept.base, kept.blob, structuredClone(cloud)) : kept.blob;
+  const blob = cloud ? merge3(kept.base, kept.blob, structuredClone(cloud), { device: who.device, runner: onRunner() }) : kept.blob;
   const synced = new Map(kept.msgHashes);
   const byId = new Map(rows.map((m) => [m.id, m]));
   const here = new Set<string>();
@@ -363,7 +363,7 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
   /** Another Mac's blob (what PUT's 409 or a read brought), merged into `state` over what was last synced. */
   function mergeIn(sync: Sync, state: AppState, theirs: { version: number; state: Blob }) {
     const mine = JSON.parse(shared(state, sync.device)) as Blob;
-    const merged = merge3(sync.base, mine, theirs.state);
+    const merged = merge3(sync.base, mine, theirs.state, { device: sync.device, runner: onRunner() });
     // A copy into memory: the merge shares objects with theirs, which is the base from now on (see build()).
     applyShared(state as unknown as Blob, fromShared(structuredClone(merged), sync.device));
     sync.base = theirs.state;

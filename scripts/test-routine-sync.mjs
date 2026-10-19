@@ -187,9 +187,9 @@ await check("the payload: the workspace's own routines, in orgo-web's shape", as
     bopsId: "rtn_a",
     botId: "bot_main",
     kind: "monitor",
-    // A task, set to the cloud: Orgo may wake its bot's computer for it.
+    // A task, set to the cloud, but its bot's computer has no runner up (none here): the Mac runs it, so Orgo wakes nothing for it.
     run: "task",
-    onMac: false,
+    onMac: true,
     title: "Morning inbox",
     goal: "Check my mail.",
     enabled: true,
@@ -211,6 +211,12 @@ await check("the payload: the workspace's own routines, in orgo-web's shape", as
   assert.equal(b.quiet, false);
   assert.deepEqual(b.schedule, { kind: "before_event", minutes: 30, source: "googlecalendar" });
   for (const k of ["nextRunAt", "timeZone", "delivery", "source", "tags", "lastStatus"]) assert.ok(!(k in b), `no ${k}`);
+  // With a runner up on its bot's computer: that runner's, so Orgo may wake the computer for it.
+  state.bots[0].computerId = "c1c1c1c1-0000-4000-8000-000000000001";
+  state.runners = { "c1c1c1c1-0000-4000-8000-000000000001": { status: "running", version: "0.0.29", buildId: "b1", by: "mac", at: 0 } };
+  assert.equal(Sync.routinePayload(r1).onMac, false);
+  delete state.runners;
+  delete state.bots[0].computerId;
 });
 
 await check("a delete sends deleteMissing; each workspace goes to its own project", async () => {

@@ -364,6 +364,18 @@ await check("nothing before the state is ready, while a newer Bops wrote it, or 
   }
 });
 
+await check("a map that couldn't go when it was due (a newer Bops wrote the state then) goes on the next look", async () => {
+  reset();
+  T.look();
+  tooNew = true;
+  await T.flushAll();
+  assert.equal(calls.length, 0, "not while a newer Bops wrote the state");
+  tooNew = false;
+  T.look();
+  await T.flushAll();
+  assert.ok(calls.some((c) => c.method === "PUT" && c.path === `/api/projects/${PID}/bops`), "sent once it can be, though nothing in it changed");
+});
+
 await check("a computer's runner never sends the map, nor the access set", async () => {
   reset();
   process.env.BOPS_RUNNER = "1";

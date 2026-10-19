@@ -1,9 +1,11 @@
-// Tests for putting two Bops's changes to a routine together (lib/server/state-merge.ts merge3): a
-// routine changed on both sides goes field by field, its clock (next and last times, the last run, a late
-// run, skips, a meeting routine's progress) as one from the side that ran it last, whichever side is
-// merging. A pause on the Mac during a run on a computer's runner keeps both; an edit made offline over
-// a runner's advance never brings back a time that already ran. Anything else changed on both sides
-// still keeps the merging side's copy whole.
+// Tests for putting two Bops's changes to a routine or a thread together (lib/server/state-merge.ts
+// merge3): a routine changed on both sides goes field by field, its clock (next and last times, the last
+// run, a late run, a meeting routine's progress) as one from the side that ran it last, whichever side is
+// merging, and the times it's skipping from both. A pause on the Mac during a run on a computer's runner
+// keeps both; an edit made offline over a runner's advance never brings back a time that already ran; a
+// skip on the Mac while a runner ran it stands. A thread changed on both sides is the copy of the Bops
+// that runs it (Session.by), with the replies and steps of both and a stop asked from elsewhere. Anything
+// else changed on both sides still keeps the merging side's copy whole.
 //
 // Pure functions: nothing reaches Bops Cloud.
 // Usage: node scripts/test-state-merge.mjs
@@ -82,16 +84,28 @@ check("a meeting routine's progress goes with the run that made it", () => {
   }
 });
 
-check("the clock is one: a field the later run cleared stays cleared", () => {
+check("the clock is one: a field the later run cleared stays cleared, and a skip made meanwhile stands", () => {
   const base = routine({ lateRun: true });
   const mac = { ...base, nextRunAt: T0 + 2 * H, skips: [T0 + H] };
   const runner = { ...base, lastRunAt: T0 + 1_000, nextRunAt: T0 + H, last: { at: T0 + 1_000, status: "ok" } };
   delete runner.lateRun;
   for (const got of bothWays(base, mac, runner)) {
     assert.equal(got.lateRun, undefined, "the runner's run cleared it");
-    assert.equal(got.skips, undefined, "skips are the clock's, from the later run");
-    assert.equal(got.nextRunAt, T0 + H);
+    assert.deepEqual(got.skips, [T0 + H], "the user's skip stands");
+    assert.equal(got.nextRunAt, T0 + H, "the clock's next time (the routines timer moves it past the skip before it's due)");
   }
+});
+
+check("skips: one made on either side stays, one taken back on either side goes, one that has passed goes", () => {
+  const base = routine({ skips: [T0 + H, T0 + 3 * H] });
+  // The Mac takes back one and skips another; the runner runs it, past a skip it had.
+  const mac = { ...base, skips: [T0 + 3 * H, T0 + 5 * H] };
+  const runner = { ...base, lastRunAt: T0 + 2 * H, nextRunAt: T0 + 4 * H, last: { at: T0 + 2 * H, status: "ok" }, skips: [T0 + 3 * H, T0 + 4 * H] };
+  for (const got of bothWays(base, mac, runner)) assert.deepEqual(got.skips, [T0 + 3 * H, T0 + 4 * H, T0 + 5 * H]);
+  // Neither ran, both skipped: both stand.
+  const a = { ...base, skips: [T0 + H, T0 + 3 * H, T0 + 6 * H] };
+  const b = { ...base, skips: [T0 + H, T0 + 3 * H, T0 + 7 * H], title: "Inbox (work)" };
+  for (const got of bothWays(base, a, b)) assert.deepEqual(got.skips, [T0 + H, T0 + 3 * H, T0 + 6 * H, T0 + 7 * H]);
 });
 
 check("neither ran since: field by field, each side's change kept", () => {
@@ -131,6 +145,87 @@ check("anything else changed on both sides keeps this side's copy whole", () => 
   const deepHere = { id: "w1", routines: [routine({ title: "Here" })] };
   const deepThere = { id: "w1", routines: [routine({ goal: "There" })] };
   assert.deepEqual(M.merge3({ watches: [deep] }, { watches: [deepHere] }, { watches: [deepThere] }).watches, [deepHere]);
+});
+
+/* ---------------- Threads ---------------- */
+
+const MAC = "dev_mac";
+const RUNNER = "dev_runner";
+const thread = (o = {}) => ({ id: "ses_1", botId: "boppy", title: "Inbox", goal: "Check my inbox", status: "running", display: 99, by: RUNNER, steps: [{ at: 1, tool: "note", detail: "Started" }], replies: [], createdAt: 1, ...o });
+const sessions = (x) => ({ sessions: [x] });
+/** The thread as merged on the Mac (merging the runner's write) and on the runner (merging the Mac's). */
+const threadBothWays = (base, mac, runner) => [
+  M.merge3(sessions(base), sessions(mac), sessions(runner), { device: MAC }).sessions[0],
+  M.merge3(sessions(base), sessions(runner), sessions(mac), { device: RUNNER, runner: true }).sessions[0],
+];
+
+check("a reply on the Mac to a runner's live thread reaches the runner, and its work stands", () => {
+  const base = thread();
+  const reply = { id: "rep_1", role: "user", text: "Only the work inbox", at: 5, delivered: false };
+  const mac = { ...base, replies: [reply] };
+  const runner = { ...base, display: 100, activity: "reading", steps: [...base.steps, { at: 6, tool: "click", detail: "Inbox" }] };
+  for (const got of threadBothWays(base, mac, runner)) {
+    assert.deepEqual(got.replies, [reply], "the reply is kept, on both sides");
+    assert.equal(got.display, 100, "its screen as the runner has it");
+    assert.equal(got.activity, "reading");
+    assert.equal(got.steps.length, 2);
+  }
+  // The runner took it in (delivered), and the Mac added another: both.
+  const base2 = { ...runner, replies: [reply] };
+  const runner2 = { ...base2, replies: [{ ...reply, delivered: true }] };
+  const more = { id: "rep_2", role: "user", text: "And archive the rest", at: 9, delivered: false };
+  const mac2 = { ...base2, replies: [reply, more] };
+  for (const got of threadBothWays(base2, mac2, runner2)) assert.deepEqual(got.replies, [{ ...reply, delivered: true }, more]);
+});
+
+check("a thread's status and screen go together, from the Bops that runs it", () => {
+  // Marked failed on the Mac (a sign-in from before threads said whose) while the runner worked on: the runner's stands.
+  const base = thread();
+  const mac = { ...base, status: "failed", error: "Bops restarted while this was running", display: undefined };
+  const runner = { ...base, steps: [...base.steps, { at: 7, tool: "type", detail: "Hello" }] };
+  for (const got of threadBothWays(base, mac, runner)) {
+    assert.deepEqual([got.status, got.display, got.error], ["running", 99, undefined]);
+    assert.equal(got.steps.length, 2);
+  }
+  // The Mac's own thread, the other way round: the Mac's.
+  const own = thread({ by: MAC });
+  const macOwn = { ...own, status: "done", answer: "All read", display: undefined };
+  const elsewhere = { ...own, title: "Inbox (work)", replies: [{ id: "rep_9", role: "user", text: "Thanks", at: 9 }] };
+  for (const got of threadBothWays(own, macOwn, elsewhere)) {
+    assert.deepEqual([got.status, got.answer, got.display], ["done", "All read", undefined]);
+    assert.equal(got.replies.length, 1, "and the reply from elsewhere");
+  }
+});
+
+check("Stop on another Bops's thread is asked for, and that Bops's stop is the thread's", () => {
+  const base = thread();
+  const mac = { ...base, stopAsked: "Stopped by you" };
+  const runner = { ...base, activity: "typing" };
+  for (const got of threadBothWays(base, mac, runner)) {
+    assert.equal(got.stopAsked, "Stopped by you", "the ask reaches the runner");
+    assert.equal(got.status, "running", "it stops there, not here");
+  }
+  // The runner stopped it (and cleared the ask) while the Mac still had the ask: stopped, the ask gone.
+  const runnerStopped = { ...base, status: "failed", error: "Stopped by you", display: undefined };
+  const asked = { ...mac, stopAsked: "Stopped by you" };
+  for (const got of threadBothWays(mac, { ...asked, title: "Inbox (now)" }, runnerStopped)) {
+    assert.equal(got.status, "failed");
+    assert.equal(got.stopAsked, undefined);
+  }
+});
+
+check("a thread picked up again on one side (a reply after it ended) is that side's", () => {
+  const base = thread({ status: "done", display: undefined, endedAt: 5 });
+  const mac = { ...base, status: "queued", endedAt: undefined, by: MAC, replies: [{ id: "rep_1", role: "user", text: "One more", at: 6 }] };
+  const runner = { ...base, steps: [...base.steps, { at: 7, tool: "note", detail: "Finished" }] };
+  for (const got of threadBothWays(base, mac, runner)) {
+    assert.deepEqual([got.status, got.by], ["queued", MAC]);
+    assert.equal(got.steps.length, 2);
+  }
+  // Ended on the Mac as the Mac's (its runner stopped), while the runner's last save still had it running.
+  const ended = { ...thread(), status: "failed", error: "Stopped: routines run on your Mac now.", display: undefined, by: MAC };
+  const late = { ...thread(), steps: [...thread().steps, { at: 8, tool: "click", detail: "Send" }] };
+  for (const got of threadBothWays(thread(), ended, late)) assert.deepEqual([got.status, got.by], ["failed", MAC]);
 });
 
 console.log(`state merge: ${passed} passed, ${failures} failed`);
