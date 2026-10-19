@@ -306,8 +306,10 @@ export function ComputerView({
   const leaving = !takeover && !!held?.leaving;
   // Esc hands control back. It's caught before the live screen gets it (so it doesn't also reach the
   // bot's computer), except while typing in Bops itself (the chat, the address bar), where Esc is Esc.
+  // In a thread's terminal (Takeover.terminal) Esc is Claude Code's, which stops what it's doing with it:
+  // it goes to the screen, and Hand back (or a reply in the thread) closes the terminal.
   useEffect(() => {
-    if (!takeover) return;
+    if (!takeover || takeover.terminal) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const t = e.target as HTMLElement | null;
@@ -779,13 +781,13 @@ export function ComputerView({
               )}
               <button
                 onClick={() => void post("/api/takeover", {}, "DELETE")}
-                title={`${(holding.get(display) ? botOn(display) : b).name} picks up from here (Esc)`}
+                title={takeover?.terminal ? "Closes the terminal" : `${(holding.get(display) ? botOn(display) : b).name} picks up from here (Esc)`}
                 className="flex shrink-0 items-center gap-2 rounded-full bg-ink py-1.5 pl-1.5 pr-4 text-[14px] font-semibold leading-[18px] transition-transform active:scale-[0.97]"
                 style={{ color: botOnInk(b) }}
               >
                 <Mascot botId={(holding.get(display) ? botOn(display) : b).id} color={(holding.get(display) ? botOn(display) : b).color} size={22} antenna={false} />
                 Hand back to {(holding.get(display) ? botOn(display) : b).name}
-                <kbd className="rounded-[5px] bg-white/15 px-1.5 py-px font-sans text-[11px] font-medium leading-4 text-white/70">esc</kbd>
+                {!takeover?.terminal && <kbd className="rounded-[5px] bg-white/15 px-1.5 py-px font-sans text-[11px] font-medium leading-4 text-white/70">esc</kbd>}
               </button>
             </div>
             </div>

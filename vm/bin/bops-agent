@@ -1,23 +1,31 @@
 #!/usr/bin/env bash
-# A thread a brain runs (lib/server/cli-agents.ts): one Claude Code process per thread on this computer,
-# started detached and pinned to the thread's screen, that Bops talks to through files, since Bops reaches
-# the computer one command at a time (Orgo's bash) and has no stream back. Each thread has a folder,
-# /root/.bops/agents/<thread>:
-#   in.jsonl   what Bops sends, one stream-json user line per message, which Claude Code reads as it comes
-#   out.jsonl  what Claude Code says (stream-json events), which Bops reads on from where it got to (read)
+# A thread a brain runs (lib/server/cli-agents.ts): one process per thread on this computer, started
+# detached and pinned to the thread's screen, that Bops talks to through files, since Bops reaches the
+# computer one command at a time (Orgo's bash) and has no stream back. For Claude Code it's Claude Code
+# itself, reading each message as it comes; for Codex, a small runner here that gives each message to a
+# `codex exec` of its own on the thread (resumed after the first), one after another. Each thread has a
+# folder, /root/.bops/agents/<thread>:
+#   in.jsonl   what Bops sends, one line per message (a stream-json user line for Claude Code; {"text"} for Codex)
+#   out.jsonl  what the CLI says (Claude Code's stream-json events, Codex's exec --json ones), which Bops reads
+#              on from where it got to (read)
 #   mcp.json   its tools besides its own: Bops' screen and browser MCP servers, as a Bops agent thread has them
-#   prompt.md  Bops' briefing for it (the bot, how it works, its skills, apps and memory), after Claude Code's own
+#   prompt.md  Bops' briefing for it (the bot, how it works, its skills, apps and memory), after the CLI's own
 #   key        a key brain's key, for a moment: bops-brain run reads it into the environment and deletes it
-# Claude Code runs through bops-brain run: from an empty environment, in the brain's own folder, with no
-# Anthropic key or token but the brain's own key, if it has one.
+#              (Codex's runner reads it once and hands each `codex exec` a file of its own the same way)
+#   closed     the run is over: Codex's runner exits once it has answered what came before
+#   term.pid   the thread's Claude Code open in a terminal for the user (terminal), when it is
+# The CLI runs through bops-brain run: from an empty environment, in the brain's own folder, with no
+# Anthropic or OpenAI key or token but the brain's own key, if it has one. Only one of the thread's process
+# and its terminal runs at a time: starting either closes the other.
 #
 # Usage:
 #   bops-agent put <thread> mcp.json|prompt.md|key
 #       write stdin to that file, readable by root only
-#   bops-agent start <thread> <brain> claude <display> <computer> <session> [-- <more claude args>...]
-#       stop the thread's process left from before, if there is one, and start Claude Code on that screen,
-#       in /workspace. It picks <session> back up when the brain's folder has it, else starts it fresh as
-#       <session>. Prints "started resumed" or "started fresh".
+#   bops-agent start <thread> <brain> claude|codex <display> <computer> <session> [-- <more CLI args>...]
+#       stop the thread's process left from before, if there is one (and close its terminal), and start
+#       the CLI on that screen, in /workspace. It picks <session> back up when the brain's folder has it,
+#       else starts it fresh (Claude Code as <session>; Codex under an id of its own, which it says).
+#       Prints "started resumed" or "started fresh".
 #   bops-agent send <thread>
 #       append stdin (one line) to in.jsonl while its process runs; "gone" and exit 3 when it doesn't
 #   bops-agent read <thread> <offset> [bytes]
@@ -26,6 +34,10 @@
 #       <offset>, each made small (no pictures, long text cut), about [bytes] of them at most
 #   bops-agent stop <thread>    Stop: SIGINT, then harder if it doesn't go
 #   bops-agent close <thread>   the end of a run: its input ends and it exits once it's done (SIGINT after a few seconds)
+#   bops-agent terminal <thread> <brain> <display> <computer> <session>
+#       the thread's process goes, and a terminal on that screen runs Claude Code's own --resume of <session>,
+#       with the thread's tools and briefing, for the user. Prints "terminal on :<display>".
+#   bops-agent unterm <thread>  close that terminal (its Claude Code first)
 set -euo pipefail
 AGENTS="${BOPS_AGENTS:-/root/.bops/agents}"
 BRAINS="${BOPS_BRAINS:-/root/.bops/brains}"
@@ -35,25 +47,25 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # search and reading pages, a to-do list, helpers) and Bops' screen and browser tools. Anything else asks
 # the user in Bops first (the screen MCP's approve tool).
 ALLOWED="Bash,BashOutput,KillShell,Read,Edit,MultiEdit,Write,Glob,Grep,LS,WebFetch,WebSearch,TodoWrite,Task,Agent,mcp__screen,mcp__browser"
-usage() { echo "usage: bops-agent put|start|send|read|stop|close <thread> ..." >&2; exit 2; }
+usage() { echo "usage: bops-agent put|start|send|read|stop|close|terminal|unterm <thread> ..." >&2; exit 2; }
 CMD="${1:-}"; T="${2:-}"
 [[ "$T" =~ ^[A-Za-z0-9_-]+$ ]] || usage
 DIR="$AGENTS/$T"
 
-# Its Claude Code is running: the process Bops started, as its pid file says, and still that one (its
-# arguments name this thread's folder), not another that took the number after a restart.
+# Its process is running (or with term.pid, its terminal): the one Bops started, as its pid file says, and
+# still that one (its arguments name this thread's folder), not another that took the number after a restart.
 alive() {
   local p
-  p="$(cat "$DIR/pid" 2>/dev/null || true)"
+  p="$(cat "$DIR/${1:-pid}" 2>/dev/null || true)"
   [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null || return 1
   case "$(ps -ww -o args= -p "$p" 2>/dev/null || true)" in *"$DIR/"*) return 0 ;; esac
   return 1
 }
-# Wait up to $1 tenths of a second for it to be gone.
+# Wait up to $1 tenths of a second for it (or $2: term.pid's) to be gone.
 gone_within() {
   local i
-  for i in $(seq 1 "$1"); do alive || return 0; sleep 0.1; done
-  ! alive
+  for i in $(seq 1 "$1"); do alive "${2:-pid}" || return 0; sleep 0.1; done
+  ! alive "${2:-pid}"
 }
 untail() { pkill -f "[t]ail .*$DIR/in.jsonl" 2>/dev/null || true; }
 signal() { local p; p="$(cat "$DIR/pid" 2>/dev/null || true)"; [[ "$p" =~ ^[0-9]+$ ]] && kill "-$1" "$p" 2>/dev/null || true; }
@@ -64,6 +76,20 @@ halt() {
   fi
   untail
   rm -f "$DIR/key"
+}
+# Close the thread's terminal: its Claude Code (the window's shell's child) first, harder if it doesn't go
+# (while it's still the shell's, so it's found), then the shell, so the window goes.
+unterm() {
+  local p i
+  if alive term.pid; then
+    p="$(cat "$DIR/term.pid")"
+    pkill -TERM -P "$p" 2>/dev/null || true
+    for i in $(seq 1 30); do pgrep -P "$p" > /dev/null 2>&1 || break; sleep 0.1; done
+    pkill -KILL -P "$p" 2>/dev/null || true
+    kill -TERM "$p" 2>/dev/null || true
+    gone_within 20 term.pid || kill -KILL "$p" 2>/dev/null || true
+  fi
+  rm -f "$DIR/term.pid"
 }
 
 case "$CMD" in
@@ -78,22 +104,29 @@ case "$CMD" in
   start)
     B="${3:-}"; KIND="${4:-}"; N="${5:-}"; C="${6:-}"; SID="${7:-}"
     [[ "$B" =~ ^[A-Za-z0-9_-]+$ && "$C" =~ ^[A-Za-z0-9_-]+$ && "$N" =~ ^[0-9]+$ && "$SID" =~ ^[0-9a-f-]{36}$ ]] || usage
-    [ "$KIND" = claude ] || { echo "no $KIND here yet" >&2; exit 2; }
+    [ "$KIND" = claude ] || [ "$KIND" = codex ] || usage
     shift 7
     [ "${1:-}" = -- ] && shift
     [ -f "$DIR/mcp.json" ] && [ -f "$DIR/prompt.md" ] || { echo "its tools or briefing aren't there" >&2; exit 1; }
     # A key file that came with this start is kept for the new process; anything else from the last one goes.
     [ -f "$DIR/key" ] && mv -f "$DIR/key" "$DIR/key.next"
     halt
+    unterm
     [ -f "$DIR/key.next" ] && mv -f "$DIR/key.next" "$DIR/key"
-    rm -f "$DIR/pid"
+    rm -f "$DIR/pid" "$DIR/closed"
     : > "$DIR/in.jsonl"; : > "$DIR/out.jsonl"; : > "$DIR/err.log"
     chmod 600 "$DIR/in.jsonl" "$DIR/out.jsonl" "$DIR/err.log"
     mkdir -p "$WORK"
-    # Claude Code keeps each session in its folder (projects/<the folder it ran in>/<session>.jsonl).
     MODE=fresh
-    if [ -d "$BRAINS/$B/projects" ] && [ -n "$(find "$BRAINS/$B/projects" -name "$SID.jsonl" -print -quit 2>/dev/null)" ]; then MODE=resumed; fi
-    DISPLAY=":$N" setsid nohup "$HERE/bops-agent" _run "$T" "$B" "$C" "$MODE" "$SID" "$@" < /dev/null > /dev/null 2>> "$DIR/err.log" &
+    if [ "$KIND" = claude ]; then
+      # Claude Code keeps each session in its folder (projects/<the folder it ran in>/<session>.jsonl).
+      if [ -d "$BRAINS/$B/projects" ] && [ -n "$(find "$BRAINS/$B/projects" -name "$SID.jsonl" -print -quit 2>/dev/null)" ]; then MODE=resumed; fi
+      DISPLAY=":$N" setsid nohup "$HERE/bops-agent" _run "$T" "$B" "$C" "$MODE" "$SID" "$@" < /dev/null > /dev/null 2>> "$DIR/err.log" &
+    else
+      # Codex keeps each thread in its folder (sessions/<date>/rollout-<time>-<thread>.jsonl).
+      if [ -d "$BRAINS/$B/sessions" ] && [ -n "$(find "$BRAINS/$B/sessions" -name "rollout-*$SID*.jsonl" -print -quit 2>/dev/null)" ]; then MODE=resumed; fi
+      DISPLAY=":$N" setsid nohup "$HERE/bops-agent" _codex "$T" "$B" "$C" "$MODE" "$SID" "$@" < /dev/null > /dev/null 2>> "$DIR/err.log" &
+    fi
     for _ in $(seq 1 50); do [ -s "$DIR/pid" ] && break; sleep 0.1; done
     [ -s "$DIR/pid" ] || { echo "it didn't start: $(tail -c 300 "$DIR/err.log")" >&2; exit 1; }
     echo "started $MODE"
@@ -118,6 +151,194 @@ case "$CMD" in
     untail
     rm -f "$DIR/key"
     printf '{"type":"bops","subtype":"exited","code":%d}\n' "$CODE" >> "$DIR/out.jsonl"
+    ;;
+  _codex)
+    # Behind start, detached: Codex's runner. Each message in in.jsonl is a `codex exec --json` of its own,
+    # on the thread from its second on (`exec resume`, by the id the first said), one after another, so a
+    # message that comes while one works waits for it. Each one's events go to out.jsonl as they come;
+    # one that's gone without ending its turn ends it there as failed, with its last words, so Bops hears.
+    # Full access, as Bops agent's executor has on this computer (--dangerously-bypass-approvals-and-sandbox:
+    # this computer is the user's sandbox); nothing asks but what changes the user's apps, which the screen
+    # MCP's app tools ask them about in Bops. Its own settings are in the brain's folder (bops-brain run);
+    # this thread's (Bops' briefing, after Codex's own instructions, and Bops' MCP servers) go on each
+    # one's command line, since one brain's threads run side by side on this computer's screens.
+    B="$3"; C="$4"; MODE="$5"; SID="$6"; shift 6
+    cd "$WORK"
+    echo $$ > "$DIR/pid"
+    exec python3 - "$DIR/" "$B" "$C" "$MODE" "$SID" "$HERE" "$@" <<'PY'
+import json, os, re, signal, subprocess, sys, time
+
+d, brain, computer, mode, sid, here = sys.argv[1:7]
+more = sys.argv[7:]
+inp, out_path, err_path = (os.path.join(d, f) for f in ("in.jsonl", "out.jsonl", "err.log"))
+# A key brain's key: read once and gone from its file; each exec gets it in a file of its own, read and deleted.
+key = None
+if os.path.exists(os.path.join(d, "key")):
+    with open(os.path.join(d, "key")) as f:
+        key = f.read()
+    os.remove(os.path.join(d, "key"))
+child = None
+stopping = False
+thread = sid if mode == "resumed" else None
+
+
+def stop(sig, _frame):
+    """Stop (SIGINT) or harder: the exec working now gets it too, and nothing more starts."""
+    global stopping
+    stopping = True
+    if child is not None and child.poll() is None:
+        try:
+            child.send_signal(sig)
+        except OSError:
+            pass
+
+
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
+
+ESC = {'"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\t"}
+
+
+def toml(v):
+    """A JSON value as TOML, for Codex's -c: strings, numbers, lists and tables."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return json.dumps(v)
+    if isinstance(v, str):
+        out = []
+        for c in v:
+            n = ord(c)
+            if c in ESC:
+                out.append(ESC[c])
+            elif n < 0x20 or n == 0x7F:
+                out.append("\\u%04x" % n)
+            elif 0xD800 <= n <= 0xDFFF:
+                out.append("\\ufffd")
+            else:
+                out.append(c)
+        return '"' + "".join(out) + '"'
+    if isinstance(v, list):
+        return "[" + ", ".join(toml(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{" + ", ".join(f"{k if re.fullmatch(r'[A-Za-z0-9_-]+', k) else toml(k)} = {toml(x)}" for k, x in v.items()) + "}"
+    return '""'
+
+
+def config():
+    """This thread's settings for Codex: Bops' briefing, and Bops' MCP servers, from its files."""
+    args = []
+    try:
+        with open(os.path.join(d, "prompt.md"), encoding="utf-8", errors="replace") as f:
+            args += ["-c", "developer_instructions=" + toml(f.read()[:60000])]
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(d, "mcp.json")) as f:
+            servers = json.load(f).get("mcpServers", {})
+    except (OSError, ValueError, AttributeError):
+        servers = {}
+    for name, x in servers.items():
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name) or not isinstance(x, dict) or not isinstance(x.get("command"), str):
+            continue
+        server = {
+            "command": x["command"],
+            "args": x.get("args", []),
+            "env": x.get("env", {}),
+            "startup_timeout_sec": 60,
+            # The screen's app tools wait up to 20 minutes for the user's OK (screen_mcp.py): Codex waits longer.
+            "tool_timeout_sec": 1260 if name == "screen" else 300,
+            # Bops' own tools, which Codex uses without asking (what changes the user's apps asks them in Bops).
+            "default_tools_approval_mode": "approve",
+        }
+        args += ["-c", f"mcp_servers.{name}={toml(server)}"]
+    return args
+
+
+def last_words(at):
+    """What Codex printed on stderr since `at`, its last line: why an exec that never ended its turn stopped."""
+    try:
+        with open(err_path, "rb") as f:
+            f.seek(at)
+            lines = [x.strip() for x in f.read().decode("utf-8", "replace").splitlines()]
+    except OSError:
+        return ""
+    lines = [x for x in lines if x and not x.startswith("Reading ")]
+    return lines[-1][:300] if lines else ""
+
+
+def turn(text, out, err):
+    """One message: a `codex exec` (or `exec resume` on the thread) with it on stdin, its events into out.jsonl."""
+    global child, thread
+    args = ["exec", *(["resume"] if thread else []), "--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", *config(), *more, *([thread] if thread else []), "-"]
+    kf = None
+    if key is not None:
+        kf = os.path.join(d, "key.run")
+        fd = os.open(kf, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, key.encode())
+        os.close(fd)
+    at = os.path.getsize(err_path) if os.path.exists(err_path) else 0
+    child = subprocess.Popen([os.path.join(here, "bops-brain"), "run", brain, "codex", "--computer", computer, *(["--key-file", kf] if kf else []), "--", *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
+    try:
+        child.stdin.write(text.encode("utf-8", "replace"))
+        child.stdin.close()
+    except OSError:
+        pass
+    ended, said = False, ""
+    for raw in iter(child.stdout.readline, b""):
+        out.write(raw if raw.endswith(b"\n") else raw + b"\n")
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        kind = ev.get("type") if isinstance(ev, dict) else None
+        if kind == "thread.started" and isinstance(ev.get("thread_id"), str):
+            thread = ev["thread_id"]
+        elif kind in ("turn.completed", "turn.failed"):
+            ended = True
+        elif kind == "error" and isinstance(ev.get("message"), str):
+            said = ev["message"]
+    code = child.wait()
+    if kf and os.path.exists(kf):
+        os.remove(kf)
+    if not ended and not stopping:
+        why = said or last_words(at) or f"it stopped (exit {code})"
+        out.write((json.dumps({"type": "turn.failed", "error": {"message": why}}) + "\n").encode())
+    return code
+
+
+offset, code = 0, 0
+with open(out_path, "ab", buffering=0) as out, open(err_path, "ab", buffering=0) as err:
+    while not stopping:
+        try:
+            with open(inp, "rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+        except OSError:
+            chunk = b""
+        end = chunk.rfind(b"\n")
+        if end < 0:
+            if os.path.exists(os.path.join(d, "closed")):
+                break
+            time.sleep(0.2)
+            continue
+        offset += end + 1
+        for raw in chunk[: end + 1].splitlines():
+            if stopping:
+                break
+            try:
+                text = json.loads(raw).get("text")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(text, str) and text.strip():
+                code = turn(text, out, err)
+    for f in ("key", "key.run"):
+        try:
+            os.remove(os.path.join(d, f))
+        except OSError:
+            pass
+    out.write((json.dumps({"type": "bops", "subtype": "exited", "code": 130 if stopping else code}) + "\n").encode())
+PY
     ;;
   send)
     alive || { echo gone; exit 3; }
@@ -193,10 +414,52 @@ PY
     echo stopped
     ;;
   close)
-    # Its input ends (the tail goes), so it finishes what it has and exits; one that doesn't is stopped.
+    # Its input ends (the tail goes, or for Codex's runner, closed), so it finishes what it has and exits;
+    # one that doesn't is stopped.
+    [ -d "$DIR" ] && : > "$DIR/closed"
     untail
     gone_within 50 || halt
     rm -f "$DIR/key"
+    echo closed
+    ;;
+  terminal)
+    # The thread's Claude Code for the user, in a terminal on its screen: its own process goes first.
+    B="${3:-}"; N="${4:-}"; C="${5:-}"; SID="${6:-}"
+    [[ "$B" =~ ^[A-Za-z0-9_-]+$ && "$C" =~ ^[A-Za-z0-9_-]+$ && "$N" =~ ^[0-9]+$ && "$SID" =~ ^[0-9a-f-]{36}$ ]] || usage
+    [ -f "$DIR/mcp.json" ] && [ -f "$DIR/prompt.md" ] || { echo "its tools or briefing aren't there" >&2; exit 1; }
+    [ -f "$DIR/key" ] && mv -f "$DIR/key" "$DIR/key.next"
+    halt
+    unterm
+    [ -f "$DIR/key.next" ] && mv -f "$DIR/key.next" "$DIR/key"
+    TERMINAL="$(command -v xfce4-terminal || command -v xterm || true)"
+    [ -n "$TERMINAL" ] || { echo "no terminal on this computer" >&2; exit 1; }
+    if [ "${TERMINAL##*/}" = xfce4-terminal ]; then TARGS=(--disable-server --title "Claude Code" --maximize -x)
+    else TARGS=(-T "Claude Code" -geometry 160x50+0+0 -e); fi
+    DISPLAY=":$N" setsid nohup "$TERMINAL" "${TARGS[@]}" "$HERE/bops-agent" _term "$T" "$B" "$C" "$SID" "$DIR/" < /dev/null > /dev/null 2>> "$DIR/err.log" &
+    for _ in $(seq 1 50); do alive term.pid && break; sleep 0.1; done
+    alive term.pid || { echo "it didn't open: $(tail -c 300 "$DIR/err.log")" >&2; exit 1; }
+    echo "terminal on :$N"
+    ;;
+  _term)
+    # In the terminal: Claude Code's own session, as the thread's process has it (its tools, its briefing,
+    # what it may do by itself, the brain's folder, no Anthropic key or token but the brain's own key). What
+    # else it would do, it asks the user right here. Once it's closed, the window says where to go on.
+    B="$3"; C="$4"; SID="$5"
+    echo $$ > "$DIR/term.pid"
+    cd "$WORK"
+    KEY=()
+    [ -f "$DIR/key" ] && KEY=(--key-file "$DIR/key")
+    set +e
+    "$HERE/bops-brain" run "$B" claude --computer "$C" ${KEY[@]+"${KEY[@]}"} -- --resume "$SID" \
+      --mcp-config "$DIR/mcp.json" --strict-mcp-config --append-system-prompt "$(cat "$DIR/prompt.md")" --allowedTools "$ALLOWED"
+    rm -f "$DIR/key"
+    echo
+    echo "Claude Code is closed. Reply in the thread in Bops and it carries on there."
+    read -r _
+    rm -f "$DIR/term.pid"
+    ;;
+  unterm)
+    unterm
     echo closed
     ;;
   *)

@@ -826,8 +826,10 @@ export const procedureKey = (s: string) =>
 /**
  * You've taken control of a bot's screen (`display`), or of the Chrome a task of the bot's has of its
  * own on your Mac (`macScreen`, Session.macScreen); the bot is paused there until you hand it back.
+ * `terminal`: you opened the thread's Claude Code in a terminal on that screen (sessions.ts openInTerminal),
+ * and `paused` it as it worked; the screen is yours until you reply in the thread or hand it back.
  */
-export type Takeover = { botId: BotId; sessionId?: string; since: number } & ({ display: number; macScreen?: undefined } | { macScreen: number; display?: undefined });
+export type Takeover = { botId: BotId; sessionId?: string; since: number; terminal?: { paused?: true } } & ({ display: number; macScreen?: undefined } | { macScreen: number; display?: undefined });
 
 export type Blocker = "sign_in" | "two_factor" | "captcha" | "payment" | "error";
 export const BLOCKER_LABEL: Record<Blocker, string> = {

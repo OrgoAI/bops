@@ -245,12 +245,14 @@ function Bops({ state }: { state: AppState | null }) {
   // running time keeps its own: the open thread, the sidebar's "5m", watch pills, the call timer.)
 
   // Clicking into a computer takes over its screen; leaving the full view hands it back (a CRM file full width took nothing).
+  // Not a thread's terminal (Takeover.terminal): it stays open on its screen until a reply or Hand back closes it.
   const wasFocused = useRef(false);
   const computerFocus = focus && !crmFocus;
+  const inTerminal = !!state?.takeover?.terminal;
   useEffect(() => {
-    if (wasFocused.current && !computerFocus) void post("/api/takeover", {}, "DELETE");
+    if (wasFocused.current && !computerFocus && !inTerminal) void post("/api/takeover", {}, "DELETE");
     wasFocused.current = computerFocus;
-  }, [computerFocus]);
+  }, [computerFocus, inTerminal]);
 
   // What Esc does to the tab on the right, set on every render (see escTab.current below).
   const escTab = useRef<(e: KeyboardEvent) => void>(() => {});

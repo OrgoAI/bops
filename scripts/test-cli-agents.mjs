@@ -11,10 +11,19 @@
 // the same session, an MCP server that didn't start is said, and a usage limit waits on the user with Finish on
 // Bops agent (which carries on there, on AI credit, with what Claude Code did) and Wait.
 //
+// A bot whose brain is Codex runs each message as a `codex exec --json` of its own on the thread (resumed after
+// the first), on the user's OpenAI key only (never a ChatGPT sign-in, never ~/.codex: the brain's own folder),
+// with the same tools and briefing and full access; its items read as Bops agent's steps, a reply while it works
+// waits for its next turn, Stop interrupts it, its key's quota waits on the user, and an exec that died says why.
+// A thread Claude Code ran opens in a terminal on its screen for the user: its headless Claude Code stops, the
+// terminal resumes the same session with the same folder, tools and briefing, and the next reply (or handing
+// the screen back) closes it, and the thread carries on headless. Only one of the two runs at a time.
+//
 // Orgo is a fake whose computers run Bops' commands here, in a throwaway folder: the real vm/bin/bops-agent and
 // bops-brain (as Bops installed them on the fake computer) with a fake Claude Code that reads stream-json lines
-// and writes stream-json events as the real one does, in an environment with Anthropic keys and tokens planted
-// in it. Bops Cloud (OpenAI behind it) is a fake too. Nothing reaches a real service. The window's cards for
+// and writes stream-json events as the real one does (or, without -p, sits in its terminal until it's closed),
+// a fake Codex that writes exec --json events as the real 0.160.0 does, and a fake terminal, in an environment
+// with Anthropic and OpenAI keys and tokens planted in it. Bops Cloud (OpenAI behind it) is a fake too. Nothing reaches a real service. The window's cards for
 // these threads are rendered to HTML by a child of the test (--render: the window's code isn't react-server).
 //
 // Usage: node --conditions=react-server scripts/test-cli-agents.mjs
@@ -100,7 +109,19 @@ if (process.argv[2] === "--render") {
   const chat = text(renderToStaticMarkup(h(ChatView, { state: state(v.asking, { appApprovals: [v.approval] }), chat: v.chat, wide: false, onOpenThread: noop, onShowBot: noop, onShowMac: noop, onShowScreen: noop, call: null, onCall: noop, callSlot: noop })));
   assert.match(chat, /Boppy wants to run: NotebookEdit \/workspace\/report\.ipynb For “Asks” notebook path: \/workspace\/report\.ipynb new source: print\(1\) Do it Don’t/, chat);
   console.log("ok render: a brain's approval says what it wants to run");
-  for (const t of [signIn.match(/Boppy needs.*Dismiss/)[0], limit.match(/Boppy is waiting.*Wait/)[0], chat.match(/Boppy wants to run.*Don’t/)[0]]) assert.ok(!/[–—]/.test(t), t);
+  // Open in the terminal (the takeover the server made): it says where, and a reply closes it; done, it offers to open; a Codex thread has its badge and no terminal.
+  const term = text(renderToStaticMarkup(h(ThreadSheet, { state: state(v.terminal, { takeover: v.takeover }), session: v.terminal, onClose: noop, onShowComputer: noop, onShowScreen: noop })));
+  assert.match(term, new RegExp(`^Migration Claude Code Boppy · in the terminal · \\d+ steps · left off on screen ${v.screenNo} `), term);
+  assert.match(term, new RegExp(`Open in the terminal on screen ${v.screenNo}\\. Your next reply closes it, and it carries on here\\. Show`));
+  assert.ok(!/Open in terminal|Paused while/.test(term), term);
+  console.log("ok render: open in the terminal, the thread says where, and that a reply closes it");
+  const done = sheet(v.done);
+  assert.match(done, /^Notes Claude Code Boppy · finished .* Open in terminal Delete/, done);
+  const codex = sheet(v.codex);
+  assert.match(codex, /^Totals Codex Boppy · /, codex);
+  assert.ok(!/Open in terminal/.test(codex));
+  console.log("ok render: a thread says which brain ran it, and one Claude Code ran opens in a terminal");
+  for (const t of [signIn.match(/Boppy needs.*Dismiss/)[0], limit.match(/Boppy is waiting.*Wait/)[0], chat.match(/Boppy wants to run.*Don’t/)[0], term]) assert.ok(!/[–—]/.test(t), t);
   process.exit(0);
 }
 
@@ -147,8 +168,8 @@ import { createInterface } from "node:readline";
 const RUNS = ${JSON.stringify(RUNS)}, HEARD = ${JSON.stringify(HEARD)}, FLAGS = ${JSON.stringify(FLAGS)}, PICTURE = ${JSON.stringify(PICTURE)};
 const args = process.argv.slice(2);
 const pid = process.pid;
-appendFileSync(RUNS, JSON.stringify({ pid, args, env: process.env, cwd: process.cwd() }) + "\\n");
-const heard = (x) => appendFileSync(HEARD, JSON.stringify({ pid, ...x }) + "\\n");
+appendFileSync(RUNS, JSON.stringify({ pid, at: Date.now(), args, env: process.env, cwd: process.cwd() }) + "\\n");
+const heard = (x) => appendFileSync(HEARD, JSON.stringify({ pid, at: Date.now(), ...x }) + "\\n");
 const D = process.env.CLAUDE_CONFIG_DIR ?? join(process.env.HOME ?? "/", ".claude");
 if (args[0] === "--version") { console.log("2.1.292 (Claude Code)"); process.exit(0); }
 if (args[0] === "auth" && args[1] === "status") {
@@ -170,9 +191,12 @@ const back = (id, content) => out({ type: "user", message: { role: "user", conte
 const wait = async (f) => { while (!existsSync(join(FLAGS, f))) await new Promise((r) => setTimeout(r, 15)); };
 let began = false, n = 0, closed = false, busy = false;
 const lines = [];
-const rl = createInterface({ input: process.stdin });
-rl.on("line", (l) => { if (!l.trim()) return; const m = JSON.parse(l); heard({ got: m.message.content }); lines.push(m); void go(); });
-rl.on("close", () => { closed = true; if (!busy) process.exit(0); });
+// Without -p, in a terminal: it's there for the user until the terminal closes it.
+const interactive = !args.includes("-p");
+if (interactive) { heard({ interactive: true }); process.on("SIGTERM", () => { heard({ terminated: true }); process.exit(143); }); setInterval(() => {}, 1000); }
+const rl = interactive ? null : createInterface({ input: process.stdin });
+rl?.on("line", (l) => { if (!l.trim()) return; const m = JSON.parse(l); heard({ got: m.message.content }); lines.push(m); void go(); });
+rl?.on("close", () => { closed = true; if (!busy) process.exit(0); });
 async function go() {
   if (busy) return;
   busy = true;
@@ -213,12 +237,84 @@ async function answer(m) {
 }
 `,
 );
+/* ---------------- A fake Codex, and a terminal ---------------- */
+
+const CODEX_RUNS = join(LOG, "codex-runs.jsonl");
+const TERMINAL = join(LOG, "terminal.log");
+// Codex 0.160.0's `codex exec --json` as Bops runs it: [resume] [options] [thread] -, the message on stdin, its
+// thread kept in CODEX_HOME/sessions as rollout-<time>-<thread>.jsonl, events as exec_events.rs writes them.
+const fakeCodex = join(scratch, "fake-codex.mjs");
+writeFileSync(
+  fakeCodex,
+  `import { appendFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+const RUNS = ${JSON.stringify(CODEX_RUNS)}, HEARD = ${JSON.stringify(HEARD)}, FLAGS = ${JSON.stringify(FLAGS)}, PICTURE = ${JSON.stringify(PICTURE)};
+const args = process.argv.slice(2);
+const pid = process.pid;
+appendFileSync(RUNS, JSON.stringify({ pid, ppid: process.ppid, at: Date.now(), args, env: process.env, cwd: process.cwd() }) + "\\n");
+const heard = (x) => appendFileSync(HEARD, JSON.stringify({ pid, at: Date.now(), ...x }) + "\\n");
+if (args[0] === "--version") { console.log("codex-cli 0.160.0"); process.exit(0); }
+const resume = args[1] === "resume";
+const pos = [];
+for (let i = resume ? 2 : 1; i < args.length; i++) { if (args[i] === "-c") { i++; continue; } if (!args[i].startsWith("--")) pos.push(args[i]); }
+const days = join(process.env.CODEX_HOME, "sessions", "2026", "10", "19");
+const rollout = (id) => (existsSync(days) ? readdirSync(days).find((f) => f.endsWith("-" + id + ".jsonl")) : undefined);
+const id = resume ? pos[0] : randomUUID();
+if (resume && !rollout(id)) { console.error("Error: thread/resume failed: no rollout found for thread id " + id); process.exit(1); }
+const file = join(days, rollout(id) ?? "rollout-2026-10-19T10-00-00-" + id + ".jsonl");
+process.on("SIGINT", () => { heard({ interrupted: true }); process.exit(130); });
+process.on("exit", (code) => heard({ exit: code }));
+const out = (e) => process.stdout.write(JSON.stringify(e) + "\\n");
+const wait = async (f) => { while (!existsSync(join(FLAGS, f))) await new Promise((r) => setTimeout(r, 15)); };
+let text = "";
+process.stdin.on("data", (d) => (text += d));
+process.stdin.on("end", () => void go());
+async function go() {
+  heard({ got: text, resume, thread: id });
+  mkdirSync(days, { recursive: true });
+  appendFileSync(file, JSON.stringify({ type: "user", text }) + "\\n");
+  out({ type: "thread.started", thread_id: id });
+  out({ type: "turn.started" });
+  if (text.includes("CRASH")) { console.error("thread 'main' panicked at core/src/codex.rs:42:9: the model stream ended early"); process.exit(101); }
+  if (text.includes("QUOTA")) { out({ type: "error", message: "Reconnecting... 1/5" }); out({ type: "turn.failed", error: { message: "You exceeded your current quota, please check your plan and billing details." } }); process.exit(1); }
+  if (text.includes("MCPDOWN")) out({ type: "item.completed", item: { id: "item_0", type: "error", message: "MCP client for \`browser\` failed to start: handshaking with MCP server failed: connection closed: initialize response" } });
+  out({ type: "item.completed", item: { id: "item_1", type: "reasoning", text: "**Checking the cart totals**\\n\\nThe totals look off by the tax." } });
+  out({ type: "item.completed", item: { id: "item_2", type: "agent_message", text: "Looking at the cart." } });
+  if (text.includes("HANG")) await new Promise(() => setInterval(() => {}, 1000));
+  const cmd = { id: "item_3", type: "command_execution", command: "/bin/bash -lc 'npm test'", aggregated_output: "", exit_code: null, status: "in_progress" };
+  out({ type: "item.started", item: cmd });
+  out({ type: "item.completed", item: { ...cmd, aggregated_output: "12 passing\\n", exit_code: 0, status: "completed" } });
+  out({ type: "item.completed", item: { id: "item_4", type: "file_change", changes: [{ path: "/workspace/src/cart.ts", kind: "update" }], status: "completed" } });
+  const click = { id: "item_5", type: "mcp_tool_call", server: "screen", tool: "click", arguments: { x: 10, y: 20 }, result: null, error: null, status: "in_progress" };
+  out({ type: "item.started", item: click });
+  out({ type: "item.completed", item: { ...click, result: { content: [{ type: "image", data: PICTURE, mimeType: "image/png" }], structured_content: null }, status: "completed" } });
+  const go2 = { id: "item_6", type: "mcp_tool_call", server: "browser", tool: "browser_navigate", arguments: { url: "https://example.com/cart" }, result: null, error: null, status: "in_progress" };
+  out({ type: "item.started", item: go2 });
+  out({ type: "item.completed", item: { ...go2, result: { content: [{ type: "text", text: "navigated" }], structured_content: null }, status: "completed" } });
+  out({ type: "item.started", item: { id: "ws_1", type: "web_search", query: "", action: { type: "other" } } });
+  out({ type: "item.completed", item: { id: "ws_1", type: "web_search", query: "sales tax rules", action: { type: "search", query: "sales tax rules" } } });
+  out({ type: "item.started", item: { id: "item_7", type: "todo_list", items: [{ text: "Fix the totals", completed: false }] } });
+  out({ type: "item.completed", item: { id: "item_7", type: "todo_list", items: [{ text: "Fix the totals", completed: true }] } });
+  if (text.includes("SLOW")) await wait("go");
+  out({ type: "item.completed", item: { id: "item_8", type: "agent_message", text: "Done: " + text.split("\\n")[0] } });
+  out({ type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 5, reasoning_output_tokens: 0 } });
+}
+`,
+);
 const fake = (name, body) => writeFileSync(join(fakebin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
 fake("claude", `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeClaude)} "$@"`);
+fake("codex", `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeCodex)} "$@"`);
+// xfce4-terminal: what it was asked (and on which screen), then the command after -x, in its place.
+fake("xfce4-terminal", `echo "$DISPLAY $*" >> ${JSON.stringify(TERMINAL)}\nwhile [ $# -gt 0 ] && [ "$1" != -x ]; do shift; done\nshift\nexec "$@"`);
 fake("setsid", `exec "$@"`);
 const lines = (f) => (existsSync(f) ? readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
 /** Every Claude Code process the fake computers ran for a thread (not its status checks), oldest first. */
 const runs = () => lines(RUNS).filter((r) => r.args.includes("-p"));
+/** Every Claude Code opened in a terminal, oldest first. */
+const terms = () => lines(RUNS).filter((r) => r.args.includes("--resume") && !r.args.includes("-p"));
+/** Every `codex exec` the fake computers ran, oldest first. */
+const execs = () => lines(CODEX_RUNS).filter((r) => r.args[0] === "exec");
 const heardBy = (pid) => lines(HEARD).filter((h) => h.pid === pid);
 const flagOn = (f) => writeFileSync(join(FLAGS, f), "");
 const flagOff = (f) => rmSync(join(FLAGS, f), { force: true });
@@ -238,8 +334,19 @@ const answers = [];
 const said = (text) => ({ id: `msg_${asked.length}`, type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text, annotations: [] }] });
 const response = (id, output) => ({ id, object: "response", model: "gpt-6.1-sol", status: "completed", output, usage: { input_tokens: 100, output_tokens: 5, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } } });
 const KEY = "sk-ant-api03-VAULT-KEY-7Qx9";
-/** What the computer's environment has besides Bops' own: keys and tokens Claude Code would use first. */
-const PLANTED = { ANTHROPIC_API_KEY: "sk-ant-api03-PLANTED", ANTHROPIC_AUTH_TOKEN: "planted-auth-token", CLAUDE_CODE_OAUTH_TOKEN: "planted-oauth-token", ANTHROPIC_BASE_URL: "https://planted.test", CLAUDECODE: "1" };
+const OPENAI_KEY = "sk-proj-VAULT-OPENAI-4Kd2";
+/** What the computer's environment has besides Bops' own: keys and tokens Claude Code or Codex would use first, and Codex's own folder. */
+const PLANTED = {
+  ANTHROPIC_API_KEY: "sk-ant-api03-PLANTED",
+  ANTHROPIC_AUTH_TOKEN: "planted-auth-token",
+  CLAUDE_CODE_OAUTH_TOKEN: "planted-oauth-token",
+  ANTHROPIC_BASE_URL: "https://planted.test",
+  CLAUDECODE: "1",
+  OPENAI_API_KEY: "sk-PLANTED-openai",
+  CODEX_API_KEY: "sk-PLANTED-codex",
+  OPENAI_BASE_URL: "https://planted-openai.test",
+  CODEX_HOME: "/planted/codex-home",
+};
 
 const pcs = new Map();
 /** A fake computer: a folder whose /usr/local/bin, /root and /workspace are its own. */
@@ -265,6 +372,7 @@ const runHere = (c, command) =>
           BOPS_BRAINS: c.brains,
           BOPS_WORKSPACE: join(c.dir, "workspace"),
           BOPS_CLAUDE: c.claude,
+          BOPS_CODEX: join(fakebin, "codex"),
           BOPS_LOGS: join(c.dir, "logs"),
           BOPS_HOME: c.home,
           ...PLANTED,
@@ -286,6 +394,11 @@ async function bash(id, command) {
     return { output: "ok\n", exit_code: 0 };
   }
   if (command.includes("npm install -g --prefix /opt/bops/claude")) return { output: "claude 2.1.292\n", exit_code: 0 };
+  // The image's Codex is there (codexInstallCommand would fetch it otherwise).
+  if (command.includes("/usr/local/bin/codex --version")) {
+    c.codexChecks = (c.codexChecks ?? 0) + 1;
+    return { output: "codex 0.160.0\n", exit_code: 0 };
+  }
   if (/(^|\n|; |\| )bops-(agent|brain) /.test(command)) {
     const r = await runHere(c, command);
     c.outputs.push({ command, output: r.output });
@@ -294,7 +407,10 @@ async function bash(id, command) {
   if (command.includes("bops-screens list")) return { output: "{}", exit_code: 0 };
   return { output: command.includes("echo ok") ? "ok" : "1", exit_code: 0 };
 }
-const vault = new Map([["ANTHROPIC_API_KEY", KEY]]);
+const vault = new Map([
+  ["ANTHROPIC_API_KEY", KEY],
+  ["OPENAI_API_KEY", OPENAI_KEY],
+]);
 let reveals = 0;
 globalThis.fetch = async (input, init) => {
   const req = new Request(input, init);
@@ -386,6 +502,9 @@ const alive = (pid) => {
 const details = (id) => thread(id).steps.map((x) => x.detail);
 /** Threads as the server left them, for the --render pass. */
 const views = {};
+const { screenMap } = await import(`${root}/lib/screens.ts`);
+const { DISPLAYS } = await import(`${root}/lib/types.ts`);
+const screenMapOf = () => screenMap(S.getState(), main.id);
 
 /* ---------------- Not signed in, then signed in ---------------- */
 
@@ -689,6 +808,243 @@ await test("a key brain's key is only in Claude Code's environment: never on a c
   });
 });
 
+/* ---------------- A Codex brain ---------------- */
+
+const CODEX = { id: "brain_codex", kind: "codex", name: "Codex", auth: "key", keyName: "OPENAI_API_KEY", keyScope: "all", bots: [main.id], workspaceId: "ws_main", createdAt: 4 };
+/** Codex's -c settings on an exec's command line, as TOML reads them (Python's tomllib). */
+const settings = (args) => {
+  const pairs = args.flatMap((a, i) => (args[i - 1] === "-c" ? [a] : []));
+  const py = "import json, sys, tomllib\nout = {}\nfor kv in json.load(sys.stdin):\n    k, v = kv.split('=', 1)\n    out[k] = tomllib.loads('v = ' + v)['v']\nprint(json.dumps(out))";
+  return JSON.parse(execFileSync("python3", ["-c", py], { input: JSON.stringify(pairs), env: { PATH: REAL_PATH } }).toString());
+};
+let cx1;
+let thread1;
+await test("a Codex brain runs its thread as a codex exec per message, on the user's OpenAI key, in Bops' own folder for it, with Bops' tools, briefing and full access", async () => {
+  S.update((s) => {
+    s.brains.push(structuredClone(CODEX));
+    S.bot(main.id).brain = CODEX.id;
+  });
+  const before = reveals;
+  const s = X.startSession({ botId: main.id, goal: "Fix the totals", title: "Totals", where: "cloud", fresh: true });
+  cx1 = s.id;
+  const t = await ended(cx1);
+  assert.equal(t.status, "done", `it finished (${t.error ?? ""}; ${warned.join(" | ")})`);
+  assert.equal(t.answer, "Done: Fix the totals", "its last message is its answer");
+  assert.equal(t.brainRun.kind, "codex");
+  assert.equal(t.brainRun.started, true);
+  assert.equal(reveals, before + 1, "its key, revealed once for its start");
+  const [r] = execs();
+  thread1 = t.brainRun.cli;
+  assert.match(thread1, /^[0-9a-f-]{36}$/);
+  assert.equal(heardBy(r.pid).find((h) => h.got).thread, thread1, "the thread Codex began is the one Bops keeps");
+  // A new thread: exec, JSON events, full access as Bops agent's executor has, the message on stdin.
+  assert.deepEqual(r.args.slice(0, 4), ["exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]);
+  assert.equal(r.args.at(-1), "-", "its message comes on stdin, not its command line");
+  assert.ok(!r.args.includes("resume"));
+  assert.ok(!r.args.join(" ").includes("Fix the totals"));
+  assert.match(heardBy(r.pid).find((h) => h.got).got, /^Fix the totals\n\n<computer_state /, "the goal, then the computer's briefing, as Bops agent's");
+  // Its environment: the brain's own folder as CODEX_HOME (never ~/.codex), its own key only, nothing planted.
+  const home = join(pc(PC).brains, CODEX.id);
+  assert.equal(r.env.CODEX_HOME, home);
+  assert.equal(r.env.CODEX_API_KEY, OPENAI_KEY);
+  for (const k of ["OPENAI_API_KEY", "OPENAI_BASE_URL", ...Object.keys(PLANTED).filter((k) => !k.startsWith("CODEX_"))]) assert.equal(r.env[k], undefined, `no ${k}`);
+  assert.equal(r.env.DISPLAY, `:${t.lastDisplay}`);
+  assert.equal(r.cwd.replace(/^\/private/, ""), join(pc(PC).dir, "workspace").replace(/^\/private/, ""));
+  // Bops' settings in that folder: the API key only (a ChatGPT sign-in is never used), no update check, live search.
+  const config = readFileSync(join(home, "config.toml"), "utf8");
+  assert.match(config, /^forced_login_method = "api"$/m);
+  assert.match(config, /^check_for_update_on_startup = false$/m);
+  assert.match(config, /^web_search = "live"$/m);
+  // This thread's: Bops' briefing after Codex's own, and the same screen and browser MCP servers, without the approve tool.
+  const c = settings(r.args);
+  assert.match(c.developer_instructions, /^You are Boppy, the .* bot in Bops\./);
+  assert.match(c.developer_instructions, /You run as Codex on this computer, for Bops\..*You have no helpers here/);
+  assert.deepEqual(Object.keys(c).sort(), ["developer_instructions", "mcp_servers.browser", "mcp_servers.screen"]);
+  const screen = c["mcp_servers.screen"];
+  assert.equal(screen.command, "/opt/bops/venv/bin/python");
+  assert.deepEqual(screen.args, ["/opt/bops/screen_mcp.py", "stdio", "--session", cx1, "--bot", main.id]);
+  assert.deepEqual(screen.env, { DISPLAY: `:${t.lastDisplay}` });
+  assert.equal(screen.tool_timeout_sec, 1260, "longer than an app's wait for the user's OK");
+  assert.equal(screen.default_tools_approval_mode, "approve");
+  assert.deepEqual(c["mcp_servers.browser"].args.slice(1, 3), ["--cdp-endpoint", `http://127.0.0.1:${9200 + t.lastDisplay}`]);
+  // Its items are the thread's steps, worded as Bops agent's are.
+  const d = details(cx1);
+  for (const x of ["Looking at the cart.", "ran npm test", "edited cart.ts", "clicked (10, 20)", "opened https://example.com/cart", 'searched "sales tax rules"', "updated its to-do list"])
+    assert.ok(d.includes(x), `a step says ${JSON.stringify(x)}: ${JSON.stringify(d)}`);
+  assert.equal(d.filter((x) => x === "ran npm test").length, 1, "a command once, as it starts");
+  assert.ok(!d.includes("Done: Fix the totals"), "its answer isn't a step too");
+  assert.equal(t.steps.find((x) => x.detail === "ran npm test").tool, "command");
+  // Pictures never come back to Bops.
+  const reads = pc(PC).outputs.filter((o) => o.command.includes(`bops-agent read ${cx1}`));
+  assert.ok(reads.length > 0 && reads.every((o) => !o.output.includes(PICTURE.slice(0, 2000))));
+  // Its key: never on a command line, its files gone.
+  assert.ok(!pc(PC).commands.some((x) => x.includes(OPENAI_KEY)), "no command Bops ran had the key in it");
+  assert.ok(!r.args.join(" ").includes(OPENAI_KEY));
+  assert.ok(!readdirSync(agentDir(cx1)).some((f) => f.startsWith("key")));
+  // The run's end lets its runner go.
+  await until(() => readFileSync(join(agentDir(cx1), "out.jsonl"), "utf8").includes('"subtype": "exited"') || readFileSync(join(agentDir(cx1), "out.jsonl"), "utf8").includes('"subtype":"exited"'), "its runner to exit");
+  assert.ok(pc(PC).codexChecks >= 1, "Bops checked Codex was there");
+  views.codex = structuredClone(thread(cx1));
+});
+
+await test("a reply picks the Codex thread back up: exec resume on the thread it began", async () => {
+  X.replyToSession(cx1, "Now add a test for it");
+  await until(() => thread(cx1).status !== "done", "it to start again");
+  const t = await ended(cx1);
+  assert.equal(t.status, "done", t.error);
+  assert.equal(t.answer, "Done: Now add a test for it");
+  const r = execs().at(-1);
+  assert.deepEqual(r.args.slice(0, 2), ["exec", "resume"]);
+  assert.deepEqual(r.args.slice(-2), [thread1, "-"], "the thread it began, then the message on stdin");
+  assert.equal(t.brainRun.cli, thread1);
+  assert.match(heardBy(r.pid).find((h) => h.got).got, /^Now add a test for it/);
+});
+
+await test("a reply while Codex works waits for its next turn, and goes in then, on the same thread", async () => {
+  const n = execs().length;
+  X.replyToSession(cx1, "SLOW: check the totals");
+  await until(() => execs().length === n + 1 && heardBy(execs().at(-1).pid).some((h) => h.got?.startsWith("SLOW")), "the first message to arrive");
+  X.replyToSession(cx1, "Also check the tax");
+  await sleep(200);
+  assert.equal(thread(cx1).replies.at(-1).delivered === true, false, "not sent while it works");
+  assert.equal(execs().length, n + 1, "nothing more ran meanwhile");
+  flagOn("go");
+  const t = await until(() => thread(cx1).status === "done" && thread(cx1).answer === "Done: Also check the tax" && thread(cx1), "both to be answered");
+  flagOff("go");
+  const [first, second] = execs().slice(-2);
+  assert.match(heardBy(second.pid).find((h) => h.got).got, /^Also check the tax/, "its own turn");
+  assert.deepEqual(second.args.slice(-2), [thread1, "-"]);
+  assert.equal(first.ppid, second.ppid, "one runner for the run");
+  assert.ok(t.replies.some((x) => x.role === "bot" && x.text === "Done: SLOW: check the totals"), "the first had its answer");
+});
+
+await test("Stop interrupts Codex", async () => {
+  X.replyToSession(cx1, "HANG on this one");
+  await until(() => heardBy(execs().at(-1).pid).some((h) => h.got?.startsWith("HANG")), "it to start working");
+  const r = execs().at(-1);
+  X.stopSession(cx1);
+  const t = await ended(cx1);
+  assert.equal(t.status, "failed");
+  assert.equal(t.error, "Stopped by you");
+  await until(() => heardBy(r.pid).some((h) => h.interrupted), "SIGINT");
+  await until(() => !alive(r.pid), "it to be gone");
+});
+
+await test("an MCP server Codex couldn't start is said once a run, and an exec that died without ending its turn says why", async () => {
+  // Two messages in one run (the second came while the first worked): Codex starts its servers for each.
+  const s = X.startSession({ botId: main.id, goal: "SLOW MCPDOWN: read the dashboard", title: "Dashboard", where: "cloud", fresh: true });
+  await until(() => execs().some((r) => heardBy(r.pid).some((h) => h.got?.startsWith("SLOW MCPDOWN"))), "it to start");
+  X.replyToSession(s.id, "MCPDOWN again: the second chart");
+  flagOn("go");
+  let t = await until(() => thread(s.id).status === "done" && thread(s.id).answer?.startsWith("Done: MCPDOWN again") && thread(s.id), "both to be answered");
+  flagOff("go");
+  assert.equal(details(s.id).filter((x) => x === "Its browser tools didn't start, so it works without them").length, 1, JSON.stringify(details(s.id)));
+  X.replyToSession(s.id, "CRASH on the next part");
+  await until(() => thread(s.id).status !== "done", "it to start again");
+  t = await ended(s.id);
+  assert.equal(t.status, "failed");
+  assert.match(t.error, /^Codex stopped: thread 'main' panicked at core\/src\/codex\.rs:42:9: the model stream ended early$/);
+});
+
+await test("at its key's quota, Codex waits on the user with Finish on Bops agent and Wait", async () => {
+  const s = X.startSession({ botId: main.id, goal: "QUOTA: the report", title: "Report", where: "cloud", fresh: true });
+  const t = await ended(s.id);
+  assert.equal(t.status, "done", t.error);
+  assert.equal(t.answer, "Codex reached what your OpenAI key allows. I can finish this on Bops agent, on your AI credit, or wait.");
+  assert.deepEqual(t.options, ["Finish on Bops agent", "Wait"]);
+  assert.equal(t.brainRun.waits, "limit");
+  assert.equal(A.needsYou(t), true);
+});
+
+await test("Codex never runs without its key: no ChatGPT sign-in, no key from anywhere else", async () => {
+  const out = await runHere(pc(PC), "bops-brain run brain_codex codex -- exec --json -");
+  assert.equal(out.exit_code, 2);
+  assert.match(out.output, /Codex runs on your OpenAI key only/);
+  S.update(() => {
+    S.bot(main.id).brain = PLAN.id;
+  });
+});
+
+/* ---------------- Open in terminal ---------------- */
+
+const termRuns = () => terms().map((r) => ({ ...r, heard: heardBy(r.pid) }));
+await test("Open in terminal: the thread's Claude Code session opens in a terminal on its screen, with its folder, tools and briefing; the next reply closes it and it carries on headless", async () => {
+  const s = X.startSession({ botId: main.id, goal: "Write the release notes", title: "Notes", where: "cloud", fresh: true });
+  let t = await ended(s.id);
+  assert.equal(t.status, "done", t.error);
+  const sid = t.brainRun.cli;
+  const screen = t.lastDisplay;
+  const at = X.openInTerminal(s.id);
+  assert.deepEqual(at, { botId: main.id, display: screen }, "its own screen");
+  const held = S.getState().takeover;
+  assert.equal(held.sessionId, s.id);
+  assert.equal(held.display, screen);
+  assert.deepEqual(held.terminal, {}, "it wasn't working: nothing paused");
+  const [r] = await until(() => termRuns().length && termRuns(), "the terminal's Claude Code");
+  // Claude Code's own session, interactive: the thread's session, folder, tools and briefing, nothing else.
+  const arg = (n) => r.args[r.args.indexOf(n) + 1];
+  assert.equal(arg("--resume"), sid);
+  assert.ok(!r.args.includes("-p") && !r.args.includes("--session-id"));
+  for (const a of ["--permission-prompt-tool", "--dangerously-skip-permissions", "--bare", "--input-format"]) assert.ok(!r.args.includes(a), `never ${a}`);
+  assert.equal(arg("--mcp-config"), join(agentDir(s.id), "mcp.json"));
+  assert.ok(r.args.includes("--strict-mcp-config"));
+  assert.match(arg("--append-system-prompt"), /^You are Boppy, the .* bot in Bops\.[\s\S]*You run as Claude Code on this computer/);
+  assert.equal(arg("--allowedTools"), runs().at(-1).args[runs().at(-1).args.indexOf("--allowedTools") + 1], "what it may do by itself, as the thread's");
+  assert.ok(!JSON.parse(readFileSync(join(agentDir(s.id), "mcp.json"), "utf8")).mcpServers.screen.args.includes("--approve"), "the user answers it in the terminal");
+  assert.equal(r.env.CLAUDE_CONFIG_DIR, join(pc(PC).brains, PLAN.id));
+  assert.ok(!Object.keys(r.env).some((k) => /^(ANTHROPIC_|CLAUDE_CODE_OAUTH|CLAUDECODE$|OPENAI_|CODEX_)/.test(k)), "no key or token from anywhere");
+  assert.equal(r.env.DISPLAY, `:${screen}`);
+  assert.match(readFileSync(TERMINAL, "utf8"), new RegExp(`^:${screen} --disable-server --title Claude Code --maximize -x \\S+/bops-agent _term ${s.id} `, "m"));
+  assert.ok(r.heard.some((h) => h.interactive));
+  // The screen is the user's meanwhile: nothing else starts there.
+  assert.equal(screenMapOf().find((x) => x.display === screen).kind, "driving");
+  // A reply closes it first, then the thread's own Claude Code picks the same session back up.
+  const n = runs().length;
+  X.replyToSession(s.id, "Now tidy it up");
+  assert.equal(S.getState().takeover, undefined, "the screen goes back");
+  t = await until(() => thread(s.id).status === "done" && thread(s.id).answer === "Done: Now tidy it up" && thread(s.id), "it to carry on headless");
+  const closed = heardBy(r.pid).find((h) => h.terminated);
+  assert.ok(closed, "the terminal's Claude Code was closed");
+  const headless = runs().at(-1);
+  assert.equal(runs().length, n + 1);
+  assert.equal(headless.args[headless.args.indexOf("--resume") + 1], sid, "the same session");
+  assert.ok(closed.at <= headless.at, "only one of the two at a time");
+  assert.ok(!existsSync(join(agentDir(s.id), "term.pid")));
+  views.done = structuredClone(t);
+});
+
+await test("Open in terminal while it works pauses it; handing the screen back closes the terminal, and it carries on headless", async () => {
+  const s = X.startSession({ botId: main.id, goal: "HANG on the migration", title: "Migration", where: "cloud", fresh: true });
+  await until(() => runs().some((r) => heardBy(r.pid).some((h) => h.got?.startsWith("HANG on the migration"))), "it to start");
+  const working = runs().find((r) => heardBy(r.pid).some((h) => h.got?.startsWith("HANG on the migration")));
+  await until(() => thread(s.id).brainRun?.started, "its session to begin");
+  const before = termRuns().length;
+  const at = X.openInTerminal(s.id);
+  assert.deepEqual(S.getState().takeover.terminal, { paused: true });
+  let t = await ended(s.id);
+  assert.equal(t.status, "failed");
+  assert.equal(t.error, "Paused while it's open in the terminal");
+  assert.equal(A.needsYou(t), false, "paused, not failed");
+  await until(() => heardBy(working.pid).some((h) => h.interrupted), "its headless Claude Code to stop");
+  const r = await until(() => termRuns().length > before && termRuns().at(-1), "the terminal");
+  assert.equal(r.args[r.args.indexOf("--resume") + 1], t.brainRun.cli);
+  assert.ok(heardBy(working.pid).some((h) => "exit" in h && h.at <= r.at), "the headless one was gone before the terminal's started");
+  assert.equal(r.env.DISPLAY, `:${at.display}`);
+  views.terminal = structuredClone(thread(s.id));
+  views.takeover = structuredClone(S.getState().takeover);
+  X.returnControl();
+  t = await until(() => thread(s.id).status === "done" && thread(s.id), "it to carry on");
+  assert.ok(heardBy(r.pid).some((h) => h.terminated), "the terminal closed");
+  const again = runs().at(-1);
+  assert.match(heardBy(again.pid).find((h) => h.got).got, /^\(From Bops: Maya had you open in a terminal on this screen, and closed it\. Check what's already done before you carry on\.\)/);
+  assert.ok(t.replies.some((x) => x.note === "You closed the terminal"));
+});
+
+await test("only a thread Claude Code ran opens in a terminal", () => {
+  assert.throws(() => X.openInTerminal(cx1), /Only a thread Claude Code runs opens in a terminal/);
+  assert.throws(() => X.openInTerminal(t1), /Only a thread Claude Code runs opens in a terminal/, "Bops agent finished it");
+});
+
 await test("the thread's words have no long dashes", () => {
   for (const id of [t1]) for (const x of [thread(id).answer, ...thread(id).steps.map((y) => y.detail)]) assert.ok(!/[–—]/.test(x), x);
   for (const w of [C.signInWords(PLAN, "Boppy's computer", false), C.stoppedWords(PLAN, "limit", "x", "Boppy's computer", "max"), C.stoppedWords({ ...PLAN, auth: "key" }, "auth", "x", "Boppy's computer"), C.claudeDriver.note("Maya")])
@@ -698,11 +1054,11 @@ await test("the thread's words have no long dashes", () => {
 await test("the window's cards for them read right (the --render pass)", async () => {
   const file = join(scratch, "views.json");
   const st = S.getState();
-  writeFileSync(file, JSON.stringify({ ...views, bots: st.bots, brains: st.brains, chat: st.chats.find((c) => c.id === views.signIn.chatId) }));
+  writeFileSync(file, JSON.stringify({ ...views, screenNo: DISPLAYS.indexOf(views.takeover.display) + 1, bots: st.bots, brains: st.brains, chat: st.chats.find((c) => c.id === views.signIn.chatId) }));
   const out = await new Promise((resolve, reject) =>
     execFile(process.execPath, [fileURLToPath(import.meta.url), "--render", file], { cwd: root, env: { PATH: REAL_PATH, HOME: process.env.HOME } }, (err, stdout, stderr) => (err ? reject(new Error(`${stdout}${stderr}`)) : resolve(stdout))),
   );
-  assert.equal(out.match(/^ok render:/gm)?.length, 3, out);
+  assert.equal(out.match(/^ok render:/gm)?.length, 5, out);
   process.stdout.write(out.replace(/^/gm, "  "));
 });
 

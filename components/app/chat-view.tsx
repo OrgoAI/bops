@@ -3,7 +3,7 @@
 import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BLOCKER_ASK, live, pairChatId, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
+import { BLOCKER_ASK, BRAIN_NAMES, live, pairChatId, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
 import { OpenLink } from "./panel-tabs";
@@ -17,7 +17,7 @@ import { Fold } from "./fold";
 import { SaveSkillDialog } from "./skill-dialog";
 import { undash } from "./side-group";
 import { ApiAsk, apiAskOf, apiCallOf, ApiNote } from "./keys";
-import { brainSignIn } from "./brains";
+import { BrainBadge, brainSignIn, openInTerminal } from "./brains";
 import { ChatAvatar, chatName, clockTime, needsYou, post, StatusIcon, teamOf, useNow } from "./ui";
 
 /** Light markdown for bot text: **bold** and [links](url). */
@@ -1716,6 +1716,8 @@ function SessionChip({ session: s, state, onClick }: { session: Session; state: 
     >
       <StatusIcon session={s} size={14} dark />
       <span className={`truncate text-[14px] leading-[18px] ${live(s) || waiting ? "text-ink" : "text-[#6B6B6B]"}`}>{s.title}</span>
+      {/* The brain that ran it, when one did (Session.brainRun): Bops agent's threads have none. */}
+      {s.brainRun?.started && <BrainBadge kind={s.brainRun.kind} title={`${BRAIN_NAMES[s.brainRun.kind]} ran this`} />}
       {/* Where it runs: the user's Mac or the cloud (deciding: nothing yet). */}
       {s.runsOn === "mac" ? (
         <span title="On your Mac" className="flex shrink-0 items-center gap-1 rounded-full bg-[#F2F2F0] px-1.5 py-px text-[11px] leading-[14px] text-[#3A3A38]">
@@ -1814,6 +1816,20 @@ export function ThreadSheet({
   const lines = timeline(s);
   const toolCount = s.steps.filter((x) => x.tool !== "note" && x.tool !== "setup").length;
   const started = s.startedAt ?? s.createdAt;
+  // The brain that ran it (Session.brainRun). One Claude Code runs opens in a terminal on its screen for the
+  // user (sessions.ts openInTerminal); while it's open there (the takeover's `terminal`), a reply closes it.
+  const brain = s.brainRun?.started ? s.brainRun.kind : undefined;
+  const terminal = state.takeover?.terminal && state.takeover.sessionId === s.id ? state.takeover.display : undefined;
+  const canTerminal = brain === "claude" && !s.onBopsAgent && s.runsOn !== "mac" && state.host !== "mac" && terminal === undefined && !!onShowScreen;
+  const [termBusy, setTermBusy] = useState(false);
+  const [termError, setTermError] = useState<{ id: string; text: string } | null>(null);
+  const toTerminal = async () => {
+    if (!onShowScreen) return;
+    setTermBusy(true);
+    const why = await openInTerminal(s.id, onShowScreen);
+    setTermError(why ? { id: s.id, text: why } : null);
+    setTermBusy(false);
+  };
 
   useEffect(() => {
     end.current?.scrollIntoView({ block: "end" });
@@ -1836,10 +1852,13 @@ export function ThreadSheet({
         <div className="flex items-center gap-2.5 border-b border-[#F0F0EE] py-3.5 pl-4 pr-3.5">
           <Mascot botId={b.id} color={b.color} size={32} />
           <div className="flex min-w-0 flex-1 flex-col gap-px">
-            <span className="truncate text-[15px] font-semibold leading-[18px]">{s.title}</span>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="truncate text-[15px] font-semibold leading-[18px]">{s.title}</span>
+              {brain && <BrainBadge kind={brain} title={`${BRAIN_NAMES[brain]} ran this`} />}
+            </div>
             <button onClick={onShowComputer} className="flex items-center gap-1.5 text-left text-[12px] leading-4 text-[#6B6B6B] hover:text-ink">
               {b.name} · {s.runsOn === "mac" ? "on your Mac · " : ""}
-              {s.askWhere && live(s) ? "waiting for you" : live(s) ? "working" : s.status === "done" ? "finished" : "stopped"} · {toolCount} steps
+              {terminal !== undefined ? "in the terminal" : s.askWhere && live(s) ? "waiting for you" : live(s) ? "working" : s.status === "done" ? "finished" : "stopped"} · {toolCount} steps
               {/* Its screen, by the number the panel and the bots use. */}
               {s.runsOn !== "mac" && (live(s) && s.display !== undefined ? ` · screen ${screenNo(s.display)}` : !live(s) && s.lastDisplay !== undefined ? ` · left off on screen ${screenNo(s.lastDisplay)}` : "")}
             </button>
@@ -1852,6 +1871,16 @@ export function ThreadSheet({
             >
               <MacIcon size={13} />
               {s.offerMac && live(s) && !s.blocker ? "Move to your Mac" : "Try on your Mac"}
+            </button>
+          )}
+          {canTerminal && (
+            <button
+              disabled={termBusy}
+              onClick={() => void toTerminal()}
+              title={live(s) ? "Pause it and work with Claude Code yourself, in a terminal on its screen" : "Work with Claude Code yourself, in a terminal on its screen"}
+              className="shrink-0 rounded-full px-3 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6] disabled:opacity-50"
+            >
+              Open in terminal
             </button>
           )}
           {live(s) ? (
@@ -1973,8 +2002,22 @@ export function ThreadSheet({
               </div>
             ),
           )}
-          {s.status === "failed" && s.error && (
-            <div className="rounded-xl bg-[#FBFFE0] px-3 py-2.5 text-[13px] leading-5 shadow-[0_0_0_1px_#E6F57A]">{s.error}</div>
+          {terminal !== undefined ? (
+            <div className="flex items-center gap-2 rounded-xl bg-[#FBFFE0] px-3 py-2.5 text-[13px] leading-5 shadow-[0_0_0_1px_#E6F57A]">
+              <span className="min-w-0 flex-1">Open in the terminal on screen {screenNo(terminal)}. Your next reply closes it, and it carries on here.</span>
+              {onShowScreen && (
+                <button onClick={() => onShowScreen(s.botId, terminal)} className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
+                  Show
+                </button>
+              )}
+            </div>
+          ) : (
+            s.status === "failed" && s.error && <div className="rounded-xl bg-[#FBFFE0] px-3 py-2.5 text-[13px] leading-5 shadow-[0_0_0_1px_#E6F57A]">{s.error}</div>
+          )}
+          {termError?.id === s.id && (
+            <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+              {termError.text}
+            </span>
           )}
           {live(s) && <span className="animate-pulse text-[14px] leading-[18px] text-[#B5B5B2]">{s.status === "queued" ? "Queued" : "Thinking"}</span>}
           <div ref={end} />
@@ -1997,7 +2040,16 @@ export function ThreadSheet({
               id="thread-reply"
               value={draft}
               onChange={setDraft}
-              placeholder={live(s) ? "Reply in thread · it sees this as it works" : "Reply in thread · picks it back up"}
+              placeholder={
+                terminal !== undefined
+                  ? "Reply in thread · closes the terminal and carries on"
+                  : live(s)
+                    ? // Codex takes a reply as its next turn, once it's done with this one (cli-agents.ts codexDriver).
+                      s.brainRun?.kind === "codex" && !s.onBopsAgent
+                      ? "Reply in thread · it takes this next"
+                      : "Reply in thread · it sees this as it works"
+                    : "Reply in thread · picks it back up"
+              }
               className="min-w-0 flex-1 bg-transparent py-[6px] text-[14px] leading-[18px] outline-none placeholder:text-[#9A9A98]"
             />
             <button type="submit" aria-label="Send" disabled={!draft.trim()} className="flex size-[30px] items-center justify-center rounded-full bg-ink disabled:opacity-30">

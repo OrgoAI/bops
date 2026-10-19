@@ -30,8 +30,9 @@ export const CLAUDE_CODE_VERSION = "2.1.292";
 /** Where Bops installs it on a computer (npm's global prefix there), and the binary. */
 export const CLAUDE_PREFIX = "/opt/bops/claude";
 export const CLAUDE_BIN = `${CLAUDE_PREFIX}/bin/claude`;
-/** Codex, in the computer's image (orgo/bops-base.mjs). */
+/** Codex, in the computer's image (orgo/bops-base.mjs), at the version the image pins (ensureCodex fetches it onto a computer without it). */
 export const CODEX_BIN = "/usr/local/bin/codex";
+export const CODEX_VERSION = "0.160.0";
 /** Each brain's folder on a computer: Claude Code's CLAUDE_CONFIG_DIR, Codex's CODEX_HOME. */
 export const BRAINS_DIR = "/root/.bops/brains";
 export const brainDir = (brainId: string) => `${BRAINS_DIR}/${brainId}`;
@@ -203,6 +204,37 @@ export function ensureClaudeCode(computerId: string): Promise<void> {
   return ready;
 }
 
+/** Each computer's Codex, checked once per run of Bops; one that failed is tried again next time. */
+const codexReady = new Map<string, Promise<void>>();
+
+/**
+ * The shell that makes sure a computer has Codex (CODEX_BIN, as its image puts it there: `codex exec-server`
+ * runs Bops agent's tools with it), and when it hasn't, fetches the release the image pins from GitHub, as
+ * the image does, unchanged. Says "codex" and its version.
+ */
+export function codexInstallCommand() {
+  const v = CODEX_VERSION;
+  const has = `${CODEX_BIN} --version 2>/dev/null | grep -q '^codex-cli '`;
+  const release = `codex-$(uname -m | sed 's/arm64/aarch64/')-unknown-linux-musl`;
+  return [
+    "mkdir -p /var/log/bops",
+    `${has} || (cd /tmp && curl -fsSL -o codex-bops.tgz https://github.com/openai/codex/releases/download/rust-v${v}/${release}.tar.gz && tar -xzf codex-bops.tgz && install -m 755 ${release} ${CODEX_BIN}; rm -f codex-bops.tgz ${release}) > /var/log/bops/codex-install.log 2>&1`,
+    `if ${has}; then echo "codex $(${CODEX_BIN} --version | cut -d' ' -f2)"; else tail -3 /var/log/bops/codex-install.log; fi`,
+  ].join("\n");
+}
+
+/** Codex on a computer: the image's, or the pinned release when it has none. Throws with plain words when it can't be. */
+export function ensureCodex(computerId: string): Promise<void> {
+  const known = codexReady.get(computerId);
+  if (known) return known;
+  const ready = orgo.bash(computerId, codexInstallCommand(), 180).then((r) => {
+    if (!/^codex \d/m.test(r.output)) throw new BrainError(`Codex isn't on the computer and didn't install (${r.output.trim().slice(-160) || "no answer"}).`, 502);
+  });
+  ready.catch(() => codexReady.delete(computerId));
+  codexReady.set(computerId, ready);
+  return ready;
+}
+
 /** The brain scripts every computer needs, kept matching this copy of Bops: sign-ins and runs, and a thread's process (bops-agent: cli-agents.ts). */
 const BRAIN_TOOLS = [
   ["vm/bin/bops-brain", "/usr/local/bin/bops-brain"],
@@ -223,7 +255,7 @@ export async function ensureBrainTools(computerId: string) {
   for (const f of files) {
     if (have.includes(`${f.md5}  ${f.dst}`)) continue;
     const r = await orgo.bash(computerId, `echo ${f.body.toString("base64")} | base64 -d > ${f.dst} && chmod 0755 ${f.dst} && echo ok`, 30);
-    if (!r.output.includes("ok")) throw new BrainError(`Bops couldn't set up the computer for Claude Code (${r.output.trim().slice(0, 120)}).`, 502);
+    if (!r.output.includes("ok")) throw new BrainError(`Bops couldn't set up the computer for its brains (${r.output.trim().slice(0, 120)}).`, 502);
   }
   toolsChecked.set(computerId, want);
 }

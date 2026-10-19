@@ -23,6 +23,18 @@ const btn = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabl
 const dark = `${btn} bg-ink text-white hover:bg-[#2A2A28]`;
 const light = `${btn} bg-[#F2F2F0] text-ink hover:bg-[#EAEAE7]`;
 
+/**
+ * Which brain a thread ran on (Session.brainRun), or a bot's tasks run on, as a small plain chip: "Claude
+ * Code", "Codex". Bops agent has none. `className`: its background where the gray doesn't read (a profile's glass).
+ */
+export function BrainBadge({ kind, title, className = "bg-[#F2F2F0]" }: { kind: BrainKind; title: string; className?: string }) {
+  return (
+    <span title={title} className={`shrink-0 rounded-full px-1.5 py-px text-[11px] leading-[14px] text-[#3A3A38] ${className}`}>
+      {BRAIN_NAMES[kind]}
+    </span>
+  );
+}
+
 /** "Sam's computer": the computer `b` works on (its own, or the one it shares). */
 const computerOf = (state: AppState, b: Bot) => `${workBot(b, state.bots).name}'s computer`;
 
@@ -67,6 +79,22 @@ export async function brainSignIn(brainId: string, botId: string, onShowScreen: 
     const res = await post("/api/brains/sign-in", { brainId, botId });
     const j = (await res.json().catch(() => ({}))) as { botId?: string; display?: number; error?: string };
     if (!res.ok || typeof j.display !== "number" || !j.botId) return undash(j.error ?? "The sign-in didn't start. Try again.");
+    onShowScreen(j.botId, j.display);
+    return null;
+  } catch {
+    return "Couldn't reach Bops. Try again.";
+  }
+}
+
+/**
+ * Open a thread Claude Code runs in a terminal on its screen, for the user to work with it there (sessions.ts
+ * openInTerminal, chat-view.tsx ThreadSheet); the app shows that screen. Null, or why not.
+ */
+export async function openInTerminal(sessionId: string, onShowScreen: Shown): Promise<string | null> {
+  try {
+    const res = await post(`/api/sessions/${sessionId}/terminal`, {});
+    const j = (await res.json().catch(() => ({}))) as { botId?: string; display?: number; error?: string };
+    if (!res.ok || typeof j.display !== "number" || !j.botId) return undash(j.error ?? "The terminal didn't open. Try again.");
     onShowScreen(j.botId, j.display);
     return null;
   } catch {

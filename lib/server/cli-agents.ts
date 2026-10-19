@@ -1,30 +1,32 @@
 import "server-only";
 import { BRAIN_NAMES, live, planName, type Brain, type BrainKind } from "@/lib/types";
-import { ensureBrainTools, ensureClaudeCode, revealBrainKey } from "./brains";
+import { ensureBrainTools, ensureClaudeCode, ensureCodex, revealBrainKey } from "./brains";
 import { answerApp, askOwner } from "./composio";
 import { orgo } from "./orgo";
 import { id, ownerName, session } from "./store";
 
 /**
- * A bot's threads on its brain (lib/server/brains.ts Brain) instead of Bops agent: Claude Code on the bot's
- * own computer, on the user's own Claude plan or Anthropic key, so none of it is on AI credit. sessions.ts runs
- * such a thread as it runs any (its screen, the screen watch, the ledger, the turn loop, answers, results,
- * routines and the cleanup); only its turns come here (sessions.ts brainTurns).
+ * A bot's threads on its brain (lib/server/brains.ts Brain) instead of Bops agent: Claude Code or Codex on
+ * the bot's own computer, on the user's own Claude plan or key, or OpenAI key, so none of it is on AI credit.
+ * sessions.ts runs such a thread as it runs any (its screen, the screen watch, the ledger, the turn loop,
+ * answers, results, routines and the cleanup); only its turns come here (sessions.ts brainTurns).
  *
- * Each run of a thread starts one Claude Code process on the computer, detached and pinned to the thread's
- * screen (vm/bin/bops-agent, through bops-brain run: an empty environment, the brain's own folder), with the
- * tools a Bops agent has there (Bops' screen and browser MCP servers) and Bops' briefing after Claude Code's
- * own system prompt. Bops reaches the computer one command at a time (orgo.bash) with no stream back, so it
- * talks to the process through files: each message is a stream-json line appended to the thread's input,
- * and every poll reads the process's events on from where the last one got to and turns them into the
- * thread's steps. A message the user sends while it works goes in at once (Claude Code takes it after what
- * it's doing); a turn ends once every message sent has its answer. Stop interrupts it (SIGINT); a process
- * that's gone mid-turn (the computer slept or restarted, or it crashed) starts again on the same session.
- * What Claude Code may not do by itself asks the user in Bops first (the screen MCP's approve tool:
+ * Each run of a thread starts one process for it on the computer (Claude Code, or Codex's runner), detached
+ * and pinned to the thread's screen (vm/bin/bops-agent, through bops-brain run: an empty environment, the
+ * brain's own folder), with the tools a Bops agent has there (Bops' screen and browser MCP servers) and Bops'
+ * briefing after the CLI's own system prompt. Bops reaches the computer one command at a time (orgo.bash)
+ * with no stream back, so it talks to the process through files: each message is a line appended to the
+ * thread's input, and every poll reads the process's events on from where the last one got to and turns them
+ * into the thread's steps. A message the user sends while Claude Code works goes in at once (it takes it
+ * after what it's doing); a turn ends once every message sent has its answer. Stop interrupts it (SIGINT); a
+ * process that's gone mid-turn (the computer slept or restarted, or it crashed) starts again on the same
+ * session. What Claude Code may not do by itself asks the user in Bops first (the screen MCP's approve tool:
  * approveTool), with the app approval card.
  *
  * A driver is one CLI's part in this: how it's installed, what it's told, how a message is written for it,
- * and how its output reads. Claude Code's is here; Codex's goes next to it, on the same files and turn loop.
+ * and how its output reads. Claude Code's and Codex's are here, on the same files and turn loop. Codex runs
+ * one `codex exec` per message on the same thread (bops-agent keeps it going between them), on the user's
+ * OpenAI key only, with full access on the computer as Bops agent's executor has there.
  */
 
 /** What Bops reads from a brain's CLI. `parent`: a helper's (Claude Code's Task), by the call that started it. */
@@ -35,8 +37,12 @@ export type CliEvent =
   | { type: "tool"; id: string; tool: string; args: Record<string, unknown>; detail?: string; parent?: string }
   | { type: "text"; text: string; parent?: string }
   | { type: "thinking"; text: string; parent?: string }
-  /** One message's answer. `stop`: turned down at the plan's usage limit or the key's ("limit"), or for its sign-in or key ("auth"). */
-  | { type: "result"; ok: boolean; text: string; stop?: "limit" | "auth" }
+  /**
+   * One message's answer. `text` unset: its last words are the answer (Codex says it in its last message,
+   * not with the end of its turn). `stop`: turned down at the plan's usage limit or the key's ("limit"), or
+   * for its sign-in or key ("auth").
+   */
+  | { type: "result"; ok: boolean; text?: string; stop?: "limit" | "auth" }
   | { type: "exited"; code: number };
 
 /** One CLI agent, as the turn loop uses it. */
@@ -52,6 +58,8 @@ export type CliDriver = {
   parse: (event: Record<string, unknown>) => CliEvent[];
   /** A message sent while it works goes in then (Claude Code queues it after what it's doing); else it waits for the next turn. */
   steers: boolean;
+  /** What it may not do by itself asks the user through the screen MCP's approve tool (Claude Code's --permission-prompt-tool). */
+  asks: boolean;
 };
 
 /** How often a turn reads the CLI's output, and how long an approval waits for the user (the screen MCP gives up at 20 minutes). Mutable for the tests only. */
@@ -121,14 +129,15 @@ const failure = (e: Record<string, unknown>) =>
   [str(e.result), ...(Array.isArray(e.errors) ? e.errors.map((x) => (typeof x === "string" ? x : str((x as { message?: unknown })?.message))) : [])].filter(Boolean).join(" ").trim() ||
   (e.subtype === "error_max_turns" ? "it reached the most turns it may take" : `it stopped (${str(e.subtype) ?? "an error"})`);
 
-/** Claude Code turned a turn down at a limit (the plan's usage, the key's credit or rate), or for its sign-in or key. */
-const LIMIT = /usage limit|limit reached|hit your (usage )?limit|out of (extra )?usage|credit balance is too low|rate.?limit|quota/i;
-const AUTH = /invalid api key|please run \/login|not logged in|log ?in again|oauth token|token (has )?expired|authentication|unauthori[sz]ed|\b401\b/i;
+/** A brain's CLI turned a turn down at a limit (the plan's usage, the key's credit, quota or rate), or for its sign-in or key. */
+const LIMIT = /usage limit|limit reached|hit your (usage )?limit|out of (extra )?usage|credit balance is too low|rate.?limit|quota|too many requests|\b429\b/i;
+const AUTH = /(invalid|incorrect) api key|please run \/login|not logged in|log ?in again|oauth token|token (has )?expired|authentication|unauthori[sz]ed|\b401\b/i;
 export const stopOf = (text: string) => (LIMIT.test(text) ? "limit" : AUTH.test(text) ? "auth" : undefined);
 
 export const claudeDriver: CliDriver = {
   kind: "claude",
   steers: true,
+  asks: true,
   prepare: async (computerId) => {
     await ensureClaudeCode(computerId);
     await ensureBrainTools(computerId);
@@ -166,7 +175,92 @@ export const claudeDriver: CliDriver = {
   },
 };
 
-const DRIVERS: Partial<Record<BrainKind, CliDriver>> = { claude: claudeDriver };
+/* ---------------- Codex ---------------- */
+
+/** A command as Codex ran it, without the shell it wraps it in: "/bin/bash -lc 'npm test'" is npm test. */
+const unwrap = (cmd: string) => /^(?:\S*\/)?(?:ba|z)?sh -l?c (['"])([\s\S]*)\1$/.exec(cmd.trim())?.[2] ?? cmd.trim();
+
+/** What a file change did, worded as Claude Code's are: "edited cart.ts", "wrote notes.md", "deleted old.ts", "edited cart.ts and 2 more files". */
+function fileChange(changes: unknown) {
+  const all = (Array.isArray(changes) ? changes : []) as { path?: unknown; kind?: unknown }[];
+  if (!all.length) return "edited files";
+  const verb = (k: unknown) => (k === "add" ? "wrote" : k === "delete" ? "deleted" : "edited");
+  const first = `${verb(all[0].kind)} ${base(all[0].path)}`;
+  return all.length === 1 ? first : `${first} and ${all.length - 1} more file${all.length === 2 ? "" : "s"}`;
+}
+
+/** A web search as the thread shows it, as a Bops agent's are (sessions.ts describeSearch). */
+function codexSearch(item: Record<string, unknown>) {
+  const a = (item.action && typeof item.action === "object" ? item.action : {}) as Record<string, unknown>;
+  if (a.type === "open_page" && str(a.url)) return `read ${cut(str(a.url)!.replace(/^https?:\/\/(www\.)?/, ""), 70)}`;
+  if (a.type === "find_in_page") return `looked for "${cut(str(a.pattern) ?? "", 40)}" in the page`;
+  const q = str(item.query)?.trim() || str(a.query)?.trim() || (Array.isArray(a.queries) ? a.queries.filter((x) => typeof x === "string").join(", ") : "");
+  return q ? `searched "${cut(q, 70)}"` : "searched the web";
+}
+
+/** Codex said one of its MCP servers didn't start (as a warning: an error item), and which. */
+const NOT_STARTED = /^MCP client for `([^`]+)` (?:failed to start|timed out)/;
+
+/**
+ * Codex (`codex exec --json`, bops-agent): each message is a turn of its own on the thread, which picks the
+ * thread back up (`exec resume`), so a message the user sends while it works waits for the next turn: it
+ * doesn't steer. Its key is the user's OpenAI key, and it has full access on the computer (as Bops agent's
+ * executor has there), so nothing asks the user but what changes their apps (the screen MCP's app tools
+ * ask, as they do for Bops agent).
+ */
+export const codexDriver: CliDriver = {
+  kind: "codex",
+  steers: false,
+  asks: false,
+  prepare: async (computerId) => {
+    await ensureCodex(computerId);
+    await ensureBrainTools(computerId);
+  },
+  note: (owner) =>
+    `You run as Codex on this computer, for Bops. Your tools are Codex's own (the shell, editing files, web search and your plan) and Bops' (the screen server's tools for the screen, ${owner}'s apps and signing in from their vault; the browser server's for the Chrome on your screen). Where the instructions above name a tool, use the one of yours that does that: web_search is your web search, the shell is your shell. You have no helpers here, so do every part yourself. What would change ${owner}'s apps (sending, posting, paying) asks them in Bops first and waits for their answer; if they say no, don't do it another way.`,
+  line: (text) => `${JSON.stringify({ text })}\n`,
+  parse: (e) => {
+    if (e.type === "thread.started") return [{ type: "started", session: str(e.thread_id), failed: [] }];
+    if (e.type === "turn.completed") return [{ type: "result", ok: true }];
+    if (e.type === "turn.failed") {
+      const text = str((e.error as { message?: unknown } | undefined)?.message)?.trim() || "its turn failed";
+      const stop = stopOf(text);
+      return [{ type: "result", ok: false, text, ...(stop ? { stop } : {}) }];
+    }
+    if (e.type === "bops" && e.subtype === "exited") return [{ type: "exited", code: Number(e.code) || 0 }];
+    const item = (e.item && typeof e.item === "object" ? e.item : undefined) as Record<string, unknown> | undefined;
+    if (!item) return [];
+    const id = str(item.id) ?? "";
+    // What it does shows as it starts; what's only whole once it's done (a change to files, a search's query, its words) as it ends.
+    if (e.type === "item.started") {
+      if (item.type === "command_execution") {
+        const command = unwrap(str(item.command) ?? "");
+        return [{ type: "tool", id, tool: "command", detail: `ran ${cut(command || "a command", 100)}`, args: { command } }];
+      }
+      if (item.type === "mcp_tool_call") {
+        const server = str(item.server) ?? "a server";
+        const tool = str(item.tool) ?? "tool";
+        const args = item.arguments && typeof item.arguments === "object" && !Array.isArray(item.arguments) ? (item.arguments as Record<string, unknown>) : {};
+        return [{ type: "tool", id, tool, args, ...(server === "screen" || server === "browser" ? {} : { detail: `used ${tool} (${server})` }) }];
+      }
+      if (item.type === "todo_list") return [{ type: "tool", id, tool: "note", detail: "updated its to-do list", args: {} }];
+      if (item.type === "collab_tool_call" && item.tool === "spawn_agent")
+        return [{ type: "tool", id, tool: "helper", detail: str(item.prompt) ? `brought in a helper for ${cut(str(item.prompt)!, 60)}` : "started a helper", args: { description: str(item.prompt) ?? "" } }];
+      return [];
+    }
+    if (e.type !== "item.completed") return [];
+    if (item.type === "agent_message" && str(item.text)?.trim()) return [{ type: "text", text: str(item.text)!.trim() }];
+    // Its reasoning summary leads with a heading in bold ("**Checking the cart**"): that, for the caption.
+    if (item.type === "reasoning" && str(item.text)?.trim()) return [{ type: "thinking", text: /^\*\*(.+?)\*\*/.exec(str(item.text)!.trim())?.[1] ?? str(item.text)!.trim().split("\n")[0] }];
+    if (item.type === "file_change") return [{ type: "tool", id, tool: "edit", detail: `${item.status === "failed" ? "couldn't change: " : ""}${fileChange(item.changes)}`, args: {} }];
+    if (item.type === "web_search") return [{ type: "tool", id, tool: "search", detail: codexSearch(item), args: {} }];
+    const down = item.type === "error" ? NOT_STARTED.exec(str(item.message) ?? "") : null;
+    if (down) return [{ type: "started", failed: [down[1]] }];
+    return [];
+  },
+};
+
+const DRIVERS: Partial<Record<BrainKind, CliDriver>> = { claude: claudeDriver, codex: codexDriver };
 /** The driver for a brain's CLI, when this build runs it (one without runs on Bops agent). */
 export const cliDriver = (kind: BrainKind) => DRIVERS[kind];
 
@@ -189,6 +283,8 @@ export type CliRun = {
   offset: number;
   /** Helpers' names by the call that started them (Claude Code's Task), for their steps. */
   helpers: Map<string, string>;
+  /** Its MCP servers the thread has been told didn't start, this run. */
+  down: Set<string>;
   /** More arguments for the CLI as it starts (the REAL_CLAUDE test's --max-turns), each a plain word. */
   args?: string[];
 };
@@ -208,7 +304,7 @@ async function put(run: Pick<CliRun, "computerId" | "sessionId">, name: "mcp.jso
 export async function openRun(o: { sessionId: string; computerId: string; display: number; brain: Brain; driver: CliDriver; cli: string; resume: boolean; mcp: unknown; prompt: string; args?: string[] }): Promise<CliRun> {
   await put(o, "mcp.json", JSON.stringify(o.mcp));
   await put(o, "prompt.md", o.prompt);
-  return { sessionId: o.sessionId, computerId: o.computerId, display: o.display, brain: o.brain, driver: o.driver, cli: o.cli, resume: o.resume, up: false, restarts: 0, offset: 0, helpers: new Map(), ...(o.args?.length ? { args: o.args } : {}) };
+  return { sessionId: o.sessionId, computerId: o.computerId, display: o.display, brain: o.brain, driver: o.driver, cli: o.cli, resume: o.resume, up: false, restarts: 0, offset: 0, helpers: new Map(), down: new Set(), ...(o.args?.length ? { args: o.args } : {}) };
 }
 
 /**
@@ -265,7 +361,28 @@ export async function closeCli(run: Pick<CliRun, "computerId" | "sessionId">) {
   await orgo.bash(run.computerId, `bops-agent close ${run.sessionId}`, 30);
 }
 
-/** Claude Code turned a turn down at its limit or for its sign-in or key (CliEvent stop): the thread waits on the user. */
+/**
+ * Open a thread's Claude Code session in a terminal on a screen of its computer, for the user to work with
+ * it there (sessions.ts openInTerminal): the thread's headless process goes first (bops-agent terminal), then
+ * xfce4-terminal runs Claude Code's own `--resume` of the thread's session there, with the thread's tools
+ * and briefing (`mcp`, `prompt`, as a run has them) through bops-brain run: an empty environment, the brain's
+ * own folder. A key brain's key goes along as a file that run reads and deletes. What Claude Code asks, the
+ * user answers in the terminal.
+ */
+export async function openTerminal(o: { sessionId: string; computerId: string; display: number; brain: Brain; cli: string; mcp: unknown; prompt: string }) {
+  await put(o, "mcp.json", JSON.stringify(o.mcp));
+  await put(o, "prompt.md", o.prompt);
+  if (o.brain.auth === "key") await put(o, "key", await revealBrainKey(o.brain));
+  const r = await orgo.bash(o.computerId, `bops-agent terminal ${o.sessionId} ${o.brain.id} ${o.display} ${o.computerId} ${o.cli}`, 30);
+  if (!r.output.includes("terminal on")) throw new Error(`its terminal didn't open (${r.output.trim().slice(-160) || "no answer"})`);
+}
+
+/** Close a thread's terminal, when it's open: its Claude Code there stops, so the thread's own can start. */
+export async function closeTerminal(run: Pick<CliRun, "computerId" | "sessionId">) {
+  await orgo.bash(run.computerId, `bops-agent unterm ${run.sessionId}`, 30);
+}
+
+/** A brain's CLI turned a turn down at its limit or for its sign-in or key (CliEvent stop): the thread waits on the user. */
 export class BrainStopped extends Error {
   why: "limit" | "auth";
   constructor(why: "limit" | "auth", said: string) {
@@ -361,7 +478,8 @@ export async function cliTurn(run: CliRun, t: CliTurn): Promise<string> {
       if (Date.now() - startedAt > t.timeoutMs) await giveUp(t.tooLong);
       if (!asking.get(run.sessionId) && Date.now() - lastAt > t.idleMs) await giveUp(t.stalled);
       if (asking.get(run.sessionId)) lastAt = Date.now();
-      // The user's words since: in now, and Claude Code takes them after what it's doing.
+      // The user's words since: in now, and Claude Code takes them after what it's doing. Codex doesn't
+      // steer: they stay unsent, and the session runner gives them to it as the next turn (sessions.ts run).
       const st = run.driver.steers ? t.steer() : undefined;
       if (st) {
         queue.push(st.text);
@@ -374,10 +492,15 @@ export async function cliTurn(run: CliRun, t: CliTurn): Promise<string> {
       for (const e of r?.events ?? []) {
         lastAt = Date.now();
         if (e.type === "started") {
-          if (e.session) run.cli = e.session;
-          run.resume = true;
-          t.started(run.cli);
-          if (e.failed.length) t.step("note", `Its ${e.failed.join(" and ")} tools didn't start, so it works without them`, {});
+          if (e.session) {
+            run.cli = e.session;
+            run.resume = true;
+            t.started(run.cli);
+          }
+          // Said once a run (Codex starts its servers again for every message).
+          const failed = e.failed.filter((x) => !run.down.has(x));
+          for (const x of failed) run.down.add(x);
+          if (failed.length) t.step("note", `Its ${failed.join(" and ")} tools didn't start, so it works without them`, {});
         } else if (e.type === "tool") {
           if (!e.parent) flush();
           if (e.tool === "helper" && e.id) run.helpers.set(e.id, cut(str(e.args.description) ?? str(e.args.subagent_type) ?? "helper", 30));
@@ -393,13 +516,14 @@ export async function cliTurn(run: CliRun, t: CliTurn): Promise<string> {
           if (line) t.activity(line.charAt(0).toLowerCase() + line.slice(1, 60).replace(/[.!?]$/, ""));
         } else if (e.type === "result") {
           queue.shift();
-          if (e.stop) throw new BrainStopped(e.stop, e.text);
-          if (!e.ok) throw new Error(`${name} stopped: ${e.text}`);
-          if (said && said !== e.text) flush();
+          const text = e.text ?? said ?? "";
+          if (e.stop) throw new BrainStopped(e.stop, text);
+          if (!e.ok) throw new Error(`${name} stopped: ${text}`);
+          if (said && said !== text) flush();
           said = undefined;
-          if (!queue.length) return e.text || "Done.";
+          if (!queue.length) return text || "Done.";
           // An answer on the way, before the user's next words: a step, and the turn goes on with those.
-          if (e.text) t.step("note", e.text, {});
+          if (text) t.step("note", text, {});
         }
       }
       // Gone with messages unanswered, once all it said is read: the computer slept or restarted, or it
@@ -479,6 +603,9 @@ export async function approveTool(botId: string, sessionId: string, args: Record
 
 /* ---------------- Waiting on the user ---------------- */
 
+/** Whose key a key brain runs on. */
+const vendor = (x: Pick<Brain, "kind">) => (x.kind === "codex" ? "OpenAI" : "Anthropic");
+
 /** When a limit resets, as Claude Code said it ("…|1760032800", or "resets 3pm"). */
 function resetsAt(text: string) {
   const ts = /\|(\d{10})\b/.exec(text)?.[1];
@@ -500,10 +627,10 @@ export function stoppedWords(x: Brain, why: "limit" | "auth", said: string, wher
     why === "limit"
       ? x.auth === "plan"
         ? `${x.name} reached your ${planName(plan)}'s usage limit${until}.`
-        : `${x.name} reached what your Anthropic key allows${until}.`
+        : `${x.name} reached what your ${vendor(x)} key allows${until}.`
       : x.auth === "plan"
         ? `${x.name} isn't signed in to your Claude plan on ${where} anymore.`
-        : `Anthropic turned down your key for ${x.name}.`;
+        : `${vendor(x)} turned down your key for ${x.name}.`;
   return `${what} I can finish this on Bops agent, on your AI credit, or wait.\n\nOptions: ${FINISH_ON_BOPS} | ${WAIT}`;
 }
 

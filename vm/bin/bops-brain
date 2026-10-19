@@ -22,7 +22,8 @@
 #       run the brain's CLI. A key brain's key comes in a 0600 file that's read into the environment
 #       (ANTHROPIC_API_KEY for Claude Code, CODEX_API_KEY for Codex) and deleted, never on a command line.
 #       With --computer, a folder signed in on another computer is deleted first, as status does. Of
-#       the caller's environment only DISPLAY carries over (the screen its tools work on).
+#       the caller's environment only DISPLAY carries over (the screen its tools work on). Codex runs
+#       only on a key (never a ChatGPT sign-in), with Bops' settings in its folder (config.toml).
 set -euo pipefail
 BRAINS="${BOPS_BRAINS:-/root/.bops/brains}"
 CLAUDE="${BOPS_CLAUDE:-/opt/bops/claude/bin/claude}"
@@ -42,6 +43,16 @@ bare() {
   local v
   for v in $(compgen -e); do unset "$v" 2>/dev/null || true; done
   export HOME="$RUN_HOME" PATH="$RUNS" LANG=C.UTF-8 TERM=xterm-256color DISABLE_AUTOUPDATER=1
+}
+
+# Bops' settings for Codex in a brain's folder, its CODEX_HOME (never ~/.codex): the user's OpenAI key only,
+# so a ChatGPT sign-in is never used even if one were made here; no update check (Bops pins it); live web
+# search, as Bops agent has.
+codex_config() {
+  local want='forced_login_method = "api"
+check_for_update_on_startup = false
+web_search = "live"'
+  [ "$(cat "$DIR/config.toml" 2>/dev/null)" = "$want" ] || (umask 077; printf '%s\n' "$want" > "$DIR/config.toml")
 }
 
 case "$CMD" in
@@ -110,7 +121,10 @@ case "$CMD" in
     SCREEN="${DISPLAY:-}"
     case "$KIND" in
       claude) bare; export CLAUDE_CONFIG_DIR="$DIR"; [ -n "$SCREEN" ] && export DISPLAY="$SCREEN"; [ -n "$KEY" ] && export ANTHROPIC_API_KEY="$KEY"; exec "$CLAUDE" "$@" ;;
-      codex) bare; export CODEX_HOME="$DIR"; [ -n "$SCREEN" ] && export DISPLAY="$SCREEN"; [ -n "$KEY" ] && export CODEX_API_KEY="$KEY"; exec "$CODEX" "$@" ;;
+      codex)
+        [ -n "$KEY" ] || { echo "Codex runs on your OpenAI key only" >&2; exit 2; }
+        codex_config
+        bare; export CODEX_HOME="$DIR" CODEX_API_KEY="$KEY"; [ -n "$SCREEN" ] && export DISPLAY="$SCREEN"; exec "$CODEX" "$@" ;;
       *) echo "claude or codex?" >&2; exit 2 ;;
     esac
     ;;

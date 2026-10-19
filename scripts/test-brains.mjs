@@ -8,8 +8,9 @@
 // back; a sign-in that fails, or that the user leaves, says why; a login folder copied to another computer is
 // never used there; sign-out is Claude Code's own; every Claude Code here runs with no Anthropic key or token
 // from its environment, and a key brain's key comes in a file that's read and deleted, never on a command
-// line; the routes are for the Bops window only; and Settings' Brain section and a bot's Brain read right,
-// with no long dashes.
+// line; the routes are for the Bops window only; Settings' Brain section and a bot's Brain read right; a
+// thread and a bot's profile say which brain ran it (or its tasks run on), and a thread Claude Code ran offers
+// Open in terminal, and while it's open there says where and that a reply closes it; all with no long dashes.
 //
 // Orgo is a fake fetch on a made-up origin whose computers run each command here, in a throwaway folder: the
 // real vm/bin/bops-brain (as Bops installed it on the fake computer) with a fake Claude Code, Codex, terminal
@@ -238,6 +239,7 @@ globalThis.fetch = async (input, init = {}) => {
 /* ---------------- The app ---------------- */
 
 const T = await import(fileUrl("lib/types.ts"));
+const A = await import(fileUrl("lib/asks.ts"));
 const S = await import(fileUrl("lib/server/store.ts"));
 const B = await import(fileUrl("lib/server/brains.ts"));
 const R = await import(fileUrl("app/api/brains/route.ts"));
@@ -740,8 +742,91 @@ await test("a bot's Brain: Bops agent or the brains it's on, and Sign in where i
   assert.equal(key, "Brain Claude Code on your Anthropic key Bops agent Claude Code 2");
 });
 
+await test("a thread says which brain ran it; one Claude Code ran opens in a terminal on its screen, which says where and that a reply closes it", async () => {
+  const { ThreadSheet, ChatView } = await import(fileUrl("components/app/chat-view.tsx"));
+  const thread = (id, more = {}) => ({
+    id,
+    botId: "otto",
+    chatId: "bot:otto",
+    sentVia: "you",
+    title: "Cart total",
+    goal: "Fix the cart total",
+    host: "orgo",
+    status: "done",
+    steps: [{ tool: "command", detail: "ran npm test", at: 2 }],
+    replies: [],
+    answer: "Fixed.",
+    createdAt: 1,
+    startedAt: 1,
+    endedAt: 3,
+    lastDisplay: 101,
+    brainRun: { brainId: "b_max", kind: "claude", computerId: "pc-main", cli: "0f6c3d2e-1111-4a2b-9c3d-123456789abc", started: true },
+    ...more,
+  });
+  const st = (sessions, more = {}) => ({ ...withBrain(view(BRAINS), "otto", "b_max"), sessions, messages: [], ...more });
+  const sheetHtml = (s, more) => renderToStaticMarkup(h(ThreadSheet, { state: st([s], more), session: s, onClose: noop, onShowComputer: noop, onShowScreen: noop }));
+  const sheet = (s, more) => text(sheetHtml(s, more));
+  const no = T.DISPLAYS.indexOf(101) + 1;
+  // Claude Code ran it: its name by the title, and Open in terminal.
+  const done = sheet(thread("ses_a"));
+  noDashes(done, "a Claude Code thread");
+  assert.match(done, new RegExp(`^Cart total Claude Code Otto · finished · 1 steps · left off on screen ${no} Open in terminal Delete `), done);
+  // Open in the terminal there: it says so, with Show, and a reply closes it.
+  const open = { botId: "otto", display: 101, sessionId: "ses_a", since: 5, terminal: {} };
+  const html = sheetHtml(thread("ses_a"), { takeover: open });
+  const inTerminal = text(html);
+  noDashes(inTerminal, "a thread open in the terminal");
+  assert.match(inTerminal, /^Cart total Claude Code Otto · in the terminal · /);
+  assert.match(inTerminal, new RegExp(`Open in the terminal on screen ${no}\\. Your next reply closes it, and it carries on here\\. Show`));
+  assert.doesNotMatch(inTerminal, /Open in terminal/, "it's open already");
+  assert.match(html, /Reply in thread · closes the terminal and carries on/);
+  // Paused as it worked: the terminal, not why it stopped.
+  const paused = sheet(thread("ses_a", { status: "failed", error: "Paused while it's open in the terminal" }), { takeover: { ...open, terminal: { paused: true } } });
+  assert.doesNotMatch(paused, /Paused while/);
+  assert.equal(A.needsYou(thread("ses_a", { status: "failed", error: "Paused while it's open in the terminal" })), false, "paused, not waiting on the user");
+  // A terminal for another thread isn't this one's.
+  assert.match(sheet(thread("ses_a"), { takeover: { ...open, sessionId: "ses_b" } }), /Open in terminal/);
+  // Bops agent finished it, Codex ran it, Bops agent ran it, or the bots work on this Mac: no terminal.
+  const finished = sheet(thread("ses_a", { onBopsAgent: true }));
+  assert.match(finished, /^Cart total Claude Code Otto/, "Claude Code ran it still");
+  assert.doesNotMatch(finished, /Open in terminal/);
+  const codexHtml = sheetHtml(thread("ses_c", { status: "running", display: 101, brainRun: { brainId: "b_codex", kind: "codex", computerId: "pc-main", cli: "019a0000-1111-7a2b-9c3d-123456789abc", started: true } }));
+  const codex = text(codexHtml);
+  assert.match(codex, /^Cart total Codex Otto · working · /);
+  assert.doesNotMatch(codex, /Open in terminal|Claude Code/);
+  assert.match(codexHtml, /Reply in thread · it takes this next/, "a reply waits for its next turn");
+  assert.match(sheet(thread("ses_d", { brainRun: undefined })), /^Cart total Otto · finished/, "Bops agent's has no badge");
+  assert.doesNotMatch(sheet(thread("ses_a"), { host: "mac" }), /Open in terminal/);
+  // Its chip in the chat says so too.
+  const s = thread("ses_a");
+  const chat = { id: "bot:otto", kind: "bot", botIds: ["otto"], createdAt: 1, typing: [] };
+  const msg = { id: "msg_1", chatId: "bot:otto", role: "bot", botId: "otto", text: "Fixed.", at: 3, sessionIds: [s.id], resultOf: s.id };
+  const chip = text(renderToStaticMarkup(h(ChatView, { state: st([s], { messages: [msg], chats: [chat] }), chat, wide: false, onOpenThread: noop, onShowBot: noop, onShowMac: noop, onShowScreen: noop, call: null, onCall: noop, callSlot: noop })));
+  assert.match(chip, /Cart total Claude Code/, chip);
+});
+
+await test("a bot's profile says which brain its tasks run on, by its role", async () => {
+  const { BotPanel } = await import(fileUrl("components/app/bot-panel.tsx"));
+  const panel = (st, b, section = "details") =>
+    text(
+      renderToStaticMarkup(
+        h(BotPanel, { state: st, bot: b, section, onSection: noop, onOpenChat: noop, onOpenThread: noop, onOpenVault: noop, onOpenComputer: noop, onOpenKeys: noop, onShowScreen: noop, onOpenAutopilot: noop, onOpenSkills: noop, onAsk: noop, onUpgrade: noop, onClose: noop }),
+      ),
+    );
+  const st = withBrain(view(BRAINS), "otto", "b_max");
+  const otto = st.bots.find((b) => b.id === "otto");
+  assert.match(panel(st, otto), /Otto Outbound · Bops team Claude Code /);
+  assert.match(panel(st, otto, "skills"), /Otto Outbound · Bops team Claude Code /, "on its other tabs too");
+  const codexSt = { ...view([...BRAINS, { id: "b_codex", kind: "codex", name: "Codex", auth: "key", keyName: "OPENAI_API_KEY", keyScope: "all", bots: ["rook"], workspaceId: "ws_main", createdAt: 6 }]) };
+  const rook = { ...codexSt.bots.find((b) => b.id === "rook"), brain: "b_codex" };
+  assert.match(panel({ ...codexSt, bots: codexSt.bots.map((b) => (b.id === "rook" ? rook : b)) }, rook), /Rook Recruiting · Bops team Codex /);
+  const agent = view(BRAINS);
+  assert.doesNotMatch(panel(agent, agent.bots.find((b) => b.id === "otto")), /Bops team (Claude Code|Codex)/, "Bops agent: none");
+  assert.doesNotMatch(panel({ ...st, host: "mac" }, otto), /Bops team Claude Code/, "on this Mac its tasks run on Bops agent");
+});
+
 await test("the brain files have no long dashes in what they say", () => {
-  for (const f of ["components/app/brains.tsx", "lib/server/brains.ts", "vm/bin/bops-brain", "vm/bin/bops-brain-browser", "app/api/brains/route.ts", "app/api/brains/bot/route.ts", "app/api/brains/sign-in/route.ts", "app/api/brains/sign-out/route.ts"])
+  for (const f of ["components/app/brains.tsx", "lib/server/brains.ts", "lib/server/cli-agents.ts", "vm/bin/bops-brain", "vm/bin/bops-brain-browser", "vm/bin/bops-agent", "app/api/brains/route.ts", "app/api/brains/bot/route.ts", "app/api/brains/sign-in/route.ts", "app/api/brains/sign-out/route.ts", "app/api/sessions/[sessionId]/terminal/route.ts"])
     noDashes(readFileSync(join(root, f), "utf8"), f);
 });
 

@@ -40,15 +40,15 @@ import { textOwner, textResult } from "./phone";
 import { askTiming, needsYou } from "@/lib/asks";
 import { channelResult } from "./channels";
 import { asksForMac, chooseWhere } from "./where";
-import { addMessage, bot, getState, id, ownerLine, ownerName, patchSession, session, stateEpoch, stateReady, update } from "./store";
+import { addMessage, bot, getState, id, ownerLine, ownerName, patchSession, sameState, session, stateEpoch, stateReady, update } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { computerToolOn, computerTurn, PAGE_RUNNER } from "./computer-task";
 import { ASKS_AGAIN, LIGHT, logRoute, routeTask, speedFor, taskConfig } from "./routing";
-import { holdsScreen, screenLabel, screenNo } from "@/lib/screens";
+import { holdsScreen, screenLabel, screenMap, screenNo } from "@/lib/screens";
 import { watching } from "./presence";
 import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours";
 import { brainById, signInStatus } from "./brains";
-import { brainName, BrainStopped, cliDriver, cliTurn, closeCli, limitPick, openRun, signInWords, stoppedWords } from "./cli-agents";
+import { brainName, BrainStopped, cliDriver, cliTurn, closeCli, closeTerminal, limitPick, openRun, openTerminal, signInWords, stoppedWords } from "./cli-agents";
 
 /**
  * Session runner. A session is one long-running task on one screen of the computer its bot works on
@@ -60,9 +60,10 @@ import { brainName, BrainStopped, cliDriver, cliTurn, closeCli, limitPick, openR
  * is its next turn if none is running. A task on the user's Mac runs the same way, in a Chrome of its
  * bot's own there (never on the user's ChatGPT sign-in: lib/server/mac.ts), so every task runs on
  * Bops' API and AI credit. A new cloud task runs on the Responses API's computer tool instead
- * (computer-task.ts), unless BOPS_COMPUTER_TOOL=0. A bot whose brain is Claude Code (brains.ts) runs its
- * cloud tasks' turns on Claude Code on its computer, on the user's own Claude plan or key, never on AI
- * credit (cli-agents.ts, brainTurns): everything around its turns is the same.
+ * (computer-task.ts), unless BOPS_COMPUTER_TOOL=0. A bot whose brain is Claude Code or Codex (brains.ts)
+ * runs its cloud tasks' turns on that CLI on its computer, on the user's own Claude plan or key, or OpenAI
+ * key, never on AI credit (cli-agents.ts, brainTurns): everything around its turns is the same. A thread
+ * Claude Code runs can open in a terminal on its screen for the user (openInTerminal).
  */
 
 const client = openaiClient();
@@ -650,11 +651,18 @@ export function stopAllSessions(reason: string) {
  *
  * A thread whose brain stopped at its limit (brainTurns) offered two replies: "Finish on Bops agent" moves it
  * to Bops agent for good (on AI credit), which picks it up with what the brain did (brainRecord); "Wait" keeps
- * it as it is, waiting on no one, until the user says more. Neither goes to the agent as their words.
+ * it as it is, waiting on no one, until the user says more. Neither goes to the agent as their words. A
+ * thread open in a terminal (openInTerminal) closes it first: only one of the two runs at a time.
  */
 export function replyToSession(sessionId: string, text: string, note?: string, from?: string) {
   const s = session(sessionId);
   if (!s) return;
+  // Open in a terminal (openInTerminal): a reply closes it, and the thread carries on headless with it.
+  const held = getState().takeover;
+  if (held?.terminal && held.sessionId === sessionId) {
+    update((state) => (state.takeover = undefined));
+    void endTerminal(held);
+  }
   const pick = !live(s) && s.brainRun?.waits === "limit" && !from && !note ? limitPick(text) : undefined;
   patchSession(sessionId, (x) => {
     x.replies.push({ id: id("rep"), role: "user", text, at: Date.now(), delivered: !!pick, note, ...(from ? { from } : {}) });
@@ -1690,12 +1698,16 @@ function brainFor(s: Session, b: Bot): Brain | undefined {
 /** A brain thread picks its CLI session back up: the same brain, on the same computer, where the CLI began it. */
 const brainResumes = (s: Session, x: Brain, computerId: string) => s.brainRun?.brainId === x.id && s.brainRun.computerId === computerId && !!s.brainRun.started;
 
-/** Bops' screen and browser tools for a brain's thread (its MCP config), as an Agents API thread has them, the screen's with the approve tool Claude Code asks the user through. */
-function brainTools(sessionId: string, botId: string, display: number, browser: boolean) {
+/**
+ * Bops' screen and browser tools for a brain's thread (its MCP config), as an Agents API thread has them.
+ * `approve`: the screen's with the approve tool Claude Code asks the user through (CliDriver asks; not in a
+ * terminal, where the user answers Claude Code there).
+ */
+function brainTools(sessionId: string, botId: string, display: number, browser: boolean, approve: boolean) {
   const env = { DISPLAY: `:${display}` };
   return {
     mcpServers: {
-      screen: { type: "stdio", command: "/opt/bops/venv/bin/python", args: ["/opt/bops/screen_mcp.py", "stdio", "--session", sessionId, "--bot", botId, "--approve"], env },
+      screen: { type: "stdio", command: "/opt/bops/venv/bin/python", args: ["/opt/bops/screen_mcp.py", "stdio", "--session", sessionId, "--bot", botId, ...(approve ? ["--approve"] : [])], env },
       ...(browser ? { browser: { type: "stdio", command: "/usr/bin/node", args: [BROWSER_MCP, "--cdp-endpoint", `http://127.0.0.1:${9200 + display}`, "--init-page", BROWSER_FRONT], env } } : {}),
     },
   };
@@ -1714,11 +1726,40 @@ function lostContext(sessionId: string) {
 }
 
 /**
- * A thread's turns on its bot's brain (cli-agents.ts): Claude Code on the bot's computer, on the user's own
- * Claude plan or Anthropic key, so nothing here is on AI credit (no credit check, no tokens counted, no
- * route: Claude Code picks its model on their account). Its briefing is an Agents API thread's (`brief`:
- * agentBrief), after Claude Code's own system prompt and what it's told about itself, and its tools are
- * Claude Code's own and the same screen and browser MCP servers. A thread new to the brain, or to the
+ * A brain thread's briefing (agentBrief, after its CLI's own system prompt) for a screen of its bot's
+ * computer, made fresh, memory included: a run's, or a terminal's (openInTerminal). Its apps and business
+ * data are tools when the computer reaches Bops (ensureScreenTools). `count`: a new session of it, which
+ * counts a use of the skill it follows.
+ */
+async function brainBrief(s: Session, b: Bot, computerId: string, display: number, count: boolean) {
+  const c = workComputer(b);
+  const outside = s.fromOutside || (!!s.partOf && !!session(s.partOf)?.fromOutside);
+  const reach = !!appsReach.get(computerId);
+  const appTools = !outside && reach;
+  const memory = await memoryBlock(wsOf(s.botId), s.goal, 3000);
+  return agentBrief(s, b, {
+    mac: false,
+    display,
+    sharedWith: c.id !== b.id ? c.name : undefined,
+    apps: appTools && accountsOf(b).length > 0,
+    appTools,
+    dataTools: reach && dataOn(b),
+    full: false,
+    onMac: false,
+    vaultTool: reach,
+    ui: false,
+    outside: !!outside,
+    memory,
+    count,
+  });
+}
+
+/**
+ * A thread's turns on its bot's brain (cli-agents.ts): Claude Code or Codex on the bot's computer, on the
+ * user's own Claude plan or key, or OpenAI key, so nothing here is on AI credit (no credit check, no tokens
+ * counted, no route: the CLI picks its model on their account). Its briefing is an Agents API thread's
+ * (`brief`: brainBrief), after the CLI's own system prompt and what it's told about itself, and its tools
+ * are the CLI's own and the same screen and browser MCP servers. A thread new to the brain, or to the
  * computer, starts a CLI session of its own (Session.brainRun); else it picks its session back up.
  *
  * Waiting on the user: a plan brain not signed in on that computer, and a turn Claude Code turned down at
@@ -1731,6 +1772,10 @@ async function brainTurns(sessionId: string, at: { computerId: string; display: 
   const b = bot(s.botId)!;
   const x = at.brain;
   const driver = cliDriver(x.kind)!;
+  // Still open in a terminal (it was set going some other way than a reply): that's over now, and
+  // bops-agent start closes it on the computer before its own process starts.
+  const held = getState().takeover;
+  if (held?.terminal && held.sessionId === sessionId) update((state) => (state.takeover = undefined));
   if (!(s.brainRun?.brainId === x.id && s.brainRun.computerId === at.computerId))
     patchSession(sessionId, { brainRun: { brainId: x.id, kind: x.kind, computerId: at.computerId, cli: randomUUID(), ...(s.brainRun?.said ? { said: s.brainRun.said } : {}) } });
   await driver.prepare(at.computerId);
@@ -1745,7 +1790,7 @@ async function brainTurns(sessionId: string, at: { computerId: string; display: 
     driver,
     cli: session(sessionId)!.brainRun!.cli,
     resume: at.resuming,
-    mcp: brainTools(sessionId, b.id, at.display, browser),
+    mcp: brainTools(sessionId, b.id, at.display, browser, driver.asks),
     prompt: [at.brief, driver.note(ownerName())].join("\n\n"),
   });
   const where = `${workComputer(b).name}'s computer`;
@@ -1828,6 +1873,94 @@ export function brainSignedIn(brainId: string, computerId: string) {
     });
   }
   void pump();
+}
+
+/* ---------------- A brain's thread in a terminal ---------------- */
+
+/** Why a thread stopped when the user opened its Claude Code in a terminal as it worked (Takeover.terminal). */
+const IN_TERMINAL = "Paused while it's open in the terminal";
+
+/**
+ * Open a thread Claude Code runs in a terminal on its screen, for the user to work with it there (the
+ * thread sheet's Open in terminal). The screen is theirs from now (a takeover with `terminal`, so no task
+ * starts on it), a thread that was working stops (its headless Claude Code with it), and Claude Code's own
+ * terminal opens there on the thread's session (`claude --resume`), with the thread's tools and briefing
+ * and the brain's folder, and nothing else in its environment (cli-agents.ts openTerminal). Only one of
+ * the two runs at a time: the next reply in the thread, or handing the screen back, closes the terminal,
+ * and the thread carries on headless on the same session (replyToSession, returnControl). Its own screen
+ * when that's free (or still its own), else a free one. Returns the screen at once; the rest goes on
+ * behind (terminalFor), and what goes wrong is said in the thread's chat.
+ */
+export function openInTerminal(sessionId: string): { botId: string; display: number } {
+  const s = session(sessionId);
+  if (!s) throw new Error("That thread isn't there anymore.");
+  const r = s.brainRun;
+  if (r?.kind !== "claude" || !r.started || s.onBopsAgent) throw new Error("Only a thread Claude Code runs opens in a terminal.");
+  if (getState().host === "mac" || s.runsOn === "mac") throw new Error("Your bots work in browsers on this Mac, so there's no terminal to open.");
+  const x = brainById(r.brainId);
+  if (!x) throw new Error("Its brain isn't there anymore.");
+  const b = bot(s.botId);
+  if (!b) throw new Error("Its bot isn't there anymore.");
+  const c = workComputer(b);
+  if (!c.computerId || c.computerId !== r.computerId) throw new Error(`Its Claude Code session is on another computer than ${c.name}'s now.`);
+  const held = getState().takeover;
+  if (held?.terminal && held.sessionId === sessionId && held.display !== undefined) return { botId: s.botId, display: held.display };
+  const map = screenMap(getState(), s.botId);
+  const mine = (d?: number) => d !== undefined && map.some((m) => m.display === d && (m.kind === "free" || m.sessionId === sessionId));
+  const display = live(s) && s.display !== undefined ? s.display : mine(s.lastDisplay) ? s.lastDisplay : map.find((m) => m.kind === "free")?.display;
+  if (display === undefined) throw new Error(`All of ${c.name}'s screens are in use. Try again when one is free.`);
+  // Paused: it was working, or the user had already taken this screen over from it.
+  const paused = live(s) || (held?.sessionId === sessionId && held.display === display);
+  if (held && !(held.display === display && sameComputer(held.botId, s.botId))) returnControl();
+  update((state) => (state.takeover = { botId: s.botId, display, sessionId, since: Date.now(), terminal: paused ? { paused: true } : {} }));
+  if (live(s)) stopSession(sessionId, IN_TERMINAL);
+  void terminalFor(sessionId, x, b.id, c.computerId, display);
+  return { botId: s.botId, display };
+}
+
+/** The terminal behind openInTerminal: the thread's run lets go first, then the computer is woken and set up, and the terminal opens. */
+async function terminalFor(sessionId: string, x: Brain, botId: string, computerId: string, display: number) {
+  const fresh = sameState();
+  const ours = () => {
+    const t = getState().takeover;
+    return fresh() && !!t?.terminal && t.sessionId === sessionId && t.display === display;
+  };
+  const driver = cliDriver("claude")!;
+  try {
+    // Its run's cleanup lets go of its Claude Code and its screen's claim first.
+    for (const end = Date.now() + 90_000; runs.has(sessionId) && Date.now() < end; ) await new Promise((r) => setTimeout(r, 250));
+    if (!ours()) return;
+    const why = await wakeForUser(computerId);
+    if (why) throw new Error(`the computer is asleep and couldn't wake up. ${why}`);
+    await ensureScreens(computerId);
+    await driver.prepare(computerId);
+    await ensureScreenTools(computerId, botId);
+    const browser = await ensureBrowserTool(computerId);
+    const s = session(sessionId);
+    const b = bot(botId);
+    if (!ours() || !s?.brainRun || !b) return;
+    const prompt = [await brainBrief(s, b, computerId, display, false), driver.note(ownerName())].join("\n\n");
+    await openTerminal({ sessionId, computerId, display, brain: x, cli: s.brainRun.cli, mcp: brainTools(sessionId, botId, display, browser, false), prompt });
+    // Handed back or replied to meanwhile: it closes again.
+    if (!ours()) await closeTerminal({ computerId, sessionId });
+  } catch (e) {
+    if (!ours()) return;
+    update((state) => (state.takeover = undefined));
+    const s = session(sessionId);
+    const why = (e as Error).message;
+    // A thread it paused stays paused, saying why (a reply sets it going again).
+    if (s?.status === "failed" && s.error === IN_TERMINAL) patchSession(sessionId, { error: `Paused. The terminal didn't open: ${why}` });
+    if (s) addMessage({ chatId: s.chatId, role: "system", text: `${s.title} didn't open in the terminal: ${why}` });
+    void pump();
+  }
+}
+
+/** A thread's terminal closes (a reply, or the screen handed back): its Claude Code there stops, so the thread's own can start. */
+async function endTerminal(t: { botId: string; sessionId?: string }) {
+  if (!t.sessionId) return;
+  const b = bot(t.botId);
+  const computerId = session(t.sessionId)?.brainRun?.computerId ?? (b && workComputer(b).computerId);
+  if (computerId) await closeTerminal({ computerId, sessionId: t.sessionId }).catch((e: Error) => console.warn(`[brains] closing ${t.sessionId}'s terminal: ${e.message}`));
 }
 
 /**
@@ -2251,10 +2384,7 @@ async function run(sessionId: string) {
     let turn: (input: string) => Promise<string>;
     if (brain) {
       // Its briefing is an Agents API thread's, made fresh each run, memory included.
-      const memory = await memoryBlock(wsOf(s.botId), s.goal, 3000);
-      const sharedWith = c.id !== b.id ? c.name : undefined;
-      const vaultTool = !!appsReach.get(computerId);
-      const brief = agentBrief(s, b, { mac: false, display, sharedWith, apps: appTools && accountsOf(b).length > 0, appTools, dataTools, full: false, onMac: false, vaultTool, ui: false, outside: !!outside, memory, count: !resuming });
+      const brief = await brainBrief(s, b, computerId, display, !resuming);
       ({ turn, close: closeBrain } = await brainTurns(sessionId, { computerId, display, brain, resuming, brief }));
     } else if (onComputerTool) turn = await computerToolTurns(sessionId, { computerId, display, sharedWith: c.id !== b.id ? c.name : undefined, resuming });
     else {
@@ -2422,7 +2552,15 @@ async function run(sessionId: string) {
     const credit = !stopped.has(sessionId) && noteOutOfCredit(e);
     // Not started or stopped by Bops Cloud for want of more AI credit, with some left (cloud/turn-guard.ts): not out of it.
     const low = stopped.has(sessionId) ? undefined : (shortOfCredit(e) ?? freeHoursUsed(e));
-    const error = stopped.has(sessionId) ? (getState().takeover?.sessionId === sessionId ? "Paused while you took over" : "Stopped by you") : credit ? OUT_OF_CREDIT : (low ?? (e as Error).message);
+    const error = stopped.has(sessionId)
+      ? getState().takeover?.sessionId === sessionId
+        ? getState().takeover?.terminal
+          ? IN_TERMINAL
+          : "Paused while you took over"
+        : "Stopped by you"
+      : credit
+        ? OUT_OF_CREDIT
+        : (low ?? (e as Error).message);
     patchSession(sessionId, { status: "failed", error, endedAt: Date.now(), offerMac: undefined });
     taskEnded(
       session(sessionId) ?? s,
@@ -3010,12 +3148,22 @@ export async function takeOverMacChrome(botId: string, macScreen: number) {
   if ((await currentUrl(port)) === "about:blank") await navigate(port, "https://www.google.com");
 }
 
-/** Hand the screen back. A paused thread picks up from where you left the screen. */
+/**
+ * Hand the screen back. A paused thread picks up from where you left the screen. A thread's terminal
+ * there (openInTerminal) closes, and a thread it paused carries on headless, on the same session.
+ */
 export function returnControl() {
   const t = getState().takeover;
   if (!t) return;
   update((state) => (state.takeover = undefined));
   trackServerEvent("bops_takeover_ended", { duration_ms: Math.max(0, Date.now() - t.since) });
+  if (t.terminal) {
+    void endTerminal(t);
+    if (t.sessionId && t.terminal.paused)
+      replyToSession(t.sessionId, `(From Bops: ${ownerName()} had you open in a terminal on this screen, and closed it. Check what's already done before you carry on.)`, "You closed the terminal");
+    void pump();
+    return;
+  }
   const what = t.macScreen !== undefined ? "Chrome" : "screen";
   if (t.sessionId) replyToSession(t.sessionId, `Your ${what} was taken over by ${ownerName()} and has been handed back. Look at the page as it is now and carry on.`, "You handed control back");
   // A thread queued while you drove (you replied in it) waited for this screen: it can start now.

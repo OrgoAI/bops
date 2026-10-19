@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { botChatId, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
+import { botChatId, BRAIN_NAMES, brainOf, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
 import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
@@ -10,7 +10,7 @@ import { BotSkills } from "./bot-skills";
 import type { AutopilotSection } from "./autopilot";
 import { AppRoutinesButton, BotRoutines, hasTemplates, routineCount, routinesFrom, RoutineSuggest, usePendingSuggest } from "./routines";
 import { BotKeys } from "./keys";
-import { BotBrain } from "./brains";
+import { BotBrain, BrainBadge } from "./brains";
 import { ComputerSummary } from "./computer";
 import { Mascot } from "./mascot";
 import { PlanNote, usePlan } from "./plan-note";
@@ -118,7 +118,10 @@ export function BotPanel({
         <Mascot botId={b.id} color={b.color} size={52} />
         <div className="flex flex-col items-center gap-px">
           <div className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{b.name}</div>
-          <div className="text-[13px] leading-4 text-[#6B6B6B]">{b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}</div>
+          <div className="flex items-center gap-1.5 text-[13px] leading-4 text-[#6B6B6B]">
+            {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}
+            <BotBrainBadge state={state} bot={b} />
+          </div>
         </div>
         {tabs}
       </div>
@@ -130,6 +133,12 @@ export function BotPanel({
       {tab === "phone" && <Phone bot={b} />}
     </section>
   );
+}
+
+/** By the bot's role: the brain its cloud tasks run on, when it's one the user brought (brains.tsx BotBrain picks it). Nothing for Bops agent, or where its tasks run on this Mac. */
+function BotBrainBadge({ state, bot: b, className }: { state: AppState; bot: Bot; className?: string }) {
+  const x = state.host === "mac" ? undefined : brainOf(b, state);
+  return x ? <BrainBadge kind={x.kind} title={`${b.name}'s tasks on its computer run on ${BRAIN_NAMES[x.kind]}`} className={className} /> : null;
 }
 
 /* ---------------- Details: the bot's contact card ---------------- */
@@ -196,7 +205,10 @@ function Details({
       </div>
       <div className="flex flex-col items-center gap-0.5">
         <div className="text-[26px] font-bold leading-[30px] tracking-[-0.02em]">{b.name}</div>
-        <div className="text-[13px] font-medium leading-4 text-[#3A3A38]">{b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}</div>
+        <div className="flex items-center gap-1.5 text-[13px] font-medium leading-4 text-[#3A3A38]">
+          {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}
+          <BotBrainBadge state={state} bot={b} className="bg-white/60 shadow-[0_0_0_1px_#0000000F]" />
+        </div>
       </div>
       <div className="flex gap-3">
         {/* With a number, it texts the bot from Messages (it answers by text, as it would anyone); without one, its chat here. */}
