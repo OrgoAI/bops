@@ -1,4 +1,4 @@
-import type { Schedule, Workspace, WorkspaceTag } from "@/lib/types";
+import type { AppLevel, Routine, Schedule, Workspace, WorkspaceTag } from "@/lib/types";
 
 /**
  * Starter routines: what a bot can do on its own once a Connected App (or a vault key) is there. When one
@@ -410,3 +410,62 @@ export const templateById = (id: string) => ROUTINE_TEMPLATES.find((t) => t.id =
 
 /** The apps whose starters learn a workspace's tags from a sample of recent items when turned on. */
 export const TAG_LEARNING_APPS = new Set(["gmail", "slack", "discord"]);
+
+/* ---------------- A Connected App's check ---------------- */
+
+/**
+ * How often a bot looks at a Connected App account on its own, picked when it's connected (the Connect
+ * screen's How often, components/app/apps.tsx): a routine of one bot's, made once the account is
+ * connected (lib/server/routine-suggestions.ts makeCheck), whose source keeps this template and the
+ * account, so an account gets one check per bot.
+ */
+export const CHECK_TEMPLATE = "check";
+
+/** The How often choices besides Only when asked: a morning read at 8 AM (like the morning starters), or a check through the day. */
+export const CHECK_TIMES: { label: string; schedule: Schedule }[] = [
+  { label: "Every morning", schedule: at("08:00") },
+  { label: "Every hour", schedule: every(60) },
+  { label: "Every 15 minutes", schedule: every(15) },
+];
+
+/** Who checks an account: the main bot when it's one of the bots picked for it, else the first one picked. */
+export function checkerOf<B extends { id: string; isMain?: boolean }>(botIds: readonly string[], bots: readonly B[]): B | undefined {
+  const picked = botIds.map((id) => bots.find((b) => b.id === id)).filter((b): b is B => !!b);
+  return picked.find((b) => b.isMain) ?? picked[0];
+}
+
+/** A check's title: "Check Gmail", or "Check Gmail (Work)" when the user named the account. */
+export const checkTitle = (appName: string, label?: string) => `Check ${appName}${label?.trim() ? ` (${label.trim()})` : ""}`;
+
+/**
+ * What a check does each run, as the user would ask it, for the access its bot has there. Read only: look
+ * at what's new since the last check and say only what matters. Read & act: handle it too, and anything
+ * that sends, posts, deletes or pays asks the user first (use_app asks them). The account is named when
+ * it has a name (the user's label first), so a bot with several in the app uses this one. Quiet (a check
+ * through the day): NOTHING when nothing matters; a morning one says so in a line.
+ */
+export function checkGoal(a: { appName: string; label?: string; name?: string; open?: boolean }, level: AppLevel, quiet: boolean): string {
+  const which = a.open ? undefined : a.label?.trim() || a.name?.trim();
+  const where = a.open ? a.appName : which ? `my ${a.appName} account "${which}"` : `my ${a.appName}`;
+  return [
+    `Check ${where} for what's new since the last check, or the last 24 hours the first time (find_app_actions, then use_app${which ? ` with account "${which}"` : ""}).`,
+    level === "read"
+      ? `Tell me only what matters: what needs me, and what changed that I'd want to know, the most urgent first. Read only: don't send, post, reply, change or delete anything in ${a.appName}.`
+      : `Handle what's new that you can within your access: draft a reply, sort, label, update or file it. Anything that sends, posts, deletes or pays asks me first (use_app asks me), so leave those for me to approve. Then tell me what you did and what still needs me.`,
+    quiet ? "If nothing new matters, answer NOTHING." : "If nothing new matters, say so in one line.",
+  ].join(" ");
+}
+
+/**
+ * Whether a starter is the job a bot's check of that app does already, so it isn't offered too: the same
+ * app and the same rhythm. A check through the day ("every") is the starters that look through the day
+ * (a monitor, or every few minutes); a morning check is the once a day reads (daily or weekdays). Weekly,
+ * monthly and meeting starters are other jobs, offered all the same.
+ */
+export function coveredByCheck(routines: readonly Pick<Routine, "botId" | "source" | "schedule">[], botId: string, t: Pick<RoutineTemplate, "app" | "schedule">): boolean {
+  const once = (k: Schedule["kind"]) => k === "daily" || k === "weekdays";
+  const own = scheduleOf(t).kind;
+  return routines.some(
+    (r) => r.botId === botId && r.source?.template === CHECK_TEMPLATE && sameApp(r.source.app, t.app) && (r.schedule.kind === "every" ? own === "every" : once(r.schedule.kind) && once(own)),
+  );
+}

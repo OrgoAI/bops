@@ -264,6 +264,21 @@ export function inHours(s: ScheduleLike, t: number, tz?: string): boolean {
   return allowedFrom(at, s, tz) === at;
 }
 
+/**
+ * How many times a schedule runs on a day it runs: each of its times of day; for an "every" one, its beats
+ * inside its hours, both ends counted as nextRun keeps them (24 for every hour all day, 96 for every 15
+ * minutes, 13 for every hour from 8 AM to 8 PM); a before_event one's calendar checks the same way; 1 for once.
+ */
+export function runsADay(s: ScheduleLike): number {
+  if (hasTimes(s)) return minutesOf(s)?.length ?? 1;
+  if (s.kind !== "every" && s.kind !== "before_event") return 1;
+  const step = stepOf(s) / MINUTE;
+  const a = s.hours ? parseClock(s.hours.from) : undefined;
+  const b = s.hours ? parseClock(s.hours.to) : undefined;
+  if (a === undefined || b === undefined || a === b) return Math.floor((24 * 60) / step);
+  return Math.floor((b > a ? b - a : b + 24 * 60 - a) / step) + 1;
+}
+
 /** A before_event schedule's lead, in ms. */
 const leadOf = (s: { minutes: number }) => Math.round(Number(s.minutes)) * MINUTE;
 

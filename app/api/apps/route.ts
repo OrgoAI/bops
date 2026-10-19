@@ -1,10 +1,16 @@
-import type { AppConnecting } from "@/lib/types";
+import { normalizeSchedule } from "@/cloud/schedule";
+import type { AppConnecting, Schedule } from "@/lib/types";
 import { cancelConnect, connectApp, disconnectAccount, labelAccount, syncApps } from "@/lib/server/composio";
 import { notReady } from "@/lib/server/ready";
+import { fromBopsWindow } from "@/lib/server/ui-token";
 
 const fail = (e: unknown) => Response.json({ error: (e as Error).message }, { status: 400 });
 
-/** Connect an account in an app (another one is fine): its sign-in page opens in the user's browser. `replaces` signs an expired one back in. */
+/**
+ * Connect an account in an app (another one is fine): its sign-in page opens in the user's browser.
+ * `replaces` signs an expired one back in. `grant.check` (How often) sets up a routine once it's
+ * connected, so it's taken only from the Bops window, like the routines' own routes.
+ */
 export async function POST(request: Request) {
   const unready = notReady();
   if (unready) return unready;
@@ -12,7 +18,10 @@ export async function POST(request: Request) {
   try {
     if (!app) throw new Error("Which app?");
     const ok = grant && Array.isArray(grant.bots) && (grant.level === "read" || grant.level === "act") ? { bots: grant.bots.map(String), level: grant.level } : undefined;
-    return Response.json(await connectApp(app, label, replaces, ok));
+    const check = ok && grant?.check ? normalizeSchedule(grant.check) : undefined;
+    if (check && "error" in check) throw new Error(check.error);
+    if (check && !fromBopsWindow(request)) return Response.json({ error: "Routines can only be changed in the Bops app." }, { status: 403 });
+    return Response.json(await connectApp(app, label, replaces, ok && check ? { ...ok, check: check.schedule as Schedule } : ok));
   } catch (e) {
     return fail(e);
   }

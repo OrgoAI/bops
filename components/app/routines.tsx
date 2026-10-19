@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { describeSchedule } from "@/cloud/schedule";
-import { sameApp, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
+import { coveredByCheck, sameApp, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
 import { onceDone, type AppState, type Bot, type Schedule, type Watch } from "@/lib/types";
 import { AppLogo, botApps } from "./apps";
 import { appNameOf, askable, autopilotOf, filterRoutines, monitorNeedsYou, RoutineList, RoutinesEmpty, scheduleNeedsYou, SourceMark, TagChips, useOpenRow, zoneOf, type AutopilotSection } from "./autopilot";
@@ -67,13 +67,18 @@ export function usePendingSuggest(state: AppState, here: (s: { app: string; botI
 /** Puts the waiting suggestion off (Not now): the server forgets it. */
 const dismiss = () => void post("/api/routines/suggestions/dismiss", {}).catch(() => {});
 
-/** What Bops offers this bot for this app, or what the catalog here says when Bops can't be asked. */
+/** What Bops offers this bot for this app, or what the catalog here says when Bops can't be asked (not what its check of the app does already). */
 function useOffers(state: AppState, app: string, botId: string | null) {
   const [got, setGot] = useState<{ key: string; templates: Offer[] } | null>(null);
   const key = `${app}:${botId ?? ""}`;
   const local = useRef<() => Offer[]>(() => []);
   useLayoutEffect(() => {
-    local.current = () => (botId ? templatesFor(app).map((t) => ({ ...t, already: runsAlready(state, botId, app, t.id) })) : []);
+    local.current = () =>
+      botId
+        ? templatesFor(app)
+            .filter((t) => !coveredByCheck(state.routines, botId, t))
+            .map((t) => ({ ...t, already: runsAlready(state, botId, app, t.id) }))
+        : [];
   });
   useEffect(() => {
     if (!botId) return;

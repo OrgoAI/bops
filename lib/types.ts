@@ -178,9 +178,11 @@ export type WorkspaceTag = { name: string; description: string };
 
 /**
  * Where a routine or watch came from, when it was a starter (lib/routine-catalog.ts): the Connected App's
- * slug or the vault key's name it's for, and the catalog template's id. One per template per bot.
+ * slug or the vault key's name it's for, and the catalog template's id. One per template per bot. A
+ * Connected App's check (CHECK_TEMPLATE, the How often picked when it was connected) keeps the account it
+ * checks too: one per account per bot.
  */
-export type RoutineSource = { app: string; template: string };
+export type RoutineSource = { app: string; template: string; account?: string };
 
 /** A skill (how a bot does a kind of job) or an app (a tool Bops builds and bots run). */
 export type SkillKind = "skill" | "app";
@@ -1157,9 +1159,11 @@ export type AppConnecting = {
   replaces?: string;
   /**
    * Who may use it once it's connected (picked when connecting), and how much: the bots picked get
-   * `level`, and the other bots of `workspaceId` (the workspace it was picked in) get none.
+   * `level`, and the other bots of `workspaceId` (the workspace it was picked in) get none. `check`: How
+   * often one of them looks at it (lib/server/routine-suggestions.ts makeCheck), a routine made once it's
+   * connected; unset is only when asked.
    */
-  grant?: { bots: BotId[]; level: AppLevel; workspaceId?: string };
+  grant?: { bots: BotId[]; level: AppLevel; workspaceId?: string; check?: Schedule };
 };
 
 /** What a bot may do in an account: read, or read and act (anything that sends, changes or pays still asks the user first). */

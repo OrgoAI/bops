@@ -30,7 +30,7 @@ const FAKES = {
   "app-version": "export const appHeaders = () => ({}); export const orgoHeaders = () => ({});",
   judgment: "export const lowRisk = async () => false; export const movesMoney = async () => false;",
   treg: "export const DATA_TOOL_NAMES = new Set(); export const dataOn = () => false; export const foundByBots = () => false; export const runDataTool = async () => '';",
-  "routine-suggestions": "export const offerStarters = async () => {};",
+  "routine-suggestions": ["offerStarters", "makeCheck", "dropChecks"].map((n) => `export const ${n} = (...a) => globalThis.__fake.suggest(${JSON.stringify(n)}, ...a);`).join("\n"),
 };
 const COMPOSIO = `export class Composio { constructor(o) { globalThis.__fake.composio.made(o); return globalThis.__fake.composio.client; } }`;
 registerHooks({
@@ -96,13 +96,22 @@ const state = {
     { id: "ses_routine", botId: "iris", routineId: "rt_1" },
   ],
   messages: [],
+  routines: [],
 };
 
 const created = [];
 const executed = [];
 const calls = [];
+// What composio.ts asked routine-suggestions.ts for, in order: starters offered, checks made, checks dropped.
+const suggested = [];
 let orgoAnswer = (method) => ({ status: method === "PUT" ? 200 : 201, json: {} });
 globalThis.__fake = {
+  suggest: (fn, ...a) => {
+    // A check is asked for once its account is there, with the access picked given: it says what it saw.
+    const seen = fn === "makeCheck" ? { account: !!state.accounts.find((x) => x.id === a[0]), level: a[1].bots.map((id) => T.levelOf(state.bots.find((b) => b.id === id), state.accounts.find((x) => x.id === a[0]) ?? {})) } : undefined;
+    suggested.push({ fn, args: JSON.parse(JSON.stringify(a)), ...(seen ? { seen } : {}) });
+    return fn === "makeCheck" ? {} : undefined;
+  },
   store: {
     bot: (id) => state.bots.find((b) => b.id === id),
     getState: () => state,
@@ -374,6 +383,115 @@ await check("accounts connected from now on are every bot's of their workspace; 
   assert.ok(relinked && !account("ca_linear"), "signed back in");
   assert.deepEqual([relinked.workspaceId, relinked.onlyGiven], ["ws_main", true]);
   assert.deepEqual(levels(relinked), [null, null, null, "act", null]);
+});
+
+/* ---------------- How often: a check made once it's connected ---------------- */
+
+// Each sign-in waits until the test finishes it (resolve, with the account) or gives up on it (reject).
+const waits = new Map();
+let waitNo = 0;
+const linkWaiting = async () => {
+  const w = { id: `wait_${++waitNo}` };
+  w.waitForConnection = () => new Promise((resolve, reject) => waits.set(w.id, { resolve, reject }));
+  return w;
+};
+const settle = () => new Promise((r) => setTimeout(r, 50));
+const hourly = { kind: "every", minutes: 60 };
+
+await check("How often goes with the sign-in: a check is asked for only once the account is connected and given, never for a sign-in that failed or was cancelled, and not without one", async () => {
+  Object.assign(state, fromV028(), { routines: [], connecting: [] });
+  globalThis.__fake.composio.client.connectedAccounts.link = linkWaiting;
+  suggested.length = 0;
+  // Continue: nothing yet, the How often waits with the sign-in.
+  await C.connectApp("gmail", "Work", undefined, { bots: ["iris", "boppy"], level: "read", check: hourly });
+  assert.deepEqual(state.connecting.at(-1).grant, { bots: ["iris", "boppy"], level: "read", check: hourly, workspaceId: "ws_main" });
+  assert.deepEqual(suggested, [], "nothing on Continue");
+  // The sign-in isn't finished: nothing is made.
+  waits.get("wait_1").reject(new Error("Connection timed out"));
+  await settle();
+  assert.equal(state.connecting.at(-1).status, "failed");
+  assert.deepEqual(suggested, [], "nothing for a sign-in that failed");
+  // Try again (the Vault posts the same grant): finished, so its check, then the starters.
+  const again = state.connecting.at(-1);
+  await C.connectApp(again.app, again.label, again.replaces, again.grant);
+  waits.get("wait_2").resolve({ id: "ca_gmail2" });
+  await settle();
+  assert.deepEqual(
+    suggested.map((x) => [x.fn, x.args[0]]),
+    [
+      ["makeCheck", "ca_gmail2"],
+      ["offerStarters", "gmail"],
+    ],
+    "the check first, so the starters offered leave out its job",
+  );
+  assert.deepEqual(suggested[0].args[1], { bots: ["iris", "boppy"], level: "read", check: hourly, workspaceId: "ws_main" });
+  assert.deepEqual(suggested[0].seen, { account: true, level: ["read", "read"] }, "the account is there, with the access picked");
+  // Cancelled, then finished anyway: no check.
+  suggested.length = 0;
+  await C.connectApp("gmail", undefined, undefined, { bots: ["boppy"], level: "act", check: hourly });
+  C.cancelConnect("wait_3");
+  waits.get("wait_3").resolve({ id: "ca_gmail3" });
+  await settle();
+  assert.ok(!suggested.some((x) => x.fn === "makeCheck"), "nothing for a sign-in that was given up");
+  // Only when asked: no check, the starters all the same.
+  await C.connectApp("gmail", undefined, undefined, { bots: ["boppy"], level: "act" });
+  waits.get("wait_4").resolve({ id: "ca_gmail5" });
+  await settle();
+  assert.deepEqual(suggested.map((x) => x.fn), ["offerStarters"]);
+  // An app with no sign-in is connected at once: its check right away, then its starters.
+  suggested.length = 0;
+  await C.connectApp("weathermap", undefined, undefined, { bots: ["penny"], level: "act", check: { kind: "daily", time: "08:00" } });
+  assert.deepEqual(
+    suggested.map((x) => [x.fn, x.args[0]]),
+    [
+      ["makeCheck", "open:weathermap"],
+      ["offerStarters", "weathermap"],
+    ],
+  );
+  assert.deepEqual(suggested[0].seen, { account: true, level: ["act"] });
+});
+
+await check("signing in again keeps the account's check (it moves to the new account), makes no other; disconnecting drops it", async () => {
+  state.routines = [{ id: "rtn_check", botId: "boppy", title: "Check Gmail (Work)", goal: "x", schedule: hourly, enabled: true, source: { app: "gmail", template: "check", account: "ca_gmail2" } }];
+  suggested.length = 0;
+  await C.connectApp("gmail", undefined, "ca_gmail2");
+  const w = state.connecting.at(-1);
+  assert.equal(w.grant, undefined, "signing in again picks nothing");
+  waits.get(w.id).resolve({ id: "ca_gmail6" });
+  await settle();
+  assert.ok(account("ca_gmail6") && !account("ca_gmail2"), "signed back in");
+  assert.deepEqual(state.routines[0].source, { app: "gmail", template: "check", account: "ca_gmail6" }, "the check is the new account's");
+  assert.deepEqual(suggested, [], "no second check, and no starters for signing back in");
+  await C.disconnectAccount("ca_gmail6");
+  assert.deepEqual(suggested.map((x) => [x.fn, x.args[0]]), [["dropChecks", "ca_gmail6"]]);
+});
+
+await check("POST /api/apps takes How often from the Bops window only, as a schedule Bops keeps", async () => {
+  const route = await import(`${root}/app/api/apps/route.ts`);
+  const post = (body, headers = {}) => route.POST(new Request("http://localhost/api/apps", { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }));
+  state.connecting = [];
+  let res = await post({ app: "gmail", grant: { bots: ["boppy"], level: "read", check: { kind: "daily", time: "8 AM" } } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(state.connecting.at(-1).grant, { bots: ["boppy"], level: "read", check: { kind: "daily", time: "08:00" }, workspaceId: "ws_main" });
+  res = await post({ app: "gmail", grant: { bots: ["boppy"], level: "read", check: { kind: "daily", time: "99:99" } } });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /isn't a time of day/);
+  assert.equal(state.connecting.length, 1, "nothing for a bad one");
+  process.env.BOPS_UI_TOKEN = "window-token-for-tests";
+  try {
+    res = await post({ app: "gmail", grant: { bots: ["boppy"], level: "read", check: hourly } });
+    assert.equal(res.status, 403, "not from the window: no routine set up through it");
+    assert.equal(state.connecting.length, 1);
+    res = await post({ app: "gmail", grant: { bots: ["boppy"], level: "read", check: hourly } }, { cookie: "bops_window=window-token-for-tests" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(state.connecting.at(-1).grant.check, hourly);
+    // Without How often it's the connect it always was, from anywhere.
+    res = await post({ app: "gmail", grant: { bots: ["boppy"], level: "read" } });
+    assert.equal(res.status, 200);
+    assert.equal(state.connecting.at(-1).grant.check, undefined);
+  } finally {
+    delete process.env.BOPS_UI_TOKEN;
+  }
 });
 
 rmSync(scratch, { recursive: true, force: true });

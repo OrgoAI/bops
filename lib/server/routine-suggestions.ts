@@ -1,7 +1,7 @@
 import "server-only";
-import { quietOf, sameApp, scheduleOf, TAG_LEARNING_APPS, tagsOf, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
-import { botChatId, MAIN_WORKSPACE, workspaceOf, type AppState, type Schedule, type Watch, type WorkspaceTag } from "@/lib/types";
-import { createRoutine } from "./routines";
+import { CHECK_TEMPLATE, checkerOf, checkGoal, checkTitle, coveredByCheck, quietOf, sameApp, scheduleOf, TAG_LEARNING_APPS, tagsOf, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
+import { botChatId, levelOf, MAIN_WORKSPACE, workspaceOf, type AppConnecting, type AppState, type Routine, type Schedule, type Watch, type WorkspaceTag } from "@/lib/types";
+import { createRoutine, deleteRoutine } from "./routines";
 import { addMessage, bot, getState, update } from "./store";
 import { findSkill } from "./workspace-skills";
 
@@ -12,6 +12,10 @@ import { findSkill } from "./workspace-skills";
  * monitor, and keeps where it came from (Routine.source), so the same starter is never made twice for a
  * bot. Turning on a Gmail, Slack or Discord starter also has the bot read a small sample of recent items
  * once and propose the workspace's own tags (learnTags), in the background.
+ *
+ * And a Connected App's check (makeCheck): the How often picked when an account was connected, made the
+ * same way once it's connected. A starter that's the same job as a bot's check isn't offered to it
+ * (coveredByCheck).
  */
 
 /** A starter as offered to a bot: whether it already runs one made from it. */
@@ -31,10 +35,13 @@ export function hasStarter(s: Pick<AppState, "routines" | "watches">, botId: str
 export function offerStarters(app: string, botIds: string[] | undefined) {
   if (!templatesFor(app).length) return;
   const botId = (botIds ?? []).find((id) => bot(id));
-  // Nothing new to offer when it runs all of them already (a key saved again).
-  if (!botId || templatesFor(app).every((t) => hasStarter(getState(), botId, t.app, t.id))) return;
+  // Nothing new to offer when it runs all of them already (a key saved again), or its check does their job.
+  if (!botId || startersFor(app, botId).every((t) => hasStarter(getState(), botId, t.app, t.id))) return;
   update((s) => void (s.suggest = { app, botId, at: Date.now() }));
 }
+
+/** The app's starters for a bot: all of them but the ones its check of the app does already (coveredByCheck). */
+const startersFor = (app: string, botId: string) => templatesFor(app).filter((t) => !coveredByCheck(getState().routines, botId, t));
 
 /**
  * The waiting suggestion is answered or put off: the window stops offering it. Only when it's for that
@@ -51,7 +58,7 @@ export function clearSuggest(match?: { app: string }) {
 export function offersFor(app: string, botId: string): { botId: string; app: string; templates: Offer[] } | { error: string } {
   if (!bot(botId)) return { error: "No such bot." };
   const s = getState();
-  return { botId, app, templates: templatesFor(app).map((t) => ({ ...t, already: hasStarter(s, botId, t.app, t.id) })) };
+  return { botId, app, templates: startersFor(app, botId).map((t) => ({ ...t, already: hasStarter(s, botId, t.app, t.id) })) };
 }
 
 /**
@@ -95,6 +102,43 @@ export function acceptStarters(app: string, botId: string, picks: { id: string; 
   const first = created[0];
   if (first && TAG_LEARNING_APPS.has(app.toLowerCase())) void learnTags(botId, app.toLowerCase(), first).catch((e: Error) => console.warn(`[routines] tags from ${app}: ${e.message}`));
   return { created, ...(errors.length ? { errors } : {}) };
+}
+
+/* ---------------- A Connected App's check ---------------- */
+
+/** Whether `botId` already checks this account (its check, made when it was connected). */
+const checks = (r: Routine, botId: string, accountId: string) => r.botId === botId && r.source?.template === CHECK_TEMPLATE && r.source.account === accountId;
+
+/**
+ * An account just finished connecting with How often picked for it (AppConnecting.grant.check): its
+ * check, one routine of one bot's (checkerOf: the main bot when it was picked, else the first picked),
+ * made like a starter: a chat run with the bot's tools and no computer, quiet when it checks through the
+ * day (quietOf), its goal worded for the access that bot has there (checkGoal), and its source the app,
+ * CHECK_TEMPLATE and the account, so connecting it again never makes a second one. Nothing without a
+ * How often; an error when that bot can't use the account.
+ */
+export function makeCheck(accountId: string, grant: AppConnecting["grant"]): { routine?: Routine; error?: string } {
+  const schedule = grant?.check;
+  if (!grant || !schedule) return {};
+  const s = getState();
+  const account = s.accounts?.find((a) => a.id === accountId);
+  const b = checkerOf(grant.bots, s.bots);
+  const level = account && b ? levelOf(b, account) : null;
+  if (!account || !b || !level) return { error: "No bot that can use it was picked to check it." };
+  const had = s.routines.find((r) => checks(r, b.id, accountId));
+  if (had) return { routine: had };
+  const quiet = quietOf({ kind: "schedule", schedule });
+  const open = accountId.startsWith("open:");
+  return createRoutine(b.id, checkTitle(account.appName, open ? undefined : account.label), checkGoal({ appName: account.appName, label: account.label, name: account.name, open }, level, quiet), schedule, {
+    run: "chat",
+    quiet,
+    source: { app: account.app, template: CHECK_TEMPLATE, account: accountId },
+  });
+}
+
+/** An account was disconnected: its checks go with it (one that went on would only find it isn't there). */
+export function dropChecks(accountId: string) {
+  for (const r of getState().routines.filter((x) => x.source?.template === CHECK_TEMPLATE && x.source.account === accountId)) deleteRoutine(r.id);
 }
 
 /* ---------------- Learning a workspace's tags ---------------- */

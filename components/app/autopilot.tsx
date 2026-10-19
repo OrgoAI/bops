@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type AnimationEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
-import { appNameFor, canonicalApp, sameApp, templateById } from "@/lib/routine-catalog";
+import { appNameFor, canonicalApp, CHECK_TEMPLATE, CHECK_TIMES, sameApp, templateById } from "@/lib/routine-catalog";
 import { botChatId, DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
 import { Fold } from "./fold";
 import { Mascot } from "./mascot";
@@ -842,11 +842,11 @@ function AppName({ state, app }: { state: AppState; app: string }) {
 /** The zone a routine's times are in: its own (Routine.timeZone), else the owner's. */
 export const zoneOf = (r: Routine, ownerZone?: string) => (r as Routine & { timeZone?: string }).timeZone || ownerZone;
 
-/** What the When picker needs for a routine: its starter's suggested times, and whether its bot uses Google Calendar. */
+/** What the When picker needs for a routine: its starter's suggested times (a check's How often), and whether its bot uses Google Calendar. */
 function whenContext(r: Routine, state: AppState) {
   const bot = state.bots.find((b) => b.id === r.botId);
   return {
-    presets: r.source?.template ? suggestedOf(templateById(r.source.template)) : undefined,
+    presets: r.source?.template ? suggestedOf(r.source.template === CHECK_TEMPLATE ? { suggested: CHECK_TIMES } : templateById(r.source.template)) : undefined,
     calendar: !!bot && botApps(state, bot).some((x) => sameApp(x.app, "googlecalendar")),
   };
 }

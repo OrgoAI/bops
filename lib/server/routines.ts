@@ -2,7 +2,7 @@ import "server-only";
 import { readlinkSync } from "node:fs";
 import { trackServerEvent } from "./analytics";
 import { botChatId, live, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
-import { appNameFor, tagsOf } from "@/lib/routine-catalog";
+import { appNameFor, CHECK_TEMPLATE, tagsOf } from "@/lib/routine-catalog";
 import { describeSchedule as describe, EVENT_CHECK_MINUTES, eventWindow, inHours, nextRun, sameWallTime, normalizeSchedule, resolveOnce, validTimeZone, whenText } from "@/cloud/schedule";
 import { cleanText, routineChanged, routineRan, syncRoutinesOnStart } from "./routine-sync";
 import { plainLinks } from "@/cloud/style";
@@ -155,7 +155,7 @@ type RoutineOpts = {
   procedure?: string;
   /** Set up on a turn someone else started: who it came from (Routine.fromOutside). */
   fromOutside?: string;
-  /** A starter it was made from (lib/server/routine-suggestions.ts), and the tags it sorts with. */
+  /** A starter it was made from, or the account it checks (lib/server/routine-suggestions.ts), and the tags it sorts with. */
   source?: RoutineSource;
   tags?: string[];
   /** The IANA zone its times are in; unset: the user's. */
@@ -220,7 +220,7 @@ export function createRoutine(botId: string, title: string, goal: string, schedu
     ...(opts.deliverTo ? { deliverTo: opts.deliverTo } : {}),
     ...(procedure ? { procedure } : {}),
     ...(outside ? { fromOutside: outside.slice(0, 200) } : {}),
-    ...(!outside && opts.source ? { source: { app: opts.source.app, template: opts.source.template } } : {}),
+    ...(!outside && opts.source ? { source: { app: opts.source.app, template: opts.source.template, ...(opts.source.account ? { account: opts.source.account } : {}) } } : {}),
     ...(!outside && opts.tags?.length ? { tags: [...new Set(opts.tags.map((t) => t.trim()).filter(Boolean))].slice(0, 12) } : {}),
   };
   update((st) => st.routines.push(r));
@@ -920,7 +920,7 @@ export function routinesNote(botIds: string[]) {
       deliverText(r),
       r.procedure ? `follows skill "${findSkill(r.botId, r.procedure)?.name ?? r.procedure}"` : "",
       r.fromOutside ? `set up by ${r.fromOutside}, not ${owner}` : "",
-      r.source ? `a starter for ${appWord(r.source.app)}` : "",
+      r.source ? (r.source.template === CHECK_TEMPLATE ? `checks ${checkWord(r.source)}, as ${owner} picked when connecting it` : `a starter for ${appWord(r.source.app)}`) : "",
       r.tags?.length ? `sorts with tags ${r.tags.join(", ")}` : "",
       // A one-off is done once its time has passed (Run now before then doesn't finish it).
       r.enabled ? (r.nextRunAt ? `next ${inSentence(whenText(r.nextRunAt, now, tz))}` : "") : r.schedule.kind === "once" && r.schedule.at <= now ? "done" : "paused",
@@ -941,6 +941,12 @@ export function routinesNote(botIds: string[]) {
 
 /** A Connected App's or a key's name as the user knows it. */
 const appWord = (app: string) => appNameFor(app) ?? app;
+/** The account a check is for, as the bot knows it: "Gmail (Work · maya@acme.com)", else the app. */
+const checkWord = (src: RoutineSource) => {
+  const a = getState().accounts?.find((x) => x.id === src.account);
+  const title = a && [a.label, a.name].filter(Boolean).join(" · ");
+  return a ? `${a.appName}${title ? ` (${title})` : ""}` : appWord(src.app);
+};
 
 // The timer calls whatever version of tick was loaded last, so edits apply without a restart.
 g.__bopsRoutineTick = tick;

@@ -2,8 +2,9 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { APP_LEVELS, appLogo, FEATURED_APPS, levelOf, type AppAccess, type AppAccount, type AppLevel, type AppState, type Bot, type LastUses } from "@/lib/types";
-import { isKeyApp } from "@/lib/routine-catalog";
+import { describeSchedule, runsADay } from "@/cloud/schedule";
+import { APP_LEVELS, appLogo, FEATURED_APPS, levelOf, type AppAccess, type AppAccount, type AppConnecting, type AppLevel, type AppState, type Bot, type LastUses, type Schedule } from "@/lib/types";
+import { CHECK_TIMES, checkerOf, isKeyApp } from "@/lib/routine-catalog";
 import { Mascot, Spinner } from "./mascot";
 import { KeyIcon } from "./screen-cards";
 import { ago, post, teamOf } from "./ui";
@@ -578,20 +579,50 @@ const Check = () => (
   </svg>
 );
 
-/** The second step: what signing in will look like, a name for the account, and who may use it. */
-function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }: { state: AppState; app: CatalogApp; replaces?: string; hasOne: boolean; onBack: () => void; onDone: () => void }) {
+/** How often a bot looks at a new account on its own (the Connect screen): Only when asked makes no routine; the rest are a check's times. */
+export const HOW_OFTEN: { label: string; schedule?: Schedule }[] = [{ label: "Only when asked" }, ...CHECK_TIMES];
+
+/**
+ * The line under How often: who checks, when, and what it does with what's new for the access picked;
+ * for a check through the day, how many checks a day that is, each one using AI credit.
+ */
+export function checkLine(bot: string, app: string, level: AppLevel, schedule: Schedule, tz?: string) {
+  const when = describeSchedule(schedule, tz);
+  const often = `${when.charAt(0).toLowerCase()}${when.slice(1)}`;
+  const what = level === "read" ? `${bot} checks ${app} ${often} and tells you what's new.` : `${bot} checks ${app} ${often} and handles what's new. Asks you before it sends, posts, deletes or pays.`;
+  const n = schedule.kind === "every" ? runsADay(schedule) : 1;
+  return n > 1 ? `${what} That's ${n} checks a day, and each one uses AI credit.` : what;
+}
+
+/**
+ * Who may use a new account, how much, and how often it's checked (`check`, a How often schedule), as
+ * Continue sends them (POST /api/apps): no check without a bot to do it, and nothing for signing in again
+ * (the bots keep what they had).
+ */
+export function grantOf(bots: string[], level: AppLevel, check: Schedule | undefined, replaces?: string): AppConnecting["grant"] {
+  if (replaces) return undefined;
+  return { bots, level, ...(check && bots.length ? { check } : {}) };
+}
+
+/** The second step: what signing in will look like, a name for the account, who may use it, and how often it's checked. */
+export function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }: { state: AppState; app: CatalogApp; replaces?: string; hasOne: boolean; onBack: () => void; onDone: () => void }) {
   const team = teamOf(state);
   const old = replaces ? state.accounts?.find((x) => x.id === replaces) : undefined;
   const [label, setLabel] = useState("");
   // Every bot, Read & act: the default for every account.
   const [bots, setBots] = useState<string[]>(() => team.map((b) => b.id));
   const [level, setLevel] = useState<AppLevel>("act");
+  // Only when asked by default: no routine.
+  const [often, setOften] = useState(HOW_OFTEN[0].label);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // One bot checks it: the main bot when it's picked, else the first one picked. None picked: no checks.
+  const checker = checkerOf(bots, team);
+  const check = checker ? HOW_OFTEN.find((o) => o.label === often)?.schedule : undefined;
   const connect = async () => {
     setBusy(true);
     setError(null);
-    const res = await post("/api/apps", { app: a.app, label: label || undefined, replaces, grant: replaces ? undefined : { bots, level } });
+    const res = await post("/api/apps", { app: a.app, label: label || undefined, replaces, grant: grantOf(bots, level, check, replaces) });
     const j = (await res.json()) as { error?: string };
     if (j.error) {
       setError(j.error);
@@ -652,6 +683,32 @@ function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }: { stat
                 </button>
               ))}
             </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">How often</span>
+            <div role="radiogroup" aria-label="How often" className="flex flex-wrap gap-1.5">
+              {HOW_OFTEN.map((o) => {
+                const on = o.schedule === check;
+                return (
+                  <button
+                    key={o.label}
+                    type="button"
+                    role="radio"
+                    aria-checked={on}
+                    disabled={!checker}
+                    onClick={() => setOften(o.label)}
+                    className={`rounded-full px-2.5 py-1 text-[12.5px] leading-4 disabled:opacity-50 ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#6B6B6B] hover:bg-[#EAEAE7]"}`}
+                  >
+                    {o.label}
+                  </button>
+                );
+              })}
+            </div>
+            {!checker ? (
+              <span className="text-[11.5px] leading-[15px] text-[#9A9A98]">Pick a bot above first: it does the checks.</span>
+            ) : (
+              check && <span className="text-[11.5px] leading-[15px] text-[#6B6B6B]">{checkLine(checker.name, a.name, level, check, state.owner?.timeZone)}</span>
+            )}
           </div>
         </>
       )}

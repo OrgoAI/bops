@@ -248,6 +248,8 @@ export async function connectApp(app: string, label?: string, replaces?: string,
       give(s, accountId, grant);
     });
     if (isNew) trackServerEvent("bops_app_connected", { toolkit: app, reconnect: false });
+    // Its check first (How often), so the starters offered after leave out the job it does.
+    await checkFor(accountId, grant);
     if (isNew) await offerStartersFor(app, grant?.bots);
     return { accountId };
   }
@@ -265,6 +267,7 @@ export async function connectApp(app: string, label?: string, replaces?: string,
     .waitForConnection(15 * 60_000)
     .then(async (ca: { id: string }) => {
       let suggestAfter: string[] | undefined;
+      let checkWith: AppConnecting["grant"];
       const name = await accountName(ca.id).catch(() => undefined);
       const old = replaces ? getState().accounts?.find((a) => a.id === replaces) : undefined;
       const isNew = !getState().accounts?.some((a) => a.id === ca.id);
@@ -276,17 +279,21 @@ export async function connectApp(app: string, label?: string, replaces?: string,
         const workspaceId = old ? old.workspaceId : ws;
         (s.accounts ??= []).push({ id: ca.id, app, appName, name, label: c?.label ?? old?.label, status: "active", at: Date.now(), ...(workspaceId ? { workspaceId } : {}), ...(old?.onlyGiven ? { onlyGiven: true } : {}) });
         give(s, ca.id, c?.grant);
-        // A new account: its bot is offered the app's starter routines (signing back in isn't new).
+        // A new account: its bot is offered the app's starter routines, and its check is made when How often
+        // was picked (signing back in isn't new). Only now: a sign-in that fails or is given up makes neither.
         if (!old) suggestAfter = c?.grant?.bots;
-        // Signed back in: the new account takes the old one's place, with the same access.
+        if (!old) checkWith = c?.grant;
+        // Signed back in: the new account takes the old one's place, with the same access and its checks.
         if (old) {
           for (const b of s.bots) if (b.access?.[old.id] !== undefined) b.access[ca.id] = b.access[old.id];
+          for (const r of s.routines) if (r.source?.account === old.id) r.source.account = ca.id;
           // Bots in Slack through this account (the Bops Slack app) move with it.
           for (const l of s.channels ?? []) if (l.slack?.accountId === old.id) l.slack.accountId = ca.id;
           dropAccount(s, old.id);
         }
       });
       if (isNew) trackServerEvent("bops_app_connected", { toolkit: app, reconnect: !!old }, { userId: who });
+      if (checkWith) await checkFor(ca.id, checkWith);
       if (suggestAfter) await offerStartersFor(app, suggestAfter);
       if (old) await cx().connectedAccounts.delete(old.id).catch(() => null);
     })
@@ -307,6 +314,16 @@ const offerStartersFor = (app: string, botIds?: string[]) =>
   import("./routine-suggestions")
     .then((m) => m.offerStarters(app, botIds && [...botIds].sort((x, y) => Number(!!bot(y)?.isMain) - Number(!!bot(x)?.isMain))))
     .catch((e: Error) => console.warn(`[apps] starters for ${app}: ${e.message}`));
+
+/**
+ * A new account's check, when How often was picked for it (lib/server/routine-suggestions.ts makeCheck);
+ * a failure there never fails the connect.
+ */
+const checkFor = async (accountId: string, grant?: AppConnecting["grant"]) => {
+  if (!grant?.check) return;
+  const out = await import("./routine-suggestions").then((m) => m.makeCheck(accountId, grant)).catch((e: Error) => ({ error: e.message }));
+  if (out.error) console.warn(`[apps] check for ${accountId}: ${out.error}`);
+};
 
 /** Stop waiting on a sign-in (or clear one that failed). */
 export function cancelConnect(waitId: string) {
@@ -339,10 +356,11 @@ function dropAccount(s: ReturnType<typeof getState>, accountId: string) {
   s.channels = (s.channels ?? []).filter((l) => l.slack?.accountId !== accountId);
 }
 
-/** Disconnect an account: Composio forgets its tokens, and no bot can use it any more. */
+/** Disconnect an account: Composio forgets its tokens, no bot can use it any more, and its checks stop. */
 export async function disconnectAccount(accountId: string) {
   if (!accountId.startsWith("open:")) await cx().connectedAccounts.delete(accountId).catch(() => null);
   update((s) => dropAccount(s, accountId));
+  await import("./routine-suggestions").then((m) => m.dropChecks(accountId)).catch((e: Error) => console.warn(`[apps] checks of ${accountId}: ${e.message}`));
 }
 
 /** The user's own name for an account ("Work"); empty clears it. */

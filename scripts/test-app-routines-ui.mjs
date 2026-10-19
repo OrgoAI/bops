@@ -4,7 +4,11 @@
 // two views of routines: the Routines page (autopilot.tsx AutopilotPage), every bot's in one list with
 // each row's bot as a chip, a row of every bot with its count on top, opened at one bot, and what to ask
 // for when there's nothing (RoutinesEmpty, whose asks open a chat with the words typed, not sent); and a
-// bot's Routines tab (BotRoutines), a short summary of what it will do, each line opening the page.
+// bot's Routines tab (BotRoutines), a short summary of what it will do, each line opening the page. And
+// the Connect screen's How often (components/app/apps.tsx ConnectStep): for an app that signs in, one that
+// takes a key and one that needs no sign-in, Only when asked first, off with why when no bot is picked,
+// the line under it (who checks, how often, what for the access, and the checks a day), and what Continue
+// sends.
 //
 // Nothing reaches a server. The .tsx files are compiled with the TypeScript in node_modules as they load.
 // Usage: node scripts/test-app-routines-ui.mjs   (not with --conditions=react-server: these are client components)
@@ -50,6 +54,7 @@ globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({})
 
 const { AppRoutines, BotRoutines, routinesOfApp, routineCount } = await import(pathToFileURL(`${root}/components/app/routines.tsx`).href);
 const { AutopilotPage, RoutinesEmpty } = await import(pathToFileURL(`${root}/components/app/autopilot.tsx`).href);
+const { ConnectStep, checkLine, grantOf, HOW_OFTEN } = await import(pathToFileURL(`${root}/components/app/apps.tsx`).href);
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { createElement: h } = await import("react");
 
@@ -276,6 +281,73 @@ await test("a bot with none: its empty state; with Connected Apps to offer, thos
   assert.match(html, /aria-label="Add routines for Gmail"/, "its app, the popover's anchor");
   assert.doesNotMatch(t, /Add routines From/, "no separate Add routines row while it has none");
   assert.doesNotMatch(t, /summarize my inbox/, "the apps are the way to start, not the asks");
+});
+
+/* ---------------- The Connect screen's How often ---------------- */
+
+const connect = (app, s = state([]), props = {}) => renderToStaticMarkup(h(ConnectStep, { state: s, app, hasOne: false, onBack: noop, onDone: noop, ...props }));
+const GMAIL = { app: "gmail", name: "Gmail", tags: [], auth: "oauth" };
+const STRIPE = { app: "stripe", name: "Stripe", tags: [], auth: "key" };
+const HN = { app: "hackernews", name: "Hacker News", tags: [], auth: "open" };
+/** The How often radios, in order: [label, checked, disabled]. */
+const radios = (html) => [...html.matchAll(/<button[^>]*role="radio"[^>]*>([^<]*)<\/button>/g)].map((m) => [m[1], /aria-checked="true"/.test(m[0]), /disabled=""/.test(m[0])]);
+
+await test("How often on the Connect screen, for an app that signs in, one that takes a key and one that needs none: below the access, Only when asked first", () => {
+  for (const [app, button] of [
+    [GMAIL, "Continue to sign in"],
+    [STRIPE, "Continue to sign in"],
+    [HN, "Add Hacker News"],
+  ]) {
+    const html = connect(app);
+    const t = text(html);
+    assert.match(html, /role="radiogroup" aria-label="How often"/, `${app.name}: a How often row`);
+    assert.deepEqual(
+      radios(html),
+      [
+        ["Only when asked", true, false],
+        ["Every morning", false, false],
+        ["Every hour", false, false],
+        ["Every 15 minutes", false, false],
+      ],
+      `${app.name}: Only when asked is picked`,
+    );
+    assert.ok(t.indexOf("Read &amp; act") < t.indexOf("How often") && t.indexOf("How often") < t.indexOf(button), `${app.name}: under Read only and Read & act, before ${button}`);
+    assert.doesNotMatch(t, /checks a day|tells you|handles what/, "no line for Only when asked");
+  }
+  // Signing in again keeps what the account had: nothing to pick.
+  const again = { ...state([]), accounts: [{ id: "ca_1", app: "gmail", appName: "Gmail", name: "sam@acme.com", status: "expired", at: now, workspaceId: "ws_main" }] };
+  assert.doesNotMatch(text(connect(GMAIL, again, { replaces: "ca_1" })), /How often/);
+});
+
+await test("no bot to pick: How often is off, and says why", () => {
+  const html = connect(GMAIL, { ...state([]), bots: [] });
+  assert.ok(radios(html).every(([, , off]) => off), "every choice is off");
+  assert.equal(radios(html).find(([, on]) => on)[0], "Only when asked");
+  assert.match(text(html), /Pick a bot above first: it does the checks\./);
+});
+
+await test("the line under it: who checks, how often, what for the access picked, and the checks a day each using AI credit", () => {
+  const [, morning, hourly, quarter] = HOW_OFTEN.map((o) => o.schedule);
+  assert.equal(HOW_OFTEN[0].schedule, undefined, "Only when asked makes no routine");
+  assert.equal(checkLine("Max", "Gmail", "read", hourly), "Max checks Gmail every hour and tells you what's new. That's 24 checks a day, and each one uses AI credit.");
+  assert.equal(checkLine("Max", "Gmail", "read", quarter), "Max checks Gmail every 15 minutes and tells you what's new. That's 96 checks a day, and each one uses AI credit.");
+  assert.equal(
+    checkLine("Ivy", "Gmail", "act", hourly),
+    "Ivy checks Gmail every hour and handles what's new. Asks you before it sends, posts, deletes or pays. That's 24 checks a day, and each one uses AI credit.",
+  );
+  assert.equal(checkLine("Max", "Hacker News", "read", morning, "America/Los_Angeles"), "Max checks Hacker News every day at 8 AM and tells you what's new.");
+  assert.equal(checkLine("Max", "Notion", "act", morning), "Max checks Notion every day at 8 AM and handles what's new. Asks you before it sends, posts, deletes or pays.");
+  // From the schedule itself: an hour from 8 AM to 8 PM is 13.
+  assert.match(checkLine("Max", "Gmail", "read", { kind: "every", minutes: 60, hours: { from: "08:00", to: "20:00" } }), /That's 13 checks a day/);
+  for (const o of HOW_OFTEN.slice(1)) for (const level of ["read", "act"]) assert.doesNotMatch(checkLine("Max", "Gmail", level, o.schedule), /[‒–—―]| - /, "no dashes");
+});
+
+await test("what Continue sends: How often only when picked and there's a bot to do it, nothing for signing in again", () => {
+  const hourly = HOW_OFTEN[2].schedule;
+  assert.deepEqual(grantOf(["bot_main", "bot_two"], "act", undefined), { bots: ["bot_main", "bot_two"], level: "act" }, "Only when asked: no check");
+  assert.deepEqual(grantOf(["bot_two"], "read", hourly), { bots: ["bot_two"], level: "read", check: { kind: "every", minutes: 60 } });
+  assert.deepEqual(grantOf([], "read", hourly), { bots: [], level: "read" }, "no bot: no check");
+  assert.equal(grantOf(["bot_main"], "read", hourly, "ca_1"), undefined);
 });
 
 console.log(`app routines ui: ${passed} passed`);

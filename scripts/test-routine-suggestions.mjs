@@ -362,6 +362,153 @@ await check("a bot sees its routines with their starters and tags, and the tags 
   assert.doesNotMatch(R.routinesNote(["bot_plain"]), /Tags your routines/);
 });
 
+/* ---------------- A Connected App's check (How often, picked when connecting) ---------------- */
+
+const Sched = await import("@/cloud/schedule");
+const hourly = { kind: "every", minutes: 60 };
+const quarter = { kind: "every", minutes: 15 };
+const morning = { kind: "daily", time: "08:00" };
+const checksOf = (accountId) => state.routines.filter((r) => r.source?.template === "check" && r.source.account === accountId);
+
+await check("How often's times are valid as kept, and say how many checks a day they are", () => {
+  assert.deepEqual(C.CHECK_TIMES.map((t) => t.label), ["Every morning", "Every hour", "Every 15 minutes"]);
+  assert.deepEqual(C.CHECK_TIMES.map((t) => t.schedule), [morning, hourly, quarter]);
+  for (const t of C.CHECK_TIMES) {
+    assert.deepEqual(Sched.normalizeSchedule(t.schedule).schedule, t.schedule, `${t.label} isn't in its kept shape`);
+    noDashes(t.label, "a How often label");
+  }
+  assert.deepEqual(C.CHECK_TIMES.map((t) => Sched.runsADay(t.schedule)), [1, 24, 96], "all day: 24 and 96");
+  assert.equal(Sched.runsADay({ kind: "every", minutes: 60, hours: { from: "08:00", to: "20:00" } }), 13, "both ends count, as nextRun runs them");
+  assert.equal(Sched.runsADay({ kind: "every", minutes: 30, hours: { from: "08:00", to: "20:00" }, days: [1, 2, 3, 4, 5] }), 25);
+  assert.equal(Sched.runsADay({ kind: "every", minutes: 60, hours: { from: "22:00", to: "06:00" } }), 9, "hours across midnight");
+  assert.equal(Sched.runsADay({ kind: "every", minutes: 90 }), 16);
+  assert.equal(Sched.runsADay({ kind: "daily", time: "08:00", times: ["08:00", "17:00"] }), 2);
+  // Every 8 AM to 8 PM hour really does run 13 times on a weekday.
+  const day = Date.parse("2026-10-13T04:00:00Z");
+  let n = 0;
+  for (let t = Sched.nextRun({ kind: "every", minutes: 60, hours: { from: "08:00", to: "20:00" } }, day, "America/New_York"); t < day + 86_400_000; t = Sched.nextRun({ kind: "every", minutes: 60, hours: { from: "08:00", to: "20:00" } }, t, "America/New_York", t)) n++;
+  assert.equal(n, 13);
+});
+
+await check("who checks: the main bot when it was picked, else the first picked; nobody when none was", () => {
+  const bots = [{ id: "a" }, { id: "m", isMain: true }, { id: "b" }];
+  assert.equal(C.checkerOf(["a", "m"], bots).id, "m");
+  assert.equal(C.checkerOf(["b", "a"], bots).id, "b");
+  assert.equal(C.checkerOf(["gone", "a"], bots).id, "a");
+  assert.equal(C.checkerOf([], bots), undefined);
+});
+
+await check("each How often makes one routine on the right bot: its schedule, a chat run, quiet through the day, its goal worded for the access", () => {
+  state.bots.push({ id: "bot_iris", name: "Iris" }, { id: "bot_otto", name: "Otto" });
+  state.accounts = [
+    { id: "ca_work", app: "gmail", appName: "Gmail", label: "Work", name: "sam@acme.com", status: "active", at: 1, workspaceId: "ws_main" },
+    { id: "ca_notion", app: "notion", appName: "Notion", name: "Acme wiki", status: "active", at: 1, workspaceId: "ws_main" },
+    { id: "open:hackernews", app: "hackernews", appName: "Hacker News", status: "active", at: 1, workspaceId: "ws_main" },
+  ];
+  // What composio.ts gave when it connected: Read only for the bots picked.
+  for (const id of ["bot_main", "bot_iris"]) (state.bots.find((b) => b.id === id).access ??= {}).ca_work = "read";
+  const before = state.routines.length;
+
+  // Every hour, Read only, Iris and the main bot picked: the main bot's.
+  const work = S.makeCheck("ca_work", { bots: ["bot_iris", "bot_main"], level: "read", check: hourly }).routine;
+  assert.equal(work.botId, "bot_main");
+  assert.equal(work.title, "Check Gmail (Work)", "the account the user named");
+  assert.deepEqual(work.schedule, hourly);
+  assert.deepEqual([work.run, work.quiet, work.enabled], ["chat", true, true]);
+  assert.deepEqual(work.source, { app: "gmail", template: "check", account: "ca_work" });
+  assert.match(work.goal, /^Check my Gmail account "Work" for what's new since the last check/);
+  assert.match(work.goal, /use_app with account "Work"/);
+  assert.match(work.goal, /Tell me only what matters/);
+  assert.match(work.goal, /Read only: don't send, post, reply, change or delete anything in Gmail\./);
+  assert.match(work.goal, /If nothing new matters, answer NOTHING\.$/);
+  assert.doesNotMatch(work.goal, /Handle/);
+
+  // Every 15 minutes, Read & act, no main bot picked: the first picked; its account by its own name.
+  const wiki = S.makeCheck("ca_notion", { bots: ["bot_iris", "bot_otto"], level: "act", check: quarter }).routine;
+  assert.equal(wiki.botId, "bot_iris");
+  assert.equal(wiki.title, "Check Notion");
+  assert.deepEqual([wiki.schedule, wiki.quiet], [quarter, true]);
+  assert.match(wiki.goal, /^Check my Notion account "Acme wiki"/);
+  assert.match(wiki.goal, /Handle what's new that you can within your access/);
+  assert.match(wiki.goal, /Anything that sends, posts, deletes or pays asks me first \(use_app asks me\)/);
+  assert.match(wiki.goal, /Then tell me what you did and what still needs me\./);
+  assert.doesNotMatch(wiki.goal, /Read only/);
+
+  // Every morning, an app with no sign-in: 8 AM in the owner's zone, not quiet, a line when there's nothing.
+  const hn = S.makeCheck("open:hackernews", { bots: ["bot_otto"], level: "read", check: morning }).routine;
+  assert.equal(hn.botId, "bot_otto");
+  assert.equal(hn.title, "Check Hacker News");
+  assert.deepEqual([hn.schedule, hn.quiet, hn.timeZone], [morning, undefined, undefined]);
+  assert.match(hn.goal, /^Check Hacker News for what's new .*\(find_app_actions, then use_app\)\./);
+  assert.match(hn.goal, /If nothing new matters, say so in one line\.$/);
+  const at = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", hourCycle: "h23" }).format(new Date(hn.nextRunAt));
+  assert.equal(at, "08:00");
+
+  assert.equal(state.routines.length, before + 3, "one routine each");
+  for (const r of [work, wiki, hn]) noDashes(`${r.title} ${r.goal}`, r.title);
+});
+
+await check("no How often, no bot that can use it: nothing is made; connecting the same account again doesn't make a second", () => {
+  const before = state.routines.length;
+  assert.deepEqual(S.makeCheck("ca_work", { bots: ["bot_main"], level: "read" }), {}, "Only when asked");
+  assert.deepEqual(S.makeCheck("ca_work", undefined), {});
+  assert.match(S.makeCheck("ca_work", { bots: [], level: "read", check: hourly }).error, /No bot that can use it/);
+  assert.match(S.makeCheck("ca_work", { bots: ["bot_max"], level: "read", check: hourly }).error, /No bot that can use it/, "another workspace's bot can't use it");
+  assert.match(S.makeCheck("ca_gone", { bots: ["bot_main"], level: "read", check: hourly }).error, /No bot that can use it/);
+  assert.equal(state.routines.length, before);
+  // Again (connected again, or added again): the one it has.
+  const first = checksOf("ca_work")[0];
+  assert.equal(S.makeCheck("ca_work", { bots: ["bot_main"], level: "read", check: quarter }).routine.id, first.id);
+  assert.equal(state.routines.length, before);
+  assert.deepEqual(first.schedule, hourly, "left as it was");
+  // Another bot picked for it later has a check of its own.
+  const otto = S.makeCheck("ca_work", { bots: ["bot_otto"], level: "act", check: quarter }).routine;
+  assert.equal(otto.botId, "bot_otto");
+  assert.equal(checksOf("ca_work").length, 2);
+});
+
+await check("starters after a check: the same job isn't offered (a check through the day covers the watches and alerts, a morning check the once a day reads), the rest are", () => {
+  // Otto checks Gmail every 15 minutes (above): the alerts and the draft replies are its job already.
+  assert.deepEqual(S.offersFor("gmail", "bot_otto").templates.map((t) => t.id), ["gmail-morning-inbox", "gmail-weekly-follow-ups"]);
+  // Iris has none: all four.
+  assert.equal(S.offersFor("gmail", "bot_iris").templates.length, 4);
+  // A morning check of Google Calendar: today's meetings is its job, the meeting prep isn't.
+  state.accounts.push({ id: "ca_cal", app: "googlecalendar", appName: "Google Calendar", status: "active", at: 1, workspaceId: "ws_main" });
+  S.makeCheck("ca_cal", { bots: ["bot_otto"], level: "read", check: morning });
+  assert.deepEqual(S.offersFor("googlecalendar", "bot_otto").templates.map((t) => t.id), ["googlecalendar-meeting-prep"]);
+  S.offerStarters("googlecalendar", ["bot_otto"]);
+  assert.deepEqual([state.suggest.app, state.suggest.botId], ["googlecalendar", "bot_otto"], "what's left is still offered after the connect");
+  S.clearSuggest();
+  // Discord checked every 15 minutes and each morning: both starters are its job, so nothing is offered.
+  state.accounts.push(
+    { id: "ca_dc1", app: "discord", appName: "Discord", status: "active", at: 1, workspaceId: "ws_main" },
+    { id: "ca_dc2", app: "discord", appName: "Discord", label: "Community", status: "active", at: 1, workspaceId: "ws_main" },
+  );
+  S.makeCheck("ca_dc1", { bots: ["bot_otto"], level: "read", check: quarter });
+  S.makeCheck("ca_dc2", { bots: ["bot_otto"], level: "read", check: morning });
+  assert.deepEqual(S.offersFor("discord", "bot_otto").templates, []);
+  S.offerStarters("discord", ["bot_otto"]);
+  assert.equal(state.suggest, undefined, "nothing left to offer");
+  // The check removed: the starters are offered again.
+  R.deleteRoutine(checksOf("ca_dc1")[0].id);
+  assert.deepEqual(S.offersFor("discord", "bot_otto").templates.map((t) => t.id), ["discord-support-watch"]);
+});
+
+await check("a check is a routine like any other: the bot sees it with its account, and disconnecting drops it", () => {
+  const note = R.routinesNote(["bot_main"]);
+  const line = note.split("\n").find((l) => l.includes('"Check Gmail (Work)"'));
+  assert.match(line, /Every hour/);
+  assert.match(line, /chat run/);
+  assert.match(line, /quiet/);
+  assert.match(line, /checks Gmail \(Work · sam@acme\.com\), as Sam picked when connecting it/);
+  noDashes(line.replace(/rtn_\w+/g, ""), "routinesNote");
+  const others = state.routines.length - checksOf("ca_work").length;
+  S.dropChecks("ca_work");
+  assert.deepEqual(checksOf("ca_work"), []);
+  assert.equal(state.routines.length, others, "only that account's");
+  assert.equal(checksOf("ca_notion").length, 1);
+});
+
 /* ---------------- The routes ---------------- */
 
 const route = await import("@/app/api/routines/suggestions/route");
