@@ -12,7 +12,8 @@ import { connectMac, dropUsers, fakeOrgo, keyOf, newUserId, prepareDb, startClou
 /**
  * The app's state in the cloud (cloud/state.ts, protocol.ts): the blob written over its version, the
  * messages as rows, each user only ever their own, a big chat paged, builds from before still served
- * until a newer one writes, and the migration that moved the messages out of the blobs.
+ * until a newer one writes, a Mac older than the one that wrote kept out of it, and the migration that
+ * moved the messages out of the blobs.
  */
 
 let orgo: Listening;
@@ -226,6 +227,88 @@ test("builds from before: their whole-state upload is taken until a newer build 
   assert.match(((await refused.json()) as { error: string }).error, /Update Bops/);
   assert.deepEqual((await loadState(id))?.state, { owner: { name: "New" } });
   assert.equal((await page(id, 0)).messages.length, 2);
+});
+
+/** What 0.0.29 and later send besides (lib/server/app-version.ts appHeaders): which state they may be given. */
+const NEWER = { "x-bops-state-level": "3" };
+/** A routine 0.0.28 would start over and over (its nextRun throws on `time` after the task started). */
+const EVERY = { id: "rtn_every", botId: "boppy", title: "Inbox", goal: "Check my inbox", schedule: { kind: "every", minutes: 30 }, enabled: true, nextRunAt: 1 };
+const noticesOf = async (userId: string, headers: Record<string, string> = {}) =>
+  ((await (await call(userId, "/v1/notices", { headers })).json()) as { notices: { id: string; title: string }[] }).notices;
+
+test("once a Mac on a newer Bops wrote the user's state, an older Mac is kept out of it: reads, merges, writes and the tunnel refused, and told to update", async () => {
+  const id = user("level");
+  const older = { device: "mac-old" };
+  const newer = { device: "mac-new", headers: NEWER };
+  // Before: the older Mac writes as it always has, and the newer one reads that like any Mac.
+  assert.equal((await putState(id, 0, { owner: { name: "Old" }, routines: [] }, older)).status, 200);
+  assert.equal((await postMessages(id, [msg(1)], [], older)).status, 200);
+  let got = (await (await call(id, "/v1/state", newer)).json()) as CloudState;
+  assert.deepEqual([got.version, got.protocol], [1, 2]);
+
+  // The newer Mac writes what the older one can't run: the row is its level from then on.
+  assert.equal((await putState(id, 1, { owner: { name: "Old" }, routines: [EVERY] }, newer)).status, 200);
+  got = (await (await call(id, "/v1/state", newer)).json()) as CloudState;
+  assert.deepEqual([got.version, got.protocol, got.writer], [2, 3, "mac-new"]);
+
+  // The older Mac gets none of it, nor a 409 with it to merge, and nothing it sends lands.
+  const refused = async (res: Response, what: string) => {
+    assert.equal(res.status, 426, what);
+    const body = (await res.json()) as { error: string; code: string; state?: unknown };
+    assert.equal(body.code, "state_too_new", what);
+    assert.match(body.error, /Update Bops on this Mac/, what);
+    assert.equal(body.state, undefined, `${what}: nothing of the state with it`);
+  };
+  await refused(await call(id, "/v1/state", older), "its read");
+  await refused(await call(id, "/v1/state/head", older), "its look at the head");
+  await refused(await putState(id, 1, { owner: { name: "Old again" }, routines: [] }, older), "its write over what it read");
+  await refused(await putState(id, 2, { owner: { name: "Old again" }, routines: [] }, older), "its write over the newest");
+  await refused(await call(id, "/v1/messages?after=0", older), "its read of the messages");
+  await refused(await postMessages(id, [msg(2)], ["msg_000001"], older), "its messages");
+  await refused(await call(id, "/v1/state/backups", { method: "POST", body: {}, ...older }), "its copy before Start over");
+  // A build from before the protocol gets none of it either.
+  assert.equal((await fetch(`${cloud.url}/v1/state`, { headers: { Authorization: `Bearer ${keyOf(id)}` } })).status, 426);
+  assert.deepEqual((await loadState(id))?.state, { owner: { name: "Old" }, routines: [EVERY] });
+  const rows = (await (await call(id, "/v1/messages?after=0", newer)).json()) as CloudMessagesPage;
+  assert.deepEqual(rows.messages.map((m) => m.id), ["msg_000001"]);
+  // Its tunnel too (it would take the newer Mac's), and its notices say to update; the newer Mac's don't.
+  await assert.rejects(connectMac(cloud.url, id), /426/);
+  assert.deepEqual((await noticesOf(id)).filter((n) => n.id === "0").map((n) => n.title), ["Update Bops on this Mac"]);
+  assert.equal((await noticesOf(id, NEWER)).filter((n) => n.id === "0").length, 0);
+
+  // The newer Mac goes on as before.
+  const mac = await connectMac(cloud.url, id, { headers: NEWER });
+  try {
+    assert.equal((await call(id, "/v1/state/head", newer)).status, 200);
+    assert.equal((await postMessages(id, [msg(2)], [], newer)).status, 200);
+    assert.equal((await putState(id, 2, { owner: { name: "New" }, routines: [EVERY] }, newer)).status, 200);
+    await until(() => mac.frames.find((f) => f.t === "state" && f.version === 3), "the newer Mac hearing of its write");
+    got = (await (await call(id, "/v1/state", newer)).json()) as CloudState;
+    assert.deepEqual([got.version, got.protocol, got.state.owner], [3, 3, { name: "New" }]);
+  } finally {
+    mac.ws.close();
+  }
+});
+
+test("a user whose Macs are all older is never marked: their reads, merges, writes, tunnel and notices are as before", async () => {
+  const id = user("level-old");
+  const a = { device: "mac-a" };
+  const b = { device: "mac-b" };
+  assert.equal((await putState(id, 0, { owner: { name: "A" } }, a)).status, 200);
+  assert.equal((await postMessages(id, [msg(1)], [], a)).status, 200);
+  // B writes over what it read before A's write: 409 with A's state to merge, then its merge goes over it.
+  const conflict = await putState(id, 0, { owner: { name: "B" } }, b);
+  assert.equal(conflict.status, 409);
+  assert.deepEqual(((await conflict.json()) as CloudStateConflict).state, { owner: { name: "A" } });
+  assert.equal((await putState(id, 1, { owner: { name: "A and B" } }, b)).status, 200);
+  const got = (await (await call(id, "/v1/state", a)).json()) as CloudState;
+  assert.deepEqual([got.version, got.protocol, got.writer, got.state], [2, 2, "mac-b", { owner: { name: "A and B" } }]);
+  assert.deepEqual(await headOf(id), { version: 2, seq: got.seq, writer: "mac-b" });
+  assert.deepEqual((await page(id, 0)).messages.map((m) => m.id), ["msg_000001"]);
+  assert.equal((await call(id, "/v1/state/backups", { method: "POST", body: {}, ...b })).status, 200);
+  const mac = await connectMac(cloud.url, id);
+  mac.ws.close();
+  assert.equal((await noticesOf(id)).filter((n) => n.id === "0").length, 0);
 });
 
 test("a write is told to the user's connected Mac, and only theirs", async () => {

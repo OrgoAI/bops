@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { ensureUserRow, query } from "./db.ts";
-import type { Route, Upgrade } from "./http.ts";
+import { refuseUpgrade, type Route, type Upgrade } from "./http.ts";
 import { CLOUD_TUNNEL_HEADER, type CloudToMac, type MacToCloud, type PendingKind } from "./protocol.ts";
-import { toJson } from "./state.ts";
+import { stateTooNew, toJson } from "./state.ts";
 
 /**
  * GET /v1/connect: one WebSocket per signed-in Mac (frames in protocol.ts). The cloud replays
@@ -214,6 +214,12 @@ export const routes: Route[] = [];
 export const upgrades: Upgrade[] = [
   {
     path: "/v1/connect",
-    handle: (req, socket, head, { user }) => wss.handleUpgrade(req, socket, head, (ws) => attach(user.id, ws)),
+    // A Mac older than the one that wrote the user's state can't be given it (state.ts), nor the user's
+    // webhooks: it would take the tunnel from the newer one (each new one replaces the last) and answer
+    // them from what it had. If Postgres can't say, it connects as before.
+    handle: (req, socket, head, { user }) =>
+      void stateTooNew(req, user.id)
+        .catch(() => false)
+        .then((old) => (old ? refuseUpgrade(socket, 426, "Update Bops on this Mac") : wss.handleUpgrade(req, socket, head, (ws) => attach(user.id, ws)))),
   },
 ];

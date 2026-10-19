@@ -92,6 +92,8 @@ any, from when until when, and optionally only for apps older than a version). T
 asks `GET /v1/notices` at launch and every 15 minutes and shows each one once as a pop-up, until the
 user puts it away (`POST /v1/notices/dismiss { id }`, kept in `bops.notice_dismissals`, so it stays away
 on all their Macs). Posted, listed and ended with `Orgo's scripts/notices.sh (OrgoAI/bops-secrets)`.
+A Mac kept out of the user's state by a newer one (see "The app's state") gets one of the cloud's own
+first, "Update Bops on this Mac" (id `0`, in no table: it comes back each time the app asks).
 
 Webhooks are public and proven by the provider's signature instead.
 
@@ -448,8 +450,9 @@ verified is refused, before a text is sent and again at the check), and an addre
 ### The tunnel
 
 `GET /v1/connect` upgrades to a WebSocket (Orgo key as Bearer). One per user: a newer one replaces
-the older (which gets `{"t":"replaced"}` and close code 4000). Frames are JSON (`CloudToMac`,
-`MacToCloud` in `protocol.ts`).
+the older (which gets `{"t":"replaced"}` and close code 4000). A Mac kept out of the user's state by
+a newer one is refused (426, see "The app's state"), so it never takes the tunnel from that one. Frames
+are JSON (`CloudToMac`, `MacToCloud` in `protocol.ts`).
 
 - `req` → the Mac replays it against its own server (`http://127.0.0.1:<port><path>`), adding
   `x-bops-cloud: <token>` (`CLOUD_TUNNEL_HEADER`; the token never leaves that Mac process) after
@@ -633,6 +636,15 @@ gets a `state` frame and reads what changed; the others look at the head every 3
 from before still `PUT /v1/state { version, state }` their whole state as a backup (its messages
 become rows) and `GET` it back with the messages in, until a newer build writes for the user
 (`protocol` 2): then the old upload is refused (426).
+
+Each app also says which state it may be given, `X-Bops-State-Level: 3` from 0.0.29 on (with every
+call and the tunnel, `lib/server/app-version.ts`; none counts as 2), and a write keeps the highest in
+`protocol`. Once that's above an app's, every one of the calls above from it is refused (426
+`state_too_new`), reads, merges and writes alike, and so is its tunnel; its notices say to update.
+0.0.28 runs a routine that runs every so often or before meetings over and over (its `nextRun` throws
+after the task started), a monthly one daily, and lists a bot with an app it has no access to as able
+to use it. What such a Mac changes meanwhile waits on it (`unsent-state.json`) and goes up merged once
+it's updated. A user whose Macs are all older is never marked: nothing changes for them.
 
 ## The main bot's chat from the phone
 

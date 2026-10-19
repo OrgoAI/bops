@@ -241,7 +241,7 @@ const cloudHttp = createServer((req, res) => {
 });
 const wss = new WebSocketServer({ noServer: true });
 cloudHttp.on("upgrade", (req, socket, head) => {
-  cloud.upgrades.push({ path: req.url, auth: req.headers.authorization, version: req.headers["x-bops-version"] });
+  cloud.upgrades.push({ path: req.url, auth: req.headers.authorization, version: req.headers["x-bops-version"], level: req.headers["x-bops-state-level"] });
   if (req.url !== "/v1/connect") return socket.destroy();
   wss.handleUpgrade(req, socket, head, (ws) => {
     const c = { ws, auth: req.headers.authorization, frames: [], closed: null, at: Date.now() };
@@ -1437,11 +1437,14 @@ await sleep(1000);
 assert.equal(await S.flushState(5000), true);
 const blobPuts = () => cloud.stateRequests.filter((x) => x.method === "PUT" && x.path === "/v1/state");
 const msgPosts = () => cloud.stateRequests.filter((x) => x.method === "POST" && x.path === "/v1/messages");
-// Every call is the signed-in user's, on their key, naming them, the protocol and this Mac.
+// Every call is the signed-in user's, on their key, naming them, the protocol and this Mac, and which
+// state it may be given (cloud/state.ts keeps a Mac older than the last to write out of it): the
+// protocol stays 2, so a cloud from before (this fake is one) answers this app as it always did.
 const lastCall = cloud.stateRequests.at(-1);
 assert.equal(lastCall.headers.authorization, `Bearer ${KEY}`);
 assert.equal(lastCall.headers["x-bops-user"], "u1");
 assert.equal(lastCall.headers["x-bops-protocol"], "2");
+assert.deepEqual(cloud.stateRequests.filter((r) => r.headers["x-bops-protocol"] !== "2" || r.headers["x-bops-state-level"] !== "3").map((r) => `${r.method} ${r.path}`), []);
 assert.match(lastCall.headers["x-bops-device"], /^[0-9a-f]{16}$/);
 const device = lastCall.headers["x-bops-device"];
 
@@ -1991,6 +1994,12 @@ assert.deepEqual(web.calls.filter((c) => !stubbed.has(c.host)), []);
 const unsaid = [...cloud.requests, ...cloud.stateRequests].filter((r) => r.headers["x-bops-version"] !== "9.9.9").map((r) => `${r.method} ${r.path}`);
 assert.deepEqual(unsaid, [], "every call to the cloud says the app's version");
 assert.ok(cloud.upgrades.length > 0 && cloud.upgrades.every((u) => u.version === "9.9.9"), `every socket says it: ${JSON.stringify(cloud.upgrades.map((u) => [u.path, u.version]))}`);
+// What the cloud keeps a Mac older than the user's state out of says which state this one may be given:
+// the tunnel and the notices, as the state's calls above.
+const tunnels = cloud.upgrades.filter((u) => u.path === "/v1/connect");
+assert.ok(tunnels.length > 0 && tunnels.every((u) => u.level === "3"), `every tunnel says its state level: ${JSON.stringify(tunnels.map((u) => u.level))}`);
+const noticeCalls = cloud.requests.filter((r) => r.path.startsWith("/v1/notices"));
+assert.ok(noticeCalls.length > 0 && noticeCalls.every((r) => r.headers["x-bops-state-level"] === "3"), "and every call for notices");
 assert.ok(cloud.requests.some((r) => r.path.startsWith("/proxy/openai/")) && cloud.requests.some((r) => r.path.startsWith("/proxy/composio")), "through the providers' proxies too");
 const toOrgo = web.calls.filter((c) => c.host === "www.orgo.ai");
 assert.ok(toOrgo.length > 0 && toOrgo.every((c) => c.headers["x-bops-version"] === "9.9.9"), "every call to Orgo says the app's version");
