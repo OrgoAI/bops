@@ -70,8 +70,9 @@ export function returnControl() {
 }
 export async function ensureComputer(botId) { calls.push(["ensureComputer", botId]); }
 export async function ensureScreens(computerId) { calls.push(["ensureScreens", computerId]); }
+export function brainLeft(brainId, name) { calls.push(["brainLeft", brainId, name]); return globalThis.__brainLeft?.(brainId) ?? []; }
 `;
-const OWN = new Set(["takeOver", "returnControl", "ensureComputer", "ensureScreens"]);
+const OWN = new Set(["takeOver", "returnControl", "ensureComputer", "ensureScreens", "brainLeft"]);
 // Modules that start processes when loaded do nothing.
 const STAND_INS = new Set(["mac", "relay", "desktop", "mirror"]);
 registerHooks({
@@ -107,7 +108,7 @@ registerHooks({
 const logged = [];
 for (const k of ["info", "warn", "error", "debug"]) console[k] = (...a) => void logged.push(a.map(String).join(" "));
 
-/* ---------------- Fakes: Claude Code, Codex, a terminal, Chrome's DevTools, bops-chrome ---------------- */
+/* ---------------- Fakes: Claude Code, Codex, a terminal, Chrome, Chrome's DevTools, bops-chrome ---------------- */
 
 const LOG = join(scratch, "logs");
 mkdirSync(LOG);
@@ -130,6 +131,8 @@ case "$1 \${2:-}" in
     if [ -f ${SLOW} ]; then for _ in $(seq 1 300); do [ -f ${STOP} ] && exit 1; sleep 0.1; done; exit 1; fi
     echo "Opening the browser to sign in"
     "$BROWSER" "https://claude.ai/oauth/authorize?code=true&state=s1&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback" || echo "no browser"
+    # The user signs in on the page it opened (its Chrome, started in the background, up first).
+    for _ in $(seq 1 60); do [ -s ${LOG}/signin-chrome.log ] && break; sleep 0.05; done
     printf '%s' '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-NEVER-KEPT"}}' > "$D/.credentials.json"
     echo "Login successful." ;;
   "auth logout") rm -f "$D/.credentials.json"; echo "Successfully logged out." ;;
@@ -144,6 +147,8 @@ fake("xdotool", "exit 0");
 // The screen's Chrome answers on its DevTools port: /json/version, and /json/new with the page to open.
 fake("curl", `echo "$*" >> ${LOG}/curl.log\nfor a in "$@"; do case "$a" in */json/version) exit 0 ;; esac; done\nexit 0`);
 fake("bops-chrome", `echo "$*" >> ${LOG}/chrome.log`);
+// The sign-in's own Chrome (bops-brain-browser): what it was asked, and the profile it would write to.
+fake("google-chrome-stable", `echo "$*" >> ${LOG}/signin-chrome.log\nfor a in "$@"; do case "$a" in --user-data-dir=*) mkdir -p "\${a#--user-data-dir=}/Default" && echo cookie > "\${a#--user-data-dir=}/Default/Cookies" ;; esac; done`);
 const lines = (name) => (existsSync(join(LOG, name)) ? readFileSync(join(LOG, name), "utf8") : "");
 /** Every run of the fake Claude Code so far: its arguments and its environment. */
 const claudeRuns = () =>
@@ -221,7 +226,9 @@ async function bash(id, command) {
 }
 const orgoCalls = [];
 const json = (status, obj) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
-const vault = new Map([["ANTHROPIC_API_KEY", "sk-ant-api03-VAULT-KEY"]]);
+/** The Vault, by where each key is ("<Orgo project>/<name>"; no project: for all workspaces), and what was revealed. */
+const vault = new Map([["/ANTHROPIC_API_KEY", "sk-ant-api03-VAULT-KEY"]]);
+const reveals = [];
 globalThis.fetch = async (input, init = {}) => {
   const req = new Request(input, init);
   const url = new URL(req.url);
@@ -231,7 +238,13 @@ globalThis.fetch = async (input, init = {}) => {
   orgoCalls.push({ method: req.method, path: url.pathname, body });
   const m = /^\/api\/computers\/([^/]+)\/bash$/.exec(url.pathname);
   if (m && req.method === "POST") return json(200, await bash(m[1], body.command));
-  if (url.pathname === "/api/secrets/reveal" && req.method === "POST") return vault.has(body.name) ? json(200, { name: body.name, value: vault.get(body.name) }) : json(404, { error: "Secret not set" });
+  if (url.pathname === "/api/secrets/reveal" && req.method === "POST") {
+    const k = `${body.workspace_id ?? ""}/${body.name}`;
+    reveals.push(k);
+    return vault.has(k) ? json(200, { name: body.name, value: vault.get(k) }) : json(404, { error: "Secret not set" });
+  }
+  if (url.pathname === "/api/secrets" && req.method === "GET")
+    return json(200, { secrets: [...vault.keys()].map((k) => ({ name: k.split("/")[1], workspace_id: k.split("/")[0] || null, updated_at: "2026-10-01T00:00:00Z" })) });
   if (url.pathname === "/api/bops/computer/active") return json(200, { ok: true });
   return json(404, { error: "Not found" });
 };
@@ -315,21 +328,25 @@ await test("a saved state's brains come back in shape: real bots only, Codex on 
     file,
     JSON.stringify({
       bots: [
-        { id: "boppy", name: "Boppy", role: "Chief of Staff", color: "#0A0A0A", isMain: true, computerStatus: "none", brain: "brain_ok" },
+        { id: "boppy", name: "Boppy", role: "Chief of Staff", color: "#0A0A0A", isMain: true, computerStatus: "none", computerId: "pc-now", brain: "brain_ok" },
         { id: "otto", name: "Otto", role: "Outbound", color: "#E9FF3B", isMain: false, computerStatus: "none", brain: "brain_lost" },
       ],
       brains: [
         { id: "brain_ok", kind: "claude", name: "Claude Code", auth: "plan", bots: ["boppy", "ghost"], createdAt: 1, signingIn: { botId: "boppy", computerId: "pc", display: 100, at: 1 } },
         { id: "brain_cx", kind: "codex", name: "Codex", auth: "plan", bots: "boppy", workspaceId: "ws_main", createdAt: 2, signingIn: { botId: "boppy", computerId: "pc", display: 101, at: 1, failed: "it took too long." } },
         { id: "brain_bad", kind: "gemini", name: "?", auth: "plan", bots: [], createdAt: 3 },
+        { id: "brain_away", kind: "claude", name: "Claude Code", auth: "plan", bots: [], workspaceId: "ws_deleted", createdAt: 4 },
+        { id: "brain_old", kind: "claude", name: "Claude Code 2", auth: "plan", bots: ["boppy"], createdAt: 5, signIns: [{ computerId: "pc-replaced", at: 1, account: { plan: "pro" } }, { computerId: "pc-now", at: 2, account: { plan: "max" } }] },
         null,
       ],
+      workspaces: [{ id: "ws_main", name: "Main", createdAt: 1 }],
     }),
   );
   const before = structuredClone(S.getState());
   await S.bindSignIn("u-norm");
   const st = S.getState();
-  assert.deepEqual(st.brains.map((x) => x.id), ["brain_ok", "brain_cx"]);
+  assert.deepEqual(st.brains.map((x) => x.id), ["brain_ok", "brain_cx", "brain_old"], "a deleted workspace's brain goes with it");
+  assert.deepEqual(st.brains[2].signIns.map((x) => x.computerId), ["pc-now"], "signed in only on a computer a bot has");
   const [ok, cx] = st.brains;
   assert.deepEqual(ok.bots, ["boppy"], "a bot that isn't here is dropped");
   assert.equal(ok.workspaceId, "ws_main");
@@ -371,7 +388,7 @@ await test("brains are added to the workspace with the bots picked, named after 
   B.removeBrain(z.id);
 });
 
-await test("a brain is renamed, and its bots set one by one: uses it, can pick it, or neither", () => {
+await test("a brain is renamed, and its bots set one by one: uses it, can pick it, or neither", async () => {
   assert.equal(B.updateBrain(planId, { name: "  Claude Code — work  " }).name, "Claude Code - work", "one line, no long dash");
   assert.throws(() => B.updateBrain(planId, { name: "   " }), /Give it a name/);
   assert.equal(B.setBrainBot(planId, "boppy", "may").bots.includes("boppy"), true);
@@ -391,6 +408,9 @@ await test("a brain is renamed, and its bots set one by one: uses it, can pick i
   B.setBotBrain("rook", null);
   assert.equal(bot("rook").brain, undefined);
   B.setBotBrain("rook", planId);
+  // Each change that takes a bot off it stops what it runs for that bot now (sessions.ts brainLeft).
+  await until("the threads it runs to be let go", () => sessionCalls.filter((c) => c[0] === "brainLeft" && c[1] === planId).length >= 4);
+  assert.ok(sessionCalls.some((c) => c[0] === "brainLeft" && c[2] === "Claude Code"));
 });
 
 /* ---------------- Claude Code on a computer ---------------- */
@@ -447,13 +467,19 @@ await test("a sign-in opens Claude Code's own on a free screen of the bot's comp
   assert.ok(sessionCalls.some((x) => x[0] === "ensureScreens" && x[1] === "pc-main"));
   // The terminal on screen 101, running Claude Code's own login.
   assert.match(lines("terminal.log"), new RegExp(`--disable-server --title Sign in to Claude Code .* -x .*bops-brain sign-in ${planId} 101`));
-  const login = claudeRuns().find((r) => r.args === "auth login --claudeai");
-  assert.ok(login, "claude auth login --claudeai");
+  // Claude Code's own sign-in as it is by default (its Claude subscription one): Bops adds no choice of its own.
+  const login = claudeRuns().find((r) => r.args === "auth login");
+  assert.ok(login, "claude auth login");
   assert.equal(login.env.DISPLAY, ":101");
   assert.equal(login.env.CLAUDE_CONFIG_DIR, join(c.brains, planId));
   assert.match(login.env.BROWSER, /bops-brain-browser$/);
-  // Its page in that screen's Chrome, as a new tab over DevTools (9200 + the display).
-  assert.match(lines("curl.log"), /-X PUT http:\/\/127\.0\.0\.1:9301\/json\/new\?https%3A%2F%2Fclaude\.ai%2Foauth%2Fauthorize%3Fcode%3Dtrue%26state%3Ds1%26redirect_uri%3Dhttp%253A%252F%252Flocalhost%253A54545%252Fcallback/);
+  // Its page in a Chrome of its own on that screen: a throwaway profile beside the brain's folder, incognito,
+  // no DevTools port, a window class of its own. Never the bots' Chrome there (its DevTools, bops-chrome).
+  const page = lines("signin-chrome.log");
+  assert.ok(page.includes(`--user-data-dir=${join(c.brains, `.signin-${planId}`)} `), page);
+  for (const want of ["--incognito", "--class=BopsSignIn", "--no-first-run", "https://claude.ai/oauth/authorize?code=true&state=s1&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback"]) assert.ok(page.includes(want), `${want}: ${page}`);
+  assert.ok(!/remote-debugging-port|BopsBrowser|profiles\/s/.test(page), page);
+  assert.ok(!lines("curl.log").includes("json/new") && !lines("chrome.log"), "nothing went to the bots' Chrome");
   // Signed in: only who, kept; the screen handed back; the chat says so.
   const x = brain(planId);
   assert.equal(x.signingIn, undefined);
@@ -466,6 +492,7 @@ await test("a sign-in opens Claude Code's own on a free screen of the bot's comp
   assert.equal(note.text, "Claude Code is signed in on Boppy's computer with your Max plan.");
   assert.equal(note.role, "system");
   assert.equal(readFileSync(join(c.brains, planId, ".computer"), "utf8"), "pc-main", "the folder knows its computer");
+  assert.ok(!existsSync(join(c.brains, `.signin-${planId}`)), "the sign-in's Chrome profile (its claude.ai cookies) is gone");
   assert.ok(T.brainReady(x, bot("otto"), S.getState()));
   assert.ok(!T.brainReady(x, bot("rook"), S.getState()), "Rook's computer is another one");
   S.update((s) => (s.sessions = s.sessions.filter((y) => y.id !== "s_busy")));
@@ -600,7 +627,35 @@ await test("a key brain's key comes from the Vault for its run only, and isn't k
   assert.equal(await B.revealBrainKey(k), "sk-ant-api03-VAULT-KEY");
   assert.ok(!JSON.stringify(S.getState()).includes("VAULT-KEY"));
   await assert.rejects(B.revealBrainKey(brain(planId)), /doesn't run on a key/);
+  // Added while the key was for all workspaces; now this workspace has its own, and the other is gone: its own.
+  S.update((s) => (s.workspaces.find((w) => w.id === "ws_main").orgoProjectId = "proj_main"));
+  vault.delete("/ANTHROPIC_API_KEY");
+  vault.set("proj_main/ANTHROPIC_API_KEY", "sk-ant-api03-WS-KEY");
+  assert.equal(brain(k.id).keyScope, "all");
+  assert.equal(await B.revealBrainKey(brain(k.id)), "sk-ant-api03-WS-KEY", "the workspace's own, as the bots' calls find it");
+  assert.equal(reveals.at(-1), "proj_main/ANTHROPIC_API_KEY");
+  // Both there: the workspace's own first.
+  vault.set("/ANTHROPIC_API_KEY", "sk-ant-api03-VAULT-KEY");
+  assert.equal(await B.revealBrainKey({ ...brain(k.id), keyScope: "all" }), "sk-ant-api03-WS-KEY");
+  vault.delete("proj_main/ANTHROPIC_API_KEY");
+  S.update((s) => delete s.workspaces.find((w) => w.id === "ws_main").orgoProjectId);
   B.removeBrain(k.id);
+});
+
+await test("a sign-in asked for on another computer closes the one going first: its terminal and page, and its screen back", async () => {
+  writeFileSync(SLOW, "");
+  const first = await B.startSignIn(planId, "otto");
+  await until("the first sign-in to open", () => pc("pc-main").commands.includes(`bops-brain login ${planId} ${first.display} pc-main`));
+  assert.equal(S.getState().takeover?.display, first.display);
+  const n = pc("pc-main").commands.length;
+  const handed = sessionCalls.filter((c) => c[0] === "returnControl").length;
+  const at = await B.startSignIn(planId, "rook");
+  assert.equal(at.botId, "rook");
+  assert.ok(pc("pc-main").commands.slice(n).includes(`bops-brain cancel ${planId}`), "closed on Boppy's computer");
+  assert.equal(brain(planId).signingIn.computerId, "pc-rook");
+  assert.equal(sessionCalls.filter((c) => c[0] === "returnControl").length, handed + 1, "Boppy's screen went back before Rook's was taken");
+  await B.cancelSignIn(planId);
+  rmSync(SLOW, { force: true });
 });
 
 /* ---------------- Routes ---------------- */
@@ -708,7 +763,10 @@ await test("Settings, Brain: Bops agent first with its bots, then each brain and
   assert.match(html, /aria-label="Remove"/);
   assert.equal(brainLine(view(BRAINS), BRAINS[2], []), "Key: ANTHROPIC_API_KEY · not in your Vault");
   assert.equal(brainLine(view(BRAINS), { ...BRAINS[1], signingIn: { botId: "rook", computerId: "pc-rook", display: 100, at: 1, failed: "it took too long." } }), "Sign-in didn't finish");
-  assert.equal(brainLine(view(BRAINS), { ...BRAINS[0], signIns: [...BRAINS[0].signIns, { computerId: "pc-rook", at: 2, account: { plan: "pro" } }] }), "Max plan · signed in on Boppy's and Rook's computers");
+  // A plan per computer, when they differ; one, when they agree; never a computer no bot has now.
+  assert.equal(brainLine(view(BRAINS), { ...BRAINS[0], signIns: [...BRAINS[0].signIns, { computerId: "pc-rook", at: 2, account: { plan: "pro" } }] }), "Max plan on Boppy's computer, Pro plan on Rook's computer");
+  assert.equal(brainLine(view(BRAINS), { ...BRAINS[0], signIns: [...BRAINS[0].signIns, { computerId: "pc-rook", at: 2, account: { plan: "max" } }] }), "Max plan · signed in on Boppy's and Rook's computers");
+  assert.equal(brainLine(view(BRAINS), { ...BRAINS[0], signIns: [{ computerId: "pc-gone", at: 0, account: { plan: "pro" } }, ...BRAINS[0].signIns] }), "Max plan · signed in on Boppy's computer");
 });
 
 await test("adding a brain asks how it signs in, in Claude Code's own words, even with a key saved; Codex takes a key", () => {
@@ -719,11 +777,11 @@ await test("adding a brain asks how it signs in, in Claude Code's own words, eve
   const claudeHtml = renderToStaticMarkup(h(AddBrain, { state: st, keys: [{ name: "ANTHROPIC_API_KEY", scope: "all" }], kind: "claude", onShowScreen: noop, onOpenVault: noop, onDone: noop }));
   const claude = text(claudeHtml);
   noDashes(claude, "Add Claude Code");
-  assert.match(claude, /How should it sign in\? You have an Anthropic key saved\. Use it, or sign in with your Claude plan\? Claude plan \(Pro, Max, Team\) .* Anthropic API key /);
+  assert.match(claude, /How should it sign in\? You have an Anthropic key saved\. Use it, or sign in with your Claude plan\? Claude account with subscription Pro, Max, Team, or Enterprise\. .* Anthropic API key /);
   assert.equal((claudeHtml.match(/aria-pressed="true"/g) ?? []).length, 1, "only Claude Code is picked, not a way to sign in");
   const codex = text(renderToStaticMarkup(h(AddBrain, { state: st, keys: [], kind: "codex", onShowScreen: noop, onOpenVault: noop, onDone: noop })));
   noDashes(codex, "Add Codex");
-  assert.match(codex, /How should it sign in\? OpenAI API key Your key from the Vault\. Usage is billed to your OpenAI account\. Add your OpenAI key in the Vault first\. Bots never see it\. Open the Vault Bots that use it Boppy Otto Rook Add/);
+  assert.match(codex, /How should it sign in\? OpenAI API key Your key from the Vault\. Usage is billed to your OpenAI account\. Add your OpenAI key in the Vault first\. Only Codex on the bot's computer gets it\. Open the Vault Bots that use it Boppy Otto Rook Add/);
   assert.doesNotMatch(codex, /Claude plan/);
 });
 
@@ -740,6 +798,20 @@ await test("a bot's Brain: Bops agent or the brains it's on, and Sign in where i
   assert.equal(agent, "Brain Bops agent, on AI credit Bops agent Claude Code 2");
   const key = text(renderToStaticMarkup(h(BotBrain, { state: withBrain(view(BRAINS), "boppy", "b_key"), bot: { ...bot("boppy"), brain: "b_key" }, onShowScreen: noop, className: "" })));
   assert.equal(key, "Brain Claude Code on your Anthropic key Bops agent Claude Code 2");
+  // A sign-in going on Rook's computer: Otto, signed in on Boppy's, still says so, with no Show of Rook's screen.
+  const going = BRAINS.map((x) => (x.id === "b_max" ? { ...x, signingIn: { botId: "rook", computerId: "pc-rook", display: 102, at: 5 } } : x));
+  const otto = text(renderToStaticMarkup(h(BotBrain, { state: withBrain(view(going), "otto", "b_max"), bot: { ...bot("otto"), brain: "b_max" }, onShowScreen: noop, className: "" })));
+  assert.equal(otto, "Brain Claude Code on your Max plan Bops agent Claude Code");
+  const rook = text(renderToStaticMarkup(h(BotBrain, { state: withBrain(view(going), "rook", "b_max"), bot: { ...bot("rook"), brain: "b_max" }, onShowScreen: noop, className: "" })));
+  assert.match(rook, /^Brain Signing in on Rook's computer .* Claude Code's sign-in is open on its screen\. Show$/);
+  // Its tasks on this Mac run on Bops agent, on AI credit, whatever its brain: it says so.
+  const onMac = text(renderToStaticMarkup(h(BotBrain, { state: { ...withBrain(view(BRAINS), "boppy", "b_key"), host: "mac" }, bot: { ...bot("boppy"), brain: "b_key" }, onShowScreen: noop, className: "" })));
+  assert.equal(onMac, "Brain Your bots work on this Mac, so they run on Bops agent, on AI credit Bops agent Claude Code 2");
+  const macBot = text(renderToStaticMarkup(h(BotBrain, { state: withBrain(view(BRAINS), "rook", "b_max"), bot: { ...bot("rook"), brain: "b_max", runsOn: "mac" }, onShowScreen: noop, className: "" })));
+  assert.match(macBot, /^Brain Rook works on your Mac, so its tasks run on Bops agent, on AI credit Bops agent Claude Code Claude Code 3$/, macBot);
+  const some = text(renderToStaticMarkup(h(BotBrain, { state: { ...withBrain(view(BRAINS), "boppy", "b_key"), mac: { ready: true } }, bot: { ...bot("boppy"), brain: "b_key", runsOn: "auto" }, onShowScreen: noop, className: "" })));
+  assert.equal(some, "Brain Claude Code on your Anthropic key · tasks on your Mac run on Bops agent Bops agent Claude Code 2");
+  noDashes(onMac + macBot + some, "a bot's Brain on the Mac");
 });
 
 await test("a thread says which brain ran it; one Claude Code ran opens in a terminal on its screen, which says where and that a reply closes it", async () => {
@@ -787,9 +859,15 @@ await test("a thread says which brain ran it; one Claude Code ran opens in a ter
   // A terminal for another thread isn't this one's.
   assert.match(sheet(thread("ses_a"), { takeover: { ...open, sessionId: "ses_b" } }), /Open in terminal/);
   // Bops agent finished it, Codex ran it, Bops agent ran it, or the bots work on this Mac: no terminal.
+  // Bops agent finishes it while Otto is on Claude Code: it says so, as it's on AI credit.
   const finished = sheet(thread("ses_a", { onBopsAgent: true }));
-  assert.match(finished, /^Cart total Claude Code Otto/, "Claude Code ran it still");
-  assert.doesNotMatch(finished, /Open in terminal/);
+  assert.match(finished, /^Cart total Bops agent Otto/, finished);
+  assert.doesNotMatch(finished, /Open in terminal|Claude Code/);
+  // So does one Bops agent took over (its response chain) or began, and Otto off Claude Code has no terminal.
+  assert.match(sheet(thread("ses_a", { responseId: "resp_1" })), /^Cart total Bops agent Otto/);
+  assert.match(sheet(thread("ses_e", { brainRun: undefined, agentSessionId: "sesn_1" })), /^Cart total Bops agent Otto/);
+  assert.match(sheet(thread("ses_e", { brainRun: undefined, agentSessionId: "sesn_1" }), { bots: view(BRAINS).bots }), /^Cart total Otto · finished/, "no badge when Otto isn't on a brain");
+  assert.doesNotMatch(sheet(thread("ses_a"), { bots: view(BRAINS).bots }), /Open in terminal/, "Otto doesn't use Claude Code now");
   const codexHtml = sheetHtml(thread("ses_c", { status: "running", display: 101, brainRun: { brainId: "b_codex", kind: "codex", computerId: "pc-main", cli: "019a0000-1111-7a2b-9c3d-123456789abc", started: true } }));
   const codex = text(codexHtml);
   assert.match(codex, /^Cart total Codex Otto · working · /);
@@ -823,6 +901,7 @@ await test("a bot's profile says which brain its tasks run on, by its role", asy
   const agent = view(BRAINS);
   assert.doesNotMatch(panel(agent, agent.bots.find((b) => b.id === "otto")), /Bops team (Claude Code|Codex)/, "Bops agent: none");
   assert.doesNotMatch(panel({ ...st, host: "mac" }, otto), /Bops team Claude Code/, "on this Mac its tasks run on Bops agent");
+  assert.doesNotMatch(panel(st, { ...otto, runsOn: "mac" }), /Bops team Claude Code/, "nor for a bot that works on the user's Mac");
 });
 
 await test("the brain files have no long dashes in what they say", () => {

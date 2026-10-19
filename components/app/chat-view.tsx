@@ -3,7 +3,7 @@
 import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BLOCKER_ASK, BRAIN_NAMES, live, pairChatId, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
+import { BLOCKER_ASK, brainOf, live, pairChatId, threadRunner, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
 import { OpenLink } from "./panel-tabs";
@@ -17,7 +17,7 @@ import { Fold } from "./fold";
 import { SaveSkillDialog } from "./skill-dialog";
 import { undash } from "./side-group";
 import { ApiAsk, apiAskOf, apiCallOf, ApiNote } from "./keys";
-import { BrainBadge, brainSignIn, openInTerminal } from "./brains";
+import { BrainBadge, brainSignIn, openInTerminal, threadBadge } from "./brains";
 import { ChatAvatar, chatName, clockTime, needsYou, post, StatusIcon, teamOf, useNow } from "./ui";
 
 /** Light markdown for bot text: **bold** and [links](url). */
@@ -1709,6 +1709,7 @@ function readableOn(hex: string) {
 function SessionChip({ session: s, state, onClick }: { session: Session; state: AppState; onClick: () => void }) {
   const b = state.bots.find((x) => x.id === s.botId);
   const waiting = needsYou(s);
+  const badge = threadBadge(s, state);
   return (
     <button
       onClick={onClick}
@@ -1716,8 +1717,8 @@ function SessionChip({ session: s, state, onClick }: { session: Session; state: 
     >
       <StatusIcon session={s} size={14} dark />
       <span className={`truncate text-[14px] leading-[18px] ${live(s) || waiting ? "text-ink" : "text-[#6B6B6B]"}`}>{s.title}</span>
-      {/* The brain that ran it, when one did (Session.brainRun): Bops agent's threads have none. */}
-      {s.brainRun?.started && <BrainBadge kind={s.brainRun.kind} title={`${BRAIN_NAMES[s.brainRun.kind]} ran this`} />}
+      {/* The brain that runs it, when one does (threadRunner); Bops agent only where its bot is on a brain now. */}
+      {badge && <BrainBadge kind={badge.kind} title={badge.title} />}
       {/* Where it runs: the user's Mac or the cloud (deciding: nothing yet). */}
       {s.runsOn === "mac" ? (
         <span title="On your Mac" className="flex shrink-0 items-center gap-1 rounded-full bg-[#F2F2F0] px-1.5 py-px text-[11px] leading-[14px] text-[#3A3A38]">
@@ -1816,11 +1817,13 @@ export function ThreadSheet({
   const lines = timeline(s);
   const toolCount = s.steps.filter((x) => x.tool !== "note" && x.tool !== "setup").length;
   const started = s.startedAt ?? s.createdAt;
-  // The brain that ran it (Session.brainRun). One Claude Code runs opens in a terminal on its screen for the
-  // user (sessions.ts openInTerminal); while it's open there (the takeover's `terminal`), a reply closes it.
-  const brain = s.brainRun?.started ? s.brainRun.kind : undefined;
+  // The brain that runs it (threadRunner). One Claude Code runs, for a bot still on that brain, opens in a
+  // terminal on its screen for the user (sessions.ts openInTerminal); while it's open there (the takeover's
+  // `terminal`), a reply closes it.
+  const runner = threadRunner(s);
+  const badge = threadBadge(s, state);
   const terminal = state.takeover?.terminal && state.takeover.sessionId === s.id ? state.takeover.display : undefined;
-  const canTerminal = brain === "claude" && !s.onBopsAgent && s.runsOn !== "mac" && state.host !== "mac" && terminal === undefined && !!onShowScreen;
+  const canTerminal = runner === "claude" && brainOf(b, state)?.id === s.brainRun?.brainId && s.runsOn !== "mac" && state.host !== "mac" && terminal === undefined && !!onShowScreen;
   const [termBusy, setTermBusy] = useState(false);
   const [termError, setTermError] = useState<{ id: string; text: string } | null>(null);
   const toTerminal = async () => {
@@ -1854,7 +1857,7 @@ export function ThreadSheet({
           <div className="flex min-w-0 flex-1 flex-col gap-px">
             <div className="flex min-w-0 items-center gap-1.5">
               <span className="truncate text-[15px] font-semibold leading-[18px]">{s.title}</span>
-              {brain && <BrainBadge kind={brain} title={`${BRAIN_NAMES[brain]} ran this`} />}
+              {badge && <BrainBadge kind={badge.kind} title={badge.title} />}
             </div>
             <button onClick={onShowComputer} className="flex items-center gap-1.5 text-left text-[12px] leading-4 text-[#6B6B6B] hover:text-ink">
               {b.name} · {s.runsOn === "mac" ? "on your Mac · " : ""}
@@ -2045,7 +2048,7 @@ export function ThreadSheet({
                   ? "Reply in thread · closes the terminal and carries on"
                   : live(s)
                     ? // Codex takes a reply as its next turn, once it's done with this one (cli-agents.ts codexDriver).
-                      s.brainRun?.kind === "codex" && !s.onBopsAgent
+                      s.brainRun?.kind === "codex" && runner !== "agent"
                       ? "Reply in thread · it takes this next"
                       : "Reply in thread · it sees this as it works"
                     : "Reply in thread · picks it back up"

@@ -69,10 +69,17 @@ gone_within() {
 }
 untail() { pkill -f "[t]ail .*$DIR/in.jsonl" 2>/dev/null || true; }
 signal() { local p; p="$(cat "$DIR/pid" 2>/dev/null || true)"; [[ "$p" =~ ^[0-9]+$ ]] && kill "-$1" "$p" 2>/dev/null || true; }
+# Stop it: SIGINT (Stop), then its input ends, then harder. The last resort takes its whole process group
+# with it: Codex's runner leads one of its own (setsid), so the exec it runs doesn't carry on without it.
 halt() {
+  local p
   if alive; then
     signal INT
-    gone_within 30 || { untail; gone_within 20; } || { signal TERM; gone_within 20; } || signal KILL
+    gone_within 30 || { untail; gone_within 20; } || { signal TERM; gone_within 20; } || {
+      p="$(cat "$DIR/pid" 2>/dev/null || true)"
+      signal KILL
+      [[ "$p" =~ ^[0-9]+$ ]] && kill -KILL -- "-$p" 2>/dev/null || true
+    }
   fi
   untail
   rm -f "$DIR/key"
@@ -128,7 +135,7 @@ case "$CMD" in
       DISPLAY=":$N" setsid nohup "$HERE/bops-agent" _codex "$T" "$B" "$C" "$MODE" "$SID" "$@" < /dev/null > /dev/null 2>> "$DIR/err.log" &
     fi
     for _ in $(seq 1 50); do [ -s "$DIR/pid" ] && break; sleep 0.1; done
-    [ -s "$DIR/pid" ] || { echo "it didn't start: $(tail -c 300 "$DIR/err.log")" >&2; exit 1; }
+    [ -s "$DIR/pid" ] || { rm -f "$DIR/key"; echo "it didn't start: $(tail -c 300 "$DIR/err.log")" >&2; exit 1; }
     echo "started $MODE"
     ;;
   _run)
@@ -138,7 +145,10 @@ case "$CMD" in
     cd "$WORK"
     KEY=()
     [ -f "$DIR/key" ] && KEY=(--key-file "$DIR/key")
-    ARGS=(-p --input-format stream-json --output-format stream-json --verbose
+    # Only the brain folder's own settings (bops-brain claude_settings), never a project's in /workspace
+    # (.claude/settings.json there, from a repo or a download, could set its environment: a key or token,
+    # or where its requests go, with the user's sign-in or key on them), nor hooks or allowed tools of one.
+    ARGS=(-p --input-format stream-json --output-format stream-json --verbose --setting-sources user
       --mcp-config "$DIR/mcp.json" --strict-mcp-config
       --append-system-prompt-file "$DIR/prompt.md"
       --allowedTools "$ALLOWED")
@@ -230,7 +240,13 @@ def config():
     args = []
     try:
         with open(os.path.join(d, "prompt.md"), encoding="utf-8", errors="replace") as f:
-            args += ["-c", "developer_instructions=" + toml(f.read()[:60000])]
+            text = f.read()[:60000]
+        # One argument may be 128 KiB at most on Linux, in bytes as written (escapes and all): shorter till it fits.
+        arg = "developer_instructions=" + toml(text)
+        while len(arg.encode("utf-8")) > 120_000 and text:
+            text = text[: len(text) * 4 // 5]
+            arg = "developer_instructions=" + toml(text)
+        args += ["-c", arg]
     except OSError:
         pass
     try:
@@ -354,6 +370,8 @@ import json, os, sys
 
 d, off, most, up = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4] == "1"
 LONG = 2000
+# The CLI's own words (its answers, what it says as it goes) are the thread's answer and steps: whole, up to this.
+WHOLE = 100_000
 
 
 def small(v, depth=0):
@@ -367,6 +385,25 @@ def small(v, depth=0):
             return {"type": v["type"]}
         return {k: small(x, depth + 1) for k, x in v.items() if k != "signature" and depth < 12}
     return v
+
+
+def event(ev):
+    """An event as Bops needs it (small), but for the CLI's own words, which Bops keeps and sends on as the
+    thread's answer: Claude Code's result and text, Codex's agent_message, cut only past WHOLE."""
+    out = small(ev)
+    if not isinstance(ev, dict) or not isinstance(out, dict):
+        return out
+    if ev.get("type") == "result" and isinstance(ev.get("result"), str):
+        out["result"] = ev["result"][:WHOLE]
+    content = (ev.get("message") or {}).get("content") if isinstance(ev.get("message"), dict) else None
+    if ev.get("type") == "assistant" and isinstance(content, list):
+        for i, c in enumerate(content[:200]):
+            if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str):
+                out["message"]["content"][i]["text"] = c["text"][:WHOLE]
+    item = ev.get("item")
+    if isinstance(item, dict) and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+        out["item"]["text"] = item["text"][:WHOLE]
+    return out
 
 
 lines, size, at, more = [], 0, off, False
@@ -386,7 +423,7 @@ try:
             if not text:
                 continue
             try:
-                ev = small(json.loads(text))
+                ev = event(json.loads(text))
             except ValueError:
                 ev = {"type": "bops", "subtype": "text", "text": small(text)}
             line = json.dumps(ev, ensure_ascii=False)
@@ -432,12 +469,12 @@ PY
     unterm
     [ -f "$DIR/key.next" ] && mv -f "$DIR/key.next" "$DIR/key"
     TERMINAL="$(command -v xfce4-terminal || command -v xterm || true)"
-    [ -n "$TERMINAL" ] || { echo "no terminal on this computer" >&2; exit 1; }
+    [ -n "$TERMINAL" ] || { rm -f "$DIR/key"; echo "no terminal on this computer" >&2; exit 1; }
     if [ "${TERMINAL##*/}" = xfce4-terminal ]; then TARGS=(--disable-server --title "Claude Code" --maximize -x)
     else TARGS=(-T "Claude Code" -geometry 160x50+0+0 -e); fi
     DISPLAY=":$N" setsid nohup "$TERMINAL" "${TARGS[@]}" "$HERE/bops-agent" _term "$T" "$B" "$C" "$SID" "$DIR/" < /dev/null > /dev/null 2>> "$DIR/err.log" &
     for _ in $(seq 1 50); do alive term.pid && break; sleep 0.1; done
-    alive term.pid || { echo "it didn't open: $(tail -c 300 "$DIR/err.log")" >&2; exit 1; }
+    alive term.pid || { rm -f "$DIR/key"; echo "it didn't open: $(tail -c 300 "$DIR/err.log")" >&2; exit 1; }
     echo "terminal on :$N"
     ;;
   _term)
@@ -450,7 +487,7 @@ PY
     KEY=()
     [ -f "$DIR/key" ] && KEY=(--key-file "$DIR/key")
     set +e
-    "$HERE/bops-brain" run "$B" claude --computer "$C" ${KEY[@]+"${KEY[@]}"} -- --resume "$SID" \
+    "$HERE/bops-brain" run "$B" claude --computer "$C" ${KEY[@]+"${KEY[@]}"} -- --resume "$SID" --setting-sources user \
       --mcp-config "$DIR/mcp.json" --strict-mcp-config --append-system-prompt "$(cat "$DIR/prompt.md")" --allowedTools "$ALLOWED"
     rm -f "$DIR/key"
     echo

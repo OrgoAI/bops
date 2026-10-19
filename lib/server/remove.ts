@@ -8,6 +8,7 @@ import { dropBotFromSkills } from "./workspace-skills";
 import { DEFAULT_UNDELETABLE, deleteOrgoWorkspace, WorkspaceError } from "./workspaces";
 import { orgo as orgoApi, OrgoError, perWorkspaceProjects } from "./orgo";
 import { routinesRemovedInWorkspace } from "./routine-sync";
+import { brainsOf, removeBrain } from "./brains";
 
 /** Delete one message from a chat. */
 export function deleteMessage(messageId: string) {
@@ -89,6 +90,8 @@ export async function deleteWorkspace(workspaceId: string) {
   const left = (getState().workspaces ?? []).filter((w) => w.id !== workspaceId);
   if (left.length === 0) throw new Error("You need at least one workspace");
   const team = getState().bots.filter((b) => workspaceOf(b) === workspaceId);
+  // Its brains first, while its bots' computers are still there: each signs out and its folder goes on them.
+  for (const x of brainsOf(workspaceId)) removeBrain(x.id);
   // The main bot last: the others' computers were cloned from its computer.
   const order = [...team.filter((x) => !x.isMain), ...team.filter((x) => x.isMain)];
   const orgo = !!gone.orgoProjectId && (await perWorkspaceProjects().catch(() => null)) === true;

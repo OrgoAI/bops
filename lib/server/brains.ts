@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { screenMap } from "@/lib/screens";
 import { botChatId, BRAIN_KEYS, BRAIN_NAMES, planName, workspaceOf, type Brain, type BrainAuth, type BrainKind, type BrainSignIn } from "@/lib/types";
-import { revealKey, type KeyScope } from "./keys";
+import { keysOf, listKeys, revealKey, type KeyScope } from "./keys";
 import { orgo } from "./orgo";
 import { sameComputer, workComputer } from "./screens";
 import { addMessage, bot, getState, id, sameState, update } from "./store";
@@ -104,6 +104,17 @@ export function addBrain(n: NewBrain): Brain {
   return brainById(brain.id)!;
 }
 
+/**
+ * What a brain runs now for bots that aren't on it anymore (or for any, once it's gone) stops at once
+ * (sessions.ts brainLeft): nothing more runs on the user's plan or key after they said so. The threads it
+ * stopped, with their computers.
+ */
+async function letGo(brainId: string, name: string) {
+  const { brainLeft } = await import("./sessions");
+  return brainLeft(brainId, name);
+}
+const letGoNow = (brainId: string, name: string) => void letGo(brainId, name).catch((e: Error) => console.warn(`[brains] stopping ${brainId}'s threads: ${e.message}`));
+
 /** Rename a brain, change which bots may use it, or (a key brain) where its key is. A bot taken off it goes back to Bops agent. */
 export function updateBrain(brainId: string, p: { name?: string; bots?: string[]; keyScope?: KeyScope }): Brain {
   const x = need(brainId);
@@ -119,6 +130,7 @@ export function updateBrain(brainId: string, p: { name?: string; bots?: string[]
     }
     if (p.keyScope && y.auth === "key") y.keyScope = p.keyScope === "workspace" ? "workspace" : "all";
   });
+  if (bots) letGoNow(brainId, x.name);
   return brainById(brainId)!;
 }
 
@@ -139,6 +151,7 @@ export function setBrainBot(brainId: string, botId: string, level: "use" | "may"
     if (level === "use") c.brain = brainId;
     else if (c.brain === brainId) delete c.brain;
   });
+  if (level !== "use") letGoNow(brainId, x.name);
   return brainById(brainId)!;
 }
 
@@ -147,30 +160,41 @@ export function setBotBrain(botId: string, brainId: string | null) {
   const b = bot(botId);
   if (!b) throw new BrainError("No such bot.", 404);
   if (brainId !== null && !need(brainId).bots.includes(botId)) throw new BrainError(`${b.name} isn't on that brain. Add it in Settings, Brain.`, 400);
+  const was = b.brain && brainById(b.brain);
   update(() => {
     const c = bot(botId)!;
     if (brainId) c.brain = brainId;
     else delete c.brain;
   });
+  if (was && was.id !== brainId) letGoNow(was.id, was.name);
 }
 
 /**
- * Take a brain away: its bots go back to Bops agent, a sign-in going stops, and on every computer it's
- * signed in on, Claude Code signs out and its folder goes (in the background, best effort: a computer
- * that's gone has nothing left to remove).
+ * Take a brain away: its bots go back to Bops agent, a sign-in going stops, what it's running stops (letGo),
+ * and on every computer it has a folder on (signed in or signing in there, or a thread of it ran there),
+ * that thread's process stops, Claude Code signs out and the folder goes (in the background, best effort:
+ * a computer that's gone has nothing left to remove).
  */
 export function removeBrain(brainId: string) {
   const x = need(brainId);
   stopWatching(brainId);
-  const computers = [...new Set([...(x.signIns ?? []).map((s) => s.computerId), ...(x.signingIn ? [x.signingIn.computerId] : [])])];
+  const ran = getState().sessions.flatMap((s) => (s.brainRun?.brainId === brainId ? [s.brainRun.computerId] : []));
+  const computers = [...new Set([...(x.signIns ?? []).map((s) => s.computerId), ...(x.signingIn ? [x.signingIn.computerId] : []), ...ran])];
   update((s) => {
     s.brains = (s.brains ?? []).filter((y) => y.id !== brainId);
     for (const b of s.bots) if (b.brain === brainId) delete b.brain;
   });
-  for (const c of computers)
-    void ensureBrainTools(c)
-      .then(() => orgo.bash(c, `bops-brain cancel ${brainId}; bops-brain forget ${brainId}`, 30))
-      .catch((e: Error) => console.warn(`[brains] removing ${brainId} from ${c}: ${e.message}`));
+  void letGo(brainId, x.name)
+    .catch(() => [] as { sessionId: string; computerId: string }[])
+    .then((left) => {
+      for (const c of computers) {
+        // Its threads' processes there first, so nothing runs on the folder as it goes.
+        const stops = left.filter((l) => l.computerId === c).map((l) => `bops-agent stop ${l.sessionId}; `);
+        void ensureBrainTools(c)
+          .then(() => orgo.bash(c, `${stops.join("")}bops-brain cancel ${brainId}; bops-brain forget ${brainId}`, 60))
+          .catch((e: Error) => console.warn(`[brains] removing ${brainId} from ${c}: ${e.message}`));
+      }
+    });
 }
 
 /* ---------------- Claude Code on a computer ---------------- */
@@ -380,6 +404,9 @@ export async function startSignIn(brainId: string, botId: string): Promise<{ bot
   if (going && !going.failed && going.computerId === computerId && watching.has(brainId)) return { botId: going.botId, display: going.display };
   const display = screenMap(getState(), botId).find((s) => s.kind === "free")?.display;
   if (display === undefined) throw new BrainError(`All of ${c.name}'s screens are in use. Try again when one is free.`, 409);
+  // Going on another computer: that one closes first (its terminal and page there, its screen back to its bot),
+  // as Cancel would, so it isn't left open on a screen the bots work on again.
+  if (going && !going.failed && going.computerId !== computerId) await cancelSignIn(brainId);
   stopWatching(brainId);
   const ctl = new AbortController();
   watching.set(brainId, ctl);
@@ -478,5 +505,15 @@ export async function signOut(brainId: string, botId: string) {
  */
 export async function revealBrainKey(x: Brain): Promise<string> {
   if (x.auth !== "key" || !x.keyName) throw new BrainError(`${x.name} doesn't run on a key.`, 400);
-  return (await revealKey(x.keyName, x.keyScope ?? "all", x.workspaceId)).value;
+  const name = x.keyName;
+  // The key as the Vault has it now, as the bots' calls find one: the workspace's own first, else the one for
+  // all workspaces (not where it was when the brain was added: it may have been replaced in the other since).
+  // When the Vault can't say, where it was then.
+  const scope: KeyScope = await listKeys({ fresh: true })
+    .then((all): KeyScope => {
+      const have = keysOf(all, x.workspaceId).filter((k) => k.name === name);
+      return have.some((k) => k.workspaceId) ? "workspace" : have.length ? "all" : (x.keyScope ?? "all");
+    })
+    .catch(() => x.keyScope ?? "all");
+  return (await revealKey(name, scope, x.workspaceId)).value;
 }

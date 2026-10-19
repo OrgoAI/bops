@@ -1,6 +1,6 @@
 import "server-only";
 import { BRAIN_NAMES, live, planName, type Brain, type BrainKind } from "@/lib/types";
-import { ensureBrainTools, ensureClaudeCode, ensureCodex, revealBrainKey } from "./brains";
+import { brainById, ensureBrainTools, ensureClaudeCode, ensureCodex, revealBrainKey } from "./brains";
 import { answerApp, askOwner } from "./composio";
 import { orgo } from "./orgo";
 import { id, ownerName, session } from "./store";
@@ -291,6 +291,22 @@ export type CliRun = {
 
 const b64 = (s: string) => Buffer.from(s).toString("base64");
 
+/**
+ * A CLI session's id as Bops keeps it and puts it in a command: Claude Code's and Codex's are both UUIDs. One
+ * that isn't (the CLI's output said something else, and the bot's own shell can write there) is never used.
+ */
+export const cliId = (v: string | undefined) => (v && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v) ? v : undefined);
+
+/**
+ * The brain as it is now, for a start of its process (each one: a run can last long): the user may have
+ * removed it meanwhile, and a key brain's key is the Vault's now, not when the run began.
+ */
+function brainNow(x: Brain): Brain {
+  const now = brainById(x.id);
+  if (!now) throw new Error(`${x.name} isn't there anymore, so it didn't start again`);
+  return now;
+}
+
 /** A file for the thread's CLI on the computer (bops-agent put), from stdin: never on a command line of its own. */
 async function put(run: Pick<CliRun, "computerId" | "sessionId">, name: "mcp.json" | "prompt.md" | "key", body: string) {
   const r = await orgo.bash(run.computerId, `echo ${b64(body)} | base64 -d | bops-agent put ${run.sessionId} ${name}`, 30);
@@ -313,9 +329,12 @@ export async function openRun(o: { sessionId: string; computerId: string; displa
  * for this start only). Says which.
  */
 async function startCli(run: CliRun): Promise<"resumed" | "fresh"> {
-  if (run.brain.auth === "key") await put(run, "key", await revealBrainKey(run.brain));
+  const x = brainNow(run.brain);
+  const cli = cliId(run.cli);
+  if (!cli) throw new Error(`${x.name} has no session Bops can pick up`);
+  if (x.auth === "key") await put(run, "key", await revealBrainKey(x));
   const more = (run.args ?? []).filter((a) => /^[A-Za-z0-9=_.:/-]+$/.test(a));
-  const r = await orgo.bash(run.computerId, `bops-agent start ${run.sessionId} ${run.brain.id} ${run.driver.kind} ${run.display} ${run.computerId} ${run.cli}${more.length ? ` -- ${more.join(" ")}` : ""}`, 30);
+  const r = await orgo.bash(run.computerId, `bops-agent start ${run.sessionId} ${x.id} ${run.driver.kind} ${run.display} ${run.computerId} '${cli}'${more.length ? ` -- ${more.join(" ")}` : ""}`, 30);
   const mode = /started (resumed|fresh)/.exec(r.output)?.[1] as "resumed" | "fresh" | undefined;
   if (!mode) throw new Error(`${run.brain.name} didn't start on the computer (${r.output.trim().slice(-160) || "no answer"})`);
   run.up = true;
@@ -370,10 +389,13 @@ export async function closeCli(run: Pick<CliRun, "computerId" | "sessionId">) {
  * user answers in the terminal.
  */
 export async function openTerminal(o: { sessionId: string; computerId: string; display: number; brain: Brain; cli: string; mcp: unknown; prompt: string }) {
+  const x = brainNow(o.brain);
+  const cli = cliId(o.cli);
+  if (!cli) throw new Error(`${x.name} has no session to open`);
   await put(o, "mcp.json", JSON.stringify(o.mcp));
   await put(o, "prompt.md", o.prompt);
-  if (o.brain.auth === "key") await put(o, "key", await revealBrainKey(o.brain));
-  const r = await orgo.bash(o.computerId, `bops-agent terminal ${o.sessionId} ${o.brain.id} ${o.display} ${o.computerId} ${o.cli}`, 30);
+  if (x.auth === "key") await put(o, "key", await revealBrainKey(x));
+  const r = await orgo.bash(o.computerId, `bops-agent terminal ${o.sessionId} ${x.id} ${o.display} ${o.computerId} '${cli}'`, 30);
   if (!r.output.includes("terminal on")) throw new Error(`its terminal didn't open (${r.output.trim().slice(-160) || "no answer"})`);
 }
 
@@ -412,6 +434,8 @@ export type CliTurn = {
   onSteer: (wake: (() => void) | undefined) => void;
   /** The CLI began (or picked up) its session: its id, as it said. */
   started: (cli: string) => void;
+  /** One more message's answer was read (the turn's own first, then the user's words it took as it worked, in order). */
+  answered?: () => void;
   /** What a session that lost its history needs first (its process started fresh where it should have picked up): the task, and where it got to. */
   context: () => string;
 };
@@ -492,8 +516,10 @@ export async function cliTurn(run: CliRun, t: CliTurn): Promise<string> {
       for (const e of r?.events ?? []) {
         lastAt = Date.now();
         if (e.type === "started") {
-          if (e.session) {
-            run.cli = e.session;
+          // Only a session id that is one (cliId): it goes into the commands that start it again.
+          const cli = cliId(e.session);
+          if (cli) {
+            run.cli = cli;
             run.resume = true;
             t.started(run.cli);
           }
@@ -516,9 +542,15 @@ export async function cliTurn(run: CliRun, t: CliTurn): Promise<string> {
           if (line) t.activity(line.charAt(0).toLowerCase() + line.slice(1, 60).replace(/[.!?]$/, ""));
         } else if (e.type === "result") {
           queue.shift();
+          t.answered?.();
           const text = e.text ?? said ?? "";
-          if (e.stop) throw new BrainStopped(e.stop, text);
-          if (!e.ok) throw new Error(`${name} stopped: ${text}`);
+          // Turned down, or failed: what it has from the user still to do waits (BrainStopped: until the user
+          // signs in or says more) or goes back to them (sessions.ts brainTurns), so it doesn't start on it.
+          if (e.stop) {
+            if (queue.length) await stopCli(run).catch(() => {});
+            throw new BrainStopped(e.stop, text);
+          }
+          if (!e.ok) await giveUp(`${name} stopped: ${text}`);
           if (said && said !== text) flush();
           said = undefined;
           if (!queue.length) return text || "Done.";
@@ -570,6 +602,11 @@ export async function approveTool(botId: string, sessionId: string, args: Record
   const input = args.input && typeof args.input === "object" && !Array.isArray(args.input) ? (args.input as Record<string, unknown>) : {};
   const owner = ownerName();
   if (!session(sessionId)?.brainRun) return JSON.stringify({ behavior: "deny", message: "Only a thread a brain runs asks this way." });
+  // Claude Code asks about one of its own tools by its name (NotebookEdit), never Bops' screen and browser
+  // ones (it uses those by itself) or words of its own: anything else isn't its question (the approve tool is
+  // one the model can call too), so the user is never shown a card for something made up.
+  if (!/^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(tool) || /^mcp__(screen|browser)__/.test(tool))
+    return JSON.stringify({ behavior: "deny", message: "That isn't a tool Claude Code asks about. Don't call approve yourself." });
   const approvalId = id("apr");
   asking.set(sessionId, (asking.get(sessionId) ?? 0) + 1);
   let timer: ReturnType<typeof setTimeout> | undefined;

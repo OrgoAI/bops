@@ -92,20 +92,28 @@ function migrate(raw: Record<string, unknown>): AppState {
 
 /**
  * Brains (lib/server/brains.ts) as this build keeps them: Claude Code or Codex (Codex on a key only), each
- * with a workspace and the bots still here that may use it. A sign-in that was going when the server
- * stopped can't be watched any more, so it goes (one that failed stays, saying why); a bot whose brain is
- * gone is on Bops agent again. Safe to run repeatedly.
+ * with a workspace that's still here (a deleted workspace's go with it) and the bots still here that may use
+ * it, and signed in only on computers a bot still has (one replaced since says nothing now). A sign-in that
+ * was going when the server stopped can't be watched any more, so it goes (one that failed stays, saying
+ * why); a bot whose brain is gone is on Bops agent again. Safe to run repeatedly.
  */
 function brains(state: AppState) {
   if (!state.brains) return;
   const here = new Set(state.bots.map((b) => b.id));
+  const computers = new Set(state.bots.map((b) => b.computerId).filter(Boolean));
+  const spaces = state.workspaces?.length ? new Set(state.workspaces.map((w) => w.id)) : undefined;
   state.brains = state.brains.filter((x) => !!x && typeof x.id === "string" && (x.kind === "claude" || x.kind === "codex"));
   for (const x of state.brains) {
     x.bots = (Array.isArray(x.bots) ? x.bots : []).filter((botId) => here.has(botId));
     if (x.kind === "codex" || (x.auth !== "plan" && x.auth !== "key")) x.auth = "key";
     x.workspaceId ??= MAIN_WORKSPACE;
     if (x.signingIn && !x.signingIn.failed) delete x.signingIn;
+    if (x.signIns) {
+      x.signIns = x.signIns.filter((s) => computers.has(s.computerId));
+      if (!x.signIns.length) delete x.signIns;
+    }
   }
+  if (spaces) state.brains = state.brains.filter((x) => spaces.has(x.workspaceId));
   for (const b of state.bots) if (b.brain && !state.brains.some((x) => x.id === b.brain)) delete b.brain;
 }
 

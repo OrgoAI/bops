@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { BRAIN_KEYS, BRAIN_NAMES, brainOf, planName, signInOn, workBot, type AppState, type Bot, type Brain, type BrainAuth, type BrainKind } from "@/lib/types";
+import { BRAIN_KEYS, BRAIN_NAMES, brainOf, brainRuns, planName, signInOn, threadRunner, workBot, type AppState, type Bot, type Brain, type BrainAuth, type BrainKind, type Session } from "@/lib/types";
 import { BotChip, BotChips, PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon } from "./apps";
 import { Mascot } from "./mascot";
 import { undash } from "./side-group";
@@ -24,15 +24,29 @@ const dark = `${btn} bg-ink text-white hover:bg-[#2A2A28]`;
 const light = `${btn} bg-[#F2F2F0] text-ink hover:bg-[#EAEAE7]`;
 
 /**
- * Which brain a thread ran on (Session.brainRun), or a bot's tasks run on, as a small plain chip: "Claude
- * Code", "Codex". Bops agent has none. `className`: its background where the gray doesn't read (a profile's glass).
+ * Which brain runs a thread (threadRunner), or a bot's tasks, as a small plain chip: "Claude Code", "Codex",
+ * or "Bops agent" ("agent", only where that isn't what the user would think: a thread that stays on Bops
+ * agent while its bot is on a brain now). `className`: its background where the gray doesn't read (a profile's glass).
  */
-export function BrainBadge({ kind, title, className = "bg-[#F2F2F0]" }: { kind: BrainKind; title: string; className?: string }) {
+export function BrainBadge({ kind, title, className = "bg-[#F2F2F0]" }: { kind: BrainKind | "agent"; title: string; className?: string }) {
   return (
     <span title={title} className={`shrink-0 rounded-full px-1.5 py-px text-[11px] leading-[14px] text-[#3A3A38] ${className}`}>
-      {BRAIN_NAMES[kind]}
+      {kind === "agent" ? "Bops agent" : BRAIN_NAMES[kind]}
     </span>
   );
+}
+
+/**
+ * A thread's badge (BrainBadge, chat-view.tsx): the brain that runs it (threadRunner), or Bops agent for one
+ * that stays there while its bot's tasks run on a brain now (it started on Bops agent, or Bops agent took it
+ * over), so the user can tell it's on AI credit. Nothing for the rest.
+ */
+export function threadBadge(s: Session, state: AppState): { kind: BrainKind | "agent"; title: string } | undefined {
+  const who = threadRunner(s);
+  if (who && who !== "agent") return { kind: who, title: `${BRAIN_NAMES[who]} ran this` };
+  const b = state.bots.find((x) => x.id === s.botId);
+  if (who !== "agent" || !b || !brainOf(b, state) || brainRuns(b, state) === "none" || s.runsOn === "mac") return undefined;
+  return { kind: "agent", title: s.brainRun?.started ? "Bops agent took this over, so it finishes it, on AI credit" : "Started on Bops agent, so it finishes there, on AI credit" };
 }
 
 /** "Sam's computer": the computer `b` works on (its own, or the one it shares). */
@@ -67,8 +81,15 @@ export function brainLine(state: AppState, x: Brain, keys?: string[]): string {
     const who = owner(going.computerId);
     return who ? `Signing in on ${who}'s computer` : "Signing in";
   }
-  const names = (x.signIns ?? []).map((s) => owner(s.computerId)).filter((n): n is string => !!n);
-  if (names.length) return `${planName(x.signIns?.[0]?.account?.plan)} · signed in on ${computersSaid([...new Set(names)])}`;
+  // Only computers a bot still has, each with its own plan: one plan when they agree ("Max plan · signed in on
+  // Sam's and Rook's computers"), else each ("Max plan on Sam's computer, Pro plan on Rook's computer").
+  const on = (x.signIns ?? []).flatMap((s) => {
+    const who = owner(s.computerId);
+    return who ? [{ who, plan: planName(s.account?.plan) }] : [];
+  });
+  const plans = [...new Set(on.map((s) => s.plan))];
+  if (plans.length === 1) return `${plans[0]} · signed in on ${computersSaid([...new Set(on.map((s) => s.who))])}`;
+  if (plans.length > 1) return on.map((s) => `${s.plan} on ${s.who}'s computer`).join(", ");
   if (going?.failed) return "Sign-in didn't finish";
   return "Not signed in";
 }
@@ -262,7 +283,8 @@ function BrainRow({ state, brain: x, keys, onShowScreen }: { state: AppState; br
           team={team}
           choices={BRAIN_CHOICES}
           level={who}
-          note={(b) => (who(b) === "may" ? "not picked" : undefined)}
+          // Picked, but its tasks all run on this Mac, where Bops agent runs them (brainRuns).
+          note={(b) => (who(b) === "may" ? "not picked" : who(b) === "use" && brainRuns(b, state) === "none" ? "on your Mac, Bops agent" : undefined)}
           what={x.name}
           disabled={busy}
           onSet={(b, level) => void run(() => call("/api/brains", { id: x.id, botId: b.id, level }, "PATCH"))}
@@ -319,10 +341,10 @@ function PickBot({ bot: b, on, onClick }: { bot: Bot; on: boolean; onClick: () =
 
 const choice = (on: boolean) => `flex flex-1 flex-col gap-0.5 rounded-[12px] px-3 py-2.5 text-left ${on ? "bg-[#FBFFE0] shadow-[0_0_0_1.5px_#0A0A0A]" : "shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"}`;
 
-/** How Claude Code signs in, in its own words: a Claude plan, or an Anthropic Console (API) key. Codex: an OpenAI key. */
+/** How Claude Code signs in, in its own words: a Claude subscription, or an Anthropic (Console) API key. Codex: an OpenAI key. */
 const SIGN_INS: Record<BrainKind, { id: BrainAuth; name: string; hint: string }[]> = {
   claude: [
-    { id: "plan", name: "Claude plan (Pro, Max, Team)", hint: "You sign in with Claude Code's own sign-in on the bot's computer." },
+    { id: "plan", name: "Claude account with subscription", hint: "Pro, Max, Team, or Enterprise. You sign in with Claude Code's own sign-in on the bot's computer." },
     { id: "key", name: "Anthropic API key", hint: "Your key from the Vault. Usage is billed to your Anthropic account." },
   ],
   codex: [{ id: "key", name: "OpenAI API key", hint: "Your key from the Vault. Usage is billed to your OpenAI account." }],
@@ -436,7 +458,7 @@ export function AddBrain({
               </span>
             ) : (
               <span className="flex flex-wrap items-center gap-2 text-[12px] leading-4 text-[#6B6B6B]">
-                {keys === null ? "Checking your Vault" : `Add your ${vendor} key in the Vault first. Bots never see it.`}
+                {keys === null ? "Checking your Vault" : `Add your ${vendor} key in the Vault first. Only ${BRAIN_NAMES[kind ?? "claude"]} on the bot's computer gets it.`}
                 {keys !== null && (
                   <button type="button" onClick={onOpenVault} className="font-medium text-ink underline-offset-2 hover:underline">
                     Open the Vault
@@ -487,9 +509,13 @@ export function BotBrain({ state, bot: b, onShowScreen, className }: { state: Ap
   const mine = (state.brains ?? []).filter((x) => x.bots.includes(b.id));
   if (!mine.length) return null;
   const now = brainOf(b, state);
-  const going = now?.signingIn && !now.signingIn.failed ? now.signingIn : undefined;
-  const signedIn = now?.auth === "plan" ? signInOn(now, workBot(b, state.bots).computerId) : undefined;
-  const hint = !now
+  const computerId = workBot(b, state.bots).computerId;
+  // Its brain's sign-in, when it's going on this bot's computer (one on another bot's isn't this one's).
+  const going = now?.signingIn && !now.signingIn.failed && now.signingIn.computerId === computerId ? now.signingIn : undefined;
+  const signedIn = now?.auth === "plan" ? signInOn(now, computerId) : undefined;
+  // A task on this Mac runs on Bops agent, whatever its brain (sessions.ts run).
+  const where = brainRuns(b, state);
+  const runs = !now
     ? "Bops agent, on AI credit"
     : now.auth === "key"
       ? `${BRAIN_NAMES[now.kind]} on your ${now.kind === "codex" ? "OpenAI" : "Anthropic"} key`
@@ -497,9 +523,16 @@ export function BotBrain({ state, bot: b, onShowScreen, className }: { state: Ap
         ? `Signing in on ${computerOf(state, b)}`
         : signedIn
           ? `${BRAIN_NAMES[now.kind]} on your ${planName(signedIn.account?.plan)}`
-          : state.host === "mac"
-            ? "Signs in on a bot computer. Your bots work on this Mac"
-            : `Not signed in on ${computerOf(state, b)}`;
+          : `Not signed in on ${computerOf(state, b)}`;
+  const hint = !now
+    ? runs
+    : where === "none"
+      ? state.host === "mac"
+        ? "Your bots work on this Mac, so they run on Bops agent, on AI credit"
+        : `${b.name} works on your Mac, so its tasks run on Bops agent, on AI credit`
+      : where === "some"
+        ? `${runs} · tasks on your Mac run on Bops agent`
+        : runs;
   const pick = async (brainId: string | null) => {
     setBusy(true);
     setError(await call("/api/brains/bot", { botId: b.id, brainId }));
@@ -511,7 +544,7 @@ export function BotBrain({ state, bot: b, onShowScreen, className }: { state: Ap
       <div className="flex items-center gap-3">
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="text-[13px] font-semibold leading-4">Brain</span>
-          <span className={`text-[12px] leading-4 ${now?.auth === "plan" && !signedIn && !going ? "text-[#B54708]" : "text-[#6B6B6B]"}`}>{hint}</span>
+          <span className={`text-[12px] leading-4 ${now?.auth === "plan" && where !== "none" && !signedIn && !going ? "text-[#B54708]" : "text-[#6B6B6B]"}`}>{hint}</span>
         </div>
         <div className="flex shrink-0 flex-wrap justify-end gap-0.5 rounded-[14px] bg-black/[0.05] p-[3px]">
           {options.map((o) => (
@@ -526,7 +559,7 @@ export function BotBrain({ state, bot: b, onShowScreen, className }: { state: Ap
           ))}
         </div>
       </div>
-      {now?.auth === "plan" && state.host !== "mac" && onShowScreen && (going || !signedIn) && (
+      {now?.auth === "plan" && where !== "none" && onShowScreen && (going || !signedIn) && (
         <div className="flex items-center gap-2">
           <span className="min-w-0 flex-1 text-[12px] leading-4 text-[#3A3A38]">
             {going ? "Claude Code's sign-in is open on its screen." : now.signingIn?.failed ? `The last sign-in didn't finish: ${undash(now.signingIn.failed)}` : `Sign in with your Claude plan on ${computerOf(state, b)} to use it.`}

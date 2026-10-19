@@ -364,6 +364,26 @@ export function brainReady(x: Brain, b: Bot, state: Pick<AppState, "bots" | "hos
   return state.host !== "mac" && !!signInOn(x, workBot(b, state.bots).computerId);
 }
 
+/**
+ * Who runs a thread now (sessions.ts brainFor): its brain's CLI once that began it (Session.brainRun), until
+ * Bops agent runs any of it (its agent session or response chain, or the user had it finish there), from when
+ * on it stays Bops agent's ("agent"), which knows what it did; nobody yet while nothing has run it.
+ */
+export function threadRunner(s: Pick<Session, "brainRun" | "onBopsAgent" | "agentSessionId" | "responseId">): BrainKind | "agent" | undefined {
+  if (s.onBopsAgent || s.agentSessionId || s.responseId) return "agent";
+  return s.brainRun?.started ? s.brainRun.kind : undefined;
+}
+
+/**
+ * Which of a bot's tasks its brain runs (sessions.ts run: a task on the user's Mac always runs on Bops agent):
+ * all of them, those in the cloud when it picks per task and this Mac can take some ("some"), or none, when
+ * its tasks all run on this Mac (bots in this Mac's browsers, or a bot set to work on the user's Mac).
+ */
+export function brainRuns(b: Pick<Bot, "runsOn">, state: Pick<AppState, "host" | "mac">): "all" | "some" | "none" {
+  if (state.host === "mac" || b.runsOn === "mac") return "none";
+  return b.runsOn === "cloud" || !state.mac?.ready ? "all" : "some";
+}
+
 export type Effort = "auto" | "low" | "medium" | "high";
 /** How hard a task's model thinks: OpenAI's reasoning efforts. */
 export type TaskEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max";

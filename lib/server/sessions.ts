@@ -9,7 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "@/cloud/protocol";
-import { BLOCKER_LABEL, botChatId, brainOf, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, workBot, workspaceOf, type Bot, type Brain, type Routine, type Session, type TaskRoute, type ThreadReply } from "@/lib/types";
+import { BLOCKER_LABEL, botChatId, brainOf, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, threadRunner, workBot, workspaceOf, type Bot, type Brain, type Routine, type Session, type TaskRoute, type ThreadReply } from "@/lib/types";
 import { CloudError, creditsOut, executorKey, noteOutOfCredit, OUT_OF_CREDIT, outOfCreditError, shortOfCredit } from "./cloud";
 import { appsMcp, appsSocket, browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
 import { relayNewComputer } from "./relay";
@@ -1022,9 +1022,14 @@ export async function ensureComputer(botId: string): Promise<void> {
     if (!b.isMain)
       await orgo.bash(clone.id, "rm -f /opt/bops/apps-*.json", 15).catch((e: Error) => console.warn(`[apps] guest keys on ${b.id}'s computer: ${e.message}`));
     // A copy made just now brings along the main computer's brain folders too, with the Claude logins in
-    // them (lib/server/brains.ts): a login is never copied to another computer, so they go before anything runs.
-    if (!b.isMain && !had)
-      await orgo.bash(clone.id, "rm -rf /root/.bops/brains", 15).catch((e: Error) => console.warn(`[brains] copied brain folders on ${b.id}'s computer: ${e.message}`));
+    // them (lib/server/brains.ts), its threads' folders (a key brain's key may be there for a moment), and
+    // (a fork) its brains' processes, logins and keys in memory: a login is never copied to another computer,
+    // so all of it goes before anything runs. Again on every setup until one finishes (one cut short
+    // left it to do), and a setup it didn't finish fails, so the next one tries again.
+    if (!b.isMain && (!had || b.computerNeverReady === clone.id)) {
+      const gone = await orgo.bash(clone.id, COPIED_BRAINS, 30).catch((e: Error) => ({ output: e.message, exit_code: 1 }));
+      if (gone.exit_code !== 0) throw new Error(`the main computer's Claude Code and Codex folders couldn't be cleared from it (${gone.output.trim().slice(0, 120) || "no answer"})`);
+    }
     await ensureScreens(clone.id);
     if (swapped()) return;
     update(() => {
@@ -1066,6 +1071,19 @@ export async function ensureComputer(botId: string): Promise<void> {
   }
   void pump();
 }
+
+/**
+ * What a bot's own computer, a copy of the main one, runs before anything else (ensureComputer): the main
+ * computer's brains' processes stop (Claude Code and its sign-in, Codex's runs, the sign-in's Chrome; never
+ * Bops agent's `codex exec-server`), and their folders and the threads' go.
+ */
+const COPIED_BRAINS = [
+  "pkill -KILL -f '[/]root/[.]bops/(agents|brains)/'",
+  "pkill -KILL -f '[/]opt/bops/claude/'",
+  "pkill -KILL -f '[c]odex exec (resume )?--json'",
+  "pkill -KILL -f '[b]ops-brain sign-in '",
+  "rm -rf /root/.bops/brains /root/.bops/agents && echo cleaned",
+].join("; ");
 
 /** Orgo statuses a computer doesn't come back from by itself (a computer that's been deleted isn't usually listed at all). */
 const BROKEN = new Set(["error", "stopped", "frozen", "deleted"]);
@@ -1684,15 +1702,39 @@ function agentBrief(
 
 /**
  * The brain a thread runs on (cli-agents.ts), when it has one: its bot's, when this build runs that CLI,
- * unless the user had Bops agent finish the thread, or Bops agent started it (its agent session or
- * response chain is Bops agent's, so it stays there). Bops agent otherwise.
+ * unless Bops agent has run any of it (threadRunner: it started there, it took over when the bot went off
+ * its brain, or the user had it finish there). Its agent session or response chain is Bops agent's, and the
+ * brain's CLI session knows nothing of what Bops agent did, so it stays on Bops agent. Bops agent otherwise.
  */
 function brainFor(s: Session, b: Bot): Brain | undefined {
-  if (s.onBopsAgent) return undefined;
+  if (threadRunner(s) === "agent") return undefined;
   const x = brainOf(b, getState());
   if (!x || !cliDriver(x.kind)) return undefined;
-  if (!s.brainRun && (s.agentSessionId || s.responseId)) return undefined;
   return x;
+}
+
+/** The runs going on a brain now (run), by thread: the brain each is on, and its computer. */
+const onBrain = new Map<string, { brainId: string; computerId: string }>();
+/** Why a thread its brain ran was stopped when the brain went, or its bot went off it (brainLeft), by thread. */
+const brainStops = new Map<string, string>();
+
+/**
+ * A brain went, or bots went off it (brains.ts removeBrain, updateBrain, setBrainBot, setBotBrain): what it's
+ * running now for a bot that isn't on it anymore stops at once, saying why, so nothing more runs on the
+ * user's plan or key after they said so. A reply carries each on with Bops agent, with what the brain did
+ * (brainRecord). Returns them, with the computer each runs on, so the brain's folder there goes only after.
+ */
+export function brainLeft(brainId: string, name: string): { sessionId: string; computerId: string }[] {
+  const left: { sessionId: string; computerId: string }[] = [];
+  for (const [sessionId, at] of onBrain) {
+    const s = session(sessionId);
+    const b = s && bot(s.botId);
+    if (at.brainId !== brainId || !s || !live(s) || (b && brainOf(b, getState())?.id === brainId)) continue;
+    brainStops.set(sessionId, `Stopped: ${b?.name ?? "Its bot"} doesn't use ${name} anymore. Reply and it carries on with Bops agent.`);
+    stopSession(sessionId);
+    left.push({ sessionId, computerId: at.computerId });
+  }
+  return left;
 }
 
 /** A brain thread picks its CLI session back up: the same brain, on the same computer, where the CLI began it. */
@@ -1820,7 +1862,11 @@ async function brainTurns(sessionId: string, at: { computerId: string; display: 
       interrupts.set(sessionId, () => ac.abort());
       // Stopped while this turn was on its way (Stop found no turn to interrupt yet).
       if (stopped.has(sessionId)) ac.abort();
-      const steered: string[] = [];
+      // The user's words it took as it worked, each message's replies, and how many of the turn's messages
+      // (its own first, then those) have their answer: the rest go back to the user's unsent words when the
+      // turn ends any other way, so the next turn gives them again (the CLI may never have taken them in).
+      const steered: string[][] = [];
+      let answered = 0;
       try {
         return await cliTurn(run, {
           input,
@@ -1835,8 +1881,9 @@ async function brainTurns(sessionId: string, at: { computerId: string; display: 
             const pending = unsent(sessionId);
             if (!pending.length || stopped.has(sessionId)) return undefined;
             const ids = pending.map((r) => r.id);
-            return { text: pending.map(forAgent).join("\n"), sent: () => (steered.push(...ids), markSent(sessionId, ids)) };
+            return { text: pending.map(forAgent).join("\n"), sent: () => (steered.push(ids), markSent(sessionId, ids)) };
           },
+          answered: () => void answered++,
           onSteer: (wake) => (wake ? steerers.set(sessionId, wake) : steerers.delete(sessionId)),
           started: (cli) =>
             patchSession(sessionId, (y) => {
@@ -1845,13 +1892,15 @@ async function brainTurns(sessionId: string, at: { computerId: string; display: 
           context: () => lostContext(sessionId),
         });
       } catch (e) {
+        const unanswered = e instanceof BrainStopped ? [] : steered.slice(Math.max(0, answered - 1)).flat();
+        if (unanswered.length) markSent(sessionId, unanswered, false);
         if (stopped.has(sessionId)) throw new Error("Stopped by you");
         if (!(e instanceof BrainStopped)) throw e;
         // Signed out there (or its key turned down): Bops reads its sign-in again, so its profile offers Sign in.
         const st = x.auth === "plan" ? await signInStatus(x.id, at.computerId).catch(() => null) : null;
         if (e.why === "auth") signedIn = false;
         const plan = brainById(x.id)?.signIns?.find((y) => y.computerId === at.computerId)?.account?.plan ?? (st?.loggedIn ? st.account?.plan : undefined);
-        return waitOn("limit", stoppedWords(x, e.why, e.message, where, plan), steered);
+        return waitOn("limit", stoppedWords(x, e.why, e.message, where, plan), steered.flat());
       } finally {
         interrupts.delete(sessionId);
         steerers.delete(sessionId);
@@ -1895,12 +1944,14 @@ export function openInTerminal(sessionId: string): { botId: string; display: num
   const s = session(sessionId);
   if (!s) throw new Error("That thread isn't there anymore.");
   const r = s.brainRun;
-  if (r?.kind !== "claude" || !r.started || s.onBopsAgent) throw new Error("Only a thread Claude Code runs opens in a terminal.");
+  if (!r || threadRunner(s) !== "claude") throw new Error("Only a thread Claude Code runs opens in a terminal.");
   if (getState().host === "mac" || s.runsOn === "mac") throw new Error("Your bots work in browsers on this Mac, so there's no terminal to open.");
   const x = brainById(r.brainId);
   if (!x) throw new Error("Its brain isn't there anymore.");
   const b = bot(s.botId);
   if (!b) throw new Error("Its bot isn't there anymore.");
+  // Its bot is still on that brain: else its next turn runs on Bops agent, which wouldn't know what was done there.
+  if (brainOf(b, getState())?.id !== x.id) throw new Error(`${b.name} doesn't use ${x.name} anymore.`);
   const c = workComputer(b);
   if (!c.computerId || c.computerId !== r.computerId) throw new Error(`Its Claude Code session is on another computer than ${c.name}'s now.`);
   const held = getState().takeover;
@@ -2299,6 +2350,8 @@ async function run(sessionId: string) {
   const onComputerTool = !mac && !brain && (s.runner === "computer" || (!s.agentSessionId && computerToolOn()));
   // Until its cleanup is done (a thread moved to the Mac waits for that: waitsForCloud).
   runs.add(sessionId);
+  // On its brain: stopped if the brain goes, or its bot goes off it, meanwhile (brainLeft).
+  if (brain) onBrain.set(sessionId, { brainId: brain.id, computerId });
   // This Mac runs the task, wherever its screen is: it doesn't idle to sleep till it's done.
   const letSleep = holdAwake();
   try {
@@ -2526,9 +2579,17 @@ async function run(sessionId: string) {
     // An offer to move it to the Mac goes with the run: tapping it later would do the whole task again there.
     patchSession(sessionId, { status: "done", endedAt: Date.now(), activity: undefined, offerMac: undefined });
     taskEnded(done, "done", startedAt, who);
+    // Its brain stopped to wait on the user (brainTurns: not signed in there, or at its limit): what it said
+    // is Bops' words, not the bot's answer. Like a run out of AI credit, they're said in the chat only (never
+    // by email, a text or a channel, where Sign in or the two replies can't be tapped), the routine records
+    // the run as one that didn't happen (said there once), and nothing goes into memory.
+    if (done.brainRun?.waits) {
+      if (!(await routineFailed(sessionId, done.answer ?? "", true)))
+        addMessage({ chatId: done.chatId, role: "bot", botId: b.id, text: done.answer ?? "", sessionIds: [sessionId], resultOf: sessionId });
+    }
     // A routine's run: the routine records it and sends the result where its results go. A quiet one
     // that found nothing posts, chimes, sends and remembers nothing (routines.ts onRoutineTaskEnd).
-    if (!(await routineDone(sessionId))) {
+    else if (!(await routineDone(sessionId))) {
       rememberTask(done);
       const result = addMessage({ chatId: done.chatId, role: "bot", botId: b.id, text: done.answer ?? "Done.", sessionIds: [sessionId], resultOf: sessionId });
       // Asking the user something (Jev may have said so already: judgeWaiting runs alongside; else a question mark).
@@ -2540,7 +2601,7 @@ async function run(sessionId: string) {
       channelResult(done, done.answer ?? "Done.");
     }
     // The part only the user's Mac can do comes next, with what the cloud found.
-    if (done.thenOnMac)
+    if (done.thenOnMac && !done.brainRun?.waits)
       startSession({ botId: b.id, goal: `${done.thenOnMac}\n\nWhat the first part found (in the cloud):\n${done.answer ?? ""}`, title: `${done.title} · on your Mac`, chatId: done.chatId, sentVia: done.sentVia, where: "mac" });
   } catch (e) {
     if (e instanceof ScreenTaken && !stopped.has(sessionId)) {
@@ -2552,12 +2613,10 @@ async function run(sessionId: string) {
     const credit = !stopped.has(sessionId) && noteOutOfCredit(e);
     // Not started or stopped by Bops Cloud for want of more AI credit, with some left (cloud/turn-guard.ts): not out of it.
     const low = stopped.has(sessionId) ? undefined : (shortOfCredit(e) ?? freeHoursUsed(e));
+    // Stopped: by the user, as they took the screen over or opened its terminal, or as its brain went (brainLeft).
     const error = stopped.has(sessionId)
-      ? getState().takeover?.sessionId === sessionId
-        ? getState().takeover?.terminal
-          ? IN_TERMINAL
-          : "Paused while you took over"
-        : "Stopped by you"
+      ? (brainStops.get(sessionId) ??
+        (getState().takeover?.sessionId === sessionId ? (getState().takeover?.terminal ? IN_TERMINAL : "Paused while you took over") : "Stopped by you"))
       : credit
         ? OUT_OF_CREDIT
         : (low ?? (e as Error).message);
@@ -2617,6 +2676,8 @@ async function run(sessionId: string) {
       }
     } finally {
       runs.delete(sessionId);
+      onBrain.delete(sessionId);
+      brainStops.delete(sessionId);
       letSleep();
     }
   }
