@@ -40,7 +40,7 @@ import { textOwner, textResult } from "./phone";
 import { askTiming, needsYou } from "@/lib/asks";
 import { channelResult } from "./channels";
 import { asksForMac, chooseWhere } from "./where";
-import { addMessage, bot, getState, id, ownerLine, ownerName, patchSession, sameState, session, stateEpoch, stateReady, update } from "./store";
+import { addMessage, bot, getState, id, ownerLine, ownerName, ownSession, patchSession, sameState, session, stateDevice, stateEpoch, stateReady, update } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { computerToolOn, computerTurn, PAGE_RUNNER } from "./computer-task";
 import { ASKS_AGAIN, LIGHT, logRoute, routeTask, speedFor, taskConfig } from "./routing";
@@ -216,9 +216,12 @@ export function startSession({ botId, goal, title, chatId, sentVia = "you", onWa
   // One job, one thread: asking for a job that's already running (or waiting on the user) adds to it.
   const same = !fresh && !onWatch ? sameJob(botId, title?.trim() || goal.slice(0, 48)) : undefined;
   if (same) return foldInto(same, goal, where, { outside, ownerAsked });
+  const by = stateDevice();
   const s: Session = {
     id: id("ses"),
     botId,
+    // This server runs it (Session.by): another Mac or a computer's runner leaves it be.
+    ...(by ? { by } : {}),
     chatId: chatId ?? botChatId(botId),
     sentVia,
     title: title?.trim() || goal.slice(0, 48),
@@ -387,7 +390,8 @@ async function route(sessionId: string, where: "mac" | "cloud" | "auto", opts: {
 export function setWhere(sessionId: string, to: "mac" | "cloud") {
   const s = session(sessionId);
   if (!s?.askWhere) return;
-  patchSession(sessionId, { askWhere: false, runsOn: to });
+  // It waited on the user, running nowhere: this server runs it now (Session.by).
+  patchSession(sessionId, { askWhere: false, runsOn: to, by: stateDevice() ?? undefined });
   void pump();
 }
 
@@ -569,7 +573,8 @@ export const stoppedByUser = (sessionId: string) => stopped.has(sessionId);
 /** Stop a session: a queued one never starts; a running one ends its turn (at OpenAI too) and frees its screen. */
 export function stopSession(sessionId: string, reason = "Stopped by you") {
   const s = session(sessionId);
-  if (!s || !live(s)) return;
+  // Another Bops's thread (Session.by) is that one's to stop: this server has no hold on its turn.
+  if (!s || !live(s) || !ownSession(s)) return;
   stopped.add(sessionId);
   siteWait.delete(sessionId);
   if (s.status === "queued") {
@@ -644,6 +649,19 @@ export function stopAllSessions(reason: string) {
 }
 
 /**
+ * A computer's runner was stopped (where the bots work switched to This Mac, its computer was deleted, its
+ * bots moved off; lib/server/runner.ts): the threads it ran (Session.by `device`, its id as the user's state
+ * knows it) end, saying why, as a thread does when Bops restarts mid-run. Its routines' runs end with them.
+ */
+export function endSessionsOf(device: string, reason: string) {
+  for (const s of getState().sessions.filter((x) => live(x) && x.by === device)) {
+    patchSession(s.id, { status: "failed", error: reason, endedAt: Date.now(), display: undefined });
+    taskEnded(s, "stopped");
+    void routineFailed(s.id, reason);
+  }
+}
+
+/**
  * The user replied in a thread. A running session takes it in while it works (steering): an Agents API
  * thread or a brain's at once, a computer-tool thread with its next step. One between turns gets it as its
  * next turn; a finished one picks the same agent session back up on a free screen. `from`: the bot passed it
@@ -682,7 +700,8 @@ export function replyToSession(sessionId: string, text: string, note?: string, f
       patchSession(sessionId, (x) => {
         if (x.route) x.route.bumps = (x.route.bumps ?? 0) + 1;
       });
-    patchSession(sessionId, { status: "queued", error: undefined, endedAt: undefined });
+    // Picked up again here, whichever Bops ran it before: it isn't running there anymore (Session.by).
+    patchSession(sessionId, { status: "queued", error: undefined, endedAt: undefined, by: stateDevice() ?? undefined });
     void pump();
   } else steerers.get(sessionId)?.();
 }
@@ -737,7 +756,8 @@ async function pump() {
   pumping = true;
   pumpAgain = false;
   try {
-    for (const s of getState().sessions.filter((x) => x.status === "queued" && !x.routing && !x.askWhere && !stopped.has(x.id) && (notBefore.get(x.id) ?? 0) <= Date.now() && !waitsForCloud(x))) {
+    // Only this server's (Session.by): another Mac's or a runner's queued thread is started there.
+    for (const s of getState().sessions.filter((x) => x.status === "queued" && ownSession(x) && !x.routing && !x.askWhere && !stopped.has(x.id) && (notBefore.get(x.id) ?? 0) <= Date.now() && !waitsForCloud(x))) {
       const b = bot(s.botId);
       if (!b) continue;
       // On the user's Mac: a Chrome of the bot's own there, not one of its computer's screens, a few at a
@@ -1300,7 +1320,7 @@ function computerFailed(b: Bot, e: Error, deleted = false, kept = false) {
     const x = bot(s.botId);
     return !!x && (workComputer(x).id === b.id || (b.isMain && !x.computerId && workspaceOf(x) === workspaceOf(b)));
   };
-  const waiting = getState().sessions.filter((s) => s.status === "queued" && !s.routing && !s.askWhere && s.runsOn !== "mac" && s.host === "orgo" && waits(s));
+  const waiting = getState().sessions.filter((s) => s.status === "queued" && ownSession(s) && !s.routing && !s.askWhere && s.runsOn !== "mac" && s.host === "orgo" && waits(s));
   const next = deleted ? "Bops deleted it, and the next task makes a new one." : kept ? "Bops kept it, so nothing on it is lost. The next task tries again." : "The next task tries again.";
   for (const s of waiting) {
     patchSession(s.id, { status: "failed", error: e.message, endedAt: Date.now() });
@@ -1923,7 +1943,7 @@ export function brainSignedIn(brainId: string, computerId: string) {
     stopped.delete(s.id);
     patchSession(s.id, (x) => {
       if (x.brainRun) delete x.brainRun.waits;
-      Object.assign(x, { status: "queued", waitingOnYou: false, error: undefined, endedAt: undefined });
+      Object.assign(x, { status: "queued", waitingOnYou: false, error: undefined, endedAt: undefined, by: stateDevice() ?? undefined });
     });
   }
   void pump();

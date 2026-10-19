@@ -654,6 +654,12 @@ export type Session = {
   onWatch?: string;
   /** Where it runs: the bot's cloud computer (also when unset, as older threads are), or a Chrome of its own on the user's Mac. */
   runsOn?: "cloud" | "mac";
+  /**
+   * The Bops that runs it, as the user's state knows it (persist-cloud.ts deviceIdFor): the Mac it was
+   * started on, or a computer's runner (lib/server/runner.ts). Only that one starts it, picks it up again,
+   * stops it, or marks it failed when it restarts. Unset on threads from before: the Mac's, never a runner's.
+   */
+  by?: string;
   /** Bops is still deciding where it runs. */
   routing?: boolean;
   /** Bops couldn't tell where it should run, so it's asking the user. */
@@ -1046,6 +1052,13 @@ export type AppState = {
    */
   macs?: Record<string, { relay?: AppState["relay"]; relayRoutes?: AppState["relayRoutes"]; mac?: MacState; setup?: AppState["setup"] }>;
   /**
+   * The Bops runner on each of the bots' computers, by Orgo computer id (lib/server/runner.ts): a Bops of
+   * its own there that runs the routines of the bots working on that computer while the user's Mac is
+   * closed (where their bots work: Cloud). Shared by every Mac and runner of the user's, so each knows
+   * whose routines are whose.
+   */
+  runners?: Record<string, RunnerState>;
+  /**
    * Whether the computers' other screens stream live through Orgo too, not only over the tailnet
    * (BOPS_SCREEN_STREAM=1, screenStreamWanted in lib/server/orgo.ts). Filled in by /api/state for the
    * app; never stored.
@@ -1053,6 +1066,24 @@ export type AppState = {
   screenStream?: boolean;
   /** Whether business data (treg) is there for the bots: lib/server/treg.ts tregOn. Filled in by /api/state for the app; never stored. */
   businessData?: boolean;
+};
+
+/**
+ * A computer's Bops runner (AppState.runners). `status`: being set up, up (its health check passed: it
+ * runs that computer's routines, and the Mac leaves them to it), couldn't start (`error` says why: those
+ * routines stay on the Mac), or being stopped (where the bots work switched to This Mac, the computer was
+ * deleted, its bots moved off). `version` and `buildId`: the Bops it runs. `keyId`: the Orgo key made for
+ * it (orgo-web /api/computers/{id}/bops-runner-key), which only the Mac that made it (`by`, its device id)
+ * revokes. `at`: when the status was set.
+ */
+export type RunnerState = {
+  status: "installing" | "running" | "failed" | "stopping";
+  version: string;
+  buildId: string;
+  keyId?: string;
+  by: string;
+  error?: string;
+  at: number;
 };
 
 /**

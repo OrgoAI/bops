@@ -1,7 +1,7 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
 import { workspaceOf, MAIN_WORKSPACE, botChatId, type AppState, type Bot, type Chat, type Message, type Session, type Reaction, type Tapback } from "@/lib/types";
-import { fileStore, onPostgres, selfHosted, type Persistence, type StateAccess } from "./persist";
+import { fileStore, onPostgres, onRunner, selfHosted, type Persistence, type StateAccess } from "./persist";
 import { cloudStore } from "./persist-cloud";
 import { pgStore } from "./persist-pg";
 import { userBopsHome, userChromeDir, userDataDir } from "./user-paths";
@@ -62,8 +62,9 @@ function migrate(raw: Record<string, unknown>): AppState {
     old.replies ??= [];
     old.title ??= old.goal.slice(0, 48);
     old.host ??= "orgo";
-    // Sessions mid-flight when the server stopped can't resume their stream.
-    if (old.status === "queued" || old.status === "starting" || old.status === "running") {
+    // Sessions mid-flight when this server stopped can't resume their stream. Another Bops's (another
+    // Mac's, a computer's runner: Session.by) are still going there, and stay as they are.
+    if ((old.status === "queued" || old.status === "starting" || old.status === "running") && ownSession(old)) {
       old.status = "failed";
       old.error = "Bops restarted while this was running";
       old.display = undefined;
@@ -227,6 +228,22 @@ export const flushState = (ms = 10_000) => store.flush(ms);
 export const unsentState = () => store.unsent();
 /** Read what another Mac of the user's changed, now (Bops Cloud said so). */
 export const pullState = () => store.pull();
+/** When what another Mac of the user's changed was last read in full (0: not yet). */
+export const statePulledAt = () => store.pulledAt();
+/** This server as the user's state knows it (Session.by); null signed out, or for a state that's only ever this server's. */
+export const stateDevice = () => store.device();
+/** A newer Bops of the user's wrote their state, so this one runs no routines and says nothing is in use until it's updated. */
+export const stateTooNew = () => store.tooNew();
+
+/**
+ * Whether this server runs the thread `s` (Session.by): it started it, or the thread is from before
+ * threads said whose they are (the Mac's, never a runner's). Only this server starts it, picks it up
+ * again, stops it, or fails it when it restarts.
+ */
+export function ownSession(s: Pick<Session, "by">): boolean {
+  if (!s.by) return !onRunner();
+  return s.by === store.device();
+}
 
 /**
  * Whose files these are: the user whose state is in memory, "" for none (a self-hosted install on its

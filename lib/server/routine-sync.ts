@@ -2,6 +2,7 @@ import "server-only";
 import { normalizeSchedule } from "@/cloud/schedule";
 import { templateById } from "@/lib/routine-catalog";
 import { workspaceOf, type Routine, type RoutineRun } from "@/lib/types";
+import { onRunner, pinnedToMac, runnerRoutine } from "./runner";
 import { bot, getState } from "./store";
 
 /**
@@ -19,6 +20,11 @@ import { bot, getState } from "./store";
  * the routes (404 or 405) is asked again at most once every 6 hours. On the first tick after start (routines.ts), each workspace sends a
  * full copy with deleteMissing, so a routine deleted while Orgo couldn't be reached goes there too.
  * Runs on the signed-in Orgo key (orgo.ts apiKey); signed out, nothing is sent.
+ *
+ * Orgo wakes a computer for its runner by these (runner.ts): each routine says how it runs (`run`) and
+ * whether it needs the Mac (`onMac`, runner.ts pinnedToMac), and every new next time is sent
+ * (routines.ts). A computer's runner sends only its own routines (runnerRoutine), never with
+ * deleteMissing: the whole set, and what's gone from it, are the Mac's to send.
  */
 
 /** How long changes gather before they're sent. */
@@ -91,6 +97,9 @@ export function routinePayload(r: Routine) {
     bopsId: r.id,
     botId: r.botId,
     kind: kind === "monitor" ? "monitor" : "schedule",
+    // How it runs (routines.ts run): someone else's is never a chat run. Orgo wakes no computer for one that needs the Mac.
+    run: r.reminder ? "reminder" : r.run === "chat" && !r.fromOutside ? "chat" : "task",
+    onMac: pinnedToMac(r, bot(r.botId)),
     title: cleanText(r.title.trim(), 200).trim() || cleanText(r.goal.trim(), 200).trim() || "Routine",
     goal: cleanText(r.goal, 8000),
     enabled: r.enabled,
@@ -166,15 +175,18 @@ async function flush(wsId: string): Promise<void> {
   const projectId = getState().workspaces?.find((w) => w.id === wsId)?.orgoProjectId;
   if (!projectId || routesMissing(projectId)) return;
   const base = `/api/projects/${encodeURIComponent(projectId)}/routines`;
+  // A runner: its own routines only, and nothing deleted (the Mac's whole set says what's gone).
+  const runner = onRunner();
   const all = getState()
-    .routines.filter((r) => workspaceOf(bot(r.botId)) === wsId)
+    .routines.filter((r) => workspaceOf(bot(r.botId)) === wsId && (!runner || runnerRoutine(r)))
     .map(routinePayload)
     .filter((x) => x !== undefined);
+  if (runner && !all.length) return;
   // More than Orgo takes in one call: the first MAX_ROUTINES go, and nothing is deleted (the rest aren't missing).
   const over = all.length > MAX_ROUTINES;
   if (over) console.warn(`[routine-sync] ${wsId}: ${all.length} routines, Orgo takes ${MAX_ROUTINES}; the rest aren't mirrored`);
   const routines = all.slice(0, MAX_ROUTINES);
-  const res = await send("PUT", base, { routines, ...(p.deleteMissing && !over ? { deleteMissing: true } : {}) });
+  const res = await send("PUT", base, { routines, ...(p.deleteMissing && !over && !runner ? { deleteMissing: true } : {}) });
   const status = res?.status ?? null;
   if (status === 404 || status === 405) {
     missing.set(projectId, Date.now() + MISSING_RETRY_MS);
@@ -285,7 +297,7 @@ export function routineRan(routineId: string, run: RoutineRun) {
   }
 }
 
-/** Once a run of the app: every workspace with an Orgo project sends a full copy, deleteMissing (routines.ts tick). */
+/** Once a run of the app: every workspace with an Orgo project sends a full copy, deleteMissing (routines.ts tick); a runner, its own routines. */
 export function syncRoutinesOnStart() {
   if (g.__bopsRoutineSyncStarted) return;
   g.__bopsRoutineSyncStarted = true;

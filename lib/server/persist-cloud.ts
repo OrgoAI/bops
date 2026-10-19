@@ -12,6 +12,7 @@ import {
   BOPS_USER_HEADER,
   STATE_CONFLICT,
   STATE_PROTOCOL,
+  STATE_TOO_NEW,
   type CloudMessageRow,
   type CloudMessagesPage,
   type CloudState,
@@ -45,6 +46,9 @@ import { moveLegacyState, userDataDir } from "./user-paths";
  * - Hearing from the user's other Macs: the tunnel says when the state changed (a "state" frame,
  *   cloud-tunnel.ts), and every 30 seconds the head is looked at anyway (only one Mac holds the tunnel).
  *   What changed is merged in, so changes not sent yet are kept.
+ * - A newer Bops of the user's wrote their state (426 STATE_TOO_NEW to a read or a write): this one
+ *   keeps what it changes, as when offline, and its routines and in-use beat stop (tooNew), so an app
+ *   that's still open after its state moved on runs nothing twice. It's told to update.
  * - Signing out, or another account signing in: what's still unsent is kept aside with that user's key
  *   and sent in the background, never into the next user's state.
  * - The cloud out of reach when a save fails, or when Bops quits or restarts: what's unsent is also
@@ -116,15 +120,22 @@ type Box = {
   aside: Map<string, Aside>;
   poll?: ReturnType<typeof setInterval>;
   hooked?: boolean;
+  /** The cloud answered 426 STATE_TOO_NEW: a newer Bops of the user's wrote their state (Persistence.tooNew). Cleared by the next read or write that lands. */
+  tooNew?: boolean;
 };
 
 class CallError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
+
+/** The cloud keeps this Bops out of the user's state: a newer one of theirs wrote it (cloud/state.ts). */
+const tooNewError = (e: unknown) => e instanceof CallError && e.status === 426 && e.code === STATE_TOO_NEW;
 
 /** A fingerprint of a value as this Mac serializes it (the same object, the same text). */
 const fp = (v: unknown) => createHash("sha1").update(typeof v === "string" ? v : JSON.stringify(v)).digest("base64");
@@ -132,7 +143,7 @@ const byTime = (a: Message, b: Message) => (a.at ?? 0) - (b.at ?? 0);
 
 /* ---------------- This Mac ---------------- */
 
-/** This Mac's hardware id (IOPlatformUUID); BOPS_DEVICE_SEED stands in for it (a test's second Mac). */
+/** This Mac's hardware id (IOPlatformUUID); BOPS_DEVICE_SEED stands in for it (a test's second Mac, a computer's runner: its computer id). */
 function platformId(): string {
   const g = globalThis as unknown as { bopsPlatformId?: string };
   if (g.bopsPlatformId) return g.bopsPlatformId;
@@ -146,8 +157,12 @@ function platformId(): string {
   return (g.bopsPlatformId = id || `${hostname()}:${homedir()}`);
 }
 
-/** This Mac as the user's state knows it (state.macs): the same Mac is another device for another user. */
-export const deviceIdFor = (userId: string) => createHash("sha256").update(`${userId}\n${platformId()}`).digest("hex").slice(0, 16);
+/**
+ * This Mac as the user's state knows it (state.macs, Session.by): the same Mac is another device for
+ * another user. `platform`: another's hardware id instead, as a computer's runner is (its computer id,
+ * its BOPS_DEVICE_SEED), so a Mac can tell which threads are that runner's.
+ */
+export const deviceIdFor = (userId: string, platform = platformId()) => createHash("sha256").update(`${userId}\n${platform}`).digest("hex").slice(0, 16);
 
 /* ---------------- Calls ---------------- */
 
@@ -179,8 +194,9 @@ async function call<T>(who: Who, path: string, init: { method?: string; body?: u
 }
 
 function refused(what: string, r: { status: number; body: unknown }): never {
-  const said = (r.body as { error?: unknown } | null)?.error;
-  throw new CallError(`${what}: Bops Cloud answered ${r.status}${typeof said === "string" ? ` (${said})` : ""}`, r.status);
+  const body = r.body as { error?: unknown; code?: unknown } | null;
+  const said = body?.error;
+  throw new CallError(`${what}: Bops Cloud answered ${r.status}${typeof said === "string" ? ` (${said})` : ""}`, r.status, typeof body?.code === "string" ? body.code : undefined);
 }
 
 /* ---------------- Loading ---------------- */
@@ -456,11 +472,13 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
         .then((wait) => {
           if (box.failures) console.info(`[store] saving to Bops Cloud again after ${box.failures} failed ${box.failures === 1 ? "try" : "tries"}`);
           box.failures = 0;
+          box.tooNew = false;
           // The blob went up a moment ago: it goes again a little later.
           if (wait > 0 && box.sync === sync) schedule(wait);
         })
         .catch((e: Error) => {
           if (box.sync !== sync) return;
+          if (tooNewError(e)) box.tooNew = true;
           box.failures++;
           // Keep working from memory; say so on the first failure and then now and then, not every retry.
           if (box.failures === 1 || box.failures % 10 === 0) console.warn(`[store] saving to Bops Cloud failed (${box.failures}x, trying again in ${retryDelay() / 1000}s): ${e.message}`);
@@ -557,6 +575,7 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
       sync.seq = after;
     }
     sync.pulledAt = Date.now();
+    box.tooNew = false;
     if (changed) {
       touch();
       // Merged with changes of this Mac's own: those go up.
@@ -564,11 +583,16 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     }
   }
 
+  /** A read the cloud refused for a newer Bops's state: this one stops its routines and beats (Persistence.tooNew). */
+  function noteTooNew(e: unknown) {
+    if (tooNewError(e)) box.tooNew = true;
+  }
+
   function startPoll() {
     if (box.poll) return;
     box.poll = setInterval(() => {
       const sync = box.sync;
-      if (sync && !box.timer) void lane(() => pullOnce(sync)).catch(() => {});
+      if (sync && !box.timer) void lane(() => pullOnce(sync)).catch(noteTooNew);
     }, POLL_MS);
     box.poll.unref?.();
   }
@@ -631,8 +655,10 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
       );
       box.aside.delete(userId);
       if (!sent) {
-        replace(a.state as unknown as Record<string, unknown>);
+        // Whose state it is first: bringing it up to date (store.ts migrate) asks which device this is.
         box.sync = a.sync;
+        box.tooNew = false;
+        replace(a.state as unknown as Record<string, unknown>);
         console.info(`[store] ${userId}'s Bops, with changes still to send to Bops Cloud`);
         schedule(0);
         return;
@@ -651,8 +677,10 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     const kept = readKept(userId);
     const legacy = kept ? null : readJson(legacyFile);
     const { state, sync } = kept ? buildKept(who, loaded, kept) : build(who, loaded, legacy);
-    replace(state);
+    // Whose state it is first: bringing it up to date (store.ts migrate) asks which device this is.
     box.sync = sync;
+    box.tooNew = false;
+    replace(state);
     if (kept) {
       sync.unsentFile = unsentFileOf(userId);
       if (kept.legacy && existsSync(legacyFile)) sync.legacyFile = legacyFile;
@@ -676,8 +704,13 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     if (box.timer) clearTimeout(box.timer);
     box.timer = undefined;
     const done = lane(() => send(sync, live(sync), true)).then(
-      () => box.sync !== sync || !hasUnsent(sync, get()),
+      () => {
+        if (box.sync !== sync) return true;
+        box.tooNew = false;
+        return !hasUnsent(sync, get());
+      },
       (e: Error) => {
+        noteTooNew(e);
         console.warn(`[store] saving to Bops Cloud: ${e.message}`);
         schedule(retryDelay());
         return false;
@@ -757,7 +790,15 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     unsent: () => !!box.sync && (!!box.timer || hasUnsent(box.sync, get())),
     pull: () => {
       const sync = box.sync;
-      return sync ? lane(() => pullOnce(sync)).catch((e: Error) => console.warn(`[store] reading from Bops Cloud: ${e.message}`)) : Promise.resolve();
+      return sync
+        ? lane(() => pullOnce(sync)).catch((e: Error) => {
+            noteTooNew(e);
+            console.warn(`[store] reading from Bops Cloud: ${e.message}`);
+          })
+        : Promise.resolve();
     },
+    pulledAt: () => box.sync?.pulledAt ?? 0,
+    device: () => box.sync?.device ?? null,
+    tooNew: () => !!box.sync && !!box.tooNew,
   };
 }

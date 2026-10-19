@@ -130,10 +130,11 @@ export const STATE_PROTOCOL = 2;
  * app's calls for the user's state (but its copy before Start over) and its tunnel are refused (426
  * STATE_TOO_NEW) and its notices say to update (cloud/state.ts). 3: routines that run every so often,
  * before meetings or monthly, and a bot with no access to an app, which 0.0.28 runs over and over, runs
- * daily, or lists as able to use it.
+ * daily, or lists as able to use it. 4: routines may run on a cloud runner (a Bops on one of the bots'
+ * computers, lib/server/runner.ts); an older app runs them all again.
  */
 export const BOPS_STATE_LEVEL_HEADER = "x-bops-state-level";
-export const STATE_LEVEL = 3;
+export const STATE_LEVEL = 4;
 /** 426: a Mac of the user's on a newer Bops wrote their state, which this app can't be given (BOPS_STATE_LEVEL_HEADER). */
 export const STATE_TOO_NEW = "state_too_new";
 /** 409: the call named another user than the key's. */

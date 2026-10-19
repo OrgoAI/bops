@@ -14,7 +14,7 @@ import { pathToFileURL } from "node:url";
 
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
-const FAKES = { store: ["bot", "getState"], orgo: ["apiKey", "callOrgo"] };
+const FAKES = { store: ["bot", "getState", "pullState", "statePulledAt"], orgo: ["apiKey", "callOrgo"] };
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith("@/")) specifier = pathToFileURL(`${root}/${specifier.slice(2)}`).href;
@@ -85,6 +85,8 @@ globalThis.__fake = {
       return state;
     },
     bot: (id) => state.bots.find((b) => b.id === id),
+    pullState: async () => {},
+    statePulledAt: () => 0,
   },
   orgo: {
     apiKey: async () => {
@@ -185,6 +187,9 @@ await check("the payload: the workspace's own routines, in orgo-web's shape", as
     bopsId: "rtn_a",
     botId: "bot_main",
     kind: "monitor",
+    // A task, set to the cloud: Orgo may wake its bot's computer for it.
+    run: "task",
+    onMac: false,
     title: "Morning inbox",
     goal: "Check my mail.",
     enabled: true,

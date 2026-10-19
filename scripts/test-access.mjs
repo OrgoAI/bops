@@ -22,7 +22,7 @@ const scratch = mkdtempSync(join(tmpdir(), "bops-test-access-"));
 
 const forward = (mod, names) => names.map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(mod)}].${n}(...a);`).join("\n");
 const FAKES = {
-  store: forward("store", ["addMessage", "bot", "getState", "id", "installId", "ownerName", "session", "update", "stateReady", "userDir", "watchChanges"]),
+  store: forward("store", ["addMessage", "bot", "getState", "id", "installId", "ownerName", "pullState", "session", "statePulledAt", "update", "stateReady", "userDir", "watchChanges"]),
   orgo: forward("orgo", ["apiKey", "callOrgo"]),
   keys: forward("keys", ["listKeys", "keysOf"]),
   cloud: forward("cloud", ["cloudOn", "cloudProxy", "cloudSession", "cloudSessionNow", "cloudUrl"]),
@@ -124,6 +124,8 @@ globalThis.__fake = {
     stateReady: () => true,
     userDir: () => scratch,
     watchChanges: () => {},
+    pullState: async () => {},
+    statePulledAt: () => 0,
   },
   orgo: {
     apiKey: async () => "sk_test",

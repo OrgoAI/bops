@@ -638,16 +638,18 @@ from before still `PUT /v1/state { version, state }` their whole state as a back
 become rows) and `GET` it back with the messages in, until a newer build writes for the user
 (`protocol` 2): then the old upload is refused (426).
 
-Each app also says which state it may be given, `X-Bops-State-Level: 3` from 0.0.29 on (with every
-call and the tunnel, `lib/server/app-version.ts`; none counts as 2), and a write keeps the highest in
+Each app also says which state it may be given, `X-Bops-State-Level: 3` or more from 0.0.29 on (4 once
+routines may run on a cloud runner, a Bops on one of the bots' computers; with every call and the tunnel,
+`lib/server/app-version.ts`; none counts as 2), and a write keeps the highest in
 `protocol`. Once that's above an app's, every one of the calls above from it but the copy before
 "Start over" is refused (426 `state_too_new`), reads, merges and writes alike, and so is its tunnel
 (one it's on then is closed as replaced); its notices say to update. The copy is made from what's
 here and none of it goes back, and that Mac's Start over goes up once it's updated.
 0.0.28 runs a routine that runs every so often or before meetings over and over (its `nextRun` throws
 after the task started), a monthly one daily, and lists a bot with an app it has no access to as able
-to use it. What such a Mac changes meanwhile waits on it (`unsent-state.json`) and goes up merged once
-it's updated. A user whose Macs are all older is never marked: nothing changes for them.
+to use it, and one before level 4 runs every routine itself, a runner's too. What such a Mac changes
+meanwhile waits on it (`unsent-state.json`) and goes up merged once it's updated; a newer app that's
+still open when it's refused stops its routines until then (`lib/server/persist-cloud.ts` tooNew). A user whose Macs are all older is never marked: nothing changes for them.
 
 ## The main bot's chat from the phone
 

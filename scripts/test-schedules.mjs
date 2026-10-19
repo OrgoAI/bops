@@ -26,11 +26,11 @@ const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 // The modules routines.ts talks to are fakes that call into globalThis.__fake (set up below).
 const FAKES = {
-  store: ["addMessage", "bot", "getState", "id", "ownerName", "patchSession", "session", "stateReady", "update"],
+  store: ["addMessage", "bot", "getState", "id", "ownerName", "patchSession", "pullState", "session", "statePulledAt", "stateReady", "stateTooNew", "update"],
   sessions: ["startSession"],
   analytics: ["trackServerEvent"],
   attention: ["pingIfWorthIt"],
-  persist: ["onPostgres"],
+  persist: ["onPostgres", "onRunner"],
   phone: ["isOwner", "ownerPhone", "sendText", "textingLine"],
   mail: ["ownerAddresses", "sendEmail"],
   channels: ["postTo"],
@@ -487,6 +487,9 @@ globalThis.__fake = {
     },
     session: (id) => state.sessions.find((x) => x.id === id),
     stateReady: () => ready,
+    stateTooNew: () => false,
+    pullState: async () => {},
+    statePulledAt: () => 0,
   },
   sessions: {
     startSession: (o) => {
@@ -498,7 +501,7 @@ globalThis.__fake = {
   },
   analytics: { trackServerEvent: () => {} },
   attention: { pingIfWorthIt: (...a) => fake.pings.push(a) },
-  persist: { onPostgres: () => false },
+  persist: { onPostgres: () => false, onRunner: () => false },
   phone: {
     isOwner: (n) => n === fake.ownerPhone,
     ownerPhone: () => fake.ownerPhone,

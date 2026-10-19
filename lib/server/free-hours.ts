@@ -5,7 +5,7 @@ import { orgo, OrgoError } from "./orgo";
 import { orgoKey } from "./orgo-auth";
 import { onPostgres } from "./persist";
 import { postOrgo } from "./plan";
-import { getState } from "./store";
+import { getState, stateTooNew } from "./store";
 
 /**
  * Free's Bops computer runs 10 hours a month, and Orgo suspends it after 15 minutes nobody uses it
@@ -30,11 +30,12 @@ function inUse(): boolean {
 
 /**
  * One beat: say it's in use if it is (or this sign-in hasn't said so yet). The timer's step, and what a
- * task or a takeover calls as it starts (`timeoutMs`: how long it waits for Orgo then); the tests call it too.
+ * task or a takeover calls as it starts (`timeoutMs`: how long it waits for Orgo then); the tests call it
+ * too. None while a newer Bops of the user's wrote their state (store.ts stateTooNew): this one runs nothing then.
  */
 export async function sayInUse(timeoutMs?: number) {
   const key = orgoKey();
-  if (!key || !cloudOn()) return;
+  if (!key || !cloudOn() || stateTooNew()) return;
   if (g.bopsActivitySaid === key && !inUse()) return;
   await postOrgo(key, "/api/bops/computer/active", {}, undefined, timeoutMs).then(
     () => void (g.bopsActivitySaid = key),

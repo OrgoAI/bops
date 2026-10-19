@@ -1444,7 +1444,7 @@ const lastCall = cloud.stateRequests.at(-1);
 assert.equal(lastCall.headers.authorization, `Bearer ${KEY}`);
 assert.equal(lastCall.headers["x-bops-user"], "u1");
 assert.equal(lastCall.headers["x-bops-protocol"], "2");
-assert.deepEqual(cloud.stateRequests.filter((r) => r.headers["x-bops-protocol"] !== "2" || r.headers["x-bops-state-level"] !== "3").map((r) => `${r.method} ${r.path}`), []);
+assert.deepEqual(cloud.stateRequests.filter((r) => r.headers["x-bops-protocol"] !== "2" || r.headers["x-bops-state-level"] !== "4").map((r) => `${r.method} ${r.path}`), []);
 assert.match(lastCall.headers["x-bops-device"], /^[0-9a-f]{16}$/);
 const device = lastCall.headers["x-bops-device"];
 
@@ -1997,9 +1997,9 @@ assert.ok(cloud.upgrades.length > 0 && cloud.upgrades.every((u) => u.version ===
 // What the cloud keeps a Mac older than the user's state out of says which state this one may be given:
 // the tunnel and the notices, as the state's calls above.
 const tunnels = cloud.upgrades.filter((u) => u.path === "/v1/connect");
-assert.ok(tunnels.length > 0 && tunnels.every((u) => u.level === "3"), `every tunnel says its state level: ${JSON.stringify(tunnels.map((u) => u.level))}`);
+assert.ok(tunnels.length > 0 && tunnels.every((u) => u.level === "4"), `every tunnel says its state level: ${JSON.stringify(tunnels.map((u) => u.level))}`);
 const noticeCalls = cloud.requests.filter((r) => r.path.startsWith("/v1/notices"));
-assert.ok(noticeCalls.length > 0 && noticeCalls.every((r) => r.headers["x-bops-state-level"] === "3"), "and every call for notices");
+assert.ok(noticeCalls.length > 0 && noticeCalls.every((r) => r.headers["x-bops-state-level"] === "4"), "and every call for notices");
 assert.ok(cloud.requests.some((r) => r.path.startsWith("/proxy/openai/")) && cloud.requests.some((r) => r.path.startsWith("/proxy/composio")), "through the providers' proxies too");
 const toOrgo = web.calls.filter((c) => c.host === "www.orgo.ai");
 assert.ok(toOrgo.length > 0 && toOrgo.every((c) => c.headers["x-bops-version"] === "9.9.9"), "every call to Orgo says the app's version");

@@ -8,8 +8,9 @@ import { cleanText, routineChanged, routineRan, syncRoutinesOnStart } from "./ro
 import { plainLinks } from "@/cloud/style";
 import { pingIfWorthIt } from "./attention";
 import { onPostgres } from "./persist";
+import { onRunner, runnerReady, runsHere } from "./runner";
 import { startSession } from "./sessions";
-import { addMessage, bot, getState, id, ownerName, patchSession, session, stateReady, update } from "./store";
+import { addMessage, bot, getState, id, ownerName, patchSession, session, stateReady, stateTooNew, update } from "./store";
 import { findSkill, skillRefId } from "./workspace-skills";
 
 /**
@@ -22,7 +23,11 @@ import { findSkill, skillRefId } from "./workspace-skills";
  * Times are wall clock times in the routine's own zone (Routine.timeZone) when it has one, else the
  * user's: Owner.timeZone, which this Mac keeps current, else this Mac's zone. The math is in
  * cloud/schedule.ts, so Bops Cloud can run the same schedules later. Each change and each run is also
- * mirrored to the workspace's Orgo project when it has one (routine-sync.ts), never holding anything up.
+ * mirrored to the workspace's Orgo project when it has one (routine-sync.ts), never holding anything up:
+ * every new next time too, which is when Orgo wakes a computer for its runner.
+ *
+ * Which Bops runs a routine is runner.ts's: the Mac, or the runner on the computer its bot works on
+ * (where the bots work: Cloud). Each one's timer skips the others' routines.
  */
 
 /** The zone Node's dates and Intl use right now. */
@@ -410,6 +415,8 @@ export function setRoutineWhere(routineId: string, where: "auto" | "cloud" | "ma
   if (!r) return { error: "No such routine." };
   if (r.fromOutside && where === "mac") return { error: outsideStaysInCloud(r) };
   update(() => (r.where = where));
+  // Which Bops runs it may change with it (runner.ts pinnedToMac): Orgo hears.
+  routineChanged(r.botId);
   return {};
 }
 
@@ -623,7 +630,8 @@ function taskRun(r: Routine, b: Bot, at: number, opts: RunOpts): RoutineRun {
       title: r.title,
       chatId,
       sentVia: "routine",
-      where: r.where ?? "auto",
+      // A runner runs only what doesn't need the Mac (runner.ts runsHere): on its computer.
+      where: onRunner() ? "cloud" : (r.where ?? "auto"),
       fresh: true,
       routineId: r.id,
       ...(r.procedure ? { procedure: r.procedure } : {}),
@@ -769,11 +777,11 @@ export async function deliver(r: Routine, text: string): Promise<RoutineRun["del
 /**
  * This Mac's zone is the user's (Owner.timeZone), kept current so routines (and Bops Cloud later) run
  * at their local times. A move to another zone (travel) works out the routines' next times again. Not
- * on a hosted server: its zone isn't the user's.
+ * on a hosted server or a computer's runner: their zone isn't the user's (a runner starts in theirs, TZ).
  */
 function keepZone() {
   const o = getState().owner;
-  if (!o || onPostgres()) return;
+  if (!o || onPostgres() || onRunner()) return;
   const zone = macZone();
   // Node keeps the zone it launched with until TZ is set: set, its dates and Intl (the time the bots are told) follow the Mac's zone now.
   if (nodeZone() !== zone) {
@@ -785,6 +793,7 @@ function keepZone() {
   g.__bopsZoneSeen = zone;
   const was = o.timeZone;
   const now = Date.now();
+  const moved = new Set<string>();
   update((s) => {
     if (s.owner) s.owner.timeZone = zone;
     // Times worked out in the old zone move to the new one; what's already due runs as it is. A skipped
@@ -793,9 +802,12 @@ function keepZone() {
       for (const r of s.routines) {
         if (!r.enabled || r.timeZone || r.schedule.kind === "once" || r.nextRunAt === undefined || r.nextRunAt <= now) continue;
         if (r.skips?.length) r.skips = r.skips.map((x) => sameWallTime(x, was, zone)).sort((a, b) => a - b);
-        r.nextRunAt = pastSkips(r, nextRun(r.schedule, now, zone, r.lastRunAt), zone) ?? r.nextRunAt;
+        const next = pastSkips(r, nextRun(r.schedule, now, zone, r.lastRunAt), zone) ?? r.nextRunAt;
+        if (next !== r.nextRunAt) moved.add(r.botId);
+        r.nextRunAt = next;
       }
   });
+  for (const botId of moved) routineChanged(botId);
 }
 
 /** An enabled routine with no next time never runs (a "once" from before that was set in the past): it's paused, and the chat says why. */
@@ -804,6 +816,7 @@ function pauseStuck(r: Routine, why: string) {
     r.enabled = false;
     r.nextRunAt = undefined;
   });
+  routineChanged(r.botId);
   addMessage({ chatId: botChatId(r.botId), role: "system", text: `Paused "${r.title}": ${why}`, routine: { id: r.id } });
 }
 
@@ -833,19 +846,26 @@ function skipLate(r: Routine, due: number, next: number | undefined, now: number
  * Run everything that's due. Called on a timer; waits while there's no account's state to run. A run
  * missed while the Mac slept runs once, late, and says so, unless it waits for its next time, which is
  * close (skipLate), where a thread of the routine's still going stays its run. Each run's next time is set before it
- * starts, so a slow run never runs twice.
+ * starts, so a slow run never runs twice. Only this Bops's routines (runner.ts runsHere); a runner also
+ * waits until it's sure of where the bots work and of the state (runnerReady), and a Bops whose state a
+ * newer one wrote (it can't be given it now) runs none. Every new next time goes to Orgo (routineChanged).
  */
 function tick() {
-  if (!stateReady()) return;
+  if (!stateReady() || stateTooNew()) return;
+  if (onRunner() && !runnerReady(() => g.__bopsRoutineTick?.())) return;
   keepZone();
   syncRoutinesOnStart();
   const now = Date.now();
   for (const r of getState().routines.filter((x) => x.enabled)) {
+    if (!runsHere(r, now)) continue;
     const tz = zoneOf(r);
     if (r.nextRunAt === undefined) {
       const next = r.schedule.kind === "once" ? (r.schedule.at > now ? r.schedule.at : undefined) : pastSkips(r, nextRun(r.schedule, now, tz, r.lastRunAt), tz);
       if (next === undefined) pauseStuck(r, r.schedule.kind === "once" ? "its time had already passed when it was set, so it never ran. Give it a new time." : "its schedule never comes due.");
-      else update(() => (r.nextRunAt = next));
+      else {
+        update(() => (r.nextRunAt = next));
+        routineChanged(r.botId);
+      }
       continue;
     }
     if (r.nextRunAt > now) continue;
@@ -864,10 +884,12 @@ function tick() {
     if (skippedNow) {
       update(() => (r.nextRunAt = next));
       if (next === undefined) pauseStuck(r, "its schedule never comes due.");
+      else routineChanged(r.botId);
       continue;
     }
     if (skipLate(r, due, raw, now, tz)) {
       update(() => (r.nextRunAt = next));
+      routineChanged(r.botId);
       // A thread of the routine's still going (a login it waits on) stays its run: the next run waits for it, and its end is the routine's.
       const t = r.last?.sessionId ? session(r.last.sessionId) : undefined;
       const still = t && live(t) ? stillGoing(r.last, t.id) : {};
@@ -883,6 +905,8 @@ function tick() {
       else delete r.lateRun;
       if (r.schedule.kind === "once") r.enabled = false;
     });
+    // Orgo hears of the next time now, not when the run ends: a runner's computer is woken for it.
+    routineChanged(r.botId);
     void run(r.id, { due }).catch((e: Error) => console.warn(`[routines] ${r.id}: ${e.message}`));
     if (r.schedule.kind !== "once" && then === undefined) pauseStuck(r, "its schedule never comes due.");
   }

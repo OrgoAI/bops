@@ -47,6 +47,12 @@ export type Persistence = {
   unsent(): boolean;
   /** Read what changed elsewhere (another Mac of the user's) now. */
   pull(): Promise<void>;
+  /** When what changed elsewhere was last read in full (0: never; a store with no elsewhere, never). */
+  pulledAt(): number;
+  /** This server as the user's state knows it (state.macs, Session.by), or null for a store that's only ever this one's. */
+  device(): string | null;
+  /** A newer Bops of the user's wrote their state, which this one can't be given (426 STATE_TOO_NEW): its routines and beats stop until it's updated. */
+  tooNew(): boolean;
 };
 
 /** What a backend needs from the store: the state, a way to swap in one loaded from elsewhere, and to say it changed. */
@@ -64,6 +70,8 @@ export class StateLoadError extends Error {}
 export const onPostgres = () => !!process.env.BOPS_DATABASE_URL;
 /** Self-hosting: keys in .env.local, no Bops Cloud, the state in files on this Mac. */
 export const selfHosted = () => process.env.BOPS_SELF_HOSTED === "1";
+/** A computer's Bops runner (BOPS_RUNNER=1, lib/server/runner.ts): the server on one of the bots' computers that runs its routines while the user's Mac is closed. */
+export const onRunner = () => process.env.BOPS_RUNNER === "1";
 
 const gx = globalThis as unknown as { __bopsExitWork?: Map<string, () => Promise<unknown>>; __bopsExitHooked?: boolean; __bopsStopping?: boolean };
 const exitWork = (gx.__bopsExitWork ??= new Map());
@@ -200,5 +208,8 @@ export function fileStore({ get, replace }: StateAccess): Persistence {
     flush: (ms) => Promise.race([flush().then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms).unref?.())]),
     unsent: () => !!save.timer || !!save.writing,
     pull: async () => {},
+    pulledAt: () => 0,
+    device: () => null,
+    tooNew: () => false,
   };
 }

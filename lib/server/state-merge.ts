@@ -67,7 +67,9 @@ export function fromShared(blob: Blob, device: string): Blob {
  * - lists of things with ids (bots, chats, sessions, routines, watches, workspaces, accounts, vault…)
  *   go thing by thing: one changed here keeps this Mac's copy, one removed on either side (and not
  *   changed on the other) goes, one added on either side stays; this Mac's order, the others' new
- *   ones after;
+ *   ones after. A routine changed on both sides goes field by field, its clock as one (mergeRoutine);
+ *   anything else changed on both keeps this Mac's copy whole, as its fields go together (a watch's
+ *   alert and what it was told, a thread's status and its screen);
  * - usage is both ledgers together; macs, and any other object, key by key;
  * - anything else is this Mac's.
  */
@@ -91,12 +93,13 @@ function mergeValue(key: string, b: unknown, m: unknown, t: unknown, top: boolea
   // Both changed it.
   if (top && key === "usage" && Array.isArray(m) && Array.isArray(t)) return usageOf(m, t);
   if ((withIds(m) || withIds(t) || withIds(b)) && (Array.isArray(m) || m === undefined) && (Array.isArray(t) || t === undefined))
-    return mergeById(Array.isArray(b) ? b : [], (m as { id: string }[]) ?? [], (t as { id: string }[]) ?? []);
+    return mergeById(Array.isArray(b) ? b : [], (m as { id: string }[]) ?? [], (t as { id: string }[]) ?? [], top && key === "routines" ? mergeRoutine : undefined);
   if (isObject(m) && isObject(t)) return mergeObject(isObject(b) ? b : {}, m, t);
   return m;
 }
 
-function mergeById(base: { id: string }[], mine: { id: string }[], theirs: { id: string }[]) {
+/** `both`: how one changed on both sides goes together; without it, this Mac's copy. */
+function mergeById(base: { id: string }[], mine: { id: string }[], theirs: { id: string }[], both?: (was: Blob, mine: Blob, theirs: Blob) => Blob) {
   const b = new Map(base.map((x) => [x.id, x]));
   const t = new Map(theirs.map((x) => [x.id, x]));
   const m = new Map(mine.map((x) => [x.id, x]));
@@ -104,12 +107,41 @@ function mergeById(base: { id: string }[], mine: { id: string }[], theirs: { id:
   for (const x of mine) {
     const was = b.get(x.id);
     const other = t.get(x.id);
-    if (other) out.push(was && same(x, was) ? other : x);
+    if (other) out.push(was && same(x, was) ? other : was && both && !same(other, was) ? (both(was as Blob, x as Blob, other as Blob) as { id: string }) : x);
     // Gone on their side: gone here too, unless this Mac changed it since (or added it).
     else if (!was || !same(x, was)) out.push(x);
   }
   // Theirs that this Mac hasn't got: new there (kept), or removed here (gone).
   for (const x of theirs) if (!m.has(x.id) && !b.has(x.id)) out.push(x);
+  return out;
+}
+
+/**
+ * A routine's clock (routines.ts tick and record): its next and last times, how its last run went, a late
+ * run, the times it's skipping, how far a meeting routine got.
+ */
+const CLOCK = ["nextRunAt", "lastRunAt", "last", "lateRun", "skips", "eventsThrough"] as const;
+
+/**
+ * A routine changed on both sides (a pause or an edit on this Mac while a computer's runner ran it, or
+ * the other way): field by field, and the clock as one, from the side that ran it last (the later
+ * lastRunAt), so the edit stays and so does the run, and an edit made offline never brings back a time
+ * that already ran. Paused on either side: no next time, nothing skipped (routines.ts setRoutineEnabled).
+ */
+function mergeRoutine(base: Blob, mine: Blob, theirs: Blob): Blob {
+  const out = mergeObject(base, mine, theirs);
+  const ran = (x: Blob) => (typeof x.lastRunAt === "number" ? x.lastRunAt : 0);
+  if (ran(mine) !== ran(theirs)) {
+    const from = ran(theirs) > ran(mine) ? theirs : mine;
+    for (const k of CLOCK) {
+      if (from[k] === undefined) delete out[k];
+      else out[k] = from[k];
+    }
+  }
+  if (out.enabled === false) {
+    delete out.nextRunAt;
+    delete out.skips;
+  }
   return out;
 }
 

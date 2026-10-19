@@ -40,9 +40,10 @@ import { forgetTelemetryChoice } from "./analytics.ts";
  * refused (426), so an old build can't write over the newer one's work. Their GET gets the messages
  * put back in.
  *
- * Each app also says which state it may be given (BOPS_STATE_LEVEL_HEADER, 3 from 0.0.29 on; none is
- * 2), and the row keeps the highest that wrote (its protocol). Once that's above an app's, every call
- * of that app's for the user's state is refused (426 STATE_TOO_NEW), reads and merges as well as
+ * Each app also says which state it may be given (BOPS_STATE_LEVEL_HEADER, 3 or more from 0.0.29 on, 4
+ * once routines may run on a cloud runner; none is 2), and the row keeps the highest that wrote (its
+ * protocol). Once that's above an app's, every call of that app's for the user's state is refused
+ * (426 STATE_TOO_NEW), reads and merges as well as
  * writes, but for its copy before Start over (postBackup), and so is its tunnel (tunnel.ts: one it
  * holds when the row goes above it is closed), and its notices say to update (notices.ts): 0.0.28 runs a
  * routine that runs every so often or before meetings over and over, a monthly one daily, and lists a

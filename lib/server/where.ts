@@ -1,12 +1,12 @@
 import "server-only";
 import { chose, decide } from "./decide";
 import { fullAccessOn } from "./full-access";
+import { MAC_WORDS } from "./runner";
 import { bot, getState, ownerName } from "./store";
 
 export type Where = "mac" | "cloud" | "ask";
 
-/** Where a new task runs, from its words (chooseWhere). Moving work already under way takes more: asksForMac. */
-const MAC_WORDS = /\b(on|from|using|use|with) my (mac|macbook|laptop|computer)\b|\blocally\b|\bon this mac\b/i;
+/** Where a new task runs, from its words (chooseWhere; MAC_WORDS, which a routine goes by too: runner.ts pinnedToMac). Moving work already under way takes more: asksForMac. */
 const CLOUD_WORDS = /\b(in the cloud|on your (own )?computer|on your (cloud )?machine)\b/i;
 
 /** The user's Mac by name: "on my Mac", "use my MacBook Pro", "to this laptop", "on the Mac" (not the Mac App Store). */
