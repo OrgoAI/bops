@@ -97,6 +97,12 @@ export type Bot = {
    * with call_api ("STRIPE_SECRET_KEY"). Only the names: the keys themselves never leave Orgo.
    */
   keys?: string[];
+  /**
+   * Its brain (Brain.id, lib/server/brains.ts): the agent its tasks run on, when it isn't Bops' own. Unset is
+   * Bops agent, on AI credit. One that names a brain this bot isn't on any more, or one that's gone, is Bops
+   * agent too (brainOf).
+   */
+  brain?: string;
 };
 
 export const MAX_PERSONA_CHARS = 1500;
@@ -282,6 +288,80 @@ export function workBot(b: Bot, bots: Bot[]): Bot {
   if (b.isMain) return freeComputerBot(bots, b.id) ?? b;
   const main = bots.find((x) => x.isMain && workspaceOf(x) === workspaceOf(b));
   return main ? workBot(main, bots) : b;
+}
+
+/**
+ * The coding agents a user can bring for their bots' tasks instead of Bops agent (lib/server/brains.ts):
+ * Claude Code, the unmodified one Bops installs on the bot's computer, and Codex. They run on the user's
+ * own account, never on Bops' AI credit.
+ */
+export type BrainKind = "claude" | "codex";
+export const BRAIN_NAMES: Record<BrainKind, string> = { claude: "Claude Code", codex: "Codex" };
+/** The Vault key a key brain runs on (lib/server/keys.ts KEY_PROVIDERS): the user's own Anthropic or OpenAI key. */
+export const BRAIN_KEYS: Record<BrainKind, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY" };
+/**
+ * How a brain signs in: with the user's own Claude plan (Pro, Max, Team), through Claude Code's own sign-in
+ * on each computer it works on, or with an API key of theirs from the Vault. Codex takes a key only.
+ */
+export type BrainAuth = "plan" | "key";
+
+/**
+ * Claude Code signed in with a plan on one computer, as its own `claude auth status --json` said when Bops
+ * last asked: how it signed in ("claude.ai") and whose account it is (the email, the organization, the
+ * plan: "max", "pro", "team"). Never the login itself: that stays in the brain's folder on that computer,
+ * which Bops never reads, copies or sends anywhere.
+ */
+export type BrainSignIn = { computerId: string; at: number; method?: string; account?: { email?: string; orgName?: string; plan?: string } };
+
+/**
+ * A brain the user added (Settings, Brain): Claude Code or Codex, how it signs in, and which bots may use it.
+ * A bot uses it once it's that bot's (Bot.brain). Nothing secret is here: a key brain names its Vault key
+ * (`keyName`, scoped as the Vault's keys are: lib/server/keys.ts KeyScope) and the key stays in the user's
+ * Orgo vault; a plan brain's logins stay on the computers, one folder per brain on each
+ * (/root/.bops/brains/<id>), and only what `signIns` says comes back.
+ */
+export type Brain = {
+  id: string;
+  kind: BrainKind;
+  /** "Claude Code", "Claude Code (work)": the user can rename it. */
+  name: string;
+  auth: BrainAuth;
+  keyName?: string;
+  keyScope?: "workspace" | "all";
+  /** The bots that may use it: each one's profile offers it. Empty: none yet. */
+  bots: BotId[];
+  workspaceId: string;
+  createdAt: number;
+  /** A plan brain: the computers it's signed in on. A bot on another computer needs its own sign-in there. */
+  signIns?: BrainSignIn[];
+  /**
+   * A plan brain signing in now: Claude Code's own sign-in is open in a terminal on `display` of that
+   * computer, the user drives that screen, and Bops asks Claude Code until it says it's signed in.
+   * `failed`: it didn't finish, and why (kept until the next try).
+   */
+  signingIn?: { botId: BotId; computerId: string; display: number; at: number; failed?: string };
+};
+
+/** "Max plan", "Pro plan": a Claude plan as Claude Code names it (BrainSignIn's plan); "Claude plan" when it didn't say. */
+export const planName = (plan?: string) => (plan ? `${plan.charAt(0).toUpperCase()}${plan.slice(1)} plan` : "Claude plan");
+
+/** A bot's brain, or undefined for Bops agent: one it picked that still lets it in, and is still there. */
+export function brainOf(b: Pick<Bot, "id" | "brain">, state: Pick<AppState, "brains">): Brain | undefined {
+  if (!b.brain) return undefined;
+  const x = state.brains?.find((y) => y.id === b.brain);
+  return x && x.bots.includes(b.id) ? x : undefined;
+}
+
+/** Where a plan brain is signed in on a computer, if it is. */
+export const signInOn = (x: Pick<Brain, "signIns">, computerId: string | undefined) => (computerId ? x.signIns?.find((s) => s.computerId === computerId) : undefined);
+
+/**
+ * Whether a brain can run `b`'s tasks now: a key brain with its key named, or a plan brain signed in on the
+ * computer `b` works on (workBot). Bots on this Mac's browsers (host "mac") have no computer of their own to sign in on.
+ */
+export function brainReady(x: Brain, b: Bot, state: Pick<AppState, "bots" | "host">): boolean {
+  if (x.auth === "key") return !!x.keyName;
+  return state.host !== "mac" && !!signInOn(x, workBot(b, state.bots).computerId);
 }
 
 export type Effort = "auto" | "low" | "medium" | "high";
@@ -832,6 +912,8 @@ export type AppState = {
   watches?: Watch[];
   /** Logins bots can sign in with. Only what's safe to show is here; secrets live in the Keychain. */
   vault?: VaultLogin[];
+  /** The brains the user added for their bots (Brain, lib/server/brains.ts). Bops agent is every bot without one. */
+  brains?: Brain[];
   /** The user's own Mac, where bots can work in a Chrome of their own. */
   mac?: MacState;
   /** The user's real app accounts, connected through Composio (lib/server/composio.ts). Several per app is fine. */

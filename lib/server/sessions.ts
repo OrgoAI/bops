@@ -993,6 +993,10 @@ export async function ensureComputer(botId: string): Promise<void> {
     // A copy brings along the secrets of bots that share the main computer; this one has its own.
     if (!b.isMain)
       await orgo.bash(clone.id, "rm -f /opt/bops/apps-*.json", 15).catch((e: Error) => console.warn(`[apps] guest keys on ${b.id}'s computer: ${e.message}`));
+    // A copy made just now brings along the main computer's brain folders too, with the Claude logins in
+    // them (lib/server/brains.ts): a login is never copied to another computer, so they go before anything runs.
+    if (!b.isMain && !had)
+      await orgo.bash(clone.id, "rm -rf /root/.bops/brains", 15).catch((e: Error) => console.warn(`[brains] copied brain folders on ${b.id}'s computer: ${e.message}`));
     await ensureScreens(clone.id);
     if (swapped()) return;
     update(() => {

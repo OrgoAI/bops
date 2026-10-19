@@ -86,7 +86,27 @@ function migrate(raw: Record<string, unknown>): AppState {
   if (state.relay?.deviceId && !state.relay.on) state.relay.turnedOff ??= true;
   // Accounts and each bot's access, from the one-account-per-app shape (any saved state, a backup too).
   appAccounts(state);
+  brains(state);
   return state;
+}
+
+/**
+ * Brains (lib/server/brains.ts) as this build keeps them: Claude Code or Codex (Codex on a key only), each
+ * with a workspace and the bots still here that may use it. A sign-in that was going when the server
+ * stopped can't be watched any more, so it goes (one that failed stays, saying why); a bot whose brain is
+ * gone is on Bops agent again. Safe to run repeatedly.
+ */
+function brains(state: AppState) {
+  if (!state.brains) return;
+  const here = new Set(state.bots.map((b) => b.id));
+  state.brains = state.brains.filter((x) => !!x && typeof x.id === "string" && (x.kind === "claude" || x.kind === "codex"));
+  for (const x of state.brains) {
+    x.bots = (Array.isArray(x.bots) ? x.bots : []).filter((botId) => here.has(botId));
+    if (x.kind === "codex" || (x.auth !== "plan" && x.auth !== "key")) x.auth = "key";
+    x.workspaceId ??= MAIN_WORKSPACE;
+    if (x.signingIn && !x.signingIn.failed) delete x.signingIn;
+  }
+  for (const b of state.bots) if (b.brain && !state.brains.some((x) => x.id === b.brain)) delete b.brain;
 }
 
 /**

@@ -395,7 +395,9 @@ await check("no bot or model can reach reveal: only its route calls it, and no t
     }
   };
   for (const d of ["app", "lib", "components"]) walk(join(root, d));
-  assert.deepEqual(users.sort(), ["app/api/keys/reveal/route.ts", "lib/server/keys.ts"]);
+  // Besides the Vault's own: a key brain's run (lib/server/brains.ts revealBrainKey), whose key goes to its
+  // computer as a file the run reads and deletes, never to a bot's tools or a model.
+  assert.deepEqual(users.sort(), ["app/api/keys/reveal/route.ts", "lib/server/brains.ts", "lib/server/keys.ts"]);
 });
 
 await check("a delete takes the key out of the vault and from every bot", async () => {

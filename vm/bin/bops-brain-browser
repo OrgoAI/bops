@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# The browser Claude Code opens while it signs in (bops-brain login): its sign-in page goes to the Chrome
+# of the screen its terminal is on (DISPLAY), as a new tab brought to the front, so it shows on the
+# live screen in Bops and the user signs in right there. With no Chrome on that screen yet, one starts
+# on the page (bops-chrome). Usage: bops-brain-browser <url>
+set -euo pipefail
+URL="${1:?url}"
+N="${DISPLAY:-}"; N="${N#:}"; N="${N%%.*}"
+[[ "$N" =~ ^[0-9]+$ ]] || { echo "no screen" >&2; exit 1; }
+PORT=$((9200 + N))
+if curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$PORT/json/version"; then
+  ENC="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$URL")"
+  curl -s --max-time 5 -X PUT "http://127.0.0.1:$PORT/json/new?$ENC" > /dev/null
+  xdotool search --onlyvisible --class BopsBrowser windowactivate > /dev/null 2>&1 || true
+else
+  "${BOPS_CHROME:-/usr/local/bin/bops-chrome}" "$N" "$URL" > /dev/null
+fi

@@ -10,6 +10,7 @@ import { BotSkills } from "./bot-skills";
 import type { AutopilotSection } from "./autopilot";
 import { AppRoutinesButton, BotRoutines, hasTemplates, routineCount, routinesFrom, RoutineSuggest, usePendingSuggest } from "./routines";
 import { BotKeys } from "./keys";
+import { BotBrain } from "./brains";
 import { ComputerSummary } from "./computer";
 import { Mascot } from "./mascot";
 import { PlanNote, usePlan } from "./plan-note";
@@ -35,6 +36,7 @@ export function BotPanel({
   onOpenVault,
   onOpenComputer,
   onOpenKeys,
+  onShowScreen,
   onOpenAutopilot,
   onOpenSkills,
   onAsk,
@@ -52,6 +54,8 @@ export function BotPanel({
   onOpenComputer: (botId: string) => void;
   /** Open Settings at Keys, to add a key for this bot. */
   onOpenKeys: (botId: string) => void;
+  /** Show one of a bot's screens up close: where its brain's sign-in opened (brains.tsx BotBrain). */
+  onShowScreen?: (botId: string, display: number) => void;
   /** Open the workspace's Routines page at a section, at one of its rows (a schedule or monitor), and at one bot's. */
   onOpenAutopilot: (section: AutopilotSection, item?: string, bot?: string) => void;
   /** Open Skills, in Knowledge, at one of them ("skill:<slug>"). */
@@ -91,7 +95,21 @@ export function BotPanel({
 
   // Each part fades in as it opens (motion-fade-in, opacity only); another bot's profile in the same tab just changes in place.
   if (tab === "details")
-    return <Details state={state} bot={b} tabs={tabs} close={close} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenComputer={onOpenComputer} onOpenKeys={onOpenKeys} onOpenRoutines={openRoutines} onUpgrade={onUpgrade} />;
+    return (
+      <Details
+        state={state}
+        bot={b}
+        tabs={tabs}
+        close={close}
+        onOpenChat={onOpenChat}
+        onOpenVault={onOpenVault}
+        onOpenComputer={onOpenComputer}
+        onOpenKeys={onOpenKeys}
+        onShowScreen={onShowScreen}
+        onOpenRoutines={openRoutines}
+        onUpgrade={onUpgrade}
+      />
+    );
 
   return (
     <section className="motion-fade-in relative flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto bg-white px-5 py-4">
@@ -132,6 +150,7 @@ function Details({
   onOpenVault,
   onOpenComputer,
   onOpenKeys,
+  onShowScreen,
   onOpenRoutines,
   onUpgrade,
 }: {
@@ -143,6 +162,7 @@ function Details({
   onOpenVault: () => void;
   onOpenComputer: (botId: string) => void;
   onOpenKeys: (botId: string) => void;
+  onShowScreen?: (botId: string, display: number) => void;
   /** This bot's Routines tab, showing one Connected App's only, or all. */
   onOpenRoutines: (app: string | null) => void;
   onUpgrade: () => void;
@@ -223,6 +243,8 @@ function Details({
       <ComputerSummary state={state} bot={b} className={`w-full ${glass}`} onOpen={() => onOpenComputer(b.id)} />
       <Uses state={state} bot={b} onOpenVault={onOpenVault} onOpenRoutines={onOpenRoutines} className={glass} />
       <BotKeys state={state} bot={b} onAdd={() => onOpenKeys(b.id)} className={glass} />
+
+      <BotBrain state={state} bot={b} onShowScreen={onShowScreen} className={glass} />
 
       <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
         <div className="flex min-w-0 flex-1 flex-col">

@@ -1,7 +1,8 @@
 // Build, validate and publish the `bops-base` Orgo template from files in this repo.
 //
 // Every Bops computer (Sam's main one and every bot clone) launches from this template:
-// Codex for the Agents API executor, the screen MCP, and helpers for per-screen Chrome.
+// Codex for the Agents API executor, Claude Code for brains the user brings, the screen MCP,
+// and helpers for per-screen Chrome.
 //
 // Usage:
 //   node orgo/bops-base.mjs validate
@@ -11,8 +12,11 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 
-const VERSION = "0.1.8";
+// lib/server/orgo.ts BOPS_TEMPLATE moves to this version once it's built.
+const VERSION = "0.1.9";
 const CODEX_VERSION = "0.160.0";
+// The same as lib/server/brains.ts CLAUDE_CODE_VERSION, which installs it on older computers.
+const CLAUDE_CODE_VERSION = "2.1.292";
 const root = new URL("..", import.meta.url).pathname;
 const read = (p) => readFileSync(`${root}${p}`, "utf8");
 
@@ -21,7 +25,7 @@ const template = {
   template: {
     name: "bops-base",
     version: VERSION,
-    description: "Bops computer: Codex executor, screen MCP, per-screen Chrome, and Tailscale for the mirrored view.",
+    description: "Bops computer: Codex executor, Claude Code, screen MCP, per-screen Chrome, and Tailscale for the mirrored view.",
     publisher: "orgo",
   },
   // 4:3, boxier than 16:9, like a laptop screen; every screen on the computer matches it.
@@ -37,6 +41,9 @@ const template = {
       "curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/node-setup.sh && bash /tmp/node-setup.sh && apt-get install -y nodejs",
       // Codex, pinned. `codex exec-server` is the Agents API executor.
       `curl -fsSL -o /tmp/codex.tgz https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz && tar -xzf /tmp/codex.tgz -C /tmp && install -m 755 /tmp/codex-x86_64-unknown-linux-musl /usr/local/bin/codex && codex --version`,
+      // Claude Code, pinned and unmodified (npm's package, its own install script and all), for brains the
+      // user signs in with their own Claude plan or key (lib/server/brains.ts, vm/bin/bops-brain).
+      `mkdir -p /opt/bops/claude && npm install -g --prefix /opt/bops/claude --no-audit --no-fund @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} && DISABLE_AUTOUPDATER=1 /opt/bops/claude/bin/claude --version`,
       // Python env for the screen MCP.
       "python3 -m venv /opt/bops/venv && /opt/bops/venv/bin/pip install -q 'mcp==1.26.0'",
       "mkdir -p /workspace/capabilities/skills /root/profiles /root/.bops /var/log/bops /opt/bops/desktop && chmod 700 /root/.bops",
@@ -51,6 +58,9 @@ const template = {
     { to: "/usr/local/bin/bops-exec", inline: read("vm/bin/bops-exec"), mode: "0755" },
     { to: "/usr/local/bin/bops-tailnet", inline: read("vm/bin/bops-tailnet"), mode: "0755" },
     { to: "/usr/local/bin/bops-screens", inline: read("vm/bin/bops-screens"), mode: "0755" },
+    // Brains: Claude Code's own sign-in on a screen, its status and sign-out, and runs with a clean environment.
+    { to: "/usr/local/bin/bops-brain", inline: read("vm/bin/bops-brain"), mode: "0755" },
+    { to: "/usr/local/bin/bops-brain-browser", inline: read("vm/bin/bops-brain-browser"), mode: "0755" },
     // The bot's own desktop (wallpaper, Chrome theme, home screen, dock); Bops supplies the bot's pages.
     { to: "/usr/local/bin/bops-desktop", inline: read("vm/bin/bops-desktop"), mode: "0755" },
     { to: "/opt/bops/bops-home.py", inline: read("vm/bops-home.py"), mode: "0755" },
