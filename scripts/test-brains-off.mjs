@@ -5,8 +5,9 @@
 // user anything, and a Codex thread's reply box reads as Bops agent's. Every brain route and a thread's terminal
 // route answer 404. The bot is on Bops agent (brainOf), no CLI runs (cliDriver), the approve tool turns everything
 // down, and its tasks run on Bops agent: a new one, and one Claude Code ran, which carries on from what it did
-// (brainRecord) as the bot's own answers. Nothing goes on its computer for brains (no Claude Code install, no
-// brain scripts, no bops-brain or bops-agent run), and the saved brain stays as it was.
+// (brainRecord) as the bot's own answers, Wait included. Nothing goes on its computer for brains (no Claude Code
+// install, no brain scripts, no bops-brain or bops-agent run), and the saved brain stays as it was. A bot's own
+// computer, a copy of the main one, is still cleared of its brain folders, and a failure there names no brain.
 //
 // Orgo, Bops Cloud and OpenAI behind it are fakes on made-up origins; nothing reaches a real service.
 // Usage: node scripts/test-brains-off.mjs   (not with --conditions=react-server: the window's code renders here too)
@@ -101,9 +102,12 @@ const said = (text) => ({ id: `msg_${asked.length}`, type: "message", role: "ass
 const response = (id, output) => ({ id, object: "response", model: "gpt-6.1-sol", status: "completed", output, usage: { input_tokens: 100, output_tokens: 5, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } } });
 /** Every command a computer was given, by computer. */
 const commands = new Map();
+/** Computers that can't be cleared of what a copy of the main one brought (sessions.ts ensureComputer). */
+const uncleared = new Set();
 async function bash(id, command) {
   if (!commands.has(id)) commands.set(id, []);
   commands.get(id).push(command);
+  if (uncleared.has(id) && command.includes("rm -rf /root/.bops/brains")) return { output: "", exit_code: 1 };
   if (command.startsWith("md5sum ")) return { output: "", exit_code: 0 };
   if (command.includes("bops-screens list")) return { output: "{}", exit_code: 0 };
   return { output: command.includes("echo ok") ? "ok" : "1", exit_code: 0 };
@@ -288,6 +292,34 @@ await check("a thread whose brain waited for a sign-in carries on with Bops agen
   assert.deepEqual(brainCommands(), []);
 });
 
+await check("Wait, to a thread its brain left at its limit, is the user's words for Bops agent: this build has no such reply", async () => {
+  const answer = "Claude Code reached your Max plan's usage limit until 5:00 PM. I can finish this on Bops agent, on your AI credit, or wait.";
+  S.update((s) =>
+    s.sessions.push(
+      brainThread("ses_lw", {
+        title: "Refunds",
+        goal: "Process the refunds",
+        answer,
+        waitingOnYou: true,
+        options: ["Finish on Bops agent", "Wait"],
+        brainRun: { brainId: PLAN.id, kind: "claude", computerId: PC, cli: "3f6c3d2e-1111-4a2b-9c3d-123456789abc", started: true, waits: "limit", said: answer },
+      }),
+    ),
+  );
+  answers.push(() => response("resp_w1", [said("Bops agent: the refunds are done.")]));
+  try {
+    X.replyToSession("ses_lw", "Wait");
+    const t = await until(() => thread("ses_lw").status === "done" && thread("ses_lw").responseId && thread("ses_lw"), "Bops agent to answer");
+    assert.equal(t.answer, "Bops agent: the refunds are done.");
+    assert.equal(t.brainRun.waits, undefined);
+    const first = asked.at(-1).input.filter((i) => i.role === "user").flatMap((i) => i.content.map((c) => c.text)).join("\n");
+    assert.match(first, /Since then Maya said:\nWait/);
+    assert.deepEqual(brainCommands(), []);
+  } finally {
+    answers.length = 0;
+  }
+});
+
 /* ---------------- The routes ---------------- */
 
 await check("every brain route, and a thread's terminal, answers 404", async () => {
@@ -327,6 +359,30 @@ await check("every brain route, and a thread's terminal, answers 404", async () 
 
 await check("a release builds without brains, whatever a .env file says", () => {
   assert.match(readFileSync(join(root, "scripts/release.sh"), "utf8"), /^NEXT_PUBLIC_BOPS_BRAINS=0 npx next build$/m);
+});
+
+/* ---------------- A copy of the main computer ---------------- */
+
+await check("a bot's own computer is still cleared of the main computer's brain folders, and says it couldn't be without naming them", async () => {
+  // Made from the main computer, where a development build may have left a Claude Code sign-in.
+  S.update((s) => {
+    s.bots.push({ id: "nova", name: "Nova", role: "Research", color: "#2EC4B6", isMain: false, computer: "own", computerId: "pc-nova", computerNeverReady: "pc-nova", computerStatus: "none" });
+    s.chats.push({ id: T.botChatId("nova"), kind: "bot", botIds: ["nova"], createdAt: 1, typing: [] });
+  });
+  uncleared.add("pc-nova");
+  try {
+    await X.ensureComputer("nova");
+    assert.ok((commands.get("pc-nova") ?? []).some((c) => c.includes("rm -rf /root/.bops/brains /root/.bops/agents")), "cleared as in a build with brains");
+    assert.equal(S.bot("nova").computerStatus, "error", "not set up");
+    const note = S.getState().messages.filter((m) => m.chatId === T.botChatId("nova")).at(-1)?.text ?? "";
+    assert.equal(note, "I couldn't set up my computer (the copy of the main computer couldn't be cleaned up (no answer)). I'll try again on my next task.");
+    assert.doesNotMatch(note, /Claude|Codex|brain/i);
+  } finally {
+    S.update((s) => {
+      s.bots = s.bots.filter((b) => b.id !== "nova");
+      s.chats = s.chats.filter((c) => c.id !== T.botChatId("nova"));
+    });
+  }
 });
 
 /* ---------------- The window ---------------- */

@@ -9,7 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "@/cloud/protocol";
-import { BLOCKER_LABEL, botChatId, brainOf, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, threadRunner, workBot, workspaceOf, type Bot, type Brain, type Routine, type Session, type TaskRoute, type ThreadReply } from "@/lib/types";
+import { BLOCKER_LABEL, botChatId, brainOf, BRAINS_ON, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, threadRunner, workBot, workspaceOf, type Bot, type Brain, type Routine, type Session, type TaskRoute, type ThreadReply } from "@/lib/types";
 import { CloudError, creditsOut, executorKey, noteOutOfCredit, OUT_OF_CREDIT, outOfCreditError, shortOfCredit } from "./cloud";
 import { appsMcp, appsSocket, browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
 import { relayNewComputer } from "./relay";
@@ -652,7 +652,8 @@ export function stopAllSessions(reason: string) {
  * A thread whose brain stopped at its limit (brainTurns) offered two replies: "Finish on Bops agent" moves it
  * to Bops agent for good (on AI credit), which picks it up with what the brain did (brainRecord); "Wait" keeps
  * it as it is, waiting on no one, until the user says more. Neither goes to the agent as their words. A
- * thread open in a terminal (openInTerminal) closes it first: only one of the two runs at a time.
+ * build without brains (BRAINS_ON) offers neither, so there they're words like any other. A thread open in
+ * a terminal (openInTerminal) closes it first: only one of the two runs at a time.
  */
 export function replyToSession(sessionId: string, text: string, note?: string, from?: string) {
   const s = session(sessionId);
@@ -663,7 +664,7 @@ export function replyToSession(sessionId: string, text: string, note?: string, f
     update((state) => (state.takeover = undefined));
     void endTerminal(held);
   }
-  const pick = !live(s) && s.brainRun?.waits === "limit" && !from && !note ? limitPick(text) : undefined;
+  const pick = BRAINS_ON && !live(s) && s.brainRun?.waits === "limit" && !from && !note ? limitPick(text) : undefined;
   patchSession(sessionId, (x) => {
     x.replies.push({ id: id("rep"), role: "user", text, at: Date.now(), delivered: !!pick, note, ...(from ? { from } : {}) });
     if (pick) x.options = undefined;
@@ -1025,10 +1026,12 @@ export async function ensureComputer(botId: string): Promise<void> {
     // them (lib/server/brains.ts), its threads' folders (a key brain's key may be there for a moment), and
     // (a fork) its brains' processes, logins and keys in memory: a login is never copied to another computer,
     // so all of it goes before anything runs. Again on every setup until one finishes (one cut short
-    // left it to do), and a setup it didn't finish fails, so the next one tries again.
+    // left it to do), and a setup it didn't finish fails, so the next one tries again. A build without
+    // brains (BRAINS_ON) clears it too, for what a build with them left there, but never names them.
     if (!b.isMain && (!had || b.computerNeverReady === clone.id)) {
       const gone = await orgo.bash(clone.id, COPIED_BRAINS, 30).catch((e: Error) => ({ output: e.message, exit_code: 1 }));
-      if (gone.exit_code !== 0) throw new Error(`the main computer's Claude Code and Codex folders couldn't be cleared from it (${gone.output.trim().slice(0, 120) || "no answer"})`);
+      const why = gone.output.trim().slice(0, 120) || "no answer";
+      if (gone.exit_code !== 0) throw new Error(BRAINS_ON ? `the main computer's Claude Code and Codex folders couldn't be cleared from it (${why})` : `the copy of the main computer couldn't be cleaned up (${why})`);
     }
     await ensureScreens(clone.id);
     if (swapped()) return;
