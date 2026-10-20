@@ -440,6 +440,8 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
     const x = runnerOf(id);
     if (x && (x.status !== "failed" || runnerKeyMade(x))) await stop(id, key, STOPPED.full);
     if (runnerOf(id)?.error !== FULL_ACCESS) failed(id, FULL_ACCESS, null, me, false);
+    // Seen here, so looked at again each time without asking the computer anything: set up as soon as they're gone.
+    box.retry.delete(id);
     return;
   }
   const x = runnerOf(id);
@@ -451,9 +453,11 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
   const plan = installPlan(x, bundle, me);
   if (plan === "keep" && x?.status === "running" && overdueOn(id)) return stillRuns(id, me);
   if (plan !== "install") return;
-  // One that didn't start, or one up that wasn't set up again, waits its turn (not when it was someone else in the workspace or the bundle, which are looked at each time).
+  // One that didn't start, or one up that wasn't set up again, waits its turn (not when it was the bundle,
+  // which is looked at each time). Someone else in the workspace that only Orgo saw (a share link) waits
+  // too: each try wakes the computer before Orgo says so again.
   const retry = box.retry.get(id);
-  if (retry && retry.at > Date.now() && (x?.status === "running" || (x?.status === "failed" && x.error !== FULL_ACCESS && x.error !== NO_BUNDLE))) return;
+  if (retry && retry.at > Date.now() && (x?.status === "running" || (x?.status === "failed" && x.error !== NO_BUNDLE))) return;
   box.busy.add(id);
   try {
     await install(id, bundle, key, me);
@@ -578,12 +582,13 @@ async function upload(id: string, bundle: Bundle, key: string): Promise<string |
 /**
  * Give computer `id` its own Orgo key (PUT /api/computers/{id}/orgo-key, no body): Orgo writes it there as
  * ORGO_API_KEY and answers only its id. Refused: why, and whether to wait longer before the next try
- * (someone else can use the workspace is looked at again each time, as the Mac's own look is).
+ * (every refusal does: someone else in the workspace that only Orgo sees would otherwise have the
+ * computer woken by each look).
  */
 async function giveKey(id: string, key: string): Promise<{ keyId: string } | { error: string; backoff: boolean }> {
   const got = await callOrgo<{ keyId?: unknown; code?: unknown }>(key, `/api/computers/${encodeURIComponent(id)}/orgo-key`, { method: "PUT", timeoutMs: 120_000 });
   if (got?.status === 200 && typeof got.json.keyId === "string" && got.json.keyId) return { keyId: got.json.keyId };
-  if (got?.status === 409 && got.json.code === "full_access_member") return { error: FULL_ACCESS, backoff: false };
+  if (got?.status === 409 && got.json.code === "full_access_member") return { error: FULL_ACCESS, backoff: true };
   if (got?.status === 403 && got.json.code === "owner_only") return { error: OWNER_ONLY, backoff: true };
   if (got?.status === 404 || got?.status === 405) return { error: "Orgo can't set up a runner on it yet", backoff: true };
   if (got?.status === 422) return { error: "a runner needs a Linux computer", backoff: true };

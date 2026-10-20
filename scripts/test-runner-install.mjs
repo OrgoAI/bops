@@ -414,13 +414,16 @@ await check("someone else can use the workspace: no runner, nothing on the compu
   assert.equal(runner().error, "someone else can use this workspace");
   assert.equal(orgo.bash.length, 0, "nothing sent to the computer");
   assert.ok(!orgo.calls.some((c) => c.path.includes("/orgo-key") || c.path.includes("/files/")));
-  // Orgo says so itself (it sees a share link too): the same, with no wait before the next look.
+  // Orgo says so itself (it sees a share link too): the same, and a wait before the next try, which would wake the computer again.
   reset();
   orgo.keyRefusal = { status: 409, json: { code: "full_access_member", error: "Someone else can use this workspace." } };
   await I.lookAtRunners();
   assert.equal(runner().error, "someone else can use this workspace");
   assert.equal(runner().keyMade, undefined);
-  assert.equal(T.retryAt(C1), undefined, "looked at again on the next look");
+  assert.ok(T.retryAt(C1) > Date.now(), "tried again later, not on every look");
+  const asked = orgo.bash.length;
+  await I.lookAtRunners();
+  assert.equal(orgo.bash.length, asked, "the next look doesn't wake the computer");
   assert.ok(!bashText().includes("__BOPS_INSTALLED__"));
   // Only the workspace's owner may: said so, and tried again later.
   reset();
