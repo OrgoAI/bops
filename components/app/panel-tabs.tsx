@@ -74,7 +74,8 @@ export function memoryAgain(t: Extract<PanelTab, { kind: "memory" }>, { category
 /** Open a link as a tab on the right; null outside the app (links then open in the browser). */
 export const OpenLink = createContext<((url: string, title?: string) => void) | null>(null);
 
-const electron = () => typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
+/** Whether this is the Mac app (Electron): web pages open in webviews, and apps the bots made run in one of their own (made-apps.tsx). */
+export const electron = () => typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
 
 export const hostOf = (url: string) => {
   try {

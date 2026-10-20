@@ -143,7 +143,7 @@ export const claudeDriver: CliDriver = {
     await ensureBrainTools(computerId);
   },
   note: (owner) =>
-    `You run as Claude Code on this computer, for Bops. Your tools are Claude Code's own (Bash for the shell, Read, Edit and Write for files, WebSearch and WebFetch to look things up and read pages, TodoWrite, and Task for helpers) and Bops' (mcp__screen__* for the screen, ${owner}'s apps, signing in from their vault and screens for helpers; mcp__browser__* for the Chrome on your screen). Where the instructions above name a tool, use the one of yours that does that: web_search is WebSearch, the shell is Bash. Any other tool asks ${owner} in Bops first and waits for their answer; if they say no, don't do it another way.`,
+    `You run as Claude Code on this computer, for Bops. Your tools are Claude Code's own (Bash for the shell, Read, Edit and Write for files, WebSearch and WebFetch to look things up and read pages, TodoWrite, and Task for helpers) and Bops' (mcp__screen__* for the screen, ${owner}'s apps, signing in with their saved logins and screens for helpers; mcp__browser__* for the Chrome on your screen). Where the instructions above name a tool, use the one of yours that does that: web_search is WebSearch, the shell is Bash. Any other tool asks ${owner} in Bops first and waits for their answer; if they say no, don't do it another way.`,
   line: (text) => `${JSON.stringify({ type: "user", message: { role: "user", content: text } })}\n`,
   parse: (e) => {
     const parent = str(e.parent_tool_use_id);
@@ -217,7 +217,7 @@ export const codexDriver: CliDriver = {
     await ensureBrainTools(computerId);
   },
   note: (owner) =>
-    `You run as Codex on this computer, for Bops. Your tools are Codex's own (the shell, editing files, web search and your plan) and Bops' (the screen server's tools for the screen, ${owner}'s apps and signing in from their vault; the browser server's for the Chrome on your screen). Where the instructions above name a tool, use the one of yours that does that: web_search is your web search, the shell is your shell. You have no helpers here, so do every part yourself. What would change ${owner}'s apps (sending, posting, paying) asks them in Bops first and waits for their answer; if they say no, don't do it another way.`,
+    `You run as Codex on this computer, for Bops. Your tools are Codex's own (the shell, editing files, web search and your plan) and Bops' (the screen server's tools for the screen, ${owner}'s apps and signing in with their saved logins; the browser server's for the Chrome on your screen). Where the instructions above name a tool, use the one of yours that does that: web_search is your web search, the shell is your shell. You have no helpers here, so do every part yourself. What would change ${owner}'s apps (sending, posting, paying) asks them in Bops first and waits for their answer; if they say no, don't do it another way.`,
   line: (text) => `${JSON.stringify({ text })}\n`,
   parse: (e) => {
     if (e.type === "thread.started") return [{ type: "started", session: str(e.thread_id), failed: [] }];

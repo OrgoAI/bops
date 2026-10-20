@@ -746,8 +746,9 @@ async function askTeammate(asker: Bot, toId: string, question: string, chatId: s
 
 /**
  * A question from an app a bot made (made-apps.ts, `bops.bot`): the bot looks it up with what it can
- * read (the user's connected apps, its inbox, memory, the web) and answers the app, not a chat. Anything
- * it would send or change waits for the user's approval in the app's chat, as from the chat.
+ * read (the user's connected apps, its inbox, memory, the web) and answers the app, not a chat. It only
+ * reads: the app's code wrote the question, not the user, so nothing is sent or changed for it, not
+ * even with Just do it on (runAppAction's readOnly).
  */
 export async function answerForApp(botId: string, app: { title: string; chatId: string }, question: string, json: boolean) {
   const b = bot(botId);
@@ -770,7 +771,7 @@ export async function answerForApp(botId: string, app: { title: string; chatId: 
   const instructions = [
     persona(b, others),
     appsNote(b, "chat"),
-    `Now you're answering "${app.title}", an app you made for ${owner} that runs in Bops, not ${owner} in a chat. Find out what it asks with your tools and answer only that, ${json ? "as JSON only: no Markdown, no words around it" : "in plain text, briefly"}. Don't send, create or change anything unless the question asks for it; if it does, that waits for ${owner}'s approval.`,
+    `Now you're answering "${app.title}", an app you made for ${owner} that runs in Bops, not ${owner} in a chat. Find out what it asks with your tools and answer only that, ${json ? "as JSON only: no Markdown, no words around it" : "in plain text, briefly"}. Here you only read: you can't send, create or change anything, so if the question asks for that, say ${owner} can ask you in the chat.`,
     ...nowLines(b),
     await memoryBlock(workspaceOf(b), question, 1500),
   ]
@@ -789,22 +790,8 @@ export async function answerForApp(botId: string, app: { title: string; chatId: 
         const out = await (c.name === "find_app_actions"
           ? findAppActions(botId, a.query ?? "")
           : c.name === "use_app"
-            ? runAppAction(
-                botId,
-                a.action ?? "",
-                a.arguments ?? {},
-                { chatId: app.chatId },
-                // The user decides in the app's chat; what the app answered lands there.
-                (ask) =>
-                  void ask
-                    .catch((e: Error) => `Failed: ${e.message}`)
-                    .then((result) => {
-                      if (saidNo(result)) return addMessage({ chatId: app.chatId, role: "system", text: `${b.name} didn't do it for ${app.title}: you said no` });
-                      const ok = !result.startsWith("Failed");
-                      addMessage({ chatId: app.chatId, role: "system", text: ok ? `${b.name} did it for ${app.title}: ${a.action}` : `${b.name} couldn't do it for ${app.title}: ${a.action} failed`, appResult: { action: a.action ?? "", ok, output: result } });
-                    }),
-                a.account ?? null,
-              )
+            ? // Read actions only: a write is refused before it's asked about or done.
+              runAppAction(botId, a.action ?? "", a.arguments ?? {}, { chatId: app.chatId }, undefined, a.account ?? null, { readOnly: true })
             : c.name === "recall"
               ? recall(workspaceOf(b), a.question ?? "")
               : c.name === "check_email"
@@ -1359,6 +1346,34 @@ async function ownerAskedToSave(chatId: string, botId: string): Promise<boolean>
     { botId },
   ).catch(() => null);
   return (yes(a?.save) ?? 0) >= 0.7;
+}
+
+/** The user's words asking for an app (make_app, change_app): Bops' own word for them. */
+const ASKS_FOR_APP = /\bapps?\b/i;
+
+/**
+ * Whether the user's own latest message here asks for an app to be made or changed: the word, the app
+ * open beside the chat as they wrote (Message.lookingAt), or a small model's yes. On a turn that read
+ * something from outside Bops, an app is built only then (a page's, an email's or an app's text could
+ * be what asks for it).
+ */
+async function ownerAskedForApp(chatId: string, botId: string): Promise<boolean> {
+  const mine = [...getState().messages].reverse().find((m) => m.chatId === chatId && fromOwner(m));
+  const words = mine?.text.trim() ?? "";
+  if (!mine || !words) return false;
+  if (mine.lookingAt || ASKS_FOR_APP.test(words)) return true;
+  const a = await decide(
+    { owner_said: words.slice(0, 1500) },
+    {
+      app: {
+        type: "noul",
+        instructions: `Does \`owner_said\` (from ${ownerName()}) ask their bot to make them a small tool of their own to keep and use (a tracker, a planner, a dashboard, a calculator, a log), or to change one?`,
+        criteria: { true: "Yes, it asks for one to be made or changed", false: "No" },
+      },
+    },
+    { botId },
+  ).catch(() => null);
+  return (yes(a?.app) ?? 0) >= 0.7;
 }
 
 /**
@@ -2097,6 +2112,11 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         const app = item.name === "change_app" ? madeApp(a.app_id ?? "") : undefined;
         if (item.name === "change_app" && (!app || app.ws !== workspaceOf(b))) {
           notes.push("Couldn't find that app");
+          continue;
+        }
+        // Not on a turn that read something from outside Bops, unless the user asked for it themselves (create_skill's rule, made apps' way).
+        if (outsideRead && !(await ownerAskedForApp(chatId, botId))) {
+          notes.push(`Didn't ${app ? `change ${app.title}` : "make the app"}: this turn read something from outside Bops, so apps are made or changed only when ${ownerName()} asks for it`);
           continue;
         }
         try {

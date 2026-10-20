@@ -315,7 +315,7 @@ await test("the motion: a flex-grow swap on one curve, inside the row, and none 
   assert.match(reduced, /\.motion-footer-slot,\s*\.motion-footer-label \{\s*transition: none;/);
 });
 
-await test("all six fit the sidebar: five 36px circles 4px apart leave the pill 120px, room for Knowledge's (112px in Chrome)", () => {
+await test("all six fit the sidebar: five 36px circles 4px apart leave the pill 119px, room for Knowledge's (112px in Chrome)", () => {
   const html = renderYou(base, "knowledge");
   assert.equal(slots(html).length, 6);
   assert.match(html, /data-footer-row="true" class="flex items-center gap-1 pb-1 pt-3"/, "4px apart, no padding at the sides");
@@ -324,8 +324,9 @@ await test("all six fit the sidebar: five 36px circles 4px apart leave the pill 
   const width = Number(app.match(/grid-cols-\[(\d+)px_minmax/)[1]);
   assert.equal(width, 340, "the sidebar's width");
   assert.match(side, /<aside className="flex min-h-0 flex-col [^"]*px-2\.5 /, "10px at each side");
-  const pill = width - 2 * 10 - 5 * 36 - 5 * 4;
-  assert.equal(pill, 120);
+  assert.match(side, /<aside className="flex min-h-0 flex-col border-r /, "and a 1px border on the right");
+  const pill = width - 1 - 2 * 10 - 5 * 36 - 5 * 4;
+  assert.equal(pill, 119);
   assert.ok(pill >= 112, "Knowledge with its icon needs 112px; Logins with three logos 106");
 });
 

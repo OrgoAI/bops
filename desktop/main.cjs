@@ -13,6 +13,7 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { startRenderService } = require("./render.cjs");
 const { createUpdates } = require("./updates.cjs");
+const { installAppFrames } = require("./app-frames.cjs");
 
 const PORT = 3210;
 const URL = `http://localhost:${PORT}`;
@@ -733,9 +734,14 @@ function fenceTabSession(s) {
   s.setDevicePermissionHandler(() => false);
 }
 
+/** The apps the bots make, on a session of their own and fenced in (desktop/app-frames.cjs); set up when the app is ready. */
+let appFrames;
+
 // A page in a tab that opens a new window opens it in your browser instead.
 app.on("web-contents-created", (_, contents) => {
   if (contents.getType() !== "webview") return;
+  // An app a bot made: app-frames.cjs fences it in, far tighter than a tab.
+  if (appFrames?.isApps(contents.session)) return;
   fenceTabSession(contents.session);
   contents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
@@ -1351,6 +1357,8 @@ app.whenReady().then(() => {
     void checkForUpdate();
     setInterval(() => void checkForUpdate(), 60 * 60_000);
   }
+  // The apps the bots make: their own session, where nothing but their pages loads (before any window can show one).
+  appFrames = installAppFrames({ app, session, server: URL, preload: path.join(__dirname, "app-frame-preload.cjs"), log: mainLog });
   // Pages the server can't read with a plain fetch (one that draws itself, one that checks for a human), read in a hidden window.
   try {
     renderService = startRenderService({ socketPath: renderSocket(), token: windowToken(), log: mainLog });

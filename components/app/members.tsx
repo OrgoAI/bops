@@ -279,7 +279,7 @@ export function Members({ state, onClose, onUpgrade }: { state: AppState; onClos
         {read?.state === "ready" ? (
           <div className="px-[22px] pb-5 pt-5 text-[12px] leading-4 text-[#9A9A98]">
             People you add sign in on orgo.ai with the email you invite. They see whatever is on your bots&apos; screens, like an open inbox, but never this Mac, your chats or
-            your vault.{" "}
+            your saved logins.{" "}
             <a href={read.orgoUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-ink">
               Open on orgo.ai
             </a>

@@ -308,7 +308,7 @@ export async function draftSkill(botId: string, chatId: string, opts: { sessionI
     "- pitfalls: what went wrong here, or what the user corrected, each as a short line saying what to do instead. Empty when nothing went wrong.",
     "- scripts: shell commands the threads ran that a next run would run again (a check, a fetch, a report), each with a file name and what it does. Only commands; never one that pays, sends or deletes. Empty when none.",
     "- updates: when one of the existing skills is for the same kind of job, its slug; then write the whole skill again, keeping what still holds of it (given in full for the closest ones) and adding what this chat taught. Else null.",
-    "- Nothing secret and nothing about a customer: no passwords, codes, keys, card or account numbers, emails, phone numbers or ids of people or customers. Say where to find them instead (\"the login saved in the vault\", \"the customer's email from the CRM\"); a key in a script is $ITS_VAULT_NAME.",
+    "- Nothing secret and nothing about a customer: no passwords, codes, keys, card or account numbers, emails, phone numbers or ids of people or customers. Say where to find them instead (\"the login saved in Logins\", \"the customer's email from the CRM\"); a key in a script is $ITS_VAULT_NAME.",
     "- Plain words. No dashes. Under 500 words in all.",
     "- When the chat has no job worth doing the same way again (small talk, a one-off question), give empty strings, no scripts and null.",
     "When focus is given, it's what the user wants the skill to be about.",

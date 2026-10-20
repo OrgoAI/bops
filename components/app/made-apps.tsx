@@ -1,8 +1,8 @@
 "use client";
 
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, createElement, useContext, useEffect, useRef, useState } from "react";
 import type { AppState, MadeApp, Message } from "@/lib/types";
-import { OpenLink } from "./panel-tabs";
+import { electron, OpenLink } from "./panel-tabs";
 import { ago, post, useNow } from "./ui";
 
 /*
@@ -51,45 +51,60 @@ const elapsed = (since: number) => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 };
 
+/** The longest web address an app may ask to open (it's shown in full first). */
+const MAX_LINK = 2000;
+
+type WebviewEl = HTMLElement & { send?: (channel: string, ...args: unknown[]) => void };
+type Bridged = { bops?: number; id?: number; method?: string; args?: unknown; event?: string; message?: string; url?: string };
+
 /**
- * The frame an app runs in, and its `window.bops`: each call comes up by message and goes on to the
- * bridge route; only messages from this frame count. A problem it hits comes up too (onProblem). A call
- * the user hasn't allowed yet is asked about (onNeeds) and made again if they say yes; a tile asks nobody.
+ * The frame an app runs in, and its `window.bops`: each call comes up and goes on to the bridge route.
+ * In the Mac app it's a webview on the apps' own session, where nothing but the app's page loads and
+ * WebRTC reaches nothing (desktop/app-frames.cjs), and its calls come only through its preload; in a
+ * browser, a sandboxed frame whose messages count only from it. Either way only its first page is
+ * answered: one it loads after that (another address it went to, or a reload) gets nothing.
+ * A problem it hits comes up too (onProblem). A call the user hasn't allowed yet is asked about
+ * (onNeeds) and made again if they say yes; a web link it asks to open goes to onOpen, which asks the
+ * user first. A tile has neither: it asks nobody and opens nothing.
  */
 function AppFrame({
   app,
   version,
   onProblem,
   onNeeds,
+  onOpen,
   className,
 }: {
   app: MadeApp;
   version: number;
   onProblem?: (problem: string) => void;
   onNeeds?: (what: string, prompt: string) => Promise<boolean>;
+  onOpen?: (url: string) => void;
   className?: string;
 }) {
-  const ref = useRef<HTMLIFrameElement>(null);
+  const [native] = useState(electron);
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const [view, setView] = useState<WebviewEl | null>(null);
+  // Pages the frame has loaded: only the first is the app's.
+  const loads = useRef(0);
   const problem = useRef(onProblem);
   const needs = useRef(onNeeds);
-  const open = useContext(OpenLink);
-  const openLink = useRef(open);
+  const opens = useRef(onOpen);
   useEffect(() => {
     problem.current = onProblem;
     needs.current = onNeeds;
-    openLink.current = open;
-  }, [onProblem, onNeeds, open]);
+    opens.current = onOpen;
+  }, [onProblem, onNeeds, onOpen]);
   useEffect(() => {
-    const on = async (e: MessageEvent) => {
-      const frame = ref.current;
-      if (!frame || e.source !== frame.contentWindow) return;
-      const m = e.data as { bops?: number; id?: number; method?: string; args?: unknown; event?: string; message?: string };
-      if (!m || m.bops !== 1) return;
+    const handle = async (m: Bridged | undefined, reply: (answer: Bridged) => void) => {
+      if (loads.current > 1 || !m || m.bops !== 1) return;
       if (m.event === "error") return problem.current?.(m.message ?? "Something went wrong.");
-      // A web link in the app: a tab of Bops (else the browser). Only http(s), checked again here.
+      // A web link in the app: the user sees the whole address and says yes before a tab of Bops opens it.
       if (m.event === "open") {
-        const url = (m as { url?: string }).url ?? "";
-        if (/^https?:\/\//i.test(url)) (openLink.current ?? ((u: string) => window.open(u, "_blank", "noopener")))(url);
+        const url = typeof m.url === "string" ? m.url : "";
+        // In a browser, only right after the user did something (a click in the frame counts here too).
+        const acted = native || (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive !== false;
+        if (/^https?:\/\//i.test(url) && url.length <= MAX_LINK && acted) opens.current?.(url);
         return;
       }
       if (m.event || typeof m.id !== "number") return;
@@ -107,12 +122,54 @@ function AppFrame({
         const yes = needs.current ? await needs.current(answer.needs, prompt) : false;
         answer = yes ? await call() : { error: needs.current ? "Not allowed: you said not now." : "Open the app to allow it." };
       }
-      frame.contentWindow?.postMessage({ bops: 1, id: m.id, result: answer.result, error: answer.error }, "*");
+      if (loads.current > 1) return;
+      reply({ bops: 1, id: m.id, result: answer.result, error: answer.error } as Bridged);
+    };
+    if (native) {
+      if (!view) return;
+      const loaded = () => void loads.current++;
+      const on = (e: Event) => {
+        const { channel, args } = e as Event & { channel?: string; args?: unknown[] };
+        if (channel === "bops-app") void handle(args?.[0] as Bridged, (answer) => view.send?.("bops-app", answer));
+      };
+      view.addEventListener("dom-ready", loaded);
+      view.addEventListener("ipc-message", on);
+      return () => {
+        view.removeEventListener("dom-ready", loaded);
+        view.removeEventListener("ipc-message", on);
+      };
+    }
+    const frame = frameRef.current;
+    if (!frame) return;
+    const on = (e: MessageEvent) => {
+      if (e.source !== frame.contentWindow) return;
+      void handle(e.data as Bridged, (answer) => frame.contentWindow?.postMessage(answer, "*"));
     };
     window.addEventListener("message", on);
     return () => window.removeEventListener("message", on);
-  }, [app.id]);
-  return <iframe ref={ref} src={`/api/made-apps/${encodeURIComponent(app.id)}/view?v=${version}`} sandbox="allow-scripts" title={app.title} className={className ?? "min-h-0 w-full flex-1 border-0 bg-white"} />;
+  }, [app.id, native, view]);
+  const path = `/api/made-apps/${encodeURIComponent(app.id)}/view?v=${version}`;
+  const look = className ?? "min-h-0 w-full flex-1 border-0 bg-white";
+  if (native) return createElement("webview", { ref: setView, src: `${location.origin}${path}`, partition: "bops-apps", title: app.title, className: look });
+  return <iframe ref={frameRef} src={path} sandbox="allow-scripts" title={app.title} className={look} onLoad={() => void loads.current++} />;
+}
+
+/** A web link an app asked to open: the whole address, opened in a tab of Bops only if the user says so. */
+function OpenAsk({ app, url, onAnswer }: { app: MadeApp; url: string; onAnswer: (yes: boolean) => void }) {
+  return (
+    <div className="mx-4 mb-3 flex shrink-0 flex-col gap-2 rounded-[14px] bg-white p-3 shadow-[0_0_0_1px_#0A0A0A]">
+      <span className="text-[12px] font-medium leading-4 text-ink">{app.title} wants to open this page</span>
+      <span className="max-h-[64px] overflow-auto break-all rounded-[8px] bg-[#F6F6F4] px-2.5 py-1.5 font-mono text-[11px] leading-[15px] text-ink">{url}</span>
+      <div className="flex gap-1.5">
+        <button onClick={() => onAnswer(true)} className="rounded-full bg-ink px-3 py-1.5 text-[12px] font-semibold leading-4 text-white">
+          Open
+        </button>
+        <button onClick={() => onAnswer(false)} className="rounded-full px-3 py-1.5 text-[12px] font-medium leading-4 text-ink hover:bg-black/[0.05]">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /** What a build is writing (or the code now), read again every so often while it builds. */
@@ -145,6 +202,9 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
   // A question the app wants to ask its bot, waiting for the user to allow it (one at a time; more wait their turn).
   const [asking, setAsking] = useState<{ prompt: string; answer: (yes: boolean) => void } | null>(null);
   const [menu, setMenu] = useState<"open" | "delete" | null>(null);
+  // A web link the app asked to open, waiting for the user's yes (the newest one; Cancel drops it).
+  const [link, setLink] = useState<string | null>(null);
+  const openLink = useContext(OpenLink);
   useNow(1000);
   if (!app) return <div className="flex flex-1 items-center justify-center text-[13px] text-[#6B6B6B]">This app was deleted.</div>;
   const maker = state.bots.find((b) => b.id === app.botId);
@@ -242,7 +302,7 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
       ) : view === "history" ? (
         <History app={app} onDone={() => setView("app")} />
       ) : app.version ? (
-        <AppFrame key={`${app.id}:${app.version}`} app={app} version={app.version} onProblem={(text) => setProblem({ version: app.version, text })} onNeeds={onNeeds} />
+        <AppFrame key={`${app.id}:${app.version}`} app={app} version={app.version} onProblem={(text) => setProblem({ version: app.version, text })} onNeeds={onNeeds} onOpen={setLink} />
       ) : building ? (
         <FirstBuild app={app} maker={maker?.name ?? "Your bot"} />
       ) : (
@@ -251,6 +311,16 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
       {shown && !building && view === "app" && <Problem app={app} text={shown} maker={maker?.name ?? "the bot"} onAsked={() => setProblem(null)} />}
       {app.error && app.version > 0 && !building && view === "app" && (
         <div className="mx-4 mb-3 shrink-0 rounded-xl bg-[#FFF4F2] px-3 py-2 text-[12px] leading-4 text-[#B42318]">The last change didn&apos;t work: {app.error}</div>
+      )}
+      {link && view === "app" && (
+        <OpenAsk
+          app={app}
+          url={link}
+          onAnswer={(yes) => {
+            if (yes) (openLink ?? ((u: string) => window.open(u, "_blank", "noopener")))(link);
+            setLink(null);
+          }}
+        />
       )}
       {asking && <AllowSheet app={app} botName={botName} prompt={asking.prompt} onAnswer={asking.answer} />}
       {building && <BuildStrip app={app} />}
@@ -267,7 +337,7 @@ function AllowSheet({ app, botName, prompt, onAnswer }: { app: MadeApp; botName:
           {app.title} wants to ask {botName}
         </span>
         <span className="text-[13px] leading-[18px] text-[#6B6B6B]">
-          {botName} looks things up in the apps you connected, Knowledge and the web to answer it. Anything it would send or change still asks you first.
+          {botName} looks things up in the apps you connected, Knowledge and the web to answer it. It only reads for the app: it never sends or changes anything. You&apos;re asked again after each change to the app.
         </span>
       </div>
       {prompt && <div className="line-clamp-3 rounded-[10px] bg-[#F6F6F4] px-3 py-2.5 font-mono text-[11px] leading-[15px] text-ink">{prompt}</div>}

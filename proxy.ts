@@ -34,7 +34,12 @@ const TAILNET_PATHS = new Set(["/api/apps/call", "/api/phone/agentphone", "/api/
 /** Handed over by Bops Cloud's tunnel (lib/server/cloud-tunnel.ts), which proves itself with its own token. */
 const TUNNEL_PATHS = new Set(["/api/cloud/event"]);
 const READS = new Set(["GET", "HEAD"]);
-/** Reads anyone on this Mac's loopback may make: the app's health, bots' pages and apps (code only, never their data), and files bots linked once the user opened them (unguessable ids). */
+/**
+ * Reads anyone on this Mac's loopback may make: the app's health, bots' pages, the page of an app a bot
+ * made (its code, which may hold what the chat gave it to start with, but never what it keeps: an id of
+ * 128 random bits, made-apps.ts; it loads in a session of its own that has no window token,
+ * desktop/app-frames.cjs), and files bots linked once the user opened them (unguessable ids).
+ */
 const OPEN_READS = (path: string) =>
   path === "/api/health" || path.startsWith("/api/pages/") || path.startsWith("/api/files/") || /^\/api\/made-apps\/[^/]+\/view$/.test(path);
 

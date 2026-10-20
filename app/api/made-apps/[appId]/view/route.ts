@@ -2,8 +2,11 @@ import { viewPage } from "@/lib/server/made-apps";
 
 /**
  * The page an app a bot made runs in (lib/server/made-apps.ts). A model wrote it, so it runs sandboxed
- * like bots' pages: an opaque origin, no network (Bops' own API included), no storage, no forms. All
- * it can reach is the window around it, by message, which passes `window.bops` calls to the bridge.
+ * like bots' pages: an opaque origin, no fetches, images or fonts from anywhere (Bops' own API
+ * included), no storage, no forms. The CSP can't stop a page going to another address itself, or
+ * WebRTC: in the Mac app it runs in a webview on a session where nothing but its page loads and WebRTC
+ * reaches nothing (desktop/app-frames.cjs). All it can reach is the window, which passes `window.bops`
+ * calls to the bridge, and only for this first page.
  */
 export async function GET(request: Request, ctx: RouteContext<"/api/made-apps/[appId]/view">) {
   const { appId } = await ctx.params;

@@ -1,4 +1,5 @@
 import "server-only";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { appPage, compile, MODULES } from "@/lib/made-app-page";
@@ -8,7 +9,7 @@ import { setting } from "./models";
 import { openaiClient } from "./openai-client";
 import { LIGHT } from "./routing";
 import { appList } from "./composio";
-import { addMessage, bot, getState, id, ownerName, sameState, update, userDir } from "./store";
+import { addMessage, bot, getState, ownerName, sameState, update, userDir } from "./store";
 import { recordTokens, usageTags } from "./usage";
 
 /**
@@ -18,9 +19,13 @@ import { recordTokens, usageTags } from "./usage";
  * - Each version's code is a file on this Mac (.data/users/<id>/made-apps/<app>/v<n>.tsx), and so is
  *   what the app keeps (data.json). The list and each app's state (building, its versions) are in the
  *   app state, so the app shows them as they change.
- * - A model wrote the code, so it runs locked down (app/api/made-apps/[appId]/view): a sandboxed frame
- *   with no network and no storage of its own. All it can reach is `window.bops`, which the window
- *   passes on to the bridge route: its own data, and quick answers from a small model.
+ * - A model wrote the code, so it runs locked down (app/api/made-apps/[appId]/view): sandboxed, with no
+ *   storage of its own, and in the Mac app in a webview on a session where nothing but its page loads
+ *   and WebRTC reaches nothing (desktop/app-frames.cjs). All it can reach is `window.bops`, which the
+ *   window passes on to the bridge route: its own data, quick answers from a small model, and its bot
+ *   (which only reads for it) once the user allows that, again after every new version.
+ * - The list is this Mac's alone (state-merge.ts PER_MAC): the code and data are files here, so another
+ *   Mac signed in to the same Bops doesn't list apps it can't open.
  * - Going back to a version is a change like any other (a new version with that code), so nothing is
  *   ever lost and Undo is the same thing.
  */
@@ -51,8 +56,15 @@ export function appCode(appId: string, version?: number) {
 /** What a build is writing right now, by app, for the tab's Code view. */
 const drafts = new Map<string, string>();
 export const draftOf = (appId: string) => drafts.get(appId) ?? null;
-/** Builds in order, one at a time per app: a change asked for mid-build waits for the build before it. */
-const queue = new Map<string, Promise<void>>();
+/**
+ * Builds in order, one at a time per app: a change asked for mid-build waits for the build before it.
+ * On globalThis, so the state's loader (store.ts migrate) can tell a build going on in this process
+ * from one cut off when Bops quit, which it marks as stopped.
+ */
+const g = globalThis as unknown as { __bopsAppBuilds?: Map<string, Promise<void>> };
+const queue = (g.__bopsAppBuilds ??= new Map<string, Promise<void>>());
+/** A new app's id: long and random, as its page can be read on this Mac's loopback without the window's token (proxy.ts). */
+const newId = () => `app_${randomBytes(16).toString("hex")}`;
 
 const RULES = (owner: string, maker: string, reach: string) =>
   [
@@ -66,7 +78,7 @@ const RULES = (owner: string, maker: string, reach: string) =>
     "`window.bops` is all it can reach (every call is async):",
     "- bops.data.get(key) → the value or null; bops.data.set(key, value) keeps any JSON value; bops.data.delete(key); bops.data.list(prefix?) → keys. Keep everything the user enters or the app works out here (localStorage and cookies are blocked); load it on start. It's the app's own, kept on their Mac, and it stays when the app changes.",
     "- bops.ask(prompt, { json?: boolean }) → a quick answer from an AI model (a string, or parsed JSON with json: true): for summarizing, sorting, drafting, extracting. It has no tools and can't browse.",
-    `- bops.bot(question, { json?: boolean }) → ${maker}, the bot that made the app, finds it out and answers: it can read ${reach}, ${owner}'s memory and the web. For anything from ${owner}'s own accounts or the live web ("the people who replied to my emails this week, as {\"people\":[{\"name\",\"email\",\"said\"}]}"). Ask for the result, not how to get it: it searches and reads on its own, and can't call APIs or fetch URLs you name. Say exactly what to return; with json: true ask for one JSON object. It's slow (10 to 60 seconds) and costs: call it when the user presses a button (Refresh) or when the kept result is a day old, never on every render; show that it's working, keep the result with bops.data and show the kept one at once. The first time, ${owner} is asked to allow it; if they don't, it throws: show that plainly with a way to try again.`,
+    `- bops.bot(question, { json?: boolean }) → ${maker}, the bot that made the app, finds it out and answers: it can read ${reach}, ${owner}'s memory and the web. For anything from ${owner}'s own accounts or the live web ("the people who replied to my emails this week, as {\"people\":[{\"name\",\"email\",\"said\"}]}"). Ask for the result, not how to get it: it searches and reads on its own, and can't call APIs or fetch URLs you name. Say exactly what to return; with json: true ask for one JSON object. It's slow (10 to 60 seconds) and costs: call it when the user presses a button (Refresh) or when the kept result is a day old, never on every render; show that it's working, keep the result with bops.data and show the kept one at once. The first time (and again after each change to the app), ${owner} is asked to allow it; if they don't, it throws: show that plainly with a way to try again.`,
     "",
     "Answer with the whole file and nothing else: no Markdown fences, no explanation. Its first line is a comment saying in a few words what this version does or changes (`// Tracks replies by stage`).",
   ].join("\n");
@@ -84,7 +96,7 @@ export function buildApp(botId: string, chatId: string, ask: { appId?: string; t
   if (ask.appId && !app) throw new Error("No such app.");
   if (!app) {
     const now = Date.now();
-    app = { id: id("app"), title: ask.title?.trim().slice(0, 60) || "New app", botId, chatId, ws: workspaceOf(b), version: 0, versions: [], createdAt: now, updatedAt: now };
+    app = { id: newId(), title: ask.title?.trim().slice(0, 60) || "New app", botId, chatId, ws: workspaceOf(b), version: 0, versions: [], createdAt: now, updatedAt: now };
     const made = app;
     update((s) => void (s.madeApps ??= []).push(made));
   }
@@ -152,6 +164,8 @@ async function build(appId: string, botId: string, change: string, lineId: strin
       a.updatedAt = Date.now();
       delete a.building;
       delete a.error;
+      // New code: the user is asked again before it may ask its bot.
+      delete a.allowed;
     });
     say(n === 1 ? `Made ${app.title}` : `${app.title} updated to v${n}`);
   } catch (e) {
@@ -230,6 +244,7 @@ export function goBack(appId: string, to: number) {
     a.versions.push({ n, note: `Back to v${to}`, at: Date.now() });
     a.updatedAt = Date.now();
     delete a.error;
+    delete a.allowed;
   });
   return madeApp(appId);
 }
@@ -280,9 +295,19 @@ export function allow(appId: string, what: "bot", on: boolean) {
   });
 }
 
-/** Questions an app asked its bot lately, by app: a loop in an app's code can't run up the user's credit. */
+/**
+ * What an app asked lately, by app and kind: a loop in an app's code can't run up the user's credit
+ * (the Apps home runs every app at once). Its bot is slow and dear; a quick answer is cheap.
+ */
 const asked = new Map<string, number[]>();
-const ASKS_PER_HOUR = 30;
+const PER_HOUR = { bot: 30, ask: 120 };
+function spend(appId: string, kind: keyof typeof PER_HOUR) {
+  const now = Date.now();
+  const key = `${appId} ${kind}`;
+  const recent = (asked.get(key) ?? []).filter((t) => now - t < 3_600_000);
+  if (recent.length >= PER_HOUR[kind]) throw new Error(`This app has asked ${kind === "bot" ? "its bot" : "for answers"} a lot in the last hour. Try again later.`);
+  asked.set(key, [...recent, now]);
+}
 
 /** JSON from a model's answer: as is, else the first object or array in it (it may have added words or fences). */
 function jsonFrom(text: string) {
@@ -323,16 +348,17 @@ export async function bridge(appId: string, method: string, args: Record<string,
       const prefix = typeof args.prefix === "string" ? args.prefix : "";
       return Object.keys(readData(appId)).filter((k) => k.startsWith(prefix));
     }
-    case "ask":
-      return ask(app, String(args.prompt ?? ""), args.json === true);
+    case "ask": {
+      const prompt = String(args.prompt ?? "");
+      if (!prompt.trim()) throw new Error("bops.ask needs a prompt.");
+      spend(appId, "ask");
+      return ask(app, prompt, args.json === true);
+    }
     case "bot": {
       const question = String(args.prompt ?? "").trim();
       if (!question) throw new Error("bops.bot needs a question.");
       if (!app.allowed?.bot) throw new NeedsAllow("bot");
-      const now = Date.now();
-      const recent = (asked.get(appId) ?? []).filter((t) => now - t < 3_600_000);
-      if (recent.length >= ASKS_PER_HOUR) throw new Error("This app has asked its bot a lot in the last hour. Try again later.");
-      asked.set(appId, [...recent, now]);
+      spend(appId, "bot");
       const { answerForApp } = await import("./chat");
       const answer = await answerForApp(app.botId, app, question, args.json === true);
       return args.json === true ? jsonFrom(answer) : answer;
@@ -343,7 +369,6 @@ export async function bridge(appId: string, method: string, args: Record<string,
 }
 
 async function ask(app: MadeApp, prompt: string, json: boolean) {
-  if (!prompt.trim()) throw new Error("bops.ask needs a prompt.");
   if (await creditsOut()) throw new Error("Your AI credit is used up.");
   const r = await client.responses.create(
     {

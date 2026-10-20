@@ -5,15 +5,15 @@ import { useCallback, useEffect, useRef, useState, type FocusEvent, type Pointer
 /*
  * The sidebar's footer (sidebar.tsx): your account (the initials), then People, Logins, Routines,
  * Knowledge and Apps. One of them is a pill with its label, the others round buttons. At rest it's the
- * one whose page is open on the right (People's sheet, the Vault, Routines, Knowledge, the Apps home or
+ * one whose page is open on the right (People's sheet, Logins, Routines, Knowledge, the Apps home or
  * an app a bot made), else Logins.
  * Pointing at another (or tabbing to it) grows that one into the pill as the one before shrinks back to a
  * circle, in one motion; moving along the row glides the pill from button to button, and leaving the row
  * settles it back on the resting one. Each is a slot 36px wide that takes the row's free space by
  * flex-grow (1 for the pill, 0 for the rest), so as one grows the other gives up the same space and the
  * row never gets wider or wraps (globals.css .motion-footer-*; with reduced motion, the swap is instant).
- * Six of them (36px, 4px apart) leave the pill 120px in the sidebar's 340px, room for Knowledge and its
- * icon, or Logins and three apps' logos.
+ * Six of them (36px, 4px apart) leave the pill 119px in the sidebar's 340px (less its 10px sides and
+ * 1px border), room for Knowledge and its icon, or Logins and three apps' logos.
  * Where nothing can hover (a touch screen), only the open page is the pill.
  */
 

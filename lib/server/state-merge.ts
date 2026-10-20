@@ -12,8 +12,12 @@ import { createHash } from "node:crypto";
 
 export type Blob = Record<string, unknown>;
 
-/** This Mac's own, under macs[deviceId] in the blob: routing through it, whether bots can work on it (state.mac) and its setup. */
-export const PER_MAC = ["relay", "relayRoutes", "mac", "setup"] as const;
+/**
+ * This Mac's own, under macs[deviceId] in the blob: routing through it, whether bots can work on it
+ * (state.mac), its setup, and the apps the bots made on it (their code and data are files on this Mac,
+ * made-apps.ts, so another Mac couldn't open them).
+ */
+export const PER_MAC = ["relay", "relayRoutes", "mac", "setup", "madeApps"] as const;
 /** Never in the cloud: who's signed in here, what's on screen right now, what waits on a live bot. */
 export const NEVER_SYNCED = ["account", "screens", "takeover", "connecting", "appApprovals", "screenStream", "cloudUser", "messages", "macs"] as const;
 /** The newest usage events kept, as lib/server/usage.ts keeps them. */

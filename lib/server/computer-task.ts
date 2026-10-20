@@ -491,7 +491,7 @@ const VAULT_TOOL = {
   type: "function",
   name: "sign_in_from_vault",
   description:
-    "Sign in on a sign-in or verification code page from the user's vault: Bops finds the page on your screen, fills the saved username, password or 2FA code straight into it and submits; you never see them. Call it whenever a page asks you to sign in, and never type a password yourself. It says whether that worked.",
+    "Sign in on a sign-in or verification code page with a login the user saved in Logins: Bops finds the page on your screen, fills the saved username, password or 2FA code straight into it and submits; you never see them. Call it whenever a page asks you to sign in, and never type a password yourself. It says whether that worked.",
   parameters: { type: "object", additionalProperties: false, required: [], properties: {} },
   strict: true,
 };
@@ -621,7 +621,7 @@ async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = ne
       t.step("parts", args.wait ? "waiting for its parts" : "checked on its parts");
       output = await t.parts.check(args.wait === true, t.signal);
     } else if (o.name === "sign_in_from_vault") {
-      t.step("vault", "signing in from your vault");
+      t.step("vault", "signing in with a saved login");
       output = await (await import("./vault")).vaultSignIn(s.botId, t.display, t.sessionId);
     } else if (o.name === "read_skill") {
       const name = String(args.name ?? "").trim();

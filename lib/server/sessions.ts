@@ -1637,10 +1637,10 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
       ? []
       : vaultTool
         ? [
-            `If a page asks you to sign in or for a verification code, call sign_in_from_vault${computer ? "" : " (with the screen number when it's on a helper's screen)"}: Bops fills ${owner}'s saved login from their vault straight into the page and tells you how it went. Never type a password yourself. If it says no login fits, or the page still needs ${owner} (or it's a captcha), stop and say in one short sentence what you need. A card lets ${owner} sign you in, and you'll be told to carry on.`,
+            `If a page asks you to sign in or for a verification code, call sign_in_from_vault${computer ? "" : " (with the screen number when it's on a helper's screen)"}: Bops fills ${owner}'s saved login from Logins straight into the page and tells you how it went. Never type a password yourself. If it says no login fits, or the page still needs ${owner} (or it's a captcha), stop and say in one short sentence what you need. A card lets ${owner} sign you in, and you'll be told to carry on.`,
           ]
         : [
-            `If a sign-in or verification code page appears, wait about 15 seconds and look again first: Bops may sign you in from ${owner}'s vault. That happens by itself on the page you're working in (there's no tool for it, so don't look for one, and never type a password yourself). If the page is already open from before, click into it first so Bops sees it. If it's still there after that (or it's a captcha), stop and say in one short sentence what you need. A card lets ${owner} sign you in, and you'll be told to carry on.`,
+            `If a sign-in or verification code page appears, wait about 15 seconds and look again first: Bops may sign you in with a login ${owner} saved in Logins. That happens by itself on the page you're working in (there's no tool for it, so don't look for one, and never type a password yourself). If the page is already open from before, click into it first so Bops sees it. If it's still there after that (or it's a captcha), stop and say in one short sentence what you need. A card lets ${owner} sign you in, and you'll be told to carry on.`,
           ]),
     "Finish each turn with a short answer in plain sentences, under 80 words: no tables or headings. Lead with the answer.",
     WRITING,

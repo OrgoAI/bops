@@ -34,6 +34,13 @@ function migrate(raw: Record<string, unknown>): AppState {
   state.chats ??= [];
   for (const b of state.bots) if (!state.chats.some((c) => c.id === botChatId(b.id))) state.chats.push({ ...botChat(b.id, 0), workspaceId: b.workspaceId });
   for (const c of state.chats) c.typing = [];
+  // An app's build that isn't going on in this process (made-apps.ts keeps those) stopped when Bops did: it isn't building.
+  const builds = (globalThis as { __bopsAppBuilds?: Map<string, unknown> }).__bopsAppBuilds;
+  for (const a of state.madeApps ?? [])
+    if (a.building && !builds?.has(a.id)) {
+      delete a.building;
+      a.error = "Bops closed before it was done. Ask again.";
+    }
   // Workspaces: everything from before belongs to the first one, "Main". Each workspace has a main bot.
   state.workspaces ??= [{ id: MAIN_WORKSPACE, name: "Main", createdAt: Date.now() }];
   if (!state.workspaces.some((w) => w.id === state.workspace)) state.workspace = state.workspaces[0].id;
