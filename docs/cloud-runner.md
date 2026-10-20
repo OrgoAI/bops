@@ -35,9 +35,11 @@ later (a restore in place, or a copy made from the computer, which gives both a 
 answers 401 the runner reads the files again (at most every 5 seconds, twice as long each time they have
 the same one, up to 5 minutes) and goes on with the new one, in Bops Cloud too.
 
-Settings shows under each computer's runner whether the computer holds its own key: "Own Orgo key
-sk_live_ab12… · used 5m ago" with Manage in Orgo (Settings, API keys on Orgo), or "No Orgo key" when it
-has none and its runner counts on one (Running, or couldn't start for want of it). The Mac asks
+Settings, Your bots' computers (`components/app/bot-computers.tsx`, in every mode), shows under each bot
+that has its own computer whether that computer holds its own key: "Own Orgo key sk_live_ab12… · used
+5m ago" with Manage in Orgo (Settings, API keys on Orgo), or "No Orgo key" when it has none and its
+runner counts on one (Running, or couldn't start for want of it); a bot that works on another bot's
+computer shows nothing more. The Mac asks
 `GET /api/computers/{id}/orgo-key` (`lib/server/computer-keys.ts`, through `/api/runs-on/keys`, never
 from the window) with the signed-in key, for the computers some bot works on, only while Settings is
 open, keeping each answer a minute. Orgo answers from its own records (`{ keyId, prefix, name,

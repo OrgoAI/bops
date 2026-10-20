@@ -8,6 +8,7 @@ import { Account } from "./account";
 import { AutopilotPage, type AutopilotSection } from "./autopilot";
 import { Members } from "./members";
 import { BotPanel, type Section } from "./bot-panel";
+import { BotComputers } from "./bot-computers";
 import { BrainSettings } from "./brains";
 import { CallBar } from "./call-bar";
 import { ChatView, forgetSheet, ThreadSheet, ToPicker } from "./chat-view";
@@ -16,7 +17,7 @@ import { crmOpen } from "@/lib/crm-access";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { tagsOf } from "@/lib/routine-catalog";
 import { CrmView, OpenCrm } from "./crm";
-import { BoppyLoading, BusyBots, Mascot } from "./mascot";
+import { BoppyLoading, BusyBots } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
 import { CHAT_TAB, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
 
@@ -1324,13 +1325,6 @@ function OwnerSettings({ owner }: { owner: AppState["owner"] }) {
   );
 }
 
-/** A bot's computer, in plain words. A bot that shares says whose computer it works on. */
-const computerNow = (state: AppState, b: AppState["bots"][number]) => {
-  const c = workBot(b, state.bots);
-  if (state.host !== "mac" && c.id !== b.id) return `Works on ${c.name}'s computer`;
-  return state.host === "mac" ? "Uses this Mac" : b.computerStatus === "ready" ? "Ready" : b.computerStatus === "cloning" ? "Setting up" : b.computerStatus === "none" ? "Set up on its first task" : "Couldn't be set up yet";
-};
-
 /**
  * For self-hosting (BOPS_SELF_HOSTED=1): the providers behind Bops, from .env.local. How screens are
  * reached (Tailscale), the email domain, the phone service, and each computer's id.
@@ -1439,23 +1433,7 @@ export function Settings({ state, onClose, onShowScreen, onOpenVault }: { state:
 
         {BRAINS_ON && <BrainSettings state={state} onShowScreen={onShowScreen} onOpenVault={onOpenVault} />}
 
-        <div className={`flex flex-col px-[22px] pt-4 ${selfHosted ? "" : "pb-5"}`}>
-          <span className="pb-1 text-[13px] font-semibold">Your bots&apos; computers</span>
-          {teamOf(state).map((b) => (
-            <div key={b.id} className="flex items-center border-b border-[#F0F0EE] py-2.5 last:border-0">
-              <span className="flex w-[200px] items-center gap-2">
-                <Mascot botId={b.id} color={b.color} size={20} />
-                <span className="text-[13.5px] font-medium">{b.name}</span>
-              </span>
-              <span className="flex flex-1 items-center gap-1.5 text-[12.5px] text-[#3A3A38]">
-                <span
-                  className={`size-[7px] rounded-full ${state.host === "mac" || workBot(b, state.bots).computerStatus === "ready" ? "bg-[#2BB673]" : workBot(b, state.bots).computerStatus === "cloning" ? "bg-[#E59A0B]" : "bg-[#C9C9C6]"}`}
-                />
-                {computerNow(state, b)}
-              </span>
-            </div>
-          ))}
-        </div>
+        <BotComputers state={state} padded={!selfHosted} askKeys={!selfHosted} />
 
         {selfHosted && <SelfHosting state={state} />}
       </div>

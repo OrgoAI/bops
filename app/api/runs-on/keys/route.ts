@@ -4,8 +4,9 @@ import { stateReady } from "@/lib/server/store";
 export const dynamic = "force-dynamic";
 
 /**
- * Whether each of the bots' computers in Settings holds its own Orgo key (lib/server/computer-keys.ts),
- * asked of Orgo here with the signed-in key, never from the window: GET ?ids=<computer>,<computer>.
+ * Whether each of the bots' own computers in Settings (Your bots' computers, components/app/bot-computers.tsx)
+ * holds its own Orgo key (lib/server/computer-keys.ts), asked of Orgo here with the signed-in key, never
+ * from the window: GET ?ids=<computer>,<computer>.
  * {keys: {<computer>: key | null}, manage}: each computer's key as Settings shows it (what names it,
  * never the key), null when it has none, left out when Orgo couldn't say; `manage` is where the user
  * sees and revokes their keys on Orgo. Each computer's answer is kept a minute.
