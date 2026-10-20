@@ -1100,6 +1100,22 @@ export type RunnerState = {
 /** Whether Bops gave the computer its Orgo key, and takes it back when it stops the runner: keyMade, or an entry from before keyMade with a keyId. */
 export const runnerKeyMade = (x: Pick<RunnerState, "keyMade" | "keyId"> | undefined): boolean => !!x && (x.keyMade ?? !!x.keyId);
 
+/** Why a runner couldn't start, when it was its key: it came up but couldn't sign in, or Orgo didn't give its computer one (runner-install.ts). */
+export const RUNNER_NO_SIGN_IN = "it couldn't sign in on its computer";
+export const RUNNER_NO_KEY = "Orgo didn't give its computer its key";
+
+/** Whether computer's runner counts on its computer's own Orgo key now: one that's up signs in with it, and one that couldn't start for want of it. */
+export const runnerNeedsKey = (x: RunnerState | undefined): boolean =>
+  !!x && (x.status === "running" || (x.status === "failed" && (x.error === RUNNER_NO_SIGN_IN || x.error === RUNNER_NO_KEY)));
+
+/**
+ * A computer's own Orgo key as Settings shows it (orgo-web GET /api/computers/{id}/orgo-key, read by
+ * app/api/runs-on/keys): what names it, never the key. `prefix`: its first characters as Orgo shows them
+ * ("sk_live_ab12"), empty when Orgo gave none that short. Times in ms; `lastUsed` and `expiresAt` null
+ * when it was never used, or never expires.
+ */
+export type ComputerOrgoKey = { keyId: string; prefix: string; name: string; createdAt: number | null; lastUsed: number | null; expiresAt: number | null };
+
 /**
  * One computer's switch to this Mac's route. `before` is how Orgo had it (proxy on or off, and through
  * what); `applied` is whether it's on this Mac's route now (a computer at work switches when it's free).

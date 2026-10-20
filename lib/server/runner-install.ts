@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { runnerKeyMade, workBot, type RunnerState } from "@/lib/types";
+import { RUNNER_NO_KEY, RUNNER_NO_SIGN_IN, runnerKeyMade, workBot, type RunnerState } from "@/lib/types";
 import { cloudUrl } from "./cloud-url";
 import { othersCanUse } from "./members";
 import { apiKey, callOrgo, orgo } from "./orgo";
@@ -531,7 +531,7 @@ async function install(id: string, bundle: Bundle, key: string, me: string) {
 
 const UNHEALTHY = {
   down: "it didn't answer on its computer",
-  nostate: "it couldn't sign in on its computer",
+  nostate: RUNNER_NO_SIGN_IN,
   exposed: "it listened beyond its own computer",
   unknown: "its computer can't say what it listens on",
   lost: "its computer didn't answer",
@@ -592,7 +592,7 @@ async function giveKey(id: string, key: string): Promise<{ keyId: string } | { e
   if (got?.status === 403 && got.json.code === "owner_only") return { error: OWNER_ONLY, backoff: true };
   if (got?.status === 404 || got?.status === 405) return { error: "Orgo can't set up a runner on it yet", backoff: true };
   if (got?.status === 422) return { error: "a runner needs a Linux computer", backoff: true };
-  return { error: "Orgo didn't give its computer its key", backoff: true };
+  return { error: RUNNER_NO_KEY, backoff: true };
 }
 
 /** Take back the key Bops gave computer `id` (Orgo revokes it, and takes it off the computer when it's up). Gone already counts. */
