@@ -591,6 +591,86 @@ async function askTeammate(asker: Bot, toId: string, question: string, chatId: s
   }
 }
 
+/**
+ * A question from an app a bot made (made-apps.ts, `bops.bot`): the bot looks it up with what it can
+ * read (the user's connected apps, its inbox, memory, the web) and answers the app, not a chat. Anything
+ * it would send or change waits for the user's approval in the app's chat, as from the chat.
+ */
+export async function answerForApp(botId: string, app: { title: string; chatId: string }, question: string, json: boolean) {
+  const b = bot(botId);
+  if (!b) throw new Error("The bot that made this app is gone.");
+  if (await creditsOut()) throw new Error("Your AI credit is used up.");
+  const owner = ownerName();
+  const ours = sameState();
+  const others = getState().bots.filter((x) => x.id !== botId && workspaceOf(x) === workspaceOf(b));
+  const tools = [
+    WEB_SEARCH,
+    ...APP_TOOLS(b),
+    ...(memoryOn() ? [fn("recall", `Ask ${owner}'s long-term memory something.`, { question: { type: "string" } })] : []),
+    ...(mailOn() && b.email
+      ? [
+          fn("check_email", "See the latest emails in your inbox, or search it.", { query: { type: ["string", "null"] } }),
+          fn("read_email", "Read an email and the rest of its conversation.", { message_id: { type: "string" } }),
+        ]
+      : []),
+  ];
+  const instructions = [
+    persona(b, others),
+    appsNote(b, "chat"),
+    `Now you're answering "${app.title}", an app you made for ${owner} that runs in Bops, not ${owner} in a chat. Find out what it asks with your tools and answer only that, ${json ? "as JSON only: no Markdown, no words around it" : "in plain text, briefly"}. Don't send, create or change anything unless the question asks for it; if it does, that waits for ${owner}'s approval.`,
+    ...nowLines(b),
+    await memoryBlock(workspaceOf(b), question, 1500),
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const reasoning = { effort: "low" as const };
+  let response = await client.responses.create({ model: CHAT_MODEL, reasoning, instructions, input: question.slice(0, 8000), tools }, usageTags("chat", botId));
+  stillOurs(ours);
+  recordTokens("chat", response.model, response.usage, botId);
+  for (let round = 0; round < 8; round++) {
+    const calls = response.output.filter((o) => o.type === "function_call") as { call_id: string; name: string; arguments: string }[];
+    if (!calls.length) break;
+    const outputs = await Promise.all(
+      calls.map(async (c) => {
+        const a = JSON.parse(c.arguments || "{}") as { query?: string | null; action?: string; arguments?: Record<string, unknown>; account?: string | null; question?: string; message_id?: string };
+        const out = await (c.name === "find_app_actions"
+          ? findAppActions(botId, a.query ?? "")
+          : c.name === "use_app"
+            ? runAppAction(
+                botId,
+                a.action ?? "",
+                a.arguments ?? {},
+                { chatId: app.chatId },
+                // The user decides in the app's chat; what the app answered lands there.
+                (ask) =>
+                  void ask
+                    .catch((e: Error) => `Failed: ${e.message}`)
+                    .then((result) => {
+                      if (saidNo(result)) return addMessage({ chatId: app.chatId, role: "system", text: `${b.name} didn't do it for ${app.title}: you said no` });
+                      const ok = !result.startsWith("Failed");
+                      addMessage({ chatId: app.chatId, role: "system", text: ok ? `${b.name} did it for ${app.title}: ${a.action}` : `${b.name} couldn't do it for ${app.title}: ${a.action} failed`, appResult: { action: a.action ?? "", ok, output: result } });
+                    }),
+                a.account ?? null,
+              )
+            : c.name === "recall"
+              ? recall(workspaceOf(b), a.question ?? "")
+              : c.name === "check_email"
+                ? checkEmail(botId, a.query ?? null)
+                : c.name === "read_email"
+                  ? readEmail(botId, a.message_id ?? "")
+                  : Promise.resolve("Not available here.")
+        ).catch((e: Error) => `Failed: ${e.message}`);
+        return { type: "function_call_output" as const, call_id: c.call_id, output: out };
+      }),
+    );
+    stillOurs(ours);
+    response = await client.responses.create({ model: CHAT_MODEL, reasoning, instructions, previous_response_id: response.id, input: outputs, tools }, usageTags("chat", botId));
+    stillOurs(ours);
+    recordTokens("chat", response.model, response.usage, botId);
+  }
+  return (response.output_text ?? "").trim();
+}
+
 /** Thrown when another account's Bops came in (a sign-out, a sign-in) while a turn waited: it stops, writing nothing. */
 class Swapped extends Error {}
 function stillOurs(ours: () => boolean) {

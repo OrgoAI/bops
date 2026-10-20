@@ -7,6 +7,7 @@ import { creditsOut, noteOutOfCredit } from "./cloud";
 import { setting } from "./models";
 import { openaiClient } from "./openai-client";
 import { LIGHT } from "./routing";
+import { appList } from "./composio";
 import { addMessage, bot, getState, id, ownerName, sameState, update, userDir } from "./store";
 import { recordTokens, usageTags } from "./usage";
 
@@ -53,7 +54,7 @@ export const draftOf = (appId: string) => drafts.get(appId) ?? null;
 /** Builds in order, one at a time per app: a change asked for mid-build waits for the build before it. */
 const queue = new Map<string, Promise<void>>();
 
-const RULES = (owner: string) =>
+const RULES = (owner: string, maker: string, reach: string) =>
   [
     `You write small apps for ${owner} that run inside Bops, the app where their AI team works. Each app is one TypeScript React file (TSX).`,
     "",
@@ -65,6 +66,7 @@ const RULES = (owner: string) =>
     "`window.bops` is all it can reach (every call is async):",
     "- bops.data.get(key) → the value or null; bops.data.set(key, value) keeps any JSON value; bops.data.delete(key); bops.data.list(prefix?) → keys. Keep everything the user enters or the app works out here (localStorage and cookies are blocked); load it on start. It's the app's own, kept on their Mac, and it stays when the app changes.",
     "- bops.ask(prompt, { json?: boolean }) → a quick answer from an AI model (a string, or parsed JSON with json: true): for summarizing, sorting, drafting, extracting. It has no tools and can't browse.",
+    `- bops.bot(question, { json?: boolean }) → ${maker}, the bot that made the app, finds it out and answers: it can read ${reach}, ${owner}'s memory and the web. For anything from ${owner}'s own accounts ("the people who replied to my emails this week, as {\"people\":[{\"name\",\"email\",\"said\"}]}"). Say exactly what to return; with json: true ask for one JSON object. It's slow (10 to 60 seconds) and costs: call it when the user presses a button (Refresh) or when the kept result is a day old, never on every render; show that it's working, keep the result with bops.data and show the kept one at once. The first time, ${owner} is asked to allow it; if they don't, it throws: show that plainly with a way to try again.`,
     "",
     "Answer with the whole file and nothing else: no Markdown fences, no explanation. Its first line is a comment saying in a few words what this version does or changes (`// Tracks replies by stage`).",
   ].join("\n");
@@ -122,7 +124,11 @@ async function build(appId: string, botId: string, change: string, lineId: strin
     const input = now
       ? `The app "${app.title}" now:\n\n${now}\n\nChange it: ${change}\n\nAnswer with the whole new file.`
       : `Make the app "${app.title}": ${change}`;
-    let code = await write(appId, botId, input, ours);
+    // bops.bot asks the bot that made the app, whoever changes it.
+    const maker = bot(app.botId);
+    const reach = (maker && appList(maker)) || "nothing of theirs yet (they can connect apps in Logins)";
+    const rules = RULES(ownerName(), maker?.name ?? "The bot", reach);
+    let code = await write(appId, botId, input, ours, rules);
     let compiled: string | null = null;
     // One more go when what it wrote doesn't compile, with the error.
     for (let tries = 0; tries < 2 && compiled === null; tries++) {
@@ -130,7 +136,7 @@ async function build(appId: string, botId: string, change: string, lineId: strin
         compiled = compile(code);
       } catch (e) {
         if (tries) throw new Error(`The code didn't compile: ${(e as Error).message}`);
-        code = await write(appId, botId, `${input}\n\nYour last answer didn't compile (${(e as Error).message}). The file you wrote:\n\n${code}\n\nAnswer with the whole file, fixed.`, ours);
+        code = await write(appId, botId, `${input}\n\nYour last answer didn't compile (${(e as Error).message}). The file you wrote:\n\n${code}\n\nAnswer with the whole file, fixed.`, ours, rules);
       }
     }
     const bad = [...code.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1]).filter((m) => !MODULES.includes(m));
@@ -161,10 +167,10 @@ async function build(appId: string, botId: string, change: string, lineId: strin
 }
 
 /** One build's code, streamed: the tab's Code view and progress follow it as it's written. */
-async function write(appId: string, botId: string, input: string, ours: () => boolean) {
+async function write(appId: string, botId: string, input: string, ours: () => boolean, rules: string) {
   drafts.set(appId, "");
   const stream = await client.responses.create(
-    { model: BUILD_MODEL(), reasoning: { effort: "medium" }, instructions: RULES(ownerName()), input, stream: true },
+    { model: BUILD_MODEL(), reasoning: { effort: "medium" }, instructions: rules, input, stream: true },
     usageTags("chat", botId),
   );
   let text = "";
@@ -252,6 +258,42 @@ function writeData(appId: string, data: Record<string, unknown>) {
   writeFileSync(join(dirOf(appId), "data.json"), text);
 }
 
+/** A call the user hasn't allowed this app yet: the window asks them, and calls again if they do. */
+export class NeedsAllow extends Error {
+  constructor(readonly what: "bot") {
+    super("Not allowed yet.");
+  }
+}
+
+/** Let an app ask its bot (`bops.bot`), or stop it. */
+export function allow(appId: string, what: "bot", on: boolean) {
+  update((s) => {
+    const a = s.madeApps?.find((x) => x.id === appId);
+    if (!a) return;
+    a.allowed ??= {};
+    if (on) a.allowed[what] = Date.now();
+    else delete a.allowed[what];
+  });
+}
+
+/** Questions an app asked its bot lately, by app: a loop in an app's code can't run up the user's credit. */
+const asked = new Map<string, number[]>();
+const ASKS_PER_HOUR = 30;
+
+/** JSON from a model's answer: as is, else the first object or array in it (it may have added words or fences). */
+function jsonFrom(text: string) {
+  try {
+    return JSON.parse(text);
+  } catch {}
+  const start = text.search(/[[{]/);
+  const end = Math.max(text.lastIndexOf("}"), text.lastIndexOf("]"));
+  if (start >= 0 && end > start)
+    try {
+      return JSON.parse(text.slice(start, end + 1));
+    } catch {}
+  throw new Error("The answer wasn't JSON.");
+}
+
 /** A call from an app's `window.bops` (the window passes it on: components/app/made-apps.tsx). */
 export async function bridge(appId: string, method: string, args: Record<string, unknown>): Promise<unknown> {
   const app = madeApp(appId);
@@ -279,6 +321,18 @@ export async function bridge(appId: string, method: string, args: Record<string,
     }
     case "ask":
       return ask(app, String(args.prompt ?? ""), args.json === true);
+    case "bot": {
+      const question = String(args.prompt ?? "").trim();
+      if (!question) throw new Error("bops.bot needs a question.");
+      if (!app.allowed?.bot) throw new NeedsAllow("bot");
+      const now = Date.now();
+      const recent = (asked.get(appId) ?? []).filter((t) => now - t < 3_600_000);
+      if (recent.length >= ASKS_PER_HOUR) throw new Error("This app has asked its bot a lot in the last hour. Try again later.");
+      asked.set(appId, [...recent, now]);
+      const { answerForApp } = await import("./chat");
+      const answer = await answerForApp(app.botId, app, question, args.json === true);
+      return args.json === true ? jsonFrom(answer) : answer;
+    }
     default:
       throw new Error(`bops.${method} isn't something apps can do.`);
   }
@@ -298,10 +352,5 @@ async function ask(app: MadeApp, prompt: string, json: boolean) {
   );
   recordTokens("chat", r.model, r.usage, app.botId);
   const out = r.output_text ?? "";
-  if (!json) return out;
-  try {
-    return JSON.parse(out);
-  } catch {
-    throw new Error("The answer wasn't JSON.");
-  }
+  return json ? jsonFrom(out) : out;
 }

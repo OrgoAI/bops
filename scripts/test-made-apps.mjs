@@ -69,6 +69,8 @@ addEventListener("message", (e) => {
   let result = null;
   if (m.method === "data.get") result = window.store[m.args.key] ?? null;
   if (m.method === "data.set") { window.store[m.args.key] = m.args.value; result = true; }
+  // The window says no to the bot (as when the user doesn't allow it): the app's call throws with why.
+  if (m.method === "bot") return f.contentWindow.postMessage({ bops: 1, id: m.id, error: "Not allowed: you said not now." }, "*");
   f.contentWindow.postMessage({ bops: 1, id: m.id, result }, "*");
 });
 </script></body>`;
@@ -113,6 +115,10 @@ try {
   await app.locator("#count").waitFor();
   assert.equal(await app.locator("#count").textContent(), "Count: 2", "its data stays when the page loads again");
   assert.equal(await page.evaluate(() => window.problems.length), 0);
+  // bops.bot goes to the window too, and what the window says comes back as the call's error.
+  const no = await page.frames()[1].evaluate(() => bops.bot("Who replied?", { json: true }).then(() => "answered", (e) => e.message));
+  assert.equal(no, "Not allowed: you said not now.");
+  assert.ok((await page.evaluate(() => window.calls)).includes("bot"));
 
   // An import it can't have, and a crash while rendering: a message in the app, and the problem reported to the window.
   for (const [path, want] of [["/broken", /can only import "react"/], ["/throws", /null|reading 'y'/]]) {

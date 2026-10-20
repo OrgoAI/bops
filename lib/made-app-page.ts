@@ -22,7 +22,7 @@ export function compile(code: string) {
 const BRIDGE = `(()=>{let n=0;const w=new Map();
 addEventListener("message",e=>{if(e.source!==parent)return;const m=e.data;if(!m||m.bops!==1||!w.has(m.id))return;const p=w.get(m.id);w.delete(m.id);m.error?p[1](new Error(m.error)):p[0](m.result)});
 const call=(method,args)=>new Promise((ok,no)=>{const id=++n;w.set(id,[ok,no]);parent.postMessage({bops:1,id,method,args},"*")});
-window.bops={data:{get:k=>call("data.get",{key:k}),set:(k,v)=>call("data.set",{key:k,value:v}),delete:k=>call("data.delete",{key:k}),list:p=>call("data.list",{prefix:p})},ask:(prompt,o)=>call("ask",{prompt,json:!!(o&&o.json)})};
+window.bops={data:{get:k=>call("data.get",{key:k}),set:(k,v)=>call("data.set",{key:k,value:v}),delete:k=>call("data.delete",{key:k}),list:p=>call("data.list",{prefix:p})},ask:(prompt,o)=>call("ask",{prompt,json:!!(o&&o.json)}),bot:(prompt,o)=>call("bot",{prompt,json:!!(o&&o.json)})};
 const report=m=>parent.postMessage({bops:1,event:"error",message:String(m).slice(0,1500)},"*");
 window.__bopsReport=report;addEventListener("error",e=>report(e.message));addEventListener("unhandledrejection",e=>report((e.reason&&e.reason.message)||e.reason));
 const mem=()=>{const d=new Map();return{getItem:k=>d.has(String(k))?d.get(String(k)):null,setItem:(k,v)=>void d.set(String(k),String(v)),removeItem:k=>void d.delete(String(k)),clear:()=>d.clear(),key:i=>[...d.keys()][i]??null,get length(){return d.size}}};
