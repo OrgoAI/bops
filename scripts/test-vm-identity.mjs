@@ -1,12 +1,14 @@
 // Tests for a runner signing in with its computer's Orgo identity (the identity spec, section 4): the
 // client (lib/server/vm-identity.ts) against a fake VMM on 127.0.0.1 (each answer: a token, refused, none
 // here, a refused connection right after a token and long after, busy, a read timeout; a rejected token
-// never sent again, a fresh one at most every 5 seconds, vm_identity_off and bops_cloud_not_ready putting
-// identity aside, the refresh on the monotonic clock, a nap, which computer this is, and no token in any
-// log), the order a runner takes its credential in (orgo-auth.ts runnerKey: identity, refused with no
-// key file, the token kept while the VMM is busy, else the key file; a 401 moves on at once, Orgo's calls
-// made once more on the next credential; another account's computer stops; the same user's new token
-// goes to Bops Cloud without the "new key" line; `[runner] auth:` said on each change), the watch of
+// never sent again, a fresh one at most every 5 seconds, vm_identity_off putting identity aside and
+// bops_cloud_not_ready only Bops Cloud's use of it, the refresh on the monotonic clock, a nap, which
+// computer this is, another computer's token never taken up, and no token in any log), the order a runner
+// takes its credential in (orgo-auth.ts runnerKey: identity, refused with no key file, the token kept
+// while the VMM is busy, else the key file, never one Orgo says isn't this computer's own; a 401 moves on
+// at once, without waiting for the next caller; Orgo's calls made once more on the next credential;
+// another account's computer stops; the same user's new token goes to Bops Cloud without the "new key"
+// line; `[runner] auth:` said and written to its auth file on each change), the watch of
 // which VM it's on (runner.ts watchIdentity), and, run on its own with --start, a runner with no
 // credential waiting instead of stopping (runner-start.ts).
 //
@@ -14,7 +16,7 @@
 // Usage: node --conditions=react-server scripts/test-vm-identity.mjs
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
@@ -150,12 +152,19 @@ const home = keyHome();
 K.runnerKeyForTests.files([home.secrets, home.env]);
 const A = await import(`${root}/lib/server/orgo-auth.ts`);
 const left = [];
+/** Orgo's profile as the runner's key check asks it (by key: an answer, or none). */
+const profiles = new Map();
+const authFile = join(home.dir, "auth");
 function resetAll() {
   VT.reset();
   VT.base(BASE);
   VT.timeouts(300, 600);
   A.orgoAuthForTests.reset();
   A.orgoAuthForTests.leave((why) => void left.push(why));
+  A.orgoAuthForTests.authFile(authFile);
+  profiles.clear();
+  A.orgoAuthForTests.profile(async (key) => profiles.get(key) ?? null);
+  rmSync(authFile, { force: true });
   left.length = 0;
   vmm.seen.length = 0;
   vmm.token = null;
@@ -406,10 +415,123 @@ await check("vm_identity_off: none at once for 5 minutes (an `again` waits too);
   assert.ok(Math.abs(off.until - performance.now() - 5 * 60_000) < 2000);
   assert.equal((await V.vmIdentity({ again: true })).state, "absent");
   assert.equal(vmm.seen.length, asked, "not asked meanwhile");
+});
+
+await check("bops_cloud_not_ready turns nothing down: Orgo keeps the token, Bops Cloud and the profile get the key file for 10 minutes, then the token again", async () => {
   resetAll();
-  vmm.token = tokenAnswer();
-  V.vmIdentityRejected((await V.vmIdentity()).token, "bops_cloud_not_ready");
-  assert.ok(Math.abs(VT.box().last.until - performance.now() - 10 * 60_000) < 2000);
+  fileKey("sk_file_key");
+  vmm.token = tokenAnswer({ token: "orgo_vm_nr.sig" });
+  assert.equal(await A.loadOrgoKey(), "orgo_vm_nr.sig");
+  assert.equal(A.cloudKey(), "orgo_vm_nr.sig", "Bops Cloud gets the token while it takes it");
+  const asked = vmm.seen.length;
+  const lines = await logged(async () => {
+    // Bops Cloud passed on orgo-web's code (persist-cloud.ts, cloud.ts): the next credential at once, no caller waiting.
+    V.vmIdentityRejected("orgo_vm_nr.sig", "bops_cloud_not_ready");
+    await sleep(50);
+  });
+  assert.equal(V.tokenRejected("orgo_vm_nr.sig"), false, "never put on the turned-down list");
+  assert.equal(V.cloudHeld(), true);
+  assert.equal(vmm.seen.length, asked, "no fresh mint");
+  assert.equal(A.orgoKey(), "orgo_vm_nr.sig", "Orgo keeps the token");
+  assert.equal(A.cloudKey(), "sk_file_key", "Bops Cloud the key file");
+  assert.deepEqual(globalThis.__fake.bound.at(-1), { user: "u1", key: "sk_file_key" }, "the state's calls carry it now");
+  assert.equal(A.runnerAuth(), "key", "said as key: the runner needs it");
+  assert.ok(lines.includes("[runner] auth: key"), lines.join(" | "));
+  assert.equal(readFileSync(authFile, "utf8"), "key\n", "and written for the Mac's look");
+  assert.ok(lines.every((l) => !l.includes("orgo_vm_")), "no token in a log");
+  // Its 10 minutes up: the token again for Bops Cloud (the key file until that's settled).
+  VT.box().cloudHoldUntil = performance.now() - 1;
+  assert.equal(A.cloudKey(), "sk_file_key");
+  await sleep(50);
+  assert.equal(A.cloudKey(), "orgo_vm_nr.sig");
+  assert.deepEqual(globalThis.__fake.bound.at(-1), { user: "u1", key: "orgo_vm_nr.sig" });
+  assert.equal(A.runnerAuth(), "identity");
+  assert.equal(readFileSync(authFile, "utf8"), "identity\n");
+  // No key file: Bops Cloud keeps the token (nothing better to give it).
+  resetAll();
+  vmm.token = tokenAnswer({ token: "orgo_vm_nr2.sig" });
+  await A.loadOrgoKey();
+  V.vmIdentityRejected("orgo_vm_nr2.sig", "bops_cloud_not_ready");
+  await sleep(50);
+  assert.equal(A.cloudKey(), "orgo_vm_nr2.sig");
+  assert.equal(A.runnerAuth(), "identity");
+});
+
+await check("a token turned down anywhere has the runner take its next credential now, without waiting for the next caller", async () => {
+  resetAll();
+  vmm.token = tokenAnswer({ token: "orgo_vm_down.sig" });
+  await A.loadOrgoKey();
+  vmm.token = tokenAnswer({ token: "orgo_vm_up.sig" });
+  await logged(async () => {
+    V.vmIdentityRejected("orgo_vm_down.sig", "identity_stale");
+    await sleep(100);
+  });
+  assert.equal(globalThis.bopsOrgoKey, "orgo_vm_up.sig", "picked already, before anyone asked");
+  assert.deepEqual(globalThis.__fake.bound.at(-1), { user: "u1", key: "orgo_vm_up.sig" });
+});
+
+await check("the VMM answering for another computer is a copy: its token is never taken up, and the runner leaves", async () => {
+  resetAll();
+  const R = await import(`${root}/lib/server/runner.ts`);
+  let copies = 0;
+  R.runnerForTests.identity({ leave: () => void copies++, copyFiles: [] });
+  fileKey("sk_file_key");
+  vmm.token = tokenAnswer({ token: "orgo_vm_fork.sig", desktop: C2.toUpperCase() });
+  const lines = await logged(async () => {
+    assert.equal(await A.loadOrgoKey(), null);
+  });
+  assert.equal(copies, 1, "left as a copy");
+  assert.equal(A.orgoKey(), null, "nothing taken up, the key file neither");
+  assert.equal((await V.vmIdentity()).state, "copy", "and it stays a copy");
+  assert.ok(lines.some((l) => l.includes(`this computer is ${C2.toUpperCase()}, not ${C1}`)), lines.join(" | "));
+  // Its own computer's, in another case: its own.
+  resetAll();
+  vmm.token = tokenAnswer({ token: "orgo_vm_own.sig", desktop: C1.toUpperCase() });
+  assert.equal(await A.loadOrgoKey(), "orgo_vm_own.sig");
+  R.runnerForTests.reset();
+});
+
+await check("a key file Orgo says isn't this computer's own is never used: the runner waits, and says which file", async () => {
+  // An account's key someone put in /root/.env.
+  resetAll();
+  fileKey("sk_account_key");
+  profiles.set("sk_account_key", { status: 200, body: { id: "u1", api_key: { id: "k9", scope: "account" } } });
+  vmm.token = { status: 404, body: {} };
+  const lines = await logged(async () => {
+    assert.equal(await A.loadOrgoKey(), "sk_account_key", "used until Orgo says");
+    await sleep(50);
+  });
+  assert.equal(A.orgoKey(), null, "then never");
+  assert.equal(A.runnerAuth(), "none");
+  assert.equal(readFileSync(authFile, "utf8"), "none\n", "none, which gets it its own key (runner-install.ts wayBack)");
+  assert.ok(lines.some((l) => l.includes(`the ORGO_API_KEY in ${home.secrets} isn't this computer's own`)), lines.join(" | "));
+  assert.equal(await A.loadOrgoKey(), null, "still not, read again");
+  // Another computer's key, and a computer key Orgo never bound: the same.
+  for (const body of [{ id: "u1", api_key: { id: "k8", scope: "computer", computer_id: C2 } }, { id: "u1", api_key: { id: "k7", scope: "account", computer_key: true } }]) {
+    resetAll();
+    fileKey("sk_not_ours");
+    profiles.set("sk_not_ours", { status: 200, body });
+    vmm.token = { status: 404, body: {} };
+    await logged(async () => {
+      await A.loadOrgoKey();
+      await sleep(50);
+    });
+    assert.equal(A.orgoKey(), null, JSON.stringify(body));
+  }
+  // Its own (bound to it), and an Orgo from before keys were bound (no api_key): used.
+  for (const body of [{ id: "u1", api_key: { id: "k1", scope: "computer", computer_id: C1.toUpperCase(), computer_key: true } }, { id: "u1", full_name: "x" }]) {
+    resetAll();
+    fileKey("sk_ours");
+    profiles.set("sk_ours", { status: 200, body });
+    vmm.token = { status: 404, body: {} };
+    await A.loadOrgoKey();
+    await sleep(50);
+    assert.equal(await A.loadOrgoKey(), "sk_ours", JSON.stringify(body));
+  }
+  // What the profile says, read the same in sign-in (orgo-sign-in.ts whoIs).
+  assert.equal(A.profileSaysOurs({ principal: { kind: "vm_identity", desktop_id: C1 } }), "own");
+  assert.equal(A.profileSaysOurs({ principal: { kind: "vm_identity", desktop_id: C2 } }), "other");
+  assert.equal(A.profileSaysOurs({ api_key: null }), null, "a session: can't say");
 });
 
 await check("which computer this is (GET /orgo/v1/identity), and BOPS_RUNNER_IDENTITY=0 skips identity altogether", async () => {

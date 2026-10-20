@@ -91,6 +91,11 @@ const g = globalThis as unknown as { __bopsOrgoKeyFiles?: readonly string[] };
  * (onlyOurs); else none. A file others could read isn't used, and nothing of the key is ever logged.
  */
 export async function readRunnerKey(): Promise<string | null> {
+  return (await readRunnerKeyFile())?.key ?? null;
+}
+
+/** The same, with the file it's in (for the runner's log: orgo-auth.ts says which file has a key that isn't the computer's own). */
+export async function readRunnerKeyFile(): Promise<{ key: string; file: string } | null> {
   for (const file of g.__bopsOrgoKeyFiles ?? ORGO_KEY_FILES) {
     let key: string | null;
     try {
@@ -99,12 +104,19 @@ export async function readRunnerKey(): Promise<string | null> {
       continue;
     }
     if (!key) continue;
-    if (await onlyOurs(file).catch(() => false)) return key;
+    if (await onlyOurs(file).catch(() => false)) return { key, file };
     console.warn(`[runner] ${file} can be read by others: its ${ORGO_KEY_NAME} isn't used`);
     return null;
   }
   return null;
 }
+
+/**
+ * What the runner signs in with now (identity, key or none), one word, written by it at each change
+ * (orgo-auth.ts takeUp), root's alone: the Mac's look reads it (runner-install.ts AUTH_LINE), as its log's
+ * `[runner] auth:` line may have rotated away.
+ */
+export const RUNNER_AUTH_FILE = "/opt/bops/runner/auth";
 
 /** Tests: read these files instead (undefined: the computer's own). */
 export const runnerKeyForTests = { files: (files?: readonly string[]) => void (g.__bopsOrgoKeyFiles = files) };

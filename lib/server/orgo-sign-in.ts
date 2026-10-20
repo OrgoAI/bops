@@ -8,8 +8,8 @@ import { startCloud, stopCloud } from "./cloud-tunnel";
 import { checkMac } from "./mac";
 import { quitBotChromes } from "./local";
 import { orgo } from "./orgo";
-import { loadOrgoKey, orgoKey, orgoKeyRejected, orgoOrigin, signedInUser, signIn, type OrgoUser } from "./orgo-auth";
-import { loopHere, onPostgres, StateLoadError } from "./persist";
+import { cloudKey, loadOrgoKey, orgoKey, orgoKeyNotOurs, orgoKeyRejected, orgoOrigin, profileSaysOurs, signedInUser, signIn, type OrgoUser } from "./orgo-auth";
+import { loopHere, onPostgres, onRunner, StateLoadError } from "./persist";
 import { relayAfterSignIn, stopRelay } from "./relay";
 import { reattachFreeComputer, stopAllSessions } from "./sessions";
 import { bindSignIn, getState, stateInCloud, stateUser, update } from "./store";
@@ -272,8 +272,10 @@ function seedOwnerName(user: OrgoUser) {
 /**
  * Who the key belongs to on Orgo (GET /api/user/profile), with their name if they've given one; "denied"
  * when Orgo turns the key down, null when it can't say. A runner's identity token that Orgo won't answer
- * for yet (403 bops_cloud_not_ready: Bops Cloud can't tell a computer from its user) is put aside like a
- * turned-down one, so the runner signs in with its key file meanwhile (orgo-auth.ts).
+ * for yet (403 bops_cloud_not_ready: Bops Cloud can't tell a computer from its user) has Bops Cloud and
+ * this ask take the key file meanwhile (orgo-auth.ts cloudKey). On a runner, a credential Orgo says isn't
+ * its computer's own (an account's key in its files, another computer's) is "denied" too, and never used
+ * (orgo-auth.ts orgoKeyNotOurs).
  */
 async function whoIs(apiKey: string): Promise<OrgoUser | "denied" | null> {
   try {
@@ -292,11 +294,18 @@ async function whoIs(apiKey: string): Promise<OrgoUser | "denied" | null> {
     }
     if (!res.ok) return null;
     const p = (await res.json()) as { id?: string; email?: string; full_name?: string };
+    if (onRunner() && profileSaysOurs(p) === "other") {
+      orgoKeyNotOurs(apiKey);
+      return "denied";
+    }
     return p.id ? { id: p.id, email: p.email || undefined, name: p.full_name?.trim() || undefined } : null;
   } catch {
     return null;
   }
 }
+
+/** The credential a state load goes by: the signed-in key, or on a runner what Bops Cloud takes (orgo-auth.ts cloudKey). */
+const signInKey = () => (onRunner() ? cloudKey() : orgoKey());
 
 /** Whether a sign-in has its key from Orgo and is landing (finish): no other user's state is loaded meanwhile. */
 const signingIn = () => !!g.bopsSignIn?.collected;
@@ -324,10 +333,10 @@ function loadForKey(key: string, now: boolean): Promise<void> {
     // Orgo turned the key down (revoked): it's a sign-in.
     if (user === "denied") return;
     if (!user) throw new Error("Orgo didn't say who's signed in");
-    if (signingIn() || orgoKey() !== key) return;
+    if (signingIn() || signInKey() !== key) return;
     await bindSignIn(user.id, key);
     // Signed out, or someone else signed in meanwhile: their state is the one in memory (or coming in), not this one's.
-    if (orgoKey() !== key || signingIn() || stateUser() !== user.id) return;
+    if (signInKey() !== key || signingIn() || stateUser() !== user.id) return;
     update((s) => (s.account = { user, signedInAt: Date.now() }));
     seedOwnerName(user);
     void checkMac().catch(() => {});
@@ -359,7 +368,8 @@ function loadForKey(key: string, now: boolean): Promise<void> {
  */
 export async function authStatus({ retry = false } = {}) {
   const key = await loadOrgoKey();
-  if (key && !signedInUser()) await loadForKey(key, retry);
+  // A runner asks Orgo's profile and loads its state from Bops Cloud with what Bops Cloud takes (its key file while it can't take identity yet).
+  if (key && !signedInUser()) await loadForKey(signInKey() ?? key, retry);
   // The Mac app and a hosted server are signed in only once the user's state is loaded; until then it asks for a sign-in.
   const needsState = onPostgres() || stateInCloud();
   const signedIn = !!key && (!needsState || !!signedInUser());

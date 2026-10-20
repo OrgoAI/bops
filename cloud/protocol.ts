@@ -22,7 +22,10 @@ export type CloudSession = {
    */
   agentmail: {
     podId: string;
+    /** Empty for a computer's runner, which gets no key (`proxied`). */
     apiKey: string;
+    /** A computer's runner: its mail goes through /proxy/agentmail on its own credential, in its bots' inboxes only (cloud/proxy.ts). */
+    proxied?: true;
     domain?: string | null;
     /**
      * The user's own mail handle, their default workspace's part of the address (tiger in

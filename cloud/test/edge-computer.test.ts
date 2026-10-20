@@ -13,10 +13,11 @@ import { dropUsers, keyOf, listen, newUserId, prepareDb, startCloud, type Listen
  * A computer's runner signing in as its computer (cloud/auth.ts, server.ts): an `orgo_vm_` token is a
  * computer whatever Orgo says (and refused everywhere without the principal Orgo names it by), a
  * computer's own key is one too, each kept 30 seconds at most and never past the token's end; a computer
- * calls only the routes its runner needs (its state, its threads, its session, the models and tools its
- * own tasks use) and is refused on phone, mail, Slack, numbers, backups, notices, usage, the iPhone's
- * agent and the tunnel; its device is Bops Cloud's to set, and another one it sends is refused; Orgo's
- * code for turning a token down is passed on.
+ * calls only the routes its runner needs (its state, its threads, its session, the providers' routes,
+ * where what it may call is each provider's: core-computer-scope.test.ts) and is refused on phone lines,
+ * mail handles, Slack, numbers, backups, notices, usage, the iPhone's agent and the tunnel; its device is
+ * Bops Cloud's to set, and another one it sends is refused; Orgo's code for turning a token down is
+ * passed on.
  */
 
 let orgo: Listening;
@@ -163,13 +164,13 @@ test("a token Orgo named no computer for is refused on every route, its state to
   assert.equal(((await r.json()) as { code?: string }).code, COMPUTER_NOT_ALLOWED);
 });
 
-test("the route table: computers on the runner's routes only, the models' socket yes, the tunnel never", () => {
+test("the route table: computers on the runner's routes only (the providers' routes say what of each it may call), the models' socket yes, the tunnel never", () => {
   const forComputers = routes()
     .filter((r) => r.computer)
     .map((r) => `${r.method} ${r.path}`);
-  for (const want of ["GET /v1/state", "PUT /v1/state", "GET /v1/state/head", "GET /v1/messages", "POST /v1/messages", "POST /v1/session", "POST /proxy/openai/*", "GET /proxy/honcho/*", "POST /v3/*", "POST /proxy/composio/*", "POST /proxy/typesafe/*", "POST /proxy/treg/*"])
+  for (const want of ["GET /v1/state", "PUT /v1/state", "GET /v1/state/head", "GET /v1/messages", "POST /v1/messages", "POST /v1/session", "POST /proxy/openai/*", "GET /proxy/honcho/*", "POST /v3/*", "POST /proxy/composio/*", "POST /proxy/typesafe/*", "POST /proxy/treg/*", "POST /proxy/agentphone/*", "GET /proxy/agentmail/*"])
     assert.ok(forComputers.includes(want), want);
-  for (const p of forComputers) assert.ok(/^(GET|PUT|POST|PATCH|DELETE) (\/v1\/(state|state\/head|messages|session)|\/proxy\/(openai|honcho|composio|typesafe|treg)\/\*|\/v3\/\*)$/.test(p), `only the runner's: ${p}`);
+  for (const p of forComputers) assert.ok(/^(GET|PUT|POST|PATCH|DELETE) (\/v1\/(state|state\/head|messages|session)|\/proxy\/(openai|honcho|composio|typesafe|treg|agentphone|agentmail)\/\*|\/v3\/\*)$/.test(p), `only the runner's: ${p}`);
   const ups = upgrades();
   assert.equal(ups.find((x) => x.path === "/proxy/openai/*")?.computer, true);
   assert.ok(!ups.find((x) => x.path === "/v1/connect")?.computer);
@@ -195,14 +196,17 @@ test("a computer writes as its own device, which Bops Cloud sets: another device
   const u = user("device");
   const token = vm(u);
   const mine = deviceIdOf(u, D1);
-  const other = await call(token, u, "/v1/state", { method: "PUT", body: { base: 0, state: { bots: [] } }, device: deviceIdOf(u, D2) });
+  // The user's Mac wrote their state first: a computer never starts one (core-computer-scope.test.ts).
+  assert.equal((await call(keyOf(u), u, "/v1/state", { method: "PUT", body: { base: 0, state: { bots: [], sessions: [] } } })).status, 200);
+  const thread = { id: "s1", botId: "b1", by: mine, status: "running" };
+  const other = await call(token, u, "/v1/state", { method: "PUT", body: { base: 1, state: { bots: [], sessions: [thread] } }, device: deviceIdOf(u, D2) });
   assert.equal(other.status, 403, "another computer's device");
   assert.equal((await call(token, u, "/v1/state/head", { device: "mac-a" })).status, 403, "a Mac's");
-  const put = await call(token, u, "/v1/state", { method: "PUT", body: { base: 0, state: { bots: [] } } });
+  const put = await call(token, u, "/v1/state", { method: "PUT", body: { base: 1, state: { bots: [], sessions: [thread] } } });
   assert.equal(put.status, 200, "no header: its own");
   let head = (await (await call(token, u, "/v1/state/head")).json()) as CloudStateHead;
   assert.equal(head.writer, mine, "written as the computer's device, set here");
-  const again = await call(token, u, "/v1/state", { method: "PUT", body: { base: head.version, state: { bots: [] } }, device: mine });
+  const again = await call(token, u, "/v1/state", { method: "PUT", body: { base: head.version, state: { bots: [], sessions: [{ ...thread, status: "done" }] } }, device: mine });
   assert.equal(again.status, 200, "its own, said: taken");
   head = (await (await call(token, u, "/v1/state/head")).json()) as CloudStateHead;
   assert.equal(head.writer, mine);

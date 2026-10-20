@@ -327,8 +327,8 @@ export async function watchIdentity(): Promise<void> {
   }
 }
 
-/** A copy of a runner's computer: its runner taken off (its program and the script that starts it: COPY_TAKES_OFF), then gone, saving nothing. */
-function leaveCopy() {
+/** A copy of a runner's computer: its runner taken off (its program and the script that starts it: COPY_TAKES_OFF), then gone, saving nothing. Also when its VMM hands it another computer's identity (orgo-auth.ts). */
+export function leaveCopy() {
   console.error("[runner] this computer is a copy of the one this runner was set up on: taking the runner off it");
   for (const f of box.copyFiles ?? COPY_TAKES_OFF) rmSync(f, { force: true });
   if (box.leave) return box.leave();

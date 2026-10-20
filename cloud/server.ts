@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import * as agent from "./agent.ts";
 import { appVersionOf, fromIphone, noteAppVersion, noteIphoneVersion, requireAppVersion, requireIphoneVersion, startAppPolicy } from "./app-version.ts";
-import { requireUser, type CloudUser } from "./auth.ts";
+import { bearer, computerSeenAt, requireUser, userForKey, type CloudUser } from "./auth.ts";
 import { captureCloudException, inTelemetryScope, shutdownTelemetry } from "./analytics.ts";
 import { config } from "./config.ts";
 import { checkCreditAccess } from "./credit.ts";
@@ -105,6 +105,48 @@ function computerCheck(req: IncomingMessage, user: CloudUser, allowed: boolean) 
   if (device && device !== c.device) throw new HttpError(403, "That device isn't this computer's.", { code: COMPUTER_NOT_ALLOWED });
 }
 
+/** How often a computer's open socket or long answer is looked at again (its sign-in kept 30 seconds at most: auth.ts). */
+export const computerWatch = { everyMs: 30_000, seenMs: 2 * 60_000 };
+
+/**
+ * A computer's socket or answer still open is looked at again every 30 seconds: Orgo turning its
+ * credential down, or naming another computer for it (deleted, moved, joined, copied or paused), ends
+ * it (`lost`). A socket (`stream` false) also ends when its token does: its runner opens another on its
+ * next token. A long answer still coming (an agent's events) outlives its token only while that computer
+ * keeps signing in afresh (computerSeenAt, under 2 minutes ago), so a task's turn isn't cut at the hour.
+ * Returns what stops the looking (when it closes).
+ */
+export function watchComputer(key: string, user: CloudUser, lost: () => void, stream: boolean): () => void {
+  const c = user.computer!;
+  let over = false;
+  const stop = () => {
+    over = true;
+    clearInterval(every);
+    if (cut) clearTimeout(cut);
+  };
+  const end = () => {
+    if (over) return;
+    stop();
+    lost();
+  };
+  const look = async () => {
+    if (over) return;
+    if (Date.now() < c.expiresAt) {
+      // Orgo out of reach says nothing either way: looked at again next time.
+      const now = await userForKey(key).catch(() => undefined);
+      if (now === null || (now && now.computer?.desktopId !== c.desktopId)) end();
+      return;
+    }
+    if (!stream || Date.now() - computerSeenAt(user.id, c.desktopId) > computerWatch.seenMs) end();
+  };
+  const every = setInterval(() => void look(), computerWatch.everyMs);
+  every.unref?.();
+  const left = c.expiresAt - Date.now();
+  const cut = Number.isFinite(left) ? setTimeout(() => void look(), Math.min(Math.max(0, left), 2 ** 31 - 1)) : undefined;
+  cut?.unref?.();
+  return stop;
+}
+
 export function makeServer(): Server {
   const table = routes();
   const ups = upgrades();
@@ -118,6 +160,8 @@ export function makeServer(): Server {
       user = route.auth === "user" ? await requireUser(req) : null;
       if (user) computerCheck(req, user, !!route.computer);
       if (user) appCheck(req, user.id, url.pathname);
+      // A computer's answer that's still coming (a stream) is held to its computer while it lasts.
+      if (user?.computer) res.on("close", watchComputer(bearer(req), user, () => res.destroy(), true));
       const as = user;
       // What the call says about usage events goes with everything its handler does (analytics.ts).
       await inTelemetryScope(req, () => route.handle(req, res, { user: as, url }));
@@ -146,6 +190,8 @@ export function makeServer(): Server {
       computerCheck(req, user, !!up.computer);
       appCheck(req, user.id, url.pathname);
       up.handle(req, socket, head, { user, url });
+      // A computer's socket is held to its computer, and to its token's end, while it's open.
+      if (user.computer) socket.on("close", watchComputer(bearer(req), user, () => socket.destroy(), false));
     } catch (e) {
       refuseUpgrade(socket, e instanceof HttpError ? e.status : 500, e instanceof HttpError ? e.message.replace(/[^\x20-\x7e]/g, "") : "Error");
     }

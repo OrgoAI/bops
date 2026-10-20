@@ -21,11 +21,16 @@ import { sleptSince } from "./awake";
  * - 429, 5xx, a read timeout: transient, asked again after Retry-After, else 2 seconds doubling to 60.
  *
  * A 401 from Orgo with a token (vmIdentityRejected) drops it for good: with `vm_identity_off` identity is
- * absent for 5 minutes (the key file then), with `bops_cloud_not_ready` for 10 (Bops Cloud can't take a
- * computer's token yet), and with any other the next ask is a fresh one (`?fresh=1`), at most every 5
- * seconds. Asked over node:http with an agent of its own (never the global one, which follows
- * NODE_USE_ENV_PROXY), no proxy, no redirects. BOPS_RUNNER_IDENTITY=0 in the runner's environment skips
- * it all (debugging one runner; the wrapper never sets it).
+ * absent for 5 minutes (the key file then), and with any other the next ask is a fresh one (`?fresh=1`),
+ * at most every 5 seconds. `bops_cloud_not_ready` (orgo-web won't give a computer's token a profile
+ * until Bops Cloud tells a computer from its user) turns nothing down: orgo-web still takes the token,
+ * and only Bops Cloud (and the profile) get the key file for 10 minutes (cloudHeld; orgo-auth.ts
+ * cloudKey), then the token again. Either way the runner takes its next credential at once (the hook
+ * orgo-auth.ts sets, onTurnedDown). A 200 for another computer than BOPS_RUNNER_COMPUTER is this
+ * computer's copy (a fork carries the runner on from the same memory): never taken up, and the runner
+ * leaves it (orgo-auth.ts). Asked over node:http with an agent of its own (never the global one, which
+ * follows NODE_USE_ENV_PROXY), no proxy, no redirects. BOPS_RUNNER_IDENTITY=0 in the runner's
+ * environment skips it all (debugging one runner; the wrapper never sets it).
  */
 
 export type VmIdentity =
@@ -42,6 +47,8 @@ export type VmIdentity =
       expiresAt: number;
     }
   | { state: "refused"; reason: string; until: number }
+  /** The VMM answered for another computer: this one is a copy of the runner's (it leaves). */
+  | { state: "copy"; desktopId: string }
   | { state: "absent"; until: number }
   /** `sticky`: a refused connection right after a 200 or a 403 (the VMM restarting), not "no identity here". */
   | { state: "transient"; retryAt: number; sticky?: boolean };
@@ -75,8 +82,12 @@ type Box = {
   /** A token was turned down: the next ask is a fresh one. */
   freshWanted: boolean;
   freshAt: number;
-  /** Until then an `again` doesn't ask (identity was said off, or Bops Cloud can't take it yet). */
+  /** Until then an `again` doesn't ask (identity was said off). */
   holdUntil?: number;
+  /** Until then Bops Cloud and the profile get the key file (bops_cloud_not_ready): orgo-web keeps the token. */
+  cloudHoldUntil?: number;
+  /** Called when a token was turned down, so the runner takes its next credential now (orgo-auth.ts). */
+  onTurnedDown?: () => void;
   /** Tokens Orgo turned down, by their SHA-256: never sent again. */
   rejected: string[];
   asking?: Promise<VmIdentity>;
@@ -198,9 +209,14 @@ async function ask(fresh: boolean): Promise<VmIdentity> {
     const token = str(b.token);
     const expiresIn = Number(b.expires_in);
     const desktopId = str(b.desktop_id);
+    const here = process.env.BOPS_RUNNER_COMPUTER;
     if (!isIdentityToken(token) || !Number.isFinite(expiresIn) || expiresIn <= 0 || !desktopId) {
       out = { state: "transient", retryAt: t + backoff() };
       say("bad", "identity: the VMM's answer wasn't a token: asking again soon", true);
+    } else if (here && desktopId.toLowerCase() !== here.toLowerCase()) {
+      // Another computer's: this is a copy of the one the runner was set up on. Its token is never taken up.
+      out = { state: "copy", desktopId };
+      say(`copy:${desktopId}`, `identity: this computer is ${desktopId}, not ${here}: a copy`, true);
     } else if (tokenRejected(token)) {
       // The VMM still hands out the one Orgo turned down: a fresh one, once the 5 seconds are up.
       box.freshWanted = true;
@@ -265,6 +281,7 @@ export async function vmIdentity(opts: { fresh?: boolean; again?: boolean } = {}
     const held = box.holdUntil !== undefined && t < box.holdUntil;
     if (last.state === "ok" && !opts.again && t < last.refreshAt && !tokenRejected(last.token) && !(box.okAt !== undefined && sleptSince(box.okAt))) return last;
     if (last.state === "refused" && t < last.until) return last;
+    if (last.state === "copy") return last;
     if (last.state === "absent" && t < last.until && (!opts.again || held)) return last;
     if (last.state === "transient" && t < last.retryAt) return last;
   }
@@ -280,32 +297,48 @@ export async function vmIdentity(opts: { fresh?: boolean; again?: boolean } = {}
 
 /**
  * Orgo answered 401 to `token` (orgo.ts, orgo-sign-in.ts, Bops Cloud through persist-cloud.ts and
- * cloud.ts), or Orgo's profile said Bops Cloud can't take a computer's token yet (403
- * bops_cloud_not_ready): it's dropped and never sent again. Anything that isn't an identity token is
- * left to orgo-auth.ts.
+ * cloud.ts): it's dropped and never sent again. Orgo's profile (or Bops Cloud, passing on its code) said
+ * Bops Cloud can't take a computer's token yet (bops_cloud_not_ready): nothing is dropped, and Bops Cloud
+ * and the profile get the key file for 10 minutes (cloudHeld). Either way the runner takes its next
+ * credential now (onTurnedDown). Anything that isn't an identity token is left to orgo-auth.ts.
  */
 export function vmIdentityRejected(token: string, code?: string) {
   if (!isIdentityToken(token)) return;
+  const t = now();
+  if (code === "bops_cloud_not_ready") {
+    box.cloudHoldUntil = t + NOT_READY_MS;
+    say(`hold:${code}`, "Bops Cloud can't take this computer's identity yet (bops_cloud_not_ready): it gets the key file meanwhile, and Orgo the identity", true);
+    box.onTurnedDown?.();
+    return;
+  }
   const h = hash(token);
   if (!box.rejected.includes(h)) box.rejected.push(h);
   if (box.rejected.length > 64) box.rejected.shift();
-  const t = now();
-  if (code === "vm_identity_off" || code === "bops_cloud_not_ready") {
-    const ms = code === "vm_identity_off" ? OFF_MS : NOT_READY_MS;
-    box.last = { state: "absent", until: t + ms };
-    box.holdUntil = t + ms;
+  if (code === "vm_identity_off") {
+    box.last = { state: "absent", until: t + OFF_MS };
+    box.holdUntil = t + OFF_MS;
     say(`hold:${code}`, `identity can't be used for now (${code}): the key file meanwhile`, true);
-    return;
+  } else {
+    box.freshWanted = true;
+    say(`rejected:${h}`, `identity turned down (${word(code, "401")}): asking for a fresh one`, true);
   }
-  box.freshWanted = true;
-  say(`rejected:${h}`, `identity turned down (${word(code, "401")}): asking for a fresh one`, true);
+  box.onTurnedDown?.();
 }
+
+/** Whether Bops Cloud (and Orgo's profile) can't take this computer's identity for now (bops_cloud_not_ready): they get the key file. */
+export const cloudHeld = () => box.cloudHoldUntil !== undefined && now() < box.cloudHoldUntil;
+
+/** What runs when a token was turned down (orgo-auth.ts: the runner's next credential, now). */
+export const onTurnedDown = (fn: () => void) => void (box.onTurnedDown = fn);
 
 /** Whether this computer's identity answered last (a token, or a VMM restarting right after one): its copy check asks it (runner.ts). */
 export const identityHere = () => !off() && (box.last?.state === "ok" || (box.last?.state === "transient" && !!box.last.sticky));
 
 /** The VM the token in use was made for, if any (a different one now: the computer woke or moved, runner.ts watchIdentity). */
 export const identityVmId = () => (box.last?.state === "ok" ? box.last.vmId : undefined);
+
+/** The VMM said this is another computer (a copy of the runner's): which. */
+export const identityCopyOf = () => (box.last?.state === "copy" ? box.last.desktopId : undefined);
 
 /** Which computer and VM this is, as its VMM says (GET /orgo/v1/identity), or null when it doesn't say. */
 export async function whoAmI(): Promise<{ desktopId: string; vmId: string } | null> {
@@ -322,7 +355,7 @@ export const vmIdentityForTests = {
   base: (url?: string) => void (box.base = url),
   timeouts: (connectMs?: number, totalMs?: number) => Object.assign(box, { connectMs, totalMs }),
   reset: () => {
-    for (const k of ["last", "okAt", "seenAt", "holdUntil", "asking", "said"] as const) delete box[k];
+    for (const k of ["last", "okAt", "seenAt", "holdUntil", "cloudHoldUntil", "asking", "said"] as const) delete box[k];
     box.backoff = 0;
     box.freshWanted = false;
     box.freshAt = -Infinity;

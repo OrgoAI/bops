@@ -17,7 +17,11 @@ import { HttpError } from "./http.ts";
  * and only as that computer's device. An `orgo_vm_` token is a computer whatever Orgo says: one whose
  * profile has no principal is refused on every route. A computer's answer is kept 30 seconds at most
  * (and never past a token's end), so a computer deleted, moved, joined or paused reaches Bops Cloud
- * within that.
+ * within that. A computer's key Orgo hasn't bound to its computer (an old one: `computer_key: true`
+ * without the computer scope) is a computer Orgo named no computer for, refused everywhere too.
+ *
+ * What a computer may touch once it's in is computer-scope.ts's (state.ts, proxy.ts); its sockets and
+ * long answers are looked at again while they're open (server.ts watchComputer, computerSeenAt).
  */
 
 export type CloudComputer = {
@@ -39,6 +43,11 @@ const COMPUTER_HIT_MS = 30_000;
 const MISS_MS = 30_000;
 /** By the key's SHA-256: who it is (or null: turned down, with Orgo's code when it gave one), until when. */
 const cache = new Map<string, { user: CloudUser | null; code?: string; until: number }>();
+/** By "<user>\n<computer>": when Orgo last answered for a credential of that computer (a fresh answer, not one kept). */
+const seen = new Map<string, number>();
+
+/** When Orgo last said a credential of this computer of the user's is good (0: not lately). */
+export const computerSeenAt = (userId: string, desktopId: string) => seen.get(`${userId}\n${desktopId}`) ?? 0;
 
 export const bearer = (req: IncomingMessage) => {
   const h = req.headers.authorization ?? "";
@@ -61,6 +70,8 @@ function computerOf(key: string, body: Record<string, unknown>, userId: string, 
   }
   if (key.startsWith(VM_TOKEN_PREFIX)) return at("", "vm_identity", now + COMPUTER_HIT_MS);
   if (k?.scope === "computer") return at(typeof k.computer_id === "string" && UUID.test(k.computer_id) ? k.computer_id.toLowerCase() : "", "computer_key", Infinity);
+  // A computer's key Orgo hasn't bound to its computer: no computer to hold it to, so refused everywhere.
+  if (k?.computer_key === true) return at("", "computer_key", Infinity);
   return undefined;
 }
 
@@ -101,6 +112,10 @@ async function signInOf(key: string, fetchImpl: typeof fetch): Promise<{ user: C
   };
   const until = computer ? Math.min(now + COMPUTER_HIT_MS, computer.expiresAt) : now + HIT_MS;
   if (until > now) cache.set(id, { user, until });
+  if (computer?.desktopId && computer.expiresAt > now) {
+    seen.set(`${userId}\n${computer.desktopId}`, now);
+    if (seen.size > 10_000) for (const [k, at] of seen) if (now - at > 10 * 60_000) seen.delete(k);
+  }
   if (cache.size > 10_000) for (const [k, v] of cache) if (v.until <= now) cache.delete(k);
   return { user };
 }
@@ -118,4 +133,7 @@ export async function requireUser(req: IncomingMessage): Promise<CloudUser> {
 }
 
 /** For tests: forget every cached answer. */
-export const clearAuthCache = () => cache.clear();
+export const clearAuthCache = () => {
+  cache.clear();
+  seen.clear();
+};

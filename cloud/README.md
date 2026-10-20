@@ -75,20 +75,51 @@ user: with the computer's Orgo identity (an `orgo_vm_` token; its profile has `p
 "vm_identity", desktop_id, expires_at }`) or the computer's own key (`api_key.scope: "computer"`, with
 `computer_id`). Either is a computer (`CloudUser.computer`), kept 30 seconds at most and never past the
 token's end, so a computer deleted, moved, joined or paused reaches the cloud within that. An `orgo_vm_`
-token is a computer whatever Orgo says: one whose profile names no computer is refused everywhere.
+token is a computer whatever Orgo says: one whose profile names no computer is refused everywhere, and so
+is a computer key Orgo never bound to its computer (`computer_key: true` without the computer scope).
 
 A computer calls only the routes marked `computer: true` (`cloud/http.ts`): `GET`/`PUT /v1/state`,
-`GET /v1/state/head`, `GET`/`POST /v1/messages`, `POST /v1/session`, and `/proxy/openai/*` (its
-WebSocket too), `/proxy/honcho/*` and `/v3/*`, `/proxy/composio/*`, `/proxy/typesafe/*` and
-`/proxy/treg/*`, which its own tasks use. Everything else is 403 `computer_not_allowed` ("A computer's
-identity can't do this."): AgentPhone, numbers and lines, mail handles, Slack links, codes, backups,
-notices, usage, the iPhone's agent, and the tunnel (`/v1/connect`: one per user, so a computer there
-would drop the user's Mac). Its device is the cloud's to set (`cloud/device.ts`: the same as the
-runner's own, from its computer id), and a state write saying another device is 403. That says which
-device wrote and guards a runner set up wrong; it bounds nothing, as anyone with the token can work
-the same device out, and the token reaches the user's whole state either way. orgo-web answers a
-profile for an identity token only once `VM_IDENTITY_BOPS_CLOUD_READY=1`, which waits for this to be
-deployed.
+`GET /v1/state/head`, `GET`/`POST /v1/messages`, `POST /v1/session`, and the providers' routes. Everything
+else is 403 `computer_not_allowed` ("A computer's identity can't do this."): numbers and lines, mail
+handles, Slack links, codes, backups, notices, usage, the iPhone's agent, and the tunnel (`/v1/connect`:
+one per user, so a computer there would drop the user's Mac).
+
+And it reaches only what its own bots use (`cloud/computer-scope.ts`, from the user's state, which it
+can't rewrite where it matters). The Mac mirrors each bot's keys, app access and computer to orgo-web on
+the user's own key, and orgo-web pins a runner's own calls (routines, Orbit, the access log, Logins) to
+the bots those rows put on its computer, so a computer that could rewrite them could reach any bot's:
+
+- **Its state:** a write over the version it read may change only its own threads (`Session.by`), its
+  bots' routines' runs (the clock, a passed skip going, a pause), how its bots are doing on it
+  (`computerStatus`, `computerRam`, `computerNeverReady`, `wakeFailed`, `tailnet`, `composio`), an
+  account's `usedAt`, a brain's sign-in on this computer, news held about its bots (added), its screens'
+  last threads, `usage` and `credits`. Anything else is 403 `computer_not_allowed` with `paths` (the first
+  20: `bots.<id>.keys`, `routines.<id>.goal`, `workspaces`). It never starts a user's state (403
+  `["state"]`), never uploads a whole one (the old builds' `PUT` without `base`), and never reads one with
+  the messages in it.
+- **Its messages:** written, changed and taken out only in its bots' chats (`bot:<id>`, and a chat one of
+  them is in), and only those read (`GET /v1/messages` skips the rest, its cursor past them).
+- **Its session:** `agentmail.apiKey` is empty and `proxied` true: the pod key reaches every inbox of the
+  user's and lives on past the computer. Its mail goes through `/proxy/agentmail/*` (computers only),
+  sent on with the user's pod key, in its bots' own inboxes only (`messages`, `search`, a message, its
+  attachments, `send`, `reply`, `reply-all`, a thread).
+- **The providers** (`Spec.computers`, `Rule.computer` in `proxy.ts`, deny by default): OpenAI, Typesafe
+  and treg as the Mac; Honcho in its bots' workspaces' banks only (`<prefix>-bops`,
+  `<prefix>-bops-<workspace>`, or the bank a workspace shares), the list filtered to them; Composio's
+  catalog, a session only for one of its bots (`x-bops-bot`) with that bot's apps and accounts, a read-only
+  app read-only (`readOnlyHint`), connecting accounts and the sandbox off, and actions only in an account
+  the bot was given (a reading one where it may only read), never connecting, deleting or linking an
+  account, a sign-in setup, a raw API call or a trigger; AgentPhone only `POST /v1/messages`, from a line
+  its bots text the user from to one of the user's verified numbers.
+
+Its device is the cloud's to set (`cloud/device.ts`: the same as the runner's own, from its computer
+id), and a state write saying another device is 403. Its open sockets and streamed answers are looked at
+again every 30 seconds (`server.ts watchComputer`): Orgo turning its credential down, or naming another
+computer for it, ends them; a socket also ends at its token's end; a streamed answer (an agent's events)
+outlives its token only while that computer keeps signing in afresh (`computerSeenAt`, under 2 minutes).
+It still reads the user's whole state and spends their AI credit (the identity spec's Q4). orgo-web
+answers a profile for an identity token only once `VM_IDENTITY_BOPS_CLOUD_READY=1`, which is set right
+after this is deployed and before `VM_IDENTITY=admins`.
 
 ### Which app
 
@@ -161,7 +192,8 @@ Idempotent, safe to call at every app start; two at once for one user must not m
   so it's sealed (`crypto.ts`) in `bops.cloud_accounts` and the same one is handed back every time.
   The Mac uses AgentMail directly with it (REST and the WebSocket mail comes in on). AgentMail itself
   keeps that key inside the pod, and it has mail permissions only (inboxes, messages, drafts,
-  labels): no keys, pods, domains, webhooks, apps or account changes.
+  labels): no keys, pods, domains, webhooks, apps or account changes. A computer's runner never gets it
+  (`apiKey` empty, `proxied` true): its mail goes through `/proxy/agentmail` (above).
 - **AgentPhone:** a sub-account named `bops-<userId>` (found by name first, else
   `POST /v1/sub-accounts`). The Mac points each number's calls at its agent
   (`PATCH /v1/numbers/{id}/voice-routing {method: "agent"}` through the proxy, agent in voice mode
@@ -201,7 +233,8 @@ object is held only until its owner is recorded. Two SDK details: the Honcho SDK
 its baseURL, so the cloud also answers Honcho at `/v3/*`; and the Composio SDK sends its key as
 `x-api-key`, so the Mac adds `Authorization: Bearer <Orgo key>` to it (`defaultHeaders`).
 
-What keeps users apart, per service:
+What keeps users apart, per service (a computer's runner is held to less, its own bots' use: "A computer's
+runner" above):
 
 - **AgentPhone:** every request gets `X-Sub-Account-Id: <the user's sub-account>`, whatever the Mac
   sent. A sub-account only sees its own numbers, agents and messages, so that is the whole wall.
@@ -826,6 +859,7 @@ bot's chat from the phone").
 |---|---|
 | `server.ts` | puts the routes together, HTTP + upgrades, start and stop |
 | `config.ts`, `http.ts`, `auth.ts`, `crypto.ts`, `db.ts` | shared pieces |
+| `computer-scope.ts` | what a computer's runner may touch of its user's Bops: its bots, their chats, accounts, inboxes, lines and banks, and what of the state it may write (the app imports it too) |
 | `protocol.ts` | what the cloud and the app say to each other (both import it) |
 | `session.ts`, `proxy.ts`, `verify.ts`, `usage.ts`, `reconcile.ts` | 1 and 2: setup, the proxies, codes, metering, agent turns read back |
 | `pricing.ts`, `credit.ts` | what each use costs, and the AI credit it's paid from (the gate) |

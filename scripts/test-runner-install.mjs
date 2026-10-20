@@ -706,11 +706,22 @@ await check("phase 1: the key step is today's whatever identity answers, the pro
   assert.ok(I.HEALTH_SCRIPT.includes("auth: (identity|key|none)$' /var/log/bops/runner.log"));
   const dir = mkdtempSync(join(tmpdir(), "bops-auth-line-"));
   const log = join(dir, "runner.log");
-  const line = I.STILL_RUNS_SCRIPT.split("; ").find((l) => l.startsWith('echo "auth=')).replace("/var/log/bops/runner.log", log);
+  const file = join(dir, "auth");
+  const line = I.STILL_RUNS_SCRIPT.split("; ").find((l) => l.startsWith('echo "auth=')).replace("/var/log/bops/runner.log", log).replace("/opt/bops/runner/auth", file);
+  assert.equal(line, I.AUTH_LINE.replace("/var/log/bops/runner.log", log).replace("/opt/bops/runner/auth", file), "the whole auth line");
   writeFileSync(log, "[runner] auth: none\n[runner] identity ok (desktop c1, expires in 52m)\n[runner] auth: identity\n[runner] running the routines of the bots on c1\n");
-  assert.equal(spawnSync("bash", ["-c", line], { encoding: "utf8" }).stdout, "auth=identity\n");
+  assert.equal(spawnSync("bash", ["-c", line], { encoding: "utf8" }).stdout, "auth=identity\n", "no auth file (a runner from before it): the log's last word");
   writeFileSync(log, "[runner] auth: identity orgo_vm_secret\n");
   assert.equal(spawnSync("bash", ["-c", line], { encoding: "utf8" }).stdout, "auth=\n", "only a line that is the word alone");
+  // The runner's auth file (orgo-auth.ts, at each change) wins: the log may have rotated past its last word.
+  writeFileSync(log, "[runner] running the routines of the bots on c1\n");
+  writeFileSync(file, "key\n");
+  assert.equal(spawnSync("bash", ["-c", line], { encoding: "utf8" }).stdout, "auth=key\n", "the file's word, the log rotated past its line");
+  writeFileSync(log, "[runner] auth: identity\n");
+  assert.equal(spawnSync("bash", ["-c", line], { encoding: "utf8" }).stdout, "auth=key\n", "the file before the log");
+  writeFileSync(file, "orgo_vm_secret\n");
+  assert.equal(spawnSync("bash", ["-c", line], { encoding: "utf8" }).stdout, "auth=identity\n", "a file that isn't a word alone: the log");
+  assert.ok(I.installScript({ name: "b.tgz", sha256: "0".repeat(64), version: "1", buildId: "x" }, "").includes("rm -f /opt/bops/runner/auth"), "a new start writes it afresh");
   rmSync(dir, { recursive: true, force: true });
   // Settings shows it (types.ts: a runner up on identity doesn't count on a key).
   const { runnerNeedsKey } = await import(`${root}/lib/types.ts`);
@@ -763,6 +774,28 @@ await check("the way back: a runner with no key and no identity it can use gets 
   orgo.overdue = true;
   await I.lookAtRunners();
   assert.equal(keyCalls("PUT"), 1);
+  // A key in its files that isn't its own (an account's key someone put in /root/.env: the runner won't use it and says none): its own from Orgo.
+  for (const ident of ["404", "200"]) {
+    reset();
+    pc(C1).key = true;
+    await I.lookAtRunners();
+    orgo.ident = ident;
+    orgo.auth = "none";
+    orgo.overdue = true;
+    orgo.calls.length = 0;
+    await I.lookAtRunners();
+    assert.equal(keyCalls("PUT"), 1, `its own key, though key=yes (ident=${ident})`);
+  }
+  // Its key in its files and using it: nothing to give.
+  reset();
+  pc(C1).key = true;
+  await I.lookAtRunners();
+  orgo.ident = "404";
+  orgo.auth = "key";
+  orgo.overdue = true;
+  orgo.calls.length = 0;
+  await I.lookAtRunners();
+  assert.equal(keyCalls("PUT"), 0, "a runner on its own key");
   // On identity and using it: nothing to give.
   reset();
   pc(C1).key = true;

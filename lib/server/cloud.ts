@@ -3,7 +3,7 @@ import { APIError } from "openai";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW, type CloudSession } from "@/cloud/protocol";
 import { cloudUrl } from "./cloud-url";
 import { appHeaders } from "./app-version";
-import { loadOrgoKey, orgoKey } from "./orgo-auth";
+import { cloudKey, loadOrgoKey, orgoKey } from "./orgo-auth";
 import { onPostgres } from "./persist";
 import { getState, update } from "./store";
 import { isIdentityToken, vmIdentityRejected } from "./vm-identity";
@@ -18,6 +18,10 @@ import { isIdentityToken, vmIdentityRejected } from "./vm-identity";
  * Self-hosting (BOPS_SELF_HOSTED=1, keys in .env.local) and a hosted server (BOPS_DATABASE_URL,
  * which holds its own keys) call every service directly, as before. BOPS_CLOUD_URL points the app
  * at another cloud (staging, or one running on this Mac).
+ *
+ * Every call here goes on cloudKey(): the signed-in key, or on a computer's runner its credential as Bops
+ * Cloud takes it (its key file while Bops Cloud can't take its identity yet: orgo-auth.ts). A runner's
+ * session holds no mail key: its mail goes through /proxy/agentmail (mail.ts).
  */
 
 export { cloudUrl };
@@ -41,7 +45,7 @@ export class CloudError extends Error {
 
 /** A request to Bops Cloud as the signed-in user (their Orgo key as Bearer). `fetchImpl` lets a test check the wire shape. */
 export async function cloudFetch(path: string, init: RequestInit = {}, fetchImpl: typeof fetch = fetch): Promise<Response> {
-  const key = orgoKey();
+  const key = cloudKey();
   if (!key) throw new CloudError("Sign in with Orgo first.");
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${key}`);
@@ -99,7 +103,7 @@ const RETRY_MS = 10_000;
  * key and kept; `fresh` asks again (a sign-in does).
  */
 export function cloudSession(fresh = false): Promise<CloudSession> {
-  const key = orgoKey();
+  const key = cloudKey();
   if (!key) return Promise.reject(new CloudError("Sign in with Orgo first."));
   if (!fresh && box.session?.key === key) return Promise.resolve(box.session.value);
   if (box.asking?.key === key) return box.asking.answer;
@@ -131,7 +135,7 @@ export function cloudSession(fresh = false): Promise<CloudSession> {
  * its first answer (it's asked for then), when signed out, or when the app isn't using the cloud.
  */
 export function cloudSessionNow(): CloudSession | null {
-  const key = cloudOn() ? orgoKey() : null;
+  const key = cloudOn() ? cloudKey() : null;
   if (!key) return null;
   if (box.session?.key === key) return box.session.value;
   void cloudSession().catch(() => {});
@@ -144,8 +148,8 @@ export function forgetCloudSession() {
 }
 
 /** Where a provider is reached through Bops Cloud and the key to reach it with (the user's Orgo key), or null when the app calls it directly. */
-export function cloudProxy(provider: "openai" | "agentphone" | "honcho" | "composio" | "typesafe" | "treg") {
-  const key = cloudOn() ? orgoKey() : null;
+export function cloudProxy(provider: "openai" | "agentphone" | "honcho" | "composio" | "typesafe" | "treg" | "agentmail") {
+  const key = cloudOn() ? cloudKey() : null;
   return key ? { url: `${cloudUrl()}/proxy/${provider}`, key } : null;
 }
 

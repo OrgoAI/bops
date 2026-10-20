@@ -12,7 +12,7 @@ import { loopHere } from "./persist";
 import { deviceIdFor } from "./persist-cloud";
 import { routineChanged } from "./routine-sync";
 import { heardRunsOn, overdueOn, RUNNER_CONF, RUNNER_WRAPPER, runsOnMissing } from "./runner";
-import { ORGO_KEY_FILES, ORGO_KEY_LINE } from "./runner-key";
+import { ORGO_KEY_FILES, ORGO_KEY_LINE, RUNNER_AUTH_FILE } from "./runner-key";
 import { computerGone, endSessionsOf } from "./sessions";
 import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNew, update } from "./store";
 
@@ -184,8 +184,12 @@ const KEY_LINE = `grep -qsE ${q(ORGO_KEY_LINE)} ${ORGO_KEY_FILES.join(" ")} && e
  * the status code only (200, 403, 404, 503, 000 when nothing answered), never the token.
  */
 export const IDENT_LINE = `echo "ident=$(curl --noproxy '*' -s -m 3 -o /dev/null -w '%{http_code}' -H 'Metadata-Flavor: Orgo' http://169.254.169.254/orgo/v1/identity/token)"`;
-/** What the runner last said it signs in with (its log's `[runner] auth:` line, orgo-auth.ts): the word only, as orgo-web logs a command's output. */
-const AUTH_LINE = `echo "auth=$(grep -E '^\\[runner\\] auth: (identity|key|none)$' /var/log/bops/runner.log 2>/dev/null | tail -n 1 | sed 's/^.*: //')"`;
+/**
+ * What the runner last said it signs in with: the word in its auth file (RUNNER_AUTH_FILE, written at each
+ * change), else its log's last `[runner] auth:` line (a runner from before the file; the log rotates at
+ * 5 MB and the word is said only when it changes). The word only, as orgo-web logs a command's output.
+ */
+export const AUTH_LINE = `echo "auth=$( (grep -sxE '(identity|key|none)' ${RUNNER_AUTH_FILE} || grep -E '^\\[runner\\] auth: (identity|key|none)$' /var/log/bops/runner.log 2>/dev/null | sed 's/^.*: //') | tail -n 1)"`;
 /** The word an `auth=` line says, if it says one. */
 const authIn = (output: string): RunnerState["auth"] => (/^auth=(identity|key|none)$/m.exec(output)?.[1] as RunnerState["auth"]) ?? undefined;
 
@@ -280,8 +284,9 @@ export function installScript(b: Pick<Bundle, "name" | "sha256" | "version" | "b
     `cat > ${RUNNER_WRAPPER} <<'BOPS_EOF'\n${wrapper}BOPS_EOF`,
     `chmod 700 ${RUNNER_WRAPPER}`,
     `cat > ${RUNNER_CONF} <<'BOPS_EOF'\n${SUPERVISOR_CONF}BOPS_EOF`,
-    // Its log starts over, so the health check reads this start's.
+    // Its log and its auth file start over, so the health check reads this start's.
     ": > /var/log/bops/runner.log",
+    `rm -f ${RUNNER_AUTH_FILE}`,
     "supervisorctl reread >/dev/null 2>&1 || true",
     "supervisorctl update >/dev/null 2>&1 || true",
     "supervisorctl restart bops-runner >/dev/null 2>&1 || true",
@@ -717,7 +722,8 @@ async function stillRuns(id: string, me: string, key: string) {
   const up = /\b(RUNNING|STARTING|BACKOFF)\b/.test(got.output);
   const auth = authIn(got.output);
   const ident = said("ident");
-  if (said("key") === "no" && ident !== "403" && (ident !== "200" || auth === "none")) return wayBack(id, me, key, up);
+  // No key and no identity it can use, or a key in its files that isn't its own (it says none: orgo-auth.ts): its own from Orgo.
+  if (ident !== "403" && ((said("key") === "no" && (ident !== "200" || auth === "none")) || (said("key") === "yes" && auth === "none"))) return wayBack(id, me, key, up);
   const x = runnerOf(id);
   if (up) {
     if (x?.status === "running" && auth && x.auth !== auth) mark(id, { ...x, auth });

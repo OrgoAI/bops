@@ -28,22 +28,27 @@ connect, 10 in all) and, by what the VMM answers:
 
 | Answer | The runner |
 |---|---|
-| 200 | uses the token, and asks again 25 minutes before it ends (at half its life for a short one), and after a nap (a wake may be another VM) |
+| 200 | uses the token, and asks again 25 minutes before it ends (at half its life for a short one), and after a nap (a wake may be another VM). A token for another computer than its own (`desktop_id` isn't `BOPS_RUNNER_COMPUTER`): this is a copy (a live fork), which never takes it up and leaves (below) |
 | 403 (the computer doesn't qualify: someone else can use its workspace, say) | uses nothing at all, never its key file, and stops |
 | 404 (none here) | uses its key file, and asks again in 5 minutes |
 | connection refused or no connection in a second | as 404, unless a 200 or 403 came in the last 10 minutes (the VMM restarting): then as below |
 | 429, 5xx, a read timeout | keeps the token in use while it hasn't ended, else its key file meanwhile; asks again after `Retry-After`, or 2 seconds doubling to 60 |
 
 A 401 from Orgo or Bops Cloud for a token drops it for good and the call is made once more on the next
-credential, at once: a fresh token (`?fresh=1`, at most every 5 seconds), or the key file with
-`vm_identity_off` (for 5 minutes) or `bops_cloud_not_ready` (for 10: orgo-web won't answer a profile for
-a token until Bops Cloud tells a computer from its user). A token for another account than the state's
+credential, at once (the runner picks it as the 401 comes, not at its next call): a fresh token
+(`?fresh=1`, at most every 5 seconds), or the key file with `vm_identity_off` (for 5 minutes).
+`bops_cloud_not_ready` (orgo-web won't answer a profile for a token until Bops Cloud tells a computer
+from its user, `VM_IDENTITY_BOPS_CLOUD_READY`) drops nothing: orgo-web still takes the token, so the
+runner keeps it for orgo-web's calls, and only Bops Cloud and Orgo's profile get the key file for 10
+minutes (`cloudKey`), then the token again; no fresh token is asked for meanwhile. A token for another account than the state's
 stops the runner ("this computer now belongs to another Orgo account"). A new token for the same user
 only swaps the key Bops Cloud's calls carry. `BOPS_RUNNER_IDENTITY=0` in the runner's environment skips
 identity (debugging one runner; the wrapper never sets it).
 
 What it signs in with goes in its log as `[runner] auth: identity`, `auth: key` or `auth: none`, at
-start and on every change. **With no credential at all** (no identity here and no key file) it stays
+start and on every change, and in `/opt/bops/runner/auth` (the word alone, 0600), which the Mac's look
+reads first: the log rotates at 5 MB and the word is said only when it changes. It says `key` while Bops
+Cloud takes its key file (`bops_cloud_not_ready`), as it needs that key then. **With no credential at all** (no identity here and no key file) it stays
 up and runs nothing, asking its identity and reading its files every 30 seconds, and starts once
 either is there: stopping would only have supervisord start it again forever, which no look from the
 Mac could tell from a runner that runs. The Mac's way back (below) gives such a computer its key.
@@ -67,7 +72,12 @@ file nobody but root can read (no read for group or others, or in `/root`, which
 the runner's settings, its wrapper or its supervisord program, and never logged. Orgo may write a new one
 later (a restore in place, or a copy made from the computer, which gives both a new one), so when Orgo
 answers 401 the runner reads the files again (at most every 5 seconds, twice as long each time they have
-the same one, up to 5 minutes) and goes on with the new one, in Bops Cloud too.
+the same one, up to 5 minutes) and goes on with the new one, in Bops Cloud too. The first time it uses a
+key it asks Orgo's profile, in the background, whose it is: one Orgo says isn't this computer's own
+(an account's or a workspace's key someone put in `/root/.env`, another computer's, a computer key Orgo
+never bound to one) is never used again, its file named in the log, and the runner waits with `auth:
+none`, which has the Mac's way back give it its own (below). An Orgo from before keys were bound to
+their computers can't say, and the key is used as before.
 
 Settings, Your bots' computers (`components/app/bot-computers.tsx`, in every mode), shows under each bot
 that has its own computer "Orgo identity (this computer only)" when its runner is up on its identity
@@ -139,9 +149,9 @@ routine comes due, and its idle suspend leaves a computer up while one is due wi
    starts `/opt/bops/runner/run.sh`, which sets the runner's settings (none secret) and makes a fresh
    window token each start. No command sent carries a key or a token.
 5. The health check: it answers on 127.0.0.1:3210 and listens there only, and says what it signs in
-   with (`auth=identity`, `key` or `none`, the word from its log's last `[runner] auth:` line and
-   nothing else, as orgo-web logs a command's output), kept as `runners[computer].auth`. Then it's
-   Running, and the Mac leaves that computer's routines to it.
+   with (`auth=identity`, `key` or `none`, the word in its auth file, else its log's last `[runner]
+   auth:` line, and nothing else, as orgo-web logs a command's output), kept as
+   `runners[computer].auth`. Then it's Running, and the Mac leaves that computer's routines to it.
 
 A build already unpacked on the computer (a copy of a computer with a runner, a try again) is used as it
 is, without an upload. A newer runner is never replaced by an older one; the same version again
@@ -169,8 +179,10 @@ minutes overdue and its computer is up, the Mac asks whether the runner is still
 an hour, every 15 minutes for one on its identity); the same command says whether the computer has its
 key, what its identity answers and what the runner last said it signs in with (none of it secret).
 With no key, and an identity that answers anything but 200 or 403 (or a runner that says `auth: none`),
-the Mac gives the computer its key (`PUT`, `keyMade`) and starts the runner if supervisord doesn't show
-it running; a runner that waits picks the key up within 30 seconds. So a runner left with no credential
+or with a key in its files and a runner that says `auth: none` (a key that isn't the computer's own, or
+one Orgo turned down), and never with identity refused (403), the Mac gives the computer its key (`PUT`,
+`keyMade`; Orgo writes it to `/root/.orgo-secrets.env`, read first) and starts the runner if supervisord
+doesn't show it running; a runner that waits picks the key up within 30 seconds. So a runner left with no credential
 (identity paused or gone with its key taken off) is found within about 25 minutes while a Mac is on, and
 waits for one otherwise. Refused, it couldn't start, and why.
 
@@ -187,8 +199,9 @@ command as using it, and it would never sleep. On its identity it asks its VMM i
 (`GET /orgo/v1/identity`, which only that computer's network reaches): another computer is a copy, and
 nothing goes through Orgo, so the look never counts as using the computer (no answer there is the look
 through Orgo). It also asks every minute: another computer leaves, and another VM of its own (a wake, a
-restore, a move) gets a new token at once. Orgo stamps the source of every copy, so a token in a copy's
-memory stops working within seconds.
+restore, a move) gets a new token at once. And whenever its VMM hands it a token for another computer,
+it's a copy, which takes its runner off and leaves without ever using that token. Orgo stamps the source
+of every copy, so a token in a copy's memory stops working within seconds.
 
 The routines Orgo keeps say the Mac runs them (`onMac`) unless a computer's runner that's Running runs
 them, and each runner going up or down sends them again, so Orgo wakes a computer only for a runner
@@ -196,14 +209,50 @@ that will run what's due. When a routine of a Running runner is 10 minutes past 
 computer is up, the Mac asks whether the runner's program is still there (at most once an hour); gone,
 it's Couldn't start, and its routines go back to the Mac.
 
-**In Bops Cloud** (`cloud/auth.ts`, `cloud/server.ts`; `cloud/README.md`, "A computer's runner") a
-runner signed in as its computer, by its identity token or its own key, calls only what it needs: its
-state (`GET`/`PUT /v1/state`, `GET /v1/state/head`), its threads (`GET`/`POST /v1/messages`), its
-session, and the models and tools its own tasks use (`/proxy/openai/*` and its WebSocket, Honcho,
-Composio, Typesafe, treg). Phone, mail handles, Slack links, numbers, codes, backups, notices, usage and
-the tunnel answer it 403. Its device is Bops Cloud's to set from its computer id, and a write saying
-another device is 403 (a guard against a runner set up wrong, not a bound: Q4 below). A computer's
-answer is kept 30 seconds at most, never past its token's end.
+**In Bops Cloud** (`cloud/auth.ts`, `cloud/server.ts`, `cloud/computer-scope.ts`; `cloud/README.md`, "A
+computer's runner") a runner signed in as its computer, by its identity token or its own key, calls only
+what it needs, and only for the bots that work on its computer (as the user's state says, which a
+computer can't change). The Mac mirrors the bots' keys, app access and computers to orgo-web on the
+user's own key, and orgo-web pins the runner's routines, Orbit, access log and Logins to exactly those
+rows, so Bops Cloud keeps the runner from rewriting them:
+
+- Its state (`GET`/`PUT /v1/state`, `GET /v1/state/head`): a write may change only its own threads
+  (`Session.by` its device), its bots' routines' runs (`nextRunAt`, `lastRunAt`, `last`, `lateRun`,
+  `eventsThrough`, a passed skip going, a pause), how its bots are doing on it (`computerStatus`,
+  `computerRam`, `computerNeverReady`, `wakeFailed`, `tailnet`, their Composio session), when an account
+  was last used, a brain's sign-in on this computer, news held about its bots, its screens' last threads,
+  the usage ledger and the out-of-credit mark. Anything else (a bot's keys or app access, a bot moved or
+  added, a routine's job, where it delivers or a routine added or taken out, another device's threads,
+  workspaces, logins, runners, numbers) is 403 `computer_not_allowed` with the paths. It never starts a
+  state, never uploads a whole one, and never reads one with every message in it. The runner keeps to
+  the same rules before it sends (`keepAllowed`), so it's never refused: what it may not send stays on the
+  runner, said once in its log. And the Mac takes of a version a runner wrote (read right after its own)
+  only what that computer may change, and writes the rest back as it was: a second guard behind Bops
+  Cloud's, for a Bops Cloud from before these rules.
+- Its messages (`GET`/`POST /v1/messages`): written, changed and taken out only in its bots' chats (and
+  group chats one of them is in), and only those read.
+- Its session (`POST /v1/session`): no AgentMail key (it reaches every inbox of the user's and outlives
+  the computer). Its mail (a routine's email, `check_email`, `read_email`, `send_email`, `reply_email`)
+  goes through `/proxy/agentmail/*`, sent on with the user's pod key, in its bots' own inboxes only.
+- The models (`/proxy/openai/*` and its WebSocket), Typesafe and treg, as the Mac.
+- Honcho in its bots' workspaces' memory banks only.
+- Composio: the catalog, its bots' sessions (each bot's apps and accounts only, a read-only app's actions
+  read-only, connecting accounts and a sandbox off), and actions in the accounts the user gave the bot
+  (reading ones only where it may only read). Never connecting, deleting or linking an account, sign-in
+  setups, raw API calls (`tools/execute/proxy`) or triggers.
+- AgentPhone: only a text (`POST /v1/messages`) from a line its bots text the user from (a bot's own, or
+  its workspace's main bot's) to one of the user's verified numbers. So a routine that texts its result
+  (`deliverTo` text, `textTo`) and a bot's `text_me` work on the runner; the check of whether a text went
+  through (reading the line's messages) doesn't, and is skipped.
+- Mail handles, Slack links, numbers and lines, codes, backups, notices, usage, the iPhone's agent and
+  the tunnel answer it 403.
+
+Its device is Bops Cloud's to set from its computer id, and a write saying another device is 403. A
+computer's answer is kept 30 seconds at most, never past its token's end, and its open sockets and long
+answers are looked at again every 30 seconds: Orgo turning its credential down, or naming another
+computer for it, closes them, a socket closes at its token's end (the runner opens another on its next
+token), and an answer still coming (an agent's events) outlives its token only while that computer
+keeps signing in afresh.
 
 **Stopping one**: switching to This Mac (or the bots to browsers on the Mac), the computer deleted, or no
 bot working on it any more. Its program and wrapper are taken off its computer (one asleep isn't woken
@@ -221,9 +270,10 @@ and that key is revoked; until then it stays Stopping, and the next look tries a
   through a runner.
 - Events waking a computer: texts, email and Slack still wait for the Mac.
 - Brains on a runner that run on the Mac (Hermes, Claude Code on the Mac).
-- Bops Cloud limiting what a computer may touch of its user's state: a computer's token or key reads
-  and writes the user's whole Bops state and spends their AI credit, as the key did before (the
-  identity spec's Q4). The session it gets still holds the user's AgentMail key, as before.
+- Bops Cloud limiting what a computer reads: its token or key still reads the user's whole Bops state
+  (every bot, routine, thread and workspace, though not the other bots' chat messages), and spends their
+  AI credit (the identity spec's Q4). Its writes are limited (above). OpenAI objects (another bot's agent
+  sessions) are the user's, not the computer's.
 - Versioned mirror PUTs (`bops_state_version`): Orgo's mirrors are last writer wins.
 - A runner making new computers while the Mac is closed: the map and the runners catch up when the Mac
   opens.
@@ -235,10 +285,12 @@ and that key is revoked; until then it stays Stopping, and the next look tries a
 
 Before this Bops ships (identity: the identity spec's rollout, `vm-identity-spec.md` 5):
 
-- Bops Cloud with the computer routes deployed to an environment before orgo-web's
-  `VM_IDENTITY_BOPS_CLOUD_READY=1` there, and before `VM_IDENTITY=on` reaches Bops computers. Until
-  that flag, orgo-web answers a profile for an identity token 403 `bops_cloud_not_ready`, and the runner
-  signs in with its key file meanwhile.
+- In each environment, in this order: Bops Cloud with the computer routes and their limits deployed
+  (the identity spec 4.4); then orgo-web's `VM_IDENTITY_BOPS_CLOUD_READY=1`, right after that deploy;
+  then `VM_IDENTITY=admins`, and later `on`. Until the flag, orgo-web answers a profile for an identity
+  token 403 `bops_cloud_not_ready`: the runner keeps the token for orgo-web and gives Bops Cloud its key
+  file meanwhile, trying the token with Bops Cloud again every 10 minutes (and one with no key file can't
+  reach Bops Cloud at all), so the flag must not wait for identity to be on.
 - bops-base stays 0.1.9 with the optional `orgo_api_key` (the phase 1 fallback). Phase 2 publishes a
   version without it, bumps `BOPS_TEMPLATE` and orgo-web's curated ref, and turns `IDENTITY_ONLY` on.
 
@@ -270,5 +322,6 @@ root on the same computer and can be steered by the web pages they read, so a pa
 read it. Phase 1 keeps it on every Bops computer (from bops-base 0.1.9 on, whether or not a runner runs
 there) as the fallback for identity. Identity is the narrow, device-bound, revocable credential this
 blocker asked for, written nowhere and good for an hour; phase 2 takes the key off the computers that
-run on it. Until phase 2, a key read off a computer reaches that computer, its bots' routines, Orbit,
-Logins and the user's whole Bops state in Bops Cloud (Q4).
+run on it. Until phase 2, a key read off a computer reaches that computer, its bots' routines, Orbit and
+Logins, reads the user's whole Bops state in Bops Cloud (Q4), and writes only what the computer may
+(above).

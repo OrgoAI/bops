@@ -5,7 +5,8 @@ import { botChatId, MAIN_WORKSPACE, workspaceOf, type Bot, type EmailInfo, type 
 import { BOPS_TIERS, type MailHandleCheck, type MailHandleResult } from "@/cloud/protocol";
 import { emailShort } from "@/lib/plan-includes";
 import { emailsHeld, isPlanBot, planRoom } from "./plan-room";
-import { cloudJson, cloudOn, cloudSessionNow } from "./cloud";
+import { appHeaders } from "./app-version";
+import { cloudJson, cloudOn, cloudProxy, cloudSessionNow } from "./cloud";
 import { askOwner } from "./composio";
 import { foundByBots } from "./treg";
 import { saveUpload } from "./uploads";
@@ -29,13 +30,19 @@ import { recordUsage } from "./usage";
  * email card, and the bot says in a line what it is. Sending and replying always wait for the user's OK.
  *
  * Signed in with Orgo, the pod is the user's own, made by Bops Cloud, which hands over a key that
- * reaches only that pod (its session; lib/server/cloud.ts). Self-hosting, it's AGENTMAIL_API_KEY.
+ * reaches only that pod (its session; lib/server/cloud.ts). Self-hosting, it's AGENTMAIL_API_KEY. A
+ * computer's runner gets no key: its mail goes through Bops Cloud (/proxy/agentmail) on its own
+ * credential, in its bots' inboxes only (cloud/proxy.ts).
  */
 
-/** The AgentMail key in use, and the pod when it's given: the user's own from Bops Cloud, or AGENTMAIL_API_KEY and AGENTMAIL_POD_ID. */
-function mailAccess(): { key: string; podId?: string } | null {
+/** The AgentMail key in use, and the pod when it's given: the user's own from Bops Cloud, or AGENTMAIL_API_KEY and AGENTMAIL_POD_ID. `via`: through Bops Cloud (a runner's). */
+function mailAccess(): { key: string; podId?: string; via?: string } | null {
   if (cloudOn()) {
     const m = cloudSessionNow()?.agentmail;
+    if (m?.proxied) {
+      const p = cloudProxy("agentmail");
+      return p ? { key: p.key, podId: m.podId, via: p.url } : null;
+    }
     return m ? { key: m.apiKey, podId: m.podId } : null;
   }
   const key = process.env.AGENTMAIL_API_KEY;
@@ -75,11 +82,13 @@ const g = globalThis as unknown as { bopsMail?: Live };
 const live: Live = (g.bopsMail ??= { making: new Map(), handled: new Set(), arrivals: new Map() });
 
 function am() {
-  const key = mailAccess()?.key;
+  const access = mailAccess();
+  const key = access?.key;
   if (!key) throw new Error("Email isn't available right now.");
-  if (!live.client || live.clientKey !== key) {
-    live.client = new AgentMailClient({ apiKey: key });
-    live.clientKey = key;
+  const made = `${access.via ?? ""}\n${key}`;
+  if (!live.client || live.clientKey !== made) {
+    live.client = new AgentMailClient(access.via ? { apiKey: key, baseUrl: access.via, headers: appHeaders() } : { apiKey: key });
+    live.clientKey = made;
     live.domain = undefined;
   }
   return live.client;

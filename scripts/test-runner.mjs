@@ -6,7 +6,8 @@
 // Bops its own, a runner only once it's read the state and Orgo again, none once a newer Bops wrote the
 // state), making sure it's on its own computer (checkIdentity: a copy of the computer takes its runner
 // off, its program and wrapper only, never the computer's Orgo key, which Orgo replaces; on its computer's
-// identity its VMM is asked instead, never Orgo, and every minute: watchIdentity) and the routines mirror (routine-sync.ts: how each runs and whether it needs the Mac; a runner
+// identity its VMM is asked instead, never Orgo, and every minute: watchIdentity), a routine that texts its
+// result run and texted from its computer's runner, and the routines mirror (routine-sync.ts: how each runs and whether it needs the Mac; a runner
 // sends only its own, never with deleteMissing).
 //
 // The store, Orgo, the nap detector and the modules a run talks to are fakes (below), so nothing reaches a
@@ -573,6 +574,41 @@ await check("a runner's timer waits until it's sure, then runs its own in the cl
   assert.ok(Date.parse(puts[0].body.routines.find((r) => r.bopsId === "r_boppy").nextRunAt) > Date.now(), "the next time");
   R.runnerForTests.reset();
   T.reset();
+});
+
+await check("a routine that texts its result runs on its computer's runner and texts from there (Bops Cloud takes that text: cloud/test/core-computer-scope.test.ts), never left to the Mac", async () => {
+  reset();
+  const texts = [];
+  const was = { ...globalThis.__fake.phone, ...{ backgroundTurn: globalThis.__fake.chat.backgroundTurn } };
+  Object.assign(globalThis.__fake.phone, {
+    ownerPhone: () => "+14155550199",
+    isOwner: (n) => n === "+14155550199",
+    textingLine: (b) => ({ from: b, line: { numberId: "num-main", agentId: "agent-main", phone: "+14155550100", type: "sms" } }),
+    sendText: async (...a) => void texts.push(a),
+  });
+  globalThis.__fake.chat.backgroundTurn = async () => ({ text: "Three new orders today." });
+  try {
+    const r = routine("r_text", "boppy", { run: "chat", deliverTo: { kind: "text" } });
+    state.routines = [r];
+    assert.equal(R.pinnedToMac(r, state.bots[0]), false, "a text needs no Mac");
+    state.runners = { [C1]: up("running") };
+    assert.equal(R.runnerRuns(r), true, "its runner's");
+    asRunner(C1);
+    orgo.answer = (c) => (c.path === "/api/bops/settings" ? { status: 200, json: { runsOn: "cloud" } } : null);
+    r.nextRunAt = Date.now() - 1000;
+    tick();
+    for (let i = 0; i < 50 && !texts.length; i++) await sleep(10);
+    assert.deepEqual(texts.map((t) => [t[0], t[1], t[2]]), [["boppy", "+14155550199", "Three new orders today."]], "texted from the runner");
+    assert.equal(byId("r_text").last?.delivery?.status, "sent");
+    // The Mac leaves it to the runner meanwhile.
+    asMac();
+    assert.equal(R.runsHere(byId("r_text")), false);
+  } finally {
+    Object.assign(globalThis.__fake.phone, { ownerPhone: was.ownerPhone, isOwner: was.isOwner, textingLine: was.textingLine, sendText: was.sendText });
+    globalThis.__fake.chat.backgroundTurn = was.backgroundTurn;
+    R.runnerForTests.reset();
+    T.reset();
+  }
 });
 
 /* ---------------- The routines mirror ---------------- */
