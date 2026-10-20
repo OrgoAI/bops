@@ -18,6 +18,7 @@ import { computerBriefing, teamBriefing } from "./briefing";
 import { ABOUT_BOPS, ASKING, tidyAnswer, WRITING } from "./style";
 import { buildApp, madeApp } from "./made-apps";
 import { savePage } from "./pages";
+import { isPeopleChat, sendToPeople } from "./people";
 import { createRoutine, deleteRoutine, describeSchedule, routinesNote, setRoutineEnabled, setRoutineWhere } from "./routines";
 import { chose, decide, yes, type Answer } from "./decide";
 import { moveToMac, offerMove, replyToSession, startSession } from "./sessions";
@@ -309,13 +310,15 @@ export async function handleMessage(
 ) {
   const c = chat(chatId);
   if (!c) return null;
+  // A conversation with other people: it goes to them (people.ts); no bot answers there.
+  if (isPeopleChat(c)) return sendToPeople(chatId, text, replyTo);
   const ours = sameState();
   // A reply to a reply joins the conversation it started from, like iMessage.
   const target = replyTo ? getState().messages.find((m) => m.id === replyTo && m.chatId === chatId) : undefined;
   const root = target ? (target.replyTo ?? target.id) : undefined;
   const app = lookingAt && madeApp(lookingAt) ? lookingAt : undefined;
   const mine = addMessage({ chatId, role: "user", text, replyTo: root, images: images?.length ? images : undefined, via, phone, channel, lookingAt: app });
-  trackServerEvent("bops_message_sent", { chat_kind: c.kind, via: onCall ? "call" : (via ?? "app"), image_count: images?.length ?? 0, is_reply: !!root });
+  trackServerEvent("bops_message_sent", { chat_kind: c.kind === "bot" ? "bot" : "group", via: onCall ? "call" : (via ?? "app"), image_count: images?.length ?? 0, is_reply: !!root });
   // Into the shared memory (unless the user wants it kept from someone), and remembered if it's a lasting fact.
   rememberMessage(wsOf(c.botIds[0]), chatId, mine.id, images?.length ? `${text} [attached ${images.length} image${images.length === 1 ? "" : "s"}]`.trim() : text, { chat: chatName(chatId) });
   // A follow-up to work already under way goes into that thread instead of starting another (not one

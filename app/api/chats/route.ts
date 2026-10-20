@@ -1,6 +1,7 @@
 import { getState, id, update } from "@/lib/server/store";
 import { botChatId, type Chat } from "@/lib/types";
 import { notReady } from "@/lib/server/ready";
+import { changePeople } from "@/lib/server/people";
 
 /** Start a conversation: one bot opens its own chat, two or more make a group chat. */
 export async function POST(request: Request) {
@@ -14,11 +15,21 @@ export async function POST(request: Request) {
   return Response.json({ chatId: chat.id });
 }
 
-/** Delete a group chat and its messages. (A bot's own chat goes when the bot does.) */
+/** Delete a group chat and its messages, or leave a conversation with people. (A bot's own chat goes when the bot does.) */
 export async function DELETE(request: Request) {
   const unready = notReady();
   if (unready) return unready;
   const { chatId } = (await request.json().catch(() => ({}))) as { chatId?: string };
+  const people = getState().chats.find((x) => x.id === chatId && x.kind === "people");
+  if (people) {
+    // Out of it for everyone (they see you left), then off this Mac.
+    if (!people.people?.left) await changePeople(people.id, { leave: true }).catch(() => {});
+    update((s) => {
+      s.chats = s.chats.filter((x) => x.id !== chatId);
+      s.messages = s.messages.filter((m) => m.chatId !== chatId);
+    });
+    return Response.json({ ok: true });
+  }
   update((s) => {
     const c = s.chats.find((x) => x.id === chatId);
     if (!c || c.kind !== "group") return;

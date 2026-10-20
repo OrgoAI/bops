@@ -10,11 +10,12 @@ import { OpenLink } from "./panel-tabs";
 import { crmOpen } from "@/lib/crm-access";
 import { CrmNote } from "./crm";
 import { LookingAt, MadeAppLine } from "./made-apps";
+import { NewPeopleChat } from "./people";
 import { MacIcon } from "./mac-tab";
 import { AttachmentTray, MessageImages, useAttachments } from "./attachments";
 import { ComposerInput } from "./composer-input";
 import { MicButton } from "./mic-button";
-import { ChatAvatar, chatName, clockTime, needsYou, post, StatusIcon, teamOf, useNow } from "./ui";
+import { ChatAvatar, chatName, clockTime, needsYou, PersonAvatar, post, StatusIcon, teamOf, useNow } from "./ui";
 
 /** Light markdown for bot text: **bold** and [links](url). */
 /** How many messages a chat draws at first, and how many more each "Show earlier messages" adds. */
@@ -270,6 +271,21 @@ export function ChatView({
     onShowMac,
   });
   const repliedAfterUser = messages.slice(lastUserIdx + 1).some((m) => m.role === "bot");
+  // A conversation with people (lib/server/people.ts): who else is in it, who's typing, and who has seen your latest message.
+  const people = c.people;
+  const myId = state.account?.user.id;
+  const others = people?.members.filter((p) => p.userId !== myId) ?? [];
+  const peopleTyping = state.peopleTyping?.[c.id] ?? [];
+  const lastMine = messages[lastUserIdx];
+  const seenBy = people && lastMine?.peopleSeq ? others.filter((p) => (p.readSeq ?? 0) >= lastMine.peopleSeq!) : [];
+  const seenLine = !people ? null : !seenBy.length ? null : people.kind === "dm" ? "Seen" : `Seen by ${seenBy.map((p) => (p.name ?? p.email ?? "").split(" ")[0]).join(", ")}`;
+  // Telling them you're typing: at most every few seconds (the server holds back more often).
+  const typedAt = useRef(0);
+  const typed = () => {
+    if (!people || people.left || Date.now() - typedAt.current < 3000) return;
+    typedAt.current = Date.now();
+    void fetch("/api/people", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "typing", chatId: c.id }) });
+  };
 
   // Opening a chat lands on its latest message; only new messages in the open chat glide in.
   const shownChat = useRef<string | null>(null);
@@ -321,7 +337,15 @@ export function ChatView({
   // Sent messages the server's state doesn't have yet.
   const waiting = pending.filter((p) => p.chatId === c.id && !messages.some((m) => m.role === "user" && m.text === p.text && m.at >= p.at - 5000));
 
-  const status = c.typing.length
+  const status = people
+    ? peopleTyping.length
+      ? `${peopleTyping.join(", ")} typing…`
+      : people.left
+        ? "You left this conversation"
+        : people.kind === "dm"
+          ? (others[0]?.email ?? (people.invited[0] ? `Asked to join: ${people.invited[0]}` : ""))
+          : `${others.length + 1} people${people.invited.length ? ` · ${people.invited.length} asked to join` : ""}`
+    : c.typing.length
     ? c.kind === "group"
       ? `${c.typing.map((b) => state.bots.find((x) => x.id === b)?.name).join(", ")} typing…`
       : "Typing…"
@@ -388,7 +412,7 @@ export function ChatView({
           ) : (
             <>
               <button onClick={() => solo && onShowBot(solo.id)} className="relative top-2 z-10" title={solo ? `${solo.name}'s profile` : undefined}>
-                <ChatAvatar chat={c} bots={state.bots} size={40} />
+                <ChatAvatar chat={c} bots={state.bots} size={40} me={myId} />
               </button>
               <div className="relative flex flex-col items-center rounded-[14px] bg-white px-3.5 pb-1.5 pt-2.5 shadow-[0_0_0_1px_#E6E6E3,0_6px_16px_-8px_#00000020]">
                 <span className="text-[14px] font-semibold leading-[18px]">{chatName(c, state.bots)}</span>
@@ -406,7 +430,11 @@ export function ChatView({
                     ? `Text ${solo.name} anything. ${solo.name} hands work to the right bot and keeps you posted.`
                     : `Text ${solo.name} anything. ${solo.name} works on its own computer, and can build you a team of bots when you need one.`
                   : `Text ${solo.name} directly. Long tasks show up here as threads you can open.`
-                : "Say hi to the group. @mention a bot to point at it."}
+                : people
+                  ? people.invited.length && !others.length
+                    ? `${people.invited.join(", ")} isn't on Bops yet. Say hi: they'll see it when they sign up with that email.`
+                    : `Say hi to ${people.kind === "dm" ? (others[0]?.name ?? others[0]?.email ?? "them") : "everyone"}. Only the people here see this.`
+                  : "Say hi to the group. @mention a bot to point at it."}
             </div>
           )}
           {hiddenCount > 0 && (
@@ -423,17 +451,18 @@ export function ChatView({
                 <MessageRow
                   m={m}
                   state={state}
-                  showSender={c.kind === "group" || (!!m.botId && m.botId !== solo?.id)}
-                  continued={!!prev && prev.role === m.role && prev.botId === m.botId && !gap}
+                  showSender={c.kind === "group" || people?.kind === "group" || (!!m.botId && m.botId !== solo?.id)}
+                  continued={!!prev && prev.role === m.role && prev.botId === m.botId && prev.from?.userId === m.from?.userId && !gap}
                   sessionById={sessionById}
                   chipIds={chipsFor(m)}
                   onOpenThread={onOpenThread}
                   onShowScreen={onShowScreen}
                   {...rowProps(m)}
                 />
-                {i + hiddenCount === lastUserIdx && repliedAfterUser && (
+                {i + hiddenCount === lastUserIdx && !people && repliedAfterUser && (
                   <div className="self-end px-1 pb-1 text-[11px] leading-[14px] text-[#9A9A98]">Read {clockTime(m.at)}</div>
                 )}
+                {i + hiddenCount === lastUserIdx && seenLine && <div className="self-end px-1 pb-1 text-[11px] leading-[14px] text-[#9A9A98]">{seenLine}</div>}
               </Fragment>
             );
           })}
@@ -443,6 +472,16 @@ export function ChatView({
               {p.text && <div className="whitespace-pre-wrap rounded-[18px] bg-[#0A0A0A] px-3.5 py-2 text-[14px] leading-5 text-white [overflow-wrap:anywhere]">{p.text}</div>}
             </div>
           ))}
+          {peopleTyping.length > 0 && (
+            <div className="flex items-end gap-2 self-start" title={`${peopleTyping.join(", ")} typing`}>
+              {people?.kind === "group" && <span className="pb-1 pl-1 text-[11px] text-[#9A9A98]">{peopleTyping.join(", ")}</span>}
+              <div className="flex items-center gap-[5px] rounded-[18px] bg-[#F2F2F0] px-4 py-[13px]">
+                <span className="size-[7px] animate-pulse rounded-full bg-[#9A9A98]" />
+                <span className="size-[7px] animate-pulse rounded-full bg-[#B5B5B2] [animation-delay:150ms]" />
+                <span className="size-[7px] animate-pulse rounded-full bg-[#D9D9D6] [animation-delay:300ms]" />
+              </div>
+            </div>
+          )}
           {c.typing.map((b) => {
             const tb = state.bots.find((x) => x.id === b);
             // Waiting on a teammate's answer: "Asking ● Max…" over the typing dots.
@@ -556,7 +595,10 @@ export function ChatView({
             <ComposerInput
               id="composer"
               value={draft}
-              onChange={setDraft}
+              onChange={(v) => {
+                setDraft(v);
+                if (v) typed();
+              }}
               onPaste={(e) => {
                 const files = filesOf(e.clipboardData);
                 if (!files.length) return;
@@ -1041,6 +1083,14 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             </div>
           </div>
         </div>
+        {m.notSent && (
+          <span className="flex items-center gap-1.5 pr-1 text-[11.5px] leading-4 text-[#B42318]" title={m.notSent}>
+            Didn&apos;t send
+            <button onClick={() => void post("/api/people", { action: "retry", messageId: m.id })} className="font-semibold text-ink underline underline-offset-2">
+              Try again
+            </button>
+          </span>
+        )}
         {m.via === "sms" && (
           <span data-tip="You texted this from your phone; the answer goes back by text" className="flex items-center gap-1 pr-1 text-[11.5px] leading-4 text-[#9A9A98]">
             <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden className="shrink-0">
@@ -1101,6 +1151,30 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
         {chipList}
       </div>
     );
+
+  // Someone else in a conversation with people: their initials and name (in a group), their words in gray.
+  if (m.role === "person" && m.from) {
+    const who = m.from;
+    return (
+      <div className="group/msg flex max-w-[86%] items-end gap-2 self-start">
+        {showSender && (!continued ? <PersonAvatar person={who} size={24} /> : <span className="w-6 shrink-0" />)}
+        <div className="flex min-w-0 flex-col gap-1">
+          {showSender && !continued && <div className="pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{who.name}</div>}
+          {quote}
+          <div className={`flex min-w-0 max-w-full items-center gap-1 ${m.reactions?.length ? "mt-3.5" : ""}`}>
+            <div className="relative min-w-0" {...holdable}>
+              {picker}
+              {actionMenu}
+              {balloons}
+              <div className="select-text whitespace-pre-wrap rounded-[18px] bg-[#F2F2F0] px-3.5 py-2 text-[14px] leading-5 text-ink [overflow-wrap:anywhere]">{m.text}</div>
+            </div>
+            {actions}
+          </div>
+          {replies}
+        </div>
+      </div>
+    );
+  }
 
   const b = state.bots.find((x) => x.id === m.botId);
   return (
@@ -1732,7 +1806,7 @@ function since(from: number, to = Date.now()) {
 
 export function ToPicker({ state, onOpenChat, onCancel }: { state: AppState; onOpenChat: (chatId: string) => void; onCancel: () => void }) {
   const [query, setQuery] = useState("");
-  const [mode, setMode] = useState<"pick" | "bot" | "group">("pick");
+  const [mode, setMode] = useState<"pick" | "bot" | "group" | "people">("pick");
   const [picked, setPicked] = useState<string[]>([]);
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
@@ -1796,7 +1870,9 @@ export function ToPicker({ state, onOpenChat, onCancel }: { state: AppState; onO
       {/* Clicking the empty space around the menu closes it, like clicking out of a popover. */}
       <div onClick={(e) => e.target === e.currentTarget && onCancel()} className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3.5">
         <div className="flex flex-col gap-0.5 rounded-[20px] bg-white p-2 shadow-[0_0_0_1px_#E6E6E3,0_18px_40px_-18px_#0000002E]">
-          {mode === "bot" ? (
+          {mode === "people" ? (
+            <NewPeopleChat onOpenChat={onOpenChat} onBack={() => setMode("pick")} />
+          ) : mode === "bot" ? (
             <div className="flex flex-col gap-2.5 p-2">
               <span className="text-[14px] font-semibold">Create a new bot</span>
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name, e.g. Nova" className="rounded-xl px-3 py-2 text-[14px] shadow-[0_0_0_1px_#E2E2DF] outline-none" />
@@ -1820,6 +1896,7 @@ export function ToPicker({ state, onOpenChat, onCancel }: { state: AppState; onO
                 <>
                   <PickerRow icon={<span className="text-[16px]">+</span>} label="Create new bot" kbd={<Kbd n={1} />} onClick={() => setMode("bot")} focused />
                   <PickerRow icon={<GroupIcon />} label="Create group chat" kbd={<Kbd n={2} />} onClick={() => setMode("group")} />
+                  <PickerRow icon={<PersonIcon />} label="Message someone" sub="People on Bops, by their email" onClick={() => setMode("people")} />
                   <div className="mx-2.5 my-1 h-px bg-[#F0F0EE]" />
                 </>
               )}
@@ -1880,6 +1957,15 @@ function Check({ on }: { on: boolean }) {
         </svg>
       )}
     </span>
+  );
+}
+
+function PersonIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="5.5" r="2.7" stroke="#0A0A0A" strokeWidth="1.4" />
+      <path d="M2.8 13.5c.7-2.6 2.7-4 5.2-4s4.5 1.4 5.2 4" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
   );
 }
 

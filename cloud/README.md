@@ -105,6 +105,7 @@ Webhooks are public and proven by the provider's signature instead.
 | 5 | `GET /v1/agent` | iPhone | the user's main bot and its chat (see "The main bot's chat from the phone") |
 | 5 | `GET /v1/agent/messages?chatId=&afterSeq=\|beforeAt=&limit=` | iPhone | that chat as the phone shows it: what changed after a cursor, or older pages |
 | 5 | `POST /v1/agent/messages` | iPhone | a message to the main bot, written into its chat and answered here |
+| 1 | `POST /v1/people/hello`, `/find`, `/convos`, `/members`, `/send`, `/read`, `/typing`; `GET /v1/people/sync?after=` | Mac | Bops users messaging each other, one to one and in groups (see "People") |
 | 2 | `/proxy/openai/*` | Mac | OpenAI, HTTP + streaming + WebSocket (the call sideband) |
 | 2 | `/proxy/agentphone/*` | Mac | AgentPhone, always in the user's own sub-account |
 | 2 | `/proxy/honcho/*` | Mac | Honcho, only the user's own workspaces |
@@ -125,6 +126,25 @@ Webhooks are public and proven by the provider's signature instead.
 | 3 | `GET /connected` | anyone | the page people land on after connecting an app |
 | 3 | `GET /oauth/callback` | anyone | Orgo's own OAuth apps send people back here; 302 on to Composio |
 | 3 | `GET /mascot/*.png\|jpg`, `/brand/*.png` | anyone | the bots' pictures (Slack's `icon_url`) and the Bops logo |
+
+### People
+
+Bops users message each other here (`people.ts`, `db/migrations/0014_people.sql`). A user's chats with
+their own bots stay in their state; a conversation between people is kept once, for everyone in it, and
+each member's Mac mirrors it (`lib/server/people.ts`).
+
+- **Finding someone:** by their exact email (`POST /v1/people/find`), only once they've used Bops; nobody
+  can list who's on Bops. Every people call keeps the caller's row in `bops.people` current (their Orgo
+  email and name). An email that isn't on Bops yet is asked into a conversation (`bops.convo_invites`) and
+  joins it when someone signs in with it.
+- **Conversations:** one other person and no name is a direct message (`dm_key`: one per pair, whoever
+  starts it); more, or a name, is a group. Any member adds people to a group; whoever made it takes them
+  out; anyone leaves. One who left keeps what they saw and gets nothing new.
+- **Sync:** every change a member should see (a message, members, a name, how far someone read) takes the
+  next `bops.people_seq`. A Mac reads what changed since its last (`GET /v1/people/sync?after=`), when it
+  starts, when its tunnel connects, and when the cloud sends it a `people` frame; nothing waits in
+  `cloud_pending`. Message ids are the sender's own, so a message sent twice is one. Typing is a `people`
+  frame with `typing`, never kept.
 
 ### POST /v1/session
 

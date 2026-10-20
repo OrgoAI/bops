@@ -10,6 +10,7 @@ import { startChannels } from "@/lib/server/channels";
 import { screenStreamWanted } from "@/lib/server/orgo";
 import { fullAccessOn } from "@/lib/server/full-access";
 import { tregOn } from "@/lib/server/treg";
+import { typingNow } from "@/lib/server/people";
 import { startActivityBeat } from "@/lib/server/free-hours";
 import { startComputerChecks } from "@/lib/server/sessions";
 
@@ -43,5 +44,5 @@ export async function GET(request: Request) {
 function forApp(state: AppState): AppState {
   // Full access is kept on this Mac, not in the state (full-access.ts): shown as part of it.
   const mac = state.mac ? { ...state.mac, fullAccess: fullAccessOn() || undefined } : state.mac;
-  return { ...state, mac, usage: undefined, bots: state.bots.map((b) => ({ ...b, appsKey: undefined })), screenStream: screenStreamWanted(), businessData: tregOn() };
+  return { ...state, mac, usage: undefined, bots: state.bots.map((b) => ({ ...b, appsKey: undefined })), screenStream: screenStreamWanted(), businessData: tregOn(), peopleTyping: typingNow() };
 }

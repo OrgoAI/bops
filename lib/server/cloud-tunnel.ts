@@ -2,6 +2,7 @@ import "server-only";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import WebSocket from "ws";
 import { CLOUD_TUNNEL_HEADER, type CloudToMac, type MacToCloud } from "@/cloud/protocol";
+import { pullPeople, someoneTyping } from "./people";
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudSession, cloudUrl, forgetCloudSession } from "./cloud";
 import { orgoKey } from "./orgo-auth";
@@ -152,6 +153,11 @@ tunnel.onFrame = (socket, frame) => {
   else if (frame.t === "event") tunnel.events = tunnel.events.then(() => deliver(socket, frame)).catch(() => {});
   // Another Mac of the user's changed the state: read what changed.
   else if (frame.t === "state" && current(socket)) void pullState();
+  // A conversation with other people changed (or someone's typing there): people.ts.
+  else if (frame.t === "people" && current(socket)) {
+    if (frame.typing) someoneTyping(frame.typing.convoId, frame.typing.userId);
+    else void pullPeople();
+  }
 };
 
 /** Try again after 1 second, then 2, 4… up to a minute; a connection that held a while starts that over. */
@@ -180,8 +186,9 @@ function connect() {
   let replaced = false;
   socket.on("open", () => {
     tunnel.openedAt = Date.now();
-    // Back after being away: what the user's other Macs changed meanwhile.
+    // Back after being away: what the user's other Macs changed meanwhile, and what people said.
     void pullState();
+    void pullPeople();
   });
   socket.on("message", (data) => {
     let frame: CloudToMac;

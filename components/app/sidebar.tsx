@@ -392,16 +392,26 @@ function ChatRow({
 }) {
   const members = state.bots.filter((b) => c.botIds.includes(b.id));
   const solo = c.kind === "bot" ? members[0] : undefined;
-  const unread = !!last && last.role !== "user" && last.at > (c.readAt ?? 0) && !selected;
-  const typing = c.typing.length > 0;
+  const unread = !!last && last.role !== "user" && last.role !== "system" && last.at > (c.readAt ?? 0) && !selected;
+  const peopleTyping = state.peopleTyping?.[c.id] ?? [];
+  const typing = c.typing.length > 0 || peopleTyping.length > 0;
+  const group = c.kind === "group" || c.people?.kind === "group";
   const preview = typing
-    ? "typing…"
+    ? peopleTyping.length && group
+      ? `${peopleTyping.join(", ")} typing…`
+      : "typing…"
     : last
       ? last.role === "user"
         ? `You: ${last.text}`
-        : c.kind === "group" && last.botId
-          ? `${state.bots.find((b) => b.id === last.botId)?.name}: ${last.text}`
-          : last.text
+        : group && last.from
+          ? `${last.from.name.split(" ")[0]}: ${last.text}`
+          : group && last.botId
+            ? `${state.bots.find((b) => b.id === last.botId)?.name}: ${last.text}`
+            : last.text
+      : c.people
+        ? c.people.invited.length && c.people.members.length < 2
+          ? "Waiting for them to join Bops"
+          : "Say hi."
       : solo
         ? solo.isMain
           ? "Your chief of staff. Ask for anything."
@@ -410,7 +420,7 @@ function ChatRow({
 
   return (
     <button onClick={onClick} onContextMenu={onMenu} className={`flex items-center gap-3 rounded-[14px] p-2.5 text-left ${selected ? "bg-[#EEEEEC]" : "hover:bg-black/[0.03]"} ${menuOpen ? "shadow-[inset_0_0_0_1.5px_#0A0A0A]" : ""}`}>
-      <ChatAvatar chat={c} bots={state.bots} size={44} />
+      <ChatAvatar chat={c} bots={state.bots} size={44} me={state.account?.user.id} />
       <div className="flex min-w-0 flex-1 flex-col gap-[3px]">
         <div className="flex items-center gap-1.5">
           <span className="truncate text-[15px] font-semibold leading-[18px]">{c.title ?? (solo ? solo.name : members.map((m) => m.name).join(", "))}</span>
