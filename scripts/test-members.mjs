@@ -690,6 +690,29 @@ for (const t of tracked) assert.ok(!/email|name|memberId|people\b/i.test(t), `no
 assert.ok(!/console\.(log|info|warn|error)\([^)]*email/i.test(server), "no email logged");
 console.log("ok - no emails in usage events");
 
+/* ---------------- Someone else can use the workspace (no Bops runner there: runner-install.ts) ---------------- */
+
+{
+  const S = await import(`${root}/lib/server/members.ts`);
+  replies = usual();
+  const others = (members, invites = []) => {
+    list = { members, invites, seats: seatsOf() };
+    return S.othersCanUse(KEY, WS);
+  };
+  const [owner, sam, jamie, guest] = MEMBERS;
+  assert.equal(await others([owner]), false, "the owner alone");
+  assert.equal(await others([owner, sam]), true, "Full access");
+  assert.equal(await others([owner, jamie]), true, "View only counts too");
+  assert.equal(await others([owner, guest]), true, "and a guest");
+  assert.equal(await others([owner], [INVITES[1]]), true, "an invite still open");
+  assert.equal(await others([owner], [INVITES[0]]), false, "an expired one doesn't");
+  replies = { ...usual(), [`GET /api/workspaces/${WS}/members`]: () => json(500, { error: "down" }) };
+  assert.equal(await S.othersCanUse(KEY, WS), null, "Orgo didn't say");
+  list = { members: MEMBERS, invites: INVITES, seats: seatsOf() };
+  replies = usual();
+}
+console.log("ok - someone else can use the workspace: any other member, or an invite still open");
+
 process.chdir(tmpdir());
 rmSync(scratch, { recursive: true, force: true });
 console.log("all passed");

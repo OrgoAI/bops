@@ -1075,22 +1075,30 @@ export type AppState = {
  * runs that computer's routines, and the Mac leaves them to it), couldn't start (`error` says why: those
  * routines stay on the Mac), or being stopped (where the bots work switched to This Mac, the computer was
  * deleted, its bots moved off). `version` and `buildId`: the Bops it runs, set up by the Mac `by` (its
- * device id). `keyId`: the Orgo key made for it (orgo-web /api/computers/{id}/bops-runner-key), which
- * other Macs use too and any of them revokes; `keyBy`, the Mac that had it made. `at`: when the status
- * was set. `upgrading`: one that's up being set up again with a newer Bops by the Mac `by` since `at`:
- * it stays up and keeps its routines meanwhile (runner-install.ts).
+ * device id). The runner signs in with its computer's own Orgo key (ORGO_API_KEY, which Orgo writes on
+ * it). `keyMade`: Bops gave the computer that key (PUT orgo-web /api/computers/{id}/orgo-key, from the
+ * Mac that set the runner up on a computer without one), so Bops takes it back when it stops the runner
+ * (DELETE, from any Mac of the user's); `keyId` is its id, to show. A computer that came with its key (a
+ * template that asks for one: bops-base 0.1.9 on) keeps it: it's the computer's, and Orgo revokes it with
+ * the computer. An entry from before keyMade that has a keyId (made by the old bops-runner-key route)
+ * counts as keyMade (runnerKeyMade), and its old `keyBy` is ignored. `at`: when the status was set.
+ * `upgrading`: one that's up being set up again with a newer Bops by the Mac `by` since `at`: it stays up
+ * and keeps its routines meanwhile (runner-install.ts).
  */
 export type RunnerState = {
   status: "installing" | "running" | "failed" | "stopping";
   version: string;
   buildId: string;
+  keyMade?: boolean;
   keyId?: string;
-  keyBy?: string;
   by: string;
   error?: string;
   at: number;
   upgrading?: { version: string; buildId: string; by: string; at: number };
 };
+
+/** Whether Bops gave the computer its Orgo key, and takes it back when it stops the runner: keyMade, or an entry from before keyMade with a keyId. */
+export const runnerKeyMade = (x: Pick<RunnerState, "keyMade" | "keyId"> | undefined): boolean => !!x && (x.keyMade ?? !!x.keyId);
 
 /**
  * One computer's switch to this Mac's route. `before` is how Orgo had it (proxy on or off, and through

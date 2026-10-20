@@ -3,10 +3,12 @@
 // it), what goes to a computer (no command ever carries a key, the window token or the upload's link), the
 // version rules (never an older one over a newer; the same version again only from the Mac that set it up
 // last; one that's up stays up while it's set up again), a copy of a computer that has the build already,
-// none where someone else has Full access, the health check (loopback only), a runner marked up that's
-// gone from its computer, Orgo's copy of the routines following each runner up or down, and the stop
-// (This Mac, the bots in browsers on the Mac, a computer deleted, no bot on it any more: taken off, its
-// key revoked by any Mac, its threads ended). The commands it sends are checked as shell too.
+// the computer's own Orgo key (one it came with is left alone; one without is given it by Orgo, and only
+// that one is taken back at the stop, an entry from before keyMade too), none where someone else can use
+// the workspace, the health check (loopback only), a runner marked up that's gone from its computer,
+// Orgo's copy of the routines following each runner up or down, and the stop (This Mac, the bots in
+// browsers on the Mac, a computer deleted, no bot on it any more: taken off, the key Bops gave revoked by
+// any Mac, its threads ended). The commands it sends are checked as shell too.
 //
 // The store, Orgo, storage and the modules it talks to are fakes (below): nothing reaches a real service.
 // Usage: node --conditions=react-server scripts/test-runner-install.mjs
@@ -26,15 +28,15 @@ const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 const FAKES = {
   store: ["flushState", "getState", "stateDevice", "stateInCloud", "stateReady", "stateTooNew", "update"],
-  members: ["othersWithFullAccess"],
+  members: ["othersCanUse"],
   orgo: ["apiKey", "callOrgo", "orgo"],
   "orgo-auth": ["orgoOrigin"],
   "persist-cloud": ["deviceIdFor"],
-  runner: ["heardRunsOn", "overdueOn", "runsOnMissing", "RUNNER_CONF", "RUNNER_KEY_FILE", "RUNNER_WRAPPER"],
+  runner: ["heardRunsOn", "overdueOn", "runsOnMissing", "RUNNER_CONF", "RUNNER_WRAPPER"],
   sessions: ["computerGone", "endSessionsOf"],
   "routine-sync": ["routineChanged"],
 };
-const VALUES = { runner: { RUNNER_CONF: "/etc/supervisor/conf.d/bops-runner.conf", RUNNER_KEY_FILE: "/root/.bops/runner/key", RUNNER_WRAPPER: "/opt/bops/runner/run.sh" } };
+const VALUES = { runner: { RUNNER_CONF: "/etc/supervisor/conf.d/bops-runner.conf", RUNNER_WRAPPER: "/opt/bops/runner/run.sh" } };
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith("@/")) specifier = pathToFileURL(`${root}/${specifier.slice(2)}`).href;
@@ -123,6 +125,7 @@ function freshOrgo() {
     missing: false,
     full: false,
     keyRefusal: null,
+    deleteAnswer: null,
     map: [C1],
     health: "__BOPS_HEALTHY__",
     keys: 0,
@@ -146,7 +149,7 @@ globalThis.__fake = {
     stateReady: () => true,
     stateTooNew: () => false,
   },
-  members: { othersWithFullAccess: async () => orgo.full },
+  members: { othersCanUse: async () => orgo.full },
   "orgo-auth": { orgoOrigin: () => process.env.BOPS_ORGO_ORIGIN },
   "persist-cloud": { deviceIdFor: (user, seed) => `device:${user}:${seed}` },
   runner: { heardRunsOn: () => orgo.mode, runsOnMissing: () => orgo.missing, overdueOn: () => orgo.overdue },
@@ -161,13 +164,19 @@ globalThis.__fake = {
       const c = { key, path, method: init.method ?? "GET", body: init.body };
       orgo.calls.push(c);
       if (path === `/api/projects/${PID}/bops`) return { status: 200, json: { bots: orgo.map.map((d, i) => ({ bopsId: `b${i}`, desktopId: d })) } };
-      const k = /^\/api\/computers\/([^/]+)\/bops-runner-key(\?keyId=(.+))?$/.exec(path);
+      // The computer's own key (orgo-web PUT and DELETE /api/computers/{id}/orgo-key): Orgo writes it on the computer, and takes it off a computer that's up.
+      const k = /^\/api\/computers\/([^/?]+)\/orgo-key$/.exec(path);
       if (k && c.method === "PUT") {
         if (orgo.keyRefusal) return orgo.keyRefusal;
         pc(k[1]).key = true;
         return { status: 200, json: { keyId: `key-${++orgo.keys}` } };
       }
-      if (k && c.method === "DELETE") return { status: 200, json: { revoked: true } };
+      if (k && c.method === "DELETE") {
+        if (orgo.deleteAnswer) return orgo.deleteAnswer;
+        const x = pc(k[1]);
+        if (x?.status === "running") x.key = false;
+        return { status: 200, json: { revoked: true, removed: x?.status === "running" } };
+      }
       if (path === "/api/files/uploads") return orgo.uploadFails ? { status: 503, json: {} } : { status: 200, json: { upload_url: UPLOAD_URL, upload_token: UPLOAD_TOKEN } };
       if (path === "/api/files/uploads/complete") {
         assert.equal(init.body.upload_token, UPLOAD_TOKEN);
@@ -207,7 +216,8 @@ globalThis.__fake = {
         }
         if (command.includes("__BOPS_HEALTHY__")) return { output: `${orgo.health}\n`, exit_code: 0 };
         if (command.includes("__BOPS_OFF__")) {
-          Object.assign(x, { current: "", key: false, have: new Set(), program: false });
+          // As the script does: the program, its script and the builds, never the computer's key.
+          Object.assign(x, { current: "", have: new Set(), program: false });
           return { output: "__BOPS_OFF__\n", exit_code: 0 };
         }
         if (/^supervisorctl stop bops-runner/.test(command)) {
@@ -249,17 +259,21 @@ function noSecrets() {
 
 /* ---------------- Setting one up ---------------- */
 
-await check("in the Cloud, a bot's computer gets a runner: its files, its key from Orgo, its program, a health check; nothing secret in any command", async () => {
+await check("in the Cloud, a bot's computer without its key gets a runner: its files, its key from Orgo (keyMade), its program, a health check; nothing secret in any command", async () => {
   reset();
   await I.lookAtRunners();
   const x = runner();
   assert.equal(x?.status, "running", JSON.stringify(x));
-  assert.deepEqual([x.version, x.buildId, x.by, x.keyId, x.keyBy], ["0.0.29", "buildA1", ME, "key-1", ME]);
+  assert.deepEqual([x.version, x.buildId, x.by, x.keyMade, x.keyId], ["0.0.29", "buildA1", ME, true, "key-1"]);
+  assert.ok(!("keyBy" in x));
   assert.equal(pc(C1).current, "0.0.29-buildA1");
   assert.ok(pc(C1).program, "its program is on");
-  const steps = orgo.calls.map((c) => `${c.method} ${c.path.replace(/\?.*/, "")}`);
-  assert.deepEqual(steps, [`GET /api/projects/${PID}/bops`, `PUT /api/computers/${C1}/bops-runner-key`, "POST /api/files/uploads", "POST /api/files/uploads/complete"]);
-  assert.deepEqual(orgo.calls[1].body, { name: "Boppy" }, "named for the bot that works on it");
+  const steps = orgo.calls.map((c) => `${c.method} ${c.path}`);
+  assert.deepEqual(steps, [`GET /api/projects/${PID}/bops`, `PUT /api/computers/${C1}/orgo-key`, "POST /api/files/uploads", "POST /api/files/uploads/complete"]);
+  assert.equal(orgo.calls[1].body, undefined, "no body: nothing secret goes to Orgo, and Orgo names the key for the computer");
+  const probe = orgo.bash.find((b) => b.command.includes('echo "current=$c"')).command;
+  assert.ok(probe.includes("grep -qsE ") && probe.includes("/root/.orgo-secrets.env /root/.env && echo key=yes || echo key=no"), "the key looked for in both files, by grep alone");
+  assert.ok(!/\bcat\b[^\n]*\/root\/\.(orgo-secrets\.)?env/.test(probe), "never printed");
   assert.deepEqual(orgo.calls[2].body, { desktopId: C1, filename: BUNDLE, size_bytes: BYTES.length, destPath: "/opt/bops/runner/incoming" });
   assert.equal(orgo.puts.length, 1);
   assert.equal(orgo.puts[0].url, UPLOAD_URL);
@@ -275,14 +289,70 @@ await check("in the Cloud, a bot's computer gets a runner: its files, its key fr
   assert.match(install, /autorestart=true/);
   assert.match(install, /supervisorctl reread[^\n]*\nsupervisorctl update/);
   const w = pc(C1).wrapper;
-  for (const want of ["export BOPS_UI_TOKEN", "HOSTNAME=127.0.0.1", "PORT=3210", "NEXT_MANUAL_SIG_HANDLE=true", "BOPS_RUNNER=1", `BOPS_RUNNER_COMPUTER='${C1}'`, `BOPS_DEVICE_SEED='${C1}'`, "BOPS_ORGO_KEY_FILE=/root/.bops/runner/key", "TZ='America/New_York'", "BOPS_ORGO_ORIGIN='https://orgo.example'", "BOPS_CLOUD_URL='https://bops.example/api'", "exec /usr/bin/node server.js"])
+  for (const want of ["export BOPS_UI_TOKEN", "HOSTNAME=127.0.0.1", "PORT=3210", "NEXT_MANUAL_SIG_HANDLE=true", "BOPS_RUNNER=1", `BOPS_RUNNER_COMPUTER='${C1}'`, `BOPS_DEVICE_SEED='${C1}'`, "TZ='America/New_York'", "BOPS_ORGO_ORIGIN='https://orgo.example'", "BOPS_CLOUD_URL='https://bops.example/api'", "exec /usr/bin/node server.js"])
     assert.ok(w.includes(want), `the wrapper has ${want}`);
+  for (const not of ["BOPS_ORGO_KEY_FILE", "ORGO_API_KEY", ".orgo-secrets.env", "/root/.env"]) assert.ok(!w.includes(not) && !install.includes(not), `neither the wrapper nor the program has ${not}: the runner reads its key itself`);
   const health = orgo.bash.find((b) => b.command.includes("__BOPS_HEALTHY__")).command;
   assert.match(health, /curl -fsS --max-time 3 -o \/dev\/null http:\/\/127\.0\.0\.1:3210\/api\/health/);
   assert.match(health, /ss -ltnH 'sport = :3210'/);
   assert.ok(health.includes("grep -qv '^127\\.0\\.0\\.1:'"), "listening only on loopback");
   assert.ok(health.includes("grep -q '^\\[runner\\] running the routines' /var/log/bops/runner.log"), "and has the state (its log says it runs)");
   assert.ok(install.includes(": > /var/log/bops/runner.log"), "this start's log");
+});
+
+await check("a computer that came with its key (a template that asks for it): no PUT, keyMade unset, and the stop leaves its key alone", async () => {
+  reset();
+  pc(C1).key = true;
+  await I.lookAtRunners();
+  const x = runner();
+  assert.equal(x?.status, "running", JSON.stringify(x));
+  assert.deepEqual([x.keyMade, x.keyId], [undefined, undefined], "not Bops' key");
+  assert.ok(!orgo.calls.some((c) => c.path.includes("/orgo-key")), "Orgo isn't asked for a key");
+  orgo.mode = "mac";
+  await I.lookAtRunners();
+  assert.equal(runner(), undefined, "stopped and out of the state");
+  assert.equal(pc(C1).program, false, "taken off its computer");
+  assert.equal(pc(C1).key, true, "its key stays: the computer's, revoked with it");
+  assert.ok(!orgo.calls.some((c) => c.path.includes("/orgo-key")), "and never revoked by Bops");
+  // Set up again later (a new release): still the computer's own, and still not marked as Bops'.
+  reset();
+  pc(C1).key = true;
+  pc(C1).current = "0.0.28-old";
+  state.runners = { [C1]: { status: "running", version: "0.0.28", buildId: "old", by: ME, at: Date.now() } };
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().version, runner().keyMade], ["running", "0.0.29", undefined]);
+  assert.ok(!orgo.calls.some((c) => c.path.includes("/orgo-key")));
+});
+
+await check("the key Bops gave is kept across a set-up again, and taken back once at the stop (200 or 404 is done)", async () => {
+  reset();
+  await I.lookAtRunners();
+  assert.deepEqual([runner().keyMade, runner().keyId], [true, "key-1"]);
+  // A newer release: the computer has the key Bops gave it, so it isn't asked for again, and it stays Bops' to take back.
+  rmSync(join(scratch, "dist-runner"), { recursive: true, force: true });
+  mkdirSync(join(scratch, "dist-runner"));
+  bundle("bops-server-0.0.30-buildB2.tgz");
+  orgo.calls.length = 0;
+  T.reset();
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().version, runner().keyMade, runner().keyId], ["running", "0.0.30", true, "key-1"]);
+  assert.ok(!orgo.calls.some((c) => c.path.includes("/orgo-key")), "no new key");
+  // The stop: Orgo already forgot it (404): done all the same.
+  orgo.deleteAnswer = { status: 404, json: { code: "key_not_found" } };
+  orgo.mode = "mac";
+  await I.lookAtRunners();
+  assert.equal(runner(), undefined);
+  assert.equal(orgo.calls.filter((c) => c.method === "DELETE" && c.path === `/api/computers/${C1}/orgo-key`).length, 1);
+  // Orgo didn't answer the revoke: it stays Stopping with the key still Bops' to take back, and the next look tries again.
+  reset();
+  await I.lookAtRunners();
+  orgo.deleteAnswer = { status: 503, json: {} };
+  orgo.mode = "mac";
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().keyMade], ["stopping", true]);
+  orgo.deleteAnswer = null;
+  await I.lookAtRunners();
+  assert.equal(runner(), undefined, "revoked, and out of the state");
 });
 
 await check("set up and up to date: nothing more is sent, and a computer asleep isn't woken", async () => {
@@ -315,20 +385,19 @@ await check("versions: a newer one replaces it, never an older one; the same ver
   assert.ok(I.compareVersions("0.0.10", "0.0.9") > 0 && I.compareVersions("0.1.0", "0.0.99") > 0 && I.compareVersions("1.2.3", "1.2.3") === 0);
   // As a look does it: a newer runner of another Mac's is left as it is; an older one is replaced, keeping its key.
   reset();
-  state.runners = { [C1]: x({ version: "0.0.31", by: "other", keyId: "key-other", keyBy: "other" }) };
+  state.runners = { [C1]: x({ version: "0.0.31", by: "other", keyMade: true, keyId: "key-other" }) };
   await I.lookAtRunners();
   assert.equal(orgo.bash.length, 0);
   assert.equal(runner().version, "0.0.31");
   reset();
   pc(C1).key = true;
   pc(C1).current = "0.0.28-old";
-  state.runners = { [C1]: x({ version: "0.0.28", buildId: "old", by: "other", keyId: "key-other", keyBy: "other" }) };
+  state.runners = { [C1]: x({ version: "0.0.28", buildId: "old", by: "other", keyMade: true, keyId: "key-other" }) };
   await I.lookAtRunners();
   assert.equal(runner().status, "running");
   assert.equal(runner().version, "0.0.29");
-  assert.equal(runner().keyId, "key-other", "the key made for it is used, not another");
-  assert.equal(runner().keyBy, "other");
-  assert.ok(!orgo.calls.some((c) => c.path.includes("bops-runner-key")), "no new key, and theirs isn't revoked");
+  assert.deepEqual([runner().keyMade, runner().keyId], [true, "key-other"], "the key another Mac had Orgo give it stays Bops' to take back");
+  assert.ok(!orgo.calls.some((c) => c.path.includes("/orgo-key")), "no new key, and theirs isn't revoked");
   // The computer has a newer one than the state says: it's never replaced.
   reset();
   pc(C1).current = "0.0.40-newer";
@@ -337,30 +406,52 @@ await check("versions: a newer one replaces it, never an older one; the same ver
   assert.ok(!bashText().includes("__BOPS_INSTALLED__"));
 });
 
-await check("someone else with Full access to the workspace: no runner, nothing on the computer, and one up is stopped", async () => {
+await check("someone else can use the workspace: no runner, nothing on the computer, and one up is stopped; Orgo's other refusals say why", async () => {
   reset();
   orgo.full = true;
   await I.lookAtRunners();
   assert.equal(runner().status, "failed");
-  assert.equal(runner().error, "someone else has Full access to this workspace");
+  assert.equal(runner().error, "someone else can use this workspace");
   assert.equal(orgo.bash.length, 0, "nothing sent to the computer");
-  assert.ok(!orgo.calls.some((c) => c.path.includes("bops-runner-key") || c.path.includes("/files/")));
-  // Orgo says so itself (it checks the computer's own workspace): the same.
+  assert.ok(!orgo.calls.some((c) => c.path.includes("/orgo-key") || c.path.includes("/files/")));
+  // Orgo says so itself (it sees a share link too): the same, with no wait before the next look.
   reset();
-  orgo.keyRefusal = { status: 409, json: { code: "full_access_member", error: "Someone else has Full access to this workspace." } };
+  orgo.keyRefusal = { status: 409, json: { code: "full_access_member", error: "Someone else can use this workspace." } };
   await I.lookAtRunners();
-  assert.equal(runner().error, "someone else has Full access to this workspace");
+  assert.equal(runner().error, "someone else can use this workspace");
+  assert.equal(runner().keyMade, undefined);
+  assert.equal(T.retryAt(C1), undefined, "looked at again on the next look");
   assert.ok(!bashText().includes("__BOPS_INSTALLED__"));
-  // Given Full access after it was set up: stopped and taken off, its key revoked.
+  // Only the workspace's owner may: said so, and tried again later.
+  reset();
+  orgo.keyRefusal = { status: 403, json: { code: "owner_only", error: "Only the owner of this workspace can do that." } };
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().error], ["failed", "only the workspace's owner can set a runner up there"]);
+  assert.ok(T.retryAt(C1) > Date.now(), "tried again later");
+  // An Orgo without the route, and a computer that isn't Linux.
+  for (const [status, error] of [
+    [404, "Orgo can't set up a runner on it yet"],
+    [405, "Orgo can't set up a runner on it yet"],
+    [422, "a runner needs a Linux computer"],
+    [503, "Orgo didn't give its computer its key"],
+  ]) {
+    reset();
+    orgo.keyRefusal = { status, json: {} };
+    await I.lookAtRunners();
+    assert.deepEqual([runner().status, runner().error, runner().keyMade], ["failed", error, undefined], String(status));
+    assert.ok(!bashText().includes("__BOPS_INSTALLED__"));
+  }
+  // Someone else can use it after it was set up: stopped and taken off, the key Bops gave revoked.
   reset();
   await I.lookAtRunners();
   orgo.full = true;
   await I.lookAtRunners();
-  assert.equal(runner().error, "someone else has Full access to this workspace");
-  assert.equal(runner().keyId, undefined, "its key revoked");
-  assert.ok(orgo.calls.some((c) => c.method === "DELETE" && c.path === `/api/computers/${C1}/bops-runner-key?keyId=key-1`));
+  assert.equal(runner().error, "someone else can use this workspace");
+  assert.deepEqual([runner().keyMade, runner().keyId], [undefined, undefined], "its key revoked");
+  assert.ok(orgo.calls.some((c) => c.method === "DELETE" && c.path === `/api/computers/${C1}/orgo-key`));
   assert.equal(pc(C1).program, false, "taken off its computer");
-  assert.deepEqual(orgo.ended, [{ device: `device:u1:${C1}`, why: "Stopped: someone else has Full access to this workspace." }]);
+  assert.equal(pc(C1).key, false, "Orgo took the key off it");
+  assert.deepEqual(orgo.ended, [{ device: `device:u1:${C1}`, why: "Stopped: someone else can use this workspace." }]);
 });
 
 await check("no bundle, a bad health check, a computer Orgo's map doesn't have: no runner", async () => {
@@ -413,12 +504,13 @@ await check("This Mac: the runner is taken off its computer, its key revoked, it
   await I.lookAtRunners();
   assert.equal(runner(), undefined, "gone from the state");
   assert.equal(pc(C1).program, false);
-  assert.equal(pc(C1).key, false);
+  assert.equal(pc(C1).key, false, "the key Bops gave it, taken off by Orgo with its revoke");
   assert.ok(orgo.bash.some((b) => b.command.includes("__BOPS_OFF__")));
   const off = orgo.bash.find((b) => b.command.includes("__BOPS_OFF__")).command;
   assert.match(off, /supervisorctl stop bops-runner/);
-  assert.match(off, /rm -f \/etc\/supervisor\/conf\.d\/bops-runner\.conf \/opt\/bops\/runner\/run\.sh \/root\/\.bops\/runner\/key/);
-  assert.ok(orgo.calls.some((c) => c.method === "DELETE" && c.path === `/api/computers/${C1}/bops-runner-key?keyId=key-1`), "its key revoked");
+  assert.match(off, /rm -f \/etc\/supervisor\/conf\.d\/bops-runner\.conf \/opt\/bops\/runner\/run\.sh\n/);
+  assert.ok(!/orgo-secrets|\/root\/\.env|ORGO_API_KEY/.test(off), "the computer's key is never Bops' to delete");
+  assert.ok(orgo.calls.some((c) => c.method === "DELETE" && c.path === `/api/computers/${C1}/orgo-key`), "its key revoked");
   assert.deepEqual(orgo.ended, [{ device: `device:u1:${C1}`, why: "Stopped: routines run on your Mac now." }]);
   assert.ok(!orgo.calls.some((c) => c.path.endsWith("/bops")), "Orgo's map isn't needed for that");
   noSecrets();
@@ -434,7 +526,7 @@ await check("stopping: an asleep computer isn't woken (its key is revoked), a de
   assert.equal(orgo.bash.length, 0, "not woken");
   assert.equal(pc(C1).status, "suspended");
   assert.equal(runner().status, "stopping", "taken off when it's up");
-  assert.equal(runner().keyId, undefined, "but its key revoked now");
+  assert.deepEqual([runner().keyMade, runner().keyId], [undefined, undefined], "but the key Bops gave it revoked now");
   pc(C1).status = "running";
   await I.lookAtRunners();
   assert.equal(runner(), undefined);
@@ -450,14 +542,30 @@ await check("stopping: an asleep computer isn't woken (its key is revoked), a de
   assert.equal(runner(C1), undefined, "the deleted one's gone");
   assert.deepEqual(orgo.ended[0], { device: `device:u1:${C1}`, why: "Stopped: its computer was deleted." }, "its threads say why");
   assert.equal(runner(C2)?.status, "running", "and its bot's new computer has one");
-  // Another Mac had its key made: revoked here all the same (Orgo revokes only the user's own runner keys for that computer).
+  // Another Mac had Orgo give it its key: revoked here all the same.
   reset();
-  state.runners = { [C1]: { status: "running", version: "0.0.29", buildId: "buildA1", by: "other", keyId: "key-other", keyBy: "other", at: Date.now() } };
+  pc(C1).key = true;
+  state.runners = { [C1]: { status: "running", version: "0.0.29", buildId: "buildA1", by: "other", keyMade: true, keyId: "key-other", at: Date.now() } };
   orgo.mode = "mac";
   await I.lookAtRunners();
-  assert.ok(orgo.calls.some((c) => c.method === "DELETE" && c.path === `/api/computers/${C1}/bops-runner-key?keyId=key-other`), "its key revoked");
+  assert.ok(orgo.calls.some((c) => c.method === "DELETE" && c.path === `/api/computers/${C1}/orgo-key`), "its key revoked");
   assert.equal(runner(), undefined, "and it's out of the state");
   assert.equal(pc(C1).program, false, "taken off its computer");
+  // An entry from before keyMade (a key made by the old bops-runner-key route, with keyBy): it loads, counts as Bops' key, and is revoked.
+  reset();
+  pc(C1).key = true;
+  state.runners = { [C1]: { status: "running", version: "0.0.29", buildId: "buildA1", by: "other", keyId: "key-old", keyBy: "other", at: Date.now() } };
+  orgo.mode = "mac";
+  await I.lookAtRunners();
+  assert.equal(orgo.calls.filter((c) => c.method === "DELETE" && c.path === `/api/computers/${C1}/orgo-key`).length, 1, "revoked");
+  assert.equal(runner(), undefined);
+  // And one set up again keeps it as Bops' (keyMade), without its old keyBy.
+  reset();
+  pc(C1).key = true;
+  pc(C1).current = "0.0.28-old";
+  state.runners = { [C1]: { status: "failed", version: "0.0.28", buildId: "old", by: ME, keyId: "key-old", keyBy: ME, error: "it didn't answer on its computer", at: Date.now() - 86_400_000 } };
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().keyMade, runner().keyId, runner().keyBy], ["running", true, "key-old", undefined]);
 });
 
 await check("the bots in browsers on this Mac stops the runners too", async () => {
@@ -471,13 +579,13 @@ await check("the bots in browsers on this Mac stops the runners too", async () =
 
 /* ---------------- Set up again, copies, gone ---------------- */
 
-await check("a copy of a computer with the build there already (no upload, no key file): set up from what's there, with a key of its own", async () => {
+await check("a copy of a computer with the build there already (no upload, no key on it): set up from what's there, with a key of its own", async () => {
   reset();
   // As a bot's own computer copied from its main bot's: the build and `current` stay, its runner and key were taken off.
   Object.assign(pc(C1), { current: "0.0.29-buildA1", have: new Set(["0.0.29-buildA1"]), key: false });
   await I.lookAtRunners();
   assert.equal(runner().status, "running", JSON.stringify(runner()));
-  assert.equal(runner().keyId, "key-1", "a key of its own");
+  assert.deepEqual([runner().keyMade, runner().keyId], [true, "key-1"], "a key of its own");
   assert.ok(!orgo.calls.some((c) => c.path.startsWith("/api/files/")), "nothing uploaded");
   assert.equal(orgo.puts.length, 0);
   // Its own try again later, with the upload gone: the same.
@@ -493,7 +601,7 @@ await check("one that's up set up again stays up, with its routines, until the n
   pc(C1).key = true;
   pc(C1).current = "0.0.28-old";
   pc(C1).have = new Set(["0.0.28-old"]);
-  state.runners = { [C1]: { status: "running", version: "0.0.28", buildId: "old", by: ME, keyId: "key-0", keyBy: ME, at: Date.now() - 86_400_000 } };
+  state.runners = { [C1]: { status: "running", version: "0.0.28", buildId: "old", by: ME, keyMade: true, keyId: "key-0", at: Date.now() - 86_400_000 } };
   let during;
   orgo.duringInstall = () => (during = structuredClone(runner()));
   await I.lookAtRunners();
@@ -505,7 +613,7 @@ await check("one that's up set up again stays up, with its routines, until the n
   reset();
   pc(C1).key = true;
   pc(C1).current = "0.0.28-old";
-  state.runners = { [C1]: { status: "running", version: "0.0.28", buildId: "old", by: ME, keyId: "key-0", keyBy: ME, at: Date.now() } };
+  state.runners = { [C1]: { status: "running", version: "0.0.28", buildId: "old", by: ME, keyMade: true, keyId: "key-0", at: Date.now() } };
   orgo.uploadFails = true;
   await I.lookAtRunners();
   assert.deepEqual([runner().status, runner().version, runner().upgrading, runner().error], ["running", "0.0.28", undefined, undefined]);
@@ -566,6 +674,7 @@ await check("every command it sends is shell that parses, and the wrapper too", 
     I.installScript({ name: BUNDLE, sha256: SHA, version: "0.0.29", buildId: "buildA1" }, I.wrapperScript({ computerId: C1, timeZone: "America/New_York", orgo: "https://orgo.example", cloud: "https://bops.example/api" })),
     I.HEALTH_SCRIPT,
     I.UNINSTALL_SCRIPT,
+    I.probeScript("0.0.29-buildA1"),
   ];
   for (const s of scripts) {
     const r = spawnSync("bash", ["-n"], { input: s, encoding: "utf8" });
@@ -574,6 +683,33 @@ await check("every command it sends is shell that parses, and the wrapper too", 
   const w = spawnSync("sh", ["-n"], { input: I.wrapperScript({ computerId: C1, orgo: "https://orgo.example", cloud: "https://bops.example/api" }), encoding: "utf8" });
   assert.equal(w.status, 0, w.stderr);
   assert.ok(!I.SUPERVISOR_CONF.includes("environment="), "no settings in the program (they're in the wrapper, none secret)");
+});
+
+await check("the probe says key=yes only for a line that sets a non-empty ORGO_API_KEY, in either file, and prints nothing of it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bops-probe-key-"));
+  const secrets = join(dir, ".orgo-secrets.env");
+  const env = join(dir, ".env");
+  // The probe's own key line, pointed at these files.
+  const line = I.probeScript("x").split("; ").find((l) => l.startsWith("grep "));
+  const probe = line.replace("/root/.orgo-secrets.env /root/.env", `${secrets} ${env}`);
+  const ask = () => spawnSync("bash", ["-c", probe], { encoding: "utf8" }).stdout;
+  const says = (files) => {
+    rmSync(secrets, { force: true });
+    rmSync(env, { force: true });
+    for (const [f, text] of Object.entries(files)) writeFileSync(f === "secrets" ? secrets : env, text);
+    return ask();
+  };
+  // As metal writes it at create, as Orgo's PUT writes it (shlex.quote), and either file alone.
+  assert.equal(says({ env: "export PATH=/usr/bin\nexport ORGO_API_KEY='sk_live_a'\\''b'\n[ -f /root/.orgo-secrets.env ] && . /root/.orgo-secrets.env\n" }), "key=yes\n");
+  assert.equal(says({ secrets: "export ORGO_API_KEY=sk_live_plain\n" }), "key=yes\n");
+  assert.equal(says({ secrets: "export ANTHROPIC_API_KEY=x\nexport ORGO_API_KEY='sk live'\"'\"'s'\n" }), "key=yes\n");
+  assert.equal(says({ env: "ORGO_API_KEY=sk_no_export\n" }), "key=yes\n");
+  // None: no files, an empty value, a comment, another name.
+  assert.equal(says({}), "key=no\n");
+  assert.equal(says({ secrets: "export ORGO_API_KEY=''\n", env: 'export ORGO_API_KEY=""\n' }), "key=no\n");
+  assert.equal(says({ env: "# export ORGO_API_KEY=sk_old\nexport MY_ORGO_API_KEY=sk_x\nexport ORGO_API_KEY_OLD=sk_y\n" }), "key=no\n");
+  assert.ok(!ask().includes("sk_"), "never a value");
+  rmSync(dir, { recursive: true, force: true });
 });
 
 rmSync(scratch, { recursive: true, force: true });

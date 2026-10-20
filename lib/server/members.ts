@@ -15,6 +15,7 @@ import {
   type SeatsError,
 } from "@/lib/members";
 import { PEOPLE_CAPS } from "@/lib/plan-includes";
+import { runnerKeyMade } from "@/lib/types";
 import { trackServerEvent } from "./analytics";
 import { reachableFromComputers } from "./composio";
 import { computerToolOn } from "./computer-task";
@@ -59,11 +60,12 @@ const done = (got: Got) => !!got && got.status >= 200 && got.status < 300;
  * Whether Bops puts keys of its own on the bots' computers, which someone with Full access (root there)
  * could read: the apps key and this Mac's tailnet address in /opt/bops/apps.json when the server listens
  * beyond this Mac (BOPS_LISTEN_ALL=1), the executor's key (BOPS_COMPUTER_TOOL=0), Tailscale's auth key,
- * a Bops runner's key (an Orgo key for the whole account, runner-install.ts) on a computer that has one.
+ * the Orgo key a Bops runner signs in with (the computer's own, for the whole account: runner-install.ts)
+ * on a computer that has one.
  */
 const keysOnComputers = () => reachableFromComputers() || !computerToolOn() || !!process.env.TAILSCALE_AUTH_KEY || runnerKeys();
-/** A computer has a Bops runner, or is getting one, or still has its key (being stopped). */
-const runnerKeys = () => Object.values(getState().runners ?? {}).some((x) => x.status === "running" || x.status === "installing" || !!x.keyId);
+/** A computer has a Bops runner, or is getting one, or still has the key Bops gave it (being stopped). */
+const runnerKeys = () => Object.values(getState().runners ?? {}).some((x) => x.status === "running" || x.status === "installing" || runnerKeyMade(x));
 
 /**
  * Whether the sheet offers Full access: not yet (FULL_ACCESS_IN_BOPS, or BOPS_MEMBERS_FULL_ACCESS=1 to
@@ -274,14 +276,17 @@ export async function membersCount(): Promise<Answer> {
 }
 
 /**
- * Whether someone besides the owner has Full access to an Orgo workspace of the user's (root on its
- * computers): a Bops runner, whose key is the whole account's, is never set up there (runner-install.ts).
- * Null when Orgo didn't say.
+ * Whether someone besides the owner can use an Orgo workspace of the user's, as far as Orgo's members
+ * list shows it: any other member (View only too, guests too), or an invite still open. A Bops runner
+ * signs in with its computer's own key, which is the whole account's, so it's never set up there
+ * (runner-install.ts). Orgo also counts a live share link, which this list doesn't show: its own answer
+ * when the computer's key is asked for (409 full_access_member) has the last word. Null when Orgo didn't say.
  */
-export async function othersWithFullAccess(key: string, projectId: string): Promise<boolean | null> {
+export async function othersCanUse(key: string, projectId: string): Promise<boolean | null> {
   const got = (await orgoMembers.list(key, projectId)) as Got;
   if (!got || got.status !== 200) return null;
-  return listOf(got.json, projectId).people.some((p) => p.role === "admin");
+  const { people, invites } = listOf(got.json, projectId);
+  return people.length > 0 || invites.some((i) => !i.expired);
 }
 
 /* ---------------- Changes (from the Bops window only: app/api/members) ---------------- */

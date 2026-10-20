@@ -3,15 +3,16 @@ import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { workBot, type RunnerState } from "@/lib/types";
+import { runnerKeyMade, workBot, type RunnerState } from "@/lib/types";
 import { cloudUrl } from "./cloud-url";
-import { othersWithFullAccess } from "./members";
+import { othersCanUse } from "./members";
 import { apiKey, callOrgo, orgo } from "./orgo";
 import { orgoOrigin } from "./orgo-auth";
 import { loopHere } from "./persist";
 import { deviceIdFor } from "./persist-cloud";
 import { routineChanged } from "./routine-sync";
-import { heardRunsOn, overdueOn, RUNNER_CONF, RUNNER_KEY_FILE, RUNNER_WRAPPER, runsOnMissing } from "./runner";
+import { heardRunsOn, overdueOn, RUNNER_CONF, RUNNER_WRAPPER, runsOnMissing } from "./runner";
+import { ORGO_KEY_FILES, ORGO_KEY_LINE } from "./runner-key";
 import { computerGone, endSessionsOf } from "./sessions";
 import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNew, update } from "./store";
 
@@ -28,19 +29,24 @@ import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNe
  * on a dev Mac the newest in dist-runner) goes up through Orgo's file uploads into the computer's
  * /opt/bops/runner/incoming; one command then checks it, unpacks it beside the others and points
  * `current` at it, under a lock, and writes its supervisord program (Orgo computers have no systemd)
- * and the script that starts it, which makes a fresh window token each time. Its key is one Orgo makes
- * and writes on the computer itself (PUT /api/computers/{id}/bops-runner-key): this Mac never has it,
- * and no command sent carries a key or a token. Never on a computer whose workspace has someone else
- * with Full access (root there; the key is the whole account's). A newer Bops is never replaced by an
- * older one; the same version built again replaces it only when this Mac set it up last (a dev Mac).
- * One that's up and set up again (a new release) stays up, with its routines, until the new one starts
- * in its place (RunnerState.upgrading); a try that doesn't get that far leaves it as it was.
+ * and the script that starts it, which makes a fresh window token each time. Its key is the computer's
+ * own ORGO_API_KEY, which Orgo writes on the computer itself and the runner reads there (runner-key.ts):
+ * one made with the computer (a template that asks for it: bops-base 0.1.9 on) is left as it is, and a
+ * computer without one gets it from Orgo now (PUT /api/computers/{id}/orgo-key), which Bops takes back
+ * when it stops the runner (RunnerState.keyMade). This Mac never has it, and no command sent carries a
+ * key or a token. Never on a computer whose workspace someone else can use (root there, or able to
+ * become it; the key is the whole account's): the Mac looks first (members.ts othersCanUse), and Orgo,
+ * which sees share links too, has the last word. A newer Bops is never replaced by an older one; the
+ * same version built again replaces it only when this Mac set it up last (a dev Mac). One that's up and
+ * set up again (a new release) stays up, with its routines, until the new one starts in its place
+ * (RunnerState.upgrading); a try that doesn't get that far leaves it as it was.
  *
  * Stopping one (the bots work on This Mac now, or in browsers on the Mac; its computer was deleted; no
- * bot works on it): its program is stopped and taken off with its key, its key revoked (by any Mac of
- * the user's: Orgo revokes only the user's own runner keys for that computer), its threads end, and it's
- * taken out of the state. A computer asleep isn't woken for that: its runner can't run anything without
- * its key, and it's taken off the next time the computer is up.
+ * bot works on it): its program is stopped and taken off, the key Bops gave its computer revoked (by
+ * any Mac of the user's: DELETE /api/computers/{id}/orgo-key, which takes it off a computer that's up
+ * too), its threads end, and it's taken out of the state. A key the computer came with stays: it's the
+ * computer's, and Orgo revokes it with the computer. A computer asleep isn't woken for that, and it's
+ * taken off the next time the computer is up.
  *
  * Looked at once a minute; a full look (and a change: where the bots work, which computers they're on)
  * goes through each computer. Nothing here asks a computer that's asleep anything unless it sets a
@@ -52,7 +58,9 @@ import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNe
 const ROOT = "/opt/bops/runner";
 const PORT = 3210;
 const NO_BUNDLE = "no server bundle";
-const FULL_ACCESS = "someone else has Full access to this workspace";
+/** orgo-web's 409 full_access_member says "Someone else can use this workspace." */
+const FULL_ACCESS = "someone else can use this workspace";
+const OWNER_ONLY = "only the workspace's owner can set a runner up there";
 /** Why its threads ended, in each case. */
 const STOPPED = {
   mac: "Stopped: routines run on your Mac now.",
@@ -152,17 +160,25 @@ const ZONE = /^[A-Za-z0-9_+/-]{1,64}$/;
 const ORIGIN = /^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~/-]*)?$/;
 const LOOPBACK_URL = /^https?:\/\/(?:localhost|127\.|\[::1\]|0\.0\.0\.0)/i;
 
-/** Where it stands on the computer: the build `current` points at, whether its key and this build are there, and supervisord. */
-const probeScript = (dirName: string) =>
+/**
+ * Where it stands on the computer: the build `current` points at, whether the computer has its Orgo key
+ * (a line that sets ORGO_API_KEY in one of the files Orgo writes it in: grep alone, never printed), whether
+ * this build is there, and supervisord.
+ */
+export const probeScript = (dirName: string) =>
   [
     `c=$(readlink ${ROOT}/current 2>/dev/null | sed 's#.*/##')`,
     `echo "current=$c"`,
-    `[ -s ${RUNNER_KEY_FILE} ] && echo key=yes || echo key=no`,
+    `grep -qsE ${q(ORGO_KEY_LINE)} ${ORGO_KEY_FILES.join(" ")} && echo key=yes || echo key=no`,
     `[ -f ${ROOT}/${dirName}/server.js ] && echo have=yes || echo have=no`,
     `command -v supervisorctl >/dev/null 2>&1 && echo sup=yes || echo sup=no`,
   ].join("; ");
 
-/** The script supervisord starts: the runner's settings (none of them secret), a window token made fresh, then the server. */
+/**
+ * The script supervisord starts: the runner's settings (none of them secret), a window token made fresh,
+ * then the server. Never its key: the runner reads that from its computer's files itself (runner-key.ts),
+ * again when Orgo has written a new one.
+ */
 export function wrapperScript(o: { computerId: string; timeZone?: string; orgo: string; cloud: string }): string {
   return [
     "#!/bin/sh",
@@ -171,7 +187,7 @@ export function wrapperScript(o: { computerId: string; timeZone?: string; orgo: 
     "BOPS_UI_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n')",
     "export BOPS_UI_TOKEN",
     `export HOME=/root HOSTNAME=127.0.0.1 PORT=${PORT} NODE_ENV=production NEXT_MANUAL_SIG_HANDLE=true`,
-    `export BOPS_RUNNER=1 BOPS_RUNNER_COMPUTER=${q(o.computerId)} BOPS_DEVICE_SEED=${q(o.computerId)} BOPS_ORGO_KEY_FILE=${RUNNER_KEY_FILE}`,
+    `export BOPS_RUNNER=1 BOPS_RUNNER_COMPUTER=${q(o.computerId)} BOPS_DEVICE_SEED=${q(o.computerId)}`,
     `export BOPS_ORGO_ORIGIN=${q(o.orgo)} BOPS_CLOUD_URL=${q(o.cloud)}`,
     ...(o.timeZone ? [`export TZ=${q(o.timeZone)}`] : []),
     `cd ${ROOT}/current || exit 1`,
@@ -264,10 +280,14 @@ export const HEALTH_SCRIPT = [
   'if [ -n "$up" ]; then echo __BOPS_NO_STATE__; else echo __BOPS_DOWN__; fi',
 ].join("\n");
 
-/** Taking it off a computer: its program stopped and gone, its script, its key file and its builds, under the lock. */
+/**
+ * Taking it off a computer: its program stopped and gone, its script and its builds, under the lock.
+ * Never the computer's Orgo key: the one Bops gave it comes off with its revoke (stop), and one it came
+ * with is the computer's.
+ */
 export const UNINSTALL_SCRIPT = [
   "supervisorctl stop bops-runner >/dev/null 2>&1",
-  `rm -f ${RUNNER_CONF} ${RUNNER_WRAPPER} ${RUNNER_KEY_FILE}`,
+  `rm -f ${RUNNER_CONF} ${RUNNER_WRAPPER}`,
   "supervisorctl update >/dev/null 2>&1",
   `mkdir -p ${ROOT}`,
   `exec 9>${ROOT}/.lock`,
@@ -317,7 +337,7 @@ function routinesFollow(id: string) {
   for (const b of s.bots) if (workBot(b, s.bots).computerId?.toLowerCase() === id.toLowerCase()) routineChanged(b.id);
 }
 
-/** Couldn't start, and why; tried again later (a wait that grows), but at once when it was the bundle or Full access. */
+/** Couldn't start, and why; tried again later (a wait that grows), but at once when it was the bundle or someone else in the workspace. */
 function failed(id: string, error: string, b: Pick<Bundle, "version" | "buildId"> | null, me: string, backoff = true) {
   const x = runnerOf(id);
   mark(id, { status: "failed", version: b?.version ?? x?.version ?? "", buildId: b?.buildId ?? x?.buildId ?? "", by: me, error, at: Date.now(), ...keyOf(x) });
@@ -335,23 +355,24 @@ function keptAsIs(id: string, error: string) {
   console.warn(`[runner-install] ${id}: kept as it was (${error})`);
   later(id);
 }
-const keyOf = (x: RunnerState | undefined) => (x?.keyId ? { keyId: x.keyId, ...(x.keyBy ? { keyBy: x.keyBy } : {}) } : {});
+/** The key Bops gave the computer, carried over to its next state (an entry from before keyMade, with a keyId, counts: runnerKeyMade). */
+const keyOf = (x: RunnerState | undefined): Pick<RunnerState, "keyMade" | "keyId"> => (runnerKeyMade(x) ? { keyMade: true, ...(x?.keyId ? { keyId: x.keyId } : {}) } : {});
 
 /* ---------------- Which computers ---------------- */
 
-type Wanted = { projects: Set<string>; botName: string };
+type Wanted = { projects: Set<string> };
 
 /**
- * The computers that should have a runner, each with the Orgo workspaces whose map lists it and the bot
- * that owns it: one some bot works on as Orgo's map says (only the user's live Bops computers) and as
- * this Mac says too. Null when Orgo didn't answer for every workspace: then nothing is set up or stopped.
+ * The computers that should have a runner, each with the Orgo workspaces whose map lists it: one some
+ * bot works on as Orgo's map says (only the user's live Bops computers) and as this Mac says too. Null
+ * when Orgo didn't answer for every workspace: then nothing is set up or stopped.
  */
 async function wantedComputers(key: string): Promise<Map<string, Wanted> | null> {
   const s = getState();
-  const local = new Map<string, string>();
+  const local = new Set<string>();
   for (const b of s.bots) {
     const w = workBot(b, s.bots);
-    if (w.computerId && w.computerStatus !== "cloning") local.set(w.computerId.toLowerCase(), w.name);
+    if (w.computerId && w.computerStatus !== "cloning") local.add(w.computerId.toLowerCase());
   }
   const out = new Map<string, Wanted>();
   for (const ws of s.workspaces ?? []) {
@@ -361,9 +382,8 @@ async function wantedComputers(key: string): Promise<Map<string, Wanted> | null>
     if (got?.status !== 200) return null;
     for (const b of Array.isArray(got.json.bots) ? got.json.bots : []) {
       const id = typeof b?.desktopId === "string" && UUID.test(b.desktopId) ? b.desktopId.toLowerCase() : null;
-      const name = id && local.get(id);
-      if (!id || !name) continue;
-      const w = out.get(id) ?? { projects: new Set<string>(), botName: name };
+      if (!id || !local.has(id)) continue;
+      const w = out.get(id) ?? { projects: new Set<string>() };
       w.projects.add(ws.orgoProjectId);
       out.set(id, w);
     }
@@ -409,16 +429,16 @@ async function look() {
   for (const [id, w] of wanted) await keepUp(id, w, key, me);
 }
 
-/** One computer that should have a runner: set up, kept as it is, or (someone else has Full access there) stopped. */
+/** One computer that should have a runner: set up, kept as it is, or (someone else can use its workspace) stopped. */
 async function keepUp(id: string, w: Wanted, key: string, me: string) {
   if (box.busy.has(id)) return;
   for (const p of w.projects) {
-    const full = await othersWithFullAccess(key, p);
-    if (full === null) return;
-    if (!full) continue;
-    // Stopped (and its key revoked), then said why. Once: a computer isn't asked again for nothing.
+    const others = await othersCanUse(key, p);
+    if (others === null) return;
+    if (!others) continue;
+    // Stopped (and the key Bops gave it revoked), then said why. Once: a computer isn't asked again for nothing.
     const x = runnerOf(id);
-    if (x && (x.status !== "failed" || x.keyId)) await stop(id, key, STOPPED.full);
+    if (x && (x.status !== "failed" || runnerKeyMade(x))) await stop(id, key, STOPPED.full);
     if (runnerOf(id)?.error !== FULL_ACCESS) failed(id, FULL_ACCESS, null, me, false);
     return;
   }
@@ -431,12 +451,12 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
   const plan = installPlan(x, bundle, me);
   if (plan === "keep" && x?.status === "running" && overdueOn(id)) return stillRuns(id, me);
   if (plan !== "install") return;
-  // One that didn't start, or one up that wasn't set up again, waits its turn (not when it was Full access or the bundle, which are looked at each time).
+  // One that didn't start, or one up that wasn't set up again, waits its turn (not when it was someone else in the workspace or the bundle, which are looked at each time).
   const retry = box.retry.get(id);
   if (retry && retry.at > Date.now() && (x?.status === "running" || (x?.status === "failed" && x.error !== FULL_ACCESS && x.error !== NO_BUNDLE))) return;
   box.busy.add(id);
   try {
-    await install(id, w, bundle, key, me);
+    await install(id, bundle, key, me);
   } finally {
     box.busy.delete(id);
   }
@@ -447,13 +467,13 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
  * up, and keeps its routines, until the new one is started in its place: a try that goes wrong before
  * that (its computer didn't answer, the files didn't upload) leaves it as it was, to be tried again later.
  */
-async function install(id: string, w: Wanted, bundle: Bundle, key: string, me: string) {
+async function install(id: string, bundle: Bundle, key: string, me: string) {
   const s = getState();
   const orgoAt = orgoOrigin();
   const cloudAt = cloudUrl();
   const before = runnerOf(id);
   const upgrade = before?.status === "running";
-  // Whether the runner that was up is changed yet (its key replaced, its files swapped): past that, one that goes wrong couldn't start.
+  // Whether the runner that was up is changed yet (its computer given a key, its files swapped): past that, one that goes wrong couldn't start.
   let touched = false;
   const fail = (error: string) => (upgrade && !touched ? keptAsIs(id, error) : failed(id, error, bundle, me));
   // A runner reaches what this Mac does: an Orgo or a Bops Cloud on this Mac it never could.
@@ -474,26 +494,16 @@ async function install(id: string, w: Wanted, bundle: Bundle, key: string, me: s
     else failed(id, UNHEALTHY[up], bundle, me);
     return;
   }
-  // Its key: the one made for it before while its file is there (another Mac's too), else a new one, and
-  // the one before revoked, whichever Mac had it made (Orgo revokes the computer's earlier ones too).
-  let x = runnerOf(id);
-  if (!x?.keyId || said("key") !== "yes") {
-    const old = x?.keyId;
-    const got = await callOrgo<{ keyId?: unknown; code?: unknown }>(key, `/api/computers/${encodeURIComponent(id)}/bops-runner-key`, {
-      method: "PUT",
-      body: { name: w.botName },
-      timeoutMs: 120_000,
-    });
-    if (got?.status === 409 && got.json.code === "full_access_member") return failed(id, FULL_ACCESS, bundle, me, false);
-    if (got?.status === 404 || got?.status === 405) return fail("Orgo can't set up a runner on it yet");
-    if (got?.status === 422) return fail("a runner needs a Linux computer");
-    const keyId = got?.status === 200 && typeof got.json.keyId === "string" ? got.json.keyId : null;
-    if (!keyId) return fail("Orgo didn't make its key");
-    // The file has this key now: a runner still up on the one before can't go on.
+  // Its key: the computer's own ORGO_API_KEY. One it has (made with it from a template that asks for it,
+  // or given it before) is left as it is: the runner reads it there. One without gets it from Orgo now,
+  // written on the computer by Orgo itself (nothing of it comes here), and Bops takes that back when it
+  // stops the runner (keyMade). Orgo keeps one key per computer and revokes any earlier one itself.
+  if (said("key") !== "yes") {
+    const given = await giveKey(id, key);
+    if ("error" in given) return given.backoff ? fail(given.error) : failed(id, given.error, bundle, me, false);
     touched = true;
-    x = { ...(x ?? { status: "installing", version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now() }), keyId, keyBy: me };
-    mark(id, x);
-    if (old && old !== keyId) await revoke(id, old, key);
+    const x = runnerOf(id);
+    mark(id, { ...(x ?? { status: "installing", version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now() }), keyMade: true, keyId: given.keyId });
   }
   if (said("have") !== "yes") {
     const sent = await upload(id, bundle, key);
@@ -565,16 +575,34 @@ async function upload(id: string, bundle: Bundle, key: string): Promise<string |
   return done?.status === 200 ? undefined : "its files didn't reach its computer";
 }
 
-/** Revoke a runner's key (Orgo also takes the file off a computer that's up). Gone already counts. */
-async function revoke(id: string, keyId: string, key: string): Promise<boolean> {
-  const got = await callOrgo(key, `/api/computers/${encodeURIComponent(id)}/bops-runner-key?keyId=${encodeURIComponent(keyId)}`, { method: "DELETE", timeoutMs: 60_000 });
+/**
+ * Give computer `id` its own Orgo key (PUT /api/computers/{id}/orgo-key, no body): Orgo writes it there as
+ * ORGO_API_KEY and answers only its id. Refused: why, and whether to wait longer before the next try
+ * (someone else can use the workspace is looked at again each time, as the Mac's own look is).
+ */
+async function giveKey(id: string, key: string): Promise<{ keyId: string } | { error: string; backoff: boolean }> {
+  const got = await callOrgo<{ keyId?: unknown; code?: unknown }>(key, `/api/computers/${encodeURIComponent(id)}/orgo-key`, { method: "PUT", timeoutMs: 120_000 });
+  if (got?.status === 200 && typeof got.json.keyId === "string" && got.json.keyId) return { keyId: got.json.keyId };
+  if (got?.status === 409 && got.json.code === "full_access_member") return { error: FULL_ACCESS, backoff: false };
+  if (got?.status === 403 && got.json.code === "owner_only") return { error: OWNER_ONLY, backoff: true };
+  if (got?.status === 404 || got?.status === 405) return { error: "Orgo can't set up a runner on it yet", backoff: true };
+  if (got?.status === 422) return { error: "a runner needs a Linux computer", backoff: true };
+  return { error: "Orgo didn't give its computer its key", backoff: true };
+}
+
+/** Take back the key Bops gave computer `id` (Orgo revokes it, and takes it off the computer when it's up). Gone already counts. */
+async function takeKeyBack(id: string, key: string): Promise<boolean> {
+  const got = await callOrgo(key, `/api/computers/${encodeURIComponent(id)}/orgo-key`, { method: "DELETE", timeoutMs: 60_000 });
   return got?.status === 200 || got?.status === 404;
 }
 
 /**
  * Stop computer `id`'s runner, saying `why` in its threads (they end; a computer deleted says so). It's
- * taken off a computer that's up or gone; one asleep keeps it until it's up again (it can't run without
- * its key). Its key is revoked, whichever Mac had it made; it goes from the state once both are done.
+ * taken off a computer that's up or gone; one asleep keeps it until it's up again, and runs nothing
+ * meanwhile (the state says it's being stopped, and a runner reads the state before it runs anything).
+ * The key Bops gave the computer (keyMade) is revoked, by whichever Mac stops it; a key it came with
+ * stays (the computer's: Orgo revokes it with the computer). It goes from the state once it's off and
+ * that key is revoked.
  */
 async function stop(id: string, key: string, why: string) {
   const user = userNow();
@@ -590,11 +618,12 @@ async function stop(id: string, key: string, why: string) {
   let off = false;
   if (c === "gone") off = true;
   else if (c?.status === "running") off = !!(await orgo.bash(id, UNINSTALL_SCRIPT, 180).catch(() => null))?.output.includes("__BOPS_OFF__");
-  if (x.keyId && (await revoke(id, x.keyId, key))) {
-    x = { ...x, keyId: undefined, keyBy: undefined };
-    mark(id, Object.fromEntries(Object.entries(x).filter(([, v]) => v !== undefined)) as RunnerState);
+  if (runnerKeyMade(x) && (await takeKeyBack(id, key))) {
+    // The key's gone (and an entry from before keyMade loses its old keyBy with it).
+    x = Object.fromEntries(Object.entries(x).filter(([k]) => k !== "keyMade" && k !== "keyId" && k !== "keyBy")) as RunnerState;
+    mark(id, x);
   }
-  if (off && !x.keyId) forget(id);
+  if (off && !runnerKeyMade(x)) forget(id);
 }
 
 /**

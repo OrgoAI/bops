@@ -1057,9 +1057,10 @@ export async function ensureComputer(botId: string): Promise<void> {
       if (Date.now() >= setupWaitUntil(startedAt, firstWakeAt)) break;
       await new Promise((r) => setTimeout(r, setupWait.pollMs));
     }
-    // A copy made just now brings along the main computer's Bops runner, with its key and that computer's
-    // id: taken off first, before anything else runs there, so it never runs the main computer's routines
-    // a second time (runner.ts RUNNER_SCRUB). A runner is set up on it afresh (runner-install.ts).
+    // A copy made just now brings along the main computer's Bops runner and that computer's id: taken off
+    // first, before anything else runs there, so it never runs the main computer's routines a second time
+    // (runner.ts RUNNER_SCRUB). Its Orgo key is Orgo's to change: it gives a copy its own, or none. A
+    // runner is set up on it afresh (runner-install.ts).
     if (!b.isMain && (!had || b.computerNeverReady === clone.id)) {
       const off = await orgo.bash(clone.id, RUNNER_SCRUB, 30).catch((e: Error) => ({ output: e.message, exit_code: 1 }));
       if (off.exit_code !== 0) throw new Error(`the copy of the main computer couldn't be cleaned up (${off.output.trim().slice(0, 120) || "no answer"})`);

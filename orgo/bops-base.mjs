@@ -12,7 +12,8 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 
-// lib/server/orgo.ts BOPS_TEMPLATE moves to this version once it's built.
+// lib/server/orgo.ts BOPS_TEMPLATE moves to this version once it's built (and orgo-web's curated ref,
+// lib/curated-templates.ts). 0.1.9 asks Orgo for the computer's own key (secrets: orgo_api_key).
 const VERSION = "0.1.9";
 const CODEX_VERSION = "0.160.0";
 // The same as lib/server/brains.ts CLAUDE_CODE_VERSION, which installs it on older computers.
@@ -28,6 +29,17 @@ const template = {
     description: "Bops computer: Codex executor, Claude Code, screen MCP, per-screen Chrome, and Tailscale for the mirrored view.",
     publisher: "orgo",
   },
+  // The computer's own Orgo key, which its Bops runner signs in with (lib/server/runner-key.ts): Orgo makes
+  // it for each computer made from this template, writes it there as ORGO_API_KEY (/root/.env), and revokes
+  // it with the computer. Never from anyone's vault, and none where someone else can use the workspace.
+  // Optional: a computer made without it gets it when the Mac sets its runner up (PUT /api/computers/{id}/orgo-key).
+  secrets: [
+    {
+      name: "orgo_api_key",
+      description: "This computer's own Orgo key, made by Orgo for it and revoked with it. The Bops runner on it signs in with it.",
+      optional: true,
+    },
+  ],
   // 4:3, boxier than 16:9, like a laptop screen; every screen on the computer matches it.
   hardware: { cpu: 4, ram_gb: 16, resolution: "1280x960x24", auto_stop_minutes: 0 },
   build: {

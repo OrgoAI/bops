@@ -2,16 +2,18 @@
 // runs by itself there (persist.ts RUNNER_LOOPS: the routines timer, the mirror of its own routines, its
 // own threads, the in-use beat; every other loop or timer of lib/server returns early, checked in each
 // module that has one), what it starts with (runner-start.ts: refusing to start without a window token,
-// on anything but loopback, on a Postgres or file store, without its computer or its key file; then the
-// state, the look at which computer it's on, and only the allowed loops), its key from its file (only
-// when it's root's alone), no Keychain, the in-use beat as the runner's and only for its own tasks, and
-// chooseWhere never picking the Mac there.
+// on anything but loopback, on a Postgres or file store, or without its computer; without its computer's
+// ORGO_API_KEY it says so and stops; then the state, the look at which computer it's on, and only the
+// allowed loops), its key (runner-key.ts: /root/.orgo-secrets.env, then /root/.env, shell quoting as Orgo
+// writes it, only from a file nobody else can read, read again when Orgo answers 401, never logged, and
+// never ORGO_API_KEY from its environment or a CLI login), no Keychain, the in-use beat as the runner's
+// and only for its own tasks, and chooseWhere never picking the Mac there.
 //
 // The modules each one talks to are fakes (below), so nothing reaches Orgo, Bops Cloud or the Keychain.
 // Usage: node --conditions=react-server scripts/test-runner-mode.mjs
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,16 +24,18 @@ const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const scratch = mkdtempSync(join(tmpdir(), "bops-runner-mode-"));
 
 // Run again with --start, this checks how a runner starts on its own: there what it starts with is faked
-// too (runner.ts, orgo-auth.ts, free-hours.ts), so only what it loads is seen.
+// too (runner.ts, orgo-auth.ts, free-hours.ts), so only what it loads is seen. With --orgo, Orgo's client
+// (orgo.ts) is the real one, against a fake Orgo: a runner's key as its calls use it.
 const START = process.argv.includes("--start");
+const ORGO = process.argv.includes("--orgo");
 
 // Each faked module: its exports, each a call to globalThis.__fake[module][name] (or a value when it's one).
 const FAKES = {
-  store: ["getState", "update", "stateReady", "stateTooNew", "ownSession", "bot", "ownerName", "addMessage", "stateUser", "bindSignIn", "releaseSignOut", "pullState", "statePulledAt"],
+  store: ["getState", "update", "stateReady", "stateTooNew", "ownSession", "bot", "ownerName", "addMessage", "stateUser", "bindSignIn", "releaseSignOut", "pullState", "statePulledAt", ...(ORGO ? ["stateEpoch", "updateUnseen", "userDir"] : [])],
   decide: ["decide", "chose"],
   "full-access": ["fullAccessOn"],
-  cloud: ["cloudOn"],
-  orgo: ["orgo", "OrgoError"],
+  cloud: ["cloudOn", ...(ORGO ? ["cloudProxy"] : [])],
+  ...(ORGO ? { usage: ["recordUsage"], "workspace-skills": ["folderKey", "moveWorkspaceFolder"] } : { orgo: ["orgo", "OrgoError"] }),
   plan: ["postOrgo"],
   local: ["CHROME"],
   "orgo-sign-in": ["authStatus"],
@@ -89,6 +93,7 @@ const posts = [];
 let ready = true;
 globalThis.__fake = {
   started: [],
+  bound: [],
   store: {
     getState: () => state,
     update: (fn) => fn(state),
@@ -99,7 +104,7 @@ globalThis.__fake = {
     ownerName: () => "Sam",
     addMessage: () => {},
     stateUser: () => "u1",
-    bindSignIn: async () => {},
+    bindSignIn: async (user, key) => void globalThis.__fake.bound.push({ user, key }),
     releaseSignOut: async () => {},
     pullState: async () => {},
     statePulledAt: () => 0,
@@ -118,7 +123,7 @@ globalThis.__fake = {
 };
 
 const asMac = () => {
-  for (const k of ["BOPS_RUNNER", "BOPS_RUNNER_COMPUTER", "BOPS_DEVICE_SEED", "BOPS_ORGO_KEY_FILE", "BOPS_UI_TOKEN", "HOSTNAME"]) delete process.env[k];
+  for (const k of ["BOPS_RUNNER", "BOPS_RUNNER_COMPUTER", "BOPS_DEVICE_SEED", "BOPS_UI_TOKEN", "HOSTNAME"]) delete process.env[k];
 };
 const asRunner = () => {
   process.env.BOPS_RUNNER = "1";
@@ -133,7 +138,6 @@ const good = () => ({
   HOSTNAME: "127.0.0.1",
   BOPS_RUNNER_COMPUTER: C1,
   BOPS_DEVICE_SEED: C1,
-  BOPS_ORGO_KEY_FILE: "/root/.bops/runner/key",
 });
 
 if (START) {
@@ -173,12 +177,16 @@ if (START) {
     await assert.rejects(S.startRunner(), /exited/);
     assert.equal(code, 1);
     assert.deepEqual(calls, [], "nothing started");
-    // No key in its file: out too, before the state.
+    // No key on its computer: out too, before the state, saying why.
     delete globalThis.__bopsRunnerStarted;
     process.env.HOSTNAME = "127.0.0.1";
     globalThis.__fake["orgo-auth"].loadOrgoKey = async () => (calls.push("key"), null);
+    const said = [];
+    console.error = (m) => said.push(String(m));
     await assert.rejects(S.startRunner(), /exited/);
+    console.error = () => {};
     assert.deepEqual(calls, ["key"]);
+    assert.deepEqual(said, ["[runner] not starting: no ORGO_API_KEY on this computer (Orgo writes it when the computer is made, or when the Mac sets the runner up)"]);
     // A copy of another computer: out before it reads the state, so it never signs in or saves as that computer's runner.
     delete globalThis.__bopsRunnerStarted;
     calls.length = 0;
@@ -191,6 +199,85 @@ if (START) {
     console.error = err;
   });
   console.log(`runner start: ${passed} passed, ${failures} failed`);
+  process.exit(failures ? 1 : 0);
+}
+
+/* ---------------- Its key as Orgo's client uses it (run on its own: node … --orgo) ---------------- */
+
+/** A runner's computer: its key files in a folder of its own (only this user can enter it, as /root). */
+function keyHome() {
+  const dir = mkdtempSync(join(tmpdir(), "bops-runner-key-"));
+  chmodSync(dir, 0o700);
+  return { dir, secrets: join(dir, ".orgo-secrets.env"), env: join(dir, ".env") };
+}
+
+if (ORGO) {
+  await check("a runner's calls use only its computer's key, and read it again when Orgo answers 401", async () => {
+    const K = await import(`${root}/lib/server/runner-key.ts`);
+    const O = await import(`${root}/lib/server/orgo.ts`);
+    const home = keyHome();
+    K.runnerKeyForTests.files([home.secrets, home.env]);
+    asRunner();
+    // Keys that must never be used on a runner: one in its environment, and a CLI login on its computer.
+    process.env.ORGO_API_KEY = "sk_from_the_environment";
+    process.env.HOME = home.dir;
+    mkdirSync(join(home.dir, ".orgo"));
+    writeFileSync(join(home.dir, ".orgo", "credentials.json"), JSON.stringify({ current: "default", profiles: { default: { apiKey: "sk_cli_login" } } }));
+    const logged = [];
+    const kept = { ...console };
+    for (const k of ["log", "info", "warn", "error"]) console[k] = (...a) => logged.push(a.join(" "));
+    try {
+      // Orgo, faked: the key it takes now, and every key it was sent.
+      let valid = "sk_first";
+      const sent = [];
+      globalThis.fetch = async (url, init = {}) => {
+        const key = String(new Headers(init.headers).get("authorization") ?? "").replace(/^Bearer /, "");
+        sent.push(key);
+        return key === valid ? Response.json({ id: C1, name: "boppy", status: "running" }) : Response.json({ error: "Invalid API key" }, { status: 401 });
+      };
+      await assert.rejects(O.apiKey(), /No ORGO_API_KEY on this computer/, "no key on its computer: none, never the environment's or a CLI login");
+      globalThis.bopsRunnerKeyRead.next = 0;
+      writeFileSync(home.secrets, "export ORGO_API_KEY=sk_first\n", { mode: 0o600 });
+      assert.equal(await O.apiKey(), "sk_first");
+      assert.equal((await O.orgo.computer(C1)).id, C1);
+      // Orgo wrote a new one on the computer (a restore in place, say): the next call is turned down, then the files are read again.
+      valid = "sk_second";
+      writeFileSync(home.secrets, "export ORGO_API_KEY=sk_second\n", { mode: 0o600 });
+      assert.equal(await O.apiKey(), "sk_first", "kept while Orgo takes it");
+      await assert.rejects(O.orgo.computer(C1), (e) => e.status === 401);
+      assert.equal(await O.apiKey(), "sk_second", "read again after the 401");
+      assert.equal((await O.orgo.computer(C1)).id, C1);
+      assert.deepEqual(globalThis.__fake.bound.at(-1), { user: "u1", key: "sk_second" }, "Bops Cloud gets the new one too");
+      // The same through callOrgo (the Mac's and the runner's direct calls).
+      valid = "sk_third";
+      writeFileSync(home.secrets, "export ORGO_API_KEY=sk_third\n", { mode: 0o600 });
+      assert.equal((await O.callOrgo(await O.apiKey(), "/api/bops/settings"))?.status, 401);
+      assert.equal(await O.apiKey(), "sk_third");
+      // Turned down while the files still have the same one: read again only after a wait, twice as long each time.
+      valid = "sk_fourth";
+      assert.equal((await O.callOrgo(await O.apiKey(), "/api/bops/settings"))?.status, 401);
+      assert.equal(await O.apiKey(), "sk_third", "the same one there");
+      const wait = globalThis.bopsRunnerKeyRead.next - Date.now();
+      assert.ok(wait > 3000 && wait <= 5000, `then a wait (${wait} ms)`);
+      writeFileSync(home.secrets, "export ORGO_API_KEY=sk_fourth\n", { mode: 0o600 });
+      assert.equal((await O.callOrgo(await O.apiKey(), "/api/bops/settings"))?.status, 401);
+      assert.equal(await O.apiKey(), "sk_third", "not read again before the wait is over");
+      globalThis.bopsRunnerKeyRead.next = 0;
+      assert.equal(await O.apiKey(), "sk_fourth", "and after it");
+      assert.equal(globalThis.bopsRunnerKeyRead.wait, 5000, "a new one starts the wait over");
+      // Its key taken off the computer (Bops took it back): none, so it runs nothing.
+      rmSync(home.secrets);
+      valid = "none";
+      assert.equal((await O.callOrgo(await O.apiKey(), "/api/bops/settings"))?.status, 401);
+      await assert.rejects(O.apiKey(), /No ORGO_API_KEY on this computer/);
+      assert.ok(!sent.includes("sk_from_the_environment") && !sent.includes("sk_cli_login"), "never another key");
+      assert.ok(!logged.some((l) => /sk_(first|second|third|fourth)/.test(l)), `no key in a log: ${logged.join(" | ")}`);
+    } finally {
+      Object.assign(console, kept);
+      rmSync(home.dir, { recursive: true, force: true });
+    }
+  });
+  console.log(`runner orgo key: ${passed} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 }
 
@@ -282,8 +369,8 @@ await check("on a runner the digest timer isn't set, Codex isn't installed, the 
 
 const R = await import(`${root}/lib/server/runner-start.ts`);
 
-await check("a runner refuses to start without a window token, off loopback, on Postgres or a file, or without its computer or key file", () => {
-  assert.equal(R.runnerRefusal(good()), null);
+await check("a runner refuses to start without a window token, off loopback, on Postgres or a file, or without its computer; its key is no setting of its own", () => {
+  assert.equal(R.runnerRefusal(good()), null, "no key file setting needed: it reads its computer's");
   assert.equal(R.runnerRefusal({ ...good(), HOSTNAME: "::1" }), null);
   const no = (env, re) => assert.match(R.runnerRefusal({ ...good(), ...env }) ?? "", re, JSON.stringify(env));
   no({ BOPS_UI_TOKEN: undefined }, /BOPS_UI_TOKEN/);
@@ -297,7 +384,6 @@ await check("a runner refuses to start without a window token, off loopback, on 
   no({ BOPS_SELF_HOSTED: "1" }, /Bops Cloud/);
   no({ BOPS_RUNNER_COMPUTER: "not-an-id" }, /BOPS_RUNNER_COMPUTER/);
   no({ BOPS_DEVICE_SEED: "c2c2c2c2-0000-4000-8000-000000000002" }, /BOPS_DEVICE_SEED/);
-  no({ BOPS_ORGO_KEY_FILE: undefined }, /BOPS_ORGO_KEY_FILE/);
 });
 
 await check("started on its own, a runner starts only what it runs", () => {
@@ -305,28 +391,63 @@ await check("started on its own, a runner starts only what it runs", () => {
   assert.equal(run.status, 0, `${run.stdout}${run.stderr}`.split("\n").filter((l) => /FAIL|passed|^\s{2}/.test(l)).join("\n"));
 });
 
+await check("a runner's calls to Orgo use only its computer's key, read again after a 401", () => {
+  const run = spawnSync(process.execPath, ["--conditions=react-server", new URL(import.meta.url).pathname, "--orgo"], { encoding: "utf8" });
+  assert.equal(run.status, 0, `${run.stdout}${run.stderr}`.split("\n").filter((l) => /FAIL|passed|^\s{2}/.test(l)).join("\n"));
+});
+
 /* ---------------- Its key, and no Keychain ---------------- */
 
-await check("a runner's key is its file's, only when it's root's alone; it has no Keychain and never signs in", async () => {
+await check("a runner's key: /root/.orgo-secrets.env, then /root/.env, as Orgo quotes it, only from a file nobody else can read; no Keychain, no sign-in", async () => {
   asRunner();
-  const file = join(scratch, "key");
-  writeFileSync(file, "sk_runner_key\n");
-  chmodSync(file, 0o644);
-  process.env.BOPS_ORGO_KEY_FILE = file;
-  const warn = console.warn;
-  console.warn = () => {};
+  const K = await import(`${root}/lib/server/runner-key.ts`);
   const A = await import(`${root}/lib/server/orgo-auth.ts`);
-  assert.equal(await A.loadOrgoKey(), null, "readable by others: not used");
+  const home = keyHome();
+  K.runnerKeyForTests.files([home.secrets, home.env]);
+  const warned = [];
+  const warn = console.warn;
+  console.warn = (m) => warned.push(String(m));
+  const read = async (files, mode = 0o600, dirMode = 0o700) => {
+    rmSync(home.secrets, { force: true });
+    rmSync(home.env, { force: true });
+    for (const [f, text] of Object.entries(files)) writeFileSync(home[f], text, { mode });
+    for (const f of Object.keys(files)) chmodSync(home[f], mode);
+    chmodSync(home.dir, dirMode);
+    return K.readRunnerKey();
+  };
+  assert.deepEqual(K.ORGO_KEY_FILES, ["/root/.orgo-secrets.env", "/root/.env"]);
+  // As metal writes it when the computer is made: /root/.env alone, a quote inside written '\''.
+  assert.equal(await read({ env: "export PATH=/usr/bin\nexport ORGO_API_KEY='sk_a'\\''b'\n[ -f /root/.orgo-secrets.env ] && . /root/.orgo-secrets.env\n" }), "sk_a'b");
+  // As Orgo's PUT writes it (shlex.quote): it wins over the line made with the computer.
+  assert.equal(await read({ secrets: "export ANTHROPIC_API_KEY=x\nexport ORGO_API_KEY=sk_new\n", env: "export ORGO_API_KEY='sk_old'\n" }), "sk_new");
+  assert.equal(await read({ secrets: "export ORGO_API_KEY='sk with'\"'\"'quote'\n" }), "sk with'quote");
+  assert.equal(await read({ secrets: 'ORGO_API_KEY="sk_dq\\$x"\n' }), "sk_dq$x", "double quotes, and no export");
+  // The first file that has it wins; one that has none (or an empty one) doesn't count.
+  assert.equal(await read({ secrets: "export OTHER=1\n", env: "export ORGO_API_KEY=sk_env\n" }), "sk_env");
+  assert.equal(await read({ secrets: "export ORGO_API_KEY=''\n", env: "export ORGO_API_KEY=sk_env\n" }), "sk_env");
+  assert.equal(await read({ env: "# export ORGO_API_KEY=sk_comment\nexport MY_ORGO_API_KEY=sk_x\n" }), null);
+  assert.equal(await read({ env: "export ORGO_API_KEY=$(cat /tmp/k)\n" }), null, "never what a shell would expand");
+  assert.equal(await read({}), null, "no files: none");
+  // Who can read it: readable by others in a folder they can enter, not used (and said, without the key); in a folder only ours (/root), used.
+  assert.equal(await read({ secrets: "export ORGO_API_KEY=sk_open\n" }, 0o644, 0o755), null);
+  assert.ok(warned.some((m) => m.includes(".orgo-secrets.env can be read by others")) && !warned.some((m) => m.includes("sk_open")), warned.join(" | "));
+  assert.equal(await read({ secrets: "export ORGO_API_KEY=sk_open\n", env: "export ORGO_API_KEY=sk_old\n" }, 0o644, 0o755), null, "the first that has it wins, so never an older one instead");
+  assert.equal(await read({ secrets: "export ORGO_API_KEY=sk_private\n" }, 0o600, 0o755), "sk_private", "0600 anywhere");
+  assert.equal(await read({ env: "export ORGO_API_KEY=sk_in_root\n" }, 0o644, 0o700), "sk_in_root", "0644 in a folder only ours");
+  assert.equal(await read({ env: "export ORGO_API_KEY=sk_group\n" }, 0o640, 0o750), null, "readable by its group");
   console.warn = warn;
-  chmodSync(file, 0o600);
+  // loadOrgoKey on a runner: its computer's key, never the Keychain.
+  await read({ secrets: "export ORGO_API_KEY=sk_runner_key\n" });
   delete globalThis.bopsOrgoKey;
-  delete globalThis.bopsOrgoKeyMissAt;
+  delete globalThis.bopsRunnerKeyRead;
   assert.equal(await A.loadOrgoKey(), "sk_runner_key");
   await assert.rejects(A.signIn("sk_other", { id: "u2" }), /Bops app on your Mac/);
   await assert.rejects(A.signOut(), /Bops app on your Mac/);
-  const K = await import(`${root}/lib/server/keychain.ts`);
-  assert.equal(await K.getSecret("anything"), null);
-  await assert.rejects(K.setSecret("anything", "x"), /only in the Bops app on your Mac/);
+  const Kc = await import(`${root}/lib/server/keychain.ts`);
+  assert.equal(await Kc.getSecret("anything"), null);
+  await assert.rejects(Kc.setSecret("anything", "x"), /only in the Bops app on your Mac/);
+  K.runnerKeyForTests.files(undefined);
+  rmSync(home.dir, { recursive: true, force: true });
   asMac();
 });
 

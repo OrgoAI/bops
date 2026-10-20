@@ -1,7 +1,7 @@
 import "server-only";
-import { readFile, stat } from "node:fs/promises";
 import { deleteSecret, getSecret, setSecret } from "./keychain";
 import { onRunner } from "./persist";
+import { readRunnerKey } from "./runner-key";
 import { bindSignIn, getState, releaseSignOut, update } from "./store";
 
 /**
@@ -10,8 +10,9 @@ import { bindSignIn, getState, releaseSignOut, update } from "./store";
  * the Mac's Keychain. Everything Bops does on Orgo (the "bops" workspace, the bots' computers, the
  * account page) runs on that key, so it all lands in the user's own Orgo account and plan.
  *
- * A computer's runner (lib/server/runner.ts) never signs in: its key is the one Orgo wrote for it on
- * its computer (BOPS_ORGO_KEY_FILE, root's alone), and is read from there.
+ * A computer's runner (lib/server/runner.ts) never signs in: its key is its computer's own, which Orgo
+ * wrote there as ORGO_API_KEY (runner-key.ts: /root/.orgo-secrets.env, then /root/.env, root's alone),
+ * and is read from there, again when Orgo turns it down (Orgo may have written a new one since).
  *
  * BOPS_ORGO_ORIGIN points Bops at another Orgo (staging, local); the default is production.
  */
@@ -29,35 +30,74 @@ const g = globalThis as unknown as {
   /** When the Keychain last had no key for us (Infinity after a sign-out: there's none until the next sign-in). */
   bopsOrgoKeyMissAt?: number;
   bopsOrgoWorkspace?: unknown;
+  /** A runner: when its computer's files are read again for its key, how long the wait after that is, the key Orgo turned down, and the read under way. */
+  bopsRunnerKeyRead?: { next: number; wait: number; rejected?: string; reading?: Promise<string | null> };
 };
 
 /** How long a failed Keychain read stands before it's tried again (it may have been locked, or a prompt turned down). */
 const RETRY_MS = 10_000;
 
+/** A runner's files read again for its key at most this often after Orgo turned it down, twice as long each time it's the same (or none). */
+const REREAD_MIN_MS = 5_000;
+const REREAD_MAX_MS = 5 * 60_000;
+
 /**
- * A runner's key, from its file: only when it's root's alone (no one else may read or write it), else
- * none. Never logged.
+ * A runner's key: its computer's own (runner-key.ts readRunnerKey), read once and kept, and read again
+ * when Orgo turned it down (orgoKeyRejected: a restore in place or a copy has Orgo write a new one), at
+ * most every REREAD_MIN_MS and twice as long each time the files have the same one or none. A new one
+ * goes to Bops Cloud too (the user's state is the same account's). None there: none, so it runs nothing.
  */
-async function keyFile(): Promise<string | null> {
-  const file = process.env.BOPS_ORGO_KEY_FILE;
-  if (!file) return null;
-  try {
-    const st = await stat(file);
-    if (!st.isFile() || (st.mode & 0o077) !== 0) {
-      console.warn("[runner] the key file can be read by others: not used");
-      return null;
-    }
-    return (await readFile(file, "utf8")).trim() || null;
-  } catch {
-    return null;
-  }
+function runnerKey(): Promise<string | null> {
+  const r = (g.bopsRunnerKeyRead ??= { next: 0, wait: REREAD_MIN_MS });
+  const had = g.bopsOrgoKey ?? null;
+  if (had && r.rejected !== had) return Promise.resolve(had);
+  if (r.reading) return r.reading;
+  if (Date.now() < r.next) return Promise.resolve(had);
+  const reading = readRunnerKey()
+    .catch(() => null)
+    .then((k) => {
+      r.rejected = undefined;
+      if (k && k !== had) {
+        r.next = 0;
+        r.wait = REREAD_MIN_MS;
+        g.bopsOrgoKey = k;
+        g.bopsOrgoKeyMissAt = undefined;
+        const user = getState().account?.user.id;
+        if (had) console.info("[runner] the Orgo key on this computer is a new one: using it");
+        if (had && user) void bindSignIn(user, k).catch((e: Error) => console.warn(`[runner] the new key for Bops Cloud: ${e.message}`));
+      } else {
+        r.next = Date.now() + r.wait;
+        r.wait = Math.min(REREAD_MAX_MS, r.wait * 2);
+        if (!k) {
+          g.bopsOrgoKey = null;
+          g.bopsOrgoKeyMissAt = Date.now();
+        }
+      }
+      return g.bopsOrgoKey ?? null;
+    })
+    .finally(() => {
+      if (r.reading === reading) r.reading = undefined;
+    });
+  r.reading = reading;
+  return reading;
 }
 
-/** Read the signed-in key from the Keychain (a runner: its key file): once per server process, and again a little later if it wasn't there. */
+/**
+ * Orgo answered 401 to `key` (orgo.ts, orgo-sign-in.ts whoIs). On a runner, its computer's key may have
+ * been written again since it was read (runnerKey): the next load reads the files again. On the Mac,
+ * nothing: a sign-in that's turned down is the user's to make again.
+ */
+export function orgoKeyRejected(key: string) {
+  if (!onRunner() || !key || key !== g.bopsOrgoKey) return;
+  (g.bopsRunnerKeyRead ??= { next: 0, wait: REREAD_MIN_MS }).rejected = key;
+}
+
+/** Read the signed-in key from the Keychain (a runner: its computer's, runnerKey): once per server process, and again a little later if it wasn't there. */
 export function loadOrgoKey(): Promise<string | null> {
+  if (onRunner()) return runnerKey();
   if (g.bopsOrgoKey) return Promise.resolve(g.bopsOrgoKey);
   if (g.bopsOrgoKey === null && Date.now() - (g.bopsOrgoKeyMissAt ?? 0) < RETRY_MS) return Promise.resolve(null);
-  const load = (g.bopsOrgoKeyLoad ??= (onRunner() ? keyFile() : getSecret(KEY_ACCOUNT)).then((k) => {
+  const load = (g.bopsOrgoKeyLoad ??= getSecret(KEY_ACCOUNT).then((k) => {
     // A sign-in or sign-out while this read was out has the last word.
     if (g.bopsOrgoKeyLoad !== load) return g.bopsOrgoKey ?? null;
     g.bopsOrgoKeyLoad = undefined;

@@ -8,7 +8,7 @@ import { startCloud, stopCloud } from "./cloud-tunnel";
 import { checkMac } from "./mac";
 import { quitBotChromes } from "./local";
 import { orgo } from "./orgo";
-import { loadOrgoKey, orgoKey, orgoOrigin, signedInUser, signIn, type OrgoUser } from "./orgo-auth";
+import { loadOrgoKey, orgoKey, orgoKeyRejected, orgoOrigin, signedInUser, signIn, type OrgoUser } from "./orgo-auth";
 import { loopHere, onPostgres, StateLoadError } from "./persist";
 import { relayAfterSignIn, stopRelay } from "./relay";
 import { reattachFreeComputer, stopAllSessions } from "./sessions";
@@ -277,6 +277,7 @@ async function whoIs(apiKey: string): Promise<OrgoUser | "denied" | null> {
       cache: "no-store",
       signal: AbortSignal.timeout(10_000),
     });
+    if (res.status === 401) orgoKeyRejected(apiKey);
     if (res.status === 401 || res.status === 403) return "denied";
     if (!res.ok) return null;
     const p = (await res.json()) as { id?: string; email?: string; full_name?: string };

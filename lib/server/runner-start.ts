@@ -5,10 +5,13 @@ import { checkIdentity, IDENTITY_EVERY_MS, runnerComputer, startRunsOn } from ".
 /**
  * A computer's Bops runner starting (instrumentation.ts, BOPS_RUNNER=1; runner.ts says what it is). It
  * has no window to poll /api/state, which is what starts the Mac's loops, so it starts its own here, and
- * only those a runner runs (persist.ts RUNNER_LOOPS): its key from its file, a look that it's on its own
- * computer (again while a task of its own runs, and before it runs anything: runner.ts checkIdentity),
- * the user's state from Bops Cloud, then the routines timer, asking Orgo where the bots work, and saying
- * its computer is in use while a task of its own runs. Its threads and the mirror of its own routines
+ * only those a runner runs (persist.ts RUNNER_LOOPS): its key (its computer's own ORGO_API_KEY, which
+ * Orgo writes when the computer is made from a template that asks for it, or when the Mac sets the runner
+ * up on one without it: runner-key.ts reads it from the files Orgo writes, never a setting of the
+ * runner's, and again when Orgo turns it down), a look that it's on its own computer (again while a task
+ * of its own runs, and before it runs anything: runner.ts checkIdentity), the user's state from Bops
+ * Cloud, then the routines timer, asking Orgo where the bots work, and saying its computer is in use
+ * while a task of its own runs. Its threads and the mirror of its own routines
  * start from the timer, as they do on the Mac. The look comes before the state: a copy of the computer
  * (a clone starts its runner as the original's) that loaded the state would take the original runner's
  * live threads for its own and fail them (store.ts migrate), and save that.
@@ -20,7 +23,8 @@ const LOOPBACK = /^(127(?:\.\d{1,3}){3}|::1|localhost)$/i;
 /**
  * Why a runner won't start with these settings, or null when it may. It answers on loopback only, with
  * a window token (nothing has it: no request but the open ones gets in), keeps the state in Bops Cloud
- * (never a file or Postgres), knows its computer, is that computer as a device, and has its key file.
+ * (never a file or Postgres), knows its computer, and is that computer as a device. Its key isn't a
+ * setting: startRunner reads it from its computer.
  */
 export function runnerRefusal(env: Record<string, string | undefined>): string | null {
   if ((env.BOPS_UI_TOKEN ?? "").length < 16) return "BOPS_UI_TOKEN isn't set";
@@ -29,7 +33,6 @@ export function runnerRefusal(env: Record<string, string | undefined>): string |
   if (env.BOPS_DATABASE_URL || env.BOPS_SELF_HOSTED === "1") return "a runner keeps the state in Bops Cloud, not in Postgres or a file";
   if (!UUID.test(env.BOPS_RUNNER_COMPUTER ?? "")) return "BOPS_RUNNER_COMPUTER isn't a computer's id";
   if ((env.BOPS_DEVICE_SEED ?? "").toLowerCase() !== env.BOPS_RUNNER_COMPUTER!.toLowerCase()) return "BOPS_DEVICE_SEED isn't the computer's id";
-  if (!env.BOPS_ORGO_KEY_FILE) return "BOPS_ORGO_KEY_FILE isn't set";
   return null;
 }
 
@@ -52,7 +55,7 @@ export async function startRunner() {
   }
   const [{ loadOrgoKey }, { authStatus }, { getState, ownSession, stateReady }] = await Promise.all([import("./orgo-auth"), import("./orgo-sign-in"), import("./store")]);
   if (!(await loadOrgoKey())) {
-    console.error("[runner] not starting: no key in BOPS_ORGO_KEY_FILE (Orgo writes it when the Mac sets the runner up)");
+    console.error("[runner] not starting: no ORGO_API_KEY on this computer (Orgo writes it when the computer is made, or when the Mac sets the runner up)");
     process.exit(1);
   }
   // A copy of another computer stops here (checkIdentity takes its runner off), before it reads the state; no answer from Orgo asks again.

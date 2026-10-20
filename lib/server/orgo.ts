@@ -2,7 +2,8 @@ import "server-only";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { orgoHeaders } from "./app-version";
-import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
+import { loadOrgoKey, orgoKeyRejected, orgoOrigin } from "./orgo-auth";
+import { onRunner } from "./persist";
 import { RTC_SHRUNK_MS } from "@/lib/rtc";
 import { recordUsage } from "./usage";
 import { getState, stateEpoch, update } from "./store";
@@ -15,11 +16,14 @@ const base = () => `${orgoOrigin()}/api`;
 
 /**
  * The key Orgo calls run on: the signed-in user's (Sign in with Orgo, kept in the Keychain), else
- * ORGO_API_KEY (self-hosting), else the Orgo CLI's login in ~/.orgo/credentials.json.
+ * ORGO_API_KEY (self-hosting), else the Orgo CLI's login in ~/.orgo/credentials.json. A computer's runner
+ * uses only its computer's own key, read from the files Orgo writes it in (runner-key.ts): never one from
+ * its environment or a CLI login on that computer, which may be anyone's.
  */
 export async function apiKey(): Promise<string> {
   const signedIn = await loadOrgoKey();
   if (signedIn) return signedIn;
+  if (onRunner()) throw new Error("No ORGO_API_KEY on this computer");
   if (process.env.ORGO_API_KEY) return process.env.ORGO_API_KEY;
   try {
     const creds = JSON.parse(readFileSync(`${homedir()}/.orgo/credentials.json`, "utf8"));
@@ -100,12 +104,15 @@ async function answered<R>(url: string, init: RequestInit, timeoutMs: number, si
   if (signal?.aborted) throw signal.reason ?? new Error("Stopped");
   const timer = AbortSignal.timeout(timeoutMs);
   try {
+    const key = await apiKey();
     const res = await fetch(url, {
       ...init,
-      headers: { ...orgoHeaders(), ...(init.headers as Record<string, string>), Authorization: `Bearer ${await apiKey()}` },
+      headers: { ...orgoHeaders(), ...(init.headers as Record<string, string>), Authorization: `Bearer ${key}` },
       cache: "no-store",
       signal: signal ? AbortSignal.any([timer, signal]) : timer,
     });
+    // A runner's key turned down: its computer may have a new one (orgo-auth.ts).
+    if (res.status === 401) orgoKeyRejected(key);
     return { res, text: await read(res) };
   } catch (e) {
     if (signal?.aborted) throw signal.reason ?? new Error("Stopped");
@@ -186,6 +193,7 @@ export async function callOrgo<T>(
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),
     });
+    if (res.status === 401) orgoKeyRejected(key);
     return { status: res.status, json: (await res.json().catch(() => ({}))) as T };
   } catch {
     return null;

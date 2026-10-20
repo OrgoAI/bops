@@ -5,14 +5,15 @@
 // nothing on an answer a minute old, or from before a nap), the routines timer (routines.ts tick: each
 // Bops its own, a runner only once it's read the state and Orgo again, none once a newer Bops wrote the
 // state), making sure it's on its own computer (checkIdentity: a copy of the computer takes its runner
-// off) and the routines mirror (routine-sync.ts: how each runs and whether it needs the Mac; a runner
+// off, its program and wrapper only, never the computer's Orgo key, which Orgo replaces) and the routines mirror (routine-sync.ts: how each runs and whether it needs the Mac; a runner
 // sends only its own, never with deleteMissing).
 //
 // The store, Orgo, the nap detector and the modules a run talks to are fakes (below), so nothing reaches a
 // real service or the user's data.
 // Usage: node --conditions=react-server scripts/test-runner.mjs
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -199,7 +200,8 @@ function reset() {
   asMac();
   fresh();
   R.runnerForTests.reset();
-  R.runnerForTests.identity({ nonceDir, leave: () => void left++ });
+  // What a copy takes off, in a folder of the test's (never the real paths).
+  R.runnerForTests.identity({ nonceDir, leave: () => void left++, copyFiles: [join(nonceDir, "bops-runner.conf"), join(nonceDir, "run.sh")] });
   left = 0;
   orgo.here = null;
   orgo.bash.length = 0;
@@ -629,6 +631,24 @@ await check("a runner makes sure it's on its own computer: the same word back ru
   assert.equal(await R.checkIdentity(), "unknown");
   assert.equal(left, 1, "the real runner stays");
   assert.match(orgo.bash.at(-1).command, /echo __BOPS_NONCE_END__/, "a read that ran to its end says so");
+});
+
+await check("a copy takes off only its runner's program and the script that starts it, never the computer's Orgo key", async () => {
+  reset();
+  asRunner(C1);
+  const [conf, wrapper, secrets, env] = ["bops-runner.conf", "run.sh", ".orgo-secrets.env", ".env"].map((f) => join(nonceDir, f));
+  for (const f of [conf, wrapper, secrets, env]) writeFileSync(f, f === secrets || f === env ? "export ORGO_API_KEY=sk_the_computers_own\n" : "x");
+  orgo.here = C2;
+  assert.equal(await R.checkIdentity(), "copy");
+  assert.equal(left, 1, "and it's gone");
+  assert.ok(!existsSync(conf) && !existsSync(wrapper), "its program and its script taken off");
+  assert.ok(existsSync(secrets) && existsSync(env), "the key files stay: Orgo gives a copy its own key, or takes it off");
+  assert.deepEqual(R.COPY_TAKES_OFF, ["/etc/supervisor/conf.d/bops-runner.conf", "/opt/bops/runner/run.sh"]);
+  // The first command on a new copy (sessions.ts ensureComputer): the same, and shell that parses.
+  assert.match(R.RUNNER_SCRUB, /rm -f \/etc\/supervisor\/conf\.d\/bops-runner\.conf \/opt\/bops\/runner\/run\.sh;/);
+  assert.ok(!/orgo-secrets|\/root\/\.env|ORGO_API_KEY|\/root\/\.bops\/runner\/key/.test(R.RUNNER_SCRUB), R.RUNNER_SCRUB);
+  assert.equal(spawnSync("bash", ["-n"], { input: R.RUNNER_SCRUB }).status, 0);
+  for (const f of [secrets, env]) rmSync(f, { force: true });
 });
 
 await check("a runner runs nothing until it's sure which computer it's on, and looks again after a nap", async () => {

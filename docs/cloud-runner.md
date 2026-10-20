@@ -13,9 +13,27 @@ of the user's and every runner go by the same one.
 
 **The runner** is this same server, on the bot's computer (`BOPS_RUNNER=1`). It keeps the user's state
 where the Mac does, in Bops Cloud, as a device of its own (`BOPS_DEVICE_SEED` is the computer's id). It
-signs in with a key Orgo made for it and wrote on that computer (`/root/.bops/runner/key`, root only),
-answers on 127.0.0.1:3210 only, and has a window token nobody has. It won't start otherwise
-(`lib/server/runner-start.ts`).
+signs in with its computer's own Orgo key (below), answers on 127.0.0.1:3210 only, and has a window token
+nobody has. It won't start otherwise (`lib/server/runner-start.ts`: "no ORGO_API_KEY on this computer").
+
+**Its key** is the computer's, not Bops': an account-wide Orgo key named "Computer key for <computer>",
+which Orgo makes for that one computer, writes there as `ORGO_API_KEY`, and revokes when the computer is
+deleted (orgo-web keeps which key is whose, `instance_details.orgo_key_id`). It gets there one of two ways:
+
+- When the computer is made, from a template that asks for it (`secrets: orgo_api_key`; bops-base 0.1.9
+  on). Metal writes `export ORGO_API_KEY='…'` into `/root/.env`.
+- When the Mac sets a runner up on a computer that has none (made before that template, or its key taken
+  off): `PUT /api/computers/{id}/orgo-key`, no body. Orgo writes it into `/root/.orgo-secrets.env` (0600,
+  sourced by `/root/.env`) and takes the line made with the computer out of `/root/.env`; the Mac only
+  hears its id.
+
+The runner reads it from those files itself (`lib/server/runner-key.ts`): `/root/.orgo-secrets.env`
+first, then `/root/.env`, the first that sets it wins, shell quoting as Orgo writes it, and only from a
+file nobody but root can read (no read for group or others, or in `/root`, which is 0700). It's never in
+the runner's settings, its wrapper or its supervisord program, and never logged. Orgo may write a new one
+later (a restore in place, or a copy made from the computer, which gives both a new one), so when Orgo
+answers 401 the runner reads the files again (at most every 5 seconds, twice as long each time they have
+the same one, up to 5 minutes) and goes on with the new one, in Bops Cloud too.
 
 **What it runs** is an allow-list (`lib/server/persist.ts` `RUNNER_LOOPS`): the routines timer, the
 mirror of its own routines to Orgo, the threads it started, and telling Orgo its computer is in use
@@ -51,17 +69,23 @@ routine comes due, and its idle suspend leaves a computer up while one is due wi
 **Setting a runner up** (from the Mac only, `lib/server/runner-install.ts`):
 
 1. Only in Cloud, for a computer some bot works on as both Orgo's map and the Mac have it, and never
-   where someone else has Full access to the workspace (they're root there; the key is the whole
-   account's): "Couldn't start: someone else has Full access to this workspace", and its routines stay
-   on the Mac.
+   where someone else can use the workspace (they're root there, or could become it; the key is the
+   whole account's): "Couldn't start: someone else can use this workspace", and its routines stay on the
+   Mac. The Mac looks first at what Orgo's members list shows (any other member, View only too, or an
+   invite still open); Orgo, which counts a live share link too, has the last word (409
+   `full_access_member`). Neither is waited on: each look asks again.
 2. The server bundle the app ships (`scripts/server-bundle.sh`, run by `scripts/release.sh`: the
    release build, stripped and checked for leaked secrets, in `Resources/runner`; on a dev Mac the
    newest in `dist-runner/`) goes up through Orgo's file uploads to `/opt/bops/runner/incoming`. One
    command then checks its sha256, unpacks it to `/opt/bops/runner/<version>-<BUILD_ID>` and points
    `current` at it, under a lock.
-3. Its key: `PUT /api/computers/{id}/bops-runner-key`, once per computer. Orgo writes it on the
-   computer itself and revokes the computer's earlier runner keys; the Mac only keeps its id
-   (`runners[computer].keyId`), which other Macs reuse. Any Mac of the user's revokes it.
+3. Its key: the Mac asks the computer whether a file has `ORGO_API_KEY` (grep, never printed). It has one
+   (made with it, or given it before): left as it is. None: `PUT /api/computers/{id}/orgo-key`, and the
+   state says Bops gave it (`runners[computer].keyMade`, with `keyId` to show), so Bops takes it back when
+   it stops the runner. Orgo keeps one key per computer and revokes an earlier one itself. Refused: "someone
+   else can use this workspace" (409), "only the workspace's owner can set a runner up there" (403
+   `owner_only`), "Orgo can't set up a runner on it yet" (404 or 405, an Orgo from before the route),
+   "a runner needs a Linux computer" (422).
 4. A supervisord program (Orgo computers have no systemd), `/etc/supervisor/conf.d/bops-runner.conf`,
    starts `/opt/bops/runner/run.sh`, which sets the runner's settings (none secret) and makes a fresh
    window token each start. No command sent carries a key or a token.
@@ -77,7 +101,9 @@ later.
 
 A bot's computer copied from its main bot's is a clone when the main computer has a runner (a fork
 carries on from the running computer's memory, runner and all), and has the runner taken off as its
-first command. A runner checks it's on its own computer as it starts (before it reads the state, so a
+first command (its supervisord program and its wrapper, never its key). Orgo gives a copy (a fork, a
+clone, one restored as new) a key of its own, or none where it may not hold one, and revokes the
+source's from the copy, so no key is live on two computers. A runner checks it's on its own computer as it starts (before it reads the state, so a
 copy never takes the original's threads for its own), right before each run, and every 5 minutes while
 a task of its own runs (a word it writes, read back through Orgo from the computer it was set up on): a
 copy takes its runner off and stops. A read that didn't finish (a slow computer's command timing out)
@@ -91,11 +117,14 @@ computer is up, the Mac asks whether the runner's program is still there (at mos
 it's Couldn't start, and its routines go back to the Mac.
 
 **Stopping one**: switching to This Mac (or the bots to browsers on the Mac), the computer deleted, or no
-bot working on it any more. Its program and key file are taken off its computer (one asleep isn't woken
-for it: it can't run anything once its key is revoked), its key is revoked by whichever Mac stops it,
-its threads end with a plain reason (as the Mac's, so a last save from the runner can't bring them
-back), and it's taken out of the state once it's off its computer and its key is revoked. Until both
-are done it stays Stopping, and the next look tries again.
+bot working on it any more. Its program and wrapper are taken off its computer (one asleep isn't woken
+for it, and runs nothing meanwhile: the state says it's Stopping), its threads end with a plain reason
+(as the Mac's, so a last save from the runner can't bring them back), and Bops takes back only what it
+gave: when `keyMade`, whichever Mac stops it sends `DELETE /api/computers/{id}/orgo-key` (200 or 404 is
+done), which revokes it and takes it off a computer that's up. A key the computer came with stays: it's
+the computer's, and Orgo revokes it with the computer. A state from before `keyMade` with a `keyId` (the
+old `bops-runner-key` route) counts as `keyMade`. It's taken out of the state once it's off its computer
+and that key is revoked; until then it stays Stopping, and the next look tries again.
 
 ## Not in this version
 
@@ -111,6 +140,19 @@ are done it stays Stopping, and the next look tries again.
 - Checking a runner's health while nothing is due: the Mac checks it when it sets it up, supervisord
   starts it again when it stops, and the Mac only asks again when one of its routines is overdue (above).
 
+## Release steps
+
+Before this Bops ships:
+
+1. orgo-web: migrations `20261077` and `20261078` applied, and `feat/orgo-key-at-create` (the
+   computer's own key: made at create for a template that asks for it, `PUT`/`DELETE
+   /api/computers/{id}/orgo-key`, a copy's own key, the revoke with the computer) merged and deployed.
+   The old `/api/computers/{id}/bops-runner-key` route is gone.
+2. Publish bops-base 0.1.9 with `orgo_api_key` (`node orgo/bops-base.mjs publish`), then bump
+   `BOPS_TEMPLATE` in `lib/server/orgo.ts` and orgo-web's curated ref (`lib/curated-templates.ts`) to
+   `system/bops-base@0.1.9`. Until then the Mac's `PUT` gives each computer its key when it sets a runner
+   up.
+
 ## Release blockers
 
 **Older apps run the runners' routines too.** The state level is 4 (`cloud/protocol.ts`), so Bops
@@ -122,8 +164,9 @@ ships as the default, raise Bops Cloud's `bops.app_policy.block_below` to this r
 call but its state's and its runs fail instead of running a second time.
 
 **The runner's key is the whole account's.** Orgo can't yet make a key that does only what a runner
-needs, so each runner has an account-wide key (named "Bops runner on <bot>", reserved, never handed to
-Orgo's own agents). The bots' agents run as root on the same computer and can be steered by the web
-pages they read, so a page could get a bot to read that key, and with it the whole Orgo account
-(computers, workspaces, members, AI credit). Cloud mode must not ship as the default until the runner
-has a narrow, device-bound, revocable credential, or the bots no longer run as root beside it.
+needs, so each computer has an account-wide key of its own ("Computer key for <computer>", never handed
+to Orgo's own agents, and it can't make or delete keys), and from bops-base 0.1.9 on every Bops computer
+has one whether or not a runner runs there. The bots' agents run as root on the same computer and can be
+steered by the web pages they read, so a page could get a bot to read that key, and with it the whole
+Orgo account (computers, workspaces, members, AI credit). Cloud mode must not ship as the default until
+the runner has a narrow, device-bound, revocable credential, or the bots no longer run as root beside it.

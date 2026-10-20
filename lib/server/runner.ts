@@ -35,16 +35,26 @@ import { getState, pullState, statePulledAt } from "./store";
 export const runnerComputer = () => process.env.BOPS_RUNNER_COMPUTER || undefined;
 export { onRunner };
 
-/** Where a runner lives on its computer (runner-install.ts writes them): its supervisord program, the script that starts it, and its key (written by Orgo). */
+/**
+ * Where a runner lives on its computer (runner-install.ts writes them): its supervisord program and the
+ * script that starts it. Its key isn't Bops': it's the computer's own ORGO_API_KEY, in the files Orgo
+ * writes it in (runner-key.ts).
+ */
 export const RUNNER_CONF = "/etc/supervisor/conf.d/bops-runner.conf";
 export const RUNNER_WRAPPER = "/opt/bops/runner/run.sh";
-export const RUNNER_KEY_FILE = "/root/.bops/runner/key";
+/**
+ * What a copy of a computer with a runner takes off (RUNNER_SCRUB, leaveCopy): the runner's program and
+ * the script that starts it, and never the computer's Orgo key. A copy's disk comes with its source's
+ * key, and Orgo itself revokes that one and gives the copy a key of its own, or none where it may not
+ * hold one (orgo-web lib/computer-orgo-key.ts), so no key is ever live on two computers.
+ */
+export const COPY_TAKES_OFF: readonly string[] = [RUNNER_CONF, RUNNER_WRAPPER];
 /**
  * The first command on a new copy of a computer (sessions.ts ensureComputer, for a bot's own computer
- * made from its main bot's): the copied runner stopped and taken off, with its key, so the copy never
- * runs the other computer's routines as that computer. A runner is set up there afresh, with its own.
+ * made from its main bot's): the copied runner stopped and taken off, so the copy never runs the other
+ * computer's routines as that computer. A runner is set up there afresh (runner-install.ts).
  */
-export const RUNNER_SCRUB = `supervisorctl stop bops-runner >/dev/null 2>&1; rm -f ${RUNNER_CONF} ${RUNNER_WRAPPER} ${RUNNER_KEY_FILE}; supervisorctl update >/dev/null 2>&1; true`;
+export const RUNNER_SCRUB = `supervisorctl stop bops-runner >/dev/null 2>&1; rm -f ${COPY_TAKES_OFF.join(" ")}; supervisorctl update >/dev/null 2>&1; true`;
 
 /** A new task's words that put it on the user's Mac (where.ts chooseWhere), and a routine's (pinnedToMac). */
 export const MAC_WORDS = /\b(on|from|using|use|with) my (mac|macbook|laptop|computer)\b|\blocally\b|\bon this mac\b/i;
@@ -98,8 +108,9 @@ const g = globalThis as unknown as {
     /** By routine: on the Mac, when it was last seen with a computer's runner, and which; on a runner, when it was last seen as not its own (handedOver). */
     seen?: Map<string, { at: number; from?: string }>;
     checking?: Promise<IdentityLook>;
-    /** Tests: where the word is written, and what a copy does instead of leaving. */
+    /** Tests: where the word is written, what a copy takes off (its runner's files elsewhere), and what it does instead of leaving. */
     nonceDir?: string;
+    copyFiles?: readonly string[];
     leave?: () => void;
   };
 };
@@ -241,9 +252,10 @@ const NONCE_END = "__BOPS_NONCE_END__";
  * and every IDENTITY_EVERY_MS while a task of its own runs (never while idle: the read is a command on the
  * computer, which counts as using it), it writes a fresh random word here and reads it back through
  * Orgo from runnerComputer(). Its word there: it's there. Another, or none, in a read that ran to its
- * end: this is a copy, which takes its runner off (leaveCopy) and stops. No answer from Orgo, or a read
- * that didn't finish (a slow computer's command timing out), proves nothing either way; until a look
- * says it's there, it runs nothing (runnerReady).
+ * end: this is a copy, which takes its runner off (leaveCopy) and stops; its key stays, as Orgo gives a
+ * copy its own or takes it off. No answer from Orgo, or a read that didn't finish (a slow computer's
+ * command timing out), proves nothing either way; until a look says it's there, it runs nothing
+ * (runnerReady).
  */
 export function checkIdentity(): Promise<IdentityLook> {
   box.checking ??= lookIdentity()
@@ -275,11 +287,11 @@ async function lookIdentity(): Promise<IdentityLook> {
   return "same";
 }
 
-/** A copy of a runner's computer: its runner taken off (its program, the script that starts it, its key), then gone, saving nothing. */
+/** A copy of a runner's computer: its runner taken off (its program and the script that starts it: COPY_TAKES_OFF), then gone, saving nothing. */
 function leaveCopy() {
   console.error("[runner] this computer is a copy of the one this runner was set up on: taking the runner off it");
+  for (const f of box.copyFiles ?? COPY_TAKES_OFF) rmSync(f, { force: true });
   if (box.leave) return box.leave();
-  for (const f of [RUNNER_CONF, RUNNER_WRAPPER, process.env.BOPS_ORGO_KEY_FILE || RUNNER_KEY_FILE]) rmSync(f, { force: true });
   try {
     spawn("supervisorctl", ["update"], { detached: true, stdio: "ignore" }).unref();
   } catch {}
@@ -389,7 +401,7 @@ export const runnerForTests = {
     if (ago === undefined) box.seen?.delete(routineId);
     else (box.seen ??= new Map()).set(routineId, { ...x, at: Date.now() - ago });
   },
-  identity: (o: { nonceDir?: string; leave?: () => void }) => Object.assign(box, o),
+  identity: (o: { nonceDir?: string; copyFiles?: readonly string[]; leave?: () => void }) => Object.assign(box, o),
   hear: (user: string, to: RunsOn, opts: { ago?: number; macAgo?: number } = {}) => {
     hear(user, to);
     if (box.heard && opts.ago) box.heard.at -= opts.ago;
