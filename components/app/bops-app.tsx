@@ -317,7 +317,8 @@ function Bops({ state }: { state: AppState | null }) {
     .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId))
     .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)))
     // Skills are this Mac's folders and need no account, so a Knowledge tab on Skills stays without one.
-    .filter((t) => t.kind !== "memory" || (t.ws === currentWorkspace(state) && (memory || t.category === "skills" || t.category === "apps")))
+    // Knowledge has no Apps any more (Apps are the apps bots make, in the footer): a tab saved on it closes.
+    .filter((t) => t.kind !== "memory" || (t.ws === currentWorkspace(state) && (t.category as string) !== "apps" && (memory || t.category === "skills")))
     // Routines shows its own workspace's bots only: another workspace's tab goes on a switch.
     .filter((t) => t.kind !== "autopilot" || t.ws === currentWorkspace(state))
     // The Apps home is a workspace's, and an app's tab goes with the app.
@@ -480,8 +481,8 @@ function Bops({ state }: { state: AppState | null }) {
       (t) => ({ ...t, section, focus: item, focusAt, bot: bot === undefined && t.kind === "autopilot" ? t.bot : (bot ?? undefined) }) as PanelTab,
     );
   };
-  /** Skills or Apps (skills.tsx), kinds in Knowledge: the Knowledge tab on the one asked for ("skill:<slug>" or "app:<slug>"). */
-  const openSkills = (item?: string) => openMemory({ category: item?.startsWith("app:") ? "apps" : "skills", focus: item });
+  /** Skills (skills.tsx), in Knowledge: the Knowledge tab on the one asked for ("skill:<slug>"). */
+  const openSkills = (item?: string) => openMemory({ category: "skills", focus: item });
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
   /** An app a bot made, in its tab (one per app), and every app as tiles (one tab per workspace). */
   const openMadeApp = (appId: string) => openTab((t) => t.kind === "made-app" && t.appId === appId, () => ({ id: tabId(), kind: "made-app", appId }));

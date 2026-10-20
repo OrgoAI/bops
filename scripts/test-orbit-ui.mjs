@@ -316,18 +316,8 @@ await test("Skills and Apps, kinds in Knowledge: Skills chip after Issues with i
   assert.match(t, /Standup post/);
   assert.ok(!/Invoice total/.test(t), "apps are on their own page");
   assert.match(t, /Draft/);
-  // Opened on Apps: only the apps, its chip the one picked.
-  const appsHtml = renderToStaticMarkup(h(MemoryView, { state, user: "u1", ws: "w1", category: "apps", onCategory: noop, onClose: noop }));
-  t = text(appsHtml);
-  assert.match(t, /^ ?Apps Programs and tools/);
-  // The Apps chip is hidden in the prod build for now.
-  assert.ok(!/aria-pressed="[^"]*"[^>]*>Apps/.test(appsHtml));
-  assert.match(t, /Invoice total/);
-  assert.ok(!/Standup post/.test(t));
-  // No apps: says so (an empty page, not other sections).
-  const noApps = { ...state, workspaces: [{ ...state.workspaces[0], apps: [] }] };
-  t = text(renderToStaticMarkup(h(MemoryView, { state: noApps, user: "u1", ws: "w1", category: "apps", onCategory: noop, onClose: noop })));
-  assert.match(t, /No apps yet\./);
+  // Knowledge has no Apps (Apps are the apps bots make, from the footer): no chip, and no page for them here.
+  assert.ok(!/>Apps</.test(html), "no Apps chip in Knowledge");
   // No drafts: only the count.
   const published = { ...state, workspaces: [{ ...state.workspaces[0], skills: [ref("skill", "standup-post", "Standup post")] }] };
   t = text(renderToStaticMarkup(h(MemoryView, { state: published, user: "u1", ws: "w1", category: "skills", onCategory: noop, onClose: noop })));
@@ -337,8 +327,6 @@ await test("Skills and Apps, kinds in Knowledge: Skills chip after Issues with i
   t = text(renderToStaticMarkup(h(MemoryView, { state: { ...state, account: undefined }, ws: "w1", category: "skills", onCategory: noop, onClose: noop })));
   assert.match(t, /Standup post/);
   assert.ok(!/Issues/.test(t), "no chips without an account");
-  t = text(renderToStaticMarkup(h(MemoryView, { state: { ...state, account: undefined }, ws: "w1", category: "apps", onCategory: noop, onClose: noop })));
-  assert.match(t, /Invoice total/);
 });
 
 await test("Routines in the footer: a round button, with how many monitors have news", async () => {
