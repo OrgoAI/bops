@@ -10,7 +10,7 @@ import { appNameOf, askable, autopilotOf, filterRoutines, monitorNeedsYou, Routi
 import { comingWhen, useClock } from "./routine-week";
 import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
 import { Mascot, Spinner } from "./mascot";
-import { Chevron, small, undash } from "./side-group";
+import { Chevron, QuestionScope, small, undash } from "./side-group";
 import { post, teamOf, useNow } from "./ui";
 import { watchName } from "./watch-overlay";
 
@@ -774,7 +774,8 @@ export { small };
  * What every bot runs from one Connected App or key: its schedules and monitors (when, next run, how the
  * last went), grouped by bot when more than one runs some, each with a trash at its end and opening in
  * place to run, pause, edit or delete it, as on the Routines page (a check deleted there is the app back
- * at Only when asked, and the row's count goes down with it). Nothing when none came from it.
+ * at Only when asked, and the row's count goes down with it), one question at a time across its bots'
+ * lists. Nothing when none came from it.
  */
 export function AppRoutines({ state, app, onOpenWatch }: { state: AppState; app: string; onOpenWatch: (w: Watch) => void }) {
   useNow(30_000);
@@ -787,23 +788,25 @@ export function AppRoutines({ state, app, onOpenWatch }: { state: AppState; app:
     .map((b) => ({ bot: b, schedules: shown.schedules.filter((r) => r.botId === b.id), monitors: shown.monitors.filter((w) => w.botId === b.id) }))
     .filter((g) => g.schedules.length + g.monitors.length);
   return (
-    <div ref={list} data-rows className="flex flex-col gap-2">
-      <span data-list-heading tabIndex={-1} className="flex items-center gap-1.5 px-2 text-[12px] font-medium leading-4 text-[#6B6B6B] outline-none">
-        Routines <span className="font-normal tabular-nums text-[#9A9A98]">{total}</span>
-        {needs > 0 && <span className="rounded-full bg-[#FEF3F2] px-2 py-px text-[11px] font-medium leading-4 text-[#B42318]">{needs === 1 ? "1 needs you" : `${needs} need you`}</span>}
-      </span>
-      {groups.map((g) => (
-        <div key={g.bot.id} className="flex flex-col gap-1.5">
-          {groups.length > 1 && (
-            <span className="flex items-center gap-1.5 px-2 text-[11.5px] leading-4 text-[#9A9A98]">
-              <Mascot botId={g.bot.id} color={g.bot.color} size={14} antenna={false} />
-              {g.bot.name}
-            </span>
-          )}
-          <RoutineList state={state} schedules={g.schedules} monitors={g.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} />
-        </div>
-      ))}
-    </div>
+    <QuestionScope reset={openId ?? ""}>
+      <div ref={list} data-rows className="flex flex-col gap-2">
+        <span data-list-heading tabIndex={-1} className="flex items-center gap-1.5 px-2 text-[12px] font-medium leading-4 text-[#6B6B6B] outline-none">
+          Routines <span className="font-normal tabular-nums text-[#9A9A98]">{total}</span>
+          {needs > 0 && <span className="rounded-full bg-[#FEF3F2] px-2 py-px text-[11px] font-medium leading-4 text-[#B42318]">{needs === 1 ? "1 needs you" : `${needs} need you`}</span>}
+        </span>
+        {groups.map((g) => (
+          <div key={g.bot.id} className="flex flex-col gap-1.5">
+            {groups.length > 1 && (
+              <span className="flex items-center gap-1.5 px-2 text-[11.5px] leading-4 text-[#9A9A98]">
+                <Mascot botId={g.bot.id} color={g.bot.color} size={14} antenna={false} />
+                {g.bot.name}
+              </span>
+            )}
+            <RoutineList state={state} schedules={g.schedules} monitors={g.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} />
+          </div>
+        ))}
+      </div>
+    </QuestionScope>
   );
 }
 

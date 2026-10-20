@@ -12,7 +12,9 @@
 // an app's list ends with a trash beside the button that opens it, asking in place; what's sent; a
 // Connected App's check saying its How often goes back to Only when asked, and the app's count after;
 // where focus goes; a refusal said in place; and an opened row's actions above what it does, cut to four
-// lines with Show all.
+// lines with Show all. The trash sits on the chevron's place, so a hidden one takes no room from the name;
+// one question at a time on the page (its week too) and in an app's list, closed as a row opens or shuts;
+// Cancel's focus when the row it was asked in has shut; and a check named by the account it looks at.
 //
 // Nothing reaches a server (fetch is a fake). The .tsx files are compiled with the TypeScript in node_modules as they load.
 // Usage: node scripts/test-app-routines-ui.mjs   (not with --conditions=react-server: these are client components)
@@ -57,7 +59,7 @@ globalThis.matchMedia = () => ({ matches: false });
 globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
 
 const { AppRoutines, BotRoutines, routinesOfApp, routineCount } = await import(pathToFileURL(`${root}/components/app/routines.tsx`).href);
-const { AutopilotPage, RoutinesEmpty } = await import(pathToFileURL(`${root}/components/app/autopilot.tsx`).href);
+const { AutopilotPage, checkedOf, RoutineList, RoutinesEmpty } = await import(pathToFileURL(`${root}/components/app/autopilot.tsx`).href);
 const { ConnectStep, checkLine, grantOf, HOW_OFTEN } = await import(pathToFileURL(`${root}/components/app/apps.tsx`).href);
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { createElement: h } = await import("react");
@@ -424,6 +426,14 @@ await test("the page: every row ends with a trash that says what it deletes, bes
       assert.ok(trash.parentElement.parentElement === head.parentElement, "beside it, at the row's end");
       const show = trash.parentElement.className;
       for (const c of ["opacity-0", "group-hover/row:opacity-100", "group-has-[:focus-visible]/row:opacity-100", "[@media(hover:none)]:opacity-100"]) assert.ok(show.includes(c), c);
+      // Over the chevron's place, so a hidden trash takes no room from the name; on touch, where it always
+      // shows, the button keeps room for it with the chevron before it.
+      assert.match(show, /\babsolute\b/);
+      assert.ok(/\bpr-3\.5\b/.test(head.className) && !/\bpr-1\.5\b/.test(head.className), "the head's own padding, as before");
+      assert.ok(head.className.includes("[@media(hover:none)]:pr-[42px]"));
+      const chevron = head.lastElementChild;
+      assert.ok(chevron.querySelector("svg"), "the chevron, last in the head");
+      for (const c of ["group-hover/row:opacity-0", "group-has-[:focus-visible]/row:opacity-0", "[@media(hover:none)]:!opacity-100"]) assert.ok(chevron.className.includes(c), `the chevron gives way: ${c}`);
       assert.ok(trash.querySelector("svg"), "the Vault's trash");
       labels.push([trash.getAttribute("aria-label"), trash.getAttribute("data-tip")]);
     }
@@ -601,6 +611,133 @@ await test("an app's routines (Apps & logins): a trash on each row; its check sa
     await m.done();
     offline();
   }
+});
+
+await test("one question at a time on the page: asking on another row, or in the week, closes the one open; opening or shutting a row closes it", async () => {
+  const calls = server();
+  const base = listed();
+  // One that runs every hour has lines in the week.
+  const s = { ...base, routines: [...base.routines, routine("h", "bot_main", "Hourly look", undefined, { schedule: { kind: "every", minutes: 60 }, nextRunAt: now + 600_000 })] };
+  const m = await mount(pageEl(s));
+  const weekLine = () => m.box.querySelector("li[data-routine] button[data-line-trash]");
+  const asking = () => (m.box.textContent.match(/won't run again|stops checking it/g) ?? []).length;
+  try {
+    await click(trashOf(row(m.box, "a")));
+    await click(trashOf(row(m.box, "b")));
+    assert.equal(asking(), 1, "one question");
+    assert.match(row(m.box, "b").textContent, /Delete this schedule\?/, "on the row asked last");
+    assert.doesNotMatch(row(m.box, "a").textContent, /Delete this schedule\?/);
+    await click(trashOf(row(m.box, "w1")));
+    assert.equal(asking(), 1, "a monitor's closes a schedule's");
+    assert.match(row(m.box, "w1").textContent, /Stop watching this\?/);
+
+    // Today, or the first day with a run (close to midnight, today may have none left).
+    for (const day of m.box.querySelectorAll('[role="tab"]')) {
+      if (weekLine()) break;
+      await click(day);
+    }
+    assert.equal(asking(), 1, "another day in the week leaves the list's question");
+    const line = weekLine();
+    assert.ok(line, "a line in the week");
+    await click(line);
+    assert.equal(asking(), 1, "the week's closes the list's");
+    assert.match(line.closest("li").textContent, /It won't run again/);
+    await click(trashOf(row(m.box, "a")));
+    assert.equal(asking(), 1, "and the list's the week's");
+    assert.match(row(m.box, "a").textContent, /Delete this schedule\?/);
+
+    // Opening its row closes it; asked inside the opened row, shutting the row closes it too.
+    const head = row(m.box, "a").querySelector("[data-row-head]");
+    await click(head);
+    assert.equal(head.getAttribute("aria-expanded"), "true");
+    assert.equal(asking(), 0, "opened: the actions, no question");
+    await click(button(row(m.box, "a"), "Delete"));
+    assert.equal(asking(), 1);
+    await click(head);
+    assert.equal(head.getAttribute("aria-expanded"), "false");
+    assert.equal(asking(), 0, "shut: gone with it");
+    // Another row opened while one asks: it closes.
+    await click(trashOf(row(m.box, "c")));
+    await click(row(m.box, "b").querySelector("[data-row-head]"));
+    assert.equal(asking(), 0);
+    assert.deepEqual(calls, [], "nothing sent");
+  } finally {
+    await m.done();
+    offline();
+  }
+});
+
+await test("one deleting while another row asks: the first is still deleted, and focus stays on the question asked meanwhile", async () => {
+  // Bops answers only when told to.
+  const calls = [];
+  let answer = noop;
+  globalThis.fetch = (url, init = {}) => {
+    calls.push({ url: String(url), method: init.method ?? "GET", body: init.body ? JSON.parse(init.body) : undefined });
+    return new Promise((r) => (answer = () => r({ ok: true, status: 200, json: async () => ({ ok: true }) })));
+  };
+  const m = await mount(pageEl(listed()));
+  try {
+    const a = row(m.box, "a");
+    await click(trashOf(a));
+    await click(button(a, "Delete"));
+    await click(trashOf(row(m.box, "b")));
+    const cancel = doc.activeElement;
+    assert.ok(cancel.textContent === "Cancel" && row(m.box, "b").contains(cancel), "b's question");
+    await act(async () => answer());
+    await sleep(350);
+    assert.deepEqual(calls.map((x) => x.body), [{ id: "a" }]);
+    assert.ok(doc.activeElement === cancel, "still there");
+    assert.match(row(m.box, "b").textContent, /Delete this schedule\?/);
+  } finally {
+    await m.done();
+    offline();
+  }
+});
+
+await test("Cancel on a question asked inside a row that has shut since: focus goes to the row's trash, not the page", async () => {
+  server();
+  const s = state([routine("a", "bot_main", "Morning inbox", undefined), routine("b", "bot_main", "Weekly report", undefined)]);
+  // A list on its own (no page around it to close the question as the row shuts).
+  const list = (openId) => h(RoutineList, { state: s, schedules: s.routines, monitors: [], openId, onToggle: noop, onOpenWatch: noop });
+  const m = await mount(list("a"));
+  try {
+    const a = row(m.box, "a");
+    await click(button(a, "Delete"));
+    assert.match(a.textContent, /Delete this schedule\?/);
+    await m.again(list(null));
+    assert.equal(a.querySelector("[data-row-head]").getAttribute("aria-expanded"), "false");
+    await click(button(a, "Cancel"));
+    assert.ok(doc.activeElement === trashOf(a), "its trash");
+  } finally {
+    await m.done();
+    offline();
+  }
+});
+
+await test("an app's routines: one question across its bots' lists; a check names the account it looks at, as How often is the account's", async () => {
+  server();
+  const work = { id: "ca_1", app: "gmail", appName: "Gmail", label: "Work", name: "me@work.com", status: "active", at: now, workspaceId: "ws_main" };
+  const home = { id: "ca_2", app: "gmail", appName: "Gmail", name: "me@home.com", status: "active", at: now, workspaceId: "ws_main" };
+  const check = (id, account, title) => routine(id, "bot_main", title, "gmail", { source: { app: "gmail", template: "check", account }, schedule: { kind: "every", minutes: 60 } });
+  const starter = routine("st", "bot_two", "Weekly follow ups", "gmail");
+  const s = { ...state([check("k1", "ca_1", "Check Gmail (Work)"), check("k2", "ca_2", "Check Gmail"), starter]), accounts: [work, home] };
+  const m = await mount(h(AppRoutines, { state: s, app: "gmail", onOpenWatch: noop }));
+  const asking = () => (m.box.textContent.match(/won't run again/g) ?? []).length;
+  try {
+    await click(trashOf(row(m.box, "k1")));
+    assert.match(row(m.box, "k1").textContent, /Delete this schedule\? It won't run again, and Gmail \(Work\)'s How often goes back to Only when asked\./, "by its label");
+    await click(trashOf(row(m.box, "k2")));
+    assert.equal(asking(), 1);
+    assert.match(row(m.box, "k2").textContent, /and Gmail \(me@home\.com\)'s How often/, "no label, and another account in the app: by its name");
+    await click(trashOf(row(m.box, "st")));
+    assert.equal(asking(), 1, "the other bot's list too");
+  } finally {
+    await m.done();
+    offline();
+  }
+  assert.equal(checkedOf({ ...s, accounts: [{ ...home }] }, { app: "gmail", template: "check", account: "ca_2" }), "Gmail", "the only one, unlabeled: the app");
+  assert.equal(checkedOf(s, { app: "gmail", template: "check", account: "gone" }), "Gmail", "an account that's gone: the app");
+  assert.equal(checkedOf({ ...s, accounts: [{ id: "open:hackernews", app: "hackernews", appName: "Hacker News", status: "active", at: now }] }, { app: "hackernews", template: "check", account: "open:hackernews" }), "Hacker News");
 });
 
 console.log(`app routines ui: ${passed} passed`);

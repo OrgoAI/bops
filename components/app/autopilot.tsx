@@ -4,7 +4,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
 import { appNameFor, canonicalApp, CHECK_TEMPLATE, CHECK_TIMES, sameApp, templateById } from "@/lib/routine-catalog";
-import { botChatId, DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
+import { botChatId, DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type RoutineSource, type Session, type Watch } from "@/lib/types";
 import { Fold } from "./fold";
 import { Mascot } from "./mascot";
 import {
@@ -14,10 +14,12 @@ import {
   FIRST,
   focusAfterRemove,
   InlineConfirm,
+  QuestionScope,
   since,
   small,
   undash,
   usePop,
+  useQuestion,
 } from "./side-group";
 import { watchName } from "./watch-overlay";
 import { AppLogo, BotChip, botApps, rowTrashBtn, TrashIcon } from "./apps";
@@ -119,6 +121,19 @@ export const monitorNeedsYou = (w: Watch) => !!w.page?.error && !w.paused;
 /** A Connected App's or a key's name as the user knows it: from their accounts or the catalog ("Stripe"), else its slug, capitalized. */
 export function appNameOf(state: AppState, app: string) {
   return state.accounts?.find((a) => a.app === app)?.appName ?? appNameFor(app) ?? app.replace(/[_-]+/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+}
+
+/**
+ * What a Connected App's check looks at, as the question before it's deleted says it: the app, with its
+ * account's label (else its name, when the app has another account), since How often is the account's.
+ */
+export function checkedOf(state: AppState, source: RoutineSource) {
+  const app = appNameOf(state, source.app);
+  const account = state.accounts?.find((a) => a.id === source.account);
+  if (!account || account.id.startsWith("open:")) return app;
+  const another = (state.accounts ?? []).some((a) => a.id !== account.id && sameApp(a.app, account.app));
+  const which = account.label?.trim() || (another ? account.name?.trim() : "");
+  return which ? `${app} (${which})` : app;
 }
 
 /** The Connected App a routine or monitor came from, as a small logo that says so on hover. */
@@ -717,49 +732,63 @@ export function AutopilotPage({
           </div>
         )}
 
-        {week && (
-          <RoutineWeek
-            routines={shown.schedules}
-            // One bot's: its lines needn't say its name.
-            bots={pickedBot ? [pickedBot] : team}
-            tz={tz}
-            now={now}
-            zoneOf={zone}
-            running={(r) => runningNow(r, state.sessions)}
-            needsYou={(r) => scheduleNeedsYou(r, state)}
-            appName={(a) => appNameOf(state, a)}
-            onOpen={(id) => setPicked({ id, at: Date.now() })}
-          />
-        )}
-
-        <div ref={list} data-rows className="flex flex-col gap-5">
-          {pickedBot && !counts[pickedBot.id] ? (
-            <RoutinesEmpty bot={pickedBot} asks={askable(state, pickedBot)} onAsk={onAsk} />
-          ) : !total ? (
-            <RoutinesEmpty asks={askable(state, main)} onAsk={onAsk} />
-          ) : !shown.schedules.length && !shown.monitors.length ? (
-            <div className="flex flex-col items-center gap-2 py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">
-              Nothing matches these filters
-              <button onClick={() => setFilter({})} className={small("plain")}>
-                Show all
-              </button>
-            </div>
-          ) : (
-            // One list, in its order, each row with the bot that runs it (the row of bots above picks one).
-            <RoutineList state={state} schedules={shown.schedules} monitors={shown.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} chips={chips} />
+        {/* One remove question at a time, in the week or the list; opening a row, or another filter, closes it. */}
+        <QuestionScope reset={`${openId ?? ""}|${botOn ?? ""}|${filter.app ?? ""}|${filter.needsYou ? 1 : 0}`}>
+          {week && (
+            <RoutineWeek
+              routines={shown.schedules}
+              // One bot's: its lines needn't say its name.
+              bots={pickedBot ? [pickedBot] : team}
+              tz={tz}
+              now={now}
+              zoneOf={zone}
+              running={(r) => runningNow(r, state.sessions)}
+              needsYou={(r) => scheduleNeedsYou(r, state)}
+              checked={(x) => checkedOf(state, x)}
+              onOpen={(id) => setPicked({ id, at: Date.now() })}
+            />
           )}
-        </div>
+
+          <div ref={list} data-rows className="flex flex-col gap-5">
+            {pickedBot && !counts[pickedBot.id] ? (
+              <RoutinesEmpty bot={pickedBot} asks={askable(state, pickedBot)} onAsk={onAsk} />
+            ) : !total ? (
+              <RoutinesEmpty asks={askable(state, main)} onAsk={onAsk} />
+            ) : !shown.schedules.length && !shown.monitors.length ? (
+              <div className="flex flex-col items-center gap-2 py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">
+                Nothing matches these filters
+                <button onClick={() => setFilter({})} className={small("plain")}>
+                  Show all
+                </button>
+              </div>
+            ) : (
+              // One list, in its order, each row with the bot that runs it (the row of bots above picks one).
+              <RoutineList state={state} schedules={shown.schedules} monitors={shown.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} chips={chips} />
+            )}
+          </div>
+        </QuestionScope>
       </div>
     </div>
   );
 }
 
+/*
+ * A row's trash sits where its chevron is, over the end of the button that opens the row, and the chevron
+ * gives way while it shows (hover, keyboard focus), so the name keeps all its room the rest of the time. On
+ * a touch screen it always shows: the button keeps room for it there, with the chevron before it.
+ */
+const TRASH_SHOWS =
+  "opacity-0 transition-opacity duration-150 ease-out group-hover/row:opacity-100 group-has-[:focus-visible]/row:opacity-100 motion-reduce:transition-none [@media(hover:none)]:opacity-100";
+const CHEVRON_GIVES_WAY =
+  "transition-opacity duration-150 ease-out group-hover/row:opacity-0 group-has-[:focus-visible]/row:opacity-0 motion-reduce:transition-none [@media(hover:none)]:!opacity-100";
+const TOUCH_ROOM = "[@media(hover:none)]:pr-[42px]";
+
 /**
  * A row on the page: its name and a line, opening in place (one at a time) to its actions and details,
  * rendered once first opened. `editing` takes the row's place while it's changed in place. `remove`: a
- * trash at the row's end, beside the button that opens it (not in it), as on the Vault's key rows: shown
- * on hover and keyboard focus, always on a touch screen. `confirm`: the question it asks, in place under
- * the row's head, open or not.
+ * trash at the row's end, on the chevron's place and not in the button that opens the row, as on the
+ * Vault's key rows: shown on hover and keyboard focus, always on a touch screen. `confirm`: the question
+ * it asks, in place under the row's head, open or not.
  */
 function PageRow({
   id,
@@ -800,12 +829,12 @@ function PageRow({
       {editing ? (
         <div className="px-3.5 py-3">{editing}</div>
       ) : (
-        <div className="group/row flex items-start">
+        <div className="group/row relative flex items-start">
           <button
             data-row-head
             onClick={onToggle}
             aria-expanded={open}
-            className={`flex min-w-0 flex-1 items-start gap-3 py-3 pl-3.5 text-left outline-none focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${remove ? "pr-1.5" : "pr-3.5"}`}
+            className={`flex min-w-0 flex-1 items-start gap-3 py-3 pl-3.5 pr-3.5 text-left outline-none focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${remove ? TOUCH_ROOM : ""}`}
           >
             {lead && <span className={`flex shrink-0 pt-px ${dim ? "opacity-50" : ""}`}>{lead}</span>}
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -813,13 +842,13 @@ function PageRow({
               {line && <span className={`text-[12.5px] leading-[17px] text-[#6B6B6B] ${open ? "[overflow-wrap:anywhere]" : "truncate"}`}>{line}</span>}
             </span>
             {end && <span className="flex shrink-0 items-center gap-1.5 pt-px">{end}</span>}
-            <span className="pt-[3px] text-[#B0B0AD]">
+            <span className={`pt-[3px] text-[#B0B0AD] ${remove ? CHEVRON_GIVES_WAY : ""}`}>
               <Chevron open={open} />
             </span>
           </button>
           {remove && (
-            <span className="flex shrink-0 pr-2 pt-2 opacity-0 transition-opacity duration-150 ease-out group-hover/row:opacity-100 group-has-[:focus-visible]/row:opacity-100 motion-reduce:transition-none [@media(hover:none)]:opacity-100">
-              <button type="button" onClick={(e) => remove.onAsk(e.currentTarget)} disabled={remove.busy} aria-label={remove.label} data-tip={remove.tip} className={rowTrashBtn}>
+            <span className={`absolute right-1.5 top-2 flex ${TRASH_SHOWS}`}>
+              <button type="button" data-row-trash onClick={(e) => remove.onAsk(e.currentTarget)} disabled={remove.busy} aria-label={remove.label} data-tip={remove.tip} className={rowTrashBtn}>
                 <TrashIcon />
               </button>
             </span>
@@ -1074,14 +1103,16 @@ type Busy = null | "run" | "toggle" | "skip" | "unskip" | "check" | "remove" | "
 
 /**
  * What a row's actions share: which one is on its way, what went wrong, and the remove question (asked
- * once more in place, under the row's head, from its trash or from Delete or Stop inside it). `run` sends
- * one and says how it went; `remove` sends the remove, and once it's done focus goes to the next row
- * (else the one before, else the list's heading: focusAfterRemove); refused, why shows under the question.
+ * once more in place, under the row's head, from its trash or from Delete or Stop inside it; one at a
+ * time in the list, closed as a row opens or shuts: QuestionScope). `run` sends one and says how it went;
+ * `remove` sends the remove, and once it's done focus goes to the next row (else the one before, else the
+ * list's heading: focusAfterRemove); refused, why shows under the question.
  */
-function useActions() {
+function useActions(kind: "schedule" | "monitor", id: string, open: boolean) {
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string | null>(null);
-  const [sure, setSure] = useState(false);
+  const question = useQuestion(kind);
+  const sure = question.on === id;
   // The row (PageRow's), Delete or Stop inside it, and which asked: the row's trash, or that one
   // ("inside", gone while the question shows, so it's found again by its ref), where focus goes back on Cancel.
   const row = useRef<HTMLDivElement>(null);
@@ -1098,19 +1129,23 @@ function useActions() {
   const ask = (from: HTMLElement | "inside") => {
     asked.current = from;
     setError(null);
-    setSure(true);
+    question.ask(id);
   };
   const cancelRemove = () => {
-    // Back where it was asked: focus returns to the button (it's back on screen once this renders).
-    flushSync(() => setSure(false));
-    (asked.current === "inside" ? removeButton.current : asked.current)?.focus();
+    // Back where it was asked: focus returns to the button (it's back on screen once this renders). Asked
+    // inside a row that has shut since (its details can't take focus then): the row's trash.
+    flushSync(() => question.close(id));
+    (asked.current !== "inside" ? asked.current : open ? removeButton.current : row.current?.querySelector<HTMLElement>("[data-row-trash]"))?.focus();
   };
   const remove = async (url: string, body: unknown, method: string) => {
     const moveOn = focusAfterRemove(row.current, "[data-item]");
     if (!(await run("remove", url, body, method))) return;
-    // Gone (the list drops the row as the state comes in, as every list does).
-    flushSync(() => setSure(false));
-    moveOn();
+    // Gone (the list drops the row as the state comes in, as every list does). Focus moves on only from
+    // the question (or the page): asked somewhere else meanwhile, it stays there.
+    const at = document.activeElement;
+    const here = !at || at === document.body || !!row.current?.contains(at);
+    flushSync(() => question.close(id));
+    if (here) moveOn();
   };
   return { busy, error, setError, sure, ask, run, cancelRemove, remove, row, removeButton };
 }
@@ -1147,7 +1182,7 @@ export function ScheduleRow({
   open: boolean;
   onToggle: () => void;
 }) {
-  const { busy, error, setError, sure, ask, run, cancelRemove, remove, row, removeButton } = useActions();
+  const { busy, error, setError, sure, ask, run, cancelRemove, remove, row, removeButton } = useActions("schedule", r.id, open);
   const [editing, setEditing] = useState(false);
   // Changing only when it runs, in place on its When.
   const [changingWhen, setChangingWhen] = useState(false);
@@ -1207,7 +1242,7 @@ export function ScheduleRow({
         sure && (
           <>
             <InlineConfirm
-              text={deleteQuestion(r, false, (a) => appNameOf(state, a))}
+              text={deleteQuestion(r, false, (x) => checkedOf(state, x))}
               action="Delete"
               doing="Deleting…"
               busy={busy === "remove"}
@@ -1360,7 +1395,7 @@ export function MonitorRow({
   onToggle: () => void;
   onShow: () => void;
 }) {
-  const { busy, error, sure, ask, run, cancelRemove, remove, row, removeButton } = useActions();
+  const { busy, error, sure, ask, run, cancelRemove, remove, row, removeButton } = useActions("monitor", w.id, open);
   // What Check now found when there was nothing new (a failure shows as the error).
   const [found, setFound] = useState<string | null>(null);
   if (!open && found) setFound(null);

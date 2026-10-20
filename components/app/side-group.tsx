@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState, type AnimationEvent } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type AnimationEvent, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { ago } from "./ui";
 
 /*
  * What the sidebar's pinned groups share: Routines (autopilot.tsx) and Orbit (memory-categories.tsx).
  * Counts that tick when they go up, the chevron that folds, the arrow that opens a group's page, where
- * this Mac keeps what the user folded, the small × that deletes from a row, where focus goes once a row
- * is deleted, and the marks that make only what arrives after the first paint move.
+ * this Mac keeps what the user folded, the small × that deletes from a row, one remove question at a time
+ * in a list and where focus goes once a row is deleted, and the marks that make only what arrives after
+ * the first paint move.
  */
 
 /** Rows a section shows before "Show all". */
@@ -202,6 +203,41 @@ export function InlineConfirm({ text, action, doing, busy, onConfirm, onCancel }
       </span>
     </div>
   );
+}
+
+const OneQuestion = createContext<{ on: string | null; set: Dispatch<SetStateAction<string | null>> } | null>(null);
+
+/**
+ * One remove question at a time in what it wraps (the Routines page with its week, an app's routines in
+ * Apps & logins): asking on one row or line closes any other. A change to `reset` (the row opened, the
+ * filters) closes it too, so a question never stays under a row that shut or comes back later on its own.
+ */
+export function QuestionScope({ reset, children }: { reset?: string; children: ReactNode }) {
+  const [on, set] = useState<string | null>(null);
+  const [was, setWas] = useState(reset);
+  if (was !== reset) {
+    setWas(reset);
+    if (on !== null) set(null);
+  }
+  const value = useMemo(() => ({ on, set }), [on]);
+  return <OneQuestion.Provider value={value}>{children}</OneQuestion.Provider>;
+}
+
+/**
+ * Which of `kind`'s questions is asking (`on`: the key it asked with, a row's id or a routine's), in the
+ * nearest QuestionScope (outside one, its own); `ask` opens one (closing any other there), `close` only
+ * that one.
+ */
+export function useQuestion(kind: string) {
+  const scope = useContext(OneQuestion);
+  const [mine, setMine] = useState<string | null>(null);
+  const [asking, set] = scope ? [scope.on, scope.set] : [mine, setMine];
+  const pre = `${kind}:`;
+  return {
+    on: asking?.startsWith(pre) ? asking.slice(pre.length) : null,
+    ask: (key: string) => set(pre + key),
+    close: (key: string) => set((x) => (x === pre + key ? null : x)),
+  };
 }
 
 /**
