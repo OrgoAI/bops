@@ -59,8 +59,10 @@ import { outbox } from "./sync-outbox";
  * and a skill this Mac had from Orgo's project (SkillRef.remotePid) that Orgo no longer lists is taken as
  * deleted there the same way. Script approvals made here go to Orgo too (POST and DELETE
  * …/skills/approvals with the person's Bops sign-in key, through an outbox kept on disk, after the skill's
- * own sync so Orgo knows the script), and a sync takes approvals made or revoked on orgo.ai. The Mac keeps
- * them in step: a computer's runner never syncs or sends a delete.
+ * own sync so Orgo knows the script; one Orgo can't place yet is sent again only once a sync sent a file
+ * with that content), and a sync takes the approvals the person signed in here made on orgo.ai or in Bops
+ * on another Mac (never another member's: theirs doesn't run a script on this Mac), and revokes made
+ * there. The Mac keeps them in step: a computer's runner never syncs or sends a delete.
  */
 
 /** Skills (and apps) per workspace, as orgo-web allows. */
@@ -662,19 +664,22 @@ export function skillFile(wsId: string, kind: SkillKind, slug: string, path: str
   return { path: f.path, content: f.content, sha256: f.sha256 };
 }
 
+/** Every file of a workspace's skills here: what's being worked on and each one's published version. */
+const filesHere = (wsId: string) =>
+  refsOf(wsId)
+    .flatMap((r) => [readBundle(skillDir(wsId, r.kind, r.slug)), r.version ? readBundle(versionDir(wsId, r.kind, r.slug, r.version)) : null])
+    .flatMap((b) => b?.files ?? []);
+
 /** Approve a script's content to run in this workspace (by its sha256). Only content that's in one of its skills can be. */
 export function approveScript(wsId: string, sha256: string, on = true): ScriptApproval[] {
   if (!/^[0-9a-f]{64}$/.test(sha256)) throw new SkillError("That isn't a script's sha256.");
-  const where = refsOf(wsId)
-    .flatMap((r) => [readBundle(skillDir(wsId, r.kind, r.slug)), r.version ? readBundle(versionDir(wsId, r.kind, r.slug, r.version)) : null])
-    .flatMap((b) => b?.files ?? [])
-    .find((f) => f.sha256 === sha256);
+  const where = filesHere(wsId).find((f) => f.sha256 === sha256);
   if (on && !where) throw new SkillError("No script in this workspace has that content.", 404);
   update((s) => {
     const ws = s.workspaces?.find((w) => w.id === wsId);
     if (!ws) return;
     const rest = (ws.approvals ?? []).filter((a) => a.sha256 !== sha256);
-    ws.approvals = on ? [...rest, { sha256, path: where!.path, at: Date.now() }] : rest;
+    ws.approvals = on ? [...rest, { sha256, path: where!.path, at: Date.now(), inBops: true }] : rest;
   });
   approvalChanged(wsId, sha256, on, where?.path);
   return workspaceById(wsId)?.approvals ?? [];
@@ -1147,8 +1152,11 @@ export function skillDeletesOnStart() {
 type ApprovalChange = { pid: string; sha256: string; on: boolean; path?: string };
 /** Approvals and revokes Orgo hasn't taken yet, kept on disk until it does. */
 const approvalsOut = outbox<ApprovalChange>("skill-approvals", 2000);
-type RemoteApproval = { sha256: string; path_hint?: string | null; approved_at?: string };
-const g2 = globalThis as unknown as { bopsApprovalsTimer?: ReturnType<typeof setTimeout>; bopsApprovalsTries?: number; bopsApprovalsSaid?: boolean };
+/** `approved_by`: the Orgo user who approved it. */
+type RemoteApproval = { sha256: string; path_hint?: string | null; approved_by?: string | null; approved_at?: string };
+const g2 = globalThis as unknown as { bopsApprovalsTimer?: ReturnType<typeof setTimeout>; bopsApprovalsTries?: number; bopsApprovalsSaid?: boolean; bopsApprovalsParked?: Set<string> };
+/** Outbox entries Orgo couldn't place (unknown_sha), by id: sent again only after a sync sent a file with that content (or once a run of Bops). */
+const parked = (g2.bopsApprovalsParked ??= new Set<string>());
 
 /** An approval made or taken back here: sent to Orgo now (or once the script's skill is there). */
 function approvalChanged(wsId: string, sha256: string, on: boolean, path?: string) {
@@ -1161,19 +1169,38 @@ function approvalChanged(wsId: string, sha256: string, on: boolean, path?: strin
 
 /**
  * Send a workspace's waiting approvals and revokes (every workspace's without one). An approval Orgo can't
- * place yet (404 unknown_sha: the skill holding that script isn't on Orgo yet) waits for the skill's next
- * sync; one Orgo didn't take for now is tried again after a backoff. The key must be the person's Bops
- * sign-in key (orgo-web's session_required otherwise): one that isn't gives up, said in the log once. True
- * when none is left waiting.
+ * place yet (404 unknown_sha: no file of the workspace's skills on Orgo has that content, as a draft of a
+ * published skill until it's published) stays on this Mac without a retry on a timer, and goes again only
+ * after a sync sent a file with that content (`pushed`) or at the next start; one whose script is in none
+ * of the workspace's skills any more (changed again, or deleted) goes from the outbox. One Orgo didn't
+ * take for now is tried again after a backoff. The key must be the person's Bops sign-in key (orgo-web's
+ * session_required otherwise): one that isn't gives up, said in the log once. True when none is left
+ * waiting for a retry.
  */
-async function flushApprovals(wsId?: string): Promise<boolean> {
+async function flushApprovals(wsId?: string, pushed?: Set<string>): Promise<boolean> {
   let left = false;
+  const shas = new Map<string, Set<string>>();
+  const inSkills = (ws: string, sha: string) => {
+    let here = shas.get(ws);
+    if (!here) shas.set(ws, (here = new Set(filesHere(ws).map((f) => f.sha256))));
+    return here.has(sha);
+  };
+  const drop = (id: string) => {
+    approvalsOut.done([id]);
+    parked.delete(id);
+  };
   for (const e of approvalsOut.waiting(wsId)) {
     const a = e.item;
     if (routes.get(a.pid) === false || workspaceById(e.wsId)?.orgoProjectId !== a.pid) {
-      approvalsOut.done([e.id]);
+      drop(e.id);
       continue;
     }
+    if (a.on && !inSkills(e.wsId, a.sha256)) {
+      drop(e.id);
+      continue;
+    }
+    if (a.on && parked.has(e.id) && !pushed?.has(a.sha256)) continue;
+    parked.delete(e.id);
     const r = a.on
       ? await skillsCall<{ approval?: RemoteApproval; code?: string }>(a.pid, "/approvals", { method: "POST", body: { sha256: a.sha256, ...(a.path ? { path_hint: a.path } : {}) } })
       : await skillsCall<{ code?: string }>(a.pid, `/approvals?sha256=${a.sha256}`, { method: "DELETE" });
@@ -1190,8 +1217,12 @@ async function flushApprovals(wsId?: string): Promise<boolean> {
       approvalsOut.done([e.id]);
       continue;
     }
-    // The script's skill isn't on Orgo yet: tried again once it is (after its sync, and the backoff).
-    if (code === "unknown_sha" || forNow(status)) {
+    // No file on Orgo has that content yet: kept here, and sent again once a sync sent one.
+    if (code === "unknown_sha") {
+      parked.add(e.id);
+      continue;
+    }
+    if (forNow(status)) {
       left = true;
       continue;
     }
@@ -1225,29 +1256,37 @@ function markApproval(wsId: string, sha256: string, on: boolean) {
 }
 
 /**
- * Orgo's approvals here (GET …/skills/approvals): one made on orgo.ai is taken, one Orgo had and no longer
- * lists was revoked there and goes here too, one made here that Orgo never had is sent. What waits to be
- * sent from here stands.
+ * Orgo's approvals here (GET …/skills/approvals): one the person signed in here made (on orgo.ai, or in
+ * Bops on another Mac: approved_by) is taken, another member's never (it doesn't run a script on this
+ * Mac); one Orgo had and no longer lists was revoked there and goes here too; one made here that Orgo
+ * never had is sent, while its script is in one of the workspace's skills. What waits to be sent from here
+ * stands.
  */
 async function pullApprovals(wsId: string, pid: string) {
   const got = await skillsCall<{ approvals?: RemoteApproval[] }>(pid, "/approvals");
   if (!got || got.status !== 200 || !Array.isArray(got.json.approvals)) return;
+  const owner = getState().account?.user.id;
   const there = new Map(got.json.approvals.filter((a) => typeof a?.sha256 === "string").map((a) => [a.sha256, a]));
+  const byOwner = (a: RemoteApproval | undefined) => !!owner && !!a && a.approved_by === owner;
   const waiting = new Set(approvalsOut.waiting(wsId).map((e) => e.item.sha256));
   const mine = workspaceById(wsId)?.approvals ?? [];
   const send: ScriptApproval[] = [];
   const kept: ScriptApproval[] = [];
+  let shas: Set<string> | undefined;
   for (const a of mine) {
     if (waiting.has(a.sha256)) kept.push(a);
-    else if (there.has(a.sha256)) kept.push(a.synced ? a : { ...a, synced: true });
-    // Orgo had it and doesn't now: revoked there. Never had it: sent.
+    else if (there.has(a.sha256)) {
+      // Made here, or taken from Orgo while Orgo says this person made it (one taken before from another member's goes).
+      if (a.inBops || byOwner(there.get(a.sha256)) || !owner) kept.push(a.synced ? a : { ...a, synced: true });
+    }
+    // Orgo had it and doesn't now: revoked there. Never had it: sent, while its script is in a skill here.
     else if (!a.synced) {
       kept.push(a);
-      send.push(a);
+      if ((shas ??= new Set(filesHere(wsId).map((f) => f.sha256))).has(a.sha256)) send.push(a);
     }
   }
   for (const [sha, a] of there)
-    if (!waiting.has(sha) && !kept.some((x) => x.sha256 === sha)) kept.push({ sha256: sha, path: (a.path_hint ?? "").slice(0, 512), at: Date.parse(a.approved_at ?? "") || Date.now(), synced: true });
+    if (byOwner(a) && !waiting.has(sha) && !kept.some((x) => x.sha256 === sha)) kept.push({ sha256: sha, path: (a.path_hint ?? "").slice(0, 512), at: Date.parse(a.approved_at ?? "") || Date.now(), synced: true });
   if (kept.length !== mine.length || kept.some((x, i) => x !== mine[i]))
     update((s) => {
       const ws = s.workspaces?.find((w) => w.id === wsId);
@@ -1303,6 +1342,7 @@ function payloadOf(wsId: string, r: SkillRef) {
   const b = r.version ? (readBundle(versionDir(wsId, r.kind, r.slug, r.version)) ?? readBundle(skillDir(wsId, r.kind, r.slug))) : readBundle(skillDir(wsId, r.kind, r.slug));
   if (!b) return null;
   return {
+    shas: b.files.map((f) => f.sha256),
     body: renderSkillMd(frontmatterOf(r.slug, r.description, b.frontmatter), b.body),
     files: b.files.map((f) => (f.content !== null ? { path: f.path, content: f.content, executable: f.executable } : { path: f.path, content_base64: f.data!.toString("base64"), executable: f.executable })),
   };
@@ -1399,6 +1439,8 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
   const goneHere = (x: RemoteSkill) => waiting.some((e) => (e.item.remoteId ? e.item.remoteId === x.id : e.item.slug === x.slug && e.item.kind === localKind(x.type)));
   const remote = listed.filter((x) => !goneHere(x));
   const local = refsOf(wsId);
+  // The contents of every file this sync sent: an approval Orgo couldn't place before may be placed now.
+  const pushed = new Set<string>();
   for (const r of local) {
     // Its Orgo id is this project's (one kept from before remotePid was: taken to be).
     const mine = !!r.remoteId && (r.remotePid ?? pid) === pid;
@@ -1423,6 +1465,7 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
           const at = made.json.skill.updated_at;
           const version = made.json.skill.current_version?.version ?? r.version ?? "";
           patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteId = id), (x.remotePid = pid), (x.remoteAt = at), (x.remoteVersion = version), (x.syncedAt = Date.now())));
+          for (const sha of p.shas) pushed.add(sha);
           res.pushed++;
         } else {
           res.failed++;
@@ -1443,7 +1486,10 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
       } else if (changedHere) {
         const p = await skillsCall<{ skill?: RemoteSkill }>(pid, `/${encodeURIComponent(there.id)}`, { method: "PATCH", body: { name: r.name, description: r.description, bot_ids: r.botIds, status: r.status } });
         const v = r.version && there.current_version?.version !== r.version ? payloadOf(wsId, r) : null;
-        if (v) await skillsCall(pid, `/${encodeURIComponent(there.id)}/versions`, { method: "POST", body: { body: v.body, files: v.files, version: r.version } });
+        if (v) {
+          const sentV = await skillsCall(pid, `/${encodeURIComponent(there.id)}/versions`, { method: "POST", body: { body: v.body, files: v.files, version: r.version } });
+          if (sentV && sentV.status < 300) for (const sha of v.shas) pushed.add(sha);
+        }
         if (p?.status === 200) {
           // What Orgo says now (after the version too), as last seen.
           const now = v ? await skillsCall<{ skills?: RemoteSkill[] }>(pid, "") : null;
@@ -1477,9 +1523,9 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
   }
   // Every skill went both ways: the next sync reads only what changed after this one's read.
   if (!res.retry && !res.failed && typeof got.json.at === "string") keepSince(wsId, pid, got.json.at);
-  // Script approvals: this Mac's go once their skills are there (one Orgo can't place yet is tried again
-  // with the next sync), and orgo.ai's come here.
-  if (!(await flushApprovals(wsId))) res.retry = true;
+  // Script approvals: this Mac's go once their skills are there (one Orgo can't place yet goes again once
+  // a sync sent a file with that content), and the person's own made elsewhere come here.
+  if (!(await flushApprovals(wsId, pushed))) res.retry = true;
   await pullApprovals(wsId, pid).catch((e: Error) => console.warn(`[skills] approvals from Orgo: ${e.message}`));
   return res;
 }

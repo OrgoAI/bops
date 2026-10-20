@@ -125,10 +125,11 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST") {
       const known = remote.skills.some((x) => x.pid === pid && (x.files ?? []).some((f) => sha(f.content_base64 !== undefined ? Buffer.from(f.content_base64, "base64") : Buffer.from(f.content)) === body.sha256));
       if (!known) return send(res, 404, { error: "No script in this workspace’s skills has that hash.", code: "unknown_sha" });
-      const had = remote.approvals.has(`${pid}:${body.sha256}`);
-      const approval = { pid, sha256: body.sha256, path_hint: body.path_hint ?? null, approved_by: "u_1", approved_at: new Date().toISOString() };
+      // Kept as it was when someone approved it already (orgo-web's ON CONFLICT DO NOTHING).
+      const had = remote.approvals.get(`${pid}:${body.sha256}`);
+      const approval = had ?? { pid, sha256: body.sha256, path_hint: body.path_hint ?? null, approved_by: "u_1", approved_at: new Date().toISOString() };
       remote.approvals.set(`${pid}:${body.sha256}`, approval);
-      return send(res, had ? 200 : 201, { approval });
+      return send(res, had ? 200 : 201, { approval: unscoped(approval) });
     }
     if (req.method === "DELETE") {
       const k = `${pid}:${url.searchParams.get("sha256")}`;
@@ -783,6 +784,8 @@ await check("Script approvals reach Orgo with the Bops sign-in key: approved and
   const wait = async (fn) => {
     for (let i = 0; i < 100 && !fn(); i++) await new Promise((r) => setTimeout(r, 20));
   };
+  // The person signed in here: Orgo's approved_by for what they approve.
+  S.update((s) => (s.account = { user: { id: "u_1", email: "sam@orgo.test" }, signedInAt: 0 }));
   const script = { path: "scripts/go.sh", content: "#!/bin/sh\necho go\n", executable: true };
   const k = W.createSkill("ws_two", { name: "Approve me", description: "Has a script", body: "# Approve me\n", files: [script] }).ref;
   clearTimers();
@@ -835,6 +838,29 @@ await check("Script approvals reach Orgo with the Bops sign-in key: approved and
   clearTimers();
   await W.syncSkills("ws_two");
   assert.equal(W.skillDetail("ws_two", "skill", k.slug).files[0].approved, false, "revoked on orgo.ai: not here either");
+  // Another member (an editor) approved it on orgo.ai, or with their own Bops: it doesn't run on this Mac.
+  const editors = () => ({ pid: "p_two", sha256: shaGo, path_hint: "scripts/go.sh", approved_by: "u_editor", approved_at: new Date().toISOString() });
+  remote.approvals.set(`p_two:${shaGo}`, editors());
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(W.skillDetail("ws_two", "skill", k.slug).files[0].approved, false, "another member's approval doesn't run it here");
+  // One taken from Orgo before (by a Bops that took every member's) goes while Orgo says another member made it.
+  S.update((s) => {
+    const ws = s.workspaces.find((w) => w.id === "ws_two");
+    ws.approvals = [...(ws.approvals ?? []), { sha256: shaGo, path: "scripts/go.sh", at: 1, synced: true }];
+  });
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(W.skillDetail("ws_two", "skill", k.slug).files[0].approved, false, "taken before from another member's: gone");
+  // Approved in this window: it runs, though Orgo's record stays the other member's.
+  W.approveScript("ws_two", shaGo);
+  await wait(() => S.getState().workspaces.find((w) => w.id === "ws_two").approvals.find((a) => a.sha256 === shaGo)?.synced);
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(remote.approvals.get(`p_two:${shaGo}`).approved_by, "u_editor");
+  assert.equal(W.skillDetail("ws_two", "skill", k.slug).files[0].approved, true, "the person's own approval here runs it");
+  W.approveScript("ws_two", shaGo, false);
+  await wait(() => !remote.approvals.has(`p_two:${shaGo}`));
   // A key that isn't the person's Bops sign-in key: Orgo says session_required, and it stays on this Mac (said once).
   remote.sessionOnly = true;
   W.approveScript("ws_two", shaGo);
@@ -847,6 +873,68 @@ await check("Script approvals reach Orgo with the Bops sign-in key: approved and
   logged.splice(0, logged.length, ...logged.filter((l) => !/only from a person signed in to Bops/.test(l)));
   W.approveScript("ws_two", shaGo, false);
   for (const r2 of [k, d]) await W.deleteSkill("ws_two", "skill", r2.slug);
+  clearTimers();
+});
+
+await check("An approval Orgo can't place (a script edited after its skill was published) isn't asked again on a timer and holds no sync back; it goes with the version that holds it; one whose script changed again leaves the outbox", async () => {
+  const O = await import(`${root}/lib/server/sync-outbox.ts`);
+  const clearTimers = () => {
+    for (const t of globalThis.bopsSkillsSync?.values() ?? []) clearTimeout(t);
+    globalThis.bopsSkillsSync?.clear();
+    clearTimeout(globalThis.bopsApprovalsTimer);
+    globalThis.bopsApprovalsTimer = undefined;
+  };
+  const wait = async (fn) => {
+    for (let i = 0; i < 100 && !fn(); i++) await new Promise((r) => setTimeout(r, 20));
+  };
+  const approvalPosts = () => remote.calls.filter((c) => c.method === "POST" && c.path === "/api/workspaces/p_two/skills/approvals");
+  const one = { path: "scripts/run.sh", content: "#!/bin/sh\necho one\n", executable: true };
+  const r = W.createSkill("ws_two", { name: "Publish me", description: "Has a script", body: "# Publish me\n", files: [one] }).ref;
+  W.publishSkill("ws_two", "skill", r.slug);
+  clearTimers();
+  await W.syncSkills("ws_two");
+  // Edited in its draft and approved: Orgo has only the published version's script.
+  const two = { ...one, content: "#!/bin/sh\necho two\n" };
+  W.updateSkill("ws_two", "skill", r.slug, { files: [two] });
+  clearTimers();
+  const shaTwo = sha(Buffer.from(two.content));
+  remote.calls = [];
+  W.approveScript("ws_two", shaTwo);
+  await wait(() => approvalPosts().length);
+  await new Promise((res) => setTimeout(res, 50));
+  assert.equal(remote.approvals.has(`p_two:${shaTwo}`), false, "Orgo can't place it");
+  assert.equal(globalThis.bopsApprovalsTimer, undefined, "no retry on a timer");
+  // A sync that sends no file with that content: not asked again, and nothing held back.
+  remote.calls = [];
+  clearTimers();
+  const res = await W.syncSkills("ws_two");
+  assert.equal(res.retry, undefined, "the sync isn't tried again for it");
+  assert.equal(globalThis.bopsSkillsSync?.size ?? 0, 0, "no sync queued");
+  assert.deepEqual(approvalPosts(), [], "not asked again");
+  assert.equal(W.skillDetail("ws_two", "skill", r.slug).files[0].approved, true, "approved on this Mac all the while");
+  // Published: the version that holds it goes, and the approval after it.
+  W.publishSkill("ws_two", "skill", r.slug);
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(remote.approvals.has(`p_two:${shaTwo}`), true, "sent after the version that holds it");
+  // Approved, then changed again before Orgo could place it: nothing for Orgo to place, out of the outbox.
+  const three = { ...one, content: "#!/bin/sh\necho three\n" };
+  W.updateSkill("ws_two", "skill", r.slug, { files: [three] });
+  clearTimers();
+  const shaThree = sha(Buffer.from(three.content));
+  remote.calls = [];
+  W.approveScript("ws_two", shaThree);
+  await wait(() => approvalPosts().length);
+  W.updateSkill("ws_two", "skill", r.slug, { files: [{ ...one, content: "#!/bin/sh\necho four\n" }] });
+  clearTimers();
+  remote.calls = [];
+  assert.equal((await W.syncSkills("ws_two")).retry, undefined);
+  assert.deepEqual(approvalPosts(), [], "not sent");
+  O.outboxForTests.writeAll();
+  const file = join(S.userDir(), "outbox", "skill-approvals.json");
+  assert.ok(!existsSync(file) || !JSON.parse(readFileSync(file, "utf8")).entries.some((e) => e.item.sha256 === shaThree), "gone from the outbox");
+  await W.deleteSkill("ws_two", "skill", r.slug);
+  W.approveScript("ws_two", shaTwo, false);
   clearTimers();
 });
 

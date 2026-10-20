@@ -237,6 +237,11 @@ export type ScriptApproval = {
   at: number;
   /** Orgo has it (sent from here, or made on orgo.ai): one it no longer lists was revoked there (lib/server/workspace-skills.ts). */
   synced?: boolean;
+  /**
+   * Made in a Bops window by the person signed in (approveScript), not taken from Orgo. One taken from
+   * Orgo counts only while Orgo says that person made it: another member's approval never runs a script here.
+   */
+  inBops?: boolean;
 };
 
 export type WorkspaceLine = {
