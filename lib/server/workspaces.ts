@@ -156,7 +156,7 @@ export async function renameWorkspace(workspaceId: string, name: string): Promis
   const per = (await perWorkspaceProjects().catch(() => null)) === true;
   let waiting: AppsGateReason | undefined;
   if (per && !w.orgoProjectId && workspaceId !== MAIN_WORKSPACE) {
-    // No project of its own yet (made with its first computer): a name the user's Orgo has is asked about now, not changed then.
+    // No project of its own yet (made at the next start or sign-in, bindMissingProjects, or with its first computer): a name the user's Orgo has is asked about now, not changed then.
     const owned = await ownedWorkspaces().catch(() => null);
     if (owned?.some((p) => sameName(p.name, clean))) return { error: `You already have an Orgo workspace named ${clean}. Pick another name.`, code: "name_taken" };
   }
@@ -467,12 +467,32 @@ function bindLater() {
   g.bopsWsBindTimer.unref?.();
 }
 
-/** Once a start (the state route, on the Mac): workspaces with no project get one, and skill deletes left from before go. */
+/**
+ * Once a start (the state route, on the Mac): workspaces with no project get one, skill deletes left
+ * from before go, and what a bound workspace changed here that Orgo hadn't taken when Bops last quit goes
+ * now, as its retries lived in memory only: each one's skills are synced (a create, an edit or a bot
+ * dropped since its last sync, SkillRef.updatedAt past syncedAt, and what Orgo has), and its Orbit is
+ * sent where its index still holds what Orgo hasn't taken (deletes, items or facts: orbitOutbox).
+ */
 export function startProjectBinding() {
   if (g.bopsWsBindStarted || onRunner() || !stateReady() || stateTooNew()) return;
   g.bopsWsBindStarted = true;
   void bindMissingProjects();
   skillDeletesOnStart();
+  void pushBoundOnStart().catch((e: Error) => console.warn(`[workspaces] sending what waited from before: ${e.message}`));
+}
+
+async function pushBoundOnStart() {
+  const bound = (getState().workspaces ?? []).filter((w) => w.orgoProjectId).map((w) => w.id);
+  if (!bound.length) return;
+  const { queueSync } = await import("./workspace-skills");
+  const { orbitChanged } = await import("./orbit-sync");
+  const { orbitOutbox } = await import("./memory-categories");
+  for (const wsId of bound) {
+    queueSync(wsId);
+    const out = orbitOutbox(wsId);
+    if (out && (out.del.length || out.items.length || out.facts.length)) orbitChanged(wsId);
+  }
 }
 
 /** Tests: forget the start and the backoff. */
@@ -528,7 +548,8 @@ async function runMigration(): Promise<MigrationResult> {
   save(() => {});
 
   // 1. The default workspace: its stored project, the one tied to it, the Bops one (rule in DESIGN.md 9), or later
-  // (no "bops" project yet: it's made with the first computer, as {name:'bops', product:'bops', bops_ws_id:'ws_main'}).
+  // (no "bops" project yet: bindMissingProjects makes it right after the move, at sign-in or start, or the first
+  // computer does, as {name:'bops', product:'bops', bops_ws_id:'ws_main'}).
   if (!after(m(), "bind-main")) {
     const owned = await ownedWorkspaces();
     same();
@@ -621,7 +642,7 @@ async function renameDefault(same: () => void): Promise<DefaultName> {
   if (main.orgoProjectId) p = (await ownedWorkspaces()).find((x) => x.id === main.orgoProjectId);
   same();
   if (!p) {
-    // No "bops" project yet: made under that name with the first computer, and named then at a later sign-in.
+    // No "bops" project yet: made under that name at the next start or sign-in (bindMissingProjects) or with the first computer, and named then at a later sign-in.
     if (isBopsName(local)) settled();
     else wait("no_project");
     return { local, project: null, renamed: false, reason: "no_project" };

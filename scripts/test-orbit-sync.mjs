@@ -7,7 +7,10 @@
 // plain ones from before still match, and the secret never goes to Orgo; Delete everywhere lists the
 // sessions Orgo knows of (only bops-chat- and bops-task- ones); issues are Orgo's rows (status, priority,
 // tags, one per thread or ticket), their history the session, and a delete keeps a session something else
-// still uses; an Orgo without the routes (404 or 405) is asked again in 6 hours; Orgo down never stops Orbit.
+// still uses, one Orgo never takes ends there, one it can't take now waits without holding up the rest, and
+// one for an issue older than the newest 200 waits until Orgo can say; what Orgo hadn't taken when Bops quit
+// goes at the next start; an Orgo without the routes (404 or 405) is asked again in 6 hours; Orgo down never
+// stops Orbit.
 //
 // Honcho is a fake answering the REST calls its SDK makes, OpenAI a fake /v1/responses that sorts each fact
 // from a table, and orgo-web a fake answering exactly as app/api/projects/[id]/orbit/** do (lib/orbit/body.ts
@@ -225,7 +228,8 @@ const askedSince = (h) => openai.calls.slice(h).flat();
 
 // Each project's Orbit, as its tables keep it, and every call. `down`: Orgo doesn't answer. `missing`: an Orgo
 // without the routes (Next's own 404 page, no JSON). `hold(call)` keeps a call waiting until releaseOrgo().
-const orgo = { calls: [], projects: new Map(), down: false, missing: false, hold: null, held: [], answer: null };
+// sessionFilter: an orgo-web whose issues list takes ?honchoSessionId= (the gap list); today's ignores it.
+const orgo = { calls: [], projects: new Map(), down: false, missing: false, hold: null, held: [], answer: null, sessionFilter: false };
 const CATEGORIES = ["people", "todos", "events", "promises", "companies", "projects", "decisions", "preferences"];
 const STATUSES = ["open", "waiting_them", "waiting_us", "done"];
 const PRIORITIES = ["urgent", "high", "normal", "low"];
@@ -430,7 +434,8 @@ async function orgoAnswer(req, url) {
   }
   if (rest === "issues" && req.method === "GET") {
     const limit = Math.min(Math.max(Number(call.query.limit) || 50, 1), 200);
-    return json({ issues: [...p.issues.values()].sort((a, c) => c.updatedAt - a.updatedAt).slice(0, limit).map(issueView) });
+    const bySession = orgo.sessionFilter ? call.query.honchoSessionId : undefined;
+    return json({ issues: [...p.issues.values()].filter((i) => !bySession || i.honchoSessionId === bySession).sort((a, c) => c.updatedAt - a.updatedAt).slice(0, limit).map(issueView) });
   }
   if (rest === "issues" && req.method === "POST") {
     if (!b.honchoSessionId || !b.title) return invalid("The request is not valid.");
@@ -916,6 +921,57 @@ await check("an issue delete Orgo can't take now (401, 403, 429) stays to send a
   assert.ok(!hbank("bops").sessions.has(y.id), "then its session");
 });
 
+await check("an issue delete Orgo never takes (409) ends there; one it can't take now (403) stays without holding up the other changes", async () => {
+  const a = (await openIssue(MAIN, { title: "Fence", sourceApp: "gmail", externalId: "thr_20" })).body.issue;
+  const b = (await openIssue(MAIN, { title: "Boiler", sourceApp: "gmail", externalId: "thr_21" })).body.issue;
+  const c = (await openIssue(MAIN, { title: "Roof", sourceApp: "gmail", externalId: "thr_22" })).body.issue;
+  // A change Orgo didn't get, waiting for the next sync.
+  orgo.down = true;
+  assert.equal((await patchIssue(MAIN, c.id, { status: "done" })).status, 200);
+  orgo.down = false;
+  const pending = () => globalThis.bopsIssues.lists.get(MAIN).cache.deletes ?? [];
+  orgo.answer = (x) => (x.method === "DELETE" && x.path.endsWith(`/orbit/issues/${a.orgoId}`) ? json({ error: "no" }, 409) : x.method === "DELETE" && x.path.endsWith(`/orbit/issues/${b.orgoId}`) ? json({ error: "no" }, 403) : null);
+  assert.equal((await removeIssue(MAIN, a.id)).status, 200);
+  assert.equal((await removeIssue(MAIN, b.id)).status, 200);
+  assert.ok(!pending().some((d) => d.id === a.id), "409: never, so not kept");
+  assert.ok(pending().some((d) => d.id === b.id), "403: kept to send");
+  await T.flushAll();
+  assert.equal(oproj(PID).issues.get(c.orgoId).status, "done", "the change went past the kept delete");
+  assert.ok(oproj(PID).issues.has(b.orgoId), "403 again: still kept");
+  assert.ok(pending().some((d) => d.id === b.id));
+  orgo.answer = null;
+  await T.flushAll();
+  assert.ok(!oproj(PID).issues.has(b.orgoId), "taken once Orgo takes it");
+  assert.ok(!pending().length);
+});
+
+await check("an issue older than the newest 200 Orgo lists keeps its delete until Orgo can say (by its session, once orgo-web takes ?honchoSessionId=)", async () => {
+  const y = (await openIssue(MAIN, { title: "Old one", sourceApp: "gmail", externalId: "thr_30" })).body.issue;
+  const p = oproj(PID);
+  const filler = [];
+  for (let i = 0; i < 200; i++) {
+    const id = randomUUID();
+    filler.push(id);
+    p.issues.set(id, { ...p.issues.get(y.orgoId), id, honchoSessionId: `issue-${randomUUID()}`, externalId: `fill_${i}`, updatedAt: Date.now() + 60_000 + i });
+  }
+  const cached = globalThis.bopsIssues.lists.get(MAIN).cache.issues.find((i) => i.id === y.id);
+  delete cached.orgoId;
+  try {
+    assert.equal((await removeIssue(MAIN, y.id)).status, 200);
+    await T.flushAll();
+    assert.ok(p.issues.has(y.orgoId), "not among the newest 200: Orgo can't say, so its row stays");
+    assert.ok(globalThis.bopsIssues.lists.get(MAIN).cache.deletes.some((d) => d.id === y.id), "and its delete is kept, not dropped");
+    assert.ok(orgo.calls.some((x) => x.method === "GET" && x.query.honchoSessionId === y.id), "asked by its session");
+    orgo.sessionFilter = true;
+    await T.flushAll();
+    assert.ok(!p.issues.has(y.orgoId), "found by its session and deleted");
+    assert.ok(!(globalThis.bopsIssues.lists.get(MAIN).cache.deletes ?? []).some((d) => d.id === y.id));
+  } finally {
+    orgo.sessionFilter = false;
+    for (const id of filler) p.issues.delete(id);
+  }
+});
+
 await check("Orgo down: an issue opens all the same (in memory), and goes to Orgo at the next sync", async () => {
   orgo.down = true;
   const r = await openIssue(MAIN, { title: "Wifi down", sourceApp: "gmail", externalId: "thr_4" });
@@ -1056,6 +1112,30 @@ await check("a forget Orgo can't take now (401, 403, 409 full, 429) stays to sen
   assert.ok(!rowOf(PID, wren.id), "gone in Orgo");
   assert.ok(oproj(PID).tombstones.has(keyed(MAIN, "item|people:wren")), "with its hash");
   assert.equal(indexOf(MAIN).out, undefined, "nothing left to send");
+});
+
+await check("a forget Orgo hadn't taken when Bops quit goes at the next start (workspaces.ts startProjectBinding), not only when Orbit is opened", async () => {
+  const Wk = await import(`${root}/lib/server/workspaces.ts`);
+  seed(MAIN, [["p1", "Pat walks the dog.", [item("people", "Pat", { key: "pat", detail: "Walks the dog" })]]]);
+  const pat = one((await refresh(MAIN)).items, "people", "Pat");
+  await settle();
+  assert.ok(rowOf(PID, pat.id), "sent");
+  orgo.answer = (c) => (c.method === "DELETE" && c.path.endsWith("/orbit/items") ? json({ error: "no", code: "forbidden" }, 403) : null);
+  assert.equal((await post({ action: "forget", ws: MAIN, id: pat.id })).status, 200);
+  await settle();
+  assert.ok(indexOf(MAIN).out?.del.includes(pat.id), "kept to send");
+  // Bops quits: its backoff and its timers were in memory only. Orgo is back by the next start.
+  T.reset();
+  orgo.answer = null;
+  Wk.projectBindingForTests.reset();
+  Wk.startProjectBinding();
+  for (let i = 0; i < 100 && rowOf(PID, pat.id); i++) {
+    await T.flushAll();
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.ok(!rowOf(PID, pat.id), "deleted in Orgo at the start");
+  assert.equal(indexOf(MAIN).out, undefined, "nothing left to send");
+  Wk.projectBindingForTests.reset();
 });
 
 await check("an item another Mac sent again after a forget here (it hadn't heard yet) stays gone, and its delete goes again", async () => {

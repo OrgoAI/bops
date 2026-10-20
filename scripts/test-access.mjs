@@ -3,14 +3,14 @@
 // for a bot wins (read, act, or none), and a channel app (Bops' Slack app) has no default; a bot's Composio session holds the apps it has by default, read
 // only where it was set so, and nothing it may not use; a task someone outside Bops started gets no apps; each
 // workspace's whole set goes to its Orgo project as the PUT orgo-web takes, a use goes to the log, and an Orgo
-// without the routes (404) is left alone; a use Orgo didn't take waits in an outbox on disk and goes after a
-// restart, once. After an upgrade from v0.0.28 every bot has exactly what it had
+// without the routes (404) is left alone; a use Orgo didn't take waits in an outbox on disk (written at once
+// as Bops quits) and goes after a restart, once, with its entry's id each time (clientId). After an upgrade from v0.0.28 every bot has exactly what it had
 // there in an account from before (only where it was given it), while one connected from now on is every bot's.
 //
 // The store, Bops Cloud, the vault's keys, Orgo and Composio are fakes: nothing reaches a real service.
 // Usage: node --conditions=react-server scripts/test-access.mjs
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -230,7 +230,8 @@ await check("a change goes to Orgo as one PUT of the whole set; a use goes to th
   assert.deepEqual(put.body.grants, A.accessPayload("ws_main", ["OPENAI_API_KEY"]));
   const log = calls.find((c) => c.method === "POST");
   assert.equal(log.path, `/api/projects/${PID}/access/log`);
-  assert.deepEqual({ ...log.body.entries[0], at: undefined }, { bot: "iris", kind: "app", target: "ca_gmail", targetName: "Gmail, sam@acme.com", action: "GMAIL_FETCH_EMAILS", via: "routine", viaId: "rt_1", outcome: "ok", at: undefined });
+  assert.match(log.body.entries[0].clientId, /^[0-9a-f]{16}$/, "its outbox entry's id, so orgo-web can keep one row for it");
+  assert.deepEqual({ ...log.body.entries[0], at: undefined, clientId: undefined }, { bot: "iris", kind: "app", target: "ca_gmail", targetName: "Gmail, sam@acme.com", action: "GMAIL_FETCH_EMAILS", via: "routine", viaId: "rt_1", outcome: "ok", at: undefined, clientId: undefined });
   assert.ok(!Number.isNaN(Date.parse(log.body.entries[0].at)));
   assert.deepEqual(Object.keys(A.lastUses(new Set(["iris"]))), ["ca_gmail"]);
   assert.deepEqual(A.lastUses(new Set(["boppy"])), {}, "by this workspace's bots only");
@@ -285,6 +286,22 @@ await check("the use log on this Mac keeps the last uses", async () => {
   assert.deepEqual([kept.at(-1).via, kept.at(-1).viaId], ["thread", "ses_mine"]);
 });
 
+await check("on the way out the outbox is written at once, not half a second later (persist.ts onExit)", async () => {
+  A.accessSyncForTests.reset();
+  O.outboxForTests.restart();
+  const file = join(scratch, "outbox", "access-uses.json");
+  rmSync(file, { force: true });
+  orgoAnswer = () => null;
+  await C.runAppAction("iris", "GMAIL_FETCH_EMAILS", {}, { sessionId: "ses_exit" });
+  assert.equal(existsSync(file), false, "not written yet: it's due in half a second");
+  await globalThis.__bopsExitWork.get("outbox:access-uses")();
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).entries.map((e) => e.item.viaId), ["ses_exit"], "written as Bops goes");
+  await A.accessSyncForTests.flushAll();
+  A.accessSyncForTests.reset();
+  O.outboxForTests.restart();
+  rmSync(file, { force: true });
+});
+
 await check("a use Orgo didn't take waits in an outbox on disk: after a quit and a start it goes, once", async () => {
   A.accessSyncForTests.reset();
   calls.length = 0;
@@ -306,7 +323,8 @@ await check("a use Orgo didn't take waits in an outbox on disk: after a quit and
   await A.accessSyncForTests.flushAll();
   const sent = calls.filter((c) => c.method === "POST" && c.path === `/api/projects/${PID}/access/log`).flatMap((c) => c.body.entries);
   assert.deepEqual(sent.map((e) => [e.action, e.via, e.viaId]), [["GMAIL_FETCH_EMAILS", "thread", "ses_outbox"]], "the use from before went");
-  assert.ok(!("oid" in sent[0]), "the outbox's id stays home");
+  assert.ok(!("oid" in sent[0]), "the outbox's id goes only as its clientId");
+  assert.equal(sent[0].clientId, kept[0].id, "the same id as the first try: a resend is the same entry");
   assert.equal(A.accessSyncForTests.waitingUses().length, 0, "out of the outbox once Orgo took it");
   // Started again: not sent twice.
   A.accessSyncForTests.reset();

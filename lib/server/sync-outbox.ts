@@ -2,6 +2,7 @@ import "server-only";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { onExit } from "./persist";
 import * as store from "./store";
 
 /**
@@ -11,7 +12,9 @@ import * as store from "./store";
  * entry is added when it's queued and taken out once Orgo took it (or said it never will); what's left
  * when Bops starts is handed back once (restore) and queued again. At most `max` per workspace (the
  * newest). Another account's folder has its own. Never throws: an outbox that can't be written is only
- * in memory, as before it existed.
+ * in memory, as before it existed. Written half a second after a change, and at once on the way out
+ * (persist.ts onExit), so a quit right after Orgo took something doesn't send it again at the next start
+ * (orgo-web's access log only appends: each use also carries its entry's id, `clientId`, access-sync.ts).
  */
 
 export type OutboxEntry<T> = { id: string; wsId: string; at: number; item: T };
@@ -85,6 +88,15 @@ export function outbox<T>(name: string, max: number): Outbox<T> {
       console.warn(`[outbox] ${name}: keeping it: ${(e as Error).message}`);
     }
   }
+
+  // On the way out (a quit, a restart): what's due to be written is written now.
+  onExit(`outbox:${name}`, async () => {
+    const b = slot.box as Box<T> | undefined;
+    if (!b?.timer) return;
+    clearTimeout(b.timer);
+    b.timer = undefined;
+    write(b);
+  });
 
   /** Written a moment after a change, once for a burst. */
   const saveSoon = (b: Box<T>) => {

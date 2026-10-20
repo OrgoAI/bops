@@ -114,7 +114,14 @@ export function accessPayload(wsId: string, keyNames: string[] = []): AccessGran
 }
 
 /** A logged use as orgo-web takes it. */
-export const usePayload = (u: AccessUse) => ({
+/**
+ * One use as orgo-web's log takes it. `clientId` is its outbox entry's id (sync-outbox.ts), the same each
+ * time it's sent: orgo-web's log only appends, so a POST sent again (a quit right after it was taken, an
+ * answer lost) adds it twice until orgo-web keeps one row per id (the orgo-web gap list); it ignores the
+ * field until then.
+ */
+export const usePayload = (u: AccessUse & { oid?: string }) => ({
+  ...(u.oid ? { clientId: u.oid } : {}),
   bot: u.bot,
   kind: u.kind,
   target: fit(u.target, MAX.target),

@@ -287,11 +287,14 @@ type Reply = { status: number; json: Record<string, unknown> };
 const ok = (r: Answer): r is { status: number; json: Record<string, unknown> } => !!r && r !== "off" && r.status < 300;
 const retryable = (r: Answer) => r === null || (r !== "off" && r.status >= 500);
 /**
- * A delete Orgo didn't take that it may take later (no answer, the key signed out or not allowed for now,
- * a timeout, too many asks, 5xx): kept in `deletes` and sent again, as orbit-sync's forget is. Only an
- * answer that it never will (400, 413) or that the row is gone (404) ends it.
+ * A delete Orgo didn't take that it may take later: no answer, the key signed out (401) or not allowed for
+ * now (403), a timeout (408), too many asks (429), 5xx. Kept in `deletes` and sent again, as orbit-sync's
+ * forget is (workspace-skills.ts forNow is the same set), without holding up the others. Any other answer
+ * ends it: done (2xx; 404 and 410, the row is gone) or one Orgo never takes (400, 405, 409, 413, 422).
  */
-const deleteAgain = (r: Answer) => r === null || (r !== "off" && r.status >= 300 && r.status !== 400 && r.status !== 404 && r.status !== 413);
+const deleteAgain = (r: Answer) => r === null || (r !== "off" && (r.status >= 500 || r.status === 401 || r.status === 403 || r.status === 408 || r.status === 429));
+/** How many issues Orgo lists at most (orgo-web's GET …/orbit/issues, newest change first). */
+const LIST_MAX = 200;
 /** The workspace's issues are Orgo's (its project has the routes, as far as is known). */
 const onOrgo = (ws: string) => !!orbitProject(ws);
 const s = (v: unknown, max: number) => (typeof v === "string" && v ? cleanText(v, max) : null);
@@ -363,14 +366,21 @@ function overlay(ws: string, was: Issue): Issue {
   return out;
 }
 
-/** The Orgo id of an issue by its session (looked up in its newest 200), or null. */
-/** The issue's Orgo id, from Orgo's list: null when Orgo hasn't it, undefined when Orgo didn't answer (or for now). */
+/**
+ * The issue's Orgo id by its session, from Orgo's list: null when Orgo surely hasn't it (the whole list is
+ * under LIST_MAX), undefined when Orgo didn't answer (or for now), or when it can't tell: the newest
+ * LIST_MAX are all there is to ask for and it isn't among them (an older issue). It asks by
+ * `?honchoSessionId=` too, which an orgo-web that has that filter answers with that row alone (the orgo-web
+ * gap list); one without it ignores it.
+ */
 async function findOrgoId(ws: string, id: string): Promise<string | null | undefined> {
-  const r = await orbitCall(ws, "GET", "/issues?limit=200");
+  const r = await orbitCall(ws, "GET", `/issues?limit=${LIST_MAX}&honchoSessionId=${encodeURIComponent(id)}`);
   if (r !== "off" && !ok(r) && deleteAgain(r)) return undefined;
   if (!ok(r) || !Array.isArray(r.json.issues)) return null;
-  const row = (r.json.issues as Record<string, unknown>[]).find((x) => x?.honchoSessionId === id);
-  return typeof row?.id === "string" ? row.id : null;
+  const list = r.json.issues as Record<string, unknown>[];
+  const row = list.find((x) => x?.honchoSessionId === id);
+  if (typeof row?.id === "string") return row.id;
+  return list.length >= LIST_MAX ? undefined : null;
 }
 
 /**
@@ -655,9 +665,10 @@ export function updateIssue(ws: string, id: string, patch: IssuePatch, by: Issue
 
 /**
  * Delete an issue: its session in memory, with its history. With Orgo, its row first, and the session only
- * when Orgo says nothing else uses it; Orgo not answering or not taking it for now (401, 403, 429: deleteAgain),
- * or not saying whether it has the row, the row and then the session go at the next sync (soon, and after a
- * backoff until Orgo takes it). False when it isn't one of this workspace's.
+ * when Orgo says nothing else uses it; Orgo not answering or not taking it for now (401, 403, 408, 429, 5xx:
+ * deleteAgain), or not saying whether it has the row (an issue older than the newest 200 it lists), the row
+ * and then the session go at the next sync (soon, and after a backoff until Orgo takes it). False when it
+ * isn't one of this workspace's.
  */
 export function deleteIssue(ws: string, id: string): Promise<boolean> {
   bankOrThrow(ws);
@@ -750,10 +761,15 @@ export function orbitIssuesFlush(ws: string): Promise<"ok" | "retry" | "off"> {
   return queued(ws, async () => {
     const ours = sameState();
     const x = bankOrThrow(ws);
+    // A delete Orgo doesn't take for now stays for the next sync; the other deletes and the changes still go.
+    let kept = false;
     for (const d of [...(cacheOf(ws).deletes ?? [])]) {
-      // Deleted while Orgo didn't answer the list: its row is looked up now.
+      // Deleted while Orgo didn't answer the list (or couldn't say, an older issue): its row is looked up now.
       const orgoId = d.orgoId || (await findOrgoId(ws, d.id));
-      if (orgoId === undefined) return "retry";
+      if (orgoId === undefined) {
+        kept = true;
+        continue;
+      }
       if (!orgoId) {
         // Orgo hasn't a row for it: only its session goes.
         const found = await sessionOf(ws, d.id);
@@ -766,7 +782,10 @@ export function orbitIssuesFlush(ws: string): Promise<"ok" | "retry" | "off"> {
       }
       const r = await orbitCall(ws, "DELETE", `/issues/${encodeURIComponent(orgoId)}`);
       if (r === "off") return "off";
-      if (deleteAgain(r)) return "retry";
+      if (deleteAgain(r)) {
+        kept = true;
+        continue;
+      }
       if (ok(r)) await afterDelete(ws, d.id, r.json);
       cacheMark(ws, ours, (c) => (c.deletes = (c.deletes ?? []).filter((y) => y.id !== d.id)));
     }
@@ -793,6 +812,6 @@ export function orbitIssuesFlush(ws: string): Promise<"ok" | "retry" | "off"> {
       cacheMark(ws, ours, (c) => (c.dirty = (c.dirty ?? []).filter((y) => y !== id)));
       cachePut(ws, next, id, ours);
     }
-    return "ok";
+    return kept ? "retry" : "ok";
   });
 }

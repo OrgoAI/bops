@@ -8,8 +8,8 @@
 // a workspace's folder moving to its Orgo project's id, and keeping in step with orgo-web's skills routes
 // (none on today's orgo-web: local only, nothing sent; with them: pushed, pulled, the later change winning,
 // a delete sent; a draft sent as soon as it's made; a delete Orgo doesn't take kept on disk, tried again,
-// never pulled back meanwhile, and sent after a restart; one deleted on Orgo deleted here, unless changed
-// here since; a deleted bot taken off Orgo's copy). Programs: a binary file kept byte for byte (on disk, on a computer, sent as content_base64,
+// never pulled back meanwhile, and sent after a restart, as is a create or an edit Orgo hadn't taken; one
+// deleted on Orgo deleted here, unless changed here since; a deleted bot taken off Orgo's copy). Programs: a binary file kept byte for byte (on disk, on a computer, sent as content_base64,
 // brought back from a presigned url and checked by its sha256), an archive refused, the bundle hash orgo-web's. orgo-web is a fake (a local server), the Keychain is never there, and the state and
 // folders live in a throwaway folder: nothing reaches a real service. The keys in it are made up.
 // Usage: node --conditions=react-server scripts/test-skills.mjs
@@ -597,6 +597,34 @@ await check("Drafts and deletes reach Orgo: a draft goes by itself; a delete Org
   await W.deleteSkill("ws_two", "skill", "slug-only");
   assert.deepEqual(remote.calls.map((c) => `${c.method} ${c.path}`), ["GET /api/workspaces/p_two/skills", "DELETE /api/workspaces/p_two/skills/sk_slugonly"]);
   assert.equal(remote.skills.some((x) => x.id === "sk_slugonly"), false);
+  clearTimers();
+});
+
+await check("A create or an edit Orgo hadn't taken when Bops quit goes at the next start (workspaces.ts startProjectBinding)", async () => {
+  const Wk = await import(`${root}/lib/server/workspaces.ts`);
+  const clearTimers = () => {
+    for (const t of globalThis.bopsSkillsSync?.values() ?? []) clearTimeout(t);
+    globalThis.bopsSkillsSync?.clear();
+    globalThis.bopsSkillsTries?.clear();
+  };
+  clearTimers();
+  // Made and edited here, and Bops quit before the sync's timer went off (it lives in memory only).
+  const made = W.createSkill("ws_two", { name: "Quit check", description: "Checks a quit", body: "# Quit check\n" }).ref;
+  clearTimers();
+  remote.calls = [];
+  Wk.projectBindingForTests.reset();
+  Wk.startProjectBinding();
+  for (let i = 0; i < 150 && !remote.calls.some((c) => c.method === "POST" && c.body?.name === "Quit check"); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(remote.calls.some((c) => c.method === "POST" && c.path === "/api/workspaces/p_two/skills" && c.body.name === "Quit check"), remote.calls.map((c) => `${c.method} ${c.path}`).join(", "));
+  assert.equal(W.findRef("ws_two", "skill", made.slug).remotePid, "p_two");
+  // Once a start: a second call sends nothing more.
+  clearTimers();
+  remote.calls = [];
+  Wk.startProjectBinding();
+  await new Promise((r) => setTimeout(r, 1700));
+  assert.ok(!remote.calls.some((c) => c.method === "POST"), "nothing again");
+  Wk.projectBindingForTests.reset();
+  await W.deleteSkill("ws_two", "skill", made.slug);
   clearTimers();
 });
 

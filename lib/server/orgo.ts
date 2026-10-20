@@ -554,8 +554,8 @@ export async function bopsProjects(): Promise<string[]> {
 /**
  * A workspace the user owns, to read their plan's numbers by (Orgo counts computers against the owner,
  * across every workspace they own): the "bops" one when there is one, else any. Unlike bopsWorkspace it
- * never makes one, so reading the plan leaves nothing behind in an account that never used the cloud.
- * Null when they own none.
+ * never makes one, so reading the plan makes nothing (the "bops" one is made by bindMissingProjects at
+ * sign-in or start, in workspaces.ts, or with the first computer). Null when they own none.
  */
 export async function ownedWorkspace(): Promise<string | null> {
   const bops = await g.bopsOrgoWorkspace?.catch(() => undefined);
@@ -579,7 +579,8 @@ export type BopsWorkspaceFound =
  * The user's own "bops" workspace, found and never made, with `key` (theirs, signed in): the id
  * bopsWorkspace() already has for them (unless `fresh`), else the one they own named "bops" (any case,
  * spaces trimmed). Never one shared with them, never another of theirs (unlike ownedWorkspace), and
- * nothing is made (unlike bopsWorkspace): "none" until a bot of theirs has had a computer. The people
+ * nothing is made (unlike bopsWorkspace): "none" until Bops made it (workspaces.ts bindMissingProjects at
+ * sign-in or start, every account signed in to Bops, or a bot's first computer). The people
  * the user adds are this workspace's members (lib/server/members.ts).
  */
 export async function findBopsWorkspace(key: string, { fresh = false, wsId }: { fresh?: boolean; wsId?: string } = {}): Promise<BopsWorkspaceFound> {
