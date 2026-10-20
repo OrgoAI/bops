@@ -1,16 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { nextRun } from "@/cloud/schedule";
-import type { Bot, Routine, RoutineRun } from "@/lib/types";
+import { appNameFor, CHECK_TEMPLATE } from "@/lib/routine-catalog";
+import type { Bot, Routine, RoutineRun, RoutineSource } from "@/lib/types";
+import { TrashIcon } from "./apps";
 import { Mascot, Spinner } from "./mascot";
-import { undash } from "./side-group";
+import { focusAfterRemove, InlineConfirm, undash, useQuestion } from "./side-group";
 import { post } from "./ui";
 
 /*
  * The week on the Routines page: seven days from today, each with a dot for every run coming that day in
  * its bot's color, and the picked day's runs in time order (what already ran today with how it went, a
- * Now line, what's coming), each with its bot and Run now, Skip (or Undo for a skipped time) and Pause. A
+ * Now line, what's coming), each with its bot and Run now, Skip (or Undo for a skipped time), Pause and
+ * Delete (the whole routine, asked once more in place under its line). A
  * routine that runs many times a day is one line ("Every 15 minutes, 8 AM to 8 PM"); one before meetings
  * is one line on its days. Which bot each color is: the row of bots on the page (WeekLegend), which picks
  * one bot's too. Times are in the user's zone. weekPlan is the plan as data, for tests.
@@ -146,6 +150,18 @@ const MONTH = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "O
 
 const RAN_WORDS: Record<RoutineRun["status"], string> = { running: "Running now", ok: "Ran", quiet: "Ran, nothing for you", failed: "Failed", skipped: "Didn't run" };
 
+/**
+ * What's asked before a routine is deleted: by its name (`named`: in the week, where a line is one of its
+ * runs, so it's clear the whole routine goes, not just that run) or as this schedule (its own row on the
+ * page), and for a Connected App's check (its How often) that what it checks (`checked`: the app, and
+ * which account of it: autopilot.tsx checkedOf) goes back to Only when asked, as a check is all How often
+ * keeps (lib/routine-catalog.ts CHECK_TEMPLATE).
+ */
+export function deleteQuestion(r: Routine, named: boolean, checked: (source: RoutineSource) => string = (x) => appNameFor(x.app) ?? x.app) {
+  const check = r.source?.template === CHECK_TEMPLATE ? checked(r.source) : null;
+  return `Delete ${named ? undash(r.title) : "this schedule"}? It won't run again${check ? `, and ${check}'s How often goes back to Only when asked` : ""}.`;
+}
+
 /** Every 15 minutes, every 2 hours. */
 function everyWords(minutes: number) {
   if (minutes % 60 === 0) return minutes === 60 ? "Every hour" : `Every ${minutes / 60} hours`;
@@ -170,12 +186,16 @@ const PAUSE = <path d="M4 2.8v6.4M8 2.8v6.4" />;
 
 /* ---------------- The week ---------------- */
 
-type Busy = { key: string; what: "run" | "skip" | "unskip" | "pause" } | null;
+type Busy = { key: string; what: "run" | "skip" | "unskip" | "pause" | "remove" } | null;
+
+/** A line of the day, by its kind, routine and time: a coming run that has run since is another line. */
+const lineKey = (it: DayItem) => `${it.kind}:${it.routine.id}:${"at" in it ? it.at : "first" in it ? it.first : ""}`;
 
 /**
  * The week strip and the picked day's runs. `onOpen` opens a routine's row below (its details, Edit, Delete).
  * `bots` colors each run, and with more than one, each line says its bot's name by its mascot; `running`
- * and `needsYou` say a routine's state as the rows do.
+ * and `needsYou` say a routine's state as the rows do; `checked` names what a Connected App's check looks
+ * at (in the question before it's deleted). One question at a time, with the page's rows (QuestionScope).
  */
 export function RoutineWeek({
   routines,
@@ -185,6 +205,7 @@ export function RoutineWeek({
   zoneOf,
   running,
   needsYou,
+  checked,
   onOpen,
 }: {
   routines: Routine[];
@@ -194,6 +215,7 @@ export function RoutineWeek({
   zoneOf: (r: Routine) => string | undefined;
   running: (r: Routine) => boolean;
   needsYou: (r: Routine) => boolean;
+  checked?: (source: RoutineSource) => string;
   onOpen: (id: string) => void;
 }) {
   // Worked out again only when a routine's times change, or the minute does (not on every render).
@@ -205,7 +227,31 @@ export function RoutineWeek({
   const day = days.find((x) => x.key === picked) ?? days[0];
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<{ key: string; text: string } | null>(null);
+  // The routine being deleted, the line that asked and its trash. The question shows under that line, or
+  // once that line has changed (a coming run that has run since is a line of another kind) under the
+  // routine's first line that day; with none left, it closes.
+  const question = useQuestion("week");
+  const [askedLine, setAskedLine] = useState<string | null>(null);
+  const asked = useRef<HTMLElement | null>(null);
+  const lines = useRef<HTMLOListElement>(null);
+  const heading = useRef<HTMLSpanElement>(null);
   const botOf = (r: Routine) => bots.find((b) => b.id === r.botId);
+  const sureId = question.on;
+  const sureItem = sureId === null ? undefined : (day.items.find((it) => it.routine.id === sureId && lineKey(it) === askedLine) ?? day.items.find((it) => it.routine.id === sureId));
+  const sureLine = sureItem ? lineKey(sureItem) : null;
+  // The line the question is under, and its trash (the one that asked, or the same routine's on its line now).
+  const lineOf = (key: string | null) => [...(lines.current?.querySelectorAll("li") ?? [])].find((li) => li.getAttribute("data-line") === key) ?? null;
+  const trashOf = (key: string | null) => (asked.current?.isConnected ? asked.current : lineOf(key)?.querySelector<HTMLElement>("[data-line-trash]"));
+  // Its routine has no line left in the day (paused or deleted elsewhere, another day): it closes, and focus
+  // that was in it goes to the day's heading.
+  const lost = sureId !== null && !sureItem ? sureId : null;
+  useEffect(() => {
+    if (lost === null) return;
+    question.close(lost);
+    const at = document.activeElement;
+    if (!at || at === document.body) heading.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lost]);
 
   const act = async (key: string, what: NonNullable<Busy>["what"], body: Record<string, unknown>) => {
     setBusy({ key, what });
@@ -218,6 +264,46 @@ export function RoutineWeek({
       setError({ key, text: "Couldn't reach Bops. Try again." });
     }
     setBusy(null);
+  };
+
+  const ask = (key: string, r: Routine, from: HTMLElement) => {
+    asked.current = from;
+    setError(null);
+    setAskedLine(key);
+    question.ask(r.id);
+  };
+  const keep = (key: string, r: Routine) => {
+    // Back where it was asked: focus returns to its trash.
+    const back = trashOf(key);
+    flushSync(() => question.close(r.id));
+    back?.focus();
+  };
+  /** Deletes the routine: all its lines go, and focus moves to the next routine's (else the day's heading); refused, why stays on the line. */
+  const remove = async (key: string, r: Routine) => {
+    const moveOn = focusAfterRemove(lineOf(key), "li", (el) => el.getAttribute("data-routine") === r.id);
+    setBusy({ key, what: "remove" });
+    setError(null);
+    let failed: string | null = null;
+    try {
+      const res = await post("/api/routines", { id: r.id }, "DELETE");
+      const j = (await res.json().catch(() => null)) as { error?: unknown } | null;
+      if (!res.ok || typeof j?.error === "string") failed = typeof j?.error === "string" ? undash(j.error) : "That didn't work. Try again.";
+    } catch {
+      failed = "Couldn't reach Bops. Try again.";
+    }
+    if (failed) {
+      setError({ key, text: failed });
+      setBusy(null);
+      return;
+    }
+    // Focus moves on only from the question (or the page): asked somewhere else meanwhile, it stays there.
+    const at = document.activeElement;
+    const here = !at || at === document.body || !!lines.current?.contains(at);
+    flushSync(() => {
+      setBusy(null);
+      question.close(r.id);
+    });
+    if (here) moveOn();
   };
 
   const label = (x: DayPlan, i: number) => (x.today ? "Today" : i === 1 ? "Tomorrow" : `${DOW_LONG[x.dow]}`);
@@ -239,7 +325,11 @@ export function RoutineWeek({
               role="tab"
               aria-selected={on}
               aria-label={`${label(x, i)}, ${MONTH[x.month]} ${x.date}: ${runsIn(x) === 1 ? "1 run" : `${runsIn(x)} runs`}`}
-              onClick={() => setPicked(x.key)}
+              onClick={() => {
+                // Another day: a question asked on this one closes.
+                if (x.key !== day.key && sureId !== null) question.close(sureId);
+                setPicked(x.key);
+              }}
               className={`relative flex min-w-0 flex-col items-center gap-1 rounded-2xl px-1 pb-2 pt-1.5 outline-none transition-colors focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] ${
                 on ? "bg-ink text-white" : x.today ? "bg-white shadow-[0_0_0_1.5px_#0A0A0A]" : "bg-white shadow-[0_0_0_1px_#ECECEA] hover:bg-[#FAFAF9]"
               }`}
@@ -261,7 +351,7 @@ export function RoutineWeek({
 
       <div key={day.key} className="motion-fade-in flex flex-col gap-1.5">
         <span className="flex items-baseline gap-1.5 px-1">
-          <span className="text-[13px] font-semibold leading-4">
+          <span ref={heading} data-list-heading tabIndex={-1} className="text-[13px] font-semibold leading-4 outline-none">
             {day.today ? "Today" : DOW_LONG[day.dow]}, {MONTH[day.month]} {day.date}
           </span>
           <span className="text-[12px] tabular-nums leading-4 text-[#9A9A98]">{total ? (total === 1 ? "1 run" : `${total} runs`) : ""}</span>
@@ -269,11 +359,11 @@ export function RoutineWeek({
         {!day.items.length ? (
           <span className="px-1 py-2 text-[12.5px] leading-4 text-[#9A9A98]">Nothing runs this day</span>
         ) : (
-          <ol className="flex flex-col">
+          <ol ref={lines} className="flex flex-col">
             {day.items.map((it, i) => {
-              const key = `${it.kind}:${it.routine.id}:${"at" in it ? it.at : "first" in it ? it.first : ""}`;
+              const key = lineKey(it);
               return (
-                <li key={key} className="flex flex-col">
+                <li key={key} data-line={key} data-routine={it.routine.id} className="flex flex-col">
                   {i === firstComing && nowAt !== null && <NowLine at={nowAt} tz={tz} />}
                   <Item
                     item={it}
@@ -289,7 +379,20 @@ export function RoutineWeek({
                     onSkip={(at) => void act(key, "skip", { id: it.routine.id, action: "skip", at })}
                     onUnskip={(at) => void act(key, "unskip", { id: it.routine.id, action: "unskip", at })}
                     onPause={() => void act(key, "pause", { id: it.routine.id, enabled: false })}
+                    onDelete={(from) => ask(key, it.routine, from)}
                   />
+                  {sureLine === key && (
+                    <div className="pb-1.5 pl-[62px] pr-1">
+                      <InlineConfirm
+                        text={deleteQuestion(it.routine, true, checked)}
+                        action="Delete"
+                        doing="Deleting…"
+                        busy={busy?.key === key && busy.what === "remove"}
+                        onConfirm={() => void remove(key, it.routine)}
+                        onCancel={() => keep(key, it.routine)}
+                      />
+                    </div>
+                  )}
                 </li>
               );
             })}
@@ -328,6 +431,7 @@ function Item({
   onSkip,
   onUnskip,
   onPause,
+  onDelete,
 }: {
   item: DayItem;
   bot?: Bot;
@@ -342,6 +446,8 @@ function Item({
   onSkip: (at: number) => void;
   onUnskip: (at: number) => void;
   onPause: () => void;
+  /** Ask to delete the whole routine (`from`: the trash, where focus goes back on Cancel). */
+  onDelete: (from: HTMLElement) => void;
 }) {
   const r = it.routine;
   const off = it.kind === "run" && it.skipped;
@@ -377,7 +483,7 @@ function Item({
         {status && <StatusMark status={status} />}
       </span>
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <button onClick={onOpen} className={`min-w-0 truncate text-left text-[13.5px] font-medium leading-[18px] outline-none hover:underline focus-visible:underline ${off ? "line-through decoration-[#9A9A98]" : ""}`}>
+        <button data-row-head onClick={onOpen} className={`min-w-0 truncate text-left text-[13.5px] font-medium leading-[18px] outline-none hover:underline focus-visible:underline ${off ? "line-through decoration-[#9A9A98]" : ""}`}>
           {undash(r.title)}
         </button>
         <span className={`text-[12px] leading-4 ${status === "failed" || needsYou ? "text-[#B42318]" : "text-[#6B6B6B]"} [overflow-wrap:anywhere]`}>
@@ -417,6 +523,17 @@ function Item({
             )}
           </>
         )}
+        {/* The whole routine, not just this run: its name in the question that follows. */}
+        <button
+          data-line-trash
+          onClick={(e) => onDelete(e.currentTarget)}
+          disabled={any}
+          aria-label={`Delete ${undash(r.title)}`}
+          data-tip="Delete routine"
+          className={`${btn} w-[26px] text-[#9A9A98] hover:bg-[#FEF3F2] hover:text-[#B42318]`}
+        >
+          {busy === "remove" ? <Spinner size={11} /> : <TrashIcon size={12} />}
+        </button>
       </span>
     </div>
   );

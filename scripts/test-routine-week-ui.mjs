@@ -4,8 +4,13 @@
 // skip and Pause, each line with its bot's name when there are several; the row of bots on the page
 // (WeekLegend) says whose each color is, how many each runs with All first, and picks one bot, then all
 // again; a row's day letters say the days it runs; a coming run's day and time for a bot's Coming up.
+// And deleting from the week, rendered into a DOM (linkedom) and clicked: every line has a trash for the
+// whole routine, asked once more in place by its name (a Connected App's check: that its How often goes
+// back to Only when asked), what's sent, where focus goes after, and a refusal said on the line; the
+// question staying with its routine when its line changes (a run that came), and closing, focus on the
+// day's heading, when the routine leaves the day or another day is picked.
 //
-// Nothing reaches a server. The .tsx files are compiled with the TypeScript in node_modules as they load.
+// Nothing reaches a server (fetch is a fake). The .tsx files are compiled with the TypeScript in node_modules as they load.
 // Usage: node scripts/test-routine-week-ui.mjs   (not with --conditions=react-server: these are client components)
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -276,6 +281,205 @@ await test("a row's letters: the days it runs from today, ink on a light bot col
   assert.match(html, /aria-label="Runs today, Tuesday, Wednesday, Thursday, Friday"/);
   assert.equal((html.match(/color:#0A0A0A/g) ?? []).length, 5, "ink on the highlighter");
   assert.match(text(html), /M T W T F S S/);
+});
+
+/* ---------------- Deleting a routine from the week, clicked ---------------- */
+
+// A DOM to render into and click (linkedom), with what these need of a browser: focus that moves, and the
+// element that has it.
+const { parseHTML } = await import("linkedom");
+const { window: win } = parseHTML("<!doctype html><html><body></body></html>");
+const doc = win.document;
+const focused = { on: null };
+win.HTMLElement.prototype.focus = function () {
+  focused.on = this;
+};
+win.HTMLElement.prototype.scrollIntoView = () => {};
+Object.defineProperty(doc, "activeElement", { configurable: true, get: () => (focused.on?.isConnected ? focused.on : doc.body) });
+globalThis.document = doc;
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const { createRoot } = await import("react-dom/client");
+const { act } = await import("react");
+
+async function mount(el) {
+  const box = doc.createElement("div");
+  doc.body.appendChild(box);
+  const root = createRoot(box);
+  await act(async () => root.render(el));
+  return { box, again: (next) => act(async () => root.render(next)), done: async () => (await act(async () => root.unmount()), box.remove()) };
+}
+const click = (el) => act(async () => void el.dispatchEvent(new win.Event("click", { bubbles: true })));
+/** Bops, faked: what it was sent, and what it answers. */
+function server(status = 200, body = { ok: true }) {
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), method: init.method ?? "GET", body: init.body ? JSON.parse(init.body) : undefined });
+    return { ok: status < 400, status, json: async () => body };
+  };
+  return calls;
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const week = (routines, extra = {}) => h(W.RoutineWeek, { routines, bots, tz: NY, now, zoneOf: () => NY, running: () => false, needsYou: () => false, onOpen: noop, ...extra });
+
+await test("the question by name: the whole routine goes, and a Connected App's check says its How often goes back to Only when asked", () => {
+  const r = routine("q", { kind: "daily", time: "09:00" }, { title: "Morning inbox" });
+  assert.equal(W.deleteQuestion(r, true), "Delete Morning inbox? It won't run again.");
+  assert.equal(W.deleteQuestion(r, false), "Delete this schedule? It won't run again.", "its own row: this schedule, as before");
+  const chk = { ...r, title: "Check Gmail (Work)", source: { app: "gmail", template: "check", account: "ca_1" } };
+  assert.equal(W.deleteQuestion(chk, true), "Delete Check Gmail (Work)? It won't run again, and Gmail's How often goes back to Only when asked.");
+  assert.equal(W.deleteQuestion(chk, false, () => "Google Mail"), "Delete this schedule? It won't run again, and Google Mail's How often goes back to Only when asked.", "the app as the user named it");
+  assert.equal(W.deleteQuestion({ ...r, source: { app: "gmail", template: "gmail-alerts" } }, true), "Delete Morning inbox? It won't run again.", "a starter isn't How often");
+  for (const x of [r, chk]) assert.ok(!/[‒–—―]/.test(W.deleteQuestion(x, true)), "no dashes");
+  // How often is the account's: the account the check looks at is named (autopilot.tsx checkedOf).
+  assert.equal(
+    W.deleteQuestion(chk, false, (x) => (x.account === "ca_1" ? "Gmail (Work)" : "Gmail")),
+    "Delete this schedule? It won't run again, and Gmail (Work)'s How often goes back to Only when asked.",
+  );
+});
+
+await test("every line of the day has a trash for its routine, after Run now, Skip and Pause: what ran, what's coming, a skipped time", async () => {
+  const a = routine("a", { kind: "daily", time: "09:00" }, { nextRunAt: Z("2026-10-19T13:00:00Z") });
+  const c = routine("c", { kind: "daily", time: "10:00" }, { botId: "bot_max", nextRunAt: Z("2026-10-20T14:00:00Z"), skips: [Z("2026-10-19T14:00:00Z")] });
+  const g = routine("g", { kind: "daily", time: "07:00" }, { nextRunAt: Z("2026-10-20T11:00:00Z"), last: { at: Z("2026-10-19T11:00:05Z"), status: "ok" } });
+  const m = await mount(week([a, c, g]));
+  try {
+    const lines = [...m.box.querySelectorAll("li[data-routine]")];
+    assert.deepEqual(lines.map((li) => li.getAttribute("data-routine")), ["g", "a", "c"], "what ran, then what's coming");
+    for (const li of lines) {
+      const title = li.querySelector("[data-row-head]").textContent;
+      const trash = li.querySelector(`button[aria-label="Delete ${title}"]`);
+      assert.ok(trash, `${title}: a trash`);
+      assert.equal(trash.getAttribute("data-tip"), "Delete routine", "the whole routine, not just this run");
+      assert.ok(trash.parentElement.lastElementChild === trash, "last of the line's actions");
+    }
+    const run = lines[1].querySelectorAll("button");
+    assert.deepEqual([...run].slice(1).map((b) => b.getAttribute("aria-label")), ["Run R a now", "Skip R a at 9 AM", "Pause R a", "Delete R a"]);
+  } finally {
+    await m.done();
+  }
+});
+
+await test("pressing it asks under that line, by name; Cancel puts focus back on it; Delete sends the routine's id, and focus goes to the next routine's line", async () => {
+  const calls = server();
+  // R a at 9 AM and 5 PM today (two lines of one routine), then R b at 6 PM.
+  const a = routine("a", { kind: "daily", time: "09:00", times: ["09:00", "17:00"] }, { title: "Morning inbox", nextRunAt: Z("2026-10-19T13:00:00Z") });
+  const b = routine("b", { kind: "daily", time: "18:00" }, { title: "Evening wrap", nextRunAt: Z("2026-10-19T22:00:00Z") });
+  const m = await mount(week([a, b]));
+  try {
+    assert.equal(m.box.querySelectorAll('li[data-routine="a"]').length, 2);
+    const first = m.box.querySelector('li[data-routine="a"]');
+    await click(first.querySelector('button[aria-label="Delete Morning inbox"]'));
+    assert.match(first.textContent, /Delete Morning inbox\? It won't run again\./, "under the line pressed");
+    assert.equal(m.box.textContent.match(/It won't run again/g).length, 1, "asked once");
+    assert.equal(doc.activeElement.textContent, "Cancel", "Cancel, the safe one, has focus");
+    await click([...first.querySelectorAll("button")].find((x) => x.textContent === "Cancel"));
+    assert.doesNotMatch(m.box.textContent, /It won't run again/);
+    assert.equal(doc.activeElement.getAttribute("aria-label"), "Delete Morning inbox", "back on the trash that asked");
+    assert.deepEqual(calls, [], "nothing sent");
+
+    await click(first.querySelector('button[aria-label="Delete Morning inbox"]'));
+    await click([...first.querySelectorAll("button")].find((x) => x.textContent === "Delete"));
+    assert.deepEqual(calls.map((x) => [x.method, x.url, x.body]), [["DELETE", "/api/routines", { id: "a" }]]);
+    assert.equal(doc.activeElement.textContent, "Evening wrap", "the next routine's line, past the other line of the one deleted");
+    // The state comes without it: all its lines go.
+    await m.again(week([b]));
+    assert.equal(m.box.querySelectorAll('li[data-routine="a"]').length, 0);
+    assert.equal(doc.activeElement.textContent, "Evening wrap");
+  } finally {
+    await m.done();
+  }
+});
+
+await test("the last routine of the day deleted: focus goes to the day's heading; a check says its How often goes back to Only when asked", async () => {
+  const calls = server();
+  const chk = routine("k", { kind: "daily", time: "09:00" }, { title: "Check Gmail", nextRunAt: Z("2026-10-19T13:00:00Z"), source: { app: "gmail", template: "check", account: "ca_1" } });
+  const m = await mount(week([chk], { checked: () => "Gmail" }));
+  try {
+    const li = m.box.querySelector('li[data-routine="k"]');
+    await click(li.querySelector('button[aria-label="Delete Check Gmail"]'));
+    assert.match(li.textContent, /Delete Check Gmail\? It won't run again, and Gmail's How often goes back to Only when asked\./);
+    await click([...li.querySelectorAll("button")].find((x) => x.textContent === "Delete"));
+    assert.deepEqual(calls.map((x) => x.body), [{ id: "k" }]);
+    await m.again(week([]));
+    assert.match(m.box.textContent, /Nothing runs this day/);
+    assert.ok(doc.activeElement.hasAttribute("data-list-heading"), "the day's heading");
+    assert.match(doc.activeElement.textContent, /Today, Oct 19/);
+  } finally {
+    await m.done();
+  }
+});
+
+await test("refused: why shows on the line, the question stays with Cancel focused, and the routine is still there", async () => {
+  server(403, { error: "Routines can only be changed in the Bops app." });
+  const a = routine("a", { kind: "daily", time: "09:00" }, { title: "Morning inbox", nextRunAt: Z("2026-10-19T13:00:00Z") });
+  const m = await mount(week([a]));
+  try {
+    const li = m.box.querySelector('li[data-routine="a"]');
+    await click(li.querySelector('button[aria-label="Delete Morning inbox"]'));
+    await click([...li.querySelectorAll("button")].find((x) => x.textContent === "Delete"));
+    await sleep(0);
+    assert.equal(li.querySelector('[role="alert"]')?.textContent, "Routines can only be changed in the Bops app.");
+    assert.match(li.textContent, /Delete Morning inbox\?/, "still asking");
+    assert.equal(doc.activeElement.textContent, "Cancel");
+    assert.ok(m.box.querySelector('li[data-routine="a"]'));
+  } finally {
+    await m.done();
+    globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
+  }
+});
+
+const cancelIn = (el) => [...el.querySelectorAll("button")].find((x) => x.textContent === "Cancel");
+
+await test("a line that changes while it asks (its run comes and goes): the question stays with the routine, on its line now, and Cancel goes back to that line's trash", async () => {
+  server();
+  // R a at 9 AM, asked at 8:59; at 9:01 it has run, so its line is what ran.
+  const before = Z("2026-10-19T12:59:00Z");
+  const a = routine("a", { kind: "daily", time: "09:00" }, { title: "Morning inbox", nextRunAt: Z("2026-10-19T13:00:00Z") });
+  const b = routine("b", { kind: "daily", time: "18:00" }, { title: "Evening wrap", nextRunAt: Z("2026-10-19T22:00:00Z") });
+  const m = await mount(week([a, b], { now: before }));
+  try {
+    const was = m.box.querySelector('li[data-routine="a"]');
+    await click(was.querySelector('button[aria-label="Delete Morning inbox"]'));
+    assert.equal(doc.activeElement.textContent, "Cancel");
+    const ran = { ...a, nextRunAt: Z("2026-10-20T13:00:00Z"), last: { at: Z("2026-10-19T13:00:05Z"), status: "ok" } };
+    await m.again(week([ran, b], { now: Z("2026-10-19T13:01:00Z") }));
+    const now = m.box.querySelector('li[data-routine="a"]');
+    assert.ok(!was.isConnected && now, "a line of another kind");
+    assert.match(now.textContent, /Delete Morning inbox\? It won't run again\./, "still asking, under its line now");
+    assert.equal(m.box.textContent.match(/It won't run again/g).length, 1);
+    assert.ok(now.contains(doc.activeElement) && doc.activeElement.textContent === "Cancel", "Cancel still has focus");
+    await click(cancelIn(now));
+    assert.doesNotMatch(m.box.textContent, /It won't run again/);
+    assert.ok(doc.activeElement === now.querySelector('button[aria-label="Delete Morning inbox"]'), "its trash on that line");
+  } finally {
+    await m.done();
+  }
+});
+
+await test("its routine leaves the day while it asks (paused elsewhere): the question closes and focus goes to the day's heading; another day picked closes it too", async () => {
+  server();
+  const a = routine("a", { kind: "daily", time: "09:00" }, { title: "Morning inbox", nextRunAt: Z("2026-10-19T13:00:00Z") });
+  const b = routine("b", { kind: "daily", time: "18:00" }, { title: "Evening wrap", nextRunAt: Z("2026-10-19T22:00:00Z") });
+  const m = await mount(week([a, b]));
+  try {
+    await click(m.box.querySelector('button[aria-label="Delete Morning inbox"]'));
+    assert.equal(doc.activeElement.textContent, "Cancel");
+    await m.again(week([{ ...a, enabled: false }, b]));
+    assert.doesNotMatch(m.box.textContent, /It won't run again/);
+    assert.ok(doc.activeElement.hasAttribute("data-list-heading"), "the day's heading, not the page");
+    // Back on: it doesn't ask again by itself.
+    await m.again(week([a, b]));
+    assert.doesNotMatch(m.box.textContent, /It won't run again/);
+
+    await click(m.box.querySelector('button[aria-label="Delete Evening wrap"]'));
+    assert.match(m.box.textContent, /Delete Evening wrap\?/);
+    await click(m.box.querySelectorAll('[role="tab"]')[1]);
+    assert.doesNotMatch(m.box.textContent, /It won't run again/, "tomorrow: no question");
+    await click(m.box.querySelectorAll('[role="tab"]')[0]);
+    assert.doesNotMatch(m.box.textContent, /It won't run again/, "nor back on today");
+  } finally {
+    await m.done();
+  }
 });
 
 console.log(`routine week ui: ${passed} passed`);

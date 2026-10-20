@@ -295,7 +295,8 @@ function ServiceRow({
   const runs = byApp.reduce((n, accounts) => n + routinesOfApp(state, accounts[0].app), 0);
   return (
     <div className={last ? "" : "border-b border-[#F0F0EE]"}>
-      <button onClick={onToggle} aria-expanded={open} className="flex h-[52px] w-full items-center gap-3 px-3.5 text-left hover:bg-[#FCFCFB]">
+      {/* Where focus goes when the last of its routines is deleted (autopilot.tsx, focusAfterRemove). */}
+      <button data-list-heading onClick={onToggle} aria-expanded={open} className="flex h-[52px] w-full items-center gap-3 px-3.5 text-left hover:bg-[#FCFCFB]">
         <span ref={iconRef} className="flex shrink-0">
           <ServiceLogo service={s} size={26} />
         </span>

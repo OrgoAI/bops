@@ -420,7 +420,10 @@ function KeyLine({
   return (
     <div className="flex flex-col gap-1.5 border-b border-[#F0F0EE] py-3 first:pt-0">
       <div className="flex items-center gap-2">
-        <span className="min-w-0 truncate font-mono text-[13px] font-medium leading-[18px]">{k.name}</span>
+        {/* Where focus goes when the last of its routines is deleted (autopilot.tsx, focusAfterRemove). */}
+        <span data-list-heading tabIndex={-1} className="min-w-0 truncate font-mono text-[13px] font-medium leading-[18px] outline-none">
+          {k.name}
+        </span>
         {meta && (
           <span data-tip={`${scopeLabel(k.scope).tip}${k.readOnly ? " Orgo lets bots only read with it." : ""}`} className="min-w-0 shrink-[3] truncate text-[12px] leading-4 text-[#9A9A98]">
             {meta}

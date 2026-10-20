@@ -148,9 +148,10 @@ export function PencilIcon() {
   );
 }
 
-export function TrashIcon() {
+/** The trash on a row that removes (here, key rows, and routine rows and the week's lines: autopilot.tsx, routine-week.tsx). */
+export function TrashIcon({ size = 13 }: { size?: number }) {
   return (
-    <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden>
       <path d="M2.5 4.5h11M6.5 4.5V3a.8.8 0 0 1 .8-.8h1.4a.8.8 0 0 1 .8.8v1.5M4 4.5l.7 8.6a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.6" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );

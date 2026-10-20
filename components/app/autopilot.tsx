@@ -1,10 +1,10 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type AnimationEvent, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type ReactNode, type Ref } from "react";
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
 import { appNameFor, canonicalApp, CHECK_TEMPLATE, CHECK_TIMES, sameApp, templateById } from "@/lib/routine-catalog";
-import { botChatId, DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type Session, type Watch } from "@/lib/types";
+import { botChatId, DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type RoutineSource, type Session, type Watch } from "@/lib/types";
 import { Fold } from "./fold";
 import { Mascot } from "./mascot";
 import {
@@ -12,18 +12,21 @@ import {
   Chevron,
   DeleteX,
   FIRST,
+  focusAfterRemove,
   InlineConfirm,
+  QuestionScope,
   since,
   small,
   undash,
   usePop,
+  useQuestion,
 } from "./side-group";
 import { watchName } from "./watch-overlay";
-import { AppLogo, BotChip, botApps } from "./apps";
+import { AppLogo, BotChip, botApps, rowTrashBtn, TrashIcon } from "./apps";
 import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
 import { CloseButton, currentWorkspace, needsYou, post, teamOf } from "./ui";
 import { FooterButton } from "./sidebar-footer";
-import { RoutineWeek, useClock, weekPlan, WeekLegend, WeekLetters } from "./routine-week";
+import { deleteQuestion, RoutineWeek, useClock, weekPlan, WeekLegend, WeekLetters } from "./routine-week";
 
 /*
  * Routines: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
@@ -31,8 +34,9 @@ import { RoutineWeek, useClock, weekPlan, WeekLegend, WeekLetters } from "./rout
  * user's Mac, or a web page with no screen). One bot owns each. How a bot does a kind of job is a skill
  * now, in Skills, in Knowledge (skills.tsx). In the sidebar, a round button in the footer beside Knowledge
  * (AutopilotButton), and the matches while it searches (AutopilotSections); on the right, a page with
- * every bot's in one list, each row ending with the bot that runs it, filtered by bot, Connected App or
- * what needs the user, each opening in place with what can be done to it (AutopilotPage), and what to ask
+ * every bot's in one list, each row ending with the bot that runs it and a trash that deletes it (asked
+ * once more in place), filtered by bot, Connected App or what needs the user, each opening in place with
+ * what can be done to it, first, then what it does and how it went (AutopilotPage), and what to ask
  * for while there's nothing (RoutinesEmpty). A bot's own, in short, are on its profile too (routines.tsx).
  * All read the app's state (useAppState), so they're as current as everything else. (Called Autopilot
  * before; the code keeps the name.)
@@ -117,6 +121,19 @@ export const monitorNeedsYou = (w: Watch) => !!w.page?.error && !w.paused;
 /** A Connected App's or a key's name as the user knows it: from their accounts or the catalog ("Stripe"), else its slug, capitalized. */
 export function appNameOf(state: AppState, app: string) {
   return state.accounts?.find((a) => a.app === app)?.appName ?? appNameFor(app) ?? app.replace(/[_-]+/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+}
+
+/**
+ * What a Connected App's check looks at, as the question before it's deleted says it: the app, with its
+ * account's label (else its name, when the app has another account), since How often is the account's.
+ */
+export function checkedOf(state: AppState, source: RoutineSource) {
+  const app = appNameOf(state, source.app);
+  const account = state.accounts?.find((a) => a.id === source.account);
+  if (!account || account.id.startsWith("open:")) return app;
+  const another = (state.accounts ?? []).some((a) => a.id !== account.id && sameApp(a.app, account.app));
+  const which = account.label?.trim() || (another ? account.name?.trim() : "");
+  return which ? `${app} (${which})` : app;
 }
 
 /** The Connected App a routine or monitor came from, as a small logo that says so on hover. */
@@ -674,7 +691,10 @@ export function AutopilotPage({
             <AutopilotIcon size={20} />
           </span>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
-            <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{GROUP_NAME}</span>
+            {/* Where focus goes when the last routine is deleted (focusAfterRemove). */}
+            <span data-list-heading tabIndex={-1} className="text-[20px] font-semibold leading-6 tracking-[-0.01em] outline-none">
+              {GROUP_NAME}
+            </span>
             <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
               What your bots do on their own. How they do each job is in{" "}
               {/* The link and its period together, so the period never starts a line on its own. */}
@@ -712,45 +732,63 @@ export function AutopilotPage({
           </div>
         )}
 
-        {week && (
-          <RoutineWeek
-            routines={shown.schedules}
-            // One bot's: its lines needn't say its name.
-            bots={pickedBot ? [pickedBot] : team}
-            tz={tz}
-            now={now}
-            zoneOf={zone}
-            running={(r) => runningNow(r, state.sessions)}
-            needsYou={(r) => scheduleNeedsYou(r, state)}
-            onOpen={(id) => setPicked({ id, at: Date.now() })}
-          />
-        )}
-
-        <div ref={list} className="flex flex-col gap-5">
-          {pickedBot && !counts[pickedBot.id] ? (
-            <RoutinesEmpty bot={pickedBot} asks={askable(state, pickedBot)} onAsk={onAsk} />
-          ) : !total ? (
-            <RoutinesEmpty asks={askable(state, main)} onAsk={onAsk} />
-          ) : !shown.schedules.length && !shown.monitors.length ? (
-            <div className="flex flex-col items-center gap-2 py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">
-              Nothing matches these filters
-              <button onClick={() => setFilter({})} className={small("plain")}>
-                Show all
-              </button>
-            </div>
-          ) : (
-            // One list, in its order, each row with the bot that runs it (the row of bots above picks one).
-            <RoutineList state={state} schedules={shown.schedules} monitors={shown.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} chips={chips} />
+        {/* One remove question at a time, in the week or the list; opening a row, or another filter, closes it. */}
+        <QuestionScope reset={`${openId ?? ""}|${botOn ?? ""}|${filter.app ?? ""}|${filter.needsYou ? 1 : 0}`}>
+          {week && (
+            <RoutineWeek
+              routines={shown.schedules}
+              // One bot's: its lines needn't say its name.
+              bots={pickedBot ? [pickedBot] : team}
+              tz={tz}
+              now={now}
+              zoneOf={zone}
+              running={(r) => runningNow(r, state.sessions)}
+              needsYou={(r) => scheduleNeedsYou(r, state)}
+              checked={(x) => checkedOf(state, x)}
+              onOpen={(id) => setPicked({ id, at: Date.now() })}
+            />
           )}
-        </div>
+
+          <div ref={list} data-rows className="flex flex-col gap-5">
+            {pickedBot && !counts[pickedBot.id] ? (
+              <RoutinesEmpty bot={pickedBot} asks={askable(state, pickedBot)} onAsk={onAsk} />
+            ) : !total ? (
+              <RoutinesEmpty asks={askable(state, main)} onAsk={onAsk} />
+            ) : !shown.schedules.length && !shown.monitors.length ? (
+              <div className="flex flex-col items-center gap-2 py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">
+                Nothing matches these filters
+                <button onClick={() => setFilter({})} className={small("plain")}>
+                  Show all
+                </button>
+              </div>
+            ) : (
+              // One list, in its order, each row with the bot that runs it (the row of bots above picks one).
+              <RoutineList state={state} schedules={shown.schedules} monitors={shown.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} chips={chips} />
+            )}
+          </div>
+        </QuestionScope>
       </div>
     </div>
   );
 }
 
+/*
+ * A row's trash sits where its chevron is, over the end of the button that opens the row, and the chevron
+ * gives way while it shows (hover, keyboard focus), so the name keeps all its room the rest of the time. On
+ * a touch screen it always shows: the button keeps room for it there, with the chevron before it.
+ */
+const TRASH_SHOWS =
+  "opacity-0 transition-opacity duration-150 ease-out group-hover/row:opacity-100 group-has-[:focus-visible]/row:opacity-100 motion-reduce:transition-none [@media(hover:none)]:opacity-100";
+const CHEVRON_GIVES_WAY =
+  "transition-opacity duration-150 ease-out group-hover/row:opacity-0 group-has-[:focus-visible]/row:opacity-0 motion-reduce:transition-none [@media(hover:none)]:!opacity-100";
+const TOUCH_ROOM = "[@media(hover:none)]:pr-[42px]";
+
 /**
- * A row on the page: its name and a line, opening in place (one at a time) to its details and actions,
- * rendered once first opened. `editing` takes the row's place while it's changed in place.
+ * A row on the page: its name and a line, opening in place (one at a time) to its actions and details,
+ * rendered once first opened. `editing` takes the row's place while it's changed in place. `remove`: a
+ * trash at the row's end, on the chevron's place and not in the button that opens the row, as on the
+ * Vault's key rows: shown on hover and keyboard focus, always on a touch screen. `confirm`: the question
+ * it asks, in place under the row's head, open or not.
  */
 function PageRow({
   id,
@@ -763,6 +801,9 @@ function PageRow({
   open,
   onToggle,
   editing,
+  remove,
+  confirm,
+  rowRef,
   children,
 }: {
   id: string;
@@ -776,26 +817,45 @@ function PageRow({
   open: boolean;
   onToggle: () => void;
   editing?: ReactNode;
+  remove?: { label: string; tip: string; busy: boolean; onAsk: (from: HTMLElement) => void };
+  confirm?: ReactNode;
+  /** The row itself (where focus goes after it's deleted is worked out from it). */
+  rowRef?: Ref<HTMLDivElement>;
   children: ReactNode;
 }) {
   const fresh = useFresh(id);
   return (
-    <div data-item={id} onAnimationEnd={fresh.done} className={`flex flex-col ${last ? "" : "border-b border-[#F0F0EE]"} ${fresh.on ? "motion-new-item" : ""}`}>
+    <div ref={rowRef} data-item={id} onAnimationEnd={fresh.done} className={`flex flex-col ${last ? "" : "border-b border-[#F0F0EE]"} ${fresh.on ? "motion-new-item" : ""}`}>
       {editing ? (
         <div className="px-3.5 py-3">{editing}</div>
       ) : (
-        <button onClick={onToggle} aria-expanded={open} className="flex items-start gap-3 px-3.5 py-3 text-left outline-none focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]">
-          {lead && <span className={`flex shrink-0 pt-px ${dim ? "opacity-50" : ""}`}>{lead}</span>}
-          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <span className={`truncate text-[14px] font-medium leading-[18px] ${dim ? "text-[#9A9A98]" : "text-ink"}`}>{title}</span>
-            {line && <span className={`text-[12.5px] leading-[17px] text-[#6B6B6B] ${open ? "[overflow-wrap:anywhere]" : "truncate"}`}>{line}</span>}
-          </span>
-          {end && <span className="flex shrink-0 items-center gap-1.5 pt-px">{end}</span>}
-          <span className="pt-[3px] text-[#B0B0AD]">
-            <Chevron open={open} />
-          </span>
-        </button>
+        <div className="group/row relative flex items-start">
+          <button
+            data-row-head
+            onClick={onToggle}
+            aria-expanded={open}
+            className={`flex min-w-0 flex-1 items-start gap-3 py-3 pl-3.5 pr-3.5 text-left outline-none focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${remove ? TOUCH_ROOM : ""}`}
+          >
+            {lead && <span className={`flex shrink-0 pt-px ${dim ? "opacity-50" : ""}`}>{lead}</span>}
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className={`truncate text-[14px] font-medium leading-[18px] ${dim ? "text-[#9A9A98]" : "text-ink"}`}>{title}</span>
+              {line && <span className={`text-[12.5px] leading-[17px] text-[#6B6B6B] ${open ? "[overflow-wrap:anywhere]" : "truncate"}`}>{line}</span>}
+            </span>
+            {end && <span className="flex shrink-0 items-center gap-1.5 pt-px">{end}</span>}
+            <span className={`pt-[3px] text-[#B0B0AD] ${remove ? CHEVRON_GIVES_WAY : ""}`}>
+              <Chevron open={open} />
+            </span>
+          </button>
+          {remove && (
+            <span className={`absolute right-1.5 top-2 flex ${TRASH_SHOWS}`}>
+              <button type="button" data-row-trash onClick={(e) => remove.onAsk(e.currentTarget)} disabled={remove.busy} aria-label={remove.label} data-tip={remove.tip} className={rowTrashBtn}>
+                <TrashIcon />
+              </button>
+            </span>
+          )}
+        </div>
       )}
+      {confirm && <div className="flex flex-col gap-1.5 px-3.5 pb-3">{confirm}</div>}
       <Fold open={open && !editing} lazy>
         <div className="flex flex-col gap-3 px-3.5 pb-3.5">{children}</div>
       </Fold>
@@ -819,12 +879,49 @@ function Facts({ rows }: { rows: [string, ReactNode][] }) {
   );
 }
 
-/** Words written for or by a bot (an ask, steps), as they were written: their line breaks kept. */
-function Words({ label, text }: { label: string; text: string }) {
+/** About this many characters, or lines, fill the four a clamped Words shows (it measures once it's on screen). */
+const LONG_WORDS = 280;
+const looksLong = (text: string) => text.length > LONG_WORDS || text.split("\n").length > 4;
+
+/**
+ * Words written for or by a bot (an ask, steps), as they were written: their line breaks kept. `clamp`:
+ * the first four lines, with Show all when there's more (and Show less after).
+ */
+function Words({ label, text, clamp = false }: { label: string; text: string; clamp?: boolean }) {
+  const [all, setAll] = useState(false);
+  // Whether there's more than four lines: a guess from its length, then measured once it's laid out.
+  const [more, setMore] = useState(() => clamp && looksLong(text));
+  const box = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!clamp || all || !el) return;
+    const measure = () => {
+      // Not laid out (no height yet): the guess stands.
+      if (el.clientHeight) setMore(el.scrollHeight > el.clientHeight + 1);
+    };
+    measure();
+    if (typeof ResizeObserver !== "function") return;
+    const watch = new ResizeObserver(measure);
+    watch.observe(el);
+    return () => watch.disconnect();
+  }, [clamp, all, text]);
   return (
     <div className="flex flex-col gap-1">
       <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">{label}</span>
-      <span className="whitespace-pre-wrap rounded-xl bg-[#F7F7F6] px-3 py-2 text-[13px] leading-[19px] text-[#3A3A38] [overflow-wrap:anywhere]">{undash(text)}</span>
+      <span className="rounded-xl bg-[#F7F7F6] px-3 py-2 text-[13px] leading-[19px] text-[#3A3A38]">
+        <span ref={box} className={`whitespace-pre-wrap [overflow-wrap:anywhere] ${clamp && !all ? "line-clamp-4" : "block"}`}>
+          {undash(text)}
+        </span>
+      </span>
+      {clamp && more && (
+        <button
+          onClick={() => setAll(!all)}
+          aria-expanded={all}
+          className="self-start text-[12px] font-medium leading-4 text-ink underline-offset-2 outline-none hover:underline focus-visible:underline"
+        >
+          {all ? "Show less" : "Show all"}
+        </button>
+      )}
     </div>
   );
 }
@@ -1006,14 +1103,21 @@ type Busy = null | "run" | "toggle" | "skip" | "unskip" | "check" | "remove" | "
 
 /**
  * What a row's actions share: which one is on its way, what went wrong, and the remove question (asked
- * once more in place; shut, the row drops it). `run` sends one and says how it went.
+ * once more in place, under the row's head, from its trash or from Delete or Stop inside it; one at a
+ * time in the list, closed as a row opens or shuts: QuestionScope). `run` sends one and says how it went;
+ * `remove` sends the remove, and once it's done focus goes to the next row (else the one before, else the
+ * list's heading: focusAfterRemove); refused, why shows under the question.
  */
-function useActions(open: boolean) {
+function useActions(kind: "schedule" | "monitor", id: string, open: boolean) {
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string | null>(null);
-  const [sure, setSure] = useState(false);
+  const question = useQuestion(kind);
+  const sure = question.on === id;
+  // The row (PageRow's), Delete or Stop inside it, and which asked: the row's trash, or that one
+  // ("inside", gone while the question shows, so it's found again by its ref), where focus goes back on Cancel.
+  const row = useRef<HTMLDivElement>(null);
   const removeButton = useRef<HTMLButtonElement>(null);
-  if (!open && sure) setSure(false);
+  const asked = useRef<HTMLElement | "inside" | null>(null);
   const run = async (what: Exclude<Busy, null>, url: string, body: unknown, method: string, answered?: (json: unknown) => string | null) => {
     setBusy(what);
     setError(null);
@@ -1022,12 +1126,28 @@ function useActions(open: boolean) {
     setError(e);
     return !e;
   };
-  const cancelRemove = () => {
-    // Back where it was asked: focus returns to the button (it's back on screen once this renders).
-    flushSync(() => setSure(false));
-    removeButton.current?.focus();
+  const ask = (from: HTMLElement | "inside") => {
+    asked.current = from;
+    setError(null);
+    question.ask(id);
   };
-  return { busy, error, setError, sure, setSure, removeButton, run, cancelRemove };
+  const cancelRemove = () => {
+    // Back where it was asked: focus returns to the button (it's back on screen once this renders). Asked
+    // inside a row that has shut since (its details can't take focus then): the row's trash.
+    flushSync(() => question.close(id));
+    (asked.current !== "inside" ? asked.current : open ? removeButton.current : row.current?.querySelector<HTMLElement>("[data-row-trash]"))?.focus();
+  };
+  const remove = async (url: string, body: unknown, method: string) => {
+    const moveOn = focusAfterRemove(row.current, "[data-item]");
+    if (!(await run("remove", url, body, method))) return;
+    // Gone (the list drops the row as the state comes in, as every list does). Focus moves on only from
+    // the question (or the page): asked somewhere else meanwhile, it stays there.
+    const at = document.activeElement;
+    const here = !at || at === document.body || !!row.current?.contains(at);
+    flushSync(() => question.close(id));
+    if (here) moveOn();
+  };
+  return { busy, error, setError, sure, ask, run, cancelRemove, remove, row, removeButton };
 }
 
 function ErrorLine({ text }: { text: string | null }) {
@@ -1040,9 +1160,10 @@ function ErrorLine({ text }: { text: string | null }) {
 }
 
 /**
- * A schedule on the page: what it asks, its bot (its mascot before the name, or with `chip` a chip at
- * the end), when and how it runs, where results go, how its last run and delivery went; Run now, Pause
- * or Resume, Delete.
+ * A schedule on the page: its bot (its mascot before the name, or with `chip` a chip at the end) and a
+ * trash at the end; opened, Run now, Skip next, Pause or Resume, Edit and Delete first, then what it asks
+ * (four lines, Show all for the rest), when and how it runs, where results go, how its last run and
+ * delivery went. Deleting a Connected App's check says that app's How often goes back to Only when asked.
  */
 export function ScheduleRow({
   routine: r,
@@ -1061,7 +1182,7 @@ export function ScheduleRow({
   open: boolean;
   onToggle: () => void;
 }) {
-  const { busy, error, setError, sure, setSure, removeButton, run, cancelRemove } = useActions(open);
+  const { busy, error, setError, sure, ask, run, cancelRemove, remove, row, removeButton } = useActions("schedule", r.id, open);
   const [editing, setEditing] = useState(false);
   // Changing only when it runs, in place on its When.
   const [changingWhen, setChangingWhen] = useState(false);
@@ -1115,8 +1236,57 @@ export function ScheduleRow({
       last={last}
       open={open}
       onToggle={onToggle}
+      rowRef={row}
+      remove={{ label: `Delete ${undash(r.title)}`, tip: "Delete", busy: !!busy, onAsk: ask }}
+      confirm={
+        sure && (
+          <>
+            <InlineConfirm
+              text={deleteQuestion(r, false, (x) => checkedOf(state, x))}
+              action="Delete"
+              doing="Deleting…"
+              busy={busy === "remove"}
+              onConfirm={() => void remove("/api/routines", { id: r.id }, "DELETE")}
+              onCancel={cancelRemove}
+            />
+            <ErrorLine text={error} />
+          </>
+        )
+      }
     >
-      <Words label={r.reminder ? "The reminder" : "What it does"} text={r.reminder ?? r.goal} />
+      {/* What can be done to it first, above what it does (often long). The question takes their place. */}
+      {!sure && (
+        <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
+          <button onClick={() => void run("run", "/api/routines", { id: r.id, action: "run" }, "PATCH")} disabled={!!busy || runningNow(r, state.sessions)} className={small("plain")}>
+            {busy === "run" ? "Running…" : "Run now"}
+          </button>
+          {canSkip && (
+            <button
+              onClick={() => void run("skip", "/api/routines", { id: r.id, action: "skip", at: r.nextRunAt }, "PATCH")}
+              disabled={!!busy}
+              data-tip={r.nextRunAt !== undefined ? `It won't run ${clockWords(r.nextRunAt, tz)}` : undefined}
+              className={small("plain")}
+            >
+              {busy === "skip" ? "Skipping…" : "Skip next"}
+            </button>
+          )}
+          {!done(r) && (
+            <button onClick={() => void run("toggle", "/api/routines", { id: r.id, enabled: !r.enabled }, "PATCH")} disabled={!!busy} className={small("plain")}>
+              {r.enabled ? "Pause" : "Resume"}
+            </button>
+          )}
+          {!r.reminder && (
+            <button onClick={() => setEditing(true)} disabled={!!busy} className={small("plain")}>
+              Edit
+            </button>
+          )}
+          <button ref={removeButton} onClick={() => ask("inside")} disabled={!!busy} className={small("red")}>
+            Delete
+          </button>
+        </div>
+      )}
+      {!sure && <ErrorLine text={error} />}
+      <Words label={r.reminder ? "The reminder" : "What it does"} text={r.reminder ?? r.goal} clamp />
       <Facts
         rows={[
           ["Bot", <BotName key="bot" bot={bot} />],
@@ -1199,54 +1369,14 @@ export function ScheduleRow({
           ],
         ]}
       />
-      {sure ? (
-        <InlineConfirm
-          text="Delete this schedule? It won't run again."
-          action="Delete"
-          doing="Deleting…"
-          busy={busy === "remove"}
-          onConfirm={() => void run("remove", "/api/routines", { id: r.id }, "DELETE")}
-          onCancel={cancelRemove}
-        />
-      ) : (
-        <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
-          <button onClick={() => void run("run", "/api/routines", { id: r.id, action: "run" }, "PATCH")} disabled={!!busy || runningNow(r, state.sessions)} className={small("plain")}>
-            {busy === "run" ? "Running…" : "Run now"}
-          </button>
-          {canSkip && (
-            <button
-              onClick={() => void run("skip", "/api/routines", { id: r.id, action: "skip", at: r.nextRunAt }, "PATCH")}
-              disabled={!!busy}
-              data-tip={r.nextRunAt !== undefined ? `It won't run ${clockWords(r.nextRunAt, tz)}` : undefined}
-              className={small("plain")}
-            >
-              {busy === "skip" ? "Skipping…" : "Skip next"}
-            </button>
-          )}
-          {!done(r) && (
-            <button onClick={() => void run("toggle", "/api/routines", { id: r.id, enabled: !r.enabled }, "PATCH")} disabled={!!busy} className={small("plain")}>
-              {r.enabled ? "Pause" : "Resume"}
-            </button>
-          )}
-          {!r.reminder && (
-            <button onClick={() => setEditing(true)} disabled={!!busy} className={small("plain")}>
-              Edit
-            </button>
-          )}
-          <button ref={removeButton} onClick={() => setSure(true)} disabled={!!busy} className={small("red")}>
-            Delete
-          </button>
-        </div>
-      )}
-      <ErrorLine text={error} />
     </PageRow>
   );
 }
 
 /**
- * A monitor on the page: its bot (its mascot before the name, or with `chip` a chip at the end), what it
- * watches (a page opens in the browser), what for, how often and when it last looked, its news or
- * trouble; Show it, Check now, Pause or Resume, Stop.
+ * A monitor on the page: its bot (its mascot before the name, or with `chip` a chip at the end) and a
+ * trash at the end that stops it; opened, Show it, Check now, Pause or Resume and Stop first, then what it
+ * watches (a page opens in the browser), what for, how often and when it last looked, its news or trouble.
  */
 export function MonitorRow({
   watch: w,
@@ -1265,7 +1395,7 @@ export function MonitorRow({
   onToggle: () => void;
   onShow: () => void;
 }) {
-  const { busy, error, sure, setSure, removeButton, run, cancelRemove } = useActions(open);
+  const { busy, error, sure, ask, run, cancelRemove, remove, row, removeButton } = useActions("monitor", w.id, open);
   // What Check now found when there was nothing new (a failure shows as the error).
   const [found, setFound] = useState<string | null>(null);
   if (!open && found) setFound(null);
@@ -1299,7 +1429,48 @@ export function MonitorRow({
       last={last}
       open={open}
       onToggle={onToggle}
+      rowRef={row}
+      remove={{ label: `Stop watching ${watchName(w)}`, tip: "Stop", busy: !!busy, onAsk: ask }}
+      confirm={
+        sure && (
+          <>
+            <InlineConfirm
+              text="Stop watching this? Bops stops checking it."
+              action="Stop"
+              doing="Stopping…"
+              busy={busy === "remove"}
+              onConfirm={() => void remove(`/api/watches?id=${encodeURIComponent(w.id)}`, {}, "DELETE")}
+              onCancel={cancelRemove}
+            />
+            <ErrorLine text={error} />
+          </>
+        )
+      }
     >
+      {!sure && (
+        <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
+          {(isScreenWatch(w) || !!w.mac) && (
+            <button onClick={onShow} disabled={!!busy} className={small("plain")}>
+              Show it
+            </button>
+          )}
+          <button onClick={check} disabled={!!busy || !!w.paused} className={small("plain")}>
+            {busy === "check" ? "Checking…" : "Check now"}
+          </button>
+          <button onClick={() => void run("toggle", "/api/watches", { id: w.id, action: w.paused ? "resume" : "pause" }, "PATCH")} disabled={!!busy} className={small("plain")}>
+            {w.paused ? "Resume" : "Pause"}
+          </button>
+          <button ref={removeButton} onClick={() => ask("inside")} disabled={!!busy} className={small("red")}>
+            Stop
+          </button>
+        </div>
+      )}
+      {!sure && <ErrorLine text={error} />}
+      {found && !error && !busy && (
+        <span role="status" className="text-[12.5px] leading-4 text-[#6B6B6B]">
+          {found}
+        </span>
+      )}
       <Facts
         rows={[
           ["Bot", <BotName key="bot" bot={bot} />],
@@ -1341,39 +1512,6 @@ export function MonitorRow({
           ],
         ]}
       />
-      {sure ? (
-        <InlineConfirm
-          text="Stop watching this? Bops stops checking it."
-          action="Stop"
-          doing="Stopping…"
-          busy={busy === "remove"}
-          onConfirm={() => void run("remove", `/api/watches?id=${encodeURIComponent(w.id)}`, {}, "DELETE")}
-          onCancel={cancelRemove}
-        />
-      ) : (
-        <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
-          {(isScreenWatch(w) || !!w.mac) && (
-            <button onClick={onShow} disabled={!!busy} className={small("plain")}>
-              Show it
-            </button>
-          )}
-          <button onClick={check} disabled={!!busy || !!w.paused} className={small("plain")}>
-            {busy === "check" ? "Checking…" : "Check now"}
-          </button>
-          <button onClick={() => void run("toggle", "/api/watches", { id: w.id, action: w.paused ? "resume" : "pause" }, "PATCH")} disabled={!!busy} className={small("plain")}>
-            {w.paused ? "Resume" : "Pause"}
-          </button>
-          <button ref={removeButton} onClick={() => setSure(true)} disabled={!!busy} className={small("red")}>
-            Stop
-          </button>
-        </div>
-      )}
-      <ErrorLine text={error} />
-      {found && !error && !busy && (
-        <span role="status" className="text-[12.5px] leading-4 text-[#6B6B6B]">
-          {found}
-        </span>
-      )}
     </PageRow>
   );
 }
