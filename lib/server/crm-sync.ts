@@ -23,18 +23,28 @@ import { outbox } from "./sync-outbox";
  *   Mac is written here, one renamed there is renamed here, one deleted there goes to this folder's .trash.
  *   A file changed on both sides since they last agreed takes the later change, and the copy that lost
  *   goes to .trash. A file here that Orgo never had is sent.
+ * - The sample (crm.ts seedOnce) is written here only once a read of Orgo's copy found nothing there, not
+ *   even a deleted file (crmMaySeed), so a Mac that can't reach Orgo, or reads it slowly, never writes a
+ *   second one where another Mac set the CRM up, nor brings back one deleted there. A sample Bops wrote
+ *   that Orgo never agreed on never goes over Orgo's: Orgo's copy stands (live) or it goes (deleted
+ *   there), the one here into .trash.
  * - What the two last agreed on is kept in the folder (.orgo.json: each file's Orgo id, name, sha256, and
  *   its size and time here), so nothing is read twice that didn't change.
  * - Only the Mac, and only where there's a CRM (crm.ts crmOn); never a computer's runner.
  */
 
-type Op = { op: "put" | "rename" | "delete"; pid: string; name: string; to?: string };
+/** `sample`: the sample as Bops wrote it here, never agreed with Orgo (Orgo's sample stands over it). */
+type Op = { op: "put" | "rename" | "delete"; pid: string; name: string; to?: string; sample?: boolean };
 type Result = "done" | "later";
 type Answer<T> = { status: number; json: T } | null;
 export type RemoteFile = { id: string; name: string; columns: string[]; rows: number; bytes: number; sha256: string; sample: boolean; createdAt: string; updatedAt: string; deletedAt: string | null };
 /** One file as the two last agreed on it: Orgo's id, name, sha256 and updatedAt, and the file's size and time here then. */
 type Known = { id: string; name: string; sha: string; at: string; size: number; mtimeMs: number };
-type Side = { pid: string; since?: string; files: Record<string, Known> };
+/**
+ * `fresh`: the last read of Orgo's copy found nothing there (no file, none deleted): the sample may be
+ * written here. `hadSample`: Orgo has or had a sample (live or deleted): one Bops wrote here never goes over it.
+ */
+type Side = { pid: string; since?: string; files: Record<string, Known>; fresh?: boolean; hadSample?: boolean };
 
 const DEBOUNCE_MS = 2000;
 const RETRY_MS = 60_000;
@@ -43,6 +53,8 @@ const MISSING_RETRY_MS = 6 * 60 * 60_000;
 const LIST_EVERY_MS = 30_000;
 /** How long the CRM's list waits on Orgo before showing what's here. */
 const LIST_WAIT_MS = 4000;
+/** orgo-web keeps a deleted file 30 days (a ?since= older than that answers as a full list, live files only): how far back a read for deleted ones looks. */
+const DELETED_LOOK_MS = 29 * 24 * 60 * 60_000;
 const TIMEOUT_MS = 30_000;
 
 const g = globalThis as unknown as {
@@ -55,14 +67,20 @@ const g = globalThis as unknown as {
   __bopsCrmPulled?: Map<string, number>;
   __bopsCrmPulling?: Map<string, Promise<boolean>>;
   __bopsCrmStarted?: string;
+  __bopsCrmSending?: string;
+  __bopsCrmDecided?: Map<string, number>;
 };
 const missing = (g.__bopsCrmMissing ??= new Map());
 const pulled = (g.__bopsCrmPulled ??= new Map());
 const pulling = (g.__bopsCrmPulling ??= new Map());
+/** When a read of each workspace's copy last said whether the sample may be written here (Side.fresh). */
+const decided = (g.__bopsCrmDecided ??= new Map());
 
 const box = outbox<Op>("crm", 1000);
 const sha256 = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 const fold = (name: string) => name.normalize("NFC").toLowerCase();
+const isSampleName = (name: string) => fold(name) === fold(SAMPLE_NAME);
+const isSample = (f: RemoteFile) => f.sample === true || (typeof f.name === "string" && isSampleName(f.name));
 const projectOf = (ws: string) => getState().workspaces?.find((w) => w.id === ws)?.orgoProjectId;
 const routesMissing = (pid: string) => (missing.get(pid) ?? 0) > Date.now();
 const crm = () => import("./crm");
@@ -99,16 +117,21 @@ const knownOf = (side: Side, name: string) => side.files[fold(name)];
 
 /* ---------------- What changed here, to send ---------------- */
 
-/** A file made or changed here (`put`), renamed (`rename`), or deleted (`del`): it goes to Orgo, in order. */
-export function crmChanged(ws: string, change: { put: string } | { rename: [string, string] } | { del: string }) {
+/**
+ * A file made or changed here (`put`; `sample`: the sample Bops wrote, crm.ts seedOnce), renamed
+ * (`rename`), or deleted (`del`): it goes to Orgo, in order.
+ */
+export function crmChanged(ws: string, change: { put: string; sample?: boolean } | { rename: [string, string] } | { del: string }) {
   if (onRunner()) return;
   const pid = projectOf(ws);
   if (!pid || routesMissing(pid)) return;
   if ("put" in change) {
-    // The file's contents go as they are when it's sent: one put waiting is enough.
+    // The file's contents go as they are when it's sent: one put waiting is enough. Not one being sent
+    // now: it may have read the file before this change.
     const waiting = box.waiting(ws);
     const last = waiting.filter((e) => e.item.pid === pid).at(-1);
-    if (!(last?.item.op === "put" && fold(last.item.name) === fold(change.put))) box.add(ws, { op: "put", pid, name: change.put });
+    if (!(last?.item.op === "put" && last.id !== g.__bopsCrmSending && fold(last.item.name) === fold(change.put)))
+      box.add(ws, { op: "put", pid, name: change.put, ...(change.sample ? { sample: true } : {}) });
   } else if ("rename" in change) box.add(ws, { op: "rename", pid, name: change.rename[0], to: change.rename[1] });
   else box.add(ws, { op: "delete", pid, name: change.del });
   flushSoon();
@@ -167,7 +190,29 @@ async function keepTheirs(dir: string, side: Side, f: RemoteFile, bytes: Buffer,
   side.files[fold(f.name)] = { id: f.id, name: f.name, sha: f.sha256, at: f.updatedAt, size: now?.size ?? st.size, mtimeMs: now?.mtimeMs ?? st.mtimeMs };
 }
 
-async function sendPut(key: string, ws: string, dir: string, side: Side, pid: string, name: string): Promise<Result> {
+/**
+ * The sample Bops wrote here, never agreed with Orgo, where Orgo has (or had) one: Orgo's stands. Its copy
+ * is written here (this one into .trash when it isn't the same), or, deleted there, this one goes to .trash.
+ */
+async function orgoSampleStands(key: string, dir: string, side: Side, pid: string, name: string, got?: Awaited<ReturnType<typeof download>>): Promise<Result> {
+  const { crmFolder } = await crm();
+  const there = got === undefined ? await download(key, pid, name) : got;
+  if (there === null) return "later";
+  await crmFolder.lane(dir, async () => {
+    const now = crmFolder.read(dir, name);
+    if (there === "gone") {
+      if (now) crmFolder.trash(dir, name);
+      return;
+    }
+    if (now && sha256(now.bytes) !== there.file.sha256) crmFolder.trash(dir, name);
+    await keepTheirs(dir, side, there.file, there.bytes);
+  });
+  side.hadSample = true;
+  writeSide(dir, side);
+  return "done";
+}
+
+async function sendPut(key: string, ws: string, dir: string, side: Side, pid: string, name: string, bopsSample = false): Promise<Result> {
   const { crmFolder } = await crm();
   const here = crmFolder.read(dir, name);
   // Gone since (renamed or deleted after): the op after this one says where it went.
@@ -175,7 +220,10 @@ async function sendPut(key: string, ws: string, dir: string, side: Side, pid: st
   const sha = sha256(here.bytes);
   const known = knownOf(side, here.name);
   if (known?.sha === sha && known.name === here.name) return "done";
-  const sample = fold(here.name) === fold(SAMPLE_NAME) ? "?sample=1" : "";
+  const sample = isSampleName(here.name) ? "?sample=1" : "";
+  // The sample Bops wrote, never agreed with Orgo: never over Orgo's (live, or deleted there).
+  const ours = bopsSample && !known && !!sample;
+  if (ours && side.hadSample) return orgoSampleStands(key, dir, side, pid, here.name);
   const put = (match?: string) =>
     call<{ file?: RemoteFile; sha256?: string | null }>(key, `${filePath(pid, here.name)}${sample}`, { method: "PUT", raw: { data: here.bytes, type: "text/csv; charset=utf-8" }, headers: match ? { "If-Match": match } : {} });
   let r = await put(known?.sha);
@@ -183,6 +231,8 @@ async function sendPut(key: string, ws: string, dir: string, side: Side, pid: st
     // Changed in Orgo too since the two last agreed (or one of that name was made on another Mac): the later change stands.
     const there = await download(key, pid, here.name);
     if (there === null) return "later";
+    // Another Mac wrote the sample first: its copy stands.
+    if (ours) return orgoSampleStands(key, dir, side, pid, here.name, there);
     if (there === "gone") r = await put();
     else if ((Date.parse(there.file.updatedAt) || 0) > here.mtimeMs) {
       await crmFolder.lane(dir, async () => {
@@ -198,6 +248,7 @@ async function sendPut(key: string, ws: string, dir: string, side: Side, pid: st
   if (status !== null && status < 300 && r!.json.file) {
     const f = r!.json.file;
     side.files[fold(here.name)] = { id: f.id, name: f.name, sha: f.sha256, at: f.updatedAt, size: here.size, mtimeMs: here.mtimeMs };
+    if (sample || f.sample) side.hadSample = true;
     writeSide(dir, side);
     return "done";
   }
@@ -232,7 +283,8 @@ async function sendRename(key: string, ws: string, dir: string, side: Side, pid:
     delete side.files[fold(from)];
     if (was) side.files[fold(f.name)] = { ...was, id: f.id, name: f.name, at: f.updatedAt };
     writeSide(dir, side);
-    return "done";
+    // A PATCH carries no contents: a change made before the rename (its put found the old name gone) goes now.
+    return sendPut(key, ws, dir, side, pid, to);
   }
   const code = codeOf(r);
   // Orgo hasn't `from` (never sent from here): `to` goes as it is.
@@ -330,16 +382,19 @@ async function flushOnce(): Promise<boolean> {
     const side = sides.get(dir) ?? readSide(dir, item.pid);
     sides.set(dir, side);
     let r: Result;
+    g.__bopsCrmSending = e.id;
     try {
       r =
         item.op === "put"
-          ? await sendPut(key, ws, dir, side, item.pid, item.name)
+          ? await sendPut(key, ws, dir, side, item.pid, item.name, item.sample === true)
           : item.op === "rename"
             ? await sendRename(key, ws, dir, side, item.pid, item.name, item.to ?? item.name)
             : await sendDelete(key, dir, side, item.pid, item.name);
     } catch (err) {
       console.warn(`[crm] sending to Orgo: ${(err as Error).message}`);
       r = "later";
+    } finally {
+      g.__bopsCrmSending = undefined;
     }
     if (r === "done") box.done([e.id]);
     else {
@@ -407,6 +462,7 @@ async function pullOnce(ws: string): Promise<boolean> {
     return got ? sha256(got.bytes) : null;
   };
   for (const f of remote) {
+    if (f && isSample(f)) side.hadSample = true;
     if (!f || typeof f.name !== "string" || busy.has(fold(f.name))) continue;
     // Renamed on another Mac: known here by its id under the old name.
     const byId = Object.values(side.files).find((k) => k.id === f.id && fold(k.name) !== fold(f.name));
@@ -426,8 +482,10 @@ async function pullOnce(ws: string): Promise<boolean> {
       continue;
     }
     const unchangedHere = !here || (known && here === known.sha);
+    // The sample Bops wrote here that Orgo never agreed on, where Orgo has one: Orgo's stands.
+    const oursUnagreed = !!here && !known && isSample(f) && isSampleName(name);
     const mtime = crmFolder.files(dir).find((x) => fold(x.name) === fold(name))?.mtimeMs ?? 0;
-    if (unchangedHere || (Date.parse(f.updatedAt) || 0) > mtime) {
+    if (unchangedHere || oursUnagreed || (Date.parse(f.updatedAt) || 0) > mtime) {
       const got = await download(key, pid, f.name);
       if (got && got !== "gone") {
         fetched.set(f.id, got.bytes);
@@ -463,17 +521,50 @@ async function pullOnce(ws: string): Promise<boolean> {
     }
   });
   if (typeof r.json.at === "string") side.since = r.json.at;
+  // Whether the sample may be written here: only where Orgo has nothing, not even a deleted file. And
+  // whether Orgo has or had a sample, before one Bops wrote here goes (it never goes over Orgo's). A full
+  // list has only the live files, so what was deleted is read too, while it isn't known.
+  const nothingThere = !remote.length && !Object.keys(side.files).length;
+  if (!nothingThere) side.fresh = false;
+  const unagreedSample = crmFolder.files(dir).some((x) => isSampleName(x.name) && !knownOf(side, x.name));
+  let deletedKnown = true;
+  if (!side.hadSample && ((nothingThere && side.fresh === undefined) || unagreedSample)) {
+    const at = Date.parse(typeof r.json.at === "string" ? r.json.at : "") || Date.now();
+    const d = await call<{ files?: RemoteFile[] }>(key, `/api/projects/${encodeURIComponent(pid)}/crm?since=${encodeURIComponent(new Date(at - DELETED_LOOK_MS).toISOString())}`);
+    if (d?.status === 200 && Array.isArray(d.json.files)) {
+      if (d.json.files.some((f) => f && isSample(f))) side.hadSample = true;
+      if (nothingThere) side.fresh = !d.json.files.length;
+    } else deletedKnown = false;
+  }
   writeSide(dir, side);
-  // A file here Orgo never had from this Mac, or not as it is now: sent.
+  // A file here Orgo never had from this Mac, or not as it is now: sent (the sample Bops wrote as that,
+  // once it's known whether Orgo had one).
   for (const x of crmFolder.files(dir)) {
     if (busy.has(fold(x.name)) || toSend.includes(x.name)) continue;
     const k = knownOf(side, x.name);
     if (!k || k.name !== x.name || shaHere(x.name) !== k.sha) toSend.push(x.name);
   }
-  for (const name of toSend) crmChanged(ws, { put: name });
+  for (const name of toSend) {
+    const sample = isSampleName(name) && !knownOf(side, name);
+    if (!sample || deletedKnown) crmChanged(ws, { put: name, sample });
+  }
   // Set up on another Mac already: this one doesn't write the sample.
-  if (remote.length || Object.keys(side.files).length) crmFolder.seeded(dir);
+  if (side.fresh === false) crmFolder.seeded(dir);
+  decided.set(ws, Date.now());
   return true;
+}
+
+/**
+ * Whether the sample may be written in a workspace's CRM here (crm.ts seedOnce): always for one only on
+ * this Mac; for one in Orgo, only once a read of Orgo's copy found nothing there (no file, none deleted).
+ * Orgo away or slow, it waits for a later open.
+ */
+export function crmMaySeed(ws: string, dir: string): boolean {
+  if (onRunner()) return true;
+  const pid = projectOf(ws);
+  if (!pid || routesMissing(pid)) return true;
+  // As this open's read found it (or one in the last 30 seconds), never an older one's.
+  return Date.now() - (decided.get(ws) ?? 0) < LIST_EVERY_MS && readSide(dir, pid).fresh === true;
 }
 
 /** The CRM's list is opened: Orgo's copy first, at most every 30 seconds, waiting on Orgo at most a few seconds. */
@@ -498,6 +589,7 @@ export function dropWorkspaceCrm(ws: string) {
   if (!user || !/^ws_[a-z0-9]+$/i.test(ws)) return;
   rmSync(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ user, "crm", ws), { recursive: true, force: true });
   pulled.delete(ws);
+  decided.delete(ws);
 }
 
 /** Once a start and sign-in (the state route, on the Mac): each bound workspace's CRM in step with Orgo, and what waited from before sent. */
@@ -532,6 +624,7 @@ export const crmSyncForTests = {
     g.__bopsCrmStarted = undefined;
     missing.clear();
     pulled.clear();
+    decided.clear();
     said.clear();
   },
 };

@@ -70,7 +70,9 @@ const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, 
 
 /* ---------------- A fake orgo-web: /api/projects/{id}/crm, as lib/bops-crm answers ---------------- */
 
-const orgo = { files: [], blobs: new Map(), calls: [], down: false, clock: Date.now(), seq: 0 };
+// putDelay and blobDelay: Orgo slow to take a PUT, or its bucket slow to answer a GET (ms).
+const orgo = { files: [], blobs: new Map(), calls: [], down: false, clock: Date.now(), seq: 0, putDelay: 0, blobDelay: 0 };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = () => new Date((orgo.clock = Math.max(Date.now(), orgo.clock + 1))).toISOString();
 const fold = (n) => n.normalize("NFC").toLowerCase();
 const live = (name) => orgo.files.find((f) => !f.deletedAt && fold(f.name) === fold(name));
@@ -99,6 +101,7 @@ const elsewhere = {
 
 async function fakeOrgo(req, url) {
   const body = req.method === "GET" || req.method === "DELETE" ? undefined : Buffer.from(await req.arrayBuffer());
+  if (req.method === "PUT" && orgo.putDelay) await sleep(orgo.putDelay);
   orgo.calls.push({ method: req.method, path: decodeURIComponent(url.pathname), query: url.search, body, ifMatch: req.headers.get("if-match"), type: req.headers.get("content-type"), auth: req.headers.get("authorization") });
   if (req.headers.get("authorization") !== `Bearer ${ORGO_KEY}`) return json({ error: "Unauthorized" }, 401);
   if (orgo.down) return json({ error: "Bops is not available right now. Try again.", code: "bops_map_unavailable" }, 503);
@@ -147,6 +150,7 @@ globalThis.fetch = async (input, init) => {
   if (url.origin === "https://orgo.test") return fakeOrgo(req, url);
   if (url.origin === "https://blobs.test") {
     orgo.calls.push({ method: "GET", path: url.pathname, blob: true, auth: req.headers.get("authorization") });
+    if (orgo.blobDelay) await sleep(orgo.blobDelay);
     const bytes = orgo.blobs.get(url.pathname.slice(1));
     return bytes ? new Response(bytes) : new Response("NoSuchKey", { status: 404 });
   }
@@ -331,6 +335,121 @@ await check("A workspace set up on another Mac doesn't get the sample again here
   await settle();
   assert.deepEqual(sent().filter((c) => !c.startsWith("GET")), [], "nothing sent back, only Orgo's files read");
   assert.equal(there(SAMPLE_NAME), undefined, "nor made again in Orgo");
+});
+
+await check("Changed, then renamed before the change went (Orgo away meanwhile): Orgo's renamed file has the change", async () => {
+  await K.createFile("ws_main", "Hot leads", { template: "pipeline" });
+  await settle();
+  orgo.down = true;
+  await K.applyFileOps("ws_main", "Hot leads", [{ op: "add", values: ["Ro", "Re", "ro@re.test", "Lead", "$4", "Maya", "", ""] }]);
+  await K.renameFile("ws_main", "Hot leads", "Warm leads");
+  await settle();
+  orgo.down = false;
+  orgo.calls = [];
+  T.reset();
+  await settle();
+  assert.deepEqual(sent(), ["PATCH …/Hot leads", "PUT …/Warm leads"], "the rename, then its contents");
+  assert.match(thereBytes("Warm leads").toString(), /Ro,Re/);
+  assert.equal(thereBytes("Warm leads").toString(), local("Warm leads").toString());
+  assert.deepEqual(T.waiting(), []);
+  // Only renamed: the PATCH alone.
+  orgo.calls = [];
+  await K.renameFile("ws_main", "Warm leads", "Cold leads");
+  await settle();
+  assert.deepEqual(sent(), ["PATCH …/Warm leads"]);
+  await K.deleteFile("ws_main", "Cold leads");
+  await settle();
+});
+
+await check("A change made while that file's put is on its way still goes (the put in flight read it before)", async () => {
+  await K.createFile("ws_main", "Busy list", { template: "pipeline" });
+  await settle();
+  orgo.putDelay = 600;
+  await K.applyFileOps("ws_main", "Busy list", [{ op: "add", values: ["One", "A", "one@a.test", "Lead", "$1", "Maya", "", ""] }]);
+  const going = T.flush();
+  await sleep(150);
+  await K.applyFileOps("ws_main", "Busy list", [{ op: "add", values: ["Two", "B", "two@b.test", "Lead", "$2", "Maya", "", ""] }]);
+  await going;
+  orgo.putDelay = 0;
+  await settle();
+  assert.deepEqual(T.waiting(), []);
+  assert.match(thereBytes("Busy list").toString(), /Two,B/);
+  assert.equal(thereBytes("Busy list").toString(), local("Busy list").toString());
+  await K.deleteFile("ws_main", "Busy list");
+  await settle();
+});
+
+await check("The sample on a new Mac: none while Orgo is away or slow (Orgo's, as edited there, comes after), none back where it was deleted, and one Bops wrote never goes over Orgo's", async () => {
+  const EDITED = "Name,Company\nReal Customer,Acme\n";
+  const newMac = () => {
+    rmSync(dir(), { recursive: true, force: true });
+    T.reset();
+  };
+  orgo.files = [];
+  orgo.blobs.clear();
+  // Orgo away at the first open: no sample here; the next open takes Orgo's, edited on the other Mac.
+  elsewhere.put(SAMPLE_NAME, EDITED).sample = true;
+  newMac();
+  orgo.down = true;
+  let list = await openList();
+  orgo.down = false;
+  assert.deepEqual(list.map((f) => f.name), [], "Orgo away: no sample written");
+  assert.equal(existsSync(join(dir(), ".seeded")), false);
+  list = await openList();
+  assert.deepEqual(list.map((f) => f.name), [SAMPLE_NAME]);
+  assert.equal(local(SAMPLE_NAME).toString(), EDITED, "Orgo's, as edited there");
+  await settle();
+  assert.equal(thereBytes(SAMPLE_NAME).toString(), EDITED, "Orgo's not written over");
+  // Orgo slow: its copy outlasts the list's wait (4 seconds); no sample meanwhile, Orgo's after.
+  for (let i = 1; i <= 3; i++) elsewhere.put(`Slow ${i}`, `Name,Email\nP${i},p${i}@x.test\n`);
+  newMac();
+  orgo.blobDelay = 1200;
+  list = await openList();
+  assert.ok(!list.some((f) => f.name === SAMPLE_NAME), "not written while Orgo's copy is on its way");
+  await T.pullCrm("ws_main");
+  orgo.blobDelay = 0;
+  await settle();
+  assert.equal(local(SAMPLE_NAME).toString(), EDITED);
+  assert.equal(thereBytes(SAMPLE_NAME).toString(), EDITED);
+  assert.equal(orgo.files.filter((f) => !f.deletedAt && f.sample).length, 1, "one sample");
+  // Deleted on the other Mac with everything else: a new Mac doesn't bring it back (Orgo's deleted files are read too).
+  for (const f of orgo.files.filter((x) => !x.deletedAt)) elsewhere.del(f.name);
+  newMac();
+  orgo.calls = [];
+  list = await openList();
+  await settle();
+  assert.deepEqual(list.map((f) => f.name), []);
+  assert.equal(there(SAMPLE_NAME), undefined, "not made again in Orgo");
+  assert.ok(existsSync(join(dir(), ".seeded")));
+  assert.ok(orgo.calls.some((c) => c.method === "GET" && /^\?since=/.test(c.query)), "what was deleted, read");
+  // One written here before (a Bops that seeded while Orgo was away) where Orgo's was deleted: it goes to .trash, not to Orgo.
+  writeFileSync(join(dir(), `${SAMPLE_NAME}.csv`), "Name\nTemplate row\n", { mode: 0o600 });
+  elsewhere.put("Kept", "Name\nK\n");
+  rmSync(join(dir(), ".orgo.json"), { force: true });
+  const before = trashed().length;
+  orgo.calls = [];
+  await openList();
+  await settle();
+  assert.equal(there(SAMPLE_NAME), undefined, "not made again in Orgo");
+  assert.equal(local(SAMPLE_NAME), null);
+  assert.equal(trashed().length, before + 1, "this Mac's copy in .trash");
+  assert.ok(!sent().some((c) => c.startsWith(`PUT …/${SAMPLE_NAME}`)));
+  // Two new Macs at once, Orgo empty: both may write it; the one that reaches Orgo second takes Orgo's,
+  // even when Orgo's is the older (no later-change rule for the sample).
+  orgo.files = [];
+  orgo.blobs.clear();
+  newMac();
+  list = await openList();
+  assert.deepEqual(list.map((f) => f.name), [SAMPLE_NAME], "Orgo has nothing: written here");
+  const first = elsewhere.put(SAMPLE_NAME, EDITED);
+  first.sample = true;
+  first.updatedAt = new Date(Date.now() - 60_000).toISOString();
+  await settle();
+  assert.equal(thereBytes(SAMPLE_NAME).toString(), EDITED, "Orgo's stands");
+  assert.equal(local(SAMPLE_NAME).toString(), EDITED, "and is the one here");
+  assert.equal(orgo.files.filter((f) => !f.deletedAt && f.sample).length, 1);
+  for (const f of orgo.files.filter((x) => !x.deletedAt)) await K.deleteFile("ws_main", f.name).catch(() => {});
+  await settle();
 });
 
 await check("A workspace with no Orgo project stays on this Mac; a deleted workspace's CRM folder goes", async () => {

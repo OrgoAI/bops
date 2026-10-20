@@ -27,7 +27,7 @@ import { workspaceOf, type Bot, type Message } from "@/lib/types";
 import { onPostgres } from "./persist";
 import { addMessage, bot, getState, ownerName, session, update, userDir } from "./store";
 import { markFound } from "./treg";
-import { crmChanged, crmBeforeList } from "./crm-sync";
+import { crmChanged, crmBeforeList, crmMaySeed } from "./crm-sync";
 
 /**
  * The user's CRM: CSV files on this Mac, one folder per workspace, listed on the left of the app and
@@ -359,14 +359,18 @@ function metas(dir: string): CrmFileMeta[] {
 /** The workspace a folder is the CRM of (its name). */
 const wsOfDir = (dir: string) => basename(dir);
 
-/** The sample pipeline, the first time a workspace's CRM is opened (never again once it's deleted, nor where another Mac set it up: crm-sync.ts). */
+/**
+ * The sample pipeline, the first time a workspace's CRM is opened (never again once it's deleted, nor where
+ * another Mac set it up: for a workspace in Orgo, only once a read of Orgo's copy found nothing there,
+ * crm-sync.ts crmMaySeed).
+ */
 function seedOnce(dir: string) {
   const marker = join(/*turbopackIgnore: true*/ dir, ".seeded");
   if (existsSync(/*turbopackIgnore: true*/ marker)) return;
   if (!entries(dir).some((e) => same(e.name, SAMPLE_NAME))) {
     const { columns, rows } = parseCsv(SAMPLE_PIPELINE);
     save(dir, join(/*turbopackIgnore: true*/ dir, `${SAMPLE_NAME}.csv`), columns, rows);
-    crmChanged(wsOfDir(dir), { put: SAMPLE_NAME });
+    crmChanged(wsOfDir(dir), { put: SAMPLE_NAME, sample: true });
   }
   writeFileSync(/*turbopackIgnore: true*/ marker, "", { mode: 0o600 });
 }
@@ -461,7 +465,7 @@ export async function listFiles(ws: unknown, opts: { seed?: boolean } = {}): Pro
   const dir = wsDir(ws);
   // The app's list: what changed in Orgo first (made, changed or deleted on another Mac), now and then.
   if (opts.seed) await crmBeforeList(wsOfDir(dir));
-  if (opts.seed && !existsSync(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ dir, ".seeded"))) await inLane(dir, () => seedOnce(dir));
+  if (opts.seed && !existsSync(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ dir, ".seeded")) && crmMaySeed(wsOfDir(dir), dir)) await inLane(dir, () => seedOnce(dir));
   return metas(dir);
 }
 
