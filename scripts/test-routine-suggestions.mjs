@@ -526,16 +526,16 @@ await check("a check whose account went, is signed out or its bot can't use now 
     assert.equal(fake.jobs.length, jobs + 1);
     work.status = "expired";
     let run = await R.runRoutine(r.id);
-    assert.deepEqual([run.status, run.error], ["failed", "Gmail (Work · sam@acme.com) is signed out. Sign in again in the Vault."]);
+    assert.deepEqual([run.status, run.error], ["failed", "Gmail (Work · sam@acme.com) is signed out. Sign in again in Logins."]);
     await R.runRoutine(r.id);
     assert.equal(said().length, 1, "said once, not every hour");
     work.status = "active";
     state.bots.find((b) => b.id === "bot_main").access.ca_work = "none";
     run = await R.runRoutine(r.id);
-    assert.equal(run.error, "Jev can't use Gmail (Work · sam@acme.com) now. Give it access in the Vault, or delete this routine.");
+    assert.equal(run.error, "Jev can't use Gmail (Work · sam@acme.com) now. Give it access in Logins, or delete this routine.");
     state.accounts = state.accounts.filter((a) => a.id !== "ca_work");
     run = await R.runRoutine(r.id);
-    assert.equal(run.error, "That Gmail account isn't connected anymore. Delete this routine, or connect it again in the Vault.");
+    assert.equal(run.error, "That Gmail account isn't connected anymore. Delete this routine, or connect it again in Logins.");
     assert.equal(fake.jobs.length, jobs + 1, "never run on Personal instead");
     for (const t of said()) noDashes(t, "a check that can't run");
   } finally {

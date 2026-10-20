@@ -447,7 +447,7 @@ export function createSkill(wsId: string, input: NewSkill): { ref: SkillRef; war
 /** A key in the name, the description or the frontmatter would reach every prompt and Orgo: refused like one in the body. */
 function noSecretsIn(name: string, description: string, extra: Record<string, unknown> = {}) {
   const found = [...scanSecrets("name", name), ...scanSecrets("description", description), ...scanSecrets("frontmatter", JSON.stringify(extra))];
-  if (found.length) throw new SkillError("That looks like a secret. Keep keys in the Vault, not in a skill.", 400, found);
+  if (found.length) throw new SkillError("That looks like a secret. Keep keys in Logins, not in a skill.", 400, found);
 }
 
 export type SkillEdit = { name?: string; description?: string; body?: string; files?: FileIn[]; botIds?: string[] };

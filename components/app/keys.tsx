@@ -708,7 +708,7 @@ export function BotKeys({ state, bot: b, onAdd, className }: { state: AppState; 
         <span className="text-[13px] font-semibold leading-4">Keys</span>
         {info.signedIn && (
           <button onClick={onAdd} className="text-[12px] font-medium leading-4 text-ink">
-            Add in Vault ›
+            Add in Logins ›
           </button>
         )}
       </div>

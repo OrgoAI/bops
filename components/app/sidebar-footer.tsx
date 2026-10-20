@@ -3,20 +3,23 @@
 import { useCallback, useEffect, useRef, useState, type FocusEvent, type PointerEvent, type ReactNode } from "react";
 
 /*
- * The sidebar's footer (sidebar.tsx): your account (the initials), then People, Apps & logins, Routines
- * and Knowledge. One of them is a pill with its label, the others round buttons. At rest it's the one
- * whose page is open on the right (People's sheet, the Vault, Routines, Knowledge), else Apps & logins.
+ * The sidebar's footer (sidebar.tsx): your account (the initials), then People, Logins, Routines,
+ * Knowledge and Apps. One of them is a pill with its label, the others round buttons. At rest it's the
+ * one whose page is open on the right (People's sheet, the Vault, Routines, Knowledge, the Apps home or
+ * an app a bot made), else Logins.
  * Pointing at another (or tabbing to it) grows that one into the pill as the one before shrinks back to a
  * circle, in one motion; moving along the row glides the pill from button to button, and leaving the row
- * settles it back on the resting one. Each is a slot 40px wide that takes the row's free space by
+ * settles it back on the resting one. Each is a slot 36px wide that takes the row's free space by
  * flex-grow (1 for the pill, 0 for the rest), so as one grows the other gives up the same space and the
  * row never gets wider or wraps (globals.css .motion-footer-*; with reduced motion, the swap is instant).
+ * Six of them (36px, 4px apart) leave the pill 120px in the sidebar's 340px, room for Knowledge and its
+ * icon, or Logins and three apps' logos.
  * Where nothing can hover (a touch screen), only the open page is the pill.
  */
 
-/** The footer's four pages: the one that's the pill at rest. */
-export type FooterPage = "people" | "vault" | "routines" | "knowledge";
-/** Every button in the footer: the four pages and your account. */
+/** The footer's pages: the one that's the pill at rest ("vault" is Logins; "apps", the apps the bots made). */
+export type FooterPage = "people" | "vault" | "routines" | "knowledge" | "apps";
+/** Every button in the footer: its pages and your account. */
 export type FooterKey = FooterPage | "you";
 
 /** Which button is the pill: the one pointed at (or tabbed to), else the resting one (the open page). */
@@ -107,19 +110,20 @@ export function useFooterHover(initial: FooterKey | null = null) {
 /**
  * Which footer button is the pill: People while its sheet is open, else the page shown on the right
  * (`tab`: the kind of the tab in sight, none while the panel is hidden or a computer is full width) when
- * it's Knowledge or Routines, else Apps & logins (the Vault, and the default). `knowledge`: whether the
- * footer has Knowledge at all (lib/memory-categories.ts categoriesOpen).
+ * it's Knowledge, Routines or Apps (the Apps home, or one of the apps), else Logins (the Vault, and the
+ * default). `knowledge`: whether the footer has Knowledge at all (lib/memory-categories.ts categoriesOpen).
  */
 export function footerPageOf({ people, tab, knowledge = true }: { people?: boolean; tab?: string; knowledge?: boolean }): FooterPage {
   if (people) return "people";
   if (tab === "memory" && knowledge) return "knowledge";
   if (tab === "autopilot") return "routines";
+  if (tab === "made-apps" || tab === "made-app") return "apps";
   return "vault";
 }
 
 /**
  * One of the footer's buttons (`name`): round with its `icon`, or the pill (`expanded`, pointed at or the
- * open page) with its `label` too, and `trail` after the label (Apps & logins' connected apps). `pressed`
+ * open page) with its `label` too, and `trail` after the label (Logins' connected apps). `pressed`
  * is whether its page is the open one (the resting pill), not merely pointed at; it defaults to
  * `expanded`. `tip` is the round one's tooltip (the pill says what it is already); `badge` (a count) sits
  * on its corner, outside the clipped button, in both shapes.
@@ -148,13 +152,13 @@ export function FooterButton({
   onClick: () => void;
 }) {
   return (
-    <span data-footer-slot={label} data-footer-key={name} className={`motion-footer-slot relative flex h-10 min-w-10 basis-10 ${expanded ? "grow" : "grow-0"} shrink`}>
+    <span data-footer-slot={label} data-footer-key={name} className={`motion-footer-slot relative flex h-9 min-w-9 basis-9 ${expanded ? "grow" : "grow-0"} shrink`}>
       <button
         onClick={onClick}
         title={expanded ? undefined : tip}
         aria-label={ariaLabel ?? label}
         aria-pressed={pressed}
-        className="flex h-10 w-full min-w-0 items-center justify-center overflow-hidden rounded-full bg-white px-2.5 text-[13.5px] font-medium text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] transition-transform duration-100 ease-out hover:bg-[#FCFCFB] outline-none focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] active:scale-[.96] motion-reduce:transition-none"
+        className="flex h-9 w-full min-w-0 items-center justify-center overflow-hidden rounded-full bg-white px-2.5 text-[13.5px] font-medium text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] transition-transform duration-100 ease-out hover:bg-[#FCFCFB] outline-none focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] active:scale-[.96] motion-reduce:transition-none"
       >
         {icon}
         <span

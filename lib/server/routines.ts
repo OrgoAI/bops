@@ -485,9 +485,9 @@ async function run(routineId: string, opts: RunOpts): Promise<RoutineRun> {
 function checkBlocked(r: Routine, b: Bot): string | undefined {
   if (r.source?.template !== CHECK_TEMPLATE || !r.source.account) return undefined;
   const a = getState().accounts?.find((x) => x.id === r.source!.account);
-  if (!a) return `That ${appWord(r.source.app)} account isn't connected anymore. Delete this routine, or connect it again in the Vault.`;
-  if (a.status !== "active") return `${checkWord(r.source)} is signed out. Sign in again in the Vault.`;
-  if (!levelOf(b, a)) return `${b.name} can't use ${checkWord(r.source)} now. Give it access in the Vault, or delete this routine.`;
+  if (!a) return `That ${appWord(r.source.app)} account isn't connected anymore. Delete this routine, or connect it again in Logins.`;
+  if (a.status !== "active") return `${checkWord(r.source)} is signed out. Sign in again in Logins.`;
+  if (!levelOf(b, a)) return `${b.name} can't use ${checkWord(r.source)} now. Give it access in Logins, or delete this routine.`;
   return undefined;
 }
 

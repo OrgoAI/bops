@@ -9,6 +9,7 @@ import type { Section } from "./bot-panel";
 import { CrmFileIcon } from "./crm";
 import { Mascot } from "./mascot";
 import { MacIcon } from "./mac-tab";
+import { AppMark, AppsIcon } from "./made-apps";
 import { KnowledgeIcon, type OrbitSection } from "./memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MonitorIcon, teamOf } from "./ui";
@@ -40,14 +41,26 @@ export type PanelTab =
    * workspace, at the row asked for (`focus`) and the bot asked for (`bot`: only its, from its profile);
    * `focusAt` is when they were asked for, so asking again shows them again.
    */
-  | { id: string; kind: "autopilot"; ws: string; section: AutopilotSection; focus?: string; focusAt?: number; bot?: string };
+  | { id: string; kind: "autopilot"; ws: string; section: AutopilotSection; focus?: string; focusAt?: number; bot?: string }
+  /** An app a bot made (made-apps.tsx): built live here, then used. */
+  | { id: string; kind: "made-app"; appId: string }
+  /** Every app the bots made in a workspace, as tiles (made-apps.tsx). */
+  | { id: string; kind: "made-apps"; ws: string };
 
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";
 
-/** A tab you're reading (a page, the Vault, a CRM file, Knowledge and Skills in it, a profile, Routines): a new "Needs you" doesn't take the panel from it. */
+/** A tab you're reading (a page, Logins, a CRM file, Knowledge and Skills in it, a profile, Routines, an app a bot made or the Apps home): a new "Needs you" doesn't take the panel from it. */
 export const isReading = (t?: PanelTab) =>
-  !!t && (t.kind === "web" || t.kind === "vault" || t.kind === "crm" || t.kind === "memory" || t.kind === "bot" || t.kind === "autopilot");
+  !!t &&
+  (t.kind === "web" ||
+    t.kind === "vault" ||
+    t.kind === "crm" ||
+    t.kind === "memory" ||
+    t.kind === "bot" ||
+    t.kind === "autopilot" ||
+    t.kind === "made-app" ||
+    t.kind === "made-apps");
 
 /**
  * The Knowledge tab, opened again for a kind, an item or a search: on the kind asked for, else where it
@@ -148,8 +161,12 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
         : t.kind === "web"
           ? t.title || hostOf(t.url)
           : t.kind === "vault"
-            ? "Vault"
-            : t.kind === "mac"
+            ? "Logins"
+            : t.kind === "made-app"
+              ? (state.madeApps?.find((a) => a.id === t.appId)?.title ?? "App")
+              : t.kind === "made-apps"
+                ? "Apps"
+                : t.kind === "mac"
               ? "Your Mac"
               : t.kind === "crm"
                 ? t.file
@@ -182,12 +199,18 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
         <KnowledgeIcon />
       ) : t.kind === "autopilot" ? (
         <AutopilotIcon />
+      ) : t.kind === "made-app" ? (
+        <AppMark app={state.madeApps?.find((a) => a.id === t.appId) ?? { id: t.appId, title: "App" }} size={15} />
+      ) : t.kind === "made-apps" ? (
+        <AppsIcon />
       ) : (
         <GlobeIcon />
       )}
       <span className={`truncate ${on ? "font-medium" : ""}`}>{label}</span>
       {needsYou ? (
         <span className="size-[7px] shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" title="Needs you" />
+      ) : t.kind === "made-app" && state.madeApps?.find((a) => a.id === t.appId)?.building ? (
+        <span className="size-[7px] shrink-0 animate-pulse rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" title="Building" />
       ) : working ? (
         <span className="size-[6px] shrink-0 animate-pulse rounded-full bg-[#2BB673]" title="Working" />
       ) : null}
@@ -338,6 +361,7 @@ export function NewTab({
   onProfile,
   onVault,
   onKnowledge,
+  onApps,
   onMac,
 }: {
   state: AppState;
@@ -347,6 +371,8 @@ export function NewTab({
   onVault: () => void;
   /** Knowledge, what the bots know (memory-categories.tsx); none where it isn't open to this account. */
   onKnowledge?: () => void;
+  /** The apps the bots made (made-apps.tsx). */
+  onApps: () => void;
   onMac: () => void;
 }) {
   const [address, setAddress] = useState("");
@@ -413,14 +439,23 @@ export function NewTab({
         )}
       </form>
       <div className="flex w-full max-w-[520px] flex-col gap-2">
+        <button onClick={onApps} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_#ECECEA] hover:bg-[#FCFCFB]">
+          <span className="flex size-7 items-center justify-center rounded-full bg-ink text-highlighter">
+            <AppsIcon size={13} />
+          </span>
+          <span className="flex flex-col">
+            <span className="text-[14px] font-medium leading-[18px]">Apps</span>
+            <span className="text-[12px] leading-4 text-[#6B6B6B]">Tools your bots made for you</span>
+          </span>
+        </button>
         <button onClick={onVault} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_#ECECEA] hover:bg-[#FCFCFB]">
           <span className="flex size-7 items-center justify-center rounded-full bg-ink text-highlighter">
             <KeyIcon />
           </span>
           <span className="flex flex-col">
-            <span className="text-[14px] font-medium leading-[18px]">Vault</span>
+            <span className="text-[14px] font-medium leading-[18px]">Logins</span>
             <span className="text-[12px] leading-4 text-[#6B6B6B]">
-              Your apps and logins, and which bots can use them
+              Your accounts and logins, and which bots can use them
             </span>
           </span>
         </button>

@@ -144,7 +144,7 @@ export function OwnerEmail({ info, onInfo }: { info: OwnerEmailInfo; onInfo: (i:
       ? "Count an email you write from, and emails you send from it count as you. Bops checks that each one really came from you."
       : canAdd || waiting
         ? "Add the email you write from, so emails from it count as you."
-        : "Connect Gmail or Outlook in the Vault, and emails you send from it count as you.";
+        : "Connect Gmail or Outlook in Logins, and emails you send from it count as you.";
 
   return (
     <div className="flex flex-col gap-1.5">

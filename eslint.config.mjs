@@ -18,6 +18,8 @@ const eslintConfig = defineConfig([
     // Release output (the built app) and the downloaded relay agent (scripts/release.sh).
     "dist-desktop/**",
     "vendor/**",
+    // React and Tailwind, prebuilt for apps bots make (scripts/build-made-app-runtime.sh).
+    "public/made-apps/**",
   ]),
 ]);
 

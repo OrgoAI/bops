@@ -19,6 +19,7 @@ import { computerBriefing, teamBriefing } from "./briefing";
 import { ABOUT_BOPS, ASKING, tidyAnswer, WRITING } from "./style";
 import { howIWork, plainLinks } from "@/cloud/style";
 import { whenText } from "@/cloud/schedule";
+import { buildApp, madeApp } from "./made-apps";
 import { savePage } from "./pages";
 import { createRoutine, deleteRoutine, describeSchedule, editRoutine, isNothing, NO_CREDIT_FOR_ROUTINES, routinesNote, runRoutine, setRoutineEnabled, setRoutineWhere, skipRoutine, unskipRoutine, zoneOf } from "./routines";
 import { undash } from "./procedures";
@@ -415,6 +416,8 @@ export async function handleMessage(
   channel?: Message["channel"],
   /** For usage events only: asked aloud on a phone call (call.ts), not typed in the app. */
   onCall?: boolean,
+  /** Sent from the app with one of the bots' apps open next to the chat (Message.lookingAt). */
+  lookingAt?: string,
 ) {
   const c = chat(chatId);
   if (!c) return null;
@@ -422,13 +425,15 @@ export async function handleMessage(
   // A reply to a reply joins the conversation it started from, like iMessage.
   const target = replyTo ? getState().messages.find((m) => m.id === replyTo && m.chatId === chatId) : undefined;
   const root = target ? (target.replyTo ?? target.id) : undefined;
-  const mine = addMessage({ chatId, role: "user", text, replyTo: root, images: images?.length ? images : undefined, via, phone, channel });
+  const app = lookingAt && madeApp(lookingAt) ? lookingAt : undefined;
+  const mine = addMessage({ chatId, role: "user", text, replyTo: root, images: images?.length ? images : undefined, via, phone, channel, lookingAt: app });
   trackServerEvent("bops_message_sent", { chat_kind: c.kind, via: onCall ? "call" : (via ?? "app"), image_count: images?.length ?? 0, is_reply: !!root });
   // Into the shared memory (unless the user wants it kept from someone), and remembered if it's a lasting fact.
   rememberMessage(wsOf(c.botIds[0]), chatId, mine.id, images?.length ? `${text} [attached ${images.length} image${images.length === 1 ? "" : "s"}]`.trim() : text, { chat: chatName(chatId) });
   // A follow-up to work already under way goes into that thread instead of starting another (not one
   // with images: a thread only takes words, and the bot here can see them).
-  if (!images?.length && (await continueThread(chatId, text, root))) return mine;
+  // Not while an app is open next to the chat: what they say then is most likely about the app.
+  if (!images?.length && !app && (await continueThread(chatId, text, root))) return mine;
   if (!ours()) return mine;
   if (c.kind === "group") {
     await groupTurn(chatId, mine);
@@ -739,6 +744,86 @@ async function askTeammate(asker: Bot, toId: string, question: string, chatId: s
   }
 }
 
+/**
+ * A question from an app a bot made (made-apps.ts, `bops.bot`): the bot looks it up with what it can
+ * read (the user's connected apps, its inbox, memory, the web) and answers the app, not a chat. Anything
+ * it would send or change waits for the user's approval in the app's chat, as from the chat.
+ */
+export async function answerForApp(botId: string, app: { title: string; chatId: string }, question: string, json: boolean) {
+  const b = bot(botId);
+  if (!b) throw new Error("The bot that made this app is gone.");
+  if (await creditsOut()) throw new Error("Your AI credit is used up.");
+  const owner = ownerName();
+  const ours = sameState();
+  const others = getState().bots.filter((x) => x.id !== botId && workspaceOf(x) === workspaceOf(b));
+  const tools = [
+    WEB_SEARCH,
+    ...APP_TOOLS(b),
+    ...(memoryOn() ? [fn("recall", `Ask ${owner}'s long-term memory something.`, { question: { type: "string" } })] : []),
+    ...(mailOn() && b.email
+      ? [
+          fn("check_email", "See the latest emails in your inbox, or search it.", { query: { type: ["string", "null"] } }),
+          fn("read_email", "Read an email and the rest of its conversation.", { message_id: { type: "string" } }),
+        ]
+      : []),
+  ];
+  const instructions = [
+    persona(b, others),
+    appsNote(b, "chat"),
+    `Now you're answering "${app.title}", an app you made for ${owner} that runs in Bops, not ${owner} in a chat. Find out what it asks with your tools and answer only that, ${json ? "as JSON only: no Markdown, no words around it" : "in plain text, briefly"}. Don't send, create or change anything unless the question asks for it; if it does, that waits for ${owner}'s approval.`,
+    ...nowLines(b),
+    await memoryBlock(workspaceOf(b), question, 1500),
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const reasoning = { effort: "low" as const };
+  let response = await client.responses.create({ model: CHAT_MODEL, reasoning, instructions, input: question.slice(0, 8000), tools }, usageTags("chat", botId));
+  stillOurs(ours);
+  recordTokens("chat", response.model, response.usage, botId);
+  for (let round = 0; round < 8; round++) {
+    const calls = response.output.filter((o) => o.type === "function_call") as { call_id: string; name: string; arguments: string }[];
+    if (!calls.length) break;
+    const outputs = await Promise.all(
+      calls.map(async (c) => {
+        const a = JSON.parse(c.arguments || "{}") as { query?: string | null; action?: string; arguments?: Record<string, unknown>; account?: string | null; question?: string; message_id?: string };
+        const out = await (c.name === "find_app_actions"
+          ? findAppActions(botId, a.query ?? "")
+          : c.name === "use_app"
+            ? runAppAction(
+                botId,
+                a.action ?? "",
+                a.arguments ?? {},
+                { chatId: app.chatId },
+                // The user decides in the app's chat; what the app answered lands there.
+                (ask) =>
+                  void ask
+                    .catch((e: Error) => `Failed: ${e.message}`)
+                    .then((result) => {
+                      if (saidNo(result)) return addMessage({ chatId: app.chatId, role: "system", text: `${b.name} didn't do it for ${app.title}: you said no` });
+                      const ok = !result.startsWith("Failed");
+                      addMessage({ chatId: app.chatId, role: "system", text: ok ? `${b.name} did it for ${app.title}: ${a.action}` : `${b.name} couldn't do it for ${app.title}: ${a.action} failed`, appResult: { action: a.action ?? "", ok, output: result } });
+                    }),
+                a.account ?? null,
+              )
+            : c.name === "recall"
+              ? recall(workspaceOf(b), a.question ?? "")
+              : c.name === "check_email"
+                ? checkEmail(botId, a.query ?? null)
+                : c.name === "read_email"
+                  ? readEmail(botId, a.message_id ?? "")
+                  : Promise.resolve("Not available here.")
+        ).catch((e: Error) => `Failed: ${e.message}`);
+        return { type: "function_call_output" as const, call_id: c.call_id, output: out };
+      }),
+    );
+    stillOurs(ours);
+    response = await client.responses.create({ model: CHAT_MODEL, reasoning, instructions, previous_response_id: response.id, input: outputs, tools }, usageTags("chat", botId));
+    stillOurs(ours);
+    recordTokens("chat", response.model, response.usage, botId);
+  }
+  return (response.output_text ?? "").trim();
+}
+
 /** Thrown when another account's Bops came in (a sign-out, a sign-in) while a turn waited: it stops, writing nothing. */
 class Swapped extends Error {}
 function stillOurs(ours: () => boolean) {
@@ -790,21 +875,23 @@ type TurnOptions = {
 };
 
 /**
- * What a routine's run can't do: set up or change standing things, save to the user's memory (no one is
- * there to say it's right, and what it read may be a stranger's), forget from it, talk in the chat, or ask
- * a teammate. Those are for the user's own turns. (It can open and update Orbit's issues.)
+ * What a routine's run can't do: set up or change standing things (an app a bot made among them), save to
+ * the user's memory (no one is there to say it's right, and what it read may be a stranger's), forget from
+ * it, talk in the chat, or ask a teammate. Those are for the user's own turns. (It can open and update
+ * Orbit's issues.)
  */
-const NOT_IN_BACKGROUND = new Set(["react", "schedule", "manage_routine", "watch", "stop_watch", "create_skill", "update_skill", "remember", "make_page", "make_image", "hand_off", "tell_task", "ask_teammate", "create_bot", ...ORBIT_OWNER_ONLY]);
+const NOT_IN_BACKGROUND = new Set(["react", "schedule", "manage_routine", "watch", "stop_watch", "create_skill", "update_skill", "remember", "make_page", "make_image", "make_app", "change_app", "hand_off", "tell_task", "ask_teammate", "create_bot", ...ORBIT_OWNER_ONLY]);
 
 /**
  * What a turn someone else started (an email, a text or a call from outside) never has: anything that sets
- * up, changes or stops what the bots do on their own (routines, watches, skills), or a new bot. Those
- * are the user's; the bot says it will pass the request on. (Nor the web or the user's data: see the tools.)
+ * up, changes or stops what the bots do on their own (routines, watches, skills), the user's apps (made by
+ * the bots, made-apps.ts), or a new bot. Those are the user's; the bot says it will pass the request on.
+ * (Nor the web or the user's data: see the tools.)
  */
 /** All a sample (BackgroundJob.sample) has: finding an app's actions and running the ones that only read. */
 const SAMPLE_TOOLS = new Set(["find_app_actions", "use_app"]);
 
-const NOT_FROM_OUTSIDE = new Set(["schedule", "manage_routine", "watch", "stop_watch", "create_skill", "update_skill", "create_bot"]);
+const NOT_FROM_OUTSIDE = new Set(["schedule", "manage_routine", "watch", "stop_watch", "create_skill", "update_skill", "make_app", "change_app", "create_bot"]);
 
 /** Lookups whose answers come from outside Bops: the web, email, apps and data. A turn that read one can't save a skill. */
 const OUTSIDE_READS = new Set(["web_fetch", "check_email", "read_email", "use_app", "call_api", ...DATA_TOOL_NAMES, ...CRM_TOOL_NAMES, ...ORBIT_TOOL_NAMES]);
@@ -1419,6 +1506,23 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       ...(relayed
         ? []
         : [
+            fn(
+              "make_app",
+              `Make ${owner} an app: a small tool of their own that they keep and use in Bops (a tracker, a calculator, a planner, a dashboard, a log). It's built in the panel beside this chat in a minute or two, it keeps its own data, and they change it by asking you. Not for a one-off answer or an explanation (make_page).`,
+              {
+                title: { type: "string", description: "Its name: two or three words (\"Outbound replies\")." },
+                what: {
+                  type: "string",
+                  description: `Everything it should do and show, complete on its own (the builder sees only this): its screens, what it keeps, what ${owner} does in it, and any data from this chat it should start with.`,
+                },
+                ...SAY,
+              },
+            ),
+            fn("change_app", `Change one of ${owner}'s apps (they're listed in the note after the conversation) when they ask for something in it to be added, fixed, moved or restyled.`, {
+              app_id: { type: "string" },
+              change: { type: "string", description: `What to change, complete on its own, in ${owner}'s words made exact.` },
+              ...SAY,
+            }),
             fn("make_image", `Make a picture and send it here, yourself, without a computer: draw a new one (a drawing, a design, a logo, a mockup), or change or build on the latest pictures in this chat (a photo ${owner} sent, or one you made). It takes up to a minute and shows up in the chat on its own.`, {
               prompt: {
                 type: "string",
@@ -1678,7 +1782,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       persona(b, others),
       opts.outside ? "" : SEARCHING,
       "If a tapback says it all (thanks, ok, sounds good), react instead of replying.",
-      "When you start, hand off or tell a task something, or make a picture, its `say` is your reply: write no other text, and don't answer the request yourself; the task will.",
+      "When you start, hand off or tell a task something, make a picture, or make or change an app, its `say` is your reply: write no other text, and don't answer the request yourself; the task will.",
       opts.outside ? "" : appsNote(b, "chat"),
       opts.outside ? "" : dataNote(b, "chat"),
       opts.outside ? "" : crmNote(b, "chat"),
@@ -1700,7 +1804,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       opts.outside ? "" : watchesNote(b.isMain ? [botId, ...others.map((o) => o.id)] : [botId], b.isMain),
       // Someone else's turn: what's the user's alone (NOT_FROM_OUTSIDE).
       opts.outside
-        ? `This turn came from ${outsideFrom}, not ${owner}. Routines, reminders, watches, skills and new bots are ${owner}'s to set up or change: if they ask for one, say you'll pass the request on to ${owner}.`
+        ? `This turn came from ${outsideFrom}, not ${owner}. Routines, reminders, watches, skills, apps and new bots are ${owner}'s to set up or change: if they ask for one, say you'll pass the request on to ${owner}.`
         : "",
       ...(opts.group
         ? [
@@ -1711,6 +1815,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       // Asked by text, in a channel or by email (it changes from turn to turn, so it's here, not in the instructions).
       relayed ? `Pictures show only in the Bops app's chat, so you can't make one from here: if ${owner} asks for one, say they can ask for it in Bops.` : "",
       followUps.length ? `This chat's tasks you can send a message on to (tell_task): ${followUps.map((s) => `"${s.title}" (${s.id}), ${live(s) ? "running" : "finished"} ${s.runsOn === "mac" ? `on ${owner}'s Mac` : "in the cloud"}`).join("; ")}.` : "",
+      // The user's apps, for change_app (which a routine's run and someone else's turn don't have).
+      bg || opts.outside ? "" : appsLine(b, answering?.lookingAt),
       noOwnRoom ? `${owner}'s Orgo plan has no room for a new bot's own computer right now (${noOwnRoom}), so a bot you create works on yours.` : "",
       // The CRM's files right now (they change; the tools' words don't).
       opts.outside ? "" : crmNowLine(b),
@@ -1967,6 +2073,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     const says: string[] = [];
     let reacted = false;
     const pages: string[] = [];
+    // Apps made or changed in this turn (made-apps.ts builds them in the background).
+    const built: string[] = [];
     const pictures: { prompt: string; shape: Shape; from?: Message["images"] }[] = [];
     for (const item of [...earlier, ...response.output]) {
       if (item.type !== "function_call" || LOOKUPS.has(item.name)) continue;
@@ -1982,6 +2090,21 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       if (item.name === "make_page") {
         const { title, html } = JSON.parse(item.arguments) as { title: string; html: string };
         pages.push(`[${title.replace(/[[\]]/g, "")}](/api/pages/${savePage(title, html)})`);
+        continue;
+      }
+      if (item.name === "make_app" || item.name === "change_app") {
+        const a = JSON.parse(item.arguments) as { title?: string; what?: string; app_id?: string; change?: string; say?: string };
+        const app = item.name === "change_app" ? madeApp(a.app_id ?? "") : undefined;
+        if (item.name === "change_app" && (!app || app.ws !== workspaceOf(b))) {
+          notes.push("Couldn't find that app");
+          continue;
+        }
+        try {
+          built.push(buildApp(botId, chatId, { appId: app?.id, title: a.title, change: (app ? a.change : a.what) ?? "" }).id);
+          if (a.say?.trim()) says.push(a.say.trim());
+        } catch (e) {
+          notes.push(`Couldn't ${app ? "change" : "make"} the app: ${(e as Error).message}`);
+        }
         continue;
       }
       if (item.name === "make_image") {
@@ -2105,8 +2228,8 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // A tapback can be the whole answer; otherwise there's always something to read.
     const said =
       text ||
-      (sessionIds.length || pictures.length
-        ? says.join(" ") || (pictures.length && !sessionIds.length ? "Making it now." : "Starting on that now.")
+      (sessionIds.length || pictures.length || built.length
+        ? says.join(" ") || (built.length && !sessionIds.length ? "Building it now." : pictures.length && !sessionIds.length ? "Making it now." : "Starting on that now.")
         : notes.length
           ? "Done."
           : reacted && !pages.length
@@ -2137,6 +2260,21 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // Still drawing a picture: it keeps typing until that's in (drawFor).
     if (!bg && ours() && !drawing.get(`${chatId} ${botId}`)) setTyping(chatId, botId, false);
   }
+}
+
+/**
+ * The apps the bots made in this bot's team (made-apps.ts), for change_app, and the one open beside the
+ * chat as the user wrote, which a change they ask for without naming another app is about.
+ */
+function appsLine(b: Bot, lookingAt?: string) {
+  const apps = (getState().madeApps ?? []).filter((a) => a.ws === workspaceOf(b));
+  if (!apps.length) return "";
+  const owner = ownerName();
+  const open = apps.find((a) => a.id === lookingAt);
+  const list = apps.map((a) => `"${a.title}" (${a.id}${a.building ? ", being built now" : a.version ? `, v${a.version}` : ""})`).join("; ");
+  return [`${owner}'s apps (change_app): ${list}.`, open ? `${owner} has "${open.title}" open beside this chat right now: what they ask to change, without naming another app, is for it.` : ""]
+    .filter(Boolean)
+    .join(" ");
 }
 
 /** Pictures being made, by chat and bot ("<chatId> <botId>"), so the bot shows as typing until they're in. */

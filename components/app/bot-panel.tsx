@@ -962,7 +962,7 @@ function Uses({ state, bot: b, onOpenVault, onOpenRoutines, className }: { state
         )}
       </div>
       <button onClick={onOpenVault} className="shrink-0 text-[12px] font-medium leading-4 text-ink">
-        Manage in Vault ›
+        Manage in Logins ›
       </button>
       {popover && (
         <RoutineSuggest

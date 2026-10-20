@@ -644,7 +644,7 @@ export async function findAppActions(botId: string, query: string, where: { sess
   if (fromOutside(where.sessionId)) return NOT_FOR_OUTSIDE();
   const b = bot(botId);
   const session = b && (await sessionFor(b));
-  if (!session) return `You have no apps; ${ownerName()} can give you access in the Vault.`;
+  if (!session) return `You have no apps; ${ownerName()} can give you access in Logins.`;
   const r = (await session.search({ query })) as unknown as {
     results: { useCase: string; primaryToolSlugs: string[]; relatedToolSlugs: string[]; executionGuidance?: string; knownPitfalls?: string[] }[];
     toolSchemas?: Record<string, { description?: string; inputSchema?: unknown }>;
@@ -661,7 +661,7 @@ export async function findAppActions(botId: string, query: string, where: { sess
 /** Which of the bot's accounts in an app it means: the one it named, or its only one. */
 function pickAccount(b: Bot, app: string, hint?: string | null) {
   const mine = accountsOf(b).filter((x) => x.account.app === app);
-  if (!mine.length) return { error: `You don't have that app; ${ownerName()} can give you access in the Vault.` };
+  if (!mine.length) return { error: `You don't have that app; ${ownerName()} can give you access in Logins.` };
   const h = hint?.trim().toLowerCase();
   const named = h ? mine.filter((x) => [x.account.label, x.account.name, x.account.id].some((v) => v && v.toLowerCase().includes(h))) : [];
   if (named.length === 1) return named[0];
@@ -711,7 +711,7 @@ export async function runAppAction(
     logUse({ bot: b.id, kind: "app", target: account.id, targetName: targetNameOf(account), action, ...viaOf(where), outcome, ...(approvedBy ? { approvedBy } : {}) });
   if (level === "read" && !reads) {
     used("refused");
-    return `You can only read ${where_}. Ask ${ownerName()} for more access in the Vault if you need it.`;
+    return `You can only read ${where_}. Ask ${ownerName()} for more access in Logins if you need it.`;
   }
   const run = async (approvedBy?: AccessUse["approvedBy"]) => {
     let res: { data?: unknown; error?: string | null; successful?: boolean };

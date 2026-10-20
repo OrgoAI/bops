@@ -210,7 +210,7 @@ export async function vaultSignIn(botId: string, display: number, sessionId: str
     const asks = pages.filter((p) => loginsFor(botId, p.url).length).map((p) => siteOfUrl(p.url));
     if (asks.length)
       return `${owner}'s saved ${[...new Set(asks)].join(", ")} login is set to ask first. Stop and say in one sentence that you need to sign in: a card lets ${owner} sign you in with one tap.`;
-    return `No login in ${owner}'s vault fits a page open on that screen (${[...new Set(pages.map((p) => siteOfUrl(p.url)))].join(", ") || "none"}). Stop and say so in one sentence: ${owner} can add one in the Vault, or sign you in with the card.`;
+    return `No login in ${owner}'s vault fits a page open on that screen (${[...new Set(pages.map((p) => siteOfUrl(p.url)))].join(", ") || "none"}). Stop and say so in one sentence: ${owner} can add one in Logins, or sign you in with the card.`;
   }
   const task = s.goal ?? "";
   for (const p of fits) {

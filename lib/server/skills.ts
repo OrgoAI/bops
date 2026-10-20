@@ -46,13 +46,13 @@ export function appsNote(b: Bot, mode: Mode, opts: { tools?: boolean } = {}) {
   const list = appList(b);
   const missing = notMine(b);
   const ask = missing.length
-    ? `Through Bops, ${owner} also has ${listed(missing)} connected, which you can't use yet. When they ask what you can use, or a job needs one of these, tell them they can give you access in the Vault (on your profile): it's faster and more reliable than doing it on a computer.`
+    ? `Through Bops, ${owner} also has ${listed(missing)} connected, which you can't use yet. When they ask what you can use, or a job needs one of these, tell them they can give you access in Logins (on your profile): it's faster and more reliable than doing it on a computer.`
     : "";
   if (!list) {
     if (mode !== "chat") return ask;
     return (
       ask ||
-      `No apps are connected for you yet. When a job needs ${owner}'s email, calendar, documents, CRM or another app, tell them they can connect it in the Vault (on your profile) and give you access; until then you can do it on a computer.`
+      `No apps are connected for you yet. When a job needs ${owner}'s email, calendar, documents, CRM or another app, tell them they can connect it in Logins (on your profile) and give you access; until then you can do it on a computer.`
     );
   }
   const yours = `Your apps: ${owner} connected these accounts and gave you access: ${list}. In an account marked read only you can look things up but not change anything; read & act also lets you make changes.`;

@@ -3,12 +3,13 @@
 import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BLOCKER_ASK, BRAINS_ON, brainOf, live, pairChatId, threadRunner, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
+import { BLOCKER_ASK, BRAINS_ON, brainOf, live, pairChatId, threadRunner, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
 import { OpenLink } from "./panel-tabs";
 import { crmOpen } from "@/lib/crm-access";
 import { CrmNote } from "./crm";
+import { LookingAt, MadeAppLine } from "./made-apps";
 import { MacIcon } from "./mac-tab";
 import { AttachmentTray, MessageImages, useAttachments } from "./attachments";
 import { ComposerInput } from "./composer-input";
@@ -182,6 +183,7 @@ export function ChatView({
   state,
   chat: c,
   wide,
+  lookingAt,
   onOpenThread,
   onShowBot,
   onShowMac,
@@ -198,6 +200,8 @@ export function ChatView({
   chat: Chat;
   /** The right panel is collapsed, so the chat centers itself. */
   wide: boolean;
+  /** An app a bot made, open beside the chat: what the user says is about it, unless they say otherwise (made-apps.tsx). */
+  lookingAt?: MadeApp;
   onOpenThread: (s: Session) => void;
   onShowBot: (botId: string) => void;
   /** Open the "Your Mac" tab. */
@@ -242,6 +246,9 @@ export function ChatView({
     }
     prefilledDone.current?.();
   }, [prefilled]);
+  // The app the user took the "Looking at" chip off: what they say isn't about it, until they open another.
+  const [notLooking, setNotLooking] = useState<string | null>(null);
+  const looking = lookingAt && notLooking !== lookingAt.id ? lookingAt : undefined;
   // The message an inline reply is to (iMessage's swipe-to-reply), and the reply view that's open.
   const [replyingTo, setReplying] = useState<Message | null>(null);
   const [repliesOpen, setRepliesOpen] = useState<string | null>(null);
@@ -354,7 +361,7 @@ export function ChatView({
     // Shows at once; goes once its images have finished uploading (usually they already have).
     const images = (await Promise.all(items.map((a) => a.done))).filter((x) => !!x);
     if (!text && !images.length) return drop();
-    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined }).finally(drop);
+    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined, lookingAt: looking?.id }).finally(drop);
   };
   const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])].filter((f) => f.type.startsWith("image/"));
   // Sent messages the server's state doesn't have yet.
@@ -578,6 +585,12 @@ export function ChatView({
               {appAsks.map((a) => (
                 <AppApprovalCard key={a.id} state={state} approval={a} className={seen.has(a.id) ? "" : "motion-rise-in"} />
               ))}
+            </div>
+          )}
+          {/* The app open beside the chat, which what's said is about (made-apps.tsx); its X takes it off. */}
+          {looking && (
+            <div className="flex px-1 pb-2">
+              <LookingAt app={looking} onClear={() => setNotLooking(looking.id)} />
             </div>
           )}
           {/* Folds open over the composer. Keyed by chat, so switching chats shows it as it is there, with
@@ -1332,6 +1345,17 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
         <CrmNote m={m} />
       )
     ) : null;
+
+  // A bot building or changing an app: Show it, Open it, or Undo the change (made-apps.tsx). Like
+  // CrmNote, a new one rises in inside a box that leaves its own alignment as it was.
+  if (m.role === "system" && m.madeApp)
+    return enter ? (
+      <div className={`flex w-full flex-col ${enterClass}`}>
+        <MadeAppLine m={m} state={state} />
+      </div>
+    ) : (
+      <MadeAppLine m={m} state={state} />
+    );
 
   // A call a bot made with one of your keys (keys.tsx): the service, the method and the path.
   const api = apiCallOf(m);

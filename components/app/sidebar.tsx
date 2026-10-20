@@ -9,6 +9,7 @@ import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
 import { FooterButton, footerPillOf, useFooterHover, type FooterKey, type FooterPage } from "./sidebar-footer";
 import { Mascot } from "./mascot";
+import { AppsIcon } from "./made-apps";
 import { KnowledgeIcon, useKnowledgeNews, type MemoryOpen } from "./memory-categories";
 import { AppLogo } from "./apps";
 import { BotMenu, type BotMenuActions } from "./bot-menu";
@@ -34,6 +35,7 @@ export function Sidebar({
   onAccount,
   onSetup,
   onVault,
+  onApps,
   onMembers,
   onOpenWatch,
   onOpenMemory,
@@ -52,6 +54,8 @@ export function Sidebar({
   /** The setup screen: what this Mac gives Bops (setup.tsx). */
   onSetup: () => void;
   onVault: () => void;
+  /** The apps the bots made (made-apps.tsx). */
+  onApps: () => void;
   /** The People sheet: who can see the bots' computers on Orgo (members.tsx). */
   onMembers: () => void;
   /** Show a watched screen or Mac window (a watched page: its row on the Routines page). */
@@ -193,8 +197,17 @@ export function Sidebar({
       )}
       {/* A newer Bops: downloading, ready to Restart into, or out on bops.bot (the Mac app checks and downloads it). */}
       <UpdateNotice />
-      {/* You, then People, your apps and logins (the Vault, with the apps you've connected), Routines and Knowledge (sidebar-footer.tsx). New bots are the + at the top. */}
-      <SidebarFooter state={state} open={footer} you={(expanded) => <YouMenu state={state} expanded={expanded} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />} onMembers={onMembers} onVault={onVault} onOpenAutopilot={onOpenAutopilot} onOpenMemory={onOpenMemory} />
+      {/* You, then People, your logins (the Vault, with the apps you've connected), Routines, Knowledge and the apps your bots made (sidebar-footer.tsx). New bots are the + at the top. */}
+      <SidebarFooter
+        state={state}
+        open={footer}
+        you={(expanded) => <YouMenu state={state} expanded={expanded} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />}
+        onMembers={onMembers}
+        onVault={onVault}
+        onOpenAutopilot={onOpenAutopilot}
+        onOpenMemory={onOpenMemory}
+        onApps={onApps}
+      />
       {menu && menuBot && menuActions && <BotMenu state={state} bot={menuBot} x={menu.x} y={menu.y} onClose={() => setMenu(null)} actions={menuActions} />}
     </aside>
   );
@@ -202,8 +215,9 @@ export function Sidebar({
 
 /**
  * The footer's row: `you` (your account: the initials and their menu, given whether it's the pill), then
- * People, Apps & logins, Routines and Knowledge. The pill (with its label) is the one pointed at or tabbed
- * to, else the one `open` names (sidebar-footer.tsx footerPageOf, footerPillOf); the others are round.
+ * People, Logins, Routines, Knowledge and Apps (the apps your bots made). The pill (with its label) is
+ * the one pointed at or tabbed to, else the one `open` names (sidebar-footer.tsx footerPageOf,
+ * footerPillOf); the others are round.
  * Picking one opens its page, and that one is the pill at rest. `hover` seeds the pointed-at one, and
  * `news` whether Knowledge has something new (tests).
  */
@@ -217,6 +231,7 @@ export function SidebarFooter({
   onVault,
   onOpenAutopilot,
   onOpenMemory,
+  onApps,
 }: {
   state: AppState;
   open?: FooterPage;
@@ -227,26 +242,29 @@ export function SidebarFooter({
   onVault: () => void;
   onOpenAutopilot: (open: AutopilotOpen) => void;
   onOpenMemory: (open: MemoryOpen) => void;
+  /** The Apps home: the apps the bots made (made-apps.tsx). */
+  onApps: () => void;
 }) {
   const knowledge = categoriesOpen(state);
   const page = open === "knowledge" && !knowledge ? "vault" : open;
   const { hover, row } = useFooterHover(initialHover);
   const pill = footerPillOf({ rest: page, hover: hover === "knowledge" && !knowledge ? null : hover });
   return (
-    <div {...row} data-footer-row className="flex items-center gap-1.5 p-1 pt-3">
+    <div {...row} data-footer-row className="flex items-center gap-1 pb-1 pt-3">
       {you(pill === "you")}
       <MembersButton state={state} expanded={pill === "people"} pressed={page === "people"} onClick={onMembers} />
       <FooterButton
         name="vault"
         expanded={pill === "vault"}
         pressed={page === "vault"}
-        label="Apps & logins"
-        tip="Your apps and logins, and which bots can use them"
+        label="Logins"
+        tip="Your accounts and logins, and which bots can use them"
         onClick={onVault}
         trail={<AppsTrail state={state} expanded={pill === "vault"} />}
       />
       <AutopilotButton state={state} expanded={pill === "routines"} pressed={page === "routines"} onOpen={onOpenAutopilot} />
       {knowledge && <KnowledgeButton state={state} expanded={pill === "knowledge"} pressed={page === "knowledge"} news={news} onOpen={() => onOpenMemory({})} />}
+      <FooterButton name="apps" expanded={pill === "apps"} pressed={page === "apps"} label="Apps" tip="Apps your bots made for you" onClick={onApps} icon={<AppsIcon size={16} />} />
     </div>
   );
 }
@@ -285,7 +303,7 @@ function NewDot() {
 }
 
 /**
- * Apps & logins' end: as the pill, the apps you've connected; round, the Vault's key. Both are there
+ * Logins' end: as the pill, the apps you've connected; round, the Vault's key. Both are there
  * and fade with the label (globals.css .motion-footer-label), so the logos don't pop in or out as it
  * grows or shrinks; the key sits over the middle of the round button.
  */
@@ -363,14 +381,14 @@ export function YouMenu({
   const item = "flex h-9 items-center gap-2.5 rounded-[10px] px-2.5 text-left text-[14px] font-medium hover:bg-black/[0.04]";
   const name = user?.name?.trim() || user?.email || state.owner?.name?.trim() || "You";
   return (
-    <div ref={box} data-footer-slot="You" data-footer-key="you" className={`motion-footer-slot relative flex h-10 min-w-10 basis-10 ${expanded ? "grow" : "grow-0"} shrink`}>
+    <div ref={box} data-footer-slot="You" data-footer-key="you" className={`motion-footer-slot relative flex h-9 min-w-9 basis-9 ${expanded ? "grow" : "grow-0"} shrink`}>
       <button
         onClick={() => setOpen(!open)}
         title={expanded ? undefined : user ? `${user.name ?? user.email ?? "Your account"}: account and settings` : "Account and settings"}
         aria-label={`${name}: account and settings`}
         aria-haspopup="menu"
         aria-expanded={open}
-        className={`flex h-10 w-full min-w-0 items-center justify-center overflow-hidden rounded-full px-2.5 text-[13px] font-semibold outline-none transition-[background-color,color,transform] duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] active:scale-[.96] motion-reduce:transition-none ${open ? "bg-ink text-highlighter" : "bg-[#EEEEEC] text-[#6B6B6B] hover:bg-[#E6E6E3]"}`}
+        className={`flex h-9 w-full min-w-0 items-center justify-center overflow-hidden rounded-full px-2.5 text-[13px] font-semibold outline-none transition-[background-color,color,transform] duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] active:scale-[.96] motion-reduce:transition-none ${open ? "bg-ink text-highlighter" : "bg-[#EEEEEC] text-[#6B6B6B] hover:bg-[#E6E6E3]"}`}
       >
         <span className="shrink-0">{initialsOf(state)}</span>
         <span aria-hidden className={`motion-footer-label min-w-0 truncate whitespace-nowrap text-[13.5px] font-medium ${open ? "text-highlighter" : "text-ink"} ${expanded ? "max-w-[160px] translate-x-0 pl-1.5 opacity-100" : "max-w-0 -translate-x-1 pl-0 opacity-0"}`}>

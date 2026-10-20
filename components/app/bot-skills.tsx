@@ -44,8 +44,8 @@ export function BotSkills({
   // What's not set up yet, said once at the end instead of an empty card each.
   const missing = [
     !skills.length && { label: "Save a skill from its chat", onClick: chat },
-    !apps.length && { label: "Add Connected Apps in Vault", onClick: onOpenVault },
-    !keyed && { label: "Add keys in Vault", onClick: () => onOpenKeys(b.id) },
+    !apps.length && { label: "Add Connected Apps in Logins", onClick: onOpenVault },
+    !keyed && { label: "Add keys in Logins", onClick: () => onOpenKeys(b.id) },
   ].filter((x): x is { label: string; onClick: () => void } => !!x);
 
   return (
@@ -66,7 +66,7 @@ export function BotSkills({
       )}
 
       {apps.length > 0 && (
-        <Group title="Connected Apps" count={apps.length} action={{ label: "Manage in Vault ›", onClick: onOpenVault }}>
+        <Group title="Connected Apps" count={apps.length} action={{ label: "Manage in Logins ›", onClick: onOpenVault }}>
           {apps.map((x, i) => (
             <div key={x.app} className={`flex items-center gap-2.5 px-4 py-[9px] ${i === apps.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
               <AppLogo app={x.app} name={x.appName} size={22} />

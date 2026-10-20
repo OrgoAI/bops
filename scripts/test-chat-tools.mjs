@@ -303,7 +303,7 @@ await check("the instructions have the new rules, said once, and none of the old
   assert.equal(t.match(/Keep those replies short and plain/g)?.length ?? 0, 0, "the style rule covers texts and channels once");
   // The tools: the web in, skills in, the schedule's new fields, the watch's web pages.
   const names = toolNames(typical);
-  for (const n of ["web_search", "web_fetch", "read_skill", "create_skill", "update_skill", "schedule", "manage_routine", "watch", "start_task"]) assert.ok(names.includes(n), `has ${n}`);
+  for (const n of ["web_search", "web_fetch", "read_skill", "create_skill", "update_skill", "schedule", "manage_routine", "watch", "start_task", "make_app", "change_app"]) assert.ok(names.includes(n), `has ${n}`);
   const tool = (n) => typical.tools.find((x) => x.name === n);
   assert.deepEqual(tool("schedule").parameters.properties.schedule.properties.kind.enum, ["daily", "weekdays", "weekly", "monthly", "every", "before_event", "once"]);
   for (const k of ["times", "days", "day_of_month"]) assert.ok(k in tool("schedule").parameters.properties.schedule.properties, `schedule has ${k}`);
@@ -918,11 +918,11 @@ await check("a turn someone else started has no web and sets up, changes or stop
   const k = started.length;
   await Chat.outsideNews("boppy", text.id, "A text");
   const names = toolNames(asked[n]);
-  for (const no of ["web_search", "web_fetch", "create_skill", "update_skill", "schedule", "manage_routine", "watch", "stop_watch", "create_bot"]) assert.ok(!names.includes(no), `no ${no}`);
+  for (const no of ["web_search", "web_fetch", "create_skill", "update_skill", "schedule", "manage_routine", "watch", "stop_watch", "make_app", "change_app", "create_bot"]) assert.ok(!names.includes(no), `no ${no}`);
   for (const yes of ["read_skill", "start_task"]) assert.ok(names.includes(yes), `has ${yes}`);
   // Told what's the user's alone, without the ids to change it with.
   const now = asked[n].input.find((x) => x.role === "developer").content;
-  assert.match(now, /\nThis turn came from a text from \+15559998888, not Alex\. Routines, reminders, watches, skills and new bots are Alex's to set up or change: if they ask for one, say you'll pass the request on to Alex\./);
+  assert.match(now, /\nThis turn came from a text from \+15559998888, not Alex\. Routines, reminders, watches, skills, apps and new bots are Alex's to set up or change: if they ask for one, say you'll pass the request on to Alex\./);
   assert.ok(!now.includes(mine.id) && !now.includes("wch_mine"), "no routine or watch ids");
   hear(now);
   const outs = asked[n + 1].input.filter((x) => x.type === "function_call_output").map((x) => hear(x.output));
@@ -967,7 +967,7 @@ await check("backgroundTurn: a quiet run that finds nothing returns null and pos
   assert.equal(S.chat(chatId).typing.includes("boppy"), false);
   const body = asked[n];
   const names = toolNames(body);
-  for (const no of ["schedule", "manage_routine", "watch", "stop_watch", "create_skill", "update_skill", "make_page", "make_image", "hand_off", "tell_task", "ask_teammate", "create_bot", "react"]) assert.ok(!names.includes(no), `no ${no}`);
+  for (const no of ["schedule", "manage_routine", "watch", "stop_watch", "create_skill", "update_skill", "make_page", "make_image", "make_app", "change_app", "hand_off", "tell_task", "ask_teammate", "create_bot", "react"]) assert.ok(!names.includes(no), `no ${no}`);
   for (const yes of ["web_search", "web_fetch", "read_skill", "start_task", "find_app_actions", "use_app", "check_email", "text_me"]) assert.ok(names.includes(yes), `has ${yes}`);
   assert.equal(body.instructions, typical.instructions.replace(/Your skills:[\s\S]*$/, body.instructions.match(/Your skills:[\s\S]*$/)[0]), "the chat's own instructions");
   const job = body.input.at(-1);

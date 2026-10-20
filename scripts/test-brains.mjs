@@ -763,7 +763,7 @@ await test("Settings, Brain: Bops agent first with its bots, then each brain and
   assert.match(html, /data-tip="maya@acme.test, Acme"/, "whose account, on hover");
   assert.match(html, /aria-label="Rename"/);
   assert.match(html, /aria-label="Remove"/);
-  assert.equal(brainLine(view(BRAINS), BRAINS[2], []), "Key: ANTHROPIC_API_KEY · not in your Vault");
+  assert.equal(brainLine(view(BRAINS), BRAINS[2], []), "Key: ANTHROPIC_API_KEY · not in Logins");
   assert.equal(brainLine(view(BRAINS), { ...BRAINS[1], signingIn: { botId: "rook", computerId: "pc-rook", display: 100, at: 1, failed: "it took too long." } }), "Sign-in didn't finish");
   // A plan per computer, when they differ; one, when they agree; never a computer no bot has now.
   assert.equal(brainLine(view(BRAINS), { ...BRAINS[0], signIns: [...BRAINS[0].signIns, { computerId: "pc-rook", at: 2, account: { plan: "pro" } }] }), "Max plan on Boppy's computer, Pro plan on Rook's computer");
@@ -783,7 +783,7 @@ await test("adding a brain asks how it signs in, in Claude Code's own words, eve
   assert.equal((claudeHtml.match(/aria-pressed="true"/g) ?? []).length, 1, "only Claude Code is picked, not a way to sign in");
   const codex = text(renderToStaticMarkup(h(AddBrain, { state: st, keys: [], kind: "codex", onShowScreen: noop, onOpenVault: noop, onDone: noop })));
   noDashes(codex, "Add Codex");
-  assert.match(codex, /How should it sign in\? OpenAI API key Your key from the Vault\. Usage is billed to your OpenAI account\. Add your OpenAI key in the Vault first\. Only Codex on the bot's computer gets it\. Open the Vault Bots that use it Boppy Otto Rook Add/);
+  assert.match(codex, /How should it sign in\? OpenAI API key Your key from Logins\. Usage is billed to your OpenAI account\. Add your OpenAI key in Logins first\. Only Codex on the bot's computer gets it\. Open Logins Bots that use it Boppy Otto Rook Add/);
   assert.doesNotMatch(codex, /Claude plan/);
 });
 
