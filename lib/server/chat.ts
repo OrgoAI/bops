@@ -16,6 +16,7 @@ import { noOwnComputer } from "./plan";
 import { botChatId, live, pairChatId, TAPBACK_EMOJI, TAPBACKS, workspaceOf, type Bot, type Message, type Schedule, type Session, type Tapback } from "@/lib/types";
 import { computerBriefing, teamBriefing } from "./briefing";
 import { ABOUT_BOPS, ASKING, tidyAnswer, WRITING } from "./style";
+import { buildApp, madeApp } from "./made-apps";
 import { savePage } from "./pages";
 import { createRoutine, deleteRoutine, describeSchedule, routinesNote, setRoutineEnabled, setRoutineWhere } from "./routines";
 import { chose, decide, yes, type Answer } from "./decide";
@@ -303,6 +304,8 @@ export async function handleMessage(
   channel?: Message["channel"],
   /** For usage events only: asked aloud on a phone call (call.ts), not typed in the app. */
   onCall?: boolean,
+  /** Sent from the app with one of the bots' apps open next to the chat (Message.lookingAt). */
+  lookingAt?: string,
 ) {
   const c = chat(chatId);
   if (!c) return null;
@@ -310,13 +313,15 @@ export async function handleMessage(
   // A reply to a reply joins the conversation it started from, like iMessage.
   const target = replyTo ? getState().messages.find((m) => m.id === replyTo && m.chatId === chatId) : undefined;
   const root = target ? (target.replyTo ?? target.id) : undefined;
-  const mine = addMessage({ chatId, role: "user", text, replyTo: root, images: images?.length ? images : undefined, via, phone, channel });
+  const app = lookingAt && madeApp(lookingAt) ? lookingAt : undefined;
+  const mine = addMessage({ chatId, role: "user", text, replyTo: root, images: images?.length ? images : undefined, via, phone, channel, lookingAt: app });
   trackServerEvent("bops_message_sent", { chat_kind: c.kind, via: onCall ? "call" : (via ?? "app"), image_count: images?.length ?? 0, is_reply: !!root });
   // Into the shared memory (unless the user wants it kept from someone), and remembered if it's a lasting fact.
   rememberMessage(wsOf(c.botIds[0]), chatId, mine.id, images?.length ? `${text} [attached ${images.length} image${images.length === 1 ? "" : "s"}]`.trim() : text, { chat: chatName(chatId) });
   // A follow-up to work already under way goes into that thread instead of starting another (not one
   // with images: a thread only takes words, and the bot here can see them).
-  if (!images?.length && (await continueThread(chatId, text, root))) return mine;
+  // Not while an app is open next to the chat: what they say then is most likely about the app.
+  if (!images?.length && !app && (await continueThread(chatId, text, root))) return mine;
   if (!ours()) return mine;
   if (c.kind === "group") {
     await groupTurn(chatId, mine);
@@ -685,6 +690,23 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
       ...(relayed
         ? []
         : [
+            fn(
+              "make_app",
+              `Make ${owner} an app: a small tool of their own that they keep and use in Bops (a tracker, a calculator, a planner, a dashboard, a log). It's built in the panel beside this chat in a minute or two, it keeps its own data, and they change it by asking you. Not for a one-off answer or an explanation (make_page).`,
+              {
+                title: { type: "string", description: "Its name: two or three words (\"Outbound replies\")." },
+                what: {
+                  type: "string",
+                  description: `Everything it should do and show, complete on its own (the builder sees only this): its screens, what it keeps, what ${owner} does in it, and any data from this chat it should start with.`,
+                },
+                ...SAY,
+              },
+            ),
+            fn("change_app", `Change one of ${owner}'s apps (they're listed in the note after the conversation) when they ask for something in it to be added, fixed, moved or restyled.`, {
+              app_id: { type: "string" },
+              change: { type: "string", description: `What to change, complete on its own, in ${owner}'s words made exact.` },
+              ...SAY,
+            }),
             fn("make_image", `Make a picture and send it here: draw a new one, or change or build on the latest pictures in this chat (a photo ${owner} sent, or one you made). It takes up to a minute and shows up in the chat on its own.`, {
               prompt: {
                 type: "string",
@@ -800,7 +822,7 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
       persona(b, others),
       opts.outside ? "" : SEARCHING,
       "If a tapback says it all (thanks, ok, sounds good), react instead of replying.",
-      "When you start, hand off or tell a task something, or make a picture, its `say` is your reply: write no other text, and don't answer the request yourself; the task will.",
+      "When you start, hand off or tell a task something, make a picture, or make or change an app, its `say` is your reply: write no other text, and don't answer the request yourself; the task will.",
       appsNote(b, "chat"),
       opts.outside ? "" : dataNote(b, "chat"),
       opts.outside ? "" : crmNote(b, "chat"),
@@ -824,6 +846,7 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
       // Asked by text, in a channel or by email (it changes from turn to turn, so it's here, not in the instructions).
       relayed ? `Pictures show only in the Bops app's chat, so you can't make one from here: if ${owner} asks for one, say they can ask for it in Bops.` : "",
       followUps.length ? `This chat's tasks you can send a message on to (tell_task): ${followUps.map((s) => `"${s.title}" (${s.id}), ${live(s) ? "running" : "finished"} ${s.runsOn === "mac" ? `on ${owner}'s Mac` : "in the cloud"}`).join("; ")}.` : "",
+      appsLine(b, answering?.lookingAt),
       noOwnRoom ? `${owner}'s Orgo plan has no room for a new bot's own computer right now (${noOwnRoom}), so a bot you create works on yours.` : "",
       // The CRM's files right now (they change; the tools' words don't).
       opts.outside ? "" : crmNowLine(b),
@@ -974,12 +997,29 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     const says: string[] = [];
     let reacted = false;
     const pages: string[] = [];
+    // Apps made or changed in this turn (made-apps.ts builds them in the background).
+    const built: string[] = [];
     const pictures: { prompt: string; shape: Shape; from?: Message["images"] }[] = [];
     for (const item of [...earlier, ...response.output]) {
       if (item.type !== "function_call" || LOOKUPS.has(item.name)) continue;
       if (item.name === "make_page") {
         const { title, html } = JSON.parse(item.arguments) as { title: string; html: string };
         pages.push(`[${title.replace(/[[\]]/g, "")}](/api/pages/${savePage(title, html)})`);
+        continue;
+      }
+      if (item.name === "make_app" || item.name === "change_app") {
+        const a = JSON.parse(item.arguments) as { title?: string; what?: string; app_id?: string; change?: string; say?: string };
+        const app = item.name === "change_app" ? madeApp(a.app_id ?? "") : undefined;
+        if (item.name === "change_app" && (!app || app.ws !== workspaceOf(b))) {
+          notes.push("Couldn't find that app");
+          continue;
+        }
+        try {
+          built.push(buildApp(botId, chatId, { appId: app?.id, title: a.title, change: (app ? a.change : a.what) ?? "" }).id);
+          if (a.say?.trim()) says.push(a.say.trim());
+        } catch (e) {
+          notes.push(`Couldn't ${app ? "change" : "make"} the app: ${(e as Error).message}`);
+        }
         continue;
       }
       if (item.name === "make_image") {
@@ -1096,8 +1136,8 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     // A tapback can be the whole answer; otherwise there's always something to read.
     const said =
       text ||
-      (sessionIds.length || pictures.length
-        ? says.join(" ") || (pictures.length && !sessionIds.length ? "Making it now." : "Starting on that now.")
+      (sessionIds.length || pictures.length || built.length
+        ? says.join(" ") || (built.length && !sessionIds.length ? "Building it now." : pictures.length && !sessionIds.length ? "Making it now." : "Starting on that now.")
         : notes.length
           ? "Done."
           : reacted && !pages.length
@@ -1123,6 +1163,21 @@ async function botTurn(botId: string, chatId: string, opts: TurnOptions = {}): P
     // Still drawing a picture: it keeps typing until that's in (drawFor).
     if (ours() && !drawing.get(`${chatId} ${botId}`)) setTyping(chatId, botId, false);
   }
+}
+
+/**
+ * The apps the bots made in this bot's team (made-apps.ts), for change_app, and the one open beside the
+ * chat as the user wrote, which a change they ask for without naming another app is about.
+ */
+function appsLine(b: Bot, lookingAt?: string) {
+  const apps = (getState().madeApps ?? []).filter((a) => a.ws === workspaceOf(b));
+  if (!apps.length) return "";
+  const owner = ownerName();
+  const open = apps.find((a) => a.id === lookingAt);
+  const list = apps.map((a) => `"${a.title}" (${a.id}${a.building ? ", being built now" : a.version ? `, v${a.version}` : ""})`).join("; ");
+  return [`${owner}'s apps (change_app): ${list}.`, open ? `${owner} has "${open.title}" open beside this chat right now: what they ask to change, without naming another app, is for it.` : ""]
+    .filter(Boolean)
+    .join(" ");
 }
 
 /** Pictures being made, by chat and bot ("<chatId> <botId>"), so the bot shows as typing until they're in. */
