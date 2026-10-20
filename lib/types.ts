@@ -291,6 +291,8 @@ export type MadeApp = {
   building?: { change: string; since: number; chars: number };
   /** The last build failed: why, in a line (the version before it keeps running). */
   error?: string;
+  /** What the user let it do, and when: ask its bot, which looks things up in their connected apps (`bops.bot`). */
+  allowed?: { bot?: number };
   createdAt: number;
   updatedAt: number;
 };

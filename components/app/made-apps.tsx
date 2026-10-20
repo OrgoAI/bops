@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import type { AppState, MadeApp, Message } from "@/lib/types";
+import { OpenLink } from "./panel-tabs";
 import { ago, post, useNow } from "./ui";
 
 /*
@@ -52,14 +53,32 @@ const elapsed = (since: number) => {
 
 /**
  * The frame an app runs in, and its `window.bops`: each call comes up by message and goes on to the
- * bridge route; only messages from this frame count. A problem it hits comes up too (onProblem).
+ * bridge route; only messages from this frame count. A problem it hits comes up too (onProblem). A call
+ * the user hasn't allowed yet is asked about (onNeeds) and made again if they say yes; a tile asks nobody.
  */
-function AppFrame({ app, version, onProblem, className }: { app: MadeApp; version: number; onProblem?: (problem: string) => void; className?: string }) {
+function AppFrame({
+  app,
+  version,
+  onProblem,
+  onNeeds,
+  className,
+}: {
+  app: MadeApp;
+  version: number;
+  onProblem?: (problem: string) => void;
+  onNeeds?: (what: string, prompt: string) => Promise<boolean>;
+  className?: string;
+}) {
   const ref = useRef<HTMLIFrameElement>(null);
   const problem = useRef(onProblem);
+  const needs = useRef(onNeeds);
+  const open = useContext(OpenLink);
+  const openLink = useRef(open);
   useEffect(() => {
     problem.current = onProblem;
-  }, [onProblem]);
+    needs.current = onNeeds;
+    openLink.current = open;
+  }, [onProblem, onNeeds, open]);
   useEffect(() => {
     const on = async (e: MessageEvent) => {
       const frame = ref.current;
@@ -67,15 +86,28 @@ function AppFrame({ app, version, onProblem, className }: { app: MadeApp; versio
       const m = e.data as { bops?: number; id?: number; method?: string; args?: unknown; event?: string; message?: string };
       if (!m || m.bops !== 1) return;
       if (m.event === "error") return problem.current?.(m.message ?? "Something went wrong.");
+      // A web link in the app: a tab of Bops (else the browser). Only http(s), checked again here.
+      if (m.event === "open") {
+        const url = (m as { url?: string }).url ?? "";
+        if (/^https?:\/\//i.test(url)) (openLink.current ?? ((u: string) => window.open(u, "_blank", "noopener")))(url);
+        return;
+      }
       if (m.event || typeof m.id !== "number") return;
-      const answer = (await fetch(`/api/made-apps/${encodeURIComponent(app.id)}/bridge`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ method: m.method, args: m.args }),
-      })
-        .then((r) => r.json())
-        .catch((err: Error) => ({ error: err.message }))) as { result?: unknown; error?: string };
-      frame.contentWindow?.postMessage({ bops: 1, id: m.id, ...answer }, "*");
+      const call = () =>
+        fetch(`/api/made-apps/${encodeURIComponent(app.id)}/bridge`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ method: m.method, args: m.args }),
+        })
+          .then((r) => r.json())
+          .catch((err: Error) => ({ error: err.message })) as Promise<{ result?: unknown; error?: string; needs?: string }>;
+      let answer = await call();
+      if (answer.needs) {
+        const prompt = String((m.args as { prompt?: unknown } | undefined)?.prompt ?? "");
+        const yes = needs.current ? await needs.current(answer.needs, prompt) : false;
+        answer = yes ? await call() : { error: needs.current ? "Not allowed: you said not now." : "Open the app to allow it." };
+      }
+      frame.contentWindow?.postMessage({ bops: 1, id: m.id, result: answer.result, error: answer.error }, "*");
     };
     window.addEventListener("message", on);
     return () => window.removeEventListener("message", on);
@@ -110,11 +142,28 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
   const app = state.madeApps?.find((a) => a.id === appId);
   const [view, setView] = useState<"app" | "code" | "history">("app");
   const [problem, setProblem] = useState<{ version: number; text: string } | null>(null);
+  // A question the app wants to ask its bot, waiting for the user to allow it (one at a time; more wait their turn).
+  const [asking, setAsking] = useState<{ prompt: string; answer: (yes: boolean) => void } | null>(null);
+  const [menu, setMenu] = useState<"open" | "delete" | null>(null);
   useNow(1000);
   if (!app) return <div className="flex flex-1 items-center justify-center text-[13px] text-[#6B6B6B]">This app was deleted.</div>;
   const maker = state.bots.find((b) => b.id === app.botId);
   const building = !!app.building;
   const shown = problem?.version === app.version ? problem.text : null;
+  const botName = maker?.name ?? "its bot";
+  const onNeeds = (what: string, prompt: string) =>
+    what === "bot"
+      ? new Promise<boolean>((done) =>
+          setAsking({
+            prompt,
+            answer: async (yes) => {
+              if (yes) await post(`/api/made-apps/${encodeURIComponent(app.id)}`, { action: "allow-bot", on: true });
+              setAsking(null);
+              done(yes);
+            },
+          }),
+        )
+      : Promise.resolve(false);
   const tab = (v: typeof view, label: string) => (
     <button
       onClick={() => setView(view === v ? "app" : v)}
@@ -141,13 +190,59 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
         </span>
         {app.versions.length > 1 && tab("history", "History")}
         {tab("code", "Code")}
+        <div className="relative shrink-0">
+          <button onClick={() => setMenu(menu ? null : "open")} aria-label="More" title="More" className="flex size-7 items-center justify-center rounded-full text-[#3A3A38] hover:bg-black/[0.05]">
+            <svg width="14" height="14" viewBox="0 0 14 14">
+              <circle cx="3" cy="7" r="1.3" fill="currentColor" />
+              <circle cx="7" cy="7" r="1.3" fill="currentColor" />
+              <circle cx="11" cy="7" r="1.3" fill="currentColor" />
+            </svg>
+          </button>
+          {menu && (
+            <div className="absolute right-0 top-9 z-20 flex w-[248px] flex-col rounded-2xl bg-white p-1.5 shadow-[0_0_0_1px_#0000000F,0_12px_32px_-8px_#00000033]">
+              {menu === "delete" ? (
+                <div className="flex flex-col gap-2 p-2">
+                  <span className="text-[13px] leading-[18px] text-ink">Delete {app.title} and everything it keeps? This can&apos;t be undone.</span>
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={() => void post(`/api/made-apps/${encodeURIComponent(app.id)}`, { action: "delete" })}
+                      className="rounded-full bg-[#B42318] px-3 py-1.5 text-[12px] font-semibold leading-4 text-white"
+                    >
+                      Delete
+                    </button>
+                    <button onClick={() => setMenu(null)} className="rounded-full px-3 py-1.5 text-[12px] font-medium leading-4 text-ink hover:bg-black/[0.05]">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {app.allowed?.bot && (
+                    <button
+                      onClick={async () => {
+                        await post(`/api/made-apps/${encodeURIComponent(app.id)}`, { action: "allow-bot", on: false });
+                        setMenu(null);
+                      }}
+                      className="rounded-xl px-2.5 py-2 text-left text-[13px] leading-4 text-ink hover:bg-[#F6F6F4]"
+                    >
+                      Stop it asking {botName}
+                    </button>
+                  )}
+                  <button onClick={() => setMenu("delete")} className="rounded-xl px-2.5 py-2 text-left text-[13px] leading-4 text-[#B42318] hover:bg-[#F6F6F4]">
+                    Delete app
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </div>
       {view === "code" ? (
         <CodeView app={app} />
       ) : view === "history" ? (
         <History app={app} onDone={() => setView("app")} />
       ) : app.version ? (
-        <AppFrame key={`${app.id}:${app.version}`} app={app} version={app.version} onProblem={(text) => setProblem({ version: app.version, text })} />
+        <AppFrame key={`${app.id}:${app.version}`} app={app} version={app.version} onProblem={(text) => setProblem({ version: app.version, text })} onNeeds={onNeeds} />
       ) : building ? (
         <FirstBuild app={app} maker={maker?.name ?? "Your bot"} />
       ) : (
@@ -157,7 +252,33 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
       {app.error && app.version > 0 && !building && view === "app" && (
         <div className="mx-4 mb-3 shrink-0 rounded-xl bg-[#FFF4F2] px-3 py-2 text-[12px] leading-4 text-[#B42318]">The last change didn&apos;t work: {app.error}</div>
       )}
+      {asking && <AllowSheet app={app} botName={botName} prompt={asking.prompt} onAnswer={asking.answer} />}
       {building && <BuildStrip app={app} />}
+    </div>
+  );
+}
+
+/** The app wants to ask its bot for the first time (Paper 3b): what that means, and the question. */
+function AllowSheet({ app, botName, prompt, onAnswer }: { app: MadeApp; botName: string; prompt: string; onAnswer: (yes: boolean) => void }) {
+  return (
+    <div className="flex shrink-0 flex-col gap-3.5 border-t-[1.5px] border-ink bg-white p-[18px]">
+      <div className="flex flex-col gap-1">
+        <span className="text-[17px] font-bold leading-[22px] tracking-[-0.015em] text-ink">
+          {app.title} wants to ask {botName}
+        </span>
+        <span className="text-[13px] leading-[18px] text-[#6B6B6B]">
+          {botName} looks things up in the apps you connected, Knowledge and the web to answer it. Anything it would send or change still asks you first.
+        </span>
+      </div>
+      {prompt && <div className="line-clamp-3 rounded-[10px] bg-[#F6F6F4] px-3 py-2.5 font-mono text-[11px] leading-[15px] text-ink">{prompt}</div>}
+      <div className="flex gap-2">
+        <button onClick={() => onAnswer(true)} className="flex-1 rounded-full bg-ink py-2.5 text-[13px] font-semibold leading-4 text-white">
+          Allow
+        </button>
+        <button onClick={() => onAnswer(false)} className="flex-1 rounded-full py-2.5 text-[13px] font-semibold leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF]">
+          Not now
+        </button>
+      </div>
     </div>
   );
 }
