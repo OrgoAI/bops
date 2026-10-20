@@ -89,6 +89,7 @@ export function useNow(ms = 1000) {
 
 export function chatName(c: Chat, bots: Bot[]) {
   if (c.title) return c.title;
+  if (c.kind === "people") return "Conversation";
   const members = c.botIds.map((b) => bots.find((x) => x.id === b)?.name ?? b);
   return c.kind === "bot" ? members[0] : members.join(", ");
 }
@@ -117,7 +118,36 @@ export function StatusIcon({ session: s, size = 13, dark }: { session: Session; 
 }
 
 /** One avatar for a chat: the bot, or two stacked bots for a group. */
-export function ChatAvatar({ chat, bots, size = 44 }: { chat: Chat; bots: Bot[]; size?: number }) {
+/** Soft colors for people's avatars (Paper: People & group chats), one each by their id. */
+const PERSON_COLORS = ["#F2C6A8", "#C9D9C4", "#B9D4F2", "#E3CFA5", "#D9C4E8", "#F2D0D9"];
+
+/** A person: their initials on a color of their own. Bots are mascots; people are round initials. */
+export function PersonAvatar({ person, size = 28 }: { person: { userId: string; name?: string | null; email?: string | null }; size?: number }) {
+  const label = person.name?.trim() || person.email?.split("@")[0] || "?";
+  const initials = label.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0]!.toUpperCase()).join("") || "?";
+  const color = PERSON_COLORS[[...person.userId].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7) % PERSON_COLORS.length];
+  return (
+    <span className="flex shrink-0 items-center justify-center rounded-full font-semibold text-ink" style={{ width: size, height: size, background: color, fontSize: Math.max(8, Math.round(size * 0.36)) }} title={label}>
+      {initials}
+    </span>
+  );
+}
+
+export function ChatAvatar({ chat, bots, size = 44, me }: { chat: Chat; bots: Bot[]; size?: number; me?: string }) {
+  if (chat.kind === "people" && chat.people) {
+    const others = chat.people.members.filter((m) => m.userId !== me);
+    if (chat.people.kind === "dm" || others.length <= 1) return <PersonAvatar person={others[0] ?? { userId: chat.id, email: chat.people.invited[0] }} size={size} />;
+    const small = Math.round(size * 0.68);
+    return (
+      <div className="relative shrink-0" style={{ width: size, height: size }}>
+        {others.slice(0, 2).map((m, i) => (
+          <div key={m.userId} className="absolute rounded-full" style={{ left: i * (size - small), top: i * (size - small), boxShadow: i ? "0 0 0 2px #fff" : undefined }}>
+            <PersonAvatar person={m} size={small} />
+          </div>
+        ))}
+      </div>
+    );
+  }
   const members = chat.botIds.map((b) => bots.find((x) => x.id === b)).filter(Boolean) as Bot[];
   if (chat.kind === "bot" && members[0]) return <Mascot botId={members[0].id} color={members[0].color} size={size} />;
   const small = Math.round(size * 0.68);
@@ -217,7 +247,9 @@ export function BrandTile({ item, size }: { item: { name: string; color: string;
 /** The workspace the user is looking at, and its team (the main bot first). */
 export const currentWorkspace = (state: AppState) => state.workspace ?? state.workspaces?.[0]?.id ?? MAIN_WORKSPACE;
 export const teamOf = (state: AppState) => state.bots.filter((b) => workspaceOf(b) === currentWorkspace(state));
-export const chatInWorkspace = (state: AppState, c: Chat) => (c.workspaceId ?? workspaceOf(state.bots.find((b) => b.id === c.botIds[0]))) === currentWorkspace(state);
+/** Whether a chat shows in the workspace you're in. Conversations with people show in every one: they're yours, not a team's. */
+export const chatInWorkspace = (state: AppState, c: Chat) =>
+  c.kind === "people" || (c.workspaceId ?? workspaceOf(state.bots.find((b) => b.id === c.botIds[0]))) === currentWorkspace(state);
 
 /**
  * Whether this is a self-hosted install (/api/config): Bops runs every service for you otherwise, so

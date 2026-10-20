@@ -184,7 +184,12 @@ export type CloudToMac =
   /** The cloud is closing this connection because a newer one from the same user took over. */
   | { t: "replaced" }
   /** The user's state changed in the cloud (another Mac wrote): the Mac reads what changed. */
-  | { t: "state"; version: number; seq: number };
+  | { t: "state"; version: number; seq: number }
+  /**
+   * A conversation with other people changed (cloud/people.ts): the Mac reads what changed since its last
+   * seq (GET /v1/people/sync). Or someone's typing there, which isn't kept anywhere.
+   */
+  | { t: "people"; seq: number; typing?: { convoId: string; userId: string } };
 
 export type MacToCloud =
   | { t: "res"; id: string; status: number; headers: Record<string, string>; body: string }
@@ -514,3 +519,28 @@ export type CloudUsage = {
   /** Per bot (null: not tied to one bot): model tokens, call seconds, and cost. */
   bots: { botId: string | null; tokens: number; callSeconds: number; costMicros: number }[];
 };
+
+/* ---------------- People: Bops users messaging each other (cloud/people.ts) ---------------- */
+
+/** Someone on Bops, as others see them: their Orgo user id, name and email. */
+export type CloudPerson = { userId: string; name: string | null; email: string | null };
+
+/** A conversation between people: one to one ("dm") or a group, with who's in it now. */
+export type CloudConvo = {
+  id: string;
+  kind: "dm" | "group";
+  title: string | null;
+  createdBy: string;
+  members: (CloudPerson & { readSeq: number })[];
+  /** Emails asked in that aren't on Bops yet: they join when they sign in with one. */
+  invited: string[];
+  /** You left it, or were taken out: it stays, with nothing new. */
+  left?: boolean;
+  seq: number;
+};
+
+/** A message in a conversation between people. `botId`: one of the author's bots wrote it. */
+export type CloudConvoMessage = { convoId: string; id: string; author: string; botId: string | null; text: string; json: Record<string, unknown> | null; at: number; seq: number };
+
+/** GET /v1/people/sync?after=: what changed in the user's conversations since `after`, and the newest seq. */
+export type PeopleSync = { me: CloudPerson; convos: CloudConvo[]; messages: CloudConvoMessage[]; seq: number; more: boolean };

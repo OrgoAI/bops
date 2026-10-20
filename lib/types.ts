@@ -191,7 +191,8 @@ export type Host = "mac" | "orgo";
 /** A conversation: one per bot, plus group chats with several bots. */
 export type Chat = {
   id: string;
-  kind: "bot" | "group";
+  /** A bot's own chat, a group of bots, or a conversation with other people (lib/server/people.ts). */
+  kind: "bot" | "group" | "people";
   botIds: BotId[];
   /** Group chats get a name; bot chats use the bot's name. */
   title?: string;
@@ -204,12 +205,22 @@ export type Chat = {
   asking?: Record<BotId, BotId>;
   /** The workspace it belongs to (a bot's own chat follows its bot). Unset means the first one. */
   workspaceId?: string;
+  /**
+   * A conversation with other people on Bops (kind "people"), mirrored from Bops Cloud (lib/server/people.ts):
+   * which one, a direct message or a group, who's in it (and how far each has read), emails asked in that
+   * aren't on Bops yet, and whether you left it.
+   */
+  people?: { convoId: string; kind: "dm" | "group"; members: Person[]; invited: string[]; createdBy: string; left?: boolean };
 };
+
+/** Someone on Bops: their Orgo user id, name and email, and in a conversation the newest message they've read. */
+export type Person = { userId: string; name: string | null; email: string | null; readSeq?: number };
 
 export type Message = {
   id: string;
   chatId: string;
-  role: "user" | "bot" | "system";
+  /** The user, a bot, Bops itself, or another person in a conversation with people (`from` says who). */
+  role: "user" | "bot" | "system" | "person";
   /** Who wrote it, for bot messages. */
   botId?: BotId;
   text: string;
@@ -246,6 +257,13 @@ export type Message = {
   email?: EmailInfo;
   /** A bot reply that also went to the user by email (they emailed the bot): the address it went to. */
   emailed?: string;
+  /**
+   * In a conversation with people (Chat.people): who wrote it, when it's someone else (role "person"); its
+   * number there (for "Seen"); and, on one of the user's own, why it didn't go (it can be sent again).
+   */
+  from?: { userId: string; name: string };
+  peopleSeq?: number;
+  notSent?: string;
   /** On the user's message: the app (lib/server/made-apps.ts) open next to the chat as they sent it, which a change they ask for is about. */
   lookingAt?: string;
   /** Images attached to it (shown from /api/uploads/<id>; bots see them too). */
@@ -650,6 +668,8 @@ export type AppState = {
   screenStream?: boolean;
   /** Whether business data (treg) is there for the bots: lib/server/treg.ts tregOn. Filled in by /api/state for the app; never stored. */
   businessData?: boolean;
+  /** Who's typing in each conversation with people, by chat id (lib/server/people.ts typingNow). Filled in by /api/state for the app; never stored. */
+  peopleTyping?: Record<string, string[]>;
 };
 
 /**

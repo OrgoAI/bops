@@ -12,6 +12,7 @@ import * as handles from "./handles.ts";
 import * as hooks from "./hooks.ts";
 import * as lines from "./lines.ts";
 import * as notices from "./notices.ts";
+import * as people from "./people.ts";
 import * as ops from "./ops.ts";
 import * as pages from "./pages.ts";
 import * as plans from "./plans.ts";
@@ -62,6 +63,7 @@ export const routes = (): Route[] => [
   ...usage.routes,
   ...notices.routes,
   ...agent.routes,
+  ...people.routes,
 ];
 export const upgrades = (): Upgrade[] => [...tunnel.upgrades, ...proxy.upgrades];
 
