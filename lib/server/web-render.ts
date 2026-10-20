@@ -239,7 +239,7 @@ export async function renderPage(url: string, opts: { limitMs?: number } = {}): 
         .map((s) => s.trim())
         .filter(Boolean);
       // The app holds the page 20 seconds at most; this waits a little longer for its answer.
-      const got = await ask({ url, proxyPort: guard.port, allow, challenge: CHALLENGE.source, wallText: WALL_TEXT, limitMs: limit }, limit + 5_000);
+      const got = await ask({ url, proxyPort: guard.port, allow, challenge: true, wallText: WALL_TEXT, limitMs: limit }, limit + 5_000);
       lastRefused = [...guard.refused, ...(Array.isArray(got.refused) ? got.refused.map(String) : [])];
       if (!got.ok) throw new Error(String(got.error ?? "The page couldn't be read in a browser."));
       if (got.challenge) throw new Error("The site kept checking for a human, so it couldn't be read even in a browser.");

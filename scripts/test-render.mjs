@@ -234,6 +234,12 @@ await part("When a page needs the browser", async () => {
     for (const t of ["Just a moment...", "Attention Required! | Cloudflare", "Checking your browser before accessing", "Verifying you are human. This may take a few seconds.", "Pardon Our Interruption", "Press & Hold to confirm you are a human"]) assert.match(t, CHALLENGE, t);
     for (const t of ["Prices loaded by JavaScript", "Welcome past the wall", "Just a moment ago", "Checking your order status", "One more step to finish your account"]) assert.doesNotMatch(t, CHALLENGE, t);
   });
+  await check("the hidden window waits on the same words, its own copy (no pattern comes from a request)", () => {
+    const own = /const WALL_WORDS =\s*(\/.*\/)([a-z]*);/.exec(readFileSync(join(root, "desktop/render.cjs"), "utf8"));
+    assert.ok(own, "WALL_WORDS in desktop/render.cjs");
+    assert.equal(own[1], `/${CHALLENGE.source}/`);
+    assert.equal(own[2], CHALLENGE.flags);
+  });
 });
 
 await part("Sites remembered as needing the browser, for 7 days", async () => {
