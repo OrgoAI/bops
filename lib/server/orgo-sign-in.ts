@@ -269,7 +269,12 @@ function seedOwnerName(user: OrgoUser) {
   if (user.name && !getState().owner?.name.trim()) update((s) => (s.owner = { name: user.name!.slice(0, 80), about: s.owner?.about }));
 }
 
-/** Who the key belongs to on Orgo (GET /api/user/profile), with their name if they've given one; "denied" when Orgo turns the key down, null when it can't say. */
+/**
+ * Who the key belongs to on Orgo (GET /api/user/profile), with their name if they've given one; "denied"
+ * when Orgo turns the key down, null when it can't say. A runner's identity token that Orgo won't answer
+ * for yet (403 bops_cloud_not_ready: Bops Cloud can't tell a computer from its user) is put aside like a
+ * turned-down one, so the runner signs in with its key file meanwhile (orgo-auth.ts).
+ */
 async function whoIs(apiKey: string): Promise<OrgoUser | "denied" | null> {
   try {
     const res = await fetch(`${orgoOrigin()}/api/user/profile`, {
@@ -277,8 +282,14 @@ async function whoIs(apiKey: string): Promise<OrgoUser | "denied" | null> {
       cache: "no-store",
       signal: AbortSignal.timeout(10_000),
     });
-    if (res.status === 401) orgoKeyRejected(apiKey);
-    if (res.status === 401 || res.status === 403) return "denied";
+    if (res.status === 401 || res.status === 403) {
+      const code = await res
+        .json()
+        .then((j: { code?: unknown } | null) => (typeof j?.code === "string" ? j.code : undefined))
+        .catch(() => undefined);
+      if (res.status === 401 || code === "bops_cloud_not_ready") orgoKeyRejected(apiKey, code);
+      return "denied";
+    }
     if (!res.ok) return null;
     const p = (await res.json()) as { id?: string; email?: string; full_name?: string };
     return p.id ? { id: p.id, email: p.email || undefined, name: p.full_name?.trim() || undefined } : null;

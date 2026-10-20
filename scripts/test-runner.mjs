@@ -5,7 +5,8 @@
 // nothing on an answer a minute old, or from before a nap), the routines timer (routines.ts tick: each
 // Bops its own, a runner only once it's read the state and Orgo again, none once a newer Bops wrote the
 // state), making sure it's on its own computer (checkIdentity: a copy of the computer takes its runner
-// off, its program and wrapper only, never the computer's Orgo key, which Orgo replaces) and the routines mirror (routine-sync.ts: how each runs and whether it needs the Mac; a runner
+// off, its program and wrapper only, never the computer's Orgo key, which Orgo replaces; on its computer's
+// identity its VMM is asked instead, never Orgo, and every minute: watchIdentity) and the routines mirror (routine-sync.ts: how each runs and whether it needs the Mac; a runner
 // sends only its own, never with deleteMissing).
 //
 // The store, Orgo, the nap detector and the modules a run talks to are fakes (below), so nothing reaches a
@@ -35,6 +36,7 @@ const FAKES = {
   channels: ["postTo"],
   chat: ["backgroundTurn"],
   "workspace-skills": ["findSkill", "skillRefId"],
+  "vm-identity": ["identityHere", "identityVmId", "whoAmI"],
 };
 registerHooks({
   resolve(specifier, context, next) {
@@ -119,6 +121,7 @@ const fake = { started: [], pulls: 0 };
 // one this runner is really on), and says nothing from any other.
 const nonceDir = mkdtempSync(join(tmpdir(), "bops-runner-nonce-"));
 const orgo = { calls: [], answer: () => null, here: null, bash: [] };
+const vmId = { here: false, who: null };
 globalThis.__fake = {
   store: {
     getState: () => state,
@@ -179,6 +182,8 @@ globalThis.__fake = {
   channels: { postTo: async () => {} },
   chat: { backgroundTurn: async () => ({ text: "" }) },
   "workspace-skills": { findSkill: () => undefined, skillRefId: (r) => r.slug },
+  // Its computer's identity (vm-identity.ts), faked: off unless a test says it's here, and which computer its VMM names.
+  "vm-identity": { identityHere: () => vmId.here, identityVmId: () => "vm-a", whoAmI: async () => vmId.who },
 };
 
 const R = await import(`${root}/lib/server/runner.ts`);
@@ -203,6 +208,8 @@ function reset() {
   // What a copy takes off, in a folder of the test's (never the real paths).
   R.runnerForTests.identity({ nonceDir, leave: () => void left++, copyFiles: [join(nonceDir, "bops-runner.conf"), join(nonceDir, "run.sh")] });
   left = 0;
+  vmId.here = false;
+  vmId.who = null;
   orgo.here = null;
   orgo.bash.length = 0;
   T.reset();
@@ -631,6 +638,37 @@ await check("a runner makes sure it's on its own computer: the same word back ru
   assert.equal(await R.checkIdentity(), "unknown");
   assert.equal(left, 1, "the real runner stays");
   assert.match(orgo.bash.at(-1).command, /echo __BOPS_NONCE_END__/, "a read that ran to its end says so");
+});
+
+await check("on its computer's identity, a runner asks its VMM which computer it's on, never Orgo: another is a copy; no answer is the look through Orgo", async () => {
+  reset();
+  asRunner(C1);
+  vmId.here = true;
+  vmId.who = { desktopId: C1.toUpperCase(), vmId: "vm-a" };
+  assert.equal(await R.checkIdentity(), "same");
+  assert.equal(orgo.bash.length, 0, "no command on its computer: the look doesn't count as using it");
+  assert.equal(R.runnerReady(), false, "and it counts as sure (the rest isn't fresh yet)");
+  vmId.who = { desktopId: C2, vmId: "vm-c" };
+  assert.equal(await R.checkIdentity(), "copy");
+  assert.equal(left, 1, "a copy leaves");
+  assert.equal(orgo.bash.length, 0);
+  // Its VMM doesn't say (restarting): the word through Orgo, as on a key file.
+  vmId.who = null;
+  assert.equal(await R.checkIdentity(), "same");
+  assert.match(orgo.bash[0].command, /cat \/run\/bops-runner\/nonce/);
+  // On its key file (no identity here): through Orgo only, as before.
+  vmId.here = false;
+  vmId.who = { desktopId: C2, vmId: "vm-c" };
+  assert.equal(await R.checkIdentity(), "same", "the VMM isn't asked");
+  assert.equal(left, 1);
+  // The minute's watch: a copy leaves; its own computer stays.
+  vmId.here = true;
+  vmId.who = { desktopId: C1, vmId: "vm-a" };
+  await R.watchIdentity();
+  assert.equal(left, 1);
+  vmId.who = { desktopId: C2, vmId: "vm-c" };
+  await R.watchIdentity();
+  assert.equal(left, 2);
 });
 
 await check("a copy takes off only its runner's program and the script that starts it, never the computer's Orgo key", async () => {

@@ -1883,8 +1883,11 @@ function responsesBridge(client: WebSocket, { ws: upstream, early, keep }: Upstr
 
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 
+/** The providers a computer's runner calls for its own tasks (the models, memory, the user's connected apps, quick decisions, business data): never AgentPhone, whose numbers and calls are the user's. */
+const FOR_COMPUTERS: ReadonlySet<Provider> = new Set(["openai", "honcho", "composio", "typesafe", "treg"]);
+
 const proxyRoutes = (provider: Provider, prefix: string, path = `${prefix}/*`): Route[] =>
-  METHODS.map((method) => ({ method, path, auth: "user", handle: (req, res, { user }) => handle(provider, prefix, req, res, user!) }));
+  METHODS.map((method) => ({ method, path, auth: "user", ...(FOR_COMPUTERS.has(provider) ? { computer: true as const } : {}), handle: (req, res, { user }) => handle(provider, prefix, req, res, user!) }));
 
 export const routes: Route[] = [
   ...(Object.keys(SPECS) as Provider[]).flatMap((p) => proxyRoutes(p, `/proxy/${p}`)),
@@ -1895,6 +1898,7 @@ export const routes: Route[] = [
 export const upgrades: Upgrade[] = [
   {
     path: "/proxy/openai/*",
+    computer: true,
     handle: (req, socket, head, { user }) => {
       // Node takes its own error handler off an upgrading socket: without one, a Mac dropping off mid-handshake would crash the process.
       socket.on("error", () => socket.destroy());

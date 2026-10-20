@@ -8,7 +8,11 @@
 // the workspace, the health check (loopback only), a runner marked up that's gone from its computer,
 // Orgo's copy of the routines following each runner up or down, and the stop (This Mac, the bots in
 // browsers on the Mac, a computer deleted, no bot on it any more: taken off, the key Bops gave revoked by
-// any Mac, its threads ended). The commands it sends are checked as shell too.
+// any Mac, its threads ended). What the runner signs in with (the health check's auth=, kept as
+// RunnerState.auth), its computer's identity in this release (phase 1: the key step as before, whatever
+// identity answers), the way back (a runner with no key and no identity it can use gets its key again,
+// and is started), and phase 2 behind IDENTITY_ONLY (each row of the identity spec's 4.5 table, a key
+// taken back only once the new build runs on identity). The commands it sends are checked as shell too.
 //
 // The store, Orgo, storage and the modules it talks to are fakes (below): nothing reaches a real service.
 // Usage: node --conditions=react-server scripts/test-runner-install.mjs
@@ -136,6 +140,11 @@ function freshOrgo() {
     uploadFails: false,
     duringInstall: null,
     supervisor: "bops-runner                      RUNNING   pid 812, uptime 1:02:03",
+    // What the computer's identity answers (curl's status code: 000 when nothing does), and what the runner says it signs in with.
+    ident: "000",
+    auth: "key",
+    starts: 0,
+    installFails: false,
   });
 }
 const pc = (c) => orgo.computers[c];
@@ -199,10 +208,12 @@ globalThis.__fake = {
         x.status = "running";
         if (command.includes('echo "current=$c"')) {
           const dir = /\/opt\/bops\/runner\/([^/ ]+)\/server\.js/.exec(command)[1];
-          return { output: `current=${x.current}\nkey=${x.key ? "yes" : "no"}\nhave=${x.have.has(dir) ? "yes" : "no"}\nsup=yes\n`, exit_code: 0 };
+          const ident = command.includes('echo "ident=') ? `ident=${orgo.ident}\n` : "";
+          return { output: `current=${x.current}\nkey=${x.key ? "yes" : "no"}\n${ident}have=${x.have.has(dir) ? "yes" : "no"}\nsup=yes\n`, exit_code: 0 };
         }
         if (command.includes("__BOPS_INSTALLED__")) {
           orgo.duringInstall?.();
+          if (orgo.installFails) return { output: "tar: something went wrong\n", exit_code: 2 };
           const dir = /mv -Tf "\$d\/current\.next"/.test(command) && /ln -sfn '([^']+)'/.exec(command)[1];
           // As the script does: the upload unpacked when it's there (and gone after), else the build there already, else nothing.
           const usesBuildThere = command.includes(`elif [ ! -f "$d/${dir}/server.js" ]; then`);
@@ -214,7 +225,7 @@ globalThis.__fake = {
           x.wrapper = /cat > \/opt\/bops\/runner\/run\.sh <<'BOPS_EOF'\n([\s\S]*?)BOPS_EOF/.exec(command)[1];
           return { output: "__BOPS_INSTALLED__\n", exit_code: 0 };
         }
-        if (command.includes("__BOPS_HEALTHY__")) return { output: `${orgo.health}\n`, exit_code: 0 };
+        if (command.includes("__BOPS_HEALTHY__")) return { output: `${orgo.health === "__BOPS_HEALTHY__" ? `auth=${orgo.auth}\n` : ""}${orgo.health}\n`, exit_code: 0 };
         if (command.includes("__BOPS_OFF__")) {
           // As the script does: the program, its script and the builds, never the computer's key.
           Object.assign(x, { current: "", have: new Set(), program: false });
@@ -224,7 +235,12 @@ globalThis.__fake = {
           x.program = false;
           return { output: "", exit_code: 0 };
         }
-        if (/^supervisorctl status bops-runner/.test(command)) return { output: `${orgo.supervisor}\n__BOPS_STATUS_END__\n`, exit_code: 0 };
+        if (/^supervisorctl status bops-runner/.test(command)) return { output: `${orgo.supervisor}\nkey=${x.key ? "yes" : "no"}\nident=${orgo.ident}\nauth=${orgo.auth}\n__BOPS_STATUS_END__\n`, exit_code: 0 };
+        if (/^supervisorctl start bops-runner/.test(command)) {
+          orgo.starts++;
+          orgo.supervisor = "bops-runner                      RUNNING   pid 900, uptime 0:00:01";
+          return { output: "", exit_code: 0 };
+        }
         return { output: "", exit_code: 0 };
       },
     },
@@ -670,6 +686,220 @@ await check("a runner marked up that left a routine well past its time, and is g
   assert.equal(runner().status, "running");
 });
 
+/* ---------------- Its computer's identity ---------------- */
+
+const keyCalls = (method) => orgo.calls.filter((c) => c.method === method && c.path === `/api/computers/${C1}/orgo-key`).length;
+
+await check("phase 1: the key step is today's whatever identity answers, the probe never asks it, and the health check's auth= is kept", async () => {
+  for (const ident of ["200", "403", "404", "503", "000"]) {
+    reset();
+    orgo.ident = ident;
+    orgo.auth = ident === "200" ? "identity" : "key";
+    await I.lookAtRunners();
+    const x = runner();
+    assert.deepEqual([x.status, x.keyMade, x.auth], ["running", true, orgo.auth], `ident=${ident}`);
+    assert.equal(keyCalls("PUT"), 1, `a key given (ident=${ident})`);
+    assert.equal(keyCalls("DELETE"), 0, "and never taken back");
+    assert.ok(!orgo.bash.some((b) => b.command.includes("169.254.169.254")), "identity isn't asked at set-up in phase 1");
+  }
+  // The health check prints the runner's last auth word, the word alone.
+  assert.ok(I.HEALTH_SCRIPT.includes("auth: (identity|key|none)$' /var/log/bops/runner.log"));
+  const dir = mkdtempSync(join(tmpdir(), "bops-auth-line-"));
+  const log = join(dir, "runner.log");
+  const line = I.STILL_RUNS_SCRIPT.split("; ").find((l) => l.startsWith('echo "auth=')).replace("/var/log/bops/runner.log", log);
+  writeFileSync(log, "[runner] auth: none\n[runner] identity ok (desktop c1, expires in 52m)\n[runner] auth: identity\n[runner] running the routines of the bots on c1\n");
+  assert.equal(spawnSync("bash", ["-c", line], { encoding: "utf8" }).stdout, "auth=identity\n");
+  writeFileSync(log, "[runner] auth: identity orgo_vm_secret\n");
+  assert.equal(spawnSync("bash", ["-c", line], { encoding: "utf8" }).stdout, "auth=\n", "only a line that is the word alone");
+  rmSync(dir, { recursive: true, force: true });
+  // Settings shows it (types.ts: a runner up on identity doesn't count on a key).
+  const { runnerNeedsKey } = await import(`${root}/lib/types.ts`);
+  assert.equal(runnerNeedsKey({ status: "running", auth: "identity" }), false);
+  assert.equal(runnerNeedsKey({ status: "running", auth: "key" }), true);
+});
+
+await check("the way back: a runner with no key and no identity it can use gets its key again and is started; one on identity is asked every 15 minutes", async () => {
+  reset();
+  orgo.ident = "200";
+  orgo.auth = "identity";
+  pc(C1).key = true;
+  await I.lookAtRunners();
+  assert.equal(runner().auth, "identity");
+  // Identity lost (paused, a host without it), the key taken off meanwhile, and the runner waiting with nothing: stopped by supervisord too.
+  pc(C1).key = false;
+  orgo.ident = "503";
+  orgo.auth = "none";
+  orgo.overdue = true;
+  orgo.supervisor = "bops-runner                      FATAL     Exited too quickly";
+  orgo.calls.length = 0;
+  await I.lookAtRunners();
+  assert.equal(keyCalls("PUT"), 1, "its key from Orgo again");
+  assert.deepEqual([runner().status, runner().keyMade, runner().auth], ["running", true, undefined]);
+  assert.equal(orgo.starts, 1, "and started");
+  assert.equal(pc(C1).key, true);
+  // Asked again within 15 minutes: not; a key runner waits an hour.
+  orgo.calls.length = 0;
+  pc(C1).key = false;
+  await I.lookAtRunners();
+  assert.equal(keyCalls("PUT"), 0, "not asked again so soon");
+  // Up and waiting (not stopped): a key, and no start needed.
+  reset();
+  orgo.ident = "000";
+  pc(C1).key = true;
+  await I.lookAtRunners();
+  pc(C1).key = false;
+  orgo.auth = "none";
+  orgo.overdue = true;
+  await I.lookAtRunners();
+  assert.equal(keyCalls("PUT"), 1);
+  assert.equal(orgo.starts, 0, "it's up: it picks the key up itself");
+  // Identity answers but the runner says it has nothing (Bops Cloud can't take it yet, say): a key all the same.
+  reset();
+  pc(C1).key = true;
+  await I.lookAtRunners();
+  pc(C1).key = false;
+  orgo.ident = "200";
+  orgo.auth = "none";
+  orgo.overdue = true;
+  await I.lookAtRunners();
+  assert.equal(keyCalls("PUT"), 1);
+  // On identity and using it: nothing to give.
+  reset();
+  pc(C1).key = true;
+  await I.lookAtRunners();
+  pc(C1).key = false;
+  orgo.ident = "200";
+  orgo.auth = "identity";
+  orgo.overdue = true;
+  orgo.calls.length = 0;
+  await I.lookAtRunners();
+  assert.equal(keyCalls("PUT"), 0);
+  assert.equal(runner().auth, "identity", "what it signs in with, kept");
+  // Refused (403): no key; stopped, it couldn't start as before.
+  reset();
+  pc(C1).key = true;
+  await I.lookAtRunners();
+  pc(C1).key = false;
+  orgo.ident = "403";
+  orgo.overdue = true;
+  orgo.supervisor = "bops-runner                      FATAL     Exited too quickly";
+  orgo.calls.length = 0;
+  await I.lookAtRunners();
+  assert.equal(keyCalls("PUT"), 0);
+  assert.deepEqual([runner().status, runner().error], ["failed", "it stopped on its computer"]);
+  // Orgo refuses the key: it couldn't start, and why (its routines back to the Mac).
+  reset();
+  pc(C1).key = true;
+  await I.lookAtRunners();
+  pc(C1).key = false;
+  orgo.auth = "none";
+  orgo.overdue = true;
+  orgo.keyRefusal = { status: 409, json: { code: "full_access_member" } };
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().error], ["failed", "someone else can use this workspace"]);
+  noSecrets();
+});
+
+await check("phase 2 (IDENTITY_ONLY): no key where identity answers, none and no runner where it's refused, a key where it doesn't answer", async () => {
+  // 200, no key: no PUT; it must say it runs on identity.
+  reset();
+  T.identityOnly(true);
+  orgo.ident = "200";
+  orgo.auth = "identity";
+  await I.lookAtRunners();
+  assert.equal(keyCalls("PUT"), 0, "no key");
+  assert.deepEqual([runner().status, runner().keyMade, runner().auth], ["running", undefined, "identity"]);
+  assert.ok(orgo.bash.find((b) => b.command.includes('echo "current=$c"')).command.includes(I.IDENT_LINE), "the probe asks identity");
+  // ...and one that doesn't (it fell back, or none): unhealthy, stopped, tried again later.
+  reset();
+  T.identityOnly(true);
+  orgo.ident = "200";
+  orgo.auth = "none";
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().error], ["failed", "it couldn't sign in on its computer"]);
+  assert.ok(orgo.bash.some((b) => /^supervisorctl stop bops-runner/.test(b.command)), "stopped");
+  assert.equal(keyCalls("PUT"), 0);
+  // 403: no key, no runner, and said why.
+  reset();
+  T.identityOnly(true);
+  orgo.ident = "403";
+  await I.lookAtRunners();
+  assert.deepEqual([runner().status, runner().error], ["failed", "someone else can use this workspace"]);
+  assert.equal(keyCalls("PUT"), 0);
+  assert.ok(!bashText().includes("__BOPS_INSTALLED__"));
+  // Anything else, with no key: today's PUT (taken back later, once identity works); with a key: as today.
+  for (const ident of ["503", "000", "404", ""]) {
+    reset();
+    T.identityOnly(true);
+    orgo.ident = ident;
+    await I.lookAtRunners();
+    assert.deepEqual([runner().status, runner().keyMade], ["running", true], `ident=${ident}`);
+    assert.equal(keyCalls("PUT"), 1);
+    reset();
+    T.identityOnly(true);
+    orgo.ident = ident;
+    pc(C1).key = true;
+    await I.lookAtRunners();
+    assert.deepEqual([runner().status, runner().keyMade, keyCalls("PUT"), keyCalls("DELETE")], ["running", undefined, 0, 0], `ident=${ident}, a key there`);
+  }
+});
+
+await check("phase 2: the key Bops gave is taken back only once the new build runs on identity, never when its upload, install or health fails, and never one the computer came with", async () => {
+  const upFrom = () => {
+    reset();
+    T.identityOnly(true);
+    pc(C1).key = true;
+    pc(C1).current = "0.0.28-old";
+    state.runners = { [C1]: { status: "running", version: "0.0.28", buildId: "old", by: ME, keyMade: true, keyId: "key-0", at: Date.now() } };
+    orgo.ident = "200";
+    orgo.auth = "identity";
+  };
+  upFrom();
+  let deletedDuring;
+  orgo.duringInstall = () => (deletedDuring = keyCalls("DELETE"));
+  await I.lookAtRunners();
+  assert.equal(deletedDuring, 0, "the key stays through the key step and the install");
+  assert.equal(keyCalls("DELETE"), 1, "taken back after health said auth=identity");
+  assert.deepEqual([runner().status, runner().version, runner().keyMade, runner().keyId, runner().auth], ["running", "0.0.29", undefined, undefined, "identity"]);
+  assert.equal(pc(C1).key, false);
+  // The upload fails: the runner that was up, and its key, as they were.
+  upFrom();
+  orgo.uploadFails = true;
+  await I.lookAtRunners();
+  assert.equal(keyCalls("DELETE"), 0);
+  assert.deepEqual([runner().status, runner().version, runner().keyMade], ["running", "0.0.28", true]);
+  // The install fails: no take-back.
+  upFrom();
+  orgo.installFails = true;
+  await I.lookAtRunners();
+  assert.equal(keyCalls("DELETE"), 0);
+  assert.equal(runner().keyMade, true);
+  // Health fails, or passes on the key rather than identity: no take-back.
+  upFrom();
+  orgo.health = "__BOPS_DOWN__";
+  await I.lookAtRunners();
+  assert.equal(keyCalls("DELETE"), 0);
+  assert.equal(runner().keyMade, true);
+  upFrom();
+  orgo.auth = "key";
+  await I.lookAtRunners();
+  assert.equal(keyCalls("DELETE"), 0);
+  assert.deepEqual([runner().status, runner().keyMade, runner().auth], ["running", true, "key"]);
+  // A key the computer came with (not keyMade): Orgo's, never taken back.
+  upFrom();
+  state.runners[C1] = { ...state.runners[C1], keyMade: undefined, keyId: undefined };
+  await I.lookAtRunners();
+  assert.equal(keyCalls("DELETE"), 0);
+  assert.equal(pc(C1).key, true);
+  // Phase 1 (the default): never taken back.
+  upFrom();
+  T.identityOnly(undefined);
+  await I.lookAtRunners();
+  assert.equal(keyCalls("DELETE"), 0);
+  assert.equal(runner().keyMade, true);
+  noSecrets();
+});
+
 /* ---------------- The commands as shell ---------------- */
 
 await check("every command it sends is shell that parses, and the wrapper too", () => {
@@ -678,6 +908,8 @@ await check("every command it sends is shell that parses, and the wrapper too", 
     I.HEALTH_SCRIPT,
     I.UNINSTALL_SCRIPT,
     I.probeScript("0.0.29-buildA1"),
+    I.probeScript("0.0.29-buildA1", { ident: true }),
+    I.STILL_RUNS_SCRIPT,
   ];
   for (const s of scripts) {
     const r = spawnSync("bash", ["-n"], { input: s, encoding: "utf8" });

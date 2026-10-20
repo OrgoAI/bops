@@ -65,7 +65,30 @@ and `BOPS_PHONE_AREA` (the area code a plan's number is bought in, 415 unless se
 
 Every request from a Mac carries `Authorization: Bearer <the user's Orgo API key>`, the key the app
 got from "Sign in with Orgo". The cloud asks Orgo whose it is (`GET /api/user/profile`) and keeps
-the answer for 5 minutes by the key's SHA-256 (`cloud/auth.ts`). It never stores the key.
+the answer for 5 minutes by the key's SHA-256 (`cloud/auth.ts`). It never stores the key. A key Orgo
+turns down is a 401, with Orgo's `code` when it gave one (an identity token's says why).
+
+### A computer's runner
+
+A runner on one of the bots' computers (`docs/cloud-runner.md`) signs in as that computer, not as its
+user: with the computer's Orgo identity (an `orgo_vm_` token; its profile has `principal: { kind:
+"vm_identity", desktop_id, expires_at }`) or the computer's own key (`api_key.scope: "computer"`, with
+`computer_id`). Either is a computer (`CloudUser.computer`), kept 30 seconds at most and never past the
+token's end, so a computer deleted, moved, joined or paused reaches the cloud within that. An `orgo_vm_`
+token is a computer whatever Orgo says: one whose profile names no computer is refused everywhere.
+
+A computer calls only the routes marked `computer: true` (`cloud/http.ts`): `GET`/`PUT /v1/state`,
+`GET /v1/state/head`, `GET`/`POST /v1/messages`, `POST /v1/session`, and `/proxy/openai/*` (its
+WebSocket too), `/proxy/honcho/*` and `/v3/*`, `/proxy/composio/*`, `/proxy/typesafe/*` and
+`/proxy/treg/*`, which its own tasks use. Everything else is 403 `computer_not_allowed` ("A computer's
+identity can't do this."): AgentPhone, numbers and lines, mail handles, Slack links, codes, backups,
+notices, usage, the iPhone's agent, and the tunnel (`/v1/connect`: one per user, so a computer there
+would drop the user's Mac). Its device is the cloud's to set (`cloud/device.ts`: the same as the
+runner's own, from its computer id), and a state write saying another device is 403. That says which
+device wrote and guards a runner set up wrong; it bounds nothing, as anyone with the token can work
+the same device out, and the token reaches the user's whole state either way. orgo-web answers a
+profile for an identity token only once `VM_IDENTITY_BOPS_CLOUD_READY=1`, which waits for this to be
+deployed.
 
 ### Which app
 

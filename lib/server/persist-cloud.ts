@@ -20,12 +20,14 @@ import {
   type CloudStateHead,
   type CloudStateSaved,
 } from "@/cloud/protocol";
+import { deviceIdOf } from "@/cloud/device";
 import type { AppState, Message } from "@/lib/types";
 import { appHeaders } from "./app-version";
 import { cloudUrl } from "./cloud-url";
 import { hookExit, onExit, onRunner, StateLoadError, type Persistence, type StateAccess } from "./persist";
 import { applyShared, fromShared, merge3, same, toShared, type Blob } from "./state-merge";
 import { moveLegacyState, userDataDir } from "./user-paths";
+import { vmIdentityRejected } from "./vm-identity";
 
 /**
  * The Mac app's state lives in Bops Cloud, under the signed-in Orgo user (cloud/state.ts). There is
@@ -162,7 +164,7 @@ function platformId(): string {
  * another user. `platform`: another's hardware id instead, as a computer's runner is (its computer id,
  * its BOPS_DEVICE_SEED), so a Mac can tell which threads are that runner's.
  */
-export const deviceIdFor = (userId: string, platform = platformId()) => createHash("sha256").update(`${userId}\n${platform}`).digest("hex").slice(0, 16);
+export const deviceIdFor = (userId: string, platform = platformId()) => deviceIdOf(userId, platform);
 
 /* ---------------- Calls ---------------- */
 
@@ -190,7 +192,10 @@ async function call<T>(who: Who, path: string, init: { method?: string; body?: u
   } catch {
     throw new CallError("Couldn't reach Bops Cloud", 0);
   }
-  return { status: res.status, body: (await res.json().catch(() => null)) as T };
+  const answer = (await res.json().catch(() => null)) as T;
+  // A runner's identity token Bops Cloud turned down (orgo-web said why): the runner takes its next credential (vm-identity.ts).
+  if (res.status === 401) vmIdentityRejected(who.key, typeof (answer as { code?: unknown } | null)?.code === "string" ? (answer as { code: string }).code : undefined);
+  return { status: res.status, body: answer };
 }
 
 function refused(what: string, r: { status: number; body: unknown }): never {

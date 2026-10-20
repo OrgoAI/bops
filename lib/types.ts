@@ -1117,7 +1117,9 @@ export type AppState = {
  * the computer. An entry from before keyMade that has a keyId (made by the old bops-runner-key route)
  * counts as keyMade (runnerKeyMade), and its old `keyBy` is ignored. `at`: when the status was set.
  * `upgrading`: one that's up being set up again with a newer Bops by the Mac `by` since `at`: it stays up
- * and keeps its routines meanwhile (runner-install.ts).
+ * and keeps its routines meanwhile (runner-install.ts). `auth`: what it said it signs in with at its last
+ * health check or look (its log's `[runner] auth:` line): its computer's Orgo identity, its key, or
+ * nothing yet.
  */
 export type RunnerState = {
   status: "installing" | "running" | "failed" | "stopping";
@@ -1125,6 +1127,7 @@ export type RunnerState = {
   buildId: string;
   keyMade?: boolean;
   keyId?: string;
+  auth?: "identity" | "key" | "none";
   by: string;
   error?: string;
   at: number;
@@ -1138,9 +1141,12 @@ export const runnerKeyMade = (x: Pick<RunnerState, "keyMade" | "keyId"> | undefi
 export const RUNNER_NO_SIGN_IN = "it couldn't sign in on its computer";
 export const RUNNER_NO_KEY = "Orgo didn't give its computer its key";
 
-/** Whether computer's runner counts on its computer's own Orgo key now: one that's up signs in with it, and one that couldn't start for want of it. */
+/**
+ * Whether computer's runner counts on its computer's own Orgo key now: one that's up signs in with it
+ * (not one up on its computer's Orgo identity), and one that couldn't start for want of it.
+ */
 export const runnerNeedsKey = (x: RunnerState | undefined): boolean =>
-  !!x && (x.status === "running" || (x.status === "failed" && (x.error === RUNNER_NO_SIGN_IN || x.error === RUNNER_NO_KEY)));
+  !!x && ((x.status === "running" && x.auth !== "identity") || (x.status === "failed" && (x.error === RUNNER_NO_SIGN_IN || x.error === RUNNER_NO_KEY)));
 
 /**
  * A computer's own Orgo key as Settings shows it (orgo-web GET /api/computers/{id}/orgo-key, read by

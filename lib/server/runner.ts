@@ -6,6 +6,7 @@ import { workBot, type Bot, type Routine, type RunnerState } from "@/lib/types";
 import { sleptSince } from "./awake";
 import { onRunner } from "./persist";
 import { getState, pullState, statePulledAt } from "./store";
+import { identityHere, identityVmId, whoAmI } from "./vm-identity";
 
 /**
  * Where the user's bots work, and which Bops runs each routine. Where they work is the user's to pick
@@ -234,6 +235,8 @@ export function runnerReady(again?: () => void): boolean {
 export type IdentityLook = "same" | "copy" | "unknown";
 /** How often a runner makes sure it's on its own computer while a task of its own runs. */
 export const IDENTITY_EVERY_MS = 5 * 60_000;
+/** How often a runner on its computer's identity asks its VMM which computer and VM it's on (watchIdentity): nothing goes through Orgo. */
+export const WHO_AM_I_EVERY_MS = 60_000;
 /**
  * How long one look stands for starting a run (without a nap since): a look right before each, so a live
  * copy of the computer (a fork, which carries on from the same memory) never starts one. Its computer is
@@ -256,6 +259,12 @@ const NONCE_END = "__BOPS_NONCE_END__";
  * copy its own or takes it off. No answer from Orgo, or a read that didn't finish (a slow computer's
  * command timing out), proves nothing either way; until a look says it's there, it runs nothing
  * (runnerReady).
+ *
+ * On its computer's Orgo identity (vm-identity.ts), it asks its VMM instead (whoAmI, from inside the
+ * computer's own network, so only that computer can be the answer): another computer is a copy, which
+ * leaves; its own is the same. Nothing goes through Orgo, so the look never counts as using the computer.
+ * No answer there (its VMM restarting) is the look through Orgo above. A runner on its key file looks
+ * only through Orgo, as before.
  */
 export function checkIdentity(): Promise<IdentityLook> {
   box.checking ??= lookIdentity()
@@ -270,6 +279,18 @@ export function checkIdentity(): Promise<IdentityLook> {
 async function lookIdentity(): Promise<IdentityLook> {
   const computer = runnerComputer();
   if (!onRunner() || !computer) return "unknown";
+  if (identityHere()) {
+    const asked = Date.now();
+    const me = await whoAmI();
+    if (me) {
+      if (me.desktopId.toLowerCase() !== computer.toLowerCase()) {
+        leaveCopy();
+        return "copy";
+      }
+      box.sureAt = asked;
+      return "same";
+    }
+  }
   const word = randomBytes(16).toString("hex");
   const dir = box.nonceDir ?? NONCE_DIR;
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -285,6 +306,25 @@ async function lookIdentity(): Promise<IdentityLook> {
   }
   box.sureAt = asked;
   return "same";
+}
+
+/**
+ * On a runner on its computer's identity, every WHO_AM_I_EVERY_MS (runner-start.ts): which computer and VM
+ * its VMM says it's on. Another computer: a copy (a fork carries the runner on from the same memory),
+ * which leaves. Another VM of its own (a wake, a restore, a move): its token was the old VM's, so a new
+ * one is asked for now. Nothing goes through Orgo.
+ */
+export async function watchIdentity(): Promise<void> {
+  const computer = runnerComputer();
+  if (!onRunner() || !computer || !identityHere()) return;
+  const me = await whoAmI().catch(() => null);
+  if (!me) return;
+  if (me.desktopId.toLowerCase() !== computer.toLowerCase()) return leaveCopy();
+  const tokenVm = identityVmId();
+  if (tokenVm && me.vmId && tokenVm !== me.vmId) {
+    const { lookForRunnerKey } = await import("./orgo-auth");
+    await lookForRunnerKey().catch(() => null);
+  }
 }
 
 /** A copy of a runner's computer: its runner taken off (its program and the script that starts it: COPY_TAKES_OFF), then gone, saving nothing. */

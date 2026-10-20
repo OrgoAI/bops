@@ -143,6 +143,11 @@ export const STATE_TOO_NEW = "state_too_new";
 export const WRONG_USER = "wrong_user";
 /** 409 on PUT /v1/state: someone else wrote since `base` (CloudStateConflict). */
 export const STATE_CONFLICT = "state_conflict";
+/**
+ * 403: a computer signed in as itself (its runner, on its Orgo identity or its own key) called what only
+ * its user may (phone, mail, Slack, numbers, backups, notices, the tunnel...), or sent another device.
+ */
+export const COMPUTER_NOT_ALLOWED = "computer_not_allowed";
 
 /** GET /v1/state: the blob (no `messages`), its version (the cloud's count, bumped on every write) and the newest message write's seq. 404 when there's none yet. */
 export type CloudState = { version: number; seq: number; protocol: number; writer: string | null; state: Record<string, unknown> };

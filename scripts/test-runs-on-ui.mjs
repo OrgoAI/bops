@@ -240,6 +240,19 @@ await test("none (404): nothing, or No Orgo key only when that computer's runner
   assert.match(text(list({ state: state({ runners: { [C2]: { ...running, status: "failed", error: "it couldn't sign in on its computer" } } }), keys: { keys: { [C2]: null }, manage: MANAGE } })), /Iris Ready No Orgo key$/);
 });
 
+await test("a runner on its computer's Orgo identity: said above the key line while the computer still holds a key, and No Orgo key never shown for it", () => {
+  const onIdentity = { ...running, auth: "identity" };
+  const t = text(list({ state: state({ runners: { [C1]: onIdentity } }), keys: { keys: { [C1]: ownKey() }, manage: MANAGE } }));
+  assert.equal(t, "Your bots' computers Boppy Ready Orgo identity (this computer only) Own Orgo key sk_live_ab12… · used 2m ago Manage in Orgo Max Works on Boppy's computer Iris Ready");
+  assert.ok(!DASHES.test(t), t);
+  assert.equal(text(list({ state: state({ runners: { [C1]: onIdentity } }), keys: { keys: { [C1]: null }, manage: MANAGE } })), "Your bots' computers Boppy Ready Orgo identity (this computer only) Max Works on Boppy's computer Iris Ready", "no key, and none needed");
+  assert.equal(B.keyLine(null, onIdentity), null);
+  // On its key, or not up: no identity line.
+  assert.ok(!text(list({ state: state({ runners: { [C1]: { ...running, auth: "key" } } }) })).includes("Orgo identity"));
+  assert.ok(!text(list({ state: state({ runners: { [C1]: { ...onIdentity, status: "stopping" } } }) })).includes("Orgo identity"));
+  assert.equal(B.IDENTITY_LINE, "Orgo identity (this computer only)");
+});
+
 await test("Orgo couldn't say (a 405, a timeout, unreachable: left out) or hasn't answered yet: nothing, and the rows as before", () => {
   const runners = { [C1]: running };
   const before = text(list({ state: state({ runners }) }));

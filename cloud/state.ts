@@ -366,6 +366,7 @@ const get: Route = {
   method: "GET",
   path: "/v1/state",
   auth: "user",
+  computer: true,
   handle: async (req, res, { user }) => {
     const v2 = newBuild(req);
     checkUser(req, user!, v2);
@@ -387,6 +388,7 @@ const getHead: Route = {
   method: "GET",
   path: "/v1/state/head",
   auth: "user",
+  computer: true,
   handle: async (req, res, { user }) => {
     checkUser(req, user!, true);
     await requireLevelFor(req, user!.id);
@@ -399,7 +401,8 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
   checkUser(req, user, true);
   if (!wholeNumber(base)) throw new HttpError(400, "base must be a whole number, 0 or more");
   const json = toJson(blobOf(state));
-  const writer = deviceOf(req);
+  // A computer's runner writes as its own device, which Bops Cloud sets (server.ts computerCheck).
+  const writer = user.computer?.device || deviceOf(req);
   const level = stateLevelOf(req);
   let raised = false;
   const version = await tx(async (c) => {
@@ -455,6 +458,7 @@ const put: Route = {
   method: "PUT",
   path: "/v1/state",
   auth: "user",
+  computer: true,
   handle: async (req, res, { user }) => {
     const body = jsonOf<Record<string, unknown> | null>(await bodyOf(req));
     const state = body?.state;
@@ -468,6 +472,7 @@ const getMessages: Route = {
   method: "GET",
   path: "/v1/messages",
   auth: "user",
+  computer: true,
   handle: async (req, res, { user, url }) => {
     checkUser(req, user!, true);
     await requireLevelFor(req, user!.id);
@@ -492,6 +497,7 @@ const postMessages: Route = {
   method: "POST",
   path: "/v1/messages",
   auth: "user",
+  computer: true,
   handle: async (req, res, { user }) => {
     checkUser(req, user!, true);
     const body = jsonOf<Record<string, unknown> | null>(await bodyOf(req));

@@ -345,6 +345,8 @@ export const routes: Route[] = [
     method: "POST",
     path: "/v1/session",
     auth: "user",
+    // A computer's runner too: the services its own tasks use, and the executor key it hands its computer's Codex.
+    computer: true,
     handle: async (req, res, { user }) => {
       sendJson(res, 200, await setUp(user!));
       // The plan, asked of orgo-web with the user's own key, and what it brings set up: after the answer, never holding it up.

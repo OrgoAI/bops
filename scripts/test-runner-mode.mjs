@@ -2,9 +2,9 @@
 // runs by itself there (persist.ts RUNNER_LOOPS: the routines timer, the mirror of its own routines, its
 // own threads, the in-use beat; every other loop or timer of lib/server returns early, checked in each
 // module that has one), what it starts with (runner-start.ts: refusing to start without a window token,
-// on anything but loopback, on a Postgres or file store, or without its computer; without its computer's
-// ORGO_API_KEY it says so and stops; then the state, the look at which computer it's on, and only the
-// allowed loops), its key (runner-key.ts: /root/.orgo-secrets.env, then /root/.env, shell quoting as Orgo
+// on anything but loopback, on a Postgres or file store, or without its computer; without any credential
+// it says so and waits for one; then the state, the look at which computer it's on, and only the
+// allowed loops; its computer's identity first is test-vm-identity.mjs), its key (runner-key.ts: /root/.orgo-secrets.env, then /root/.env, shell quoting as Orgo
 // writes it, only from a file nobody else can read, read again when Orgo answers 401, never logged, and
 // never ORGO_API_KEY from its environment or a CLI login), no Keychain, the in-use beat as the runner's
 // and only for its own tasks, and chooseWhere never picking the Mac there.
@@ -40,9 +40,9 @@ const FAKES = {
   local: ["CHROME"],
   "orgo-sign-in": ["authStatus"],
   routines: [],
-  ...(START ? { runner: ["checkIdentity", "IDENTITY_EVERY_MS", "runnerComputer", "startRunsOn"], "orgo-auth": ["loadOrgoKey"], "free-hours": ["startActivityBeat"] } : {}),
+  ...(START ? { runner: ["checkIdentity", "IDENTITY_EVERY_MS", "runnerComputer", "startRunsOn", "watchIdentity", "WHO_AM_I_EVERY_MS"], "orgo-auth": ["loadOrgoKey", "lookForRunnerKey"], "free-hours": ["startActivityBeat"] } : {}),
 };
-const VALUES = { local: { CHROME: "/nonexistent/Chrome" }, runner: { IDENTITY_EVERY_MS: 300000 } };
+const VALUES = { local: { CHROME: "/nonexistent/Chrome" }, runner: { IDENTITY_EVERY_MS: 300000, WHO_AM_I_EVERY_MS: 60000 } };
 const loaded = [];
 registerHooks({
   resolve(specifier, context, next) {
@@ -146,8 +146,8 @@ if (START) {
     let tries = 0;
     let looks = ["unknown", "same"];
     ready = false;
-    globalThis.__fake.runner = { checkIdentity: async () => (calls.push("identity"), looks.shift() ?? "same"), runnerComputer: () => C1, startRunsOn: () => calls.push("runs-on") };
-    globalThis.__fake["orgo-auth"] = { loadOrgoKey: async () => (calls.push("key"), "sk_runner") };
+    globalThis.__fake.runner = { checkIdentity: async () => (calls.push("identity"), looks.shift() ?? "same"), runnerComputer: () => C1, startRunsOn: () => calls.push("runs-on"), watchIdentity: async () => {} };
+    globalThis.__fake["orgo-auth"] = { loadOrgoKey: async () => (calls.push("key"), "sk_runner"), lookForRunnerKey: async () => (calls.push("look"), "sk_runner") };
     globalThis.__fake["free-hours"] = { startActivityBeat: () => calls.push("in-use") };
     globalThis.__fake["orgo-sign-in"] = { authStatus: async () => (calls.push("state"), (ready = ++tries >= 2), {}) };
     Object.assign(process.env, good());
@@ -162,6 +162,7 @@ if (START) {
     for (const m of ["mail", "phone", "channels", "cloud-tunnel", "bops-sync", "access-sync", "watches", "relay", "runner-install", "mac", "attention", "orbit-sync", "memory-categories", "sessions"])
       assert.ok(!loaded.includes(m), `${m} isn't started`);
     clearInterval(globalThis.__bopsRunnerIdentity);
+    clearInterval(globalThis.__bopsRunnerWhoAmI);
     // Refused: out, before anything.
     const exit = process.exit;
     const err = console.error;
@@ -177,19 +178,32 @@ if (START) {
     await assert.rejects(S.startRunner(), /exited/);
     assert.equal(code, 1);
     assert.deepEqual(calls, [], "nothing started");
-    // No key on its computer: out too, before the state, saying why.
+    // No credential on its computer (no identity, no key): it waits, saying why, and looks again until one is there; never out (supervisord would only start it again, forever).
     delete globalThis.__bopsRunnerStarted;
     process.env.HOSTNAME = "127.0.0.1";
+    globalThis.__bopsRunnerNoAuthMs = 5;
     globalThis.__fake["orgo-auth"].loadOrgoKey = async () => (calls.push("key"), null);
+    let looks2 = 0;
+    globalThis.__fake["orgo-auth"].lookForRunnerKey = async () => (calls.push("look"), ++looks2 >= 3 ? "sk_given_later" : null);
+    looks = ["same"];
+    ready = true;
     const said = [];
-    console.error = (m) => said.push(String(m));
-    await assert.rejects(S.startRunner(), /exited/);
-    console.error = () => {};
-    assert.deepEqual(calls, ["key"]);
-    assert.deepEqual(said, ["[runner] not starting: no ORGO_API_KEY on this computer (Orgo writes it when the computer is made, or when the Mac sets the runner up)"]);
+    const warn = console.warn;
+    console.warn = (m) => said.push(String(m));
+    console.log = () => {};
+    await S.startRunner();
+    console.log = log;
+    console.warn = warn;
+    clearInterval(globalThis.__bopsRunnerIdentity);
+    clearInterval(globalThis.__bopsRunnerWhoAmI);
+    delete globalThis.__bopsRunnerIdentity;
+    delete globalThis.__bopsRunnerWhoAmI;
+    assert.deepEqual(calls.slice(0, 5), ["key", "look", "look", "look", "identity"], "waits, looking again, then goes on");
+    assert.deepEqual(said, ["[runner] waiting: no Orgo identity and no ORGO_API_KEY on this computer yet (Orgo writes the key when the computer is made, or when the Mac sets the runner up)"]);
     // A copy of another computer: out before it reads the state, so it never signs in or saves as that computer's runner.
     delete globalThis.__bopsRunnerStarted;
     calls.length = 0;
+    globalThis.__fake.started.length = 0;
     looks = ["copy"];
     ready = false;
     globalThis.__fake["orgo-auth"].loadOrgoKey = async () => (calls.push("key"), "sk_runner");
@@ -212,6 +226,8 @@ function keyHome() {
 }
 
 if (ORGO) {
+  // Its computer's identity is test-vm-identity.mjs; here, a runner on its key file alone.
+  process.env.BOPS_RUNNER_IDENTITY = "0";
   await check("a runner's calls use only its computer's key, and read it again when Orgo answers 401", async () => {
     const K = await import(`${root}/lib/server/runner-key.ts`);
     const O = await import(`${root}/lib/server/orgo.ts`);
@@ -436,7 +452,8 @@ await check("a runner's key: /root/.orgo-secrets.env, then /root/.env, as Orgo q
   assert.equal(await read({ env: "export ORGO_API_KEY=sk_in_root\n" }, 0o644, 0o700), "sk_in_root", "0644 in a folder only ours");
   assert.equal(await read({ env: "export ORGO_API_KEY=sk_group\n" }, 0o640, 0o750), null, "readable by its group");
   console.warn = warn;
-  // loadOrgoKey on a runner: its computer's key, never the Keychain.
+  // loadOrgoKey on a runner: its computer's key, never the Keychain (its identity skipped here: test-vm-identity.mjs).
+  process.env.BOPS_RUNNER_IDENTITY = "0";
   await read({ secrets: "export ORGO_API_KEY=sk_runner_key\n" });
   delete globalThis.bopsOrgoKey;
   delete globalThis.bopsRunnerKeyRead;
@@ -447,6 +464,7 @@ await check("a runner's key: /root/.orgo-secrets.env, then /root/.env, as Orgo q
   assert.equal(await Kc.getSecret("anything"), null);
   await assert.rejects(Kc.setSecret("anything", "x"), /only in the Bops app on your Mac/);
   K.runnerKeyForTests.files(undefined);
+  delete process.env.BOPS_RUNNER_IDENTITY;
   rmSync(home.dir, { recursive: true, force: true });
   asMac();
 });

@@ -13,12 +13,20 @@ export type Route = {
   /** Exact path ("/v1/session") or a prefix ending in "/*" ("/proxy/openai/*"). */
   path: string;
   auth: "user" | "public";
+  /**
+   * A computer signed in as itself (CloudUser.computer: its runner, on its identity token or its own
+   * key) may call it: only what the runner needs (its state, its threads, its session, the models and
+   * tools its own tasks use). Everything else answers it 403 (server.ts).
+   */
+  computer?: true;
   handle: (req: IncomingMessage, res: ServerResponse, ctx: { user: CloudUser | null; url: URL }) => Promise<void>;
 };
 
 /** A WebSocket upgrade handler for a path prefix ("/v1/connect", "/proxy/openai/*"). Always for a signed-in user. */
 export type Upgrade = {
   path: string;
+  /** A computer signed in as itself may open it (Route.computer). */
+  computer?: true;
   handle: (req: IncomingMessage, socket: Duplex, head: Buffer, ctx: { user: CloudUser; url: URL }) => void;
 };
 

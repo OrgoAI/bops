@@ -32,11 +32,15 @@ export function keyLine(k: ComputerOrgoKey | null | undefined, x: RunnerState | 
   return `Own Orgo key${k.prefix ? ` ${k.prefix}…` : ""} · ${used}`;
 }
 
+/** What a runner on its computer's Orgo identity says it signs in with (RunnerState.auth), above its key line while the computer still holds one. */
+export const IDENTITY_LINE = "Orgo identity (this computer only)";
+
 /**
  * Settings, Your bots' computers: each of the workspace's bots and how its computer is, and under a bot
- * that has its own computer, whether that computer holds its own Orgo key (`keys`, from
- * /api/runs-on/keys; null until it answers, and nothing said meanwhile). A bot that works on another
- * bot's computer says only whose. Exported for the tests.
+ * that has its own computer, whether its runner signs in with that computer's Orgo identity and whether
+ * the computer holds its own Orgo key (`keys`, from /api/runs-on/keys; null until it answers, and
+ * nothing said meanwhile). A bot that works on another bot's computer says only whose. Exported for the
+ * tests.
  */
 export function BotComputersList({ state, keys, padded }: { state: AppState; keys: ComputerKeys | null; padded: boolean }) {
   return (
@@ -46,6 +50,7 @@ export function BotComputersList({ state, keys, padded }: { state: AppState; key
         const own = ownComputer(state, b);
         const key = own ? keys?.keys[own] : undefined;
         const line = own ? keyLine(key, state.runners?.[own]) : null;
+        const identity = !!own && state.runners?.[own]?.status === "running" && state.runners[own].auth === "identity";
         return (
           <div key={b.id} className="flex items-center border-b border-[#F0F0EE] py-2.5 last:border-0">
             <span className="flex w-[200px] items-center gap-2">
@@ -59,6 +64,7 @@ export function BotComputersList({ state, keys, padded }: { state: AppState; key
                 />
                 {computerNow(state, b)}
               </span>
+              {identity && <span className="min-w-0 truncate pl-[13px] text-[12px] leading-4 text-[#6B6B6B]">{IDENTITY_LINE}</span>}
               {line && (
                 <span className="flex min-w-0 items-center gap-2 pl-[13px] text-[12px] leading-4 text-[#6B6B6B]">
                   <span className="min-w-0 truncate" data-tip={key?.name || undefined}>

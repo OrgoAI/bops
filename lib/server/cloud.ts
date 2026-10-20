@@ -6,6 +6,7 @@ import { appHeaders } from "./app-version";
 import { loadOrgoKey, orgoKey } from "./orgo-auth";
 import { onPostgres } from "./persist";
 import { getState, update } from "./store";
+import { isIdentityToken, vmIdentityRejected } from "./vm-identity";
 
 /**
  * Bops Cloud (cloud/README.md): the server Orgo runs so that Orgo's provider keys never sit on a
@@ -45,11 +46,23 @@ export async function cloudFetch(path: string, init: RequestInit = {}, fetchImpl
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${key}`);
   for (const [k, v] of Object.entries(appHeaders())) headers.set(k, v);
+  let res: Response;
   try {
-    return await fetchImpl(`${cloudUrl()}${path}`, { cache: "no-store", signal: AbortSignal.timeout(20_000), ...init, headers });
+    res = await fetchImpl(`${cloudUrl()}${path}`, { cache: "no-store", signal: AbortSignal.timeout(20_000), ...init, headers });
   } catch {
     throw new CloudError("Couldn't reach Bops Cloud. Check your internet connection.");
   }
+  // A runner's identity token turned down (orgo-web said why): it takes its next credential (vm-identity.ts).
+  if (res.status === 401 && isIdentityToken(key))
+    vmIdentityRejected(
+      key,
+      await res
+        .clone()
+        .json()
+        .then((j: { code?: unknown } | null) => (typeof j?.code === "string" ? j.code : undefined))
+        .catch(() => undefined),
+    );
+  return res;
 }
 
 /** What a failed answer means, for the user. Out of AI credit (402), the cloud's own words. */

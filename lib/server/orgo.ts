@@ -9,6 +9,7 @@ import { recordUsage } from "./usage";
 import { getState, stateEpoch, update } from "./store";
 import { MAIN_WORKSPACE, type Workspace } from "@/lib/types";
 import { folderKey, moveWorkspaceFolder } from "./workspace-skills";
+import { isIdentityToken } from "./vm-identity";
 
 /** Thin Orgo REST client (the published SDKs predate screens and clone). */
 
@@ -17,8 +18,9 @@ const base = () => `${orgoOrigin()}/api`;
 /**
  * The key Orgo calls run on: the signed-in user's (Sign in with Orgo, kept in the Keychain), else
  * ORGO_API_KEY (self-hosting), else the Orgo CLI's login in ~/.orgo/credentials.json. A computer's runner
- * uses only its computer's own key, read from the files Orgo writes it in (runner-key.ts): never one from
- * its environment or a CLI login on that computer, which may be anyone's.
+ * uses only its computer's own credential: its Orgo identity, else its key read from the files Orgo
+ * writes it in (orgo-auth.ts runnerKey): never one from its environment or a CLI login on that computer,
+ * which may be anyone's.
  */
 export async function apiKey(): Promise<string> {
   const signedIn = await loadOrgoKey();
@@ -96,9 +98,20 @@ const MAKE_MS = 180_000;
 /** Orgo didn't answer in time (the connection dropped, or it hung): the call may or may not have been done. */
 export class OrgoTimeout extends Error {}
 
+/** Orgo's code in an answer (a 401's says why an identity token was turned down), read from a copy so the answer itself is still unread. */
+async function codeOf(res: Response): Promise<string | undefined> {
+  try {
+    const j = (await res.clone().json()) as { code?: unknown } | null;
+    return typeof j?.code === "string" ? j.code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * One request to Orgo with the signed-in key, read with `read`, within `timeoutMs` (OrgoTimeout after) or
  * until `signal` (a task stopped), which ends it as the signal says. A network error comes as Node gave it.
+ * Says which key went, so a caller can tell a runner's identity token was turned down.
  */
 async function answered<R>(url: string, init: RequestInit, timeoutMs: number, signal: AbortSignal | undefined, read: (res: Response) => Promise<R>) {
   if (signal?.aborted) throw signal.reason ?? new Error("Stopped");
@@ -111,9 +124,9 @@ async function answered<R>(url: string, init: RequestInit, timeoutMs: number, si
       cache: "no-store",
       signal: signal ? AbortSignal.any([timer, signal]) : timer,
     });
-    // A runner's key turned down: its computer may have a new one (orgo-auth.ts).
-    if (res.status === 401) orgoKeyRejected(key);
-    return { res, text: await read(res) };
+    // A runner's credential turned down: its computer may have a new key, or a fresh token (orgo-auth.ts).
+    if (res.status === 401) orgoKeyRejected(key, await codeOf(res));
+    return { res, text: await read(res), key };
   } catch (e) {
     if (signal?.aborted) throw signal.reason ?? new Error("Stopped");
     if (timer.aborted) throw new OrgoTimeout(`Orgo didn't answer within ${Math.round(timeoutMs / 1000)} seconds`);
@@ -135,14 +148,21 @@ async function call<T>(
   { wait = method === "POST" || method === "PATCH", timeoutMs = CALL_MS, signal }: { wait?: boolean; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<T> {
   const until = Date.now() + wakeWaitMs();
+  let reauthed = false;
   for (let attempt = 0; ; attempt++) {
-    let res: Response, text: string;
+    let res: Response, text: string, key: string;
     try {
-      ({ res, text } = await answered(`${base()}${path}`, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs, signal, async (r) => r.text()));
+      ({ res, text, key } = await answered(`${base()}${path}`, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs, signal, async (r) => r.text()));
     } catch (e) {
       // A read that didn't get through is safe to make again, once; an action may have happened, so it says so instead.
       if (method === "GET" && attempt === 0 && !signal?.aborted) continue;
       throw e;
+    }
+    // A runner's identity token turned down (its computer woke on another VM, say): once more on the
+    // credential it takes next, at once (orgo-auth.ts). A 401 is answered before anything is done.
+    if (res.status === 401 && !reauthed && isIdentityToken(key)) {
+      reauthed = true;
+      continue;
     }
     let json: { error?: string; code?: unknown; retry_after?: unknown } = {};
     try {
@@ -193,8 +213,9 @@ export async function callOrgo<T>(
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (res.status === 401) orgoKeyRejected(key);
-    return { status: res.status, json: (await res.json().catch(() => ({}))) as T };
+    const json = (await res.json().catch(() => ({}))) as T;
+    if (res.status === 401) orgoKeyRejected(key, typeof (json as { code?: unknown })?.code === "string" ? (json as { code: string }).code : undefined);
+    return { status: res.status, json };
   } catch {
     return null;
   }

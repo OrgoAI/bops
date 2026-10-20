@@ -8,6 +8,7 @@ import { config } from "./config.ts";
 import { checkCreditAccess } from "./credit.ts";
 import { migrate, query } from "./db.ts";
 import { HttpError, matches, refuseUpgrade, sendJson, type Route, type Upgrade } from "./http.ts";
+import { BOPS_DEVICE_HEADER, COMPUTER_NOT_ALLOWED } from "./protocol.ts";
 import * as handles from "./handles.ts";
 import * as hooks from "./hooks.ts";
 import * as lines from "./lines.ts";
@@ -88,6 +89,22 @@ function appCheck(req: IncomingMessage, userId: string, path: string) {
   requireAppVersion(path, version);
 }
 
+/**
+ * A computer signed in as itself (its runner: auth.ts CloudUser.computer) calls only the routes marked
+ * for it (`allowed`), and only as its own device: Bops Cloud sets that from the computer's id, and a
+ * device header that says another is refused. That's which device wrote, and a guard against a runner
+ * set up wrong; it bounds nothing, as anyone with the token can work the same device out. An identity
+ * token Orgo named no computer for is refused everywhere.
+ */
+function computerCheck(req: IncomingMessage, user: CloudUser, allowed: boolean) {
+  const c = user.computer;
+  if (!c) return;
+  if (!c.desktopId || !allowed) throw new HttpError(403, "A computer's identity can't do this.", { code: COMPUTER_NOT_ALLOWED });
+  const said = req.headers[BOPS_DEVICE_HEADER];
+  const device = (Array.isArray(said) ? said[0] : said)?.trim();
+  if (device && device !== c.device) throw new HttpError(403, "That device isn't this computer's.", { code: COMPUTER_NOT_ALLOWED });
+}
+
 export function makeServer(): Server {
   const table = routes();
   const ups = upgrades();
@@ -99,6 +116,7 @@ export function makeServer(): Server {
     try {
       if (!route) throw new HttpError(404, "Not found");
       user = route.auth === "user" ? await requireUser(req) : null;
+      if (user) computerCheck(req, user, !!route.computer);
       if (user) appCheck(req, user.id, url.pathname);
       const as = user;
       // What the call says about usage events goes with everything its handler does (analytics.ts).
@@ -124,6 +142,8 @@ export function makeServer(): Server {
     if (fromIphone(req)) return refuseUpgrade(socket, 403, "Forbidden");
     try {
       const user = await requireUser(req);
+      // The tunnel is one per user: a computer there would drop the user's Mac.
+      computerCheck(req, user, !!up.computer);
       appCheck(req, user.id, url.pathname);
       up.handle(req, socket, head, { user, url });
     } catch (e) {

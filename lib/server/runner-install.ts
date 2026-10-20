@@ -41,6 +41,15 @@ import { flushState, getState, stateDevice, stateInCloud, stateReady, stateTooNe
  * set up again (a new release) stays up, with its routines, until the new one starts in its place
  * (RunnerState.upgrading); a try that doesn't get that far leaves it as it was.
  *
+ * Its computer's Orgo identity (vm-identity.ts) comes first on the runner, and its key is the fallback
+ * wherever identity doesn't reach. This release (the identity spec's phase 1) gives every computer its
+ * key as before, whatever identity says; the health check says what the runner signs in with
+ * (RunnerState.auth). Phase 2 (IDENTITY_ONLY, off until every host runs identity) gives no key to a
+ * computer on identity and takes back the one Bops gave once the new build runs on identity. Either
+ * way a runner is never left with nothing: one with no key and no identity it can use waits
+ * (runner-start.ts), its routines fall overdue, and the Mac's look gives its computer a key again
+ * (stillRuns, the way back).
+ *
  * Stopping one (the bots work on This Mac now, or in browsers on the Mac; its computer was deleted; no
  * bot works on it): its program is stopped and taken off, the key Bops gave its computer revoked (by
  * any Mac of the user's: DELETE /api/computers/{id}/orgo-key, which takes it off a computer that's up
@@ -80,6 +89,15 @@ const RETRY_MAX_MS = 12 * 60 * 60_000;
 const INSTALLING_STALE_MS = 20 * 60_000;
 /** How often at most a computer is asked whether its runner is still there (stillRuns): a command keeps it awake a while. */
 const STILL_RUNS_EVERY_MS = 60 * 60_000;
+/** The same for a runner on its computer's identity: one that lost it may be waiting with no credential at all. */
+const STILL_RUNS_IDENTITY_MS = 15 * 60_000;
+/**
+ * Phase 2 of the identity spec (its rollout step 12): no key for a computer whose identity answers, and
+ * the key Bops gave taken back once the new runner proves it runs on identity. Off until every host has
+ * run identity through a full roll; until then every computer gets its key as before, whatever identity
+ * says (runnerInstallForTests.identityOnly turns it on in the tests).
+ */
+const IDENTITY_ONLY = false;
 
 /* ---------------- The bundle ---------------- */
 
@@ -160,16 +178,28 @@ const ZONE = /^[A-Za-z0-9_+/-]{1,64}$/;
 const ORIGIN = /^https?:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~/-]*)?$/;
 const LOOPBACK_URL = /^https?:\/\/(?:localhost|127\.|\[::1\]|0\.0\.0\.0)/i;
 
+const KEY_LINE = `grep -qsE ${q(ORGO_KEY_LINE)} ${ORGO_KEY_FILES.join(" ")} && echo key=yes || echo key=no`;
+/**
+ * The computer's Orgo identity asked as a program on it would (its VMM, from inside its own network):
+ * the status code only (200, 403, 404, 503, 000 when nothing answered), never the token.
+ */
+export const IDENT_LINE = `echo "ident=$(curl --noproxy '*' -s -m 3 -o /dev/null -w '%{http_code}' -H 'Metadata-Flavor: Orgo' http://169.254.169.254/orgo/v1/identity/token)"`;
+/** What the runner last said it signs in with (its log's `[runner] auth:` line, orgo-auth.ts): the word only, as orgo-web logs a command's output. */
+const AUTH_LINE = `echo "auth=$(grep -E '^\\[runner\\] auth: (identity|key|none)$' /var/log/bops/runner.log 2>/dev/null | tail -n 1 | sed 's/^.*: //')"`;
+/** The word an `auth=` line says, if it says one. */
+const authIn = (output: string): RunnerState["auth"] => (/^auth=(identity|key|none)$/m.exec(output)?.[1] as RunnerState["auth"]) ?? undefined;
+
 /**
  * Where it stands on the computer: the build `current` points at, whether the computer has its Orgo key
  * (a line that sets ORGO_API_KEY in one of the files Orgo writes it in: grep alone, never printed), whether
- * this build is there, and supervisord.
+ * this build is there, and supervisord; in phase 2 (`ident`) what its identity answers too (IDENT_LINE).
  */
-export const probeScript = (dirName: string) =>
+export const probeScript = (dirName: string, { ident = false }: { ident?: boolean } = {}) =>
   [
     `c=$(readlink ${ROOT}/current 2>/dev/null | sed 's#.*/##')`,
     `echo "current=$c"`,
-    `grep -qsE ${q(ORGO_KEY_LINE)} ${ORGO_KEY_FILES.join(" ")} && echo key=yes || echo key=no`,
+    KEY_LINE,
+    ...(ident ? [IDENT_LINE] : []),
     `[ -f ${ROOT}/${dirName}/server.js ] && echo have=yes || echo have=no`,
     `command -v supervisorctl >/dev/null 2>&1 && echo sup=yes || echo sup=no`,
   ].join("; ");
@@ -262,7 +292,8 @@ export function installScript(b: Pick<Bundle, "name" | "sha256" | "version" | "b
 /**
  * The health check: the runner answers on 127.0.0.1:PORT within a minute or so, listens there only
  * (never on an address another computer could reach), and has the user's state (its log says it's
- * running the routines: runner-start.ts). Nothing of the log is sent back, only whether it says so.
+ * running the routines: runner-start.ts). Nothing of the log is sent back, only whether it says so, and
+ * what it signs in with (`auth=identity`, `key` or `none`: the word alone).
  */
 export const HEALTH_SCRIPT = [
   "command -v ss >/dev/null 2>&1 || { echo __BOPS_NO_SS__; exit 0; }",
@@ -273,7 +304,7 @@ export const HEALTH_SCRIPT = [
   `    l=$(ss -ltnH 'sport = :${PORT}' | awk '{print $4}')`,
   '    if [ -z "$l" ]; then echo __BOPS_NO_SS__; exit 0; fi',
   "    if printf '%s\\n' \"$l\" | grep -qv '^127\\.0\\.0\\.1:'; then echo __BOPS_EXPOSED__; exit 0; fi",
-  "    if grep -q '^\\[runner\\] running the routines' /var/log/bops/runner.log 2>/dev/null; then echo __BOPS_HEALTHY__; exit 0; fi",
+  `    if grep -q '^\\[runner\\] running the routines' /var/log/bops/runner.log 2>/dev/null; then ${AUTH_LINE}; echo __BOPS_HEALTHY__; exit 0; fi`,
   "  fi",
   "  sleep 2",
   "done",
@@ -296,6 +327,13 @@ export const UNINSTALL_SCRIPT = [
   "echo __BOPS_OFF__",
 ].join("\n");
 
+/**
+ * Whether a runner marked up is still there (stillRuns): supervisord's word, then whether its computer
+ * has its key, what its identity answers and what the runner says it signs in with (none of them
+ * secret), then the end marker, so a read cut short says nothing.
+ */
+export const STILL_RUNS_SCRIPT = `supervisorctl status bops-runner 2>&1; ${KEY_LINE}; ${IDENT_LINE}; ${AUTH_LINE}; echo __BOPS_STATUS_END__`;
+
 /* ---------------- The state ---------------- */
 
 type Box = {
@@ -311,6 +349,8 @@ type Box = {
   busy: Set<string>;
   /** When each computer was last asked whether its runner is still there (stillRuns). */
   asked?: Map<string, number>;
+  /** Tests: phase 2 on (IDENTITY_ONLY). */
+  identityOnly?: boolean;
 };
 const g = globalThis as unknown as { __bopsRunnerInstall?: Box };
 const box: Box = (g.__bopsRunnerInstall ??= { lookedAt: 0, retry: new Map(), busy: new Set() });
@@ -357,6 +397,11 @@ function keptAsIs(id: string, error: string) {
 }
 /** The key Bops gave the computer, carried over to its next state (an entry from before keyMade, with a keyId, counts: runnerKeyMade). */
 const keyOf = (x: RunnerState | undefined): Pick<RunnerState, "keyMade" | "keyId"> => (runnerKeyMade(x) ? { keyMade: true, ...(x?.keyId ? { keyId: x.keyId } : {}) } : {});
+/** The same state with no key of Bops' (it was taken back; an entry from before keyMade loses its old keyBy with it). */
+const keyless = (x: RunnerState) => Object.fromEntries(Object.entries(x).filter(([k]) => k !== "keyMade" && k !== "keyId" && k !== "keyBy")) as RunnerState;
+/** What the runner signs in with, when its computer said. */
+const authOf = (auth: RunnerState["auth"]): Pick<RunnerState, "auth"> => (auth ? { auth } : {});
+const identityOnly = () => box.identityOnly ?? IDENTITY_ONLY;
 
 /* ---------------- Which computers ---------------- */
 
@@ -451,7 +496,7 @@ async function keepUp(id: string, w: Wanted, key: string, me: string) {
     return;
   }
   const plan = installPlan(x, bundle, me);
-  if (plan === "keep" && x?.status === "running" && overdueOn(id)) return stillRuns(id, me);
+  if (plan === "keep" && x?.status === "running" && overdueOn(id)) return stillRuns(id, me, key);
   if (plan !== "install") return;
   // One that didn't start, or one up that wasn't set up again, waits its turn (not when it was the bundle,
   // which is looked at each time). Someone else in the workspace that only Orgo saw (a share link) waits
@@ -485,7 +530,8 @@ async function install(id: string, bundle: Bundle, key: string, me: string) {
   if (upgrade) mark(id, { ...before, upgrading: { version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now() } });
   else mark(id, { status: "installing", version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now(), ...keyOf(before) });
   const dirName = `${bundle.version}-${bundle.buildId}`;
-  const probe = await orgo.bash(id, probeScript(dirName), 60).catch(() => null);
+  const phase2 = identityOnly();
+  const probe = await orgo.bash(id, probeScript(dirName, { ident: phase2 }), 60).catch(() => null);
   if (!probe) return fail("its computer didn't answer");
   const said = (k: string) => new RegExp(`^${k}=(.*)$`, "m").exec(probe.output)?.[1]?.trim() ?? "";
   if (said("sup") !== "yes") return fail("its computer can't keep a runner going (no supervisord)");
@@ -494,15 +540,21 @@ async function install(id: string, bundle: Bundle, key: string, me: string) {
   if (there && compareVersions(there[1], bundle.version) > 0) {
     const up = await health(id);
     const x = runnerOf(id);
-    if (up === "ok") mark(id, { status: "running", version: there[1], buildId: there[2], by: x?.by ?? me, at: Date.now(), ...keyOf(x) });
-    else failed(id, UNHEALTHY[up], bundle, me);
+    if (up.up === "ok") mark(id, { status: "running", version: there[1], buildId: there[2], by: x?.by ?? me, at: Date.now(), ...keyOf(x), ...authOf(up.auth) });
+    else failed(id, UNHEALTHY[up.up], bundle, me);
     return;
   }
   // Its key: the computer's own ORGO_API_KEY. One it has (made with it from a template that asks for it,
   // or given it before) is left as it is: the runner reads it there. One without gets it from Orgo now,
   // written on the computer by Orgo itself (nothing of it comes here), and Bops takes that back when it
   // stops the runner (keyMade). Orgo keeps one key per computer and revokes any earlier one itself.
-  if (said("key") !== "yes") {
+  // Phase 2: a computer whose identity answers gets none (the runner signs in with that), and one whose
+  // identity is refused (someone else can use its workspace) gets none and no runner.
+  const ident = phase2 ? said("ident") : "";
+  const hadKey = said("key") === "yes";
+  if (ident === "403") return fail(FULL_ACCESS);
+  const onIdentity = ident === "200";
+  if (!hadKey && !onIdentity) {
     const given = await giveKey(id, key);
     if ("error" in given) return given.backoff ? fail(given.error) : failed(id, given.error, bundle, me, false);
     touched = true;
@@ -518,13 +570,19 @@ async function install(id: string, bundle: Bundle, key: string, me: string) {
   const put = await orgo.bash(id, installScript(bundle, wrapper), 240).catch(() => null);
   if (!put?.output.includes("__BOPS_INSTALLED__")) return fail(put?.output.includes("__BOPS_NO_FILES__") ? "its files weren't on its computer" : "its files couldn't be put in place");
   const up = await health(id);
-  if (up !== "ok") {
+  // Phase 2, given no key for its identity: it must say it runs on it, or it's as unhealthy as any other.
+  const bad = up.up !== "ok" ? up.up : onIdentity && !hadKey && up.auth !== "identity" ? "noidentity" : null;
+  if (bad) {
     // Never left half up: a runner that answered beyond its computer, or not at all, is stopped (its routines stay on the Mac).
     await orgo.bash(id, "supervisorctl stop bops-runner >/dev/null 2>&1; true", 30).catch(() => null);
-    return fail(UNHEALTHY[up]);
+    return fail(UNHEALTHY[bad]);
   }
   box.retry.delete(id);
-  mark(id, { status: "running", version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now(), ...keyOf(runnerOf(id)) });
+  // Phase 2: the key Bops gave (and only that one: a key the computer came with is Orgo's), taken back
+  // only now that the new build runs on its identity. A try that went wrong before this left the runner
+  // that was up, and its key, as they were.
+  if (onIdentity && hadKey && up.auth === "identity" && runnerKeyMade(runnerOf(id)) && (await takeKeyBack(id, key))) mark(id, keyless(runnerOf(id)!));
+  mark(id, { status: "running", version: bundle.version, buildId: bundle.buildId, by: me, at: Date.now(), ...keyOf(runnerOf(id)), ...authOf(up.auth) });
   // The runner goes by the state: it starts on that computer's routines once it reads this.
   void flushState().catch(() => {});
 }
@@ -532,19 +590,21 @@ async function install(id: string, bundle: Bundle, key: string, me: string) {
 const UNHEALTHY = {
   down: "it didn't answer on its computer",
   nostate: RUNNER_NO_SIGN_IN,
+  noidentity: RUNNER_NO_SIGN_IN,
   exposed: "it listened beyond its own computer",
   unknown: "its computer can't say what it listens on",
   lost: "its computer didn't answer",
 } as const;
 
-async function health(id: string): Promise<"ok" | keyof typeof UNHEALTHY> {
+/** The health check's answer, and what the runner said it signs in with when it passed. */
+async function health(id: string): Promise<{ up: "ok" | Exclude<keyof typeof UNHEALTHY, "noidentity">; auth?: RunnerState["auth"] }> {
   const out = await orgo.bash(id, HEALTH_SCRIPT, 240).catch(() => null);
-  if (!out) return "lost";
-  if (out.output.includes("__BOPS_HEALTHY__")) return "ok";
-  if (out.output.includes("__BOPS_EXPOSED__")) return "exposed";
-  if (out.output.includes("__BOPS_NO_STATE__")) return "nostate";
-  if (out.output.includes("__BOPS_NO_SS__")) return "unknown";
-  return "down";
+  if (!out) return { up: "lost" };
+  if (out.output.includes("__BOPS_HEALTHY__")) return { up: "ok", auth: authIn(out.output) };
+  if (out.output.includes("__BOPS_EXPOSED__")) return { up: "exposed" };
+  if (out.output.includes("__BOPS_NO_STATE__")) return { up: "nostate" };
+  if (out.output.includes("__BOPS_NO_SS__")) return { up: "unknown" };
+  return { up: "down" };
 }
 
 /**
@@ -625,7 +685,7 @@ async function stop(id: string, key: string, why: string) {
   else if (c?.status === "running") off = !!(await orgo.bash(id, UNINSTALL_SCRIPT, 180).catch(() => null))?.output.includes("__BOPS_OFF__");
   if (runnerKeyMade(x) && (await takeKeyBack(id, key))) {
     // The key's gone (and an entry from before keyMade loses its old keyBy with it).
-    x = Object.fromEntries(Object.entries(x).filter(([k]) => k !== "keyMade" && k !== "keyId" && k !== "keyBy")) as RunnerState;
+    x = keyless(x);
     mark(id, x);
   }
   if (off && !runnerKeyMade(x)) forget(id);
@@ -634,21 +694,54 @@ async function stop(id: string, key: string, why: string) {
 /**
  * A computer whose runner is marked up but left one of its routines well past its time (a runner that
  * runs advances it before it starts): whether its program is still there, asked only when the computer
- * is up (one asleep isn't woken for it) and at most once an hour. Gone or stopped (it left as a copy by
- * mistake, or kept failing): it couldn't start, so its routines go back to the Mac, and it's set up
- * again later.
+ * is up (one asleep isn't woken for it) and at most once an hour (15 minutes for a runner on its
+ * computer's identity, which may have lost it). Gone or stopped (it left as a copy by mistake, or kept
+ * failing): it couldn't start, so its routines go back to the Mac, and it's set up again later.
+ *
+ * The way back: a computer with no key whose identity doesn't answer (anything but 200 or 403), or whose
+ * runner says it has nothing to sign in with, gets its key from Orgo again (wayBack). A runner left
+ * with no credential waits for one rather than stopping (runner-start.ts), which is why its routines
+ * fell overdue.
  */
-async function stillRuns(id: string, me: string) {
+async function stillRuns(id: string, me: string, key: string) {
   const asked = (box.asked ??= new Map());
-  if (Date.now() - (asked.get(id) ?? 0) < STILL_RUNS_EVERY_MS) return;
+  const every = runnerOf(id)?.auth === "identity" ? STILL_RUNS_IDENTITY_MS : STILL_RUNS_EVERY_MS;
+  if (Date.now() - (asked.get(id) ?? 0) < every) return;
   const c = await orgo.computer(id).catch(() => null);
   if (c?.status !== "running") return;
   asked.set(id, Date.now());
-  const got = await orgo.bash(id, "supervisorctl status bops-runner 2>&1; echo __BOPS_STATUS_END__", 30).catch(() => null);
+  const got = await orgo.bash(id, STILL_RUNS_SCRIPT, 30).catch(() => null);
   // Only a read that ran to its end says anything.
   if (got?.exit_code !== 0 || !got.output.includes("__BOPS_STATUS_END__")) return;
-  if (/\b(RUNNING|STARTING|BACKOFF)\b/.test(got.output)) return;
-  if (runnerOf(id)?.status === "running") failed(id, "it stopped on its computer", null, me);
+  const said = (k: string) => new RegExp(`^${k}=(.*)$`, "m").exec(got.output)?.[1]?.trim() ?? "";
+  const up = /\b(RUNNING|STARTING|BACKOFF)\b/.test(got.output);
+  const auth = authIn(got.output);
+  const ident = said("ident");
+  if (said("key") === "no" && ident !== "403" && (ident !== "200" || auth === "none")) return wayBack(id, me, key, up);
+  const x = runnerOf(id);
+  if (up) {
+    if (x?.status === "running" && auth && x.auth !== auth) mark(id, { ...x, auth });
+    return;
+  }
+  if (x?.status === "running") failed(id, "it stopped on its computer", null, me);
+}
+
+/**
+ * A runner with no key and no identity it can use: Orgo gives its computer its key again (Bops' to take
+ * back: keyMade), and supervisord starts it if it's stopped. A runner that's up and waiting picks the key
+ * up within 30 seconds (runner-start.ts). Refused: it couldn't start, and why (its routines go back to
+ * the Mac).
+ */
+async function wayBack(id: string, me: string, key: string, up: boolean) {
+  const given = await giveKey(id, key);
+  if ("error" in given) {
+    if (runnerOf(id)?.status === "running") failed(id, given.error, null, me);
+    return;
+  }
+  const x = runnerOf(id);
+  if (x) mark(id, { ...x, keyMade: true, keyId: given.keyId, auth: undefined });
+  if (!up) await orgo.bash(id, "supervisorctl start bops-runner >/dev/null 2>&1; true", 30).catch(() => null);
+  console.info(`[runner-install] ${id}: its runner had nothing to sign in with: its computer has its key again`);
 }
 
 /* ---------------- When ---------------- */
@@ -698,6 +791,9 @@ export const runnerInstallForTests = {
     box.retry.clear();
     box.busy.clear();
     box.asked?.clear();
+    box.identityOnly = undefined;
   },
   retryAt: (id: string) => box.retry.get(id)?.at,
+  /** Phase 2 (IDENTITY_ONLY) on or off for the tests. */
+  identityOnly: (on?: boolean) => void (box.identityOnly = on),
 };
