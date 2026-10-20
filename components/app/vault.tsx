@@ -15,7 +15,7 @@ import { ago, CloseButton, post, teamOf } from "./ui";
  */
 
 /**
- * The Vault, as a tab on the right: Apps & logins, one list with a row per service (an app's accounts,
+ * The Vault, as a tab on the right: Logins, one list with a row per service (an app's accounts,
  * its MCP server and the site's saved login together), so it stays short as more is connected. What
  * needs the user (an account signed out) comes first, with a way to fix it; bots show on a row only
  * where access differs from "all of them"; with more than FOLD_OVER services, the ones not used lately
@@ -69,7 +69,7 @@ export function VaultTab({ state, onClose }: { state: AppState; onClose: () => v
       <div className="flex w-full max-w-[600px] flex-col gap-4">
         <div className="flex items-start gap-3">
           <div className="flex min-w-0 flex-1 flex-col gap-1">
-            <span className="text-[22px] font-bold leading-7 tracking-[-0.02em]">Apps &amp; logins</span>
+            <span className="text-[22px] font-bold leading-7 tracking-[-0.02em]">Logins</span>
             <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
               {services.length ? `${services.length} connected. ` : ""}Each bot gets only the access you give it; passwords stay in your Mac&apos;s Keychain and no AI sees them.
             </span>
@@ -132,8 +132,8 @@ export function VaultTab({ state, onClose }: { state: AppState; onClose: () => v
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 onKeyDown={(e) => e.key === "Escape" && q && (e.preventDefault(), setQ(""))}
-                placeholder="Search apps and logins"
-                aria-label="Search apps and logins"
+                placeholder="Search logins"
+                aria-label="Search logins"
                 className="min-w-0 flex-1 bg-transparent text-[13.5px] leading-5 text-ink outline-none placeholder:text-[#9A9A98]"
               />
             </label>

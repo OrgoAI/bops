@@ -7,6 +7,7 @@ import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
 import { Mascot } from "./mascot";
+import { AppsIcon } from "./made-apps";
 import { KnowledgeIcon, type MemoryOpen } from "./memory-categories";
 import { AppLogo } from "./apps";
 import { BotMenu, type BotMenuActions } from "./bot-menu";
@@ -32,6 +33,7 @@ export function Sidebar({
   onAccount,
   onSetup,
   onVault,
+  onApps,
   onMembers,
   onOpenWatch,
   onOpenMemory,
@@ -48,6 +50,8 @@ export function Sidebar({
   /** The setup screen: what this Mac gives Bops (setup.tsx). */
   onSetup: () => void;
   onVault: () => void;
+  /** The apps the bots made (made-apps.tsx). */
+  onApps: () => void;
   /** The People sheet: who can see the bots' computers on Orgo (members.tsx). */
   onMembers: () => void;
   /** Show a watched screen or Mac window. */
@@ -176,16 +180,16 @@ export function Sidebar({
 
       {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
       <UpdateNotice />
-      {/* You, your apps and logins (the Vault, with the apps you've connected), and Knowledge. New bots are the + at the top. */}
+      {/* You, your logins (the Vault, with the apps you've connected), Knowledge, and the apps your bots made. New bots are the + at the top. */}
       <div className="flex items-center gap-1.5 p-1 pt-3">
         <YouMenu state={state} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />
         <MembersButton state={state} onClick={onMembers} />
         <button
           onClick={onVault}
-          title="Your apps and logins, and which bots can use them"
+          title="Your accounts and logins, and which bots can use them"
           className="flex h-10 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full bg-white px-2.5 text-[13.5px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
         >
-          <span className="truncate">Apps &amp; logins</span>
+          <span className="truncate">Logins</span>
           <AppStack state={state} />
         </button>
         {categoriesOpen(state) && (
@@ -198,6 +202,14 @@ export function Sidebar({
             <KnowledgeIcon size={16} />
           </button>
         )}
+        <button
+          onClick={onApps}
+          title="Apps your bots made for you"
+          aria-label="Apps"
+          className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
+        >
+          <AppsIcon size={16} />
+        </button>
       </div>
       {menu && menuBot && menuActions && <BotMenu state={state} bot={menuBot} x={menu.x} y={menu.y} onClose={() => setMenu(null)} actions={menuActions} />}
     </aside>

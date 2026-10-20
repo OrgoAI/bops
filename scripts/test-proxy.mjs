@@ -56,6 +56,10 @@ assert.ok(passes(call("HEAD", "/api/health", { origin: null })));
 assert.ok(passes(call("GET", "/api/health", { origin: null })));
 assert.ok(passes(call("GET", "/api/pages/p_123", { origin: null })));
 assert.equal(call("POST", "/api/pages/p_123").status, 403, "but nothing else on them");
+// An app a bot made: its page (code only) is an open read; what it keeps, its code and its bridge are the window's.
+assert.ok(passes(call("GET", "/api/made-apps/app_123/view?v=2", { origin: null })));
+for (const [method, path] of [["POST", "/api/made-apps/app_123/bridge"], ["GET", "/api/made-apps/app_123"], ["POST", "/api/made-apps/app_123"], ["GET", "/api/made-apps/app_123/view/x"]])
+  assert.equal(call(method, path).status, 403, `${method} ${path} without the window's token`);
 assert.ok(passes(call("OPTIONS", "/api/state")));
 // The tailnet's paths and the tunnel's prove themselves (a bot's secret, a webhook signature, the tunnel's token).
 assert.ok(passes(call("POST", "/api/apps/call", { host: "100.64.0.3:3210", origin: null })));

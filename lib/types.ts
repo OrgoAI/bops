@@ -246,6 +246,8 @@ export type Message = {
   email?: EmailInfo;
   /** A bot reply that also went to the user by email (they emailed the bot): the address it went to. */
   emailed?: string;
+  /** On the user's message: the app (lib/server/made-apps.ts) open next to the chat as they sent it, which a change they ask for is about. */
+  lookingAt?: string;
   /** Images attached to it (shown from /api/uploads/<id>; bots see them too). */
   images?: { id: string; type: string; w?: number; h?: number }[];
   /** A picture the bot made (make_image): what it was asked to show, so it knows what it sent. */
@@ -263,6 +265,34 @@ export type Message = {
    * file's version after it, so the note can open the file and undo the save while nothing changed since.
    */
   crm?: { ws: string; file: string; added: number; changed: number; created?: true; snapshot?: string; after: string; undone?: true };
+  /**
+   * Set on the line a bot's app build leaves (lib/server/made-apps.ts): the app, and the version the
+   * build made (or is making), so the line can open the app, show it building, and undo the change.
+   */
+  madeApp?: { appId: string; version: number };
+};
+
+/**
+ * An app a bot made for the user (lib/server/made-apps.ts): a small React app that runs in a tab of
+ * Bops' right panel, locked down, and keeps its own data. Each change is a new version; going back
+ * to one is a change too.
+ */
+export type MadeApp = {
+  id: string;
+  title: string;
+  /** The bot that made it, and the chat it was asked for in (its builds report there). */
+  botId: BotId;
+  chatId: string;
+  ws: string;
+  /** The version that runs now (0 while the first one is being built). */
+  version: number;
+  versions: { n: number; note: string; at: number }[];
+  /** Being built: the change asked for, when it started, and how much code is written so far. */
+  building?: { change: string; since: number; chars: number };
+  /** The last build failed: why, in a line (the version before it keeps running). */
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
 };
 
 export type EmailInfo = {
@@ -542,6 +572,8 @@ export type AppState = {
   /** Teams the user keeps apart, and the one they're looking at. */
   workspaces?: Workspace[];
   workspace?: string;
+  /** Apps the bots made for the user (lib/server/made-apps.ts): their code and data are files on this Mac. */
+  madeApps?: MadeApp[];
   /**
    * The user's own mobile numbers (Settings, How your bots reach you): when they agreed to get texts
    * from their bots, and when they proved the number is theirs with a texted code

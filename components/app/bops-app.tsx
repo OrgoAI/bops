@@ -16,6 +16,7 @@ import { CrmView, OpenCrm } from "./crm";
 import { BoppyLoading, BusyBots, Mascot } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
 import { CHAT_TAB, hostOf, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
+import { MadeAppsHome, MadeAppTab, OpenMadeApp } from "./made-apps";
 
 /** Your Mac's tab, and the chat's bot's profile (it follows the chat, like the computer tab); both open on demand. */
 const MAC_TAB = "tab_mac";
@@ -117,6 +118,8 @@ function Bops({ state }: { state: AppState | null }) {
   const [followed, setFollowed] = useState("");
   // The newest thing waiting on you in this chat that the panel last went to (lib/asks.ts chatAsks): undefined until the first look, so what was already waiting doesn't jump.
   const [shownAsk, setShownAsk] = useState<string | undefined>(undefined);
+  // The latest app build line in the chat (made-apps.tsx), so a new one opens its app's tab once.
+  const [shownBuild, setShownBuild] = useState<string | undefined>(undefined);
   // The popped-out Mac previews ask for the Your Mac tab by bumping a key in local storage.
   const openMacRef = useRef<() => void>(() => {});
   useEffect(() => {
@@ -298,7 +301,9 @@ function Bops({ state }: { state: AppState | null }) {
     .map((t) => (t.id === PROFILE_TAB && t.kind === "bot" ? { ...t, botId: chatBotId } : t))
     .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId))
     .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)))
-    .filter((t) => t.kind !== "memory" || (memory && t.ws === currentWorkspace(state)));
+    .filter((t) => t.kind !== "memory" || (memory && t.ws === currentWorkspace(state)))
+    .filter((t) => t.kind !== "made-apps" || t.ws === currentWorkspace(state))
+    .filter((t) => t.kind !== "made-app" || !!state.madeApps?.some((a) => a.id === t.appId));
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
   if (recent.at(-1) !== active) {
     setRecent([...recent.filter((id) => id !== active), active].slice(-20));
@@ -313,7 +318,15 @@ function Bops({ state }: { state: AppState | null }) {
   if (leadKey !== followed) {
     setFollowed(leadKey);
     const browsing =
-      tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || tab.kind === "memory" || (tab.kind === "computer" && tab.botId !== chatBotId) || (tab.kind === "bot" && tab.id !== PROFILE_TAB));
+      tab &&
+      (tab.kind === "web" ||
+        tab.kind === "vault" ||
+        tab.kind === "crm" ||
+        tab.kind === "memory" ||
+        tab.kind === "made-app" ||
+        tab.kind === "made-apps" ||
+        (tab.kind === "computer" && tab.botId !== chatBotId) ||
+        (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
       // Its screen comes up with it, even with the side panel hidden, and the panel follows the action
       // again (several at once show side by side), even if you'd picked a screen before.
@@ -388,7 +401,7 @@ function Bops({ state }: { state: AppState | null }) {
   const askKey = ask ? `${ask.id}:${ask.endedAt ?? ""}:${ask.blocker ?? ""}` : "";
   if (shownAsk !== askKey) {
     setShownAsk(askKey);
-    const reading = tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || tab.kind === "memory" || tab.kind === "bot");
+    const reading = tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || tab.kind === "memory" || tab.kind === "made-app" || tab.kind === "made-apps" || tab.kind === "bot");
     const d = ask && (ask.display ?? ask.lastDisplay);
     if (shownAsk !== undefined && ask && d !== undefined && ask.runsOn !== "mac" && ask.host !== "mac" && !reading && !focus) {
       // As showScreen does, with the tab named for the ask (rendering can't make a new id).
@@ -429,6 +442,29 @@ function Bops({ state }: { state: AppState | null }) {
     );
   };
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
+  /** An app a bot made, in its tab (one per app), and every app as tiles (one tab per workspace). */
+  const openMadeApp = (appId: string) => openTab((t) => t.kind === "made-app" && t.appId === appId, () => ({ id: tabId(), kind: "made-app", appId }));
+  const openApps = () => {
+    const ws = currentWorkspace(state);
+    openTab((t) => t.kind === "made-apps" && t.ws === ws, () => ({ id: tabId(), kind: "made-apps", ws }));
+  };
+  // An app starting to build from this chat comes up beside it, built live there (unless a computer is
+  // full width). Not on the first look at the chat: only a build that starts while you're here.
+  const lastBuild = state.messages.findLast((m) => m.chatId === chat.id && m.madeApp);
+  if (shownBuild !== (lastBuild?.id ?? "")) {
+    setShownBuild(lastBuild?.id ?? "");
+    const building = lastBuild?.madeApp && state.madeApps?.find((a) => a.id === lastBuild.madeApp!.appId)?.building;
+    if (shownBuild !== undefined && lastBuild?.madeApp && building && !focus) {
+      // As openMadeApp does (rendering can't make a new id: the tab is named for the app).
+      const appId = lastBuild.madeApp.appId;
+      const there = openTabs.find((t) => t.kind === "made-app" && t.appId === appId);
+      if (!there) setTabs([...openTabs, { id: `tab_app_${appId}`, kind: "made-app", appId }]);
+      setActive(there?.id ?? `tab_app_${appId}`);
+      setPanelOpen(true);
+    }
+  }
+  // The app beside the chat, which what the user says is about (made-apps.tsx LookingAt).
+  const lookingAt = panelOpen && tab?.kind === "made-app" ? state.madeApps?.find((a) => a.id === tab.appId) : undefined;
   // eslint-disable-next-line react-hooks/refs -- kept current for the storage listener above
   openMacRef.current = openMac;
   const openWeb = (url: string, title?: string) => openTab((t) => t.kind === "web" && t.url === url, () => ({ id: tabId(), kind: "web", url, title }));
@@ -558,6 +594,7 @@ function Bops({ state }: { state: AppState | null }) {
         state={state}
         chat={chat}
         wide={!panelOpen}
+        lookingAt={lookingAt}
         onOpenThread={openThread}
         onShowBot={(id) => openProfile(id)}
         onShowMac={openMac}
@@ -617,6 +654,7 @@ function Bops({ state }: { state: AppState | null }) {
     <BusyBots.Provider value={busy}>
     <OpenLink.Provider value={openWeb}>
     <OpenCrm.Provider value={openCrm}>
+    <OpenMadeApp.Provider value={openMadeApp}>
       <TooltipLayer />
       <NoticePopup />
       <ViewReporter chatId={chat.id} threadId={thread?.id ?? null} />
@@ -651,6 +689,7 @@ function Bops({ state }: { state: AppState | null }) {
             onAccount={() => setAccount(true)}
             onSetup={() => setSetup(true)}
             onVault={openVault}
+            onApps={openApps}
             onMembers={() => setMembers(true)}
             onOpenWatch={showWatch}
             onOpenMemory={openMemory}
@@ -764,6 +803,15 @@ function Bops({ state }: { state: AppState | null }) {
                       }}
                       onProfile={(id) => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "bot", botId: id, section: "details" } : t)))}
                       onVault={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "vault" } : t)))}
+                      // The workspace's one Apps tab: this new tab gives way to it (or becomes it).
+                      onApps={() => {
+                        const ws = currentWorkspace(state);
+                        const there = tabs.find((t) => t.kind === "made-apps" && t.ws === ws);
+                        if (there) {
+                          closeTab(tab.id);
+                          setActive(there.id);
+                        } else setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "made-apps", ws } : t)));
+                      }}
                       // The workspace's one Knowledge tab: this new tab gives way to it (or becomes it).
                       onKnowledge={
                         categoriesOpen(state)
@@ -781,6 +829,10 @@ function Bops({ state }: { state: AppState | null }) {
                     />
                   ) : tab?.kind === "vault" ? (
                     <VaultTab state={state} onClose={() => leaveTab(tab.id)} />
+                  ) : tab?.kind === "made-app" ? (
+                    <MadeAppTab key={tab.id} state={state} appId={tab.appId} />
+                  ) : tab?.kind === "made-apps" ? (
+                    <MadeAppsHome state={state} ws={tab.ws} />
                   ) : tab?.kind === "crm" ? (
                     <CrmView
                       key={`${tab.id}:${tab.file}`}
@@ -885,6 +937,7 @@ function Bops({ state }: { state: AppState | null }) {
         {/* What bots are doing on the user's Mac, live, in the corner (hidden while the Your Mac tab is open). */}
         {!(tab?.kind === "mac" && panelOpen) && <MacPreviews state={state} onOpen={openMac} />}
       </div>
+    </OpenMadeApp.Provider>
     </OpenCrm.Provider>
     </OpenLink.Provider>
     </BusyBots.Provider>
