@@ -15,7 +15,9 @@ import { getState, stateReady, stateTooNew, watchChanges } from "./store";
  * may use (Bot.keys: `keys`, orgo-web's bops_bots.secret_names), never a value. Every brain of the
  * workspace is a resource of kind brain (its id, name, kind and how it signs in: plan or key, never the
  * key), in a build with brains (BRAINS_ON), and only once orgo-web says it takes that kind (the map's
- * answer lists `kinds`: an orgo-web that doesn't would refuse the whole map with a 400).
+ * answer lists `kinds`: an orgo-web that doesn't would refuse the whole map with a 400). The first map
+ * of a run reads the kinds first (GET), so it already holds the brains: one without them would have
+ * orgo-web delete every brain row and make it again.
  *
  * The same rules as routine-sync.ts: Bops stays the source and nothing waits on Orgo. A workspace whose
  * map changed sends the whole of it SYNC_DEBOUNCE_MS after the last change in a burst (PUT
@@ -54,6 +56,7 @@ const g = globalThis as unknown as {
   __bopsMapStarted?: boolean;
   __bopsMapCutSaid?: Set<string>;
   __bopsMapKinds?: string[] | null;
+  __bopsMapKindsAsk?: Promise<boolean>;
 };
 const pending = (g.__bopsMapSync ??= new Map());
 const missing = (g.__bopsMapSyncMissing ??= new Map());
@@ -173,6 +176,31 @@ async function send(path: string, body: unknown): Promise<{ status: number; json
   return callOrgo<{ kinds?: unknown }>(key, path, { method: "PUT", body, timeoutMs: TIMEOUT_MS });
 }
 
+const isKinds = (k: unknown): k is string[] => Array.isArray(k) && k.every((x) => typeof x === "string");
+
+/**
+ * In a build with brains, the kinds orgo-web takes, read once a run before the first map goes (GET
+ * /api/projects/{id}/bops answers them too), so that map holds the brains already. False when Orgo didn't
+ * answer for now (the map waits for the backoff); true otherwise (an orgo-web that doesn't say takes none;
+ * one without the route: the PUT finds out).
+ */
+function learnKinds(projectId: string): Promise<boolean> {
+  if (!BRAINS_ON || kindsTaken() !== null) return Promise.resolve(true);
+  g.__bopsMapKindsAsk ??= (async () => {
+    const { apiKey, callOrgo } = await import("./orgo");
+    const key = await apiKey().catch(() => "");
+    if (!key) return false;
+    const r = await callOrgo<{ kinds?: unknown }>(key, `/api/projects/${encodeURIComponent(projectId)}/bops`, { timeoutMs: TIMEOUT_MS });
+    const status = r?.status ?? null;
+    if (status === 200) {
+      if (kindsTaken() === null) g.__bopsMapKinds = isKinds(r!.json?.kinds) ? r!.json.kinds : [];
+      return true;
+    }
+    return !retryable(status);
+  })().finally(() => (g.__bopsMapKindsAsk = undefined));
+  return g.__bopsMapKindsAsk;
+}
+
 /** Send a workspace's map as it is now. */
 async function flush(wsId: string): Promise<void> {
   const p = pending.get(wsId);
@@ -182,7 +210,11 @@ async function flush(wsId: string): Promise<void> {
   const projectId = projectOf(wsId);
   // Not sent now: looked at again on the next change, as if never sent (look's `seen`).
   if (!projectId || routesMissing(projectId) || onRunner() || !stateReady() || stateTooNew()) return void seen.delete(wsId);
-  const res = await send(`/api/projects/${encodeURIComponent(projectId)}/bops`, bopsMapPayload(wsId));
+  if (!(await learnKinds(projectId))) return void queue(wsId, (p.tries ?? 0) + 1);
+  const payload = bopsMapPayload(wsId);
+  // What goes is what was last queued: the brains learned just now don't send it once more.
+  seen.set(wsId, `${projectId}\n${JSON.stringify(payload)}`);
+  const res = await send(`/api/projects/${encodeURIComponent(projectId)}/bops`, payload);
   const status = res?.status ?? null;
   if (status === 404 || status === 405) {
     missing.set(projectId, Date.now() + MISSING_RETRY_MS);
@@ -198,7 +230,7 @@ async function flush(wsId: string): Promise<void> {
   missing.delete(projectId);
   // What kinds it takes: one it takes now that wasn't sent (brains) goes at once, every workspace's.
   const kinds = res?.json?.kinds;
-  if (Array.isArray(kinds) && kinds.every((k) => typeof k === "string")) {
+  if (isKinds(kinds)) {
     const had = kindsTaken();
     g.__bopsMapKinds = kinds as string[];
     if (!had?.includes("brain") && kinds.includes("brain")) {
@@ -291,6 +323,7 @@ export const bopsSyncForTests = {
     inFlight.clear();
     seen.clear();
     g.__bopsMapKinds = undefined;
+    g.__bopsMapKindsAsk = undefined;
     if (g.__bopsMapSoon) clearTimeout(g.__bopsMapSoon);
     g.__bopsMapSoon = undefined;
     g.__bopsMapStarted = false;

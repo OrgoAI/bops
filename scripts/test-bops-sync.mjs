@@ -224,6 +224,36 @@ if (BRAINS_BUILD) {
     await T.flushAll();
     assert.equal(puts().length, 0);
   });
+  await check("a start in a build with brains: the kinds are read first, so the first map already holds the brains (orgo-web never deletes them to make them again)", async () => {
+    reset();
+    const ALL = ["app", "login", "phone", "inbox", "channel", "brain"];
+    const brainsIn = (body) => body.resources.filter((r) => r.kind === "brain");
+    const acmeBrain = { id: "brn_3", name: "Claude Code", kind: "claude", auth: "plan", bots: ["ace"], workspaceId: "ws_acme", createdAt: 1 };
+    state.brains.push(acmeBrain);
+    answer = () => ({ status: 200, json: { kinds: ALL } });
+    T.look();
+    await T.flushAll();
+    const gets = calls.filter((c) => c.method === "GET");
+    assert.deepEqual(gets.map((c) => c.path), [`/api/projects/${PID}/bops`], "read once, for every workspace");
+    assert.ok(calls.indexOf(gets[0]) < calls.findIndex((c) => c.method === "PUT"), "before the first map");
+    assert.equal(puts().length, 2);
+    assert.ok(puts().every((c) => brainsIn(c.body).length), "every map with its brains, the first too");
+    calls.length = 0;
+    T.look();
+    await T.flushAll();
+    assert.deepEqual(calls, [], "sent once: nothing more while nothing changes");
+    // Orgo not answering the read: the map waits (never one without its brains), and goes with them after.
+    reset();
+    state.brains.push(acmeBrain);
+    answer = (method) => (method === "GET" ? { status: 503, json: {} } : { status: 200, json: { kinds: ALL } });
+    T.look();
+    await T.flushAll();
+    assert.equal(puts().length, 0);
+    answer = () => ({ status: 200, json: { kinds: ALL } });
+    await T.flushAll();
+    assert.equal(puts().length, 2);
+    assert.ok(puts().every((c) => brainsIn(c.body).length));
+  });
   rmSync(scratch, { recursive: true, force: true });
   console.log(`bops sync (brains): ${passed} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
