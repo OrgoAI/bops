@@ -555,6 +555,8 @@ export type MadeApp = {
   /** The sha256 of the data this Mac and Orgo last agreed on, and of what Orgo holds as last heard (fetched when the app reads it). */
   dataSha?: string;
   orgoData?: { sha256: string; at: number };
+  /** Versions Orgo refused for what looked like a secret, by number: the sha256 of the code it refused (not sent again while the code is the same). */
+  refused?: Record<string, string>;
 };
 
 /**

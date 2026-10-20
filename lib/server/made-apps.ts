@@ -72,6 +72,8 @@ const g = globalThis as unknown as { __bopsAppBuilds?: Map<string, Promise<void>
 const queue = (g.__bopsAppBuilds ??= new Map<string, Promise<void>>());
 /** A new app's id: long and random, as its page can be read on this Mac's loopback without the window's token (proxy.ts). */
 const newId = () => `app_${randomBytes(16).toString("hex")}`;
+/** The first `n` characters of a title or note, never half an emoji (orgo-web refuses that text). */
+const chars = (s: string, n: number) => Array.from(s).slice(0, n).join("");
 
 const RULES = (owner: string, maker: string, reach: string) =>
   [
@@ -103,7 +105,7 @@ export function buildApp(botId: string, chatId: string, ask: { appId?: string; t
   if (ask.appId && !app) throw new Error("No such app.");
   if (!app) {
     const now = Date.now();
-    app = { id: newId(), title: ask.title?.trim().slice(0, 60) || "New app", botId, chatId, ws: workspaceOf(b), version: 0, versions: [], createdAt: now, updatedAt: now, deviceId: thisDevice() };
+    app = { id: newId(), title: chars(ask.title?.trim() ?? "", 60) || "New app", botId, chatId, ws: workspaceOf(b), version: 0, versions: [], createdAt: now, updatedAt: now, deviceId: thisDevice() };
     const made = app;
     update((s) => void (s.madeApps ??= []).push(made));
     // Its record goes to Orgo at once, building (version 0), so every Mac lists it.
@@ -167,7 +169,7 @@ async function build(appId: string, botId: string, change: string, lineId: strin
     // Deleted meanwhile (here, or on another Mac): nothing is written for it.
     if (!ours() || !madeApp(appId)) return;
     const n = (madeApp(appId)?.versions.at(-1)?.n ?? 0) + 1;
-    const note = /^\s*\/\/\s*(.+)/.exec(code)?.[1]?.trim().slice(0, 120) || change.slice(0, 120);
+    const note = chars(/^\s*\/\/\s*(.+)/.exec(code)?.[1]?.trim() ?? "", 120) || chars(change, 120);
     mkdirSync(dirOf(appId), { recursive: true });
     writeFileSync(join(dirOf(appId), `v${n}.tsx`), code);
     set((a) => {

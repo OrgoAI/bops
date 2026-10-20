@@ -78,6 +78,7 @@ const g = globalThis as unknown as {
   __bopsAppsCopyWanted?: Set<string>;
   __bopsAppsFetching?: Map<string, Promise<boolean>>;
   __bopsAppBuilds?: Map<string, Promise<void>>;
+  __bopsAppsSending?: string;
 };
 const missing = (g.__bopsAppsMissing ??= new Map());
 const copyWanted = (g.__bopsAppsCopyWanted ??= new Set());
@@ -85,6 +86,17 @@ const fetching = (g.__bopsAppsFetching ??= new Map());
 
 const box = outbox<Op>("made-apps", 5000);
 const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+/**
+ * A title or note as orgo-web stores it (lib/bops-made-apps/body.ts storable): no NUL and no half of an
+ * emoji, at most `max` UTF-16 units, never cut inside an emoji (as routine-sync.ts fit).
+ */
+function storable(text: string, max: number) {
+  const t = text.replace(/\u0000/g, "").replace(LONE_SURROGATE, "");
+  if (t.length <= max) return t;
+  const c = t.charCodeAt(max - 1);
+  return t.slice(0, c >= 0xd800 && c <= 0xdbff ? max - 1 : max);
+}
 
 /** An app's own folder on this Mac. */
 export function appFolder(appId: string) {
@@ -227,8 +239,10 @@ function enqueue(app: Pick<MadeApp, "id" | "ws">, op: Op["op"], more: { n?: numb
   const pid = projectOf(app.ws);
   if (!pid || routesMissing(pid)) return;
   const mine = box.waiting(app.ws).filter((e) => e.item.appId === app.id && e.item.pid === pid);
-  if (op === "app" && mine.some((e) => e.item.op === "app")) return flushSoon();
-  if (op === "version" && mine.some((e) => e.item.op === "version" && e.item.n === more.n)) return flushSoon();
+  // One waiting is enough (it reads the app as it is when it's sent), not one being sent now: it may have read it before this change.
+  const queued = mine.filter((e) => e.id !== g.__bopsAppsSending);
+  if (op === "app" && queued.some((e) => e.item.op === "app")) return flushSoon();
+  if (op === "version" && queued.some((e) => e.item.op === "version" && e.item.n === more.n)) return flushSoon();
   if (op === "data") box.done(mine.filter((e) => e.item.op === "data").map((e) => e.id));
   // A delete: nothing else of it is worth sending any more.
   if (op === "delete") box.done(mine.map((e) => e.id));
@@ -270,11 +284,11 @@ async function call<T>(key: string, path: string, init: { method?: "GET" | "PUT"
 function appBody(a: MadeApp) {
   return {
     botId: a.botId.slice(0, MAX.botId),
-    title: a.title.slice(0, MAX.title),
+    title: storable(a.title, MAX.title),
     currentVersion: a.version,
     ...(a.deviceId ? { deviceId: a.deviceId } : {}),
     createdAt: a.createdAt,
-    versions: a.versions.map((v) => ({ n: v.n, note: v.note.slice(0, MAX.note), at: v.at })),
+    versions: a.versions.map((v) => ({ n: v.n, note: storable(v.note, MAX.note), at: v.at })),
   };
 }
 
@@ -346,7 +360,11 @@ async function sendVersion(key: string, pid: string, appId: string, n: number): 
   const v = a.versions.find((x) => x.n === n);
   const file = join(/*turbopackIgnore: true*/ appFolder(appId), `v${n}.tsx`);
   if (!v || !existsSync(/*turbopackIgnore: true*/ file)) return "done";
-  const body = { code: readFileSync(/*turbopackIgnore: true*/ file, "utf8"), note: v.note.slice(0, MAX.note), at: v.at };
+  const source = readFileSync(/*turbopackIgnore: true*/ file, "utf8");
+  const sourceSha = sha256(source);
+  // Refused for a secret before, and the same code still: not sent again.
+  if (a.refused?.[n] === sourceSha) return "done";
+  const body = { code: source, note: storable(v.note, MAX.note), at: v.at };
   const put = () => call<{ problems?: unknown[] }>(key, `${base(pid, appId)}/versions/${n}`, { method: "PUT", body });
   let r = await put();
   // Its record isn't in Orgo yet (sent before it, and not taken): the record now, then the code again.
@@ -358,6 +376,11 @@ async function sendVersion(key: string, pid: string, appId: string, n: number): 
   if (status !== null && status < 300) return "done";
   const code = codeOf(r);
   if (code === "secret_found") {
+    // Kept with the app (apps.json), so no start sends it again while its code is the same.
+    updateUnseen((s) => {
+      const x = s.madeApps?.find((y) => y.id === appId);
+      if (x) x.refused = { ...x.refused, [n]: sourceSha };
+    });
     const places = Array.isArray((r!.json as { problems?: unknown[] }).problems) ? (r!.json as { problems: unknown[] }).problems.length : 0;
     warnOnce(`secret:${appId}:${n}`, `${a.title} v${n} wasn't sent to Orgo: it holds what looks like a secret (${places || "a"} place${places === 1 ? "" : "s"}); it stays on this Mac`);
     return "done";
@@ -515,11 +538,14 @@ async function flushOnce(): Promise<boolean> {
       continue;
     }
     let r: Result;
+    g.__bopsAppsSending = e.id;
     try {
       r = await send(key, e);
     } catch (err) {
       console.warn(`[made-apps] sending to Orgo: ${(err as Error).message}`);
       r = "later";
+    } finally {
+      g.__bopsAppsSending = undefined;
     }
     if (r === "done") box.done([e.id]);
     else {
@@ -677,8 +703,14 @@ export async function sendAll(wsId: string): Promise<boolean> {
       const a = findApp(there.bopsId);
       if (!a || !sent.has(a.id)) continue;
       tookRecord(a.id, sent.get(a.id)!, there);
-      for (const v of there.versions ?? [])
-        if (!v.sha256 && existsSync(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ appFolder(a.id), `v${v.n}.tsx`))) enqueue(a, "version", { n: v.n });
+      for (const v of there.versions ?? []) {
+        const file = join(/*turbopackIgnore: true*/ appFolder(a.id), `v${v.n}.tsx`);
+        if (v.sha256 || !existsSync(/*turbopackIgnore: true*/ file)) continue;
+        // Refused for a secret before, and the same code still: not sent again.
+        const refused = findApp(a.id)?.refused?.[v.n];
+        if (refused && refused === sha256(readFileSync(/*turbopackIgnore: true*/ file, "utf8"))) continue;
+        enqueue(a, "version", { n: v.n });
+      }
       const file = dataFile(a.id);
       if (!existsSync(/*turbopackIgnore: true*/ file)) continue;
       const here = sha256(readFileSync(/*turbopackIgnore: true*/ file));

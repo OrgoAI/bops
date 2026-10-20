@@ -98,8 +98,11 @@ const view = (a) => ({
   data: a.data,
 });
 const iso = (v) => new Date(typeof v === "number" ? v : Date.parse(v)).toISOString();
+/** Text orgo-web stores (lib/bops-made-apps/body.ts storable): no NUL, no half of an emoji. */
+const storable = (t) => typeof t !== "string" || !/\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(t);
 /** PUT …/apps/{id} and the full copy: made, changed, or unchanged; a deleted one stays deleted. */
 function upsert(bopsId, b, deviceId) {
+  if (!storable(b.title) || (b.versions ?? []).some((v) => !storable(v.note))) return { status: "invalid" };
   let a = orgo.apps.get(keyOf(bopsId));
   if (a?.deletedAt) return { status: "deleted", a };
   const created = !a;
@@ -206,6 +209,7 @@ async function fakeOrgo(req, url) {
     }
     if (!a) return json({ error: "App not found.", code: "app_not_found" }, 404);
     if (a.deletedAt) return json({ error: "This app was deleted.", code: "app_deleted", deletedAt: a.deletedAt }, 409);
+    if (!storable(b.note) || !storable(b.code)) return json({ error: "The version is not valid.", code: "invalid_version" }, 400);
     // The skill bundles' secret scan, as far as these tests need it: a live Stripe key.
     const line = b.code.split("\n").findIndex((l) => /sk_live_[0-9a-zA-Z]{20,}/.test(l));
     if (line >= 0) return json({ error: "A file holds what looks like a secret.", code: "secret_found", problems: [{ path: `v${n}.tsx`, line: line + 1, reason: "stripe_key" }] }, 422);
@@ -539,6 +543,43 @@ await check("A version holding a secret: Orgo refuses it, it stays on this Mac, 
   logged.splice(0, logged.length, ...logged.filter((l) => !l.includes("looks like a secret")));
   O.outboxForTests.writeAll();
   assert.equal(existsSync(join(S.userDir(), "outbox", "made-apps.json")), false, "not asked again");
+  // Kept with the app on this Mac: no start sends it again (nor says so again) while its code is the same.
+  assert.equal(app(pays).refused?.[1], sha(readFileSync(join(folder(pays), "v1.tsx"))));
+  for (let round = 1; round <= 2; round++) {
+    O.outboxForTests.restart();
+    T.restart();
+    orgo.calls = [];
+    F.startMadeAppsSync();
+    for (let i = 0; i < 100 && !orgo.calls.some((c) => c.method === "PUT" && c.path === `/api/projects/${PID}/bops/apps`); i++) await new Promise((r) => setTimeout(r, 20));
+    await settle();
+    assert.ok(orgo.calls.some((c) => c.method === "PUT" && c.path === `/api/projects/${PID}/bops/apps`), "the full copy went");
+    assert.deepEqual(sent().filter((c) => c.endsWith(`/${pays}/versions/1`)), [], `start ${round}: not sent again`);
+  }
+  assert.deepEqual(logged.filter((l) => l.includes("looks like a secret")), [], "nor said again");
+});
+
+await check("A title or note cut at an emoji is cut before it, so Orgo takes the app; one kept from before with half an emoji or a NUL goes cleaned", async () => {
+  code.push("export default function App() { return <p>party</p>; }\n");
+  const party = await build(`${"y".repeat(119)}🎉 make it pop`, undefined, `${"P".repeat(59)}🎉 party`);
+  await settle();
+  const a = app(party);
+  assert.equal(a.title, `${"P".repeat(59)}🎉`, "60 characters, the emoji whole");
+  assert.equal(a.versions[0].note, `${"y".repeat(119)}🎉`, "the note from the change asked for, 120 characters");
+  assert.equal(there(party)?.title, a.title, "Orgo took its record");
+  assert.ok(there(party).versions.get(1).sha256, "and its code");
+  // Kept from before this Bops: half an emoji and a NUL in its title and note. Sent without them.
+  S.update((s) => {
+    const x = s.madeApps.find((y) => y.id === party);
+    x.title = "Half \uD83C";
+    x.versions[0].note = "a\u0000b\uDF89";
+    F.touched(x);
+  });
+  F.appSaved(app(party));
+  await settle();
+  assert.equal(there(party).title, "Half ");
+  orgo.calls = [];
+  assert.equal(await T.sendAll("ws_main"), true, "the full copy, every app, taken");
+  assert.ok(!logged.some((l) => /invalid_app/.test(l)), "never refused");
 });
 
 await check("A workspace deleted: its apps go from this Mac, nothing sent (Orgo's went with its project)", async () => {
