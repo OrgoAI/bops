@@ -68,7 +68,9 @@ export function clampEvery(minutes: number): number {
  * it isn't one.
  */
 export function parseClock(time: string): number | undefined {
-  const m = /^\s*(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?\s*m?\.?)?\s*$/i.exec(typeof time === "string" ? time : "");
+  const t = typeof time === "string" ? time.trim() : "";
+  if (t.length > 16) return undefined;
+  const m = /^(\d{1,2})(?::(\d{2}))?(?:\s*([ap])\.?\s*m?\.?)?$/i.exec(t);
   if (!m) return undefined;
   let h = Number(m[1]);
   const min = m[2] ? Number(m[2]) : 0;

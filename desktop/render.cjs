@@ -128,10 +128,18 @@ function pageUrl(raw) {
 /**
  * Reads one page: opens it in a hidden window whose every request goes through the guard at
  * 127.0.0.1:`proxyPort`, waits for it to load and settle (no request under way for half a second, at most
- * 2.5 seconds), and while it still matches `challenge` (a "checking your browser" page: its title, or
- * text shorter than `wallText`) waits for it to move on, until `limitMs` is up. Resolves with what it shows, `challenge: true` when it never moved past
+ * 2.5 seconds), and when `challenge` is set, while it still shows WALL_WORDS (a "checking your browser"
+ * page: its title, or text shorter than `wallText`) waits for it to move on, until `limitMs` is up. Resolves with what it shows, `challenge: true` when it never moved past
  * that; rejects when it couldn't load. The window is destroyed whatever happens.
  */
+/**
+ * Words a "checking your browser" page shows: the same as CHALLENGE in lib/server/web-render.ts
+ * (scripts/test-render.mjs checks they match). Kept here, not sent by the app, so no pattern from a
+ * request ever becomes a regular expression.
+ */
+const WALL_WORDS =
+  /just a moment\.\.\.|attention required! \| cloudflare|checking your browser|checking if the site connection is secure|verify(?:ing)? (?:that )?you are (?:a )?human|are you a robot|please verify you are a human|enable javascript and cookies to continue|pardon our interruption|ddos protection by|request unsuccessful\. incapsula|access to this page has been denied|press (?:&|and) hold to confirm/i;
+
 async function renderOnce({ url, proxyPort, allow, challenge, wallText, limitMs }) {
   const u = pageUrl(url);
   if (!u) throw new Error("Only http and https pages can be read in a browser.");
@@ -145,7 +153,7 @@ async function renderOnce({ url, proxyPort, allow, challenge, wallText, limitMs 
   // Everything through the guard, this Mac's own addresses too ("<-loopback>" takes away the usual exception).
   await s.setProxy({ mode: "fixed_servers", proxyRules: `127.0.0.1:${proxyPort}`, proxyBypassRules: "<-loopback>" });
   await s.closeAllConnections();
-  const waitFor = /** @type {RegExp | null} */ (challenge ? new RegExp(challenge, "i") : null);
+  const waitFor = /** @type {RegExp | null} */ (challenge ? WALL_WORDS : null);
   const wallMax = Number(wallText) || 2000;
   // A wall's page is short: a long page that mentions "verify you are human" somewhere is a page.
   const walled = (got) => !!waitFor && (waitFor.test(got.title) || (got.text.length < wallMax && waitFor.test(got.text)));

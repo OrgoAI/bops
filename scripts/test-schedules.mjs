@@ -95,6 +95,15 @@ await check("daily in New York, Kolkata and UTC", () => {
   eq(S.nextRun({ kind: "daily", time: "9:30 pm" }, Z("2026-10-13T20:30:00Z"), NY), Z("2026-10-14T01:30:00Z"), "9:30 pm");
 });
 
+await check("a time of day reads the usual ways, and a long run of spaces is turned down at once", () => {
+  for (const [t, m] of [["09:00", 540], ["9:30", 570], [" 21:15 ", 1275], ["9 AM", 540], ["9:30 pm", 1290], ["9 a.m.", 540], ["12 am", 0], ["12pm", 720]]) eq(S.parseClock(t), m, t);
+  for (const t of ["25:00", "9:75", "13 pm", "nine", "", "9 x"]) eq(S.parseClock(t), undefined, t);
+  const started = performance.now();
+  eq(S.parseClock("9" + " ".repeat(50_000) + "x"), undefined, "spaces");
+  eq(S.parseClock("1" + " ".repeat(50_000)), 60, "trailing spaces trim");
+  assert.ok(performance.now() - started < 200, "quick");
+});
+
 await check("weekdays and weekly", () => {
   eq(S.nextRun({ kind: "weekdays", time: "09:00" }, Z("2026-10-16T14:00:00Z"), NY), Z("2026-10-19T13:00:00Z"), "Friday 10 AM to Monday 9 AM");
   eq(S.nextRun({ kind: "weekly", day: 1, time: "09:00" }, Z("2026-10-13T20:30:00Z"), UTC), Z("2026-10-19T09:00:00Z"), "next Monday UTC");
