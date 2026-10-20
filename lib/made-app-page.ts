@@ -16,6 +16,7 @@ export function compile(code: string) {
 
 /**
  * `window.bops` inside the app: each call goes to the window (the frame's parent), which answers it.
+ * A web link it shows opens in a tab of Bops (the sandbox allows no windows of its own).
  * localStorage and sessionStorage throw in a sandboxed page, so code that reaches for them gets a
  * stand-in that forgets on reload instead of crashing (bops.data is where an app keeps things).
  */
@@ -27,6 +28,7 @@ const report=m=>parent.postMessage({bops:1,event:"error",message:String(m).slice
 window.__bopsReport=report;addEventListener("error",e=>report(e.message));addEventListener("unhandledrejection",e=>report((e.reason&&e.reason.message)||e.reason));
 const mem=()=>{const d=new Map();return{getItem:k=>d.has(String(k))?d.get(String(k)):null,setItem:(k,v)=>void d.set(String(k),String(v)),removeItem:k=>void d.delete(String(k)),clear:()=>d.clear(),key:i=>[...d.keys()][i]??null,get length(){return d.size}}};
 for(const k of["localStorage","sessionStorage"])try{Object.defineProperty(window,k,{value:mem(),configurable:true})}catch{}
+addEventListener("click",e=>{const a=e.target&&e.target.closest&&e.target.closest("a[href]");if(!a)return;const u=a.href;if(!/^https?:/i.test(u))return;e.preventDefault();parent.postMessage({bops:1,event:"open",url:u},"*")},true);
 parent.postMessage({bops:1,event:"ready"},"*");})();`;
 
 /** Runs the compiled app: React from the page, its default export rendered, and a problem shown and reported, not a blank page. */

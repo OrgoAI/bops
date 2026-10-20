@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import type { AppState, MadeApp, Message } from "@/lib/types";
+import { OpenLink } from "./panel-tabs";
 import { ago, post, useNow } from "./ui";
 
 /*
@@ -71,10 +72,13 @@ function AppFrame({
   const ref = useRef<HTMLIFrameElement>(null);
   const problem = useRef(onProblem);
   const needs = useRef(onNeeds);
+  const open = useContext(OpenLink);
+  const openLink = useRef(open);
   useEffect(() => {
     problem.current = onProblem;
     needs.current = onNeeds;
-  }, [onProblem, onNeeds]);
+    openLink.current = open;
+  }, [onProblem, onNeeds, open]);
   useEffect(() => {
     const on = async (e: MessageEvent) => {
       const frame = ref.current;
@@ -82,6 +86,12 @@ function AppFrame({
       const m = e.data as { bops?: number; id?: number; method?: string; args?: unknown; event?: string; message?: string };
       if (!m || m.bops !== 1) return;
       if (m.event === "error") return problem.current?.(m.message ?? "Something went wrong.");
+      // A web link in the app: a tab of Bops (else the browser). Only http(s), checked again here.
+      if (m.event === "open") {
+        const url = (m as { url?: string }).url ?? "";
+        if (/^https?:\/\//i.test(url)) (openLink.current ?? ((u: string) => window.open(u, "_blank", "noopener")))(url);
+        return;
+      }
       if (m.event || typeof m.id !== "number") return;
       const call = () =>
         fetch(`/api/made-apps/${encodeURIComponent(app.id)}/bridge`, {

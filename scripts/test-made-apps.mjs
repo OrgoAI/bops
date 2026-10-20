@@ -48,6 +48,7 @@ export default function App() {
       <span id="count" className="text-2xl font-bold">Count: {n}</span>
       <button id="plus" className="rounded-xl bg-[#E8FF3A] px-3 py-1" onClick={async () => { await bops.data.set("n", n + 1); setN(n + 1); }}>+1</button>
       <span id="said">{typeof localStorage}</span>
+      <a id="link" href="https://example.com/x" target="_blank">a link</a>
     </div>
   );
 }
@@ -58,12 +59,13 @@ const throws = `export default function App() { const x: any = null; return <div
 const pages = { "/counter": P.appPage("Counter", counter, runtimes), "/broken": P.appPage("Broken", broken, runtimes), "/throws": P.appPage("Throws", throws, runtimes) };
 // The window around the app: answers `window.bops` from a store of its own, and keeps the problems the app reports.
 const PARENT = (src) => `<!doctype html><body><iframe id="app" sandbox="allow-scripts" src="${src}" style="width:600px;height:400px"></iframe><script>
-window.store = {}; window.problems = []; window.calls = [];
+window.store = {}; window.problems = []; window.calls = []; window.opened = [];
 addEventListener("message", (e) => {
   const f = document.getElementById("app");
   if (e.source !== f.contentWindow) return;
   const m = e.data; if (!m || m.bops !== 1) return;
   if (m.event === "error") return window.problems.push(m.message);
+  if (m.event === "open") return window.opened.push(m.url);
   if (m.event) return;
   window.calls.push(m.method);
   let result = null;
@@ -105,6 +107,9 @@ try {
   assert.equal(await app.locator("#said").textContent(), "object");
   const net = await page.frames()[1].evaluate(() => fetch("http://bops.test/counter").then(() => "reached", () => "blocked"));
   assert.equal(net, "blocked", "no network");
+  // A web link goes to the window, which opens it in a tab of Bops.
+  await app.locator("#link").click();
+  assert.deepEqual(await page.evaluate(() => window.opened), ["https://example.com/x"]);
   // Loaded again, it picks up where it was.
   await page.evaluate(() => {
     const keep = window.store;
