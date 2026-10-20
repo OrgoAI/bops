@@ -6,8 +6,8 @@ import { ago } from "./ui";
 /*
  * What the sidebar's pinned groups share: Routines (autopilot.tsx) and Orbit (memory-categories.tsx).
  * Counts that tick when they go up, the chevron that folds, the arrow that opens a group's page, where
- * this Mac keeps what the user folded, the small × that deletes from a row, and the marks that make only
- * what arrives after the first paint move.
+ * this Mac keeps what the user folded, the small × that deletes from a row, where focus goes once a row
+ * is deleted, and the marks that make only what arrives after the first paint move.
  */
 
 /** Rows a section shows before "Show all". */
@@ -202,6 +202,40 @@ export function InlineConfirm({ text, action, doing, busy, onConfirm, onCancel }
       </span>
     </div>
   );
+}
+
+/**
+ * Where focus goes once a row is deleted, worked out while it's still there (`row`, one of the `rows` in
+ * the nearest [data-rows], else its parent; `same` passes over others of the same thing): the head
+ * ([data-row-head]) of the row after it, else the one before, else the nearest list heading
+ * ([data-list-heading]) out from it. The function it gives focuses the first of those still on the page,
+ * then once more after the list has dropped the row (with its last row a list can drop its heading too),
+ * so focus never falls to the page.
+ */
+export function focusAfterRemove(row: Element | null, rows: string, same?: (el: Element) => boolean): () => void {
+  const targets: HTMLElement[] = [];
+  if (row) {
+    const scope = row.closest("[data-rows]") ?? row.parentElement;
+    const all = [...(scope?.querySelectorAll(rows) ?? [])].filter((el) => el === row || !same?.(el));
+    const i = all.indexOf(row);
+    if (i >= 0)
+      for (const el of [all[i + 1], all[i - 1]]) {
+        const head = el?.querySelector<HTMLElement>("[data-row-head]");
+        if (head) targets.push(head);
+      }
+    for (let up = row.parentElement; up; up = up.parentElement) {
+      const heading = up.querySelector<HTMLElement>("[data-list-heading]");
+      if (heading && !row.contains(heading) && !targets.includes(heading)) targets.push(heading);
+    }
+  }
+  const go = () => targets.find((el) => el.isConnected)?.focus();
+  return () => {
+    go();
+    setTimeout(() => {
+      const at = document.activeElement;
+      if (!at || at === document.body || !at.isConnected) go();
+    }, 300);
+  };
 }
 
 /** A small × that shows on hover (or keyboard focus) and deletes, without opening what it sits on. */

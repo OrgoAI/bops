@@ -2,7 +2,8 @@
 // kind, says writes ask first, and has no dashes), offering, turning on and putting off starters
 // (lib/server/routine-suggestions.ts, with the real lib/server/routines.ts), learning a workspace's tags
 // from a sample (a fake background turn), the note the bots see, and the routes (app/api/routines/
-// suggestions and its dismiss: the Bops window only).
+// suggestions and its dismiss: the Bops window only; and DELETE /api/routines, where deleting a Connected
+// App's check is its How often back at Only when asked).
 //
 // The store, sessions, phone, mail, channels and chat modules are fakes, so nothing reaches a real
 // service, a model or the user's own data.
@@ -593,6 +594,34 @@ await check("dismiss clears the waiting suggestion", async () => {
   const res = await dismissRoute.POST(post({}, "http://localhost/api/routines/suggestions/dismiss"));
   assert.deepEqual(await res.json(), { ok: true });
   assert.equal(state.suggest, undefined);
+});
+
+await check("a check deleted in the app (DELETE /api/routines) is its account back at Only when asked: no check left, the bot no longer told of it, its starters offered again; only from the Bops window", async () => {
+  const routinesRoute = await import("@/app/api/routines/route");
+  const del = (id, headers = {}) => new Request("http://localhost/api/routines", { method: "DELETE", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ id }) });
+  // How often keeps nothing but the check itself (routine-catalog.ts CHECK_TEMPLATE): Iris checks Gmail every 15 minutes.
+  const r = S.makeCheck("ca_work", { bots: ["bot_iris"], level: "read", check: quarter }).routine;
+  assert.equal(r.botId, "bot_iris");
+  assert.deepEqual(S.offersFor("gmail", "bot_iris").templates.map((t) => t.id), ["gmail-morning-inbox", "gmail-weekly-follow-ups"], "the check does the alerts and replies");
+  assert.match(R.routinesNote(["bot_iris"]), /"Check Gmail \(Work\)"/);
+
+  // From anywhere but the window: refused, and it stays.
+  process.env.BOPS_UI_TOKEN = "window-token-for-tests";
+  try {
+    const no = await routinesRoute.DELETE(del(r.id));
+    assert.equal(no.status, 403);
+    assert.match((await no.json()).error, /only be changed in the Bops app/);
+    assert.equal(checksOf("ca_work").length, 1);
+    const ok = await routinesRoute.DELETE(del(r.id, { cookie: "bops_window=window-token-for-tests" }));
+    assert.deepEqual([ok.status, await ok.json()], [200, { ok: true }]);
+  } finally {
+    delete process.env.BOPS_UI_TOKEN;
+  }
+  assert.deepEqual(checksOf("ca_work"), [], "Only when asked: nothing checks it");
+  assert.doesNotMatch(R.routinesNote(["bot_iris"]), /Check Gmail/, "the bot isn't told of it anymore");
+  assert.equal(S.offersFor("gmail", "bot_iris").templates.length, 4, "what the check did is offered again");
+  // Deleted again, or one that's gone: still fine.
+  assert.equal((await routinesRoute.DELETE(del(r.id))).status, 200);
 });
 
 await check("the window only: GET, POST and dismiss are refused from anywhere else", async () => {
