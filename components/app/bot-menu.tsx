@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { live, type AppState, type Bot, type Effort } from "@/lib/types";
+import { appsStayLine, live, type AppState, type Bot, type Effort } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { needsYou, post } from "./ui";
 import { EFFORT_HINT, type Section } from "./bot-panel";
@@ -182,7 +182,8 @@ export function BotMenu({ state, bot: b, x, y, onClose, actions }: { state: AppS
 /**
  * Deleting a bot, asked once more, saying what goes with it (lib/server/remove.ts deleteBot: its own
  * computer and everything on it, its inboxes, its chat, threads and routines) and what stays (memory
- * and Knowledge, the user's apps and logins, its messages in group chats). Cancel has focus.
+ * and Knowledge, the user's apps and logins, its messages in group chats, and the apps it made, which
+ * go to the main bot). Cancel has focus.
  */
 function DeleteBot({ state, bot: b, onClose }: { state: AppState; bot: Bot; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
@@ -203,6 +204,7 @@ function DeleteBot({ state, bot: b, onClose }: { state: AppState; bot: Bot; onCl
     `Its chat${threads ? `, ${threads} thread${threads === 1 ? "" : "s"}` : ""}${routines ? ` and ${routines} routine${routines === 1 ? "" : "s"}` : ""}`,
   ].filter(Boolean) as string[];
   const stays = ["Knowledge", "your apps and logins", "its messages in group chats", ...(host ? [`${host.name}'s computer, which it shared`] : [])];
+  const madeApps = appsStayLine(state, b);
   const remove = async () => {
     setBusy(true);
     setError(null);
@@ -234,6 +236,7 @@ function DeleteBot({ state, bot: b, onClose }: { state: AppState; bot: Bot; onCl
         <div className="flex flex-col gap-2 border-t border-[#ECECEA] pt-3.5">
           <span className="font-mono text-[11px] font-medium tracking-[0.06em] text-[#6B6B6B]">STAYS</span>
           <span className="text-[13.5px] leading-5 text-[#3A3A38]">{stays.join(", ").replace(/^./, (c) => c.toUpperCase())}</span>
+          {madeApps && <span className="text-[13.5px] leading-5 text-[#3A3A38]">{madeApps}</span>}
         </div>
         {error && (
           <span role="alert" className="text-[13px] leading-[18px] text-[#B42318]">

@@ -13,7 +13,7 @@ export async function GET(request: Request, ctx: RouteContext<"/api/made-apps/[a
   const v = Number(new URL(request.url).searchParams.get("v")) || undefined;
   let html: string | null = null;
   try {
-    html = viewPage(appId, v);
+    html = await viewPage(appId, v);
   } catch {}
   if (!html) return new Response("Not found", { status: 404 });
   return new Response(html, {

@@ -250,11 +250,11 @@ async function runSync(): Promise<SyncResult | null> {
 
 /**
  * What deleting a workspace takes with it, for the confirm: the computers (its team's here, and what's in
- * its Orgo workspace), its keys (the ones for This workspace), its skills and its apps, Bops' and Orgo's
- * together, each once. `orgo`: its Orgo workspace goes too. Throws for the default workspace, and when Orgo
+ * its Orgo workspace), its keys (the ones for This workspace), its skills and its apps, the apps its bots
+ * made and its CRM files, Bops' and Orgo's together, each once. `orgo`: its Orgo workspace goes too. Throws for the default workspace, and when Orgo
  * doesn't say what's in it (nothing is deleted without the user seeing the list).
  */
-export type DeletePreview = { id: string; name: string; orgo: boolean; bots: string[]; computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[] };
+export type DeletePreview = { id: string; name: string; orgo: boolean; bots: string[]; computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[]; madeApps: string[]; crmFiles: string[] };
 
 export class WorkspaceError extends Error {
   status: number;
@@ -280,6 +280,9 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
   const keys: string[] = [];
   const skills = refsOf(workspaceId, "skill").map((r) => r.name);
   const apps = refsOf(workspaceId, "app").map((r) => r.name);
+  const madeApps = (getState().madeApps ?? []).filter((a) => a.ws === workspaceId).map((a) => a.title);
+  const { crmNames } = await import("./crm-sync");
+  const crmFiles = await crmNames(workspaceId);
   // Orgo not answering is said, never taken for "nothing there": Delete would refuse then too (remove.ts).
   const orgo =
     !!w.orgoProjectId &&
@@ -299,6 +302,8 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
     keys.push(...there.keys);
     skills.push(...there.skills);
     apps.push(...there.apps);
+    madeApps.push(...there.madeApps);
+    crmFiles.push(...there.crmFiles);
     // An orgo-web that only counts them: more there than are named here are still said, never left off.
     const more = (n: number | undefined, named: string[], one: string, many: string) => {
       if (n && n > named.length) named.push(`${n} ${n === 1 ? one : many} on Orgo`);
@@ -310,7 +315,7 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
     for (const k of await listKeys().catch(() => [])) if (k.workspaceId === w.orgoProjectId) keys.push(k.name);
   }
   const once = (xs: string[]) => xs.filter((x, i) => xs.findIndex((y) => sameName(x, y)) === i);
-  return { id: w.id, name: w.name, orgo, bots: team.map((b) => b.name), computers, keys: once(keys), skills: once(skills), apps: once(apps) };
+  return { id: w.id, name: w.name, orgo, bots: team.map((b) => b.name), computers, keys: once(keys), skills: once(skills), apps: once(apps), madeApps: once(madeApps), crmFiles: once(crmFiles) };
 }
 
 /* ---------------- Moving onto Orgo workspaces ---------------- */
@@ -437,8 +442,9 @@ async function runBind(): Promise<string[]> {
 }
 
 /**
- * A workspace just got its Orgo project: its routines go in full (deleteMissing), its skills and Orbit
- * now. The map and the access set go by themselves: their next look sees the new project.
+ * A workspace just got its Orgo project: its routines go in full (deleteMissing), its skills, Orbit, the
+ * apps its bots made and its CRM files now. The map and the access set go by themselves: their next look
+ * sees the new project.
  */
 async function afterBind(wsId: string) {
   try {
@@ -447,6 +453,10 @@ async function afterBind(wsId: string) {
     const { orbitChanged, pullSoon } = await import("./orbit-sync");
     orbitChanged(wsId);
     pullSoon(wsId);
+    const { appsBound } = await import("./made-apps-sync");
+    appsBound(wsId);
+    const { crmBound } = await import("./crm-sync");
+    crmBound(wsId);
   } catch (e) {
     console.warn(`[workspaces] ${wsId}'s copy to its new Orgo project: ${(e as Error).message}`);
   }

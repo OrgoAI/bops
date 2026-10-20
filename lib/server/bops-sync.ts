@@ -1,5 +1,5 @@
 import "server-only";
-import { brainOf, sharesComputer, workBot, workspaceOf, type AppState } from "@/lib/types";
+import { BRAINS_ON, brainOf, sharesComputer, workBot, workspaceOf, type AppState, type BrainKind } from "@/lib/types";
 import { targetNameOf } from "./access-sync";
 import { onRunner } from "./persist";
 import { cleanText, fit } from "./routine-sync";
@@ -12,7 +12,10 @@ import { getState, stateReady, stateTooNew, watchChanges } from "./store";
  * and what the workspace has (its Connected App accounts, the logins its bots may use, its phone line),
  * and the watches. Orgo wakes the computer of the bot whose routine comes due by it (runner.ts). Names
  * and ids only: no key, password or token is ever in it. Each bot carries the names of the vault keys it
- * may use (Bot.keys: `keys`, orgo-web's bops_bots.secret_names), never a value.
+ * may use (Bot.keys: `keys`, orgo-web's bops_bots.secret_names), never a value. Every brain of the
+ * workspace is a resource of kind brain (its id, name, kind and how it signs in: plan or key, never the
+ * key), in a build with brains (BRAINS_ON), and only once orgo-web says it takes that kind (the map's
+ * answer lists `kinds`: an orgo-web that doesn't would refuse the whole map with a 400).
  *
  * The same rules as routine-sync.ts: Bops stays the source and nothing waits on Orgo. A workspace whose
  * map changed sends the whole of it SYNC_DEBOUNCE_MS after the last change in a burst (PUT
@@ -36,7 +39,7 @@ const MAX = { id: 128, name: 200, role: 500, ref: 256, app: 128, lookFor: 2000, 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type MapBot = { bopsId: string; name: string; role: string; isMain: boolean; computer: "own" | "shared"; desktopId: string | null; brain?: string; keys: string[] };
-export type MapResource = { kind: "app" | "login" | "phone" | "inbox" | "channel"; ref: string; name: string; app?: string; status?: string; ownerBotId?: string };
+export type MapResource = { kind: "app" | "login" | "phone" | "inbox" | "channel" | "brain"; ref: string; name: string; app?: string; status?: string; ownerBotId?: string };
 export type MapWatch = { bopsId: string; botId: string; kind: "screen" | "page" | "mac"; site: string; lookFor: string; url?: string; everyMin?: number; paused: boolean };
 export type BopsMap = { bots: MapBot[]; resources: MapResource[]; watches: MapWatch[] };
 
@@ -50,6 +53,7 @@ const g = globalThis as unknown as {
   __bopsMapSoon?: ReturnType<typeof setTimeout>;
   __bopsMapStarted?: boolean;
   __bopsMapCutSaid?: Set<string>;
+  __bopsMapKinds?: string[] | null;
 };
 const pending = (g.__bopsMapSync ??= new Map());
 const missing = (g.__bopsMapSyncMissing ??= new Map());
@@ -58,6 +62,11 @@ const inFlight = (g.__bopsMapSyncInFlight ??= new Map());
 const seen = (g.__bopsMapSeen ??= new Map());
 
 /* ---------------- The map ---------------- */
+
+/** The resource kinds orgo-web takes, as its last answer to the map said (null: not said yet, or an orgo-web that doesn't say). */
+const kindsTaken = () => g.__bopsMapKinds ?? null;
+/** A brain's kind as orgo-web names it (bops_resources.app). */
+const BRAIN_APP: Record<BrainKind, string> = { claude: "claude_code", codex: "codex" };
 
 /** An id Orgo keeps as it is: one cut or cleaned would no longer be the one Bops has, so it isn't sent. */
 const keeps = (s: string | undefined, max: number): s is string => !!s && s.length <= max && cleanText(s, max) === s;
@@ -115,6 +124,9 @@ export function bopsMapPayload(wsId: string, s: AppState = getState()): BopsMap 
     if (b.mail) add("inbox", b.mail.inboxId, b.email ?? "", { status: b.mail.paused ? "paused" : "active", owner: b.id });
   }
   for (const c of s.channels ?? []) if (ids.has(c.botId)) add("channel", c.id, c.handle, { app: c.kind, status: c.status, owner: c.botId });
+  // Every brain of the workspace, the ones no bot uses too: names only, never its key.
+  if (BRAINS_ON && kindsTaken()?.includes("brain"))
+    for (const x of s.brains ?? []) if (x.workspaceId === wsId) add("brain", x.id, x.name, { app: BRAIN_APP[x.kind] ?? x.kind, status: x.auth });
 
   const watches: MapWatch[] = [];
   const watched = new Set<string>();
@@ -154,11 +166,11 @@ const routesMissing = (projectId: string, now = Date.now()) => (missing.get(proj
 /** Orgo didn't answer, answered 5xx, or for now (signed out, a timeout, too many at once): worth sending again. */
 const retryable = (status: number | null) => status === null || status >= 500 || status === 401 || status === 403 || status === 408 || status === 429;
 
-async function send(path: string, body: unknown): Promise<{ status: number } | null> {
+async function send(path: string, body: unknown): Promise<{ status: number; json?: { kinds?: unknown } } | null> {
   const { apiKey, callOrgo } = await import("./orgo");
   const key = await apiKey().catch(() => "");
   if (!key) return null;
-  return callOrgo(key, path, { method: "PUT", body, timeoutMs: TIMEOUT_MS });
+  return callOrgo<{ kinds?: unknown }>(key, path, { method: "PUT", body, timeoutMs: TIMEOUT_MS });
 }
 
 /** Send a workspace's map as it is now. */
@@ -184,6 +196,16 @@ async function flush(wsId: string): Promise<void> {
     return;
   }
   missing.delete(projectId);
+  // What kinds it takes: one it takes now that wasn't sent (brains) goes at once, every workspace's.
+  const kinds = res?.json?.kinds;
+  if (Array.isArray(kinds) && kinds.every((k) => typeof k === "string")) {
+    const had = kindsTaken();
+    g.__bopsMapKinds = kinds as string[];
+    if (!had?.includes("brain") && kinds.includes("brain")) {
+      seen.clear();
+      look();
+    }
+  }
 }
 
 /** Flush a workspace, one flush at a time: what's queued meanwhile goes right after. */
@@ -268,6 +290,7 @@ export const bopsSyncForTests = {
     missing.clear();
     inFlight.clear();
     seen.clear();
+    g.__bopsMapKinds = undefined;
     if (g.__bopsMapSoon) clearTimeout(g.__bopsMapSoon);
     g.__bopsMapSoon = undefined;
     g.__bopsMapStarted = false;

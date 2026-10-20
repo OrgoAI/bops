@@ -14,12 +14,16 @@ export type Blob = Record<string, unknown>;
 
 /**
  * This Mac's own, under macs[deviceId] in the blob: routing through it, whether bots can work on it
- * (state.mac), its setup, and the apps the bots made on it (their code and data are files on this Mac,
- * made-apps.ts, so another Mac couldn't open them).
+ * (state.mac) and its setup.
  */
-export const PER_MAC = ["relay", "relayRoutes", "mac", "setup", "madeApps"] as const;
-/** Never in the cloud: who's signed in here, what's on screen right now, what waits on a live bot. */
-export const NEVER_SYNCED = ["account", "screens", "takeover", "connecting", "appApprovals", "screenStream", "cloudUser", "messages", "macs"] as const;
+export const PER_MAC = ["relay", "relayRoutes", "mac", "setup"] as const;
+/**
+ * Never in the cloud: who's signed in here, what's on screen right now, what waits on a live bot, and the
+ * apps the bots made, whose record is Orgo's (made-apps-sync.ts: every Mac lists them from there, and this
+ * Mac keeps its copy in made-apps/apps.json). A list from before, under macs[deviceId].madeApps, is read
+ * into that copy once and goes from the blob with this Mac's next save.
+ */
+export const NEVER_SYNCED = ["account", "screens", "takeover", "connecting", "appApprovals", "screenStream", "cloudUser", "messages", "macs", "madeApps"] as const;
 /** The newest usage events kept, as lib/server/usage.ts keeps them. */
 const MAX_USAGE = 20_000;
 

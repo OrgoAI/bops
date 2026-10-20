@@ -3,7 +3,7 @@
 // bops.bot refused until the user allows it, and the allow gone with every new version (a build, a Go
 // back); a Go back mid-build refused; how much an app may ask in an hour (bops.ask too); a call too big for
 // the bridge route refused before it's read; a delete taking its files; a build cut off when Bops quit not
-// left building (store.ts); the list kept per Mac in Bops Cloud (state-merge.ts PER_MAC); and the bot only
+// left building (store.ts); the list never in Bops Cloud's shared state (state-merge.ts NEVER_SYNCED); and the bot only
 // reading for an app (chat.ts answerForApp).
 // OpenAI is a fake, and the state lives in a throwaway folder: nothing reaches a real service.
 // Usage: node --conditions=react-server scripts/test-made-apps-server.mjs
@@ -128,7 +128,7 @@ await check("a build makes v1 under an id of 128 random bits, and its code is ke
   await waitBuilt(made.id);
   assert.equal(app(made.id).version, 1, app(made.id).error);
   assert.match(A.appCode(made.id), /^\/\/ Counts/);
-  assert.match(A.viewPage(made.id), /<div id="root"><\/div>/);
+  assert.match(await A.viewPage(made.id), /<div id="root"><\/div>/);
   assert.ok(S.getState().messages.some((m) => m.text === "Made Counter"));
 });
 
@@ -195,12 +195,15 @@ await check("the bridge route: a call too big is refused before it's read; a bad
   assert.deepEqual(await (await call(JSON.stringify({ method: "bot", args: { prompt: "Hi" } }))).json(), { needs: "bot" });
 });
 
-await check("the list is this Mac's alone in Bops Cloud (its files are here)", () => {
+await check("the list is never in Bops Cloud's shared state: Orgo is its record, and this Mac keeps a copy", () => {
   const shared = M.toShared(S.getState(), "mac_a");
   assert.equal(shared.madeApps, undefined, "not for every Mac");
-  assert.equal(shared.macs.mac_a.madeApps.length, S.getState().madeApps.length, "kept under this Mac");
-  assert.equal(M.fromShared(shared, "mac_a").madeApps.length, S.getState().madeApps.length, "and back on it");
-  assert.equal(M.fromShared(shared, "mac_b").madeApps, undefined, "another Mac doesn't list them");
+  assert.equal(shared.macs?.mac_a?.madeApps, undefined, "nor under this Mac");
+  assert.equal(M.fromShared({ ...shared, madeApps: [{ id: "app_x" }] }, "mac_a").madeApps, undefined, "never taken from the cloud");
+  // A merge with another Mac's changes keeps the list in memory as it is.
+  const target = { ...S.getState() };
+  M.applyShared(target, M.fromShared(shared, "mac_a"));
+  assert.equal(target.madeApps, S.getState().madeApps);
 });
 
 await check("delete takes its files and its record", () => {

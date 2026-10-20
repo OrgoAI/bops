@@ -198,18 +198,27 @@ async function call<T>(
 /**
  * One call to Orgo with `key`, the key passed in and only that (never apiKey's fallbacks): its status and
  * JSON (an empty object when it had none), or null when it didn't answer within `timeoutMs`. `headers` go
- * along (an Idempotency-Key), never in place of the key. `path` starts with /api.
+ * along (an Idempotency-Key, an If-Match), never in place of the key. `raw`: a body sent as it is with its
+ * own type (an app's data as the Mac wrote it, a CRM file's CSV) instead of `body` as JSON. `path` starts
+ * with /api.
  */
 export async function callOrgo<T>(
   key: string,
   path: string,
-  { method = "GET", body, headers, timeoutMs = 15_000 }: { method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; body?: unknown; headers?: Record<string, string>; timeoutMs?: number } = {},
+  {
+    method = "GET",
+    body,
+    raw,
+    headers,
+    timeoutMs = 15_000,
+  }: { method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; body?: unknown; raw?: { data: string | Uint8Array; type: string }; headers?: Record<string, string>; timeoutMs?: number } = {},
 ): Promise<{ status: number; json: T } | null> {
   try {
+    const type: Record<string, string> = raw ? { "Content-Type": raw.type } : body === undefined ? {} : { "Content-Type": "application/json" };
     const res = await fetch(`${orgoOrigin()}${path}`, {
       method,
-      headers: { ...orgoHeaders(), ...headers, Authorization: `Bearer ${key}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      headers: { ...orgoHeaders(), ...headers, Authorization: `Bearer ${key}`, ...type },
+      ...(raw ? { body: raw.data as BodyInit } : body === undefined ? {} : { body: JSON.stringify(body) }),
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -932,6 +941,9 @@ export type OrgoDeletePreview = {
   keys: string[];
   skills: string[];
   apps: string[];
+  /** The apps its bots made and its CRM files, by name (an orgo-web that keeps them: madeApps [{ title }], crmFiles [{ name }]). */
+  madeApps: string[];
+  crmFiles: string[];
   /** An orgo-web that counted skills and apps (563ed1cf6) instead of naming them: how many it has, names unknown. */
   skillCount?: number;
   appCount?: number;
@@ -956,6 +968,8 @@ export async function deletePreview(projectId: string): Promise<OrgoDeletePrevie
     keys: names(j.keys ?? j.secrets),
     skills: names(j.skills),
     apps: names(j.apps),
+    madeApps: names(j.madeApps),
+    crmFiles: names(j.crmFiles),
     ...(count(j.skills) !== undefined && { skillCount: count(j.skills) }),
     ...(count(j.apps) !== undefined && { appCount: count(j.apps) }),
   };

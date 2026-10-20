@@ -593,7 +593,7 @@ export { DeleteX };
  * one, or start a new one. Each workspace is its own team: its own main bot, bots, chats and threads.
  */
 /** What deleting a workspace takes with it (GET /api/workspaces?preview=), for the confirm. */
-type DeletePreview = { id: string; name: string; orgo: boolean; computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[] };
+type DeletePreview = { id: string; name: string; orgo: boolean; computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[]; madeApps?: string[]; crmFiles?: string[] };
 
 /** How often a rename made on orgo.ai is looked for while the app is open. */
 const NAMES_SYNC_MS = 10 * 60_000;
@@ -813,7 +813,7 @@ function GoesWith({ label, items }: { label: string; items: string[] }) {
  * workspace), then Delete. Orgo saying no keeps the workspace whole, with its words here.
  */
 function DeleteConfirm({ name, preview, error, busy, onCancel, onDelete }: { name: string; preview?: DeletePreview; error?: string; busy?: boolean; onCancel: () => void; onDelete: () => void }) {
-  const nothing = !!preview && !preview.computers.length && !preview.keys.length && !preview.skills.length && !preview.apps.length;
+  const nothing = !!preview && !preview.computers.length && !preview.keys.length && !preview.skills.length && !preview.apps.length && !preview.madeApps?.length && !preview.crmFiles?.length;
   return (
     <div className="mx-1 my-1 flex flex-col gap-1.5 rounded-[10px] bg-[#F7F7F5] p-2.5 text-[12px] leading-4 text-[#6B6B6B]">
       <span className="text-[13px] font-medium text-ink">Delete {name}?</span>
@@ -827,6 +827,8 @@ function DeleteConfirm({ name, preview, error, busy, onCancel, onDelete }: { nam
               <GoesWith label="Keys" items={preview.keys} />
               <GoesWith label="Skills" items={preview.skills} />
               <GoesWith label="Apps" items={preview.apps} />
+              <GoesWith label="Apps its bots made" items={preview.madeApps ?? []} />
+              <GoesWith label="CRM files" items={preview.crmFiles ?? []} />
             </ul>
           )}
           {preview.orgo && <span>Its Orgo workspace is deleted too.</span>}

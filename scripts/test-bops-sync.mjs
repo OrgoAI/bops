@@ -10,13 +10,17 @@
 // call, so nothing reaches a real Orgo or the user's data.
 // Usage: node --conditions=react-server scripts/test-bops-sync.mjs
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 for (const k of Object.keys(process.env)) if (/^(BOPS|ORGO|NEXT_PUBLIC_BOPS)_/.test(k)) delete process.env[k];
+// A build with brains (lib/types.ts BRAINS_ON, read as it loads): this file runs itself once more as one, for the brains' checks.
+const BRAINS_BUILD = process.argv.includes("--brains-build");
+if (BRAINS_BUILD) process.env.NEXT_PUBLIC_BOPS_BRAINS = "1";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const scratch = mkdtempSync(join(tmpdir(), "bops-test-map-"));
 
@@ -181,6 +185,49 @@ const reset = () => {
   Date.now = realNow;
 };
 const puts = () => calls.filter((c) => c.method === "PUT" && c.path.endsWith("/bops"));
+
+if (BRAINS_BUILD) {
+  await check("every brain of the workspace is in its map (names only), once orgo-web says it takes the kind: sent again at once then", async () => {
+    reset();
+    state.brains.push(
+      { id: "brn_2", name: "Codex (work)", kind: "codex", auth: "key", keyName: "CODEX_WORK_KEY", keyScope: "workspace", bots: [], workspaceId: "ws_main", createdAt: 1 },
+      { id: "brn_3", name: "Claude Code", kind: "claude", auth: "plan", bots: ["ace"], workspaceId: "ws_acme", createdAt: 1 },
+    );
+    const brainsIn = (body) => body.resources.filter((r) => r.kind === "brain");
+    // An orgo-web that hasn't said, or says it takes no brains: none sent (one it doesn't take would fail the whole map).
+    assert.deepEqual(brainsIn(Sync.bopsMapPayload("ws_main", state)), []);
+    answer = () => ({ status: 200, json: { kinds: ["app", "login", "phone", "inbox", "channel"] } });
+    T.look();
+    await T.flushAll();
+    assert.equal(puts().length, 2);
+    assert.ok(puts().every((c) => !brainsIn(c.body).length));
+    assert.equal(puts().find((c) => c.path === `/api/projects/${PID}/bops`).body.bots.find((b) => b.bopsId === "iris").brain, "brn_1", "the brain a bot uses, as before");
+    // It takes them now: every workspace's map goes again at once, with each of its brains, one no bot uses too.
+    calls.length = 0;
+    answer = () => ({ status: 200, json: { kinds: ["app", "login", "phone", "inbox", "channel", "brain"] } });
+    state.bots.find((b) => b.id === "max").name = "Max R";
+    T.look();
+    await T.flushAll();
+    await T.flushAll();
+    const main = puts().filter((c) => c.path === `/api/projects/${PID}/bops`).at(-1);
+    assert.deepEqual(brainsIn(main.body), [
+      { kind: "brain", ref: "brn_1", name: "Claude Code", app: "claude_code", status: "plan" },
+      { kind: "brain", ref: "brn_2", name: "Codex (work)", app: "codex", status: "key" },
+    ]);
+    const acme = puts().filter((c) => c.path === `/api/projects/${PID2}/bops`).at(-1);
+    assert.ok(acme, "the other workspace's map went again too, unchanged otherwise");
+    assert.deepEqual(brainsIn(acme.body), [{ kind: "brain", ref: "brn_3", name: "Claude Code", app: "claude_code", status: "plan" }]);
+    assert.ok(!JSON.stringify(calls).includes("CODEX_WORK_KEY"), "never its key's name, nor a value");
+    // Sent once: nothing more while nothing changes.
+    calls.length = 0;
+    T.look();
+    await T.flushAll();
+    assert.equal(puts().length, 0);
+  });
+  rmSync(scratch, { recursive: true, force: true });
+  console.log(`bops sync (brains): ${passed} passed, ${failures} failed`);
+  process.exit(failures ? 1 : 0);
+}
 
 await check("the payload: each bot and its computer, the workspace's and each bot's own, the watches", async () => {
   reset();
@@ -405,6 +452,17 @@ await check("a computer's runner never sends the map, nor the access set", async
   await Access.accessSyncForTests.flushAll();
   assert.ok(calls.some((c) => c.path === `/api/projects/${PID}/access`), "the Mac's access set");
 });
+
+// The brains' checks, in a build with brains (this file once more, as one).
+{
+  const run = spawnSync(process.execPath, ["--conditions=react-server", fileURLToPath(import.meta.url), "--brains-build"], { encoding: "utf8" });
+  const said = /bops sync \(brains\): (\d+) passed, (\d+) failed/.exec(run.stdout);
+  if (run.status === 0 && said) passed += Number(said[1]);
+  else {
+    failures += Math.max(1, Number(said?.[2] ?? 1));
+    console.error(`FAIL in a build with brains\n  ${(run.stdout + run.stderr).split("\n").filter((l) => !/MODULE_TYPELESS|To eliminate|trace-warnings|Reparsing/.test(l)).join("\n  ")}`);
+  }
+}
 
 rmSync(scratch, { recursive: true, force: true });
 console.log(`bops sync: ${passed} passed, ${failures} failed`);

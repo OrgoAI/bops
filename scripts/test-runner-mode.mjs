@@ -334,6 +334,7 @@ const GATED = {
   "runner-install.ts": ['loopHere("runner-install")'],
   "access-sync.ts": ["onRunner()"],
   "bops-sync.ts": ["onRunner()"],
+  "made-apps-sync.ts": ["if (!onRunner())", "if (onRunner() || !stateReady() || stateTooNew()) return;"],
   "routines.ts": ["onPostgres() || onRunner()"],
 };
 /** Run on a runner, and why. */

@@ -219,6 +219,8 @@ export type SkillRef = {
   /** The Orgo project that id is in: once set, a sync that no longer finds it there takes it as deleted there. */
   remotePid?: string;
   remoteAt?: string;
+  /** The version Orgo had when they last agreed ("" for none), so a sync that reads only what changed since (?since=) knows Orgo's copy of one that didn't. */
+  remoteVersion?: string;
   /** When this Mac and Orgo last agreed on it: a change here after this goes to Orgo. */
   syncedAt?: number;
   /** How many times a bot read it for a job, and when it last did. */
@@ -229,7 +231,13 @@ export type SkillRef = {
 };
 
 /** A script someone approved to run, by its content (an unchanged script carried into a new version stays approved). */
-export type ScriptApproval = { sha256: string; path: string; at: number };
+export type ScriptApproval = {
+  sha256: string;
+  path: string;
+  at: number;
+  /** Orgo has it (sent from here, or made on orgo.ai): one it no longer lists was revoked there (lib/server/workspace-skills.ts). */
+  synced?: boolean;
+};
 
 export type WorkspaceLine = {
   phone: string;
@@ -539,7 +547,26 @@ export type MadeApp = {
   allowed?: { bot?: number };
   createdAt: number;
   updatedAt: number;
+  /** The Mac that built it (its device id), as Orgo's record says (lib/server/made-apps-sync.ts). */
+  deviceId?: string;
+  /** This Mac's updatedAt Orgo has, and Orgo's updatedAt as last seen: a change here after the first goes to Orgo, one there after the second comes here. */
+  syncedAt?: number;
+  remoteAt?: string;
+  /** The sha256 of the data this Mac and Orgo last agreed on, and of what Orgo holds as last heard (fetched when the app reads it). */
+  dataSha?: string;
+  orgoData?: { sha256: string; at: number };
 };
+
+/**
+ * What a bot's delete says of the apps it made: they stay, under its workspace's main bot (their builds
+ * report in its chat; lib/server/made-apps-sync.ts appsToMainBot). Null when it made none.
+ */
+export function appsStayLine(state: Pick<AppState, "bots" | "madeApps">, b: Pick<Bot, "id" | "workspaceId">): string | null {
+  const n = (state.madeApps ?? []).filter((a) => a.botId === b.id).length;
+  const main = state.bots.find((x) => x.isMain && x.id !== b.id && workspaceOf(x) === workspaceOf(b));
+  if (!n || !main) return null;
+  return n === 1 ? `The app it made stays, under ${main.name}.` : `The ${n} apps it made stay, under ${main.name}.`;
+}
 
 export type EmailInfo = {
   dir: "in" | "out";
@@ -1015,7 +1042,7 @@ export type AppState = {
   /** Teams the user keeps apart, and the one they're looking at. */
   workspaces?: Workspace[];
   workspace?: string;
-  /** Apps the bots made for the user (lib/server/made-apps.ts): their code and data are files on this Mac. */
+  /** Apps the bots made for the user (lib/server/made-apps.ts): recorded in Orgo, with a copy on this Mac (made-apps-sync.ts); never in Bops Cloud's shared state. */
   madeApps?: MadeApp[];
   /**
    * The user's own mobile numbers (Settings, How your bots reach you): when they agreed to get texts

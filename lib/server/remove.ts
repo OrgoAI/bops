@@ -37,7 +37,9 @@ export function deleteThread(sessionId: string) {
  * the skills only it had (a skill other bots have too stays theirs). Group chats keep their
  * history without it, unless only one bot is left in them. Its channels go too (channels.ts removeLink:
  * its Telegram or Discord bot stops listening and its token leaves the Keychain; a Slack link leaves Bops
- * Cloud), as they go from Orgo's map with it. The main bot can't be deleted.
+ * Cloud), as they go from Orgo's map with it. The apps it made stay, under its workspace's main bot (their
+ * record in Orgo too: made-apps-sync.ts appsToMainBot), as the delete's question says. The main bot can't
+ * be deleted.
  */
 export async function deleteBot(botId: string, withWorkspace = false) {
   const b = bot(botId);
@@ -60,6 +62,11 @@ export async function deleteBot(botId: string, withWorkspace = false) {
   const chatId = botChatId(botId);
   const wsId = workspaceOf(b);
   const hadRoutines = getState().routines.some((r) => r.botId === botId);
+  // Its apps go to the main bot while it's still here (a workspace's delete takes them all instead).
+  if (!withWorkspace) {
+    const { appsToMainBot } = await import("./made-apps-sync");
+    appsToMainBot(botId, wsId);
+  }
   dropBotFromSkills(botId, workspaceOf(b));
   update((state) => {
     state.bots = state.bots.filter((x) => x.id !== botId);
@@ -109,6 +116,11 @@ export async function deleteWorkspace(workspaceId: string) {
   await passFreeComputer(workspaceId);
   for (const b of order) if (bot(b.id)?.computerId) await resetComputer(b.id);
   for (const b of order) await deleteBot(b.id, true);
+  // Its made apps and CRM files: off this Mac too (Orgo's went with its project).
+  const { dropWorkspaceApps } = await import("./made-apps-sync");
+  dropWorkspaceApps(workspaceId);
+  const { dropWorkspaceCrm } = await import("./crm-sync");
+  dropWorkspaceCrm(workspaceId);
   update((state) => {
     state.workspaces = left;
     state.chats = state.chats.filter((c) => c.workspaceId !== workspaceId);

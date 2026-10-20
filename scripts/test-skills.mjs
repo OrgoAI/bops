@@ -9,7 +9,10 @@
 // (none on today's orgo-web: local only, nothing sent; with them: pushed, pulled, the later change winning,
 // a delete sent; a draft sent as soon as it's made; a delete Orgo doesn't take kept on disk, tried again,
 // never pulled back meanwhile, and sent after a restart, as is a create or an edit Orgo hadn't taken; one
-// deleted on Orgo deleted here, unless changed here since; a deleted bot taken off Orgo's copy). Programs: a binary file kept byte for byte (on disk, on a computer, sent as content_base64,
+// deleted on Orgo deleted here, unless changed here since; a deleted bot taken off Orgo's copy; a sync that
+// reads only what changed since the last (?since=) with orgo-web's record of deletions, so several Macs agree
+// on what was deleted; script approvals sent with the Bops sign-in key through an outbox on disk, after the
+// skill's own sync, and orgo.ai's approvals and revokes taken here). Programs: a binary file kept byte for byte (on disk, on a computer, sent as content_base64,
 // brought back from a presigned url and checked by its sha256), an archive refused, the bundle hash orgo-web's. orgo-web is a fake (a local server), the Keychain is never there, and the state and
 // folders live in a throwaway folder: nothing reaches a real service. The keys in it are made up.
 // Usage: node --conditions=react-server scripts/test-skills.mjs
@@ -75,7 +78,17 @@ const FAKE_STRIPE = ["sk", "live", "0123456789abcdefABCDEF01"].join("_");
 
 /* ---------------- A fake orgo-web's skills routes (or none, as today) ---------------- */
 
-const remote = { routes: false, skills: [], calls: [], seq: 0, failDeletes: false };
+// deletions: orgo-web's record of each delete (skill_deletions), for ?since=. approvals: by project and sha256.
+const remote = { routes: false, skills: [], calls: [], seq: 0, failDeletes: false, deletions: [], approvals: new Map(), failApprovals: false, sessionOnly: false, since: true };
+/** A skill deleted on Orgo (on orgo.ai, or by another Mac), with the record orgo-web keeps of it. */
+/** A row as the route answers it: without the project it's in. */
+const unscoped = (x) => Object.fromEntries(Object.entries(x).filter(([k]) => k !== "pid"));
+const dropRemote = (id) => {
+  const s = remote.skills.find((x) => x.id === id);
+  if (!s) return;
+  remote.skills = remote.skills.filter((x) => x !== s);
+  remote.deletions.push({ id: s.id, pid: s.pid, slug: s.slug, type: s.type, deleted_at: new Date().toISOString() });
+};
 const send = (res, status, obj) => {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(obj));
@@ -87,7 +100,7 @@ const server = createServer(async (req, res) => {
   const text = Buffer.concat(chunks).toString();
   const url = new URL(req.url, "http://fake");
   const body = text ? JSON.parse(text) : undefined;
-  remote.calls.push({ method: req.method, path: url.pathname, body, auth: req.headers.authorization });
+  remote.calls.push({ method: req.method, path: url.pathname, query: url.search, body, auth: req.headers.authorization });
   // A presigned GET of one stored file: no key, as from the bucket.
   const blob = url.pathname.match(/^\/blobs\/([^/]+)\/(.+)$/);
   if (blob && req.method === "GET") {
@@ -103,11 +116,44 @@ const server = createServer(async (req, res) => {
     return res.end("<!doctype html><title>404</title>");
   }
   const [, pid, sid, sub] = m;
+  // Script approvals (app/api/projects/[id]/skills/approvals/route.ts): only with the person's Bops sign-in key.
+  if (sid === "approvals" && !sub) {
+    const mine = () => [...remote.approvals.values()].filter((a) => a.pid === pid).map(unscoped);
+    if (req.method === "GET") return send(res, 200, { approvals: mine() });
+    if (remote.failApprovals) return send(res, 503, { error: "Couldn’t save the approval. Try again." });
+    if (remote.sessionOnly) return send(res, 403, { error: "A person approves scripts.", code: "session_required" });
+    if (req.method === "POST") {
+      const known = remote.skills.some((x) => x.pid === pid && (x.files ?? []).some((f) => sha(f.content_base64 !== undefined ? Buffer.from(f.content_base64, "base64") : Buffer.from(f.content)) === body.sha256));
+      if (!known) return send(res, 404, { error: "No script in this workspace’s skills has that hash.", code: "unknown_sha" });
+      const had = remote.approvals.has(`${pid}:${body.sha256}`);
+      const approval = { pid, sha256: body.sha256, path_hint: body.path_hint ?? null, approved_by: "u_1", approved_at: new Date().toISOString() };
+      remote.approvals.set(`${pid}:${body.sha256}`, approval);
+      return send(res, had ? 200 : 201, { approval });
+    }
+    if (req.method === "DELETE") {
+      const k = `${pid}:${url.searchParams.get("sha256")}`;
+      if (!remote.approvals.delete(k)) return send(res, 404, { error: "That hash is not approved.", code: "not_found" });
+      return send(res, 200, { revoked: true, sha256: url.searchParams.get("sha256") });
+    }
+  }
   // Orgo busy for deletes (a 503), as when its database is away.
   if (sid && req.method === "DELETE" && remote.failDeletes) return send(res, 503, { error: "Couldn’t delete the skill. Try again." });
   const view = (s) => ({ id: s.id, workspace_id: pid, slug: s.slug, name: s.name, description: s.description, type: s.type, status: s.status, bot_ids: s.bot_ids, source: s.source, updated_at: s.updated_at, current_version: s.version ? { version: s.version } : null });
   const now = () => new Date(Date.now() + ++remote.seq).toISOString();
-  if (!sid && req.method === "GET") return send(res, 200, { skills: remote.skills.filter((s) => s.pid === pid).map(view) });
+  if (!sid && req.method === "GET") {
+    const since = remote.since ? url.searchParams.get("since") : null;
+    const at = new Date().toISOString();
+    if (!since) return send(res, 200, { skills: remote.skills.filter((s) => s.pid === pid).map(view), ...(remote.since ? { deleted: [], full: true, at } : {}) });
+    // What changed after since (a 2 minute overlap), and the deletions after it, never one live now.
+    const after = (Number(since) || Date.parse(since)) - 120_000;
+    const live = new Set(remote.skills.map((x) => x.id));
+    return send(res, 200, {
+      skills: remote.skills.filter((s) => s.pid === pid && Date.parse(s.updated_at) > after).map(view),
+      deleted: remote.deletions.filter((d) => d.pid === pid && Date.parse(d.deleted_at) > after && !live.has(d.id)).map(unscoped),
+      full: false,
+      at,
+    });
+  }
   if (!sid && req.method === "POST") {
     const s = { id: `sk_${++remote.seq}`, pid, slug: body.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"), name: body.name, description: body.description, type: body.type, status: body.status, bot_ids: body.bot_ids, source: body.source, version: body.version ?? "0.1.0", body: body.body, files: body.files, updated_at: now() };
     remote.skills.push(s);
@@ -131,7 +177,7 @@ const server = createServer(async (req, res) => {
     return send(res, 200, { skill: view(s) });
   }
   if (req.method === "DELETE") {
-    remote.skills = remote.skills.filter((x) => x !== s);
+    dropRemote(s.id);
     return send(res, 200, { deleted: true, id: s.id });
   }
   return send(res, 405, { error: "no" });
@@ -477,10 +523,11 @@ await check("With orgo-web's skills routes: pushed, pulled, the later change win
   assert.deepEqual([got.source, got.status, got.version, got.remoteId], ["orgo", "published", "1.0.0", "sk_orgo"]);
   assert.ok(existsSync(join(dataDir(), "p_two", "skills", "made-in-orgo", "scripts", "x.sh")));
   assert.match(W.readSkill("tess", "Made in Orgo"), /^Skill: Made in Orgo \(version 1\.0\.0\)/);
-  // Run again: nothing changed on either side, nothing sent.
+  // Run again: nothing changed on either side, nothing sent; only what changed since the last sync is read, and the approvals.
   remote.calls = [];
   assert.deepEqual(await W.syncSkills("ws_two"), { mode: "orgo", pushed: 0, pulled: 0, failed: 0 });
-  assert.deepEqual(remote.calls.map((c) => c.method), ["GET"]);
+  assert.deepEqual(remote.calls.map((c) => `${c.method} ${c.path}`), ["GET /api/workspaces/p_two/skills", "GET /api/workspaces/p_two/skills/approvals"]);
+  assert.match(remote.calls[0].query, /^\?since=/, "only what changed since");
   // Changed on Orgo since: brought here.
   const there = remote.skills.find((s) => s.id === "sk_orgo");
   Object.assign(there, { name: "Made in Orgo, v2", version: "1.0.1", body: there.body.replace("# Made in Orgo", "# Made in Orgo, changed there"), updated_at: new Date(Date.now() + 60_000).toISOString() });
@@ -650,24 +697,157 @@ await check("A skill deleted on Orgo goes here too (unless changed here since: t
     assert.ok(patch, remote.calls.map((c) => `${c.method} ${c.path}`).join(", "));
     assert.deepEqual(patch.body.bot_ids, ["tess"]);
     assert.deepEqual(remote.skills.find((x) => x.id === idB).bot_ids, ["tess"]);
-    // Both deleted on orgo.ai; one changed here since.
-    remote.skills = remote.skills.filter((x) => x.id !== idA && x.id !== idB);
+    // Both deleted on orgo.ai (with orgo-web's record of it); one changed here since.
+    dropRemote(idA);
+    dropRemote(idB);
     await new Promise((r) => setTimeout(r, 5));
     W.updateSkill("ws_two", "skill", b.slug, { description: "Changed here after, again" });
     clearTimers();
     remote.calls = [];
     const r = await W.syncSkills("ws_two");
     assert.equal(r.removed, 1, JSON.stringify(r));
+    assert.match(remote.calls[0].query, /^\?since=/, "told by the record, not by a missing line in the whole list");
     assert.equal(W.findRef("ws_two", "skill", a.slug), undefined, "deleted here as on Orgo");
     assert.ok(!existsSync(join(dataDir(), "p_two", "skills", a.slug)), "its folder too");
     assert.ok(!remote.calls.some((c) => c.method === "POST" && c.body?.name === "Gone there"), "never sent again");
     const back = remote.calls.find((c) => c.method === "POST" && c.body?.name === "Kept here");
     assert.ok(back, "the one changed here goes back to Orgo");
     await W.deleteSkill("ws_two", "skill", b.slug);
+    // An orgo-web from before the record (the whole list, no deletions): one Orgo had from here and no longer lists was deleted there.
+    const c = W.createSkill("ws_two", { name: "Old Orgo", description: "Deleted on an older Orgo", body: "# Old Orgo\n" }).ref;
+    clearTimers();
+    await W.syncSkills("ws_two");
+    remote.since = false;
+    remote.skills = remote.skills.filter((x) => x.id !== W.findRef("ws_two", "skill", c.slug).remoteId);
+    clearTimers();
+    assert.equal((await W.syncSkills("ws_two")).removed, 1);
+    assert.equal(W.findRef("ws_two", "skill", c.slug), undefined);
   } finally {
+    remote.since = true;
     S.update((s) => (s.bots = s.bots.filter((x) => x.id !== "nia")));
     clearTimers();
   }
+});
+
+await check("Several Macs agree: a sync reads only what changed since the last (?since=, kept in the workspace's folder) with Orgo's record of deletions; one deleted on another Mac goes here, one changed there comes here, one changed here goes there", async () => {
+  const clearTimers = () => {
+    for (const t of globalThis.bopsSkillsSync?.values() ?? []) clearTimeout(t);
+    globalThis.bopsSkillsSync?.clear();
+  };
+  const x = W.createSkill("ws_two", { name: "Mac one", description: "Made on this Mac", body: "# Mac one\n" }).ref;
+  const y = W.createSkill("ws_two", { name: "Mac two", description: "Changed elsewhere", body: "# Mac two\n" }).ref;
+  const z = W.createSkill("ws_two", { name: "Mac three", description: "Changed here", body: "# Mac three\n" }).ref;
+  clearTimers();
+  await W.syncSkills("ws_two");
+  const since = JSON.parse(readFileSync(join(dataDir(), "p_two", ".orgo-since.json"), "utf8"));
+  assert.equal(since.pid, "p_two");
+  assert.ok(Date.parse(since.at) > Date.now() - 60_000, "the time of the last whole sync, kept per Mac");
+  const [idX, idY, idZ] = [x, y, z].map((r) => W.findRef("ws_two", "skill", r.slug).remoteId);
+  assert.ok(idX && idY && idZ);
+  assert.equal(W.findRef("ws_two", "skill", x.slug).remoteVersion, "0.1.0", "Orgo's version, as last agreed");
+  // Another Mac deleted X and changed Y's name; this Mac changed Z's description.
+  dropRemote(idX);
+  Object.assign(remote.skills.find((s) => s.id === idY), { name: "Mac two, renamed there", updated_at: new Date(Date.now() + 1000).toISOString() });
+  await new Promise((r) => setTimeout(r, 5));
+  W.updateSkill("ws_two", "skill", z.slug, { description: "Changed here, later" });
+  clearTimers();
+  remote.calls = [];
+  const r = await W.syncSkills("ws_two");
+  assert.deepEqual([r.removed, r.pulled, r.pushed, r.failed], [1, 1, 1, 0], JSON.stringify(r));
+  const lists = remote.calls.filter((c) => c.method === "GET" && c.path === "/api/workspaces/p_two/skills");
+  assert.equal(lists.length, 1, "one read of what changed, not the whole list");
+  assert.match(lists[0].query, /^\?since=/);
+  assert.equal(W.findRef("ws_two", "skill", x.slug), undefined, "deleted on the other Mac: gone here");
+  assert.equal(W.findRef("ws_two", "skill", y.slug).name, "Mac two, renamed there");
+  assert.equal(remote.calls.find((c) => c.method === "PATCH").path, `/api/workspaces/p_two/skills/${idZ}`);
+  assert.equal(remote.skills.find((s) => s.id === idZ).description, "Changed here, later");
+  // A skill made on this Mac since, never sent: the whole list is read so it's matched by name (never a second copy).
+  const w = W.createSkill("ws_two", { name: "Mac four", description: "New here", body: "# Mac four\n" }).ref;
+  clearTimers();
+  remote.calls = [];
+  await W.syncSkills("ws_two");
+  assert.deepEqual(remote.calls.filter((c) => c.method === "GET" && c.path === "/api/workspaces/p_two/skills").map((c) => c.query), [remote.calls[0].query, ""]);
+  assert.equal(remote.skills.filter((s) => s.name === "Mac four").length, 1);
+  for (const r2 of [y, z, w]) await W.deleteSkill("ws_two", "skill", r2.slug);
+  clearTimers();
+});
+
+await check("Script approvals reach Orgo with the Bops sign-in key: approved and revoked through an outbox kept on disk, one whose skill isn't on Orgo yet sent after its sync, orgo.ai's taken here, its revokes too", async () => {
+  const O = await import(`${root}/lib/server/sync-outbox.ts`);
+  const clearTimers = () => {
+    for (const t of globalThis.bopsSkillsSync?.values() ?? []) clearTimeout(t);
+    globalThis.bopsSkillsSync?.clear();
+    clearTimeout(globalThis.bopsApprovalsTimer);
+    globalThis.bopsApprovalsTimer = undefined;
+  };
+  const wait = async (fn) => {
+    for (let i = 0; i < 100 && !fn(); i++) await new Promise((r) => setTimeout(r, 20));
+  };
+  const script = { path: "scripts/go.sh", content: "#!/bin/sh\necho go\n", executable: true };
+  const k = W.createSkill("ws_two", { name: "Approve me", description: "Has a script", body: "# Approve me\n", files: [script] }).ref;
+  clearTimers();
+  await W.syncSkills("ws_two");
+  const shaGo = sha(Buffer.from(script.content));
+  // Approved in the Bops window: Orgo has it, with its path.
+  remote.calls = [];
+  W.approveScript("ws_two", shaGo);
+  await wait(() => remote.approvals.has(`p_two:${shaGo}`));
+  const posted = remote.calls.find((c) => c.method === "POST" && c.path === "/api/workspaces/p_two/skills/approvals");
+  assert.deepEqual(posted.body, { sha256: shaGo, path_hint: "scripts/go.sh" });
+  assert.equal(posted.auth, `Bearer ${ORGO_KEY}`, "the key Bops signed in with");
+  await wait(() => S.getState().workspaces.find((w) => w.id === "ws_two").approvals.find((a) => a.sha256 === shaGo)?.synced);
+  assert.equal(S.getState().workspaces.find((w) => w.id === "ws_two").approvals.find((a) => a.sha256 === shaGo).synced, true);
+  // Taken back: revoked on Orgo too.
+  W.approveScript("ws_two", shaGo, false);
+  await wait(() => !remote.approvals.has(`p_two:${shaGo}`));
+  assert.equal(remote.approvals.has(`p_two:${shaGo}`), false);
+  // A script in a draft Orgo hasn't got yet: unknown there, kept on disk, and sent once its skill went.
+  const late = { path: "scripts/late.sh", content: "#!/bin/sh\necho late\n", executable: true };
+  const d = W.createSkill("ws_two", { name: "Not there yet", description: "Draft", body: "# Not there yet\n", files: [late] }).ref;
+  clearTimers();
+  const shaLate = sha(Buffer.from(late.content));
+  remote.calls = [];
+  W.approveScript("ws_two", shaLate);
+  await wait(() => remote.calls.some((c) => c.path.endsWith("/approvals")));
+  assert.equal(remote.approvals.has(`p_two:${shaLate}`), false, "Orgo can't place it yet");
+  O.outboxForTests.writeAll();
+  const file = join(S.userDir(), "outbox", "skill-approvals.json");
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).entries.map((e) => [e.item.sha256, e.item.on]), [[shaLate, true]]);
+  clearTimers();
+  // Orgo down, then Bops quits: it goes at the next start's sync.
+  remote.failApprovals = true;
+  O.outboxForTests.restart();
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(remote.approvals.has(`p_two:${shaLate}`), false);
+  remote.failApprovals = false;
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(remote.approvals.has(`p_two:${shaLate}`), true, "sent after its skill's sync");
+  O.outboxForTests.writeAll();
+  assert.ok(!existsSync(file), "nothing left to send");
+  // Approved on orgo.ai: taken here. Revoked there: gone here.
+  remote.approvals.set(`p_two:${shaGo}`, { pid: "p_two", sha256: shaGo, path_hint: "scripts/go.sh", approved_by: "u_1", approved_at: new Date().toISOString() });
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(W.skillDetail("ws_two", "skill", k.slug).files[0].approved, true, "approved on orgo.ai: runs here");
+  remote.approvals.delete(`p_two:${shaGo}`);
+  clearTimers();
+  await W.syncSkills("ws_two");
+  assert.equal(W.skillDetail("ws_two", "skill", k.slug).files[0].approved, false, "revoked on orgo.ai: not here either");
+  // A key that isn't the person's Bops sign-in key: Orgo says session_required, and it stays on this Mac (said once).
+  remote.sessionOnly = true;
+  W.approveScript("ws_two", shaGo);
+  await wait(() => logged.some((l) => /only from a person signed in to Bops/.test(l)));
+  assert.equal(remote.approvals.has(`p_two:${shaGo}`), false);
+  assert.equal(W.skillDetail("ws_two", "skill", k.slug).files[0].approved, true, "still approved on this Mac");
+  O.outboxForTests.writeAll();
+  assert.ok(!existsSync(file), "not asked again");
+  remote.sessionOnly = false;
+  logged.splice(0, logged.length, ...logged.filter((l) => !/only from a person signed in to Bops/.test(l)));
+  W.approveScript("ws_two", shaGo, false);
+  for (const r2 of [k, d]) await W.deleteSkill("ws_two", "skill", r2.slug);
+  clearTimers();
 });
 
 /* ---------------- Programs: binary files ---------------- */

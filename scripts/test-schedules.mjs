@@ -30,7 +30,7 @@ const FAKES = {
   sessions: ["startSession"],
   analytics: ["trackServerEvent"],
   attention: ["pingIfWorthIt"],
-  persist: ["onPostgres", "onRunner"],
+  persist: ["onExit", "onPostgres", "onRunner"],
   phone: ["isOwner", "ownerPhone", "sendText", "textingLine"],
   mail: ["ownerAddresses", "sendEmail"],
   channels: ["postTo"],
@@ -510,7 +510,7 @@ globalThis.__fake = {
   },
   analytics: { trackServerEvent: () => {} },
   attention: { pingIfWorthIt: (...a) => fake.pings.push(a) },
-  persist: { onPostgres: () => false, onRunner: () => false },
+  persist: { onExit: () => {}, onPostgres: () => false, onRunner: () => false },
   phone: {
     isOwner: (n) => n === fake.ownerPhone,
     ownerPhone: () => fake.ownerPhone,

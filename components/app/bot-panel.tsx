@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { botChatId, BRAIN_NAMES, BRAINS_ON, brainOf, brainRuns, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
+import { appsStayLine, botChatId, BRAIN_NAMES, BRAINS_ON, brainOf, brainRuns, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
 import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
@@ -358,7 +358,7 @@ function Details({
         </button>
       </div>
 
-      {!b.isMain && <DeleteBot bot={b} />}
+      {!b.isMain && <DeleteBot bot={b} apps={appsStayLine(state, b)} />}
     </section>
   );
 }
@@ -447,8 +447,8 @@ function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppSta
   );
 }
 
-/** Deleting a bot takes its computer with it, so it asks once more, saying exactly that. */
-function DeleteBot({ bot: b }: { bot: Bot }) {
+/** Deleting a bot takes its computer with it, so it asks once more, saying exactly that (and that the apps it made stay, `apps`). */
+function DeleteBot({ bot: b, apps }: { bot: Bot; apps: string | null }) {
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -470,8 +470,8 @@ function DeleteBot({ bot: b }: { bot: Bot }) {
     <div className="motion-rise-in flex w-full flex-col gap-2.5 rounded-2xl bg-[#FEF3F2] px-4 py-3 shadow-[0_0_0_1px_#FECDCA]">
       <span className="text-[13px] leading-[18px] text-[#3A3A38]">
         {sharesComputer(b)
-          ? `Delete ${b.name}? Its chat, threads and routines go with it; the computer it works on stays. This can't be undone.`
-          : `Delete ${b.name}? Its computer, chat, threads and routines go with it. This can't be undone.`}
+          ? `Delete ${b.name}? Its chat, threads and routines go with it; the computer it works on stays.${apps ? ` ${apps}` : ""} This can't be undone.`
+          : `Delete ${b.name}? Its computer, chat, threads and routines go with it.${apps ? ` ${apps}` : ""} This can't be undone.`}
       </span>
       {error && <span className="text-[12px] text-[#B42318]">{error}</span>}
       <div className="flex gap-2">

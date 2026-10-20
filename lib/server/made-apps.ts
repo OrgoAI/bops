@@ -9,8 +9,9 @@ import { setting } from "./models";
 import { openaiClient } from "./openai-client";
 import { LIGHT } from "./routing";
 import { appList } from "./composio";
-import { addMessage, bot, getState, ownerName, sameState, update, userDir } from "./store";
+import { addMessage, bot, getState, ownerName, sameState, update } from "./store";
 import { recordTokens, usageTags } from "./usage";
+import { appDeleted, appFolder, appSaved, codeHere, dataHere, dataSaved, loadLocalApps, thisDevice, touched, versionSaved } from "./made-apps-sync";
 
 /**
  * Apps the bots make for the user: a small React app in one TSX file, asked for in a chat (make_app,
@@ -18,14 +19,15 @@ import { recordTokens, usageTags } from "./usage";
  *
  * - Each version's code is a file on this Mac (.data/users/<id>/made-apps/<app>/v<n>.tsx), and so is
  *   what the app keeps (data.json). The list and each app's state (building, its versions) are in the
- *   app state, so the app shows them as they change.
+ *   app state, so the app shows them as they change, and in made-apps/apps.json, this Mac's copy of it.
  * - A model wrote the code, so it runs locked down (app/api/made-apps/[appId]/view): sandboxed, with no
  *   storage of its own, and in the Mac app in a webview on a session where nothing but its page loads
  *   and WebRTC reaches nothing (desktop/app-frames.cjs). All it can reach is `window.bops`, which the
  *   window passes on to the bridge route: its own data, quick answers from a small model, and its bot
  *   (which only reads for it) once the user allows that, again after every new version.
- * - The list is this Mac's alone (state-merge.ts PER_MAC): the code and data are files here, so another
- *   Mac signed in to the same Bops doesn't list apps it can't open.
+ * - Orgo is the record (made-apps-sync.ts): every app, version and its data go there, so every Mac signed
+ *   in to the same Bops lists and opens them (code and data fetched the first time they're needed, then
+ *   kept here), and a lost Mac loses none. Never in Bops Cloud's shared state (state-merge.ts NEVER_SYNCED).
  * - Going back to a version is a change like any other (a new version with that code), so nothing is
  *   ever lost and Undo is the same thing.
  */
@@ -35,14 +37,19 @@ const BUILD_MODEL = () => setting("gpt-6.1-sol", "BOPS_APP_MODEL", "BOPS_CHAT_MO
 /** The code a build may write, and what an app may keep (both far more than a small app needs). */
 const MAX_CODE = 200_000;
 const MAX_DATA = 5_000_000;
-const dirOf = (appId: string) => {
-  const dir = userDir();
-  if (!dir) throw new Error("Sign in to Bops first.");
-  if (!/^app_[a-z0-9]+$/i.test(appId)) throw new Error("No such app.");
-  return join(dir, "made-apps", appId);
+const dirOf = appFolder;
+
+export const madeApp = (appId: string) => {
+  loadLocalApps();
+  return getState().madeApps?.find((a) => a.id === appId);
 };
 
-export const madeApp = (appId: string) => getState().madeApps?.find((a) => a.id === appId);
+/** An app's code at a version (its current one by default) on this Mac, fetched from Orgo first when only Orgo has it (made on another Mac). */
+export async function codeFor(appId: string, version?: number) {
+  const n = version ?? madeApp(appId)?.version;
+  if (n) await codeHere(appId, n);
+  return appCode(appId, n);
+}
 
 /** An app's code at a version (its current one by default), or null. */
 export function appCode(appId: string, version?: number) {
@@ -76,7 +83,7 @@ const RULES = (owner: string, maker: string, reach: string) =>
     "- Plain, short words in the UI. An empty state says what to do first.",
     "",
     "`window.bops` is all it can reach (every call is async):",
-    "- bops.data.get(key) → the value or null; bops.data.set(key, value) keeps any JSON value; bops.data.delete(key); bops.data.list(prefix?) → keys. Keep everything the user enters or the app works out here (localStorage and cookies are blocked); load it on start. It's the app's own, kept on their Mac, and it stays when the app changes.",
+    "- bops.data.get(key) → the value or null; bops.data.set(key, value) keeps any JSON value; bops.data.delete(key); bops.data.list(prefix?) → keys. Keep everything the user enters or the app works out here (localStorage and cookies are blocked); load it on start. It's the app's own, kept with their Bops on every Mac, and it stays when the app changes.",
     "- bops.ask(prompt, { json?: boolean }) → a quick answer from an AI model (a string, or parsed JSON with json: true): for summarizing, sorting, drafting, extracting. It has no tools and can't browse.",
     `- bops.bot(question, { json?: boolean }) → ${maker}, the bot that made the app, finds it out and answers: it can read ${reach}, ${owner}'s memory and the web. For anything from ${owner}'s own accounts or the live web ("the people who replied to my emails this week, as {\"people\":[{\"name\",\"email\",\"said\"}]}"). Ask for the result, not how to get it: it searches and reads on its own, and can't call APIs or fetch URLs you name. Say exactly what to return; with json: true ask for one JSON object. It's slow (10 to 60 seconds) and costs: call it when the user presses a button (Refresh) or when the kept result is a day old, never on every render; show that it's working, keep the result with bops.data and show the kept one at once. The first time (and again after each change to the app), ${owner} is asked to allow it; if they don't, it throws: show that plainly with a way to try again.`,
     "",
@@ -96,9 +103,11 @@ export function buildApp(botId: string, chatId: string, ask: { appId?: string; t
   if (ask.appId && !app) throw new Error("No such app.");
   if (!app) {
     const now = Date.now();
-    app = { id: newId(), title: ask.title?.trim().slice(0, 60) || "New app", botId, chatId, ws: workspaceOf(b), version: 0, versions: [], createdAt: now, updatedAt: now };
+    app = { id: newId(), title: ask.title?.trim().slice(0, 60) || "New app", botId, chatId, ws: workspaceOf(b), version: 0, versions: [], createdAt: now, updatedAt: now, deviceId: thisDevice() };
     const made = app;
     update((s) => void (s.madeApps ??= []).push(made));
+    // Its record goes to Orgo at once, building (version 0), so every Mac lists it.
+    appSaved(made);
   }
   const appId = app.id;
   const first = !app.version;
@@ -132,7 +141,9 @@ async function build(appId: string, botId: string, change: string, lineId: strin
     });
   try {
     if (await creditsOut()) throw new Error("Your AI credit is used up.");
-    const now = appCode(appId);
+    const now = await codeFor(appId);
+    // Changing one made on another Mac whose code couldn't be fetched: never a new app over it.
+    if (app.version && !now) throw new Error("Couldn't get its code from Orgo. Try again in a moment.");
     const input = now
       ? `The app "${app.title}" now:\n\n${now}\n\nChange it: ${change}\n\nAnswer with the whole new file.`
       : `Make the app "${app.title}": ${change}`;
@@ -153,7 +164,8 @@ async function build(appId: string, botId: string, change: string, lineId: strin
     }
     const bad = [...code.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1]).filter((m) => !MODULES.includes(m));
     if (bad.length) throw new Error(`It imports ${bad.join(", ")}, which apps can't use.`);
-    if (!ours()) return;
+    // Deleted meanwhile (here, or on another Mac): nothing is written for it.
+    if (!ours() || !madeApp(appId)) return;
     const n = (madeApp(appId)?.versions.at(-1)?.n ?? 0) + 1;
     const note = /^\s*\/\/\s*(.+)/.exec(code)?.[1]?.trim().slice(0, 120) || change.slice(0, 120);
     mkdirSync(dirOf(appId), { recursive: true });
@@ -161,12 +173,14 @@ async function build(appId: string, botId: string, change: string, lineId: strin
     set((a) => {
       a.version = n;
       a.versions.push({ n, note, at: Date.now() });
-      a.updatedAt = Date.now();
+      touched(a);
       delete a.building;
       delete a.error;
       // New code: the user is asked again before it may ask its bot.
       delete a.allowed;
     });
+    const built = madeApp(appId);
+    if (built) versionSaved(built, n);
     say(n === 1 ? `Made ${app.title}` : `${app.title} updated to v${n}`);
   } catch (e) {
     const why = noteOutOfCredit(e) ? "Your AI credit is used up." : (e as Error).message;
@@ -220,15 +234,15 @@ const runtime = (file: string) => {
   return runtimes.get(file)!;
 };
 
-/** The whole page for an app at a version (its current one by default), or null. */
-export function viewPage(appId: string, version?: number) {
+/** The whole page for an app at a version (its current one by default), or null; its code fetched from Orgo the first time it's opened here. */
+export async function viewPage(appId: string, version?: number) {
   const app = madeApp(appId);
-  const code = appCode(appId, version);
+  const code = await codeFor(appId, version);
   if (!app || !code) return null;
   return appPage(app.title, code, { react: runtime("react-19.2.8.js"), tailwind: runtime("tailwind-browser-4.3.3.js") });
 }
 
-/** Go back to a version: a new version with its code, so the one being left stays in the history. */
+/** Go back to a version: a new version with its code, so the one being left stays in the history. (The route fetches that version's code first, codeFor.) */
 export function goBack(appId: string, to: number) {
   const app = madeApp(appId);
   const code = appCode(appId, to);
@@ -236,23 +250,29 @@ export function goBack(appId: string, to: number) {
   if (app.building) throw new Error("It's being changed right now. Try again when that's done.");
   if (to === app.version) return app;
   const n = (app.versions.at(-1)?.n ?? 0) + 1;
+  mkdirSync(dirOf(appId), { recursive: true });
   writeFileSync(join(dirOf(appId), `v${n}.tsx`), code);
   update((s) => {
     const a = s.madeApps?.find((x) => x.id === appId);
     if (!a) return;
     a.version = n;
     a.versions.push({ n, note: `Back to v${to}`, at: Date.now() });
-    a.updatedAt = Date.now();
+    touched(a);
     delete a.error;
     delete a.allowed;
   });
-  return madeApp(appId);
+  const back = madeApp(appId);
+  if (back) versionSaved(back, n);
+  return back;
 }
 
+/** Delete an app: its files and its line here, and its record, versions and data in Orgo (the delete waits on disk until Orgo took it). */
 export function deleteApp(appId: string) {
-  if (!madeApp(appId)) return;
+  const app = madeApp(appId);
+  if (!app) return;
   rmSync(dirOf(appId), { recursive: true, force: true });
   update((s) => void (s.madeApps = s.madeApps?.filter((a) => a.id !== appId)));
+  appDeleted(app);
 }
 
 /* ---------------- What an app keeps ---------------- */
@@ -271,6 +291,8 @@ function writeData(appId: string, data: Record<string, unknown>) {
   if (text.length > MAX_DATA) throw new Error("This app's data is full (5 MB).");
   mkdirSync(dirOf(appId), { recursive: true });
   writeFileSync(join(dirOf(appId), "data.json"), text);
+  const app = madeApp(appId);
+  if (app) dataSaved(app);
 }
 
 /** A call the user hasn't allowed this app yet: the window asks them, and calls again if they do. */
@@ -328,6 +350,8 @@ export async function bridge(appId: string, method: string, args: Record<string,
   const app = madeApp(appId);
   if (!app) throw new Error("No such app.");
   const key = typeof args.key === "string" ? args.key.slice(0, 200) : "";
+  // What it keeps, as Orgo has it, before it reads or writes any (kept or changed on another Mac).
+  if (method.startsWith("data.")) await dataHere(appId);
   switch (method) {
     case "data.get":
       return readData(appId)[key] ?? null;

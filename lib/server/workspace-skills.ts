@@ -51,10 +51,16 @@ import { outbox } from "./sync-outbox";
  * in step with Orgo (syncSkills); otherwise they stay on this Mac. Every change here queues a sync (a new
  * draft too, and a bot taken off by its delete), and a sync Orgo didn't take is tried again after a
  * backoff. A delete goes to Orgo through an outbox kept with the user's folder (sync-outbox.ts), tried
- * again until Orgo took it, and a sync never brings back one still waiting there. A skill this Mac had
- * from Orgo's project (SkillRef.remotePid) that Orgo no longer lists was deleted there: it goes here too,
- * unless it changed here since the two last agreed (then it goes to Orgo again). The Mac keeps them in
- * step: a computer's runner never syncs or sends a delete.
+ * again until Orgo took it, and a sync never brings back one still waiting there. A sync reads only what
+ * changed in Orgo since the last one (?since=, kept per Mac in the workspace's folder) with Orgo's record
+ * of what was deleted since: one deleted there (on another Mac, on orgo.ai) goes here too, unless it
+ * changed here since the two last agreed (then it goes to Orgo again), so several Macs agree on what was
+ * deleted. Without a record (the first sync, one too old, an orgo-web without it) the whole list is read,
+ * and a skill this Mac had from Orgo's project (SkillRef.remotePid) that Orgo no longer lists is taken as
+ * deleted there the same way. Script approvals made here go to Orgo too (POST and DELETE
+ * …/skills/approvals with the person's Bops sign-in key, through an outbox kept on disk, after the skill's
+ * own sync so Orgo knows the script), and a sync takes approvals made or revoked on orgo.ai. The Mac keeps
+ * them in step: a computer's runner never syncs or sends a delete.
  */
 
 /** Skills (and apps) per workspace, as orgo-web allows. */
@@ -670,6 +676,7 @@ export function approveScript(wsId: string, sha256: string, on = true): ScriptAp
     const rest = (ws.approvals ?? []).filter((a) => a.sha256 !== sha256);
     ws.approvals = on ? [...rest, { sha256, path: where!.path, at: Date.now() }] : rest;
   });
+  approvalChanged(wsId, sha256, on, where?.path);
   return workspaceById(wsId)?.approvals ?? [];
 }
 
@@ -1034,6 +1041,8 @@ export function moveWorkspaceFolder(fromKey: string, toKey: string) {
 /* ---------------- In step with Orgo ---------------- */
 
 type RemoteSkill = { id: string; slug: string; name: string; description: string | null; type: string; status: string; bot_ids?: string[]; updated_at: string; current_version?: { version?: string } | null };
+/** One of Orgo's record of deletions (GET …/skills?since=): a skill deleted after `since`, never one live now. */
+type RemoteDeletion = { id: string; slug: string; type: string; deleted_at: string };
 
 const remoteType = (kind: SkillKind) => (kind === "app" ? "app" : "skill");
 // "software" is what an older orgo-web called an app.
@@ -1132,6 +1141,163 @@ export function skillDeletesOnStart() {
   void flushDeletes().catch((e: Error) => console.warn(`[skills] deletes: ${e.message}`));
 }
 
+/* ---------------- Script approvals, in step with Orgo ---------------- */
+
+/** An approval or a revoke still to send: the project, the script's sha256, and where it is. */
+type ApprovalChange = { pid: string; sha256: string; on: boolean; path?: string };
+/** Approvals and revokes Orgo hasn't taken yet, kept on disk until it does. */
+const approvalsOut = outbox<ApprovalChange>("skill-approvals", 2000);
+type RemoteApproval = { sha256: string; path_hint?: string | null; approved_at?: string };
+const g2 = globalThis as unknown as { bopsApprovalsTimer?: ReturnType<typeof setTimeout>; bopsApprovalsTries?: number; bopsApprovalsSaid?: boolean };
+
+/** An approval made or taken back here: sent to Orgo now (or once the script's skill is there). */
+function approvalChanged(wsId: string, sha256: string, on: boolean, path?: string) {
+  const pid = workspaceById(wsId)?.orgoProjectId;
+  if (!pid || routes.get(pid) === false || onRunner()) return;
+  approvalsOut.done(approvalsOut.waiting(wsId).filter((e) => e.item.sha256 === sha256).map((e) => e.id));
+  approvalsOut.add(wsId, { pid, sha256, on, ...(path ? { path: path.slice(0, 512) } : {}) });
+  void flushApprovals(wsId).catch((e: Error) => console.warn(`[skills] approvals: ${e.message}`));
+}
+
+/**
+ * Send a workspace's waiting approvals and revokes (every workspace's without one). An approval Orgo can't
+ * place yet (404 unknown_sha: the skill holding that script isn't on Orgo yet) waits for the skill's next
+ * sync; one Orgo didn't take for now is tried again after a backoff. The key must be the person's Bops
+ * sign-in key (orgo-web's session_required otherwise): one that isn't gives up, said in the log once. True
+ * when none is left waiting.
+ */
+async function flushApprovals(wsId?: string): Promise<boolean> {
+  let left = false;
+  for (const e of approvalsOut.waiting(wsId)) {
+    const a = e.item;
+    if (routes.get(a.pid) === false || workspaceById(e.wsId)?.orgoProjectId !== a.pid) {
+      approvalsOut.done([e.id]);
+      continue;
+    }
+    const r = a.on
+      ? await skillsCall<{ approval?: RemoteApproval; code?: string }>(a.pid, "/approvals", { method: "POST", body: { sha256: a.sha256, ...(a.path ? { path_hint: a.path } : {}) } })
+      : await skillsCall<{ code?: string }>(a.pid, `/approvals?sha256=${a.sha256}`, { method: "DELETE" });
+    const status = r?.status ?? null;
+    const code = typeof (r?.json as { code?: unknown } | undefined)?.code === "string" ? (r!.json as { code: string }).code : undefined;
+    if (status !== null && (status < 300 || (!a.on && status === 404))) {
+      approvalsOut.done([e.id]);
+      if (a.on) markApproval(e.wsId, a.sha256, true);
+      continue;
+    }
+    if (code === "session_required") {
+      if (!g2.bopsApprovalsSaid) console.warn("[skills] Orgo takes script approvals only from a person signed in to Bops; this key isn't, so they stay on this Mac");
+      g2.bopsApprovalsSaid = true;
+      approvalsOut.done([e.id]);
+      continue;
+    }
+    // The script's skill isn't on Orgo yet: tried again once it is (after its sync, and the backoff).
+    if (code === "unknown_sha" || forNow(status)) {
+      left = true;
+      continue;
+    }
+    console.warn(`[skills] Orgo answered ${status} to ${a.on ? "an approval" : "a revoke"}; not asked again`);
+    approvalsOut.done([e.id]);
+  }
+  if (left) approvalsLater();
+  else g2.bopsApprovalsTries = 0;
+  return !left;
+}
+
+function approvalsLater() {
+  if (g2.bopsApprovalsTimer) return;
+  const n = (g2.bopsApprovalsTries = (g2.bopsApprovalsTries ?? 0) + 1);
+  g2.bopsApprovalsTimer = setTimeout(
+    () => {
+      g2.bopsApprovalsTimer = undefined;
+      void flushApprovals().catch((e: Error) => console.warn(`[skills] approvals: ${e.message}`));
+    },
+    Math.min(DELETE_RETRY_MS * 2 ** (n - 1), DELETE_RETRY_MAX_MS),
+  );
+  g2.bopsApprovalsTimer.unref?.();
+}
+
+/** Orgo has this approval (`on`), or not. */
+function markApproval(wsId: string, sha256: string, on: boolean) {
+  update((s) => {
+    const x = s.workspaces?.find((w) => w.id === wsId)?.approvals?.find((y) => y.sha256 === sha256);
+    if (x) x.synced = on || undefined;
+  });
+}
+
+/**
+ * Orgo's approvals here (GET …/skills/approvals): one made on orgo.ai is taken, one Orgo had and no longer
+ * lists was revoked there and goes here too, one made here that Orgo never had is sent. What waits to be
+ * sent from here stands.
+ */
+async function pullApprovals(wsId: string, pid: string) {
+  const got = await skillsCall<{ approvals?: RemoteApproval[] }>(pid, "/approvals");
+  if (!got || got.status !== 200 || !Array.isArray(got.json.approvals)) return;
+  const there = new Map(got.json.approvals.filter((a) => typeof a?.sha256 === "string").map((a) => [a.sha256, a]));
+  const waiting = new Set(approvalsOut.waiting(wsId).map((e) => e.item.sha256));
+  const mine = workspaceById(wsId)?.approvals ?? [];
+  const send: ScriptApproval[] = [];
+  const kept: ScriptApproval[] = [];
+  for (const a of mine) {
+    if (waiting.has(a.sha256)) kept.push(a);
+    else if (there.has(a.sha256)) kept.push(a.synced ? a : { ...a, synced: true });
+    // Orgo had it and doesn't now: revoked there. Never had it: sent.
+    else if (!a.synced) {
+      kept.push(a);
+      send.push(a);
+    }
+  }
+  for (const [sha, a] of there)
+    if (!waiting.has(sha) && !kept.some((x) => x.sha256 === sha)) kept.push({ sha256: sha, path: (a.path_hint ?? "").slice(0, 512), at: Date.parse(a.approved_at ?? "") || Date.now(), synced: true });
+  if (kept.length !== mine.length || kept.some((x, i) => x !== mine[i]))
+    update((s) => {
+      const ws = s.workspaces?.find((w) => w.id === wsId);
+      if (ws) ws.approvals = kept;
+    });
+  // Not with a key Orgo takes no approvals from (said once): they stay here.
+  if (!g2.bopsApprovalsSaid) for (const a of send) approvalChanged(wsId, a.sha256, true, a.path);
+}
+
+/* ---------------- What a sync reads ---------------- */
+
+/** The time of this Mac's last whole sync of a workspace with Orgo (orgo-web's `at`), kept in its folder for ?since=. */
+const sinceFile = (wsId: string) => {
+  const dir = workspaceDir(wsId);
+  return dir ? join(/*turbopackIgnore: true*/ dir, ".orgo-since.json") : null;
+};
+function sinceOf(wsId: string, pid: string): string | undefined {
+  const file = sinceFile(wsId);
+  try {
+    const s = file && existsSync(/*turbopackIgnore: true*/ file) ? (JSON.parse(readFileSync(/*turbopackIgnore: true*/ file, "utf8")) as { pid?: string; at?: string }) : null;
+    return s?.pid === pid && typeof s.at === "string" ? s.at : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function keepSince(wsId: string, pid: string, at: string) {
+  const file = sinceFile(wsId);
+  if (!file) return;
+  try {
+    mkdirSync(/*turbopackIgnore: true*/ dirname(file), { recursive: true });
+    writeFileSync(/*turbopackIgnore: true*/ `${file}.tmp`, JSON.stringify({ pid, at }), { mode: 0o600 });
+    renameSync(/*turbopackIgnore: true*/ `${file}.tmp`, file);
+  } catch (e) {
+    console.warn(`[skills] keeping when the last sync was: ${(e as Error).message}`);
+  }
+}
+
+/** A skill as Orgo had it when the two last agreed: what an answer of only what changed leaves out of it. */
+const asLastSeen = (r: SkillRef): RemoteSkill => ({
+  id: r.remoteId!,
+  slug: r.slug,
+  name: r.name,
+  description: r.description,
+  type: remoteType(r.kind),
+  status: r.status,
+  bot_ids: r.botIds,
+  updated_at: r.remoteAt!,
+  current_version: r.remoteVersion ? { version: r.remoteVersion } : null,
+});
+
 /** What a skill's folder sends Orgo: its SKILL.md text and files, a binary file (a program) as content_base64. */
 function payloadOf(wsId: string, r: SkillRef) {
   const b = r.version ? (readBundle(versionDir(wsId, r.kind, r.slug, r.version)) ?? readBundle(skillDir(wsId, r.kind, r.slug))) : readBundle(skillDir(wsId, r.kind, r.slug));
@@ -1190,7 +1356,9 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
   // Deletes waiting go first: a sync never brings back one Orgo hasn't taken yet.
   skillDeletesOnStart();
   if (!(await flushDeletes(wsId))) res.retry = true;
-  const got = await skillsCall<{ skills?: RemoteSkill[] }>(pid, "");
+  // Only what changed since the last whole sync, with Orgo's record of what was deleted since.
+  const since = sinceOf(wsId, pid);
+  const got = await skillsCall<{ skills?: RemoteSkill[]; deleted?: RemoteDeletion[]; full?: boolean; at?: string }>(pid, since ? `?since=${encodeURIComponent(since)}` : "");
   if (!got || forNow(got.status)) return { ...res, retry: true };
   if (got.status === 404 || got.status === 405 || !Array.isArray(got.json.skills)) {
     if (got.status === 404 || got.status === 405) routes.set(pid, false);
@@ -1198,10 +1366,38 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
   }
   routes.set(pid, true);
   res.mode = "orgo";
+  const changed = got.json.skills;
+  // Deleted on Orgo (another Mac, orgo.ai), as its record says: here too, unless it changed here since the
+  // two last agreed: then it goes to Orgo again, as a new one.
+  for (const d of Array.isArray(got.json.deleted) ? got.json.deleted : []) {
+    if (!d || typeof d.id !== "string" || changed.some((x) => x.id === d.id)) continue;
+    const r = refsOf(wsId).find((x) => x.remoteId === d.id && (x.remotePid ?? pid) === pid);
+    if (!r) continue;
+    if (r.syncedAt && r.updatedAt <= r.syncedAt) {
+      dropLocal(wsId, r.kind, r.slug);
+      res.removed = (res.removed ?? 0) + 1;
+    } else patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteId = undefined), (x.remotePid = undefined), (x.remoteAt = undefined), (x.remoteVersion = undefined), (x.syncedAt = undefined)));
+  }
+  // An answer of only what changed holds every skill here that changed there; the rest are as Orgo had them
+  // when the two last agreed. One this Mac can't place that way (never sent, or from before remoteVersion)
+  // needs the whole list.
+  let listed = changed;
+  if (got.json.full === false) {
+    const ids = new Set(changed.map((x) => x.id));
+    const lastSeen = (r: SkillRef) => !!r.remoteId && (r.remotePid ?? pid) === pid && !!r.syncedAt && !!r.remoteAt && r.remoteVersion !== undefined;
+    const here = refsOf(wsId);
+    if (here.every((r) => (r.remoteId && ids.has(r.remoteId)) || lastSeen(r))) listed = [...changed, ...here.filter((r) => !(r.remoteId && ids.has(r.remoteId))).map(asLastSeen)];
+    else {
+      const all = await skillsCall<{ skills?: RemoteSkill[] }>(pid, "");
+      if (!all || forNow(all.status)) return { ...res, retry: true };
+      if (!Array.isArray(all.json.skills)) return res;
+      listed = all.json.skills;
+    }
+  }
   // Deleted here and not taken by Orgo yet: as if Orgo hadn't them (never matched, never brought here).
   const waiting = deletes.waiting(wsId).filter((e) => e.item.pid === pid);
   const goneHere = (x: RemoteSkill) => waiting.some((e) => (e.item.remoteId ? e.item.remoteId === x.id : e.item.slug === x.slug && e.item.kind === localKind(x.type)));
-  const remote = got.json.skills.filter((x) => !goneHere(x));
+  const remote = listed.filter((x) => !goneHere(x));
   const local = refsOf(wsId);
   for (const r of local) {
     // Its Orgo id is this project's (one kept from before remotePid was: taken to be).
@@ -1225,7 +1421,8 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
         if (made?.status === 201 && made.json.skill?.id) {
           const id = made.json.skill.id;
           const at = made.json.skill.updated_at;
-          patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteId = id), (x.remotePid = pid), (x.remoteAt = at), (x.syncedAt = Date.now())));
+          const version = made.json.skill.current_version?.version ?? r.version ?? "";
+          patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteId = id), (x.remotePid = pid), (x.remoteAt = at), (x.remoteVersion = version), (x.syncedAt = Date.now())));
           res.pushed++;
         } else {
           res.failed++;
@@ -1238,6 +1435,8 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
       const changedThere = there.updated_at !== r.remoteAt;
       const changedHere = !r.syncedAt || r.updatedAt > r.syncedAt;
       if (r.remoteId !== there.id || r.remotePid !== pid) patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteId = there.id), (x.remotePid = pid)));
+      // In step: Orgo's version as it is, for a sync that reads only what changed (one from before it kept this).
+      if (!changedThere && !changedHere && r.remoteVersion !== (there.current_version?.version ?? "")) patchRef(wsId, r.kind, r.slug, (x) => void (x.remoteVersion = there.current_version?.version ?? ""));
       if (changedThere && (!changedHere || remoteAt >= r.updatedAt)) {
         if (await pull(wsId, pid, there, r)) res.pulled++;
         else res.failed++;
@@ -1248,9 +1447,16 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
         if (p?.status === 200) {
           // What Orgo says now (after the version too), as last seen.
           const now = v ? await skillsCall<{ skills?: RemoteSkill[] }>(pid, "") : null;
-          const at = now?.json.skills?.find((x) => x.id === there.id)?.updated_at ?? p.json.skill?.updated_at ?? new Date().toISOString();
-          patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteAt = at), (x.syncedAt = Date.now())));
+          const after = now?.json.skills?.find((x) => x.id === there.id);
+          const at = after?.updated_at ?? p.json.skill?.updated_at ?? new Date().toISOString();
+          const version = after?.current_version?.version ?? (v ? r.version : (p.json.skill?.current_version?.version ?? there.current_version?.version)) ?? "";
+          patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteAt = at), (x.remoteVersion = version), (x.syncedAt = Date.now())));
           res.pushed++;
+        } else if (p?.status === 404) {
+          // Gone from Orgo with no record of it (an orgo-web from before the record): changed here since,
+          // so it goes back to Orgo as a new one at the next try.
+          patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteId = undefined), (x.remotePid = undefined), (x.remoteAt = undefined), (x.remoteVersion = undefined), (x.syncedAt = undefined)));
+          res.retry = true;
         } else {
           res.failed++;
           if (forNow(p?.status ?? null)) res.retry = true;
@@ -1269,6 +1475,12 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
     if (await pull(wsId, pid, x)) res.pulled++;
     else res.failed++;
   }
+  // Every skill went both ways: the next sync reads only what changed after this one's read.
+  if (!res.retry && !res.failed && typeof got.json.at === "string") keepSince(wsId, pid, got.json.at);
+  // Script approvals: this Mac's go once their skills are there (one Orgo can't place yet is tried again
+  // with the next sync), and orgo.ai's come here.
+  if (!(await flushApprovals(wsId))) res.retry = true;
+  await pullApprovals(wsId, pid).catch((e: Error) => console.warn(`[skills] approvals from Orgo: ${e.message}`));
   return res;
 }
 
@@ -1329,6 +1541,7 @@ async function pull(wsId: string, pid: string, x: RemoteSkill, into?: SkillRef):
         r.remoteId = x.id;
         r.remotePid = pid;
         r.remoteAt = x.updated_at;
+        r.remoteVersion = said ?? "";
         r.updatedAt = Date.parse(x.updated_at) || Date.now();
         r.syncedAt = Math.max(Date.now(), r.updatedAt);
       });
@@ -1349,6 +1562,7 @@ async function pull(wsId: string, pid: string, x: RemoteSkill, into?: SkillRef):
       r.remoteId = x.id;
       r.remotePid = pid;
       r.remoteAt = x.updated_at;
+      r.remoteVersion = said ?? "";
       r.updatedAt = Date.parse(x.updated_at) || r.updatedAt;
       r.syncedAt = Math.max(Date.now(), r.updatedAt);
     });
