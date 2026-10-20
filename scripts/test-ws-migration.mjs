@@ -8,8 +8,10 @@
 // the account is new (both ways of the gate); run again it changes nothing; stopped after any call it resumes to
 // the same end; a rollback deletes only the empty projects it made, and a refused delete leaves it whole. New
 // workspace, Rename (orgo.ai's renames come here too) and Delete (a preview of what goes, then orgo-web's POST
-// .../delete; a refusal keeps the workspace whole; the default can't be) follow it; keys are this workspace's or
-// all workspaces'. orgo-web is a fake (a local server) with the real routes, the Keychain is never there, and the
+// .../delete; a refusal keeps the workspace whole; the default can't be; Orgo not answering or no one signed
+// in deletes nothing, and the brains stay until Orgo deleted it) follow it; keys are this workspace's or all
+// workspaces'. A workspace with no Orgo project gets one at start and at sign-in (the default's "bops" one
+// made when the account has none), tried again while Orgo can't make it, and then sends its routines in full. orgo-web is a fake (a local server) with the real routes, the Keychain is never there, and the
 // state lives in a throwaway folder: nothing reaches a real service.
 // Usage: node --conditions=react-server scripts/test-ws-migration.mjs
 import assert from "node:assert/strict";
@@ -81,7 +83,8 @@ process.on("unhandledRejection", (e) => rejections.push(String(e?.stack ?? e)));
  * `previewCounts`: delete-preview counts skills and apps (orgo-web's first build, 563ed1cf6) instead of
  * naming them as orgo-web does now. `skillsOf`: per project, its public.skills rows ({ name, slug, type }).
  */
-const orgo = { modern: false, columnOnly: false, projects: [], computers: new Map(), secrets: [], calls: [], changes: 0, failAt: 0, seq: 0, clock: 0, apps: null, refuseDelete: new Set(), noPreview: false, previewCounts: false, skillsOf: {} };
+const orgo = { modern: false, columnOnly: false, projects: [], computers: new Map(), secrets: [], calls: [], changes: 0, failAt: 0, seq: 0, clock: 0, apps: null, refuseDelete: new Set(), noPreview: false, previewCounts: false, skillsOf: {}, failCreate: new Set(), listDown: false };
+// `failCreate`: project names POST /api/workspaces answers 500 for (made nothing). `listDown`: GET /api/workspaces answers 503.
 // `columnOnly`: the migration is applied (GET answers every column, so `product` shows) but the routes are still today's.
 const stamp = () => new Date(Date.UTC(2026, 9, 15) + ++orgo.clock * 1000).toISOString();
 const project = (p) => ({ id: p.id, name: p.name, role: "owner", created_at: p.created_at, updated_at: p.updated_at, member_count: 1, desktops: [...orgo.computers.values()].filter((c) => c.project === p.id).map((c) => ({ id: c.id, name: c.name })), ...(orgo.modern || orgo.columnOnly ? { product: p.product, bops_ws_id: p.bops_ws_id ?? null } : {}) });
@@ -96,6 +99,8 @@ function world({ modern, columnOnly = false }) {
   orgo.noPreview = false;
   orgo.previewCounts = false;
   orgo.skillsOf = {};
+  orgo.failCreate = new Set();
+  orgo.listDown = false;
   orgo.projects = [
     { id: "p_bops", name: "bops", product: "bops", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
     // An older Bops one by name (another case): the free computer decides which is the default's.
@@ -143,9 +148,10 @@ const server = createServer(async (req, res) => {
   };
   // /api/workspaces is orgo-web's alias of /api/projects (next.config rewrites).
   const p = url.pathname.replace(/^\/api\/projects(?=\/|$)/, "/api/workspaces");
-  if (p === "/api/workspaces" && req.method === "GET") return send(res, 200, { workspaces: orgo.projects.map(project) });
+  if (p === "/api/workspaces" && req.method === "GET") return orgo.listDown ? send(res, 503, { error: "Database unavailable" }) : send(res, 200, { workspaces: orgo.projects.map(project) });
   if (p === "/api/workspaces" && req.method === "POST") {
     const name = String(body?.name ?? "").trim();
+    if (orgo.failCreate.has(name)) return send(res, 500, { error: "boom" });
     if (orgo.modern && body?.bops_ws_id) {
       const had = orgo.projects.find((x) => x.bops_ws_id === body.bops_ws_id);
       if (had) return changed(200, { id: had.id, name: had.name, product: had.product, bops_ws_id: had.bops_ws_id, updated_at: had.updated_at });
@@ -253,6 +259,9 @@ const server = createServer(async (req, res) => {
     return send(res, 200, { status: 200, contentType: "application/json", body: { used: used ? (used.workspace_id ? "workspace" : "account") : "none" }, truncated: false, headers: {} });
   }
   if (p.includes("/skills")) return html404(res);
+  // The routines mirror (routine-sync.ts): taken, and answered with their Orgo ids.
+  const routinesOf = p.match(/^\/api\/workspaces\/([^/]+)\/routines$/);
+  if (routinesOf && req.method === "PUT") return send(res, 200, { routines: (body?.routines ?? []).map((r) => ({ id: `rt_${r.bopsId}`, bopsId: r.bopsId })) });
   return send(res, 404, { error: `fake orgo-web has no ${req.method} ${p}` });
 });
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -913,6 +922,126 @@ await check("The name bops stays the default's: once its project took the user's
   // The default may take bops back.
   assert.deepEqual(await (await Route.PATCH(req("PATCH", { id: "ws_main", name: "bops" }))).json(), { ok: true });
   assert.equal(byId("p_bops").name, "bops");
+});
+
+await check("A workspace with no Orgo project gets one at start: the default's bops project made when the account has none, the rest under their names; one Orgo can't make is tried again; then its routines go in full", async () => {
+  const RS = await import(`${root}/lib/server/routine-sync.ts`);
+  world({ modern: true });
+  seed();
+  // An account whose bots never needed a computer: no Bops project at all yet (and no free computer).
+  orgo.projects = orgo.projects.filter((p) => p.product !== "bops");
+  for (const c of [...orgo.computers.values()]) if (c.project !== "p_orgo") orgo.computers.delete(c.id);
+  S.update((s) => {
+    for (const b of s.bots) {
+      delete b.computerId;
+      delete b.freeComputer;
+      b.computerStatus = "none";
+    }
+    s.routines = [{ id: "rtn_quiet", botId: "quinn", title: "Check", goal: "Check it.", schedule: { kind: "daily", time: "08:00" }, enabled: true }];
+  });
+  // Orgo can't make Quiet's yet.
+  orgo.failCreate.add("Quiet");
+  Wk.projectBindingForTests.reset();
+  RS.routineSyncForTests.reset();
+  const before = warned.length;
+  Wk.startProjectBinding();
+  const bound = await Wk.bindMissingProjects();
+  assert.deepEqual(bound.sort(), ["ws_busy", "ws_free", "ws_main", "ws_orgo"].sort());
+  const mainProject = byId(ws("ws_main").orgoProjectId);
+  assert.deepEqual([mainProject?.name, mainProject?.product, mainProject?.bops_ws_id], ["bops", "bops", "ws_main"], "the default's bops project, made as its first computer would");
+  assert.equal(byId(ws("ws_orgo").orgoProjectId)?.name, "orgo (Bops)", "a name Orgo has gets (Bops)");
+  assert.equal(ws("ws_quiet").orgoProjectId, undefined, "Orgo couldn't make it");
+  assert.ok(Wk.projectBindingForTests.retrying(), "tried again after a backoff");
+  assert.ok(warned.slice(before).some((w) => /no Orgo project for ws_quiet yet/.test(w)));
+  warned.splice(before);
+  // Once a start: a second poll asks nothing more of Orgo's projects.
+  const asks = () => orgo.calls.filter((c) => c.path === "/api/workspaces" || c.path === "/api/projects").length;
+  const n = asks();
+  Wk.startProjectBinding();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(asks(), n);
+  // Orgo makes it now (the retry, run here at once): bound, and its routines go in full, with deleteMissing.
+  orgo.failCreate.clear();
+  RS.routineSyncForTests.reset();
+  orgo.calls = [];
+  assert.deepEqual(await Wk.bindMissingProjects(), ["ws_quiet"]);
+  const quiet = ws("ws_quiet").orgoProjectId;
+  assert.equal(byId(quiet)?.name, "Quiet");
+  assert.equal(byId(quiet)?.bops_ws_id, "ws_quiet");
+  assert.equal(Wk.projectBindingForTests.retrying(), true, "the earlier timer is still set; it finds nothing to do");
+  // What it has goes a moment after (afterBind), with the routines' 2 second gather: sent here at once.
+  await new Promise((r) => setTimeout(r, 100));
+  await RS.routineSyncForTests.flushAll();
+  const put = orgo.calls.find((c) => c.method === "PUT" && c.path === `/api/projects/${quiet}/routines`);
+  assert.ok(put, orgo.calls.map((c) => `${c.method} ${c.path}`).join(", "));
+  assert.equal(put.body.deleteMissing, true);
+  assert.deepEqual(put.body.routines.map((r) => r.bopsId), ["rtn_quiet"]);
+  // All bound: nothing more is asked.
+  orgo.calls = [];
+  assert.deepEqual(await Wk.bindMissingProjects(), []);
+  assert.equal(orgo.calls.length, 0);
+  Wk.projectBindingForTests.reset();
+  RS.routineSyncForTests.reset();
+  S.update((s) => (s.routines = []));
+});
+
+await check("Delete: Orgo not answering, or no one signed in, deletes nothing (never this Mac alone); the brains stay until Orgo deleted it", async () => {
+  world({ modern: true });
+  seed();
+  assert.equal((await Wk.migrateWorkspacesToOrgo()).status, "done");
+  const quiet = ws("ws_quiet").orgoProjectId;
+  S.update((s) => (s.brains = [{ id: "brn_quiet", kind: "claude_code", name: "Claude Code", auth: "plan", bots: ["quinn"], workspaceId: "ws_quiet", createdAt: 1 }]));
+  // Orgo doesn't answer (nothing known about it yet in this run).
+  globalThis.bopsOrgoPerWorkspace = undefined;
+  orgo.listDown = true;
+  const down = await Route.DELETE(req("DELETE", { id: "ws_quiet" }));
+  assert.equal(down.status, 502);
+  assert.match((await down.json()).error, /^Couldn't reach Orgo to delete Quiet, so it's still here/);
+  assert.ok(ws("ws_quiet") && byId(quiet), "here and on Orgo");
+  assert.ok(S.bot("quinn"));
+  assert.deepEqual((S.getState().brains ?? []).map((x) => x.id), ["brn_quiet"], "its brain too");
+  // Orgo refusing leaves the brain as well.
+  orgo.listDown = false;
+  orgo.refuseDelete.add(quiet);
+  assert.equal((await Route.DELETE(req("DELETE", { id: "ws_quiet" }))).status, 502);
+  assert.deepEqual((S.getState().brains ?? []).map((x) => x.id), ["brn_quiet"]);
+  orgo.refuseDelete.clear();
+  // Signed out: nothing deleted either.
+  globalThis.bopsOrgoKey = null;
+  globalThis.bopsOrgoKeyMissAt = Date.now();
+  try {
+    const out = await Route.DELETE(req("DELETE", { id: "ws_quiet" }));
+    assert.equal(out.status, 401);
+    assert.match((await out.json()).error, /^Sign in to Orgo to delete Quiet/);
+    assert.ok(ws("ws_quiet") && byId(quiet));
+  } finally {
+    globalThis.bopsOrgoKey = ORGO_KEY;
+  }
+  // Orgo answering: deleted there and here, and then the brain.
+  assert.equal((await Route.DELETE(req("DELETE", { id: "ws_quiet" }))).status, 200);
+  assert.equal(ws("ws_quiet"), undefined);
+  assert.equal(byId(quiet), undefined);
+  assert.deepEqual(S.getState().brains ?? [], []);
+});
+
+await check("Deleting a bot takes its channels with it (no listener or token left), as Orgo's map drops them", async () => {
+  const BS = await import(`${root}/lib/server/bops-sync.ts`);
+  world({ modern: true });
+  seed();
+  assert.equal((await Wk.migrateWorkspacesToOrgo()).status, "done");
+  S.update((s) => {
+    s.channels = [
+      { id: "ch_max_tg", kind: "telegram", botId: "max", handle: "@max_bot", pairCode: "123456", status: "live", at: 1 },
+      { id: "ch_max_slack", kind: "slack", botId: "max", handle: "Acme", pairCode: "234567", status: "live", at: 1 },
+      { id: "ch_boppy_tg", kind: "telegram", botId: "boppy", handle: "@boppy_bot", pairCode: "345678", status: "live", at: 1 },
+    ];
+  });
+  assert.deepEqual(BS.bopsMapPayload("ws_main").resources.filter((r) => r.kind === "channel").map((r) => r.ref).sort(), ["ch_boppy_tg", "ch_max_slack", "ch_max_tg"]);
+  await Rm.deleteBot("max");
+  assert.equal(S.bot("max"), undefined);
+  assert.deepEqual((S.getState().channels ?? []).map((c) => c.id), ["ch_boppy_tg"], "its channels went, another bot's stayed");
+  assert.deepEqual(BS.bopsMapPayload("ws_main").resources.filter((r) => r.kind === "channel").map((r) => r.ref), ["ch_boppy_tg"]);
+  S.update((s) => (s.channels = []));
 });
 
 await check("Nothing unexpected: no stray warnings or rejections", async () => {

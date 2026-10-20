@@ -11,7 +11,8 @@ import { getState, stateReady, stateTooNew, watchChanges } from "./store";
  * (workBot: its own, or its main bot's), what it owns (its phone line, its inbox, the channels it's in)
  * and what the workspace has (its Connected App accounts, the logins its bots may use, its phone line),
  * and the watches. Orgo wakes the computer of the bot whose routine comes due by it (runner.ts). Names
- * and ids only: no key, password or token is ever in it.
+ * and ids only: no key, password or token is ever in it. Each bot carries the names of the vault keys it
+ * may use (Bot.keys: `keys`, orgo-web's bops_bots.secret_names), never a value.
  *
  * The same rules as routine-sync.ts: Bops stays the source and nothing waits on Orgo. A workspace whose
  * map changed sends the whole of it SYNC_DEBOUNCE_MS after the last change in a burst (PUT
@@ -19,7 +20,9 @@ import { getState, stateReady, stateTooNew, watchChanges } from "./store";
  * now (no answer, 401, 403, 408, 429, 5xx) is sent again after a backoff; one it refused (a 400) waits for
  * the next change. One flush per workspace at a time. An Orgo without the route (404 or 405) is asked
  * again at most once every 6 hours. Runs on the signed-in Orgo key; signed out, nothing is sent. The map
- * is the Mac's: a computer's Bops runner never sends it.
+ * is the Mac's: a computer's Bops runner never sends it. orgo-web takes at most CAPS of each list in one
+ * PUT and replaces the whole map with it: past a cap the rest is cut (said in the log; orgo-web's follow-up
+ * is a paged PUT), so the same ones are cut each time.
  */
 
 export const SYNC_DEBOUNCE_MS = 2_000;
@@ -29,10 +32,10 @@ const RETRY_MAX_MS = 30 * 60_000;
 const TIMEOUT_MS = 15_000;
 /** orgo-web's caps (lib/bops-map/body.ts MAP_LIMITS): the most of each one PUT sends, and the longest text in each field. */
 const CAPS = { bots: 200, resources: 2000, watches: 500 };
-const MAX = { id: 128, name: 200, role: 500, ref: 256, app: 128, lookFor: 2000, url: 2048, everyMin: 10080 };
+const MAX = { id: 128, name: 200, role: 500, ref: 256, app: 128, lookFor: 2000, url: 2048, everyMin: 10080, keys: 200, keyName: 128 };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export type MapBot = { bopsId: string; name: string; role: string; isMain: boolean; computer: "own" | "shared"; desktopId: string | null; brain?: string };
+export type MapBot = { bopsId: string; name: string; role: string; isMain: boolean; computer: "own" | "shared"; desktopId: string | null; brain?: string; keys: string[] };
 export type MapResource = { kind: "app" | "login" | "phone" | "inbox" | "channel"; ref: string; name: string; app?: string; status?: string; ownerBotId?: string };
 export type MapWatch = { bopsId: string; botId: string; kind: "screen" | "page" | "mac"; site: string; lookFor: string; url?: string; everyMin?: number; paused: boolean };
 export type BopsMap = { bots: MapBot[]; resources: MapResource[]; watches: MapWatch[] };
@@ -46,6 +49,7 @@ const g = globalThis as unknown as {
   __bopsMapSeen?: Map<string, string>;
   __bopsMapSoon?: ReturnType<typeof setTimeout>;
   __bopsMapStarted?: boolean;
+  __bopsMapCutSaid?: Set<string>;
 };
 const pending = (g.__bopsMapSync ??= new Map());
 const missing = (g.__bopsMapSyncMissing ??= new Map());
@@ -78,6 +82,8 @@ export function bopsMapPayload(wsId: string, s: AppState = getState()): BopsMap 
       computer: sharesComputer(b) ? "shared" : "own",
       desktopId: desktop && UUID.test(desktop) ? desktop.toLowerCase() : null,
       ...(keeps(brain, MAX.id) ? { brain } : {}),
+      // Always said, so a key taken away goes from Orgo's copy too (an empty list is none).
+      keys: [...new Set(b.keys ?? [])].filter((k) => keeps(k, MAX.keyName)).sort().slice(0, MAX.keys),
     };
   });
 
@@ -128,7 +134,17 @@ export function bopsMapPayload(wsId: string, s: AppState = getState()): BopsMap 
       paused: !!w.paused,
     });
   }
+  const cut = [team.length > CAPS.bots && `${team.length} bots (Orgo takes ${CAPS.bots})`, resources.length > CAPS.resources && `${resources.length} resources (${CAPS.resources})`, watches.length > CAPS.watches && `${watches.length} watches (${CAPS.watches})`].filter(Boolean);
+  if (cut.length) warnCut(wsId, cut.join(", "));
   return { bots, resources: resources.slice(0, CAPS.resources), watches: watches.slice(0, CAPS.watches) };
+}
+
+/** Said once per workspace and run of Bops (the map is built on every look). */
+function warnCut(wsId: string, what: string) {
+  const said = (g.__bopsMapCutSaid ??= new Set());
+  if (said.has(`${wsId}:${what}`)) return;
+  said.add(`${wsId}:${what}`);
+  console.warn(`[bops-sync] ${wsId}: ${what}; the rest isn't in Orgo's copy`);
 }
 
 /* ---------------- Sending ---------------- */

@@ -15,6 +15,7 @@ import { startComputerChecks } from "@/lib/server/sessions";
 import { startRunsOn } from "@/lib/server/runner";
 import { startBopsSync } from "@/lib/server/bops-sync";
 import { startRunnerInstalls } from "@/lib/server/runner-install";
+import { startProjectBinding } from "@/lib/server/workspaces";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +26,8 @@ export const dynamic = "force-dynamic";
  * Bops Cloud's tunnel if the server's start didn't (the Keychain gave the key only later), the look
  * at the bots' computers on Orgo (one deleted there since is replaced), asking Orgo where the bots
  * work (runner.ts), which says which routines are this Mac's, the map of the bots in each Orgo
- * workspace (bops-sync.ts), and the runners on the bots' computers (runner-install.ts).
+ * workspace (bops-sync.ts), the runners on the bots' computers (runner-install.ts), and an Orgo project
+ * for each workspace that has none yet (workspaces.ts startProjectBinding).
  */
 export async function GET(request: Request) {
   ensureCloud();
@@ -37,6 +39,7 @@ export async function GET(request: Request) {
   startRunsOn();
   startBopsSync();
   startRunnerInstalls();
+  startProjectBinding();
   const have = new URL(request.url).searchParams.get("v");
   const version = getVersion();
   if (have !== null && Number(have) === version) return Response.json({ version });

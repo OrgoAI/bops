@@ -6,6 +6,7 @@ import { accessIsDefault, levelOf, workspaceOf, type AccessUse, type AppAccount,
 import { onRunner } from "./persist";
 import { cleanText, fit } from "./routine-sync";
 import { bot, getState, session, stateReady, userDir, watchChanges } from "./store";
+import { outbox } from "./sync-outbox";
 
 /**
  * Who may use what, and what they used. Bops keeps which bot may use which Connected App account, API key
@@ -23,7 +24,10 @@ import { bot, getState, session, stateReady, userDir, watchChanges } from "./sto
  * is held and goes with the next change. One flush per workspace at a time. An Orgo without the routes
  * (404 or 405) is asked again at most once every 6 hours. Runs on the signed-in Orgo key; signed out,
  * nothing is sent. The set is the Mac's to send: a computer's Bops runner (runner.ts) sends only the uses
- * its routines' threads made.
+ * its routines' threads made. Logged uses Orgo hasn't taken yet wait in an outbox kept with the user's
+ * folder (sync-outbox.ts), so a quit while Orgo is away loses none: what's left goes after the next start.
+ * Orgo takes MAX_GRANTS grants a call and replaces the whole set with them: a workspace with more has the
+ * rest cut (said in the log; orgo-web's follow-up is a paged PUT).
  */
 
 export const SYNC_DEBOUNCE_MS = 2_000;
@@ -46,7 +50,9 @@ export type AccessGrant = { bot: string; botName: string; kind: "app" | "key" | 
 /** Where a use happened, as the callers know it: a chat (and why it ran: a routine, a call) or a thread. */
 export type UseWhere = { chatId?: string; sessionId?: string; via?: AccessUse["via"]; viaId?: string };
 
-type Pending = { timer?: ReturnType<typeof setTimeout>; grants: boolean; uses: AccessUse[]; tries?: number };
+/** A use waiting to go; `oid` is its entry in the outbox kept on disk. */
+type Waiting = AccessUse & { oid?: string };
+type Pending = { timer?: ReturnType<typeof setTimeout>; grants: boolean; uses: Waiting[]; tries?: number };
 
 const g = globalThis as unknown as {
   __bopsAccessSync?: Map<string, Pending>;
@@ -63,6 +69,8 @@ const inFlight = (g.__bopsAccessSyncInFlight ??= new Map());
 const held = (g.__bopsAccessSyncHeld ??= new Map());
 /** Each workspace's set as last queued, so only a real change is sent. */
 const seen = (g.__bopsAccessSeen ??= new Map());
+/** Logged uses Orgo hasn't taken yet, kept on disk until it does. */
+const usesOutbox = outbox<AccessUse>("access-uses", MAX_USES_WAITING);
 
 /* ---------------- The set ---------------- */
 
@@ -144,7 +152,7 @@ async function vaultKeys(wsId: string): Promise<string[]> {
   }
 }
 
-function requeue(wsId: string, p: Pending, uses = p.uses, grants = p.grants) {
+function requeue(wsId: string, p: Pending, uses: Waiting[] = p.uses, grants = p.grants) {
   const tries = (p.tries ?? 0) + 1;
   queue(
     wsId,
@@ -158,7 +166,7 @@ function requeue(wsId: string, p: Pending, uses = p.uses, grants = p.grants) {
 }
 
 /** A batch Orgo refused: not sent again as it is, but it goes with the next change. */
-function hold(wsId: string, grants: boolean, uses: AccessUse[]) {
+function hold(wsId: string, grants: boolean, uses: Waiting[]) {
   const h = held.get(wsId);
   held.set(wsId, { grants: grants || !!h?.grants, uses: [...(h?.uses ?? []), ...uses].slice(-MAX_USES_WAITING) });
 }
@@ -190,7 +198,8 @@ async function flush(wsId: string): Promise<void> {
     missing.delete(projectId);
   }
   for (let i = 0; i < p.uses.length; i += LOG_BATCH) {
-    const res = await send("POST", `${base}/log`, { entries: p.uses.slice(i, i + LOG_BATCH).map(usePayload) });
+    const batch = p.uses.slice(i, i + LOG_BATCH);
+    const res = await send("POST", `${base}/log`, { entries: batch.map(usePayload) });
     const status = res?.status ?? null;
     if (status === 404 || status === 405) {
       missing.set(projectId, Date.now() + MISSING_RETRY_MS);
@@ -203,6 +212,7 @@ async function flush(wsId: string): Promise<void> {
       return;
     }
     missing.delete(projectId);
+    usesOutbox.done(batch.map((u: Waiting) => u.oid));
   }
 }
 
@@ -223,6 +233,7 @@ function start(wsId: string): Promise<void> {
 
 /** Gather a change for a workspace and send it all `wait` after the last one. */
 function queue(wsId: string, add: (p: Pending) => void, wait = SYNC_DEBOUNCE_MS) {
+  restoreUses();
   const p: Pending = pending.get(wsId) ?? { grants: false, uses: [] };
   const h = held.get(wsId);
   if (h) {
@@ -246,6 +257,7 @@ function queue(wsId: string, add: (p: Pending) => void, wait = SYNC_DEBOUNCE_MS)
  */
 function look() {
   if (!stateReady() || onRunner()) return;
+  restoreUses();
   for (const w of getState().workspaces ?? []) {
     if (!w.orgoProjectId || routesMissing(w.orgoProjectId)) continue;
     const sig = `${w.orgoProjectId}\n${JSON.stringify(accessPayload(w.id))}`;
@@ -276,6 +288,25 @@ export function accessChanged() {
     for (const w of getState().workspaces ?? []) if (w.orgoProjectId && !routesMissing(w.orgoProjectId)) queue(w.id, (p) => (p.grants = true));
   } catch (e) {
     console.warn(`[access-sync] ${(e as Error).message}`);
+  }
+}
+
+/** Uses left in the outbox by a run of Bops before this one: queued again, once (queue and look call this first). */
+function restoreUses() {
+  const back = usesOutbox.restore();
+  if (!back.length) return;
+  const by = new Map<string, Waiting[]>();
+  for (const e of back) by.set(e.wsId, [...(by.get(e.wsId) ?? []), { ...e.item, oid: e.id }]);
+  for (const [wsId, uses] of by) {
+    // Its workspace is gone, or has no project now: nowhere to send them.
+    if (!projectOf(wsId)) {
+      usesOutbox.done(uses.map((u) => u.oid));
+      continue;
+    }
+    queue(wsId, (p) => {
+      const had = new Set(p.uses.map((u) => u.oid));
+      p.uses = [...uses.filter((u) => !had.has(u.oid)), ...p.uses].slice(-MAX_USES_WAITING);
+    });
   }
 }
 
@@ -350,8 +381,11 @@ export function logUse(u: Omit<AccessUse, "at">) {
     const wsId = workspaceOf(b);
     const projectId = projectOf(wsId);
     if (!projectId || routesMissing(projectId)) return;
+    // What an earlier run of Bops left waiting first, so this one isn't handed back with it.
+    restoreUses();
+    const oid = usesOutbox.add(wsId, use);
     queue(wsId, (p) => {
-      p.uses.push(use);
+      p.uses.push({ ...use, oid });
       if (p.uses.length > MAX_USES_WAITING) p.uses.splice(0, p.uses.length - MAX_USES_WAITING);
     });
   } catch (e) {
@@ -386,4 +420,6 @@ export const accessSyncForTests = {
     held.clear();
     seen.clear();
   },
+  /** The uses still in the outbox (on disk with the user's folder). */
+  waitingUses: () => usesOutbox.waiting(),
 };

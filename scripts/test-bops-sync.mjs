@@ -92,6 +92,8 @@ const fresh = () => ({
       email: "boppy@main.bops.bot",
       mail: { inboxId: "inbox_boppy", podId: "pod_secret_1", paused: true },
       persona: "Be brief.",
+      // The vault keys it may use: names only go (bops_bots.secret_names), each once, sorted; one too long for Orgo stays out.
+      keys: ["OPENAI_API_KEY", "GITHUB_TOKEN", "OPENAI_API_KEY", "K".repeat(129)],
     },
     { id: "max", name: "Max", role: "Research", color: "#E9FF3B", isMain: false, computerStatus: "none" },
     { id: "iris", name: "Iris", role: "", color: "#FF8800", isMain: false, computer: "own", computerId: C_IRIS, computerStatus: "ready", brain: "brn_1" },
@@ -184,11 +186,11 @@ await check("the payload: each bot and its computer, the workspace's and each bo
   reset();
   const map = Sync.bopsMapPayload("ws_main", state);
   assert.deepEqual(map.bots, [
-    { bopsId: "boppy", name: "Boppy", role: "Chief of staff", isMain: true, computer: "own", desktopId: C_MAIN.toLowerCase() },
-    // Max shares: it works on Boppy's computer.
-    { bopsId: "max", name: "Max", role: "Research", isMain: false, computer: "shared", desktopId: C_MAIN.toLowerCase() },
+    { bopsId: "boppy", name: "Boppy", role: "Chief of staff", isMain: true, computer: "own", desktopId: C_MAIN.toLowerCase(), keys: ["GITHUB_TOKEN", "OPENAI_API_KEY"] },
+    // Max shares: it works on Boppy's computer. No keys is said as none, so one taken away goes from Orgo too.
+    { bopsId: "max", name: "Max", role: "Research", isMain: false, computer: "shared", desktopId: C_MAIN.toLowerCase(), keys: [] },
     // A brain only in a build with brains (BRAINS_ON): none here.
-    { bopsId: "iris", name: "Iris", role: "", isMain: false, computer: "own", desktopId: C_IRIS },
+    { bopsId: "iris", name: "Iris", role: "", isMain: false, computer: "own", desktopId: C_IRIS, keys: [] },
   ]);
   assert.deepEqual(map.resources, [
     { kind: "app", ref: "ca_gmail", name: "Gmail, Work · sam@acme.com", app: "gmail", status: "active" },
@@ -253,8 +255,18 @@ await check("orgo-web's limits: text cut without half an emoji, NUL out, ids tha
   state.bots = Array.from({ length: 230 }, (_, i) => ({ id: `b${i}`, name: `B${i}`, role: "", isMain: i === 0, computerStatus: "none", phone: `+1555${i}`, phoneLine: { numberId: `n${i}`, agentId: "a" }, mail: { inboxId: `i${i}`, podId: "p" } }));
   state.accounts = Array.from({ length: 1900 }, (_, i) => ({ id: `ca${i}`, app: "gmail", appName: "Gmail", status: "active", at: 1, workspaceId: "ws_main" }));
   state.watches = Array.from({ length: 600 }, (_, i) => ({ id: `w${i}`, botId: "b0", display: 1, site: "X", lookFor: "x", since: 1 }));
-  const big = Sync.bopsMapPayload("ws_main", state);
-  assert.deepEqual([big.bots.length, big.resources.length, big.watches.length], [200, 2000, 500]);
+  const warn = console.warn;
+  const said = [];
+  console.warn = (...a) => said.push(a.join(" "));
+  try {
+    const big = Sync.bopsMapPayload("ws_main", state);
+    assert.deepEqual([big.bots.length, big.resources.length, big.watches.length], [200, 2000, 500]);
+    Sync.bopsMapPayload("ws_main", state);
+  } finally {
+    console.warn = warn;
+  }
+  // What's cut is said, once a run (the map is built on every look), never silently.
+  assert.deepEqual(said, ["[bops-sync] ws_main: 230 bots (Orgo takes 200), 2362 resources (2000), 600 watches (500); the rest isn't in Orgo's copy"]);
 });
 
 await check("a change is one PUT 2 seconds after the burst, each workspace to its own project; unchanged isn't sent", async () => {

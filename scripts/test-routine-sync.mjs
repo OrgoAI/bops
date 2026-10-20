@@ -3,18 +3,23 @@
 // routines (its own only, deleteMissing after a delete), finished runs follow as POSTs (a running one
 // isn't sent), an Orgo without the routes (404 or 405) is left alone for 6 hours and then asked again,
 // the first sync after start sends every workspace with deleteMissing, and nothing ever throws into a
-// routine (Orgo down, signed out, a broken state).
+// routine (Orgo down, signed out, a broken state). Past 500 routines they go 500 a call and what's gone is
+// deleted one by one; finished runs wait in an outbox on disk, so a quit while Orgo is away loses none; a
+// workspace that only now got its Orgo project sends its whole set.
 //
 // The store and the Orgo client are fakes: Orgo's answers come from a fake fetch below, which records
 // every call, so nothing reaches a real Orgo or the user's data.
 // Usage: node --conditions=react-server scripts/test-routine-sync.mjs
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
-const FAKES = { store: ["bot", "getState", "pullState", "statePulledAt"], orgo: ["apiKey", "callOrgo"] };
+const FAKES = { store: ["bot", "getState", "pullState", "statePulledAt", "userDir"], orgo: ["apiKey", "callOrgo"] };
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith("@/")) specifier = pathToFileURL(`${root}/${specifier.slice(2)}`).href;
@@ -74,6 +79,7 @@ const ORGO = (method, path, body) => (method === "PUT" ? { status: 200, json: { 
 let answer = ORGO;
 let key = "sk_test_key";
 let broken = false;
+let userFolder = null;
 const fakeFetch = async (method, path, body) => {
   calls.push({ method, path, body: body === undefined ? undefined : JSON.parse(JSON.stringify(body)) });
   return answer(method, path, body);
@@ -87,6 +93,8 @@ globalThis.__fake = {
     bot: (id) => state.bots.find((b) => b.id === id),
     pullState: async () => {},
     statePulledAt: () => 0,
+    // The account's folder: none, but for the outbox's checks (a throwaway one).
+    userDir: () => userFolder,
   },
   orgo: {
     apiKey: async () => {
@@ -106,6 +114,7 @@ globalThis.__fake = {
 };
 
 const Sync = await import("@/lib/server/routine-sync");
+const { outboxForTests } = await import("@/lib/server/sync-outbox");
 const T = Sync.routineSyncForTests;
 const realNow = Date.now;
 const reset = () => {
@@ -474,24 +483,99 @@ await check("one flush per workspace at a time: a change during a slow PUT goes 
   assert.deepEqual(puts[1].body.routines.map((r) => r.bopsId), ["rtn_s0", "rtn_new"], "the newer state goes last");
 });
 
-await check("more than 500 routines: the first 500 go, without deleteMissing; ones that can't go don't count", async () => {
+await check("more than 500 routines: 500 a call, none with deleteMissing, then what Orgo has that Bops doesn't is deleted one by one; ones that can't go don't count", async () => {
   reset();
-  const warn = console.warn;
-  console.warn = () => {};
+  state.routines = [routine({ id: "rtn_bad0", schedule: { kind: "daily", time: "nope" } }), ...Array.from({ length: 500 }, (_, i) => routine({ id: `rtn_${i}` }))];
+  Sync.routineChanged("bot_main", { deleted: true });
+  await T.flushAll();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.routines.length, 500);
+  assert.equal(calls[0].body.deleteMissing, true, "500 that can go: a full sync");
+  reset();
+  state.routines = Array.from({ length: 501 }, (_, i) => routine({ id: `rtn_${i}` }));
+  const base = `/api/projects/${PID}/routines`;
+  // Orgo has two Bops no longer has (deleted here), and the 501.
+  const there = [...state.routines.map((r) => r.id), "rtn_gone1", "rtn_gone2"].map((bopsId) => ({ id: orgoId(bopsId), bopsId }));
+  answer = (m, path, body) => (m === "GET" && path === base ? { status: 200, json: { routines: there } } : m === "DELETE" ? { status: 200, json: { deleted: true } } : ORGO(m, path, body));
+  Sync.routineChanged("bot_main", { deleted: true });
+  await T.flushAll();
+  const puts = calls.filter((c) => c.method === "PUT");
+  assert.deepEqual(puts.map((c) => c.body.routines.length), [500, 1], "every routine goes, 500 a call");
+  assert.ok(puts.every((c) => c.body.deleteMissing === undefined), "a part of the set never deletes the rest");
+  assert.deepEqual(calls.filter((c) => c.method === "GET").map((c) => c.path), [base]);
+  assert.deepEqual(calls.filter((c) => c.method === "DELETE").map((c) => c.path).sort(), [`${base}/${orgoId("rtn_gone1")}`, `${base}/${orgoId("rtn_gone2")}`].sort(), "only the two gone from Bops");
+  // A delete Orgo doesn't answer: the whole full sync goes again after a backoff.
+  reset();
+  state.routines = Array.from({ length: 501 }, (_, i) => routine({ id: `rtn_${i}` }));
+  answer = (m, path, body) => (m === "GET" && path === base ? { status: 200, json: { routines: there } } : m === "DELETE" ? { status: 503, json: {} } : ORGO(m, path, body));
+  Sync.routineChanged("bot_main", { deleted: true });
+  await T.flushAll();
+  assert.equal(T.pendingCount(), 1, "waiting for its retry");
+  answer = (m, path, body) => (m === "GET" && path === base ? { status: 200, json: { routines: there } } : m === "DELETE" ? { status: 200, json: {} } : ORGO(m, path, body));
+  calls.length = 0;
+  await T.flushAll();
+  assert.equal(calls.filter((c) => c.method === "DELETE").length, 2, "tried again");
+});
+
+await check("finished runs wait in an outbox on disk: a quit while Orgo is away loses none, and they go after the next start", async () => {
+  reset();
+  userFolder = mkdtempSync(join(tmpdir(), "bops-test-routine-outbox-"));
   try {
-    state.routines = [routine({ id: "rtn_bad0", schedule: { kind: "daily", time: "nope" } }), ...Array.from({ length: 500 }, (_, i) => routine({ id: `rtn_${i}` }))];
-    Sync.routineChanged("bot_main", { deleted: true });
+    const file = join(userFolder, "outbox", "routine-runs.json");
+    state.routines = [routine({ id: "rtn_out" })];
+    // Orgo away.
+    answer = () => {
+      throw new Error("ECONNREFUSED");
+    };
+    Sync.routineRan("rtn_out", { at: Date.parse("2026-10-14T12:00:00Z"), status: "ok" });
     await T.flushAll();
-    assert.equal(calls[0].body.routines.length, 500);
-    assert.equal(calls[0].body.deleteMissing, true, "500 that can go: a full sync");
-    reset();
-    state.routines = Array.from({ length: 501 }, (_, i) => routine({ id: `rtn_${i}` }));
-    Sync.routineChanged("bot_main", { deleted: true });
+    outboxForTests.writeAll();
+    assert.ok(existsSync(file), "kept on disk");
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).entries.length, 1);
+    // Bops quits (everything in memory gone) and starts again, with Orgo back.
+    T.reset();
+    outboxForTests.restart();
+    answer = ORGO;
+    calls.length = 0;
+    Sync.syncRoutinesOnStart();
     await T.flushAll();
-    assert.equal(calls[0].body.routines.length, 500);
-    assert.equal(calls[0].body.deleteMissing, undefined, "never deletes the ones past 500");
+    const runs = calls.filter((c) => c.method === "POST" && c.path.endsWith("/runs"));
+    assert.equal(runs.length, 1, "the run left from before went");
+    assert.equal(runs[0].path, `/api/projects/${PID}/routines/${orgoId("rtn_out")}/runs`);
+    assert.equal(runs[0].body.startedAt, "2026-10-14T12:00:00.000Z");
+    outboxForTests.writeAll();
+    assert.equal(T.waitingRuns().length, 0, "out of the outbox once Orgo took it");
+    assert.ok(!existsSync(file), "nothing left on disk");
+    // Started again: it isn't sent twice.
+    T.reset();
+    outboxForTests.restart();
+    calls.length = 0;
+    Sync.syncRoutinesOnStart();
+    await T.flushAll();
+    assert.equal(calls.filter((c) => c.path.endsWith("/runs")).length, 0);
   } finally {
-    console.warn = warn;
+    outboxForTests.restart();
+    rmSync(userFolder, { recursive: true, force: true });
+    userFolder = null;
+  }
+});
+
+await check("a workspace that just got its Orgo project sends its whole set, with deleteMissing", async () => {
+  reset();
+  state.routines = [routine({ id: "rtn_bound", botId: "bot_local" })];
+  const local = state.workspaces.find((w) => w.id === "ws_local");
+  Sync.routinesBound("ws_local");
+  assert.equal(T.pendingCount(), 0, "no project yet: nothing");
+  local.orgoProjectId = "77777777-2222-4333-8444-555555555555";
+  try {
+    Sync.routinesBound("ws_local");
+    await T.flushAll();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].path, `/api/projects/${local.orgoProjectId}/routines`);
+    assert.equal(calls[0].body.deleteMissing, true);
+    assert.deepEqual(calls[0].body.routines.map((r) => r.bopsId), ["rtn_bound"]);
+  } finally {
+    delete local.orgoProjectId;
   }
 });
 

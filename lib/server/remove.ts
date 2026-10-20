@@ -6,7 +6,7 @@ import { stopWatch } from "./watches";
 import { deleteInboxes } from "./mail";
 import { dropBotFromSkills } from "./workspace-skills";
 import { DEFAULT_UNDELETABLE, deleteOrgoWorkspace, WorkspaceError } from "./workspaces";
-import { orgo as orgoApi, OrgoError, perWorkspaceProjects } from "./orgo";
+import { apiKey, orgo as orgoApi, OrgoError, perWorkspaceProjects } from "./orgo";
 import { routinesRemovedInWorkspace } from "./routine-sync";
 import { brainsOf, removeBrain } from "./brains";
 
@@ -35,7 +35,9 @@ export function deleteThread(sessionId: string) {
  * Delete a bot: stop its work, stop watching its screens, delete its own computer if it has one
  * (only ever one in the Bops workspace; a bot that shares the main bot's leaves that one alone), then remove it with its chat, threads, routines and
  * the skills only it had (a skill other bots have too stays theirs). Group chats keep their
- * history without it, unless only one bot is left in them. The main bot can't be deleted.
+ * history without it, unless only one bot is left in them. Its channels go too (channels.ts removeLink:
+ * its Telegram or Discord bot stops listening and its token leaves the Keychain; a Slack link leaves Bops
+ * Cloud), as they go from Orgo's map with it. The main bot can't be deleted.
  */
 export async function deleteBot(botId: string, withWorkspace = false) {
   const b = bot(botId);
@@ -49,6 +51,12 @@ export async function deleteBot(botId: string, withWorkspace = false) {
   if (b.computerId) await resetComputer(botId);
   // Its email inboxes go too (they count against the AgentMail plan).
   await deleteInboxes(b);
+  // Its channels: no listener or token is left for a bot that's gone.
+  const links = (getState().channels ?? []).filter((c) => c.botId === botId);
+  if (links.length) {
+    const { removeLink } = await import("./channels");
+    for (const l of links) await removeLink(l.id).catch((e: Error) => console.warn(`[remove] ${b.name}'s ${l.kind} channel: ${e.message}`));
+  }
   const chatId = botChatId(botId);
   const wsId = workspaceOf(b);
   const hadRoutines = getState().routines.some((r) => r.botId === botId);
@@ -81,7 +89,9 @@ export async function deleteBot(botId: string, withWorkspace = false) {
  * moved; one that went with the project is already gone, and a failure here leaves the project gone, which
  * Delete again takes as done and goes on). The free Bops computer stays when another workspace's main bot
  * works on it or has it (freeComputerOnDelete): it passes to that one instead. Only then is it taken off
- * this Mac.
+ * this Mac. A workspace with an Orgo project is never deleted on this Mac alone: when Orgo can't be asked
+ * (it doesn't answer, or no one is signed in) nothing is deleted and the user is told to try again. Its
+ * brains go once Orgo's workspace has (a refusal leaves them as they were).
  */
 export async function deleteWorkspace(workspaceId: string) {
   const gone = (getState().workspaces ?? []).find((w) => w.id === workspaceId);
@@ -90,12 +100,12 @@ export async function deleteWorkspace(workspaceId: string) {
   const left = (getState().workspaces ?? []).filter((w) => w.id !== workspaceId);
   if (left.length === 0) throw new Error("You need at least one workspace");
   const team = getState().bots.filter((b) => workspaceOf(b) === workspaceId);
-  // Its brains first, while its bots' computers are still there: each signs out and its folder goes on them.
-  for (const x of brainsOf(workspaceId)) removeBrain(x.id);
   // The main bot last: the others' computers were cloned from its computer.
   const order = [...team.filter((x) => !x.isMain), ...team.filter((x) => x.isMain)];
-  const orgo = !!gone.orgoProjectId && (await perWorkspaceProjects().catch(() => null)) === true;
+  const orgo = !!gone.orgoProjectId && (await orgoWorkspaceGoes(gone.name)) === true;
   if (orgo) await deleteOrgoWorkspace(gone);
+  // Its brains, while its bots' computers are still there: each signs out and its folder goes on them.
+  for (const x of brainsOf(workspaceId)) removeBrain(x.id);
   await passFreeComputer(workspaceId);
   for (const b of order) if (bot(b.id)?.computerId) await resetComputer(b.id);
   for (const b of order) await deleteBot(b.id, true);
@@ -106,6 +116,21 @@ export async function deleteWorkspace(workspaceId: string) {
     state.messages = state.messages.filter((m) => chats.has(m.chatId));
     if (state.workspace === workspaceId) state.workspace = left[0].id;
   });
+}
+
+/**
+ * Whether a workspace's Orgo project goes with it (per workspace projects: deletePreview said so too).
+ * Throws, so nothing is deleted, when Orgo can't be asked: no one is signed in, or it didn't answer. Null
+ * (Orgo lists no project tied to a Bops workspace, so this one's is gone there) and false (an Orgo without
+ * per workspace projects) delete it on this Mac only.
+ */
+async function orgoWorkspaceGoes(name: string): Promise<boolean | null> {
+  if (!(await apiKey().catch(() => ""))) throw new WorkspaceError(`Sign in to Orgo to delete ${name}: its Orgo workspace goes with it.`, 401);
+  try {
+    return await perWorkspaceProjects();
+  } catch {
+    throw new WorkspaceError(`Couldn't reach Orgo to delete ${name}, so it's still here. Try again.`, 502);
+  }
 }
 
 /**

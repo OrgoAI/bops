@@ -8,7 +8,7 @@ import { isIssueId, PRIORITY_IDS, priorityLabel, STATUS_IDS, statusLabel, type I
 import { tagsOf } from "@/lib/routine-catalog";
 import { bankClient, memoryOn, sessionRef } from "./memory";
 import { categoriesOn, snapshot } from "./memory-categories";
-import { orbitCall, orbitProject } from "./orbit-sync";
+import { orbitCall, orbitChanged, orbitProject } from "./orbit-sync";
 import { cleanText } from "./routine-sync";
 import { bot, getState, ownerName, sameState, userDir } from "./store";
 
@@ -286,6 +286,12 @@ type Answer = Awaited<ReturnType<typeof orbitCall>>;
 type Reply = { status: number; json: Record<string, unknown> };
 const ok = (r: Answer): r is { status: number; json: Record<string, unknown> } => !!r && r !== "off" && r.status < 300;
 const retryable = (r: Answer) => r === null || (r !== "off" && r.status >= 500);
+/**
+ * A delete Orgo didn't take that it may take later (no answer, the key signed out or not allowed for now,
+ * a timeout, too many asks, 5xx): kept in `deletes` and sent again, as orbit-sync's forget is. Only an
+ * answer that it never will (400, 413) or that the row is gone (404) ends it.
+ */
+const deleteAgain = (r: Answer) => r === null || (r !== "off" && r.status >= 300 && r.status !== 400 && r.status !== 404 && r.status !== 413);
 /** The workspace's issues are Orgo's (its project has the routes, as far as is known). */
 const onOrgo = (ws: string) => !!orbitProject(ws);
 const s = (v: unknown, max: number) => (typeof v === "string" && v ? cleanText(v, max) : null);
@@ -358,8 +364,10 @@ function overlay(ws: string, was: Issue): Issue {
 }
 
 /** The Orgo id of an issue by its session (looked up in its newest 200), or null. */
-async function findOrgoId(ws: string, id: string): Promise<string | null> {
+/** The issue's Orgo id, from Orgo's list: null when Orgo hasn't it, undefined when Orgo didn't answer (or for now). */
+async function findOrgoId(ws: string, id: string): Promise<string | null | undefined> {
   const r = await orbitCall(ws, "GET", "/issues?limit=200");
+  if (r !== "off" && !ok(r) && deleteAgain(r)) return undefined;
   if (!ok(r) || !Array.isArray(r.json.issues)) return null;
   const row = (r.json.issues as Record<string, unknown>[]).find((x) => x?.honchoSessionId === id);
   return typeof row?.id === "string" ? row.id : null;
@@ -647,8 +655,9 @@ export function updateIssue(ws: string, id: string, patch: IssuePatch, by: Issue
 
 /**
  * Delete an issue: its session in memory, with its history. With Orgo, its row first, and the session only
- * when Orgo says nothing else uses it; Orgo not answering, the row and then the session go at the next
- * sync. False when it isn't one of this workspace's.
+ * when Orgo says nothing else uses it; Orgo not answering or not taking it for now (401, 403, 429: deleteAgain),
+ * or not saying whether it has the row, the row and then the session go at the next sync (soon, and after a
+ * backoff until Orgo takes it). False when it isn't one of this workspace's.
  */
 export function deleteIssue(ws: string, id: string): Promise<boolean> {
   bankOrThrow(ws);
@@ -656,13 +665,25 @@ export function deleteIssue(ws: string, id: string): Promise<boolean> {
     const ours = sameState();
     if (onOrgo(ws) && isIssueId(id) && !isGone(ws, id)) {
       const orgoId = cacheOf(ws).issues.find((i) => i.id === id)?.orgoId ?? (await findOrgoId(ws, id));
+      if (orgoId === undefined) {
+        // Orgo didn't say whether it has the row: gone here now, and the row (then the session) at the next sync.
+        cacheMark(ws, ours, (c) => {
+          c.gone = [...new Set([...(c.gone ?? []), id])];
+          c.deletes = [...(c.deletes ?? []).filter((d) => d.id !== id), { orgoId: "", id }];
+        });
+        cachePut(ws, null, id, ours);
+        // Sent with the next sync, soon, and again after a backoff until Orgo takes it.
+        orbitChanged(ws);
+        return true;
+      }
       if (orgoId) {
         const r = await orbitCall(ws, "DELETE", `/issues/${encodeURIComponent(orgoId)}`);
         if (r !== "off") {
           cacheMark(ws, ours, (c) => {
             c.gone = [...new Set([...(c.gone ?? []), id])];
-            if (retryable(r)) c.deletes = [...(c.deletes ?? []).filter((d) => d.id !== id), { orgoId, id }];
+            if (deleteAgain(r)) c.deletes = [...(c.deletes ?? []).filter((d) => d.id !== id), { orgoId, id }];
           });
+          if (deleteAgain(r)) orbitChanged(ws);
           cachePut(ws, null, id, ours);
           // Deleted there already (404: on another Mac, which saw to the session).
           if (ok(r)) await afterDelete(ws, id, r.json);
@@ -730,9 +751,22 @@ export function orbitIssuesFlush(ws: string): Promise<"ok" | "retry" | "off"> {
     const ours = sameState();
     const x = bankOrThrow(ws);
     for (const d of [...(cacheOf(ws).deletes ?? [])]) {
-      const r = await orbitCall(ws, "DELETE", `/issues/${encodeURIComponent(d.orgoId)}`);
+      // Deleted while Orgo didn't answer the list: its row is looked up now.
+      const orgoId = d.orgoId || (await findOrgoId(ws, d.id));
+      if (orgoId === undefined) return "retry";
+      if (!orgoId) {
+        // Orgo hasn't a row for it: only its session goes.
+        const found = await sessionOf(ws, d.id);
+        if (found) {
+          await sessionRef(x.client, d.id).delete();
+          x.forget(d.id);
+        }
+        cacheMark(ws, ours, (c) => (c.deletes = (c.deletes ?? []).filter((y) => y.id !== d.id)));
+        continue;
+      }
+      const r = await orbitCall(ws, "DELETE", `/issues/${encodeURIComponent(orgoId)}`);
       if (r === "off") return "off";
-      if (retryable(r)) return "retry";
+      if (deleteAgain(r)) return "retry";
       if (ok(r)) await afterDelete(ws, d.id, r.json);
       cacheMark(ws, ours, (c) => (c.deletes = (c.deletes ?? []).filter((y) => y.id !== d.id)));
     }

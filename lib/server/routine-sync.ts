@@ -4,6 +4,7 @@ import { templateById } from "@/lib/routine-catalog";
 import { workspaceOf, type Routine, type RoutineRun } from "@/lib/types";
 import { onRunner, runnerRoutine, runnerRuns } from "./runner";
 import { bot, getState } from "./store";
+import { outbox } from "./sync-outbox";
 
 /**
  * A copy of each workspace's routines in its Orgo project (orgo-web public.routines and
@@ -19,7 +20,12 @@ import { bot, getState } from "./store";
  * One flush per workspace at a time, so a slow PUT is never overtaken by a newer one. An Orgo without
  * the routes (404 or 405) is asked again at most once every 6 hours. On the first tick after start (routines.ts), each workspace sends a
  * full copy with deleteMissing, so a routine deleted while Orgo couldn't be reached goes there too.
- * Runs on the signed-in Orgo key (orgo.ts apiKey); signed out, nothing is sent.
+ * Finished runs wait in an outbox kept with the user's folder (sync-outbox.ts) until Orgo took them, so a
+ * quit while Orgo is away loses none: what's left goes again after the next start. Orgo takes 500
+ * routines a call: a workspace with more sends them 500 at a time, and what's gone is deleted one by one
+ * (GET the list, DELETE each Orgo has that Bops doesn't), so deletes reach Orgo past 500 too. A workspace
+ * that gets its Orgo project only later (workspaces.ts bindMissingProjects) sends its full copy then
+ * (routinesBound). Runs on the signed-in Orgo key (orgo.ts apiKey); signed out, nothing is sent.
  *
  * Orgo wakes a computer for its runner by these (runner.ts): each routine says how it runs (`run`) and
  * whether the Mac runs it (`onMac`: it needs the Mac, runner.ts pinnedToMac, or its computer has no
@@ -41,7 +47,9 @@ const RETRY_MAX_MS = 30 * 60_000;
 /** The most finished runs kept waiting for one workspace (the newest). */
 const MAX_RUNS_WAITING = 200;
 
-type Pending = { timer?: ReturnType<typeof setTimeout>; deleteMissing: boolean; runs: { bopsId: string; run: RoutineRun; finishedAt: number }[]; tries?: number };
+/** A finished run waiting to go; `oid` is its entry in the outbox kept on disk. */
+type WaitingRun = { bopsId: string; run: RoutineRun; finishedAt: number; oid?: string };
+type Pending = { timer?: ReturnType<typeof setTimeout>; deleteMissing: boolean; runs: WaitingRun[]; tries?: number };
 
 const g = globalThis as unknown as {
   __bopsRoutineSync?: Map<string, Pending>;
@@ -58,6 +66,8 @@ const missing = (g.__bopsRoutineSyncMissing ??= new Map());
 const inFlight = (g.__bopsRoutineSyncInFlight ??= new Map());
 /** A batch Orgo refused (a 400, too big): not sent again as it is, but its deleteMissing and runs go with the next change. */
 const held = (g.__bopsRoutineSyncHeld ??= new Map());
+/** Finished runs Orgo hasn't taken yet, kept on disk until it does (the newest MAX_RUNS_WAITING per workspace). */
+const runsOutbox = outbox<Omit<WaitingRun, "oid">>("routine-runs", MAX_RUNS_WAITING);
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 /**
@@ -139,11 +149,11 @@ export function runPayload(run: RoutineRun, finishedAt: number) {
 }
 
 /** One call to orgo-web with the signed-in key: its status and JSON, or null when it didn't answer or no one is signed in. */
-async function send(method: "PUT" | "POST", path: string, body: unknown): Promise<{ status: number; json: unknown } | null> {
+async function send(method: "GET" | "PUT" | "POST" | "DELETE", path: string, body?: unknown): Promise<{ status: number; json: unknown } | null> {
   const { apiKey, callOrgo } = await import("./orgo");
   const key = await apiKey().catch(() => "");
   if (!key) return null;
-  return callOrgo(key, path, { method, body, timeoutMs: TIMEOUT_MS });
+  return callOrgo(key, path, { method, ...(body === undefined ? {} : { body }), timeoutMs: TIMEOUT_MS });
 }
 
 /** The Orgo id of each routine the PUT answered with, by its Bops id. */
@@ -175,7 +185,7 @@ function requeue(wsId: string, p: Pending, runs = p.runs, deleteMissing = p.dele
   );
 }
 
-/** Send what's waiting for a workspace: its routines, then its finished runs. */
+/** Send what's waiting for a workspace: its routines (500 a call), what's gone from them, then its finished runs. */
 async function flush(wsId: string): Promise<void> {
   const p = pending.get(wsId);
   if (!p) return;
@@ -191,37 +201,67 @@ async function flush(wsId: string): Promise<void> {
     .map(routinePayload)
     .filter((x) => x !== undefined);
   if (runner && !all.length) return;
-  // More than Orgo takes in one call: the first MAX_ROUTINES go, and nothing is deleted (the rest aren't missing).
+  // More than Orgo takes in one call: 500 at a time, none with deleteMissing (a part isn't the whole set);
+  // what's gone is then deleted one by one.
   const over = all.length > MAX_ROUTINES;
-  if (over) console.warn(`[routine-sync] ${wsId}: ${all.length} routines, Orgo takes ${MAX_ROUTINES}; the rest aren't mirrored`);
-  const routines = all.slice(0, MAX_ROUTINES);
-  const res = await send("PUT", base, { routines, ...(p.deleteMissing && !over && !runner ? { deleteMissing: true } : {}) });
-  const status = res?.status ?? null;
-  if (status === 404 || status === 405) {
-    missing.set(projectId, Date.now() + MISSING_RETRY_MS);
-    return;
-  }
-  if (status === null || status >= 300) {
-    if (status !== null) console.warn(`[routine-sync] ${wsId}: Orgo answered ${status} to the routines`);
-    if (retryable(status)) requeue(wsId, p);
-    else {
-      const h = held.get(wsId);
-      held.set(wsId, { deleteMissing: p.deleteMissing || !!h?.deleteMissing, runs: [...(h?.runs ?? []), ...p.runs].slice(-MAX_RUNS_WAITING) });
+  const ids = new Map<string, string>();
+  for (let i = 0; i === 0 || i < all.length; i += MAX_ROUTINES) {
+    const routines = all.slice(i, i + MAX_ROUTINES);
+    const res = await send("PUT", base, { routines, ...(p.deleteMissing && !over && !runner ? { deleteMissing: true } : {}) });
+    const status = res?.status ?? null;
+    if (status === 404 || status === 405) {
+      missing.set(projectId, Date.now() + MISSING_RETRY_MS);
+      return;
     }
-    return;
+    if (status === null || status >= 300) {
+      if (status !== null) console.warn(`[routine-sync] ${wsId}: Orgo answered ${status} to the routines`);
+      if (retryable(status)) requeue(wsId, p);
+      else {
+        const h = held.get(wsId);
+        held.set(wsId, { deleteMissing: p.deleteMissing || !!h?.deleteMissing, runs: [...(h?.runs ?? []), ...p.runs].slice(-MAX_RUNS_WAITING) });
+      }
+      return;
+    }
+    for (const [bopsId, id] of orgoIds(res?.json)) ids.set(bopsId, id);
   }
   missing.delete(projectId);
-  const ids = orgoIds(res?.json);
+  if (over && p.deleteMissing && !runner && !(await deleteGone(wsId, base, new Set(all.map((r) => r.bopsId))))) requeue(wsId, p, [], true);
   const again: Pending["runs"] = [];
   for (const x of p.runs) {
     const orgoId = ids.get(x.bopsId);
     // Not in Orgo's copy (deleted meanwhile, or its schedule couldn't go): nothing to record it on.
-    if (!orgoId) continue;
+    if (!orgoId) {
+      runsOutbox.done([x.oid]);
+      continue;
+    }
     const s = await send("POST", `${base}/${encodeURIComponent(orgoId)}/runs`, runPayload(x.run, x.finishedAt));
     if (retryable(s?.status ?? null)) again.push(x);
+    else runsOutbox.done([x.oid]);
     if (s && s.status >= 300 && s.status !== 404) console.warn(`[routine-sync] ${wsId}: Orgo answered ${s.status} to a run`);
   }
   if (again.length) requeue(wsId, p, again, false);
+}
+
+/**
+ * A workspace with more routines than one call takes: each routine Orgo has that isn't among `keep` is
+ * deleted by its Orgo id (DELETE /api/projects/{id}/routines/{routineId}), as deleteMissing does for 500 or
+ * fewer. False when Orgo didn't answer the list or a delete for now (all of it goes again after a backoff).
+ */
+async function deleteGone(wsId: string, base: string, keep: Set<string>): Promise<boolean> {
+  const listed = await send("GET", base);
+  const list = (listed?.json as { routines?: unknown })?.routines;
+  if (!listed || listed.status >= 300 || !Array.isArray(list)) {
+    if (listed && !retryable(listed.status)) console.warn(`[routine-sync] ${wsId}: Orgo answered ${listed.status} to the routines list`);
+    return !retryable(listed?.status ?? null);
+  }
+  let ok = true;
+  for (const x of list as { id?: unknown; bopsId?: unknown }[]) {
+    if (typeof x?.id !== "string" || typeof x.bopsId !== "string" || keep.has(x.bopsId)) continue;
+    const d = await send("DELETE", `${base}/${encodeURIComponent(x.id)}`);
+    if (retryable(d?.status ?? null)) ok = false;
+    else if (d && d.status >= 300 && d.status !== 404) console.warn(`[routine-sync] ${wsId}: Orgo answered ${d.status} to a routine's delete`);
+  }
+  return ok;
 }
 
 /**
@@ -245,6 +285,7 @@ function start(wsId: string): Promise<void> {
 
 /** Gather a change for a workspace and send it all `wait` (SYNC_DEBOUNCE_MS) after the last one. */
 function queue(wsId: string, add: (p: Pending) => void, wait = SYNC_DEBOUNCE_MS) {
+  restoreRuns();
   const p: Pending = pending.get(wsId) ?? { deleteMissing: false, runs: [] };
   const h = held.get(wsId);
   if (h) {
@@ -290,6 +331,26 @@ export function routinesRemovedInWorkspace(wsId: string) {
   }
 }
 
+/** Runs left in the outbox by a run of Bops before this one: queued again, once (queue calls this first). */
+function restoreRuns() {
+  const back = runsOutbox.restore();
+  if (!back.length) return;
+  const by = new Map<string, WaitingRun[]>();
+  for (const e of back) by.set(e.wsId, [...(by.get(e.wsId) ?? []), { ...e.item, oid: e.id }]);
+  for (const [wsId, runs] of by) {
+    const projectId = getState().workspaces?.find((w) => w.id === wsId)?.orgoProjectId;
+    // Its workspace is gone, or has no project now: nothing to record them on.
+    if (!projectId) {
+      runsOutbox.done(runs.map((x) => x.oid));
+      continue;
+    }
+    queue(wsId, (p) => {
+      const had = new Set(p.runs.map((x) => x.oid));
+      p.runs = [...runs.filter((x) => !had.has(x.oid)), ...p.runs].slice(-MAX_RUNS_WAITING);
+    });
+  }
+}
+
 /** A routine's run was recorded (routines.ts record): once it's finished, it goes to Orgo with the routine. */
 export function routineRan(routineId: string, run: RoutineRun) {
   try {
@@ -297,10 +358,28 @@ export function routineRan(routineId: string, run: RoutineRun) {
     const r = getState().routines.find((x) => x.id === routineId);
     const at = r && projectOfBot(r.botId);
     if (!at || routesMissing(at.projectId)) return;
+    // What an earlier run of Bops left waiting first, so this one isn't handed back with it.
+    restoreRuns();
+    const item = { bopsId: routineId, run: { ...run }, finishedAt: Date.now() };
+    const oid = runsOutbox.add(at.wsId, item);
     queue(at.wsId, (p) => {
-      p.runs.push({ bopsId: routineId, run: { ...run }, finishedAt: Date.now() });
+      p.runs.push({ ...item, oid });
       if (p.runs.length > MAX_RUNS_WAITING) p.runs.splice(0, p.runs.length - MAX_RUNS_WAITING);
     });
+  } catch (e) {
+    console.warn(`[routine-sync] ${(e as Error).message}`);
+  }
+}
+
+/**
+ * A workspace just got its Orgo project (workspaces.ts bindMissingProjects): its whole set goes now, with
+ * deleteMissing, so what was made and deleted before it had one is there too.
+ */
+export function routinesBound(wsId: string) {
+  try {
+    const projectId = getState().workspaces?.find((w) => w.id === wsId)?.orgoProjectId;
+    if (!projectId || routesMissing(projectId) || onRunner()) return;
+    queue(wsId, (p) => (p.deleteMissing = true));
   } catch (e) {
     console.warn(`[routine-sync] ${(e as Error).message}`);
   }
@@ -334,4 +413,6 @@ export const routineSyncForTests = {
     held.clear();
     g.__bopsRoutineSyncStarted = false;
   },
+  /** The finished runs still in the outbox (on disk with the user's folder). */
+  waitingRuns: () => runsOutbox.waiting(),
 };

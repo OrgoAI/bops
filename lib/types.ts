@@ -216,6 +216,8 @@ export type SkillRef = {
   legacyId?: string;
   /** Orgo's id for it and when Orgo last changed it (lib/server/workspace-skills.ts sync). */
   remoteId?: string;
+  /** The Orgo project that id is in: once set, a sync that no longer finds it there takes it as deleted there. */
+  remotePid?: string;
   remoteAt?: string;
   /** When this Mac and Orgo last agreed on it: a change here after this goes to Orgo. */
   syncedAt?: number;

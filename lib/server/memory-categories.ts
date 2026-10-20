@@ -618,7 +618,9 @@ function rebuild(index: Index, item: Item) {
 /**
  * Facts gone from memory (deleted, or dropped as out of date): their items lose them, and an item no
  * sorted fact backs any more goes, unless the user changed or hid it (a fact that comes back reworded
- * merges into it by its key). Says whether anything changed.
+ * merges into it by its key). An item that goes is deleted from the workspace's Orbit in Orgo too (its
+ * delete waits in Index.out until Orgo took it), so the next read of Orgo doesn't bring it back. Says
+ * whether anything changed.
  */
 function dropMany(index: Index, facts: string[]) {
   const gone = new Set(facts.filter((f) => Object.hasOwn(index.facts, f)));
@@ -637,6 +639,7 @@ function dropMany(index: Index, facts: string[]) {
     if (!backed.has(id)) {
       if (!item.edited && !item.marked && !item.hidden) {
         delete index.items[id];
+        sendLater(index, { del: [id] });
         continue;
       }
       // Kept for the user's sake (hidden, marked, renamed): what the facts said goes with them.

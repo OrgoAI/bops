@@ -884,6 +884,38 @@ await check("an issue deleted on another Mac: a change here finds it gone", asyn
   assert.ok(!l.body.issues.some((y) => y.id === x.id));
 });
 
+await check("an issue delete Orgo can't take now (401, 403, 429) stays to send and goes once Orgo takes it; one whose row Orgo couldn't say goes at the next sync too", async () => {
+  const refuseDeletes = (status) => (orgo.answer = (c) => (c.method === "DELETE" && c.path.includes("/orbit/issues/") ? json({ error: "no" }, status) : null));
+  const x = (await openIssue(MAIN, { title: "Leaky tap", sourceApp: "gmail", externalId: "thr_9" })).body.issue;
+  assert.ok(x.orgoId);
+  const rowThere = () => [...oproj(PID).issues.values()].some((r) => r.honchoSessionId === x.id);
+  refuseDeletes(401);
+  assert.equal((await removeIssue(MAIN, x.id)).status, 200);
+  assert.ok(!(await listIssues(MAIN)).body.issues.some((i) => i.id === x.id), "gone here at once");
+  assert.ok(rowThere(), "401: still in Orgo");
+  assert.ok(T.pendingCount() >= 1, "a sync is asked for");
+  for (const status of [403, 429]) {
+    refuseDeletes(status);
+    await T.flushAll();
+    assert.ok(rowThere(), `${status}: still in Orgo, kept to send`);
+  }
+  orgo.answer = null;
+  await T.flushAll();
+  assert.ok(!rowThere(), "the row went once Orgo took it");
+  assert.ok(!hbank("bops").sessions.has(x.id), "then its session");
+  // Deleted while Orgo was down, with no Orgo id on this Mac (opened elsewhere): its row is looked up and deleted at the next sync.
+  const y = (await openIssue(MAIN, { title: "Gate code", sourceApp: "gmail", externalId: "thr_10" })).body.issue;
+  const cached = globalThis.bopsIssues.lists.get(MAIN).cache.issues.find((i) => i.id === y.id);
+  delete cached.orgoId;
+  orgo.down = true;
+  assert.equal((await removeIssue(MAIN, y.id)).status, 200);
+  orgo.down = false;
+  assert.ok([...oproj(PID).issues.values()].some((r) => r.honchoSessionId === y.id), "still in Orgo meanwhile");
+  await T.flushAll();
+  assert.ok(![...oproj(PID).issues.values()].some((r) => r.honchoSessionId === y.id), "found by its session and deleted");
+  assert.ok(!hbank("bops").sessions.has(y.id), "then its session");
+});
+
 await check("Orgo down: an issue opens all the same (in memory), and goes to Orgo at the next sync", async () => {
   orgo.down = true;
   const r = await openIssue(MAIN, { title: "Wifi down", sourceApp: "gmail", externalId: "thr_4" });
@@ -968,6 +1000,27 @@ await check("one sync per workspace at a time: a change while a PUT is under way
 });
 
 /* ---------------- Review fixes ---------------- */
+
+await check("an item whose facts were deleted here (the memory panel's Delete) is deleted in Orgo too, and the next read doesn't bring it back", async () => {
+  const f = seed(MAIN, [["v1", "Vic fixes the boiler on Fridays.", [item("people", "Vic", { key: "vic", detail: "Fixes the boiler" })]]]);
+  const vic = one((await refresh(MAIN)).items, "people", "Vic");
+  await settle();
+  assert.ok(rowOf(PID, vic.id), "sent");
+  // Deleted from memory on this Mac (memory.ts forgetFact, then dropFacts): nothing backs the item now.
+  removeFact(Mem.bankOf(MAIN), f.v1.id);
+  orgo.calls = [];
+  MC.dropFacts(Mem.bankOf(MAIN), [f.v1.id]);
+  await settle();
+  const del = orgo.calls.find((c) => c.method === "DELETE" && c.path === `/api/projects/${PID}/orbit/items`);
+  assert.ok(del, orgo.calls.map((c) => `${c.method} ${c.path}`).join(", "));
+  assert.ok(JSON.stringify(del.body ?? del.query).includes(vic.id), "its id");
+  assert.ok(!rowOf(PID, vic.id), "gone in Orgo");
+  // A full read of Orgo now: it stays gone.
+  OS.pullSoon(MAIN);
+  await settle();
+  assert.ok(!(await refresh(MAIN)).items.some((i) => i.title === "Vic"), "not brought back");
+  assert.equal(indexOf(MAIN).out, undefined, "nothing left to send");
+});
 
 await check("a forget Orgo can't take now (401, 403, 409 full, 429) stays to send, and goes once Orgo takes it", async () => {
   seed(MAIN, [["w1", "Wren is Tiger's neighbour.", [item("people", "Wren", { key: "wren", detail: "Your neighbour" })]]]);

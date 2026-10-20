@@ -3,7 +3,8 @@
 // for a bot wins (read, act, or none), and a channel app (Bops' Slack app) has no default; a bot's Composio session holds the apps it has by default, read
 // only where it was set so, and nothing it may not use; a task someone outside Bops started gets no apps; each
 // workspace's whole set goes to its Orgo project as the PUT orgo-web takes, a use goes to the log, and an Orgo
-// without the routes (404) is left alone. After an upgrade from v0.0.28 every bot has exactly what it had
+// without the routes (404) is left alone; a use Orgo didn't take waits in an outbox on disk and goes after a
+// restart, once. After an upgrade from v0.0.28 every bot has exactly what it had
 // there in an account from before (only where it was given it), while one connected from now on is every bot's.
 //
 // The store, Bops Cloud, the vault's keys, Orgo and Composio are fakes: nothing reaches a real service.
@@ -154,6 +155,7 @@ globalThis.__fake = {
 const T = await import(`${root}/lib/types.ts`);
 const C = await import(`${root}/lib/server/composio.ts`);
 const A = await import(`${root}/lib/server/access-sync.ts`);
+const O = await import(`${root}/lib/server/sync-outbox.ts`);
 const bot = (id) => state.bots.find((b) => b.id === id);
 const account = (id) => state.accounts.find((a) => a.id === id);
 
@@ -281,6 +283,38 @@ await check("the use log on this Mac keeps the last uses", async () => {
   assert.ok(kept.length >= 3);
   assert.deepEqual(Object.keys(kept.at(-1)).sort(), ["action", "at", "bot", "kind", "outcome", "target", "targetName", "via", "viaId"]);
   assert.deepEqual([kept.at(-1).via, kept.at(-1).viaId], ["thread", "ses_mine"]);
+});
+
+await check("a use Orgo didn't take waits in an outbox on disk: after a quit and a start it goes, once", async () => {
+  A.accessSyncForTests.reset();
+  calls.length = 0;
+  // Orgo away.
+  orgoAnswer = () => null;
+  await C.runAppAction("iris", "GMAIL_FETCH_EMAILS", {}, { sessionId: "ses_outbox" });
+  await A.accessSyncForTests.flushAll();
+  assert.ok(calls.some((c) => c.method === "POST"), "tried");
+  O.outboxForTests.writeAll();
+  const file = join(scratch, "outbox", "access-uses.json");
+  const kept = JSON.parse(readFileSync(file, "utf8")).entries;
+  assert.deepEqual(kept.map((e) => [e.wsId, e.item.viaId]), [["ws_main", "ses_outbox"]], "kept on disk with its workspace");
+  // Bops quits (what's in memory is gone) and starts again, with Orgo back.
+  A.accessSyncForTests.reset();
+  O.outboxForTests.restart();
+  orgoAnswer = (method) => ({ status: method === "PUT" ? 200 : 201, json: {} });
+  calls.length = 0;
+  A.accessSyncForTests.look();
+  await A.accessSyncForTests.flushAll();
+  const sent = calls.filter((c) => c.method === "POST" && c.path === `/api/projects/${PID}/access/log`).flatMap((c) => c.body.entries);
+  assert.deepEqual(sent.map((e) => [e.action, e.via, e.viaId]), [["GMAIL_FETCH_EMAILS", "thread", "ses_outbox"]], "the use from before went");
+  assert.ok(!("oid" in sent[0]), "the outbox's id stays home");
+  assert.equal(A.accessSyncForTests.waitingUses().length, 0, "out of the outbox once Orgo took it");
+  // Started again: not sent twice.
+  A.accessSyncForTests.reset();
+  O.outboxForTests.restart();
+  calls.length = 0;
+  A.accessSyncForTests.look();
+  await A.accessSyncForTests.flushAll();
+  assert.equal(calls.filter((c) => c.method === "POST").length, 0);
 });
 
 /* ---------------- After an upgrade from v0.0.28 ---------------- */

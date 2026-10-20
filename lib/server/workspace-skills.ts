@@ -31,7 +31,9 @@ import {
   type FolderFile,
   type Problem,
 } from "./skill-bundle";
+import { onRunner } from "./persist";
 import { bot, getState, update, userDir } from "./store";
+import { outbox } from "./sync-outbox";
 
 /**
  * Skills and apps: a workspace's ways of doing a kind of job (skills) and the tools Bops built that bots
@@ -46,7 +48,13 @@ import { bot, getState, update, userDir } from "./store";
  * a new version stays approved). A bot sees only a skill's name and description until it reads one
  * (read_skill), and only the published skills of its own workspace whose bots include it (none named:
  * every bot). When orgo-web has the skills routes and the workspace has its Orgo project, they're kept
- * in step with Orgo (syncSkills); otherwise they stay on this Mac.
+ * in step with Orgo (syncSkills); otherwise they stay on this Mac. Every change here queues a sync (a new
+ * draft too, and a bot taken off by its delete), and a sync Orgo didn't take is tried again after a
+ * backoff. A delete goes to Orgo through an outbox kept with the user's folder (sync-outbox.ts), tried
+ * again until Orgo took it, and a sync never brings back one still waiting there. A skill this Mac had
+ * from Orgo's project (SkillRef.remotePid) that Orgo no longer lists was deleted there: it goes here too,
+ * unless it changed here since the two last agreed (then it goes to Orgo again). The Mac keeps them in
+ * step: a computer's runner never syncs or sends a delete.
  */
 
 /** Skills (and apps) per workspace, as orgo-web allows. */
@@ -60,6 +68,8 @@ const FILE_CAP = 20_000;
 const g = globalThis as unknown as {
   bopsSkillsRoutes?: Map<string, boolean>;
   bopsSkillsSync?: Map<string, ReturnType<typeof setTimeout>>;
+  bopsSkillsTries?: Map<string, number>;
+  bopsSkillsDeleteTimer?: ReturnType<typeof setTimeout>;
   bopsSkillsCopied?: Map<string, string>;
   bopsSkillsInFlight?: Map<string, { done: Promise<SyncResult>; again: boolean }>;
 };
@@ -440,6 +450,8 @@ export function createSkill(wsId: string, input: NewSkill): { ref: SkillRef; war
     if (ws) (ws[listKey(kind)] ??= []).push(ref);
   });
   if (input.status === "published") publishSkill(wsId, kind, slug, { version: typeof extra.version === "string" ? extra.version : undefined });
+  // A draft goes to Orgo too (create_skill, Save as skill, an import); one brought from Orgo is there already.
+  if (ref.source !== "orgo") queueSync(wsId);
   const warnings = undeclaredSecrets([{ path: "SKILL.md", content: body }, ...files], Array.isArray(fm.requires_secrets) ? (fm.requires_secrets as string[]) : []);
   return { ref: findRef(wsId, kind, slug)!, warnings };
 }
@@ -564,26 +576,51 @@ export function rollbackSkill(wsId: string, kind: SkillKind, slug: string, versi
   return findRef(wsId, kind, slug)!;
 }
 
-/** Delete a skill or app: its folder and versions on this Mac, and Orgo's copy. */
+/**
+ * Delete a skill or app: its folder and versions on this Mac, and Orgo's copy (by its Orgo id, else by its
+ * slug: one sent whose id this Mac never heard). The delete waits in an outbox on disk until Orgo took it,
+ * tried now and again after a backoff, so Orgo not answering never brings the skill back.
+ */
 export async function deleteSkill(wsId: string, kind: SkillKind, slug: string): Promise<boolean> {
   const r = findRef(wsId, kind, slug);
   if (!r) return false;
+  dropLocal(wsId, kind, slug);
+  const pid = workspaceById(wsId)?.orgoProjectId;
+  // Its Orgo copy is in the project it was sent to (one from before that was kept: this one's).
+  const at = r.remoteId ? (r.remotePid ?? pid) : pid;
+  if (at && routes.get(at) !== false && !onRunner()) {
+    deletes.add(wsId, { pid: at, kind, slug, ...(r.remoteId ? { remoteId: r.remoteId } : {}) });
+    await flushDeletes(wsId).catch((e: Error) => console.warn(`[skills] deleting Orgo's copy: ${e.message}`));
+  }
+  return true;
+}
+
+/** A skill's ref, folder and versions off this Mac (nothing sent). */
+function dropLocal(wsId: string, kind: SkillKind, slug: string) {
   update((s) => {
     const ws = s.workspaces?.find((w) => w.id === wsId);
     if (ws) ws[listKey(kind)] = (ws[listKey(kind)] ?? []).filter((x) => x.slug !== slug);
   });
   for (const d of [skillDir(wsId, kind, slug), workspaceDir(wsId) && join(/*turbopackIgnore: true*/ workspaceDir(wsId)!, ".versions", listKey(kind), slug)])
     if (d) rmSync(/*turbopackIgnore: true*/ d, { recursive: true, force: true });
-  if (r.remoteId) await remoteDelete(wsId, r.remoteId).catch((e: Error) => console.warn(`[skills] deleting Orgo's copy: ${e.message}`));
-  return true;
 }
 
-/** A bot is gone: off every skill that named it; one only it had is kept, for every bot of the workspace (never deleted with it). */
+/**
+ * A bot is gone: off every skill that named it; one only it had is kept, for every bot of the workspace
+ * (never deleted with it). A change like any other: Orgo's copy loses the bot too.
+ */
 export function dropBotFromSkills(botId: string, wsId: string) {
+  let changed = false;
   for (const r of refsOf(wsId)) {
     if (!r.botIds.includes(botId)) continue;
-    patchRef(wsId, r.kind, r.slug, (x) => (x.botIds = x.botIds.filter((id) => id !== botId)));
+    patchRef(wsId, r.kind, r.slug, (x) => {
+      x.botIds = x.botIds.filter((id) => id !== botId);
+      // Later than the last sync, even in its millisecond: a change to send.
+      x.updatedAt = Math.max(Date.now(), (x.syncedAt ?? 0) + 1);
+    });
+    changed = true;
   }
+  if (changed) queueSync(wsId);
 }
 
 /* ---------------- Reading them ---------------- */
@@ -1014,10 +1051,85 @@ async function skillsCall<T>(projectId: string, path: string, init: { method?: "
 
 const routes = (g.bopsSkillsRoutes ??= new Map());
 
-async function remoteDelete(wsId: string, remoteId: string) {
-  const pid = workspaceById(wsId)?.orgoProjectId;
-  if (!pid || routes.get(pid) === false) return;
-  await skillsCall(pid, `/${encodeURIComponent(remoteId)}`, { method: "DELETE" });
+/** A delete still to send: the project it's in, and its Orgo id (none: found by slug and kind when it's sent). */
+type SkillDelete = { pid: string; kind: SkillKind; slug: string; remoteId?: string };
+/** Deletes Orgo hasn't taken yet, kept on disk until it does. */
+const deletes = outbox<SkillDelete>("skill-deletes", 2 * MAX_SKILLS);
+
+/** Orgo didn't answer, or answered for now (signed out, not allowed for now, a timeout, too many, 5xx): sent again later. */
+const forNow = (status: number | null) => status === null || status >= 500 || status === 401 || status === 403 || status === 408 || status === 429;
+const DELETE_RETRY_MS = 60_000;
+const DELETE_RETRY_MAX_MS = 30 * 60_000;
+
+/**
+ * Send a workspace's waiting deletes (every workspace's without one): DELETE .../skills/{id}, the id found
+ * by slug and kind in Orgo's list for one without. Done when Orgo deleted it, or hasn't it (404, or not
+ * in its list); kept, and tried again after a backoff, when Orgo didn't answer or answered for now. One
+ * Orgo will never take (a 400) is given up on, said in the log. True when none is left waiting.
+ */
+async function flushDeletes(wsId?: string): Promise<boolean> {
+  const lists = new Map<string, RemoteSkill[] | null>();
+  const listOf = async (pid: string) => {
+    if (!lists.has(pid)) {
+      const got = await skillsCall<{ skills?: RemoteSkill[] }>(pid, "");
+      lists.set(pid, got && got.status < 300 && Array.isArray(got.json.skills) ? got.json.skills : got && !forNow(got.status) ? [] : null);
+    }
+    return lists.get(pid)!;
+  };
+  let left = false;
+  for (const e of deletes.waiting(wsId)) {
+    const d = e.item;
+    if (routes.get(d.pid) === false) {
+      deletes.done([e.id]);
+      continue;
+    }
+    let remoteId = d.remoteId;
+    if (!remoteId) {
+      const list = await listOf(d.pid);
+      if (list === null) {
+        left = true;
+        continue;
+      }
+      remoteId = list.find((x) => x.slug === d.slug && localKind(x.type) === d.kind)?.id;
+      if (!remoteId) {
+        deletes.done([e.id]);
+        continue;
+      }
+    }
+    const r = await skillsCall(d.pid, `/${encodeURIComponent(remoteId)}`, { method: "DELETE" });
+    const status = r?.status ?? null;
+    if (forNow(status)) {
+      left = true;
+      continue;
+    }
+    if (status !== null && status >= 300 && status !== 404) console.warn(`[skills] Orgo answered ${status} to deleting ${d.slug}; not asked again`);
+    deletes.done([e.id]);
+  }
+  if (left) deletesLater();
+  else if (!wsId) g.bopsSkillsTries?.delete("deletes");
+  return !left;
+}
+
+/** Deletes still waiting go again after a backoff (1 minute, doubling to 30). */
+function deletesLater() {
+  if (g.bopsSkillsDeleteTimer) return;
+  const tries = (g.bopsSkillsTries ??= new Map());
+  const n = (tries.get("deletes") ?? 0) + 1;
+  tries.set("deletes", n);
+  g.bopsSkillsDeleteTimer = setTimeout(
+    () => {
+      g.bopsSkillsDeleteTimer = undefined;
+      void flushDeletes().catch((e: Error) => console.warn(`[skills] deletes: ${e.message}`));
+    },
+    Math.min(DELETE_RETRY_MS * 2 ** (n - 1), DELETE_RETRY_MAX_MS),
+  );
+  g.bopsSkillsDeleteTimer.unref?.();
+}
+
+/** Deletes left in the outbox by an earlier run of Bops go now (once a start: the skills route's first sync, or a sign-in). */
+export function skillDeletesOnStart() {
+  if (onRunner() || !deletes.restore().length) return;
+  void flushDeletes().catch((e: Error) => console.warn(`[skills] deletes: ${e.message}`));
 }
 
 /** What a skill's folder sends Orgo: its SKILL.md text and files, a binary file (a program) as content_base64. */
@@ -1030,7 +1142,8 @@ function payloadOf(wsId: string, r: SkillRef) {
   };
 }
 
-export type SyncResult = { mode: "local" | "orgo"; pushed: number; pulled: number; failed: number };
+/** `removed`: deleted on Orgo, so deleted here. `retry`: Orgo didn't take all of it for now (tried again after a backoff). */
+export type SyncResult = { mode: "local" | "orgo"; pushed: number; pulled: number; failed: number; removed?: number; retry?: boolean };
 
 /**
  * Keep a workspace's skills in step with Orgo's (GET/POST/PATCH /api/workspaces/{project}/skills), keyed
@@ -1057,7 +1170,15 @@ export function syncSkills(wsId: string): Promise<SyncResult> {
       if (!entry.again) return r;
     }
   };
-  entry.done = loop().finally(() => inFlight.delete(wsId));
+  entry.done = loop()
+    .then((r) => {
+      // Not all of it went: again after a backoff. All of it did: the backoff starts over.
+      const tries = (g.bopsSkillsTries ??= new Map());
+      if (r.retry) queueSync(wsId, (tries.get(wsId) ?? 0) + 1);
+      else tries.delete(wsId);
+      return r;
+    })
+    .finally(() => inFlight.delete(wsId));
   inFlight.set(wsId, entry);
   return entry.done;
 }
@@ -1066,19 +1187,33 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
   const res: SyncResult = { mode: "local", pushed: 0, pulled: 0, failed: 0 };
   const pid = workspaceById(wsId)?.orgoProjectId;
   if (!pid || routes.get(pid) === false || !workspaceDir(wsId)) return res;
+  // Deletes waiting go first: a sync never brings back one Orgo hasn't taken yet.
+  skillDeletesOnStart();
+  if (!(await flushDeletes(wsId))) res.retry = true;
   const got = await skillsCall<{ skills?: RemoteSkill[] }>(pid, "");
-  if (!got || got.status === 401) return res;
+  if (!got || forNow(got.status)) return { ...res, retry: true };
   if (got.status === 404 || got.status === 405 || !Array.isArray(got.json.skills)) {
     if (got.status === 404 || got.status === 405) routes.set(pid, false);
     return res;
   }
   routes.set(pid, true);
   res.mode = "orgo";
-  const remote = got.json.skills;
+  // Deleted here and not taken by Orgo yet: as if Orgo hadn't them (never matched, never brought here).
+  const waiting = deletes.waiting(wsId).filter((e) => e.item.pid === pid);
+  const goneHere = (x: RemoteSkill) => waiting.some((e) => (e.item.remoteId ? e.item.remoteId === x.id : e.item.slug === x.slug && e.item.kind === localKind(x.type)));
+  const remote = got.json.skills.filter((x) => !goneHere(x));
   const local = refsOf(wsId);
   for (const r of local) {
-    const there = remote.find((x) => (r.remoteId ? x.id === r.remoteId : x.slug === r.slug && localKind(x.type) === r.kind));
+    // Its Orgo id is this project's (one kept from before remotePid was: taken to be).
+    const mine = !!r.remoteId && (r.remotePid ?? pid) === pid;
+    const there = remote.find((x) => (mine ? x.id === r.remoteId : x.slug === r.slug && localKind(x.type) === r.kind));
     try {
+      if (!there && mine && r.remotePid === pid && r.syncedAt && r.updatedAt <= r.syncedAt) {
+        // Orgo had it and doesn't now, and it hasn't changed here since: deleted there (on orgo.ai, or on another Mac).
+        dropLocal(wsId, r.kind, r.slug);
+        res.removed = (res.removed ?? 0) + 1;
+        continue;
+      }
       if (!there) {
         // Only here: made on Orgo with its current text.
         const p = payloadOf(wsId, r);
@@ -1090,16 +1225,19 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
         if (made?.status === 201 && made.json.skill?.id) {
           const id = made.json.skill.id;
           const at = made.json.skill.updated_at;
-          patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteId = id), (x.remoteAt = at), (x.syncedAt = Date.now())));
+          patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteId = id), (x.remotePid = pid), (x.remoteAt = at), (x.syncedAt = Date.now())));
           res.pushed++;
-        } else res.failed++;
+        } else {
+          res.failed++;
+          if (forNow(made?.status ?? null)) res.retry = true;
+        }
         continue;
       }
       // Changed on Orgo: its updated_at isn't the one last seen. Changed here: since the two last agreed.
       const remoteAt = Date.parse(there.updated_at) || 0;
       const changedThere = there.updated_at !== r.remoteAt;
       const changedHere = !r.syncedAt || r.updatedAt > r.syncedAt;
-      if (!r.remoteId) patchRef(wsId, r.kind, r.slug, (x) => (x.remoteId = there.id));
+      if (r.remoteId !== there.id || r.remotePid !== pid) patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteId = there.id), (x.remotePid = pid)));
       if (changedThere && (!changedHere || remoteAt >= r.updatedAt)) {
         if (await pull(wsId, pid, there, r)) res.pulled++;
         else res.failed++;
@@ -1113,7 +1251,10 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
           const at = now?.json.skills?.find((x) => x.id === there.id)?.updated_at ?? p.json.skill?.updated_at ?? new Date().toISOString();
           patchRef(wsId, r.kind, r.slug, (x) => ((x.remoteAt = at), (x.syncedAt = Date.now())));
           res.pushed++;
-        } else res.failed++;
+        } else {
+          res.failed++;
+          if (forNow(p?.status ?? null)) res.retry = true;
+        }
       }
     } catch (e) {
       res.failed++;
@@ -1123,6 +1264,8 @@ async function syncOnce(wsId: string): Promise<SyncResult> {
   // Only on Orgo: brought here.
   for (const x of remote) {
     if (refsOf(wsId).some((r) => r.remoteId === x.id || (r.slug === x.slug && r.kind === localKind(x.type)))) continue;
+    // Gone from this Mac since the list was read (deleted meanwhile): not brought back.
+    if (deletes.waiting(wsId).some((e) => e.item.pid === pid && (e.item.remoteId === x.id || (e.item.slug === x.slug && e.item.kind === localKind(x.type))))) continue;
     if (await pull(wsId, pid, x)) res.pulled++;
     else res.failed++;
   }
@@ -1184,6 +1327,7 @@ async function pull(wsId: string, pid: string, x: RemoteSkill, into?: SkillRef):
           if (!r.versions?.some((v) => v.version === version)) r.versions = [...(r.versions ?? []), { version, at: Date.now(), sha256: bundleSha(md, files.map((f) => ({ path: f.path, sha256: sha256Hex(fileBytes(f)), executable: f.executable }))) }];
         }
         r.remoteId = x.id;
+        r.remotePid = pid;
         r.remoteAt = x.updated_at;
         r.updatedAt = Date.parse(x.updated_at) || Date.now();
         r.syncedAt = Math.max(Date.now(), r.updatedAt);
@@ -1203,6 +1347,7 @@ async function pull(wsId: string, pid: string, x: RemoteSkill, into?: SkillRef):
     });
     patchRef(wsId, kind, ref.slug, (r) => {
       r.remoteId = x.id;
+      r.remotePid = pid;
       r.remoteAt = x.updated_at;
       r.updatedAt = Date.parse(x.updated_at) || r.updatedAt;
       r.syncedAt = Math.max(Date.now(), r.updatedAt);
@@ -1214,19 +1359,28 @@ async function pull(wsId: string, pid: string, x: RemoteSkill, into?: SkillRef):
   }
 }
 
-/** Sync a workspace a moment after a change here (several changes in a row are one sync). */
-function queueSync(wsId: string) {
+/**
+ * Sync a workspace a moment after a change here (several changes in a row are one sync), or after a
+ * backoff once `tries` syncs in a row didn't all go (1 minute, doubling to 30): a change meanwhile goes
+ * at once.
+ */
+export function queueSync(wsId: string, tries = 0) {
   const pid = workspaceById(wsId)?.orgoProjectId;
-  if (!pid || routes.get(pid) === false) return;
+  if (!pid || routes.get(pid) === false || onRunner()) return;
   const timers = (g.bopsSkillsSync ??= new Map());
+  const counts = (g.bopsSkillsTries ??= new Map());
+  if (tries) counts.set(wsId, tries);
+  else if (timers.has(wsId) && (counts.get(wsId) ?? 0) > 0) counts.delete(wsId);
   clearTimeout(timers.get(wsId));
-  timers.set(
-    wsId,
-    setTimeout(() => {
+  const t = setTimeout(
+    () => {
       timers.delete(wsId);
       void syncSkills(wsId).catch((e: Error) => console.warn(`[skills] sync: ${e.message}`));
-    }, 1500),
+    },
+    tries ? Math.min(DELETE_RETRY_MS * 2 ** (tries - 1), DELETE_RETRY_MAX_MS) : 1500,
   );
+  t.unref?.();
+  timers.set(wsId, t);
 }
 
 /** Whether Orgo has the skills routes for this project, as last seen (undefined: not asked yet). */
