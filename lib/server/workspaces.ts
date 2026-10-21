@@ -64,7 +64,7 @@ export type CreateResult = { id: string; chatId: string; orgoProjectId?: string 
 export async function createWorkspace(name: string): Promise<CreateResult> {
   const clean = freeLocalName(name.trim().slice(0, NAME_MAX) || "New workspace");
   const ws = id("ws");
-  let made: { id: string; name: string } | undefined;
+  let made: { id: string; name: string; updatedAt?: string } | undefined;
   if ((await perWorkspaceProjects().catch(() => null)) === true) {
     try {
       made = await ensureProject(ws, { interactive: true, name: clean });
@@ -89,7 +89,12 @@ export async function createWorkspace(name: string): Promise<CreateResult> {
     workspaceId: ws,
   };
   update((s) => {
-    (s.workspaces ??= [{ id: MAIN_WORKSPACE, name: "Main", createdAt: Date.now() }]).push({ id: ws, name: clean, createdAt: Date.now(), ...(made ? { orgoProjectId: made.id, orgoName: made.name } : {}) });
+    (s.workspaces ??= [{ id: MAIN_WORKSPACE, name: "Main", createdAt: Date.now() }]).push({
+      id: ws,
+      name: clean,
+      createdAt: Date.now(),
+      ...(made ? { orgoProjectId: made.id, orgoName: made.name, ...(made.updatedAt ? { orgoUpdatedAt: made.updatedAt } : {}) } : {}),
+    });
     s.bots.push(main);
     s.chats.push({ id: botChatId(mainId), kind: "bot", botIds: [mainId], createdAt: Date.now(), typing: [], workspaceId: ws });
     s.workspace = ws;
@@ -251,10 +256,26 @@ async function runSync(): Promise<SyncResult | null> {
 /**
  * What deleting a workspace takes with it, for the confirm: the computers (its team's here, and what's in
  * its Orgo workspace), its keys (the ones for This workspace), its skills and its apps, the apps its bots
- * made and its CRM files, Bops' and Orgo's together, each once. `orgo`: its Orgo workspace goes too. Throws for the default workspace, and when Orgo
- * doesn't say what's in it (nothing is deleted without the user seeing the list).
+ * made and its CRM files, its routines and its Orbit issues, Bops' and Orgo's together, each once. `orgo`:
+ * its Orgo workspace goes too. `memory`: its memory bank goes too (its own, used by no other workspace:
+ * memory.ts memoryGoesWith). Throws for the default workspace, and when Orgo doesn't say what's in it
+ * (nothing is deleted without the user seeing the list).
  */
-export type DeletePreview = { id: string; name: string; orgo: boolean; bots: string[]; computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[]; madeApps: string[]; crmFiles: string[] };
+export type DeletePreview = {
+  id: string;
+  name: string;
+  orgo: boolean;
+  memory: boolean;
+  bots: string[];
+  computers: { id: string; name: string }[];
+  keys: string[];
+  skills: string[];
+  apps: string[];
+  madeApps: string[];
+  crmFiles: string[];
+  routines: string[];
+  issues: string[];
+};
 
 export class WorkspaceError extends Error {
   status: number;
@@ -283,6 +304,14 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
   const madeApps = (getState().madeApps ?? []).filter((a) => a.ws === workspaceId).map((a) => a.title);
   const { crmNames } = await import("./crm-sync");
   const crmFiles = await crmNames(workspaceId);
+  // Its routines and its Orbit issues: Orgo's delete takes its copy of them too.
+  const ids = new Set(team.map((b) => b.id));
+  const routines = getState()
+    .routines.filter((r) => ids.has(r.botId))
+    .map((r) => r.title.trim() || r.goal.trim().slice(0, 60) || "Routine");
+  const issues = await issueTitles(workspaceId);
+  const { memoryGoesWith } = await import("./memory");
+  const memory = memoryGoesWith(workspaceId)?.whole === true;
   // Orgo not answering is said, never taken for "nothing there": Delete would refuse then too (remove.ts).
   const orgo =
     !!w.orgoProjectId &&
@@ -304,6 +333,8 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
     apps.push(...there.apps);
     madeApps.push(...there.madeApps);
     crmFiles.push(...there.crmFiles);
+    routines.push(...there.routines);
+    issues.push(...there.issues);
     // An orgo-web that only counts them: more there than are named here are still said, never left off.
     const more = (n: number | undefined, named: string[], one: string, many: string) => {
       if (n && n > named.length) named.push(`${n} ${n === 1 ? one : many} on Orgo`);
@@ -315,7 +346,27 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
     for (const k of await listKeys().catch(() => [])) if (k.workspaceId === w.orgoProjectId) keys.push(k.name);
   }
   const once = (xs: string[]) => xs.filter((x, i) => xs.findIndex((y) => sameName(x, y)) === i);
-  return { id: w.id, name: w.name, orgo, bots: team.map((b) => b.name), computers, keys: once(keys), skills: once(skills), apps: once(apps), madeApps: once(madeApps), crmFiles: once(crmFiles) };
+  return {
+    id: w.id,
+    name: w.name,
+    orgo,
+    memory,
+    bots: team.map((b) => b.name),
+    computers,
+    keys: once(keys),
+    skills: once(skills),
+    apps: once(apps),
+    madeApps: once(madeApps),
+    crmFiles: once(crmFiles),
+    routines: once(routines),
+    issues: once(issues),
+  };
+}
+
+/** The titles of a workspace's Orbit issues (orbit-issues.ts issueTitlesOf); none with memory off. */
+async function issueTitles(workspaceId: string): Promise<string[]> {
+  const { issueTitlesOf } = await import("./orbit-issues");
+  return issueTitlesOf(workspaceId);
 }
 
 /* ---------------- Moving onto Orgo workspaces ---------------- */
@@ -478,17 +529,20 @@ function bindLater() {
 }
 
 /**
- * Once a start (the state route, on the Mac): workspaces with no project get one, skill deletes left
- * from before go, and what a bound workspace changed here that Orgo hadn't taken when Bops last quit goes
- * now, as its retries lived in memory only: each one's skills are synced (a create, an edit or a bot
- * dropped since its last sync, SkillRef.updatedAt past syncedAt, and what Orgo has), and its Orbit is
- * sent where its index still holds what Orgo hasn't taken (deletes, items or facts: orbitOutbox).
+ * Once a start (the state route, on the Mac): workspaces with no project get one, skill deletes and a
+ * deleted workspace's memory left from before go, and what a bound workspace changed here that Orgo
+ * hadn't taken when Bops last quit goes now, as its retries lived in memory only: each one's skills are
+ * synced (a create, an edit or a bot dropped since its last sync, SkillRef.updatedAt past syncedAt, and
+ * what Orgo has), and its Orbit is sent where its index still holds what Orgo hasn't taken (deletes,
+ * items or facts: orbitOutbox).
  */
 export function startProjectBinding() {
   if (g.bopsWsBindStarted || onRunner() || !stateReady() || stateTooNew()) return;
   g.bopsWsBindStarted = true;
   void bindMissingProjects();
   skillDeletesOnStart();
+  // A deleted workspace's memory that memory didn't take before Bops last quit.
+  void import("./memory-deletes").then((m) => m.memoryDeletesOnStart()).catch((e: Error) => console.warn(`[memory] deletes from before: ${e.message}`));
   void pushBoundOnStart().catch((e: Error) => console.warn(`[workspaces] sending what waited from before: ${e.message}`));
 }
 

@@ -154,7 +154,8 @@ const server = createServer(async (req, res) => {
     if (orgo.failCreate.has(name)) return send(res, 500, { error: "boom" });
     if (orgo.modern && body?.bops_ws_id) {
       const had = orgo.projects.find((x) => x.bops_ws_id === body.bops_ws_id);
-      if (had) return changed(200, { id: had.id, name: had.name, product: had.product, bops_ws_id: had.bops_ws_id, updated_at: had.updated_at });
+      // orgo-web answers a create as createdBody does: created_at, never updated_at.
+      if (had) return changed(200, { id: had.id, name: had.name, user_id: "u_tiger", status: "active", icon_url: null, created_at: had.created_at, product: had.product, bops_ws_id: had.bops_ws_id });
     }
     if (orgo.projects.some((x) => x.name.toLowerCase() === name.toLowerCase())) return send(res, 400, TAKEN);
     // "bops" is only the default's (bops_ws_id ws_main) or an old app's own {name: 'bops'} (no product).
@@ -163,7 +164,7 @@ const server = createServer(async (req, res) => {
     const at = stamp();
     const made = { id, name, created_at: at, updated_at: at, ...(orgo.modern ? { product: body?.product ?? (name.toLowerCase() === "bops" ? "bops" : "orgo"), bops_ws_id: body?.bops_ws_id ?? null } : { product: name.toLowerCase() === "bops" ? "bops" : "orgo" }) };
     orgo.projects.push(made);
-    return changed(201, { id, name, updated_at: at, ...(orgo.modern ? { product: made.product, bops_ws_id: made.bops_ws_id } : {}) });
+    return changed(201, { id, name, user_id: "u_tiger", status: "active", icon_url: null, created_at: at, ...(orgo.modern ? { product: made.product, bops_ws_id: made.bops_ws_id } : {}) });
   }
   if (p === "/api/bops/apps" && req.method === "GET") return orgo.apps === null ? html404(res) : send(res, 200, { apps: orgo.apps });
   const one = p.match(/^\/api\/workspaces\/([^/]+)$/);
@@ -481,6 +482,14 @@ await check("New workspace: its Orgo workspace is made too, marked and tied; a n
   assert.equal(S.getState().workspace, made.id, "the new one is the current one");
   const p = byId(made.orgoProjectId);
   assert.deepEqual([p.name, p.product, p.bops_ws_id, ws(made.id).orgoName], ["Ventures", "bops", made.id, "Ventures"]);
+  // orgo-web's create answers created_at, not updated_at: the new workspace knows when Orgo last changed it all the same.
+  assert.equal(ws(made.id).orgoUpdatedAt, p.created_at);
+  // So a list older than that (a replica behind) never takes a name back for it.
+  const was = { name: p.name, updated_at: p.updated_at };
+  Object.assign(p, { name: "Ventures Old", updated_at: "2026-01-01T00:00:00Z" });
+  assert.deepEqual((await Wk.syncWorkspaceNames()).renamed, []);
+  assert.equal(ws(made.id).name, "Ventures");
+  Object.assign(p, was);
   // Rename: Orgo first; one the user's Orgo has is refused, and nothing changes.
   const clash = await Route.PATCH(req("PATCH", { id: made.id, name: "orgo" }));
   assert.equal(clash.status, 409);

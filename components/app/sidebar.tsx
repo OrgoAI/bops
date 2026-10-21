@@ -17,6 +17,7 @@ import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
 import { useSetupNeedsYou } from "./setup";
 import { arrived, DeleteX, forgetShown, rememberShown, usePop, useRise } from "./side-group";
 import { UpdateNotice } from "./update-notice";
+import { forgetWorkspaceHere } from "@/lib/workspace-local";
 import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, NeedsYouDot, post, quietNothing, RoundButton, SideToggleIcon, StatusIcon, teamOf, useNow } from "./ui";
 
 /**
@@ -593,7 +594,20 @@ export { DeleteX };
  * one, or start a new one. Each workspace is its own team: its own main bot, bots, chats and threads.
  */
 /** What deleting a workspace takes with it (GET /api/workspaces?preview=), for the confirm. */
-type DeletePreview = { id: string; name: string; orgo: boolean; computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[]; madeApps?: string[]; crmFiles?: string[] };
+type DeletePreview = {
+  id: string;
+  name: string;
+  orgo: boolean;
+  memory?: boolean;
+  computers: { id: string; name: string }[];
+  keys: string[];
+  skills: string[];
+  apps: string[];
+  madeApps?: string[];
+  crmFiles?: string[];
+  routines?: string[];
+  issues?: string[];
+};
 
 /** How often a rename made on orgo.ai is looked for while the app is open. */
 const NAMES_SYNC_MS = 10 * 60_000;
@@ -609,6 +623,17 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
   const box = useRef<HTMLDivElement>(null);
   const workspaces = state.workspaces ?? [];
   const current = workspaces.find((w) => w.id === currentWorkspace(state));
+
+  // A workspace deleted (here, or on another Mac) takes what this window kept for it in localStorage.
+  const listed = useRef<{ user: string; ids: Set<string> } | null>(null);
+  const user = state.account?.user.id ?? "";
+  const ids = workspaces.map((w) => w.id).join(" ");
+  useEffect(() => {
+    const now = new Set(ids.split(" ").filter(Boolean));
+    const was = listed.current;
+    if (was && was.user === user && now.size) for (const id of was.ids) if (!now.has(id)) forgetWorkspaceHere(id);
+    listed.current = { user, ids: now };
+  }, [user, ids]);
 
   // A workspace renamed on orgo.ai is renamed here too: now, and every 10 minutes while the app is open.
   useEffect(() => {
@@ -681,7 +706,10 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
     try {
       const res = await post("/api/workspaces", { id }, "DELETE");
       const j = (await res.json().catch(() => ({}))) as { error?: string };
-      if (res.ok) setDeleting(null);
+      if (res.ok) {
+        setDeleting(null);
+        forgetWorkspaceHere(id);
+      }
       else setDeleting({ id, preview, error: j.error ?? "That didn't work, so nothing was deleted. Try again." });
     } catch {
       setDeleting({ id, preview, error: "Couldn't reach Bops. Try again." });
@@ -809,18 +837,29 @@ function GoesWith({ label, items }: { label: string; items: string[] }) {
 }
 
 /**
- * Delete a workspace, confirmed: what goes with it (its computers, keys, skills and apps, here and in its Orgo
- * workspace), then Delete. Orgo saying no keeps the workspace whole, with its words here.
+ * Delete a workspace, confirmed: what goes with it (its computers, keys, skills and apps, the apps its bots
+ * made, its CRM files, routines and Orbit issues, here and in its Orgo workspace, and its memory when its bank
+ * goes), then Delete. Orgo saying no keeps the workspace whole, with its words here.
  */
-function DeleteConfirm({ name, preview, error, busy, onCancel, onDelete }: { name: string; preview?: DeletePreview; error?: string; busy?: boolean; onCancel: () => void; onDelete: () => void }) {
-  const nothing = !!preview && !preview.computers.length && !preview.keys.length && !preview.skills.length && !preview.apps.length && !preview.madeApps?.length && !preview.crmFiles?.length;
+export function DeleteConfirm({ name, preview, error, busy, onCancel, onDelete }: { name: string; preview?: DeletePreview; error?: string; busy?: boolean; onCancel: () => void; onDelete: () => void }) {
+  const nothing =
+    !!preview &&
+    !preview.computers.length &&
+    !preview.keys.length &&
+    !preview.skills.length &&
+    !preview.apps.length &&
+    !preview.madeApps?.length &&
+    !preview.crmFiles?.length &&
+    !preview.routines?.length &&
+    !preview.issues?.length;
+  const team = preview?.memory ? "Its bots, chats and memory go" : "Its bots and chats go";
   return (
     <div className="mx-1 my-1 flex flex-col gap-1.5 rounded-[10px] bg-[#F7F7F5] p-2.5 text-[12px] leading-4 text-[#6B6B6B]">
       <span className="text-[13px] font-medium text-ink">Delete {name}?</span>
       {!preview && !error && <span>Checking what&apos;s in it&hellip;</span>}
       {preview && (
         <>
-          <span>{nothing ? "Its bots and chats go. Nothing else is in it." : "Its bots and chats go, and with them:"}</span>
+          <span>{nothing ? `${team}. Nothing else is in it.` : `${team}, and with them:`}</span>
           {!nothing && (
             <ul className="flex flex-col gap-0.5">
               <GoesWith label="Computers" items={preview.computers.map((c) => c.name)} />
@@ -829,6 +868,8 @@ function DeleteConfirm({ name, preview, error, busy, onCancel, onDelete }: { nam
               <GoesWith label="Apps" items={preview.apps} />
               <GoesWith label="Apps its bots made" items={preview.madeApps ?? []} />
               <GoesWith label="CRM files" items={preview.crmFiles ?? []} />
+              <GoesWith label="Routines" items={preview.routines ?? []} />
+              <GoesWith label="Orbit issues" items={preview.issues ?? []} />
             </ul>
           )}
           {preview.orgo && <span>Its Orgo workspace is deleted too.</span>}

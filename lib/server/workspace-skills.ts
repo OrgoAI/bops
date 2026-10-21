@@ -1645,3 +1645,23 @@ export function queueSync(wsId: string, tries = 0) {
 
 /** Whether Orgo has the skills routes for this project, as last seen (undefined: not asked yet). */
 export const skillsRoutesSeen = (projectId: string) => routes.get(projectId);
+
+/**
+ * A deleted workspace's skills and apps go from this Mac (remove.ts deleteWorkspace, while it's still
+ * listed, so its folder is found): its folder (workspaces/<project or workspace id>, with every skill's
+ * files, versions and the sync's marks), its deletes and approvals still to send (Orgo's copies went with
+ * its project), and a sync waiting for it.
+ */
+export function dropWorkspaceSkills(wsId: string) {
+  const timers = g.bopsSkillsSync;
+  clearTimeout(timers?.get(wsId));
+  timers?.delete(wsId);
+  g.bopsSkillsTries?.delete(wsId);
+  deletes.done(deletes.waiting(wsId).map((e) => e.id));
+  const approvals = approvalsOut.waiting(wsId).map((e) => e.id);
+  approvalsOut.done(approvals);
+  for (const id of approvals) parked.delete(id);
+  if (wsId === MAIN_WORKSPACE) return;
+  const dir = workspaceDir(wsId);
+  if (dir) rmSync(/*turbopackIgnore: true*/ dir, { recursive: true, force: true });
+}

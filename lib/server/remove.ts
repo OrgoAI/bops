@@ -4,7 +4,7 @@ import { dropGuestKey, resetComputer, stopSession } from "./sessions";
 import { bot, getState, session, update } from "./store";
 import { stopWatch } from "./watches";
 import { deleteInboxes } from "./mail";
-import { dropBotFromSkills } from "./workspace-skills";
+import { dropBotFromSkills, dropWorkspaceSkills } from "./workspace-skills";
 import { DEFAULT_UNDELETABLE, deleteOrgoWorkspace, WorkspaceError } from "./workspaces";
 import { apiKey, orgo as orgoApi, OrgoError, perWorkspaceProjects } from "./orgo";
 import { routinesRemovedInWorkspace } from "./routine-sync";
@@ -98,7 +98,10 @@ export async function deleteBot(botId: string, withWorkspace = false) {
  * works on it or has it (freeComputerOnDelete): it passes to that one instead. Only then is it taken off
  * this Mac. A workspace with an Orgo project is never deleted on this Mac alone: when Orgo can't be asked
  * (it doesn't answer, or no one is signed in) nothing is deleted and the user is told to try again. Its
- * brains go once Orgo's workspace has (a refusal leaves them as they were).
+ * brains go once Orgo's workspace has (a refusal leaves them as they were). Its memory goes from Honcho
+ * too (orgo-web's delete doesn't reach it): its own bank whole, or, in a bank another workspace uses, its
+ * issues' sessions (memory-deletes.ts, through an outbox while memory doesn't answer). And nothing of it
+ * stays on this Mac: its skills' folder, its issues' cache and its Orbit index go with it.
  */
 export async function deleteWorkspace(workspaceId: string) {
   const gone = (getState().workspaces ?? []).find((w) => w.id === workspaceId);
@@ -121,6 +124,17 @@ export async function deleteWorkspace(workspaceId: string) {
   dropWorkspaceApps(workspaceId);
   const { dropWorkspaceCrm } = await import("./crm-sync");
   dropWorkspaceCrm(workspaceId);
+  // Its memory: its own bank, or its issues' sessions in the bank it shares, said while it's still listed.
+  const { memoryDeleteFor, deleteWorkspaceMemory } = await import("./memory-deletes");
+  const { memoryGoesWith } = await import("./memory");
+  const { issueSessionsOf, dropWorkspaceIssues } = await import("./orbit-issues");
+  const goes = memoryGoesWith(workspaceId);
+  const memory = memoryDeleteFor(workspaceId, goes && !goes.whole ? await issueSessionsOf(workspaceId) : []);
+  // What else it kept on this Mac: its skills' folder, its issues' cache and its Orbit index.
+  const { dropWorkspaceCategories } = await import("./memory-categories");
+  const forgotten = dropWorkspaceCategories(workspaceId, goes?.whole ? goes.binding.bank : null);
+  dropWorkspaceIssues(workspaceId);
+  dropWorkspaceSkills(workspaceId);
   update((state) => {
     state.workspaces = left;
     state.chats = state.chats.filter((c) => c.workspaceId !== workspaceId);
@@ -128,6 +142,9 @@ export async function deleteWorkspace(workspaceId: string) {
     state.messages = state.messages.filter((m) => chats.has(m.chatId));
     if (state.workspace === workspaceId) state.workspace = left[0].id;
   });
+  // Memory isn't waited on: what it doesn't take now waits in an outbox (memory-deletes.ts).
+  void forgotten.catch(() => {});
+  void deleteWorkspaceMemory(workspaceId, memory).catch((e: Error) => console.warn(`[memory] deleting ${gone.name}'s memory: ${e.message}`));
 }
 
 /**

@@ -1071,3 +1071,74 @@ export async function dream(ws: string) {
   await x.client.scheduleDream({ observer: b.peer, observed: b.peer });
   x.card = undefined;
 }
+
+/* ---------------- A deleted workspace's memory ---------------- */
+
+/**
+ * What of a workspace's memory goes when it's deleted (remove.ts deleteWorkspace, and the confirm's list):
+ * the bank it uses whole (every session, message and fact in it) when no other workspace uses that bank
+ * (its own, or one it shared from a workspace deleted since); otherwise (`whole` false) only its Orbit
+ * issues' sessions there. Never the user's own bank (the default's, maybe their other agents' too), nor
+ * one Bops didn't name (bops-<workspace>). Null with memory off, and for the default workspace. Asked
+ * while the workspace is still listed: its binding is read from it.
+ */
+export function memoryGoesWith(ws: string): { binding: Binding; whole: boolean } | null {
+  if (!on() || ws === MAIN_WORKSPACE) return null;
+  const binding = bindingOf(ws);
+  const others = [MAIN_WORKSPACE, ...(getState().workspaces ?? []).map((w) => w.id)].filter((x) => x !== ws);
+  const shared = others.some((x) => bindingOf(x).bank === binding.bank);
+  const bops = binding.bank.startsWith("bops-") && binding.bank !== ownBank(MAIN_WORKSPACE).bank;
+  return { binding, whole: bops && !shared };
+}
+
+/** Whether a workspace listed now uses this bank, or it's the user's own (the default's, never deleted whole). */
+export const bankInUse = (bank: string) => bank === ownBank(MAIN_WORKSPACE).bank || [MAIN_WORKSPACE, ...(getState().workspaces ?? []).map((w) => w.id)].some((x) => bindingOf(x).bank === bank);
+
+/** At most this many sessions are deleted one by one when memory won't delete a bank that still has them. */
+const BANK_SESSIONS_MAX = 5000;
+
+/**
+ * Delete a bank from memory for good (a deleted workspace's own: memory-deletes.ts): every session,
+ * message and fact in it. Memory refusing it while it still has sessions (409) has them deleted first, by
+ * id, and is asked again. Gone already is fine. Its review on this Mac goes too, and its client here, so
+ * nothing uses (or makes again) the bank. Throws what memory answered otherwise, to be tried again.
+ */
+export async function deleteBank(b: Binding): Promise<void> {
+  const x = bankFor(b);
+  const id = x.client.workspaceId;
+  const gone = async () => {
+    try {
+      await x.client.deleteWorkspace(id);
+    } catch (e) {
+      if (!notFound(e)) throw e;
+    }
+  };
+  try {
+    await gone();
+  } catch (e) {
+    if ((e as { status?: number }).status !== 409) throw e;
+    // Listed first, then deleted: deleting while paging would skip some.
+    const ids: string[] = [];
+    for await (const s of await x.client.sessions({ size: 100 })) {
+      ids.push(s.id);
+      if (ids.length >= BANK_SESSIONS_MAX) break;
+    }
+    for (const sid of ids)
+      try {
+        await sessionRef(x.client, sid).delete();
+      } catch (err) {
+        if (!notFound(err)) throw err;
+      }
+    await gone();
+  }
+  live.banks.delete(id);
+  const all = reviews();
+  if (all[b.bank]) {
+    delete all[b.bank];
+    const file = reviewsFile();
+    if (file) {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, JSON.stringify(all));
+    }
+  }
+}

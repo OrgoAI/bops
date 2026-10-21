@@ -48,10 +48,12 @@ const nameOf = (by: IssueBy) => (by.botId ? (bot(by.botId)?.name ?? "A bot") : o
  * session) still to delete.
  */
 type Cache = { at: number; issues: Issue[]; dirty?: string[]; gone?: string[]; deletes?: { orgoId: string; id: string }[] };
-type Live = { lists: Map<string, { file: string | null; cache: Cache }>; queues: Map<string, Promise<unknown>>; joined: Set<string>; backfilled?: Set<string> };
+/** `dropped`: workspaces deleted here (dropWorkspaceIssues): their cache is never written again. */
+type Live = { lists: Map<string, { file: string | null; cache: Cache }>; queues: Map<string, Promise<unknown>>; joined: Set<string>; backfilled?: Set<string>; dropped?: Set<string> };
 const g = globalThis as unknown as { bopsIssues?: Live };
 const live: Live = (g.bopsIssues ??= { lists: new Map(), queues: new Map(), joined: new Set() });
 live.backfilled ??= new Set();
+live.dropped ??= new Set();
 
 const fileOf = (ws: string) => {
   const dir = userDir();
@@ -84,7 +86,7 @@ function cacheOf(ws: string): Cache {
 }
 
 function saveCache(ws: string, cache: Cache, ours: () => boolean) {
-  if (!ours()) return;
+  if (!ours() || live.dropped!.has(ws)) return;
   live.lists.set(ws, { file: fileOf(ws), cache });
   const file = fileOf(ws);
   if (!file) return;
@@ -814,4 +816,49 @@ export function orbitIssuesFlush(ws: string): Promise<"ok" | "retry" | "off"> {
     }
     return kept ? "retry" : "ok";
   });
+}
+
+/* ---------------- A deleted workspace ---------------- */
+
+/**
+ * The sessions in memory of a workspace's issues, for its delete (memory-deletes.ts): the cache's and
+ * memory's list of them, asked while the workspace is still listed (its bank is read from it). Memory not
+ * answering within `ms` leaves the cache's.
+ */
+export async function issueSessionsOf(ws: string, ms = 10_000): Promise<string[]> {
+  const ids = new Set(cacheOf(ws).issues.map((i) => i.id).filter(isIssueId));
+  if (issuesOn())
+    try {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<null>((r) => (timer = setTimeout(() => r(null), ms)));
+      const found = await Promise.race([findSessions(ws), late]).finally(() => clearTimeout(timer));
+      if (!found) console.warn(`[issues] ${ws}: memory didn't list its issues for the delete in time`);
+      for (const s of found ?? []) if (isIssueId(s.id)) ids.add(s.id);
+    } catch (e) {
+      console.warn(`[issues] ${ws}: listing its issues for the delete: ${(e as Error).message}`);
+    }
+  return [...ids];
+}
+
+/**
+ * The titles of a workspace's issues for its delete's confirm: as listIssues has them now, or the cache's
+ * when Orgo and memory don't answer within `ms`. None with memory off.
+ */
+export async function issueTitlesOf(ws: string, ms = 8000): Promise<string[]> {
+  if (!issuesOn()) return [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>((r) => (timer = setTimeout(() => r(null), ms)));
+  const r = await Promise.race([listIssues(ws).catch(() => null), late]).finally(() => clearTimeout(timer));
+  const issues = r?.issues ?? cacheOf(ws).issues.filter((i) => !cacheOf(ws).gone?.includes(i.id));
+  return issues.map((i) => i.title.trim() || "Issue");
+}
+
+/** A deleted workspace's issues go from this Mac: its cache (orbit-issues/ws-<id>.json), and nothing writes it again. */
+export function dropWorkspaceIssues(ws: string) {
+  live.dropped!.add(ws);
+  live.lists.delete(ws);
+  live.queues.delete(ws);
+  live.backfilled!.delete(ws);
+  const file = fileOf(ws);
+  if (file) rmSync(/*turbopackIgnore: true*/ file, { force: true });
 }

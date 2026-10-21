@@ -485,7 +485,7 @@ export const collisionNames = (name: string) => [name, `${name} (Bops)`, ...Arra
  * already has is said back (OrgoError, nameTaken) for them to pick another; otherwise the next free one
  * of collisionNames is used and noted.
  */
-export async function ensureProject(wsId: string, opts: { interactive?: boolean; name?: string } = {}): Promise<{ id: string; name: string; renamed?: boolean; created?: boolean }> {
+export async function ensureProject(wsId: string, opts: { interactive?: boolean; name?: string } = {}): Promise<{ id: string; name: string; updatedAt?: string; renamed?: boolean; created?: boolean }> {
   const w = workspaceOfId(wsId);
   const local = (opts.name ?? w?.name ?? "Workspace").trim().slice(0, 80) || "Workspace";
   const owned = await ownedWorkspaces();
@@ -494,7 +494,7 @@ export async function ensureProject(wsId: string, opts: { interactive?: boolean;
     // Tied here only once Orgo tied it too (a refusal, a 409 taken by another, or an orgo-web without the code: nothing).
     if (tied.bops_ws_id !== wsId && !(await tieProject(tied.id, wsId))) throw new Error(`Orgo didn't tie ${tied.id.slice(0, 8)} to this workspace`);
     bindProject(wsId, tied.id, tied.name, tied.updated_at);
-    return { id: tied.id, name: tied.name };
+    return { id: tied.id, name: tied.name, ...(tied.updated_at ? { updatedAt: tied.updated_at } : {}) };
   }
   const name = wsId === MAIN_WORKSPACE && /^main$/i.test(local) ? WORKSPACE : local;
   const tries = opts.interactive ? [name] : collisionNames(name);
@@ -505,7 +505,7 @@ export async function ensureProject(wsId: string, opts: { interactive?: boolean;
   for (const n of tries) {
     if (!opts.interactive && taken.has(n.toLowerCase())) continue;
     try {
-      const made = await call<{ id: string; name?: string; product?: unknown; bops_ws_id?: unknown; updated_at?: string | null }>("POST", "/workspaces", { name: n, product: "bops", bops_ws_id: wsId }, { wait: false });
+      const made = await call<{ id: string; name?: string; product?: unknown; bops_ws_id?: unknown; created_at?: string | null; updated_at?: string | null }>("POST", "/workspaces", { name: n, product: "bops", bops_ws_id: wsId }, { wait: false });
       if (!saidBack(made, wsId)) {
         // An orgo-web without the code made a plain Orgo project: it goes again, and this workspace stays on the "bops" project.
         if (g.bopsOrgoPerWorkspace) g.bopsOrgoPerWorkspace.on = null;
@@ -513,15 +513,17 @@ export async function ensureProject(wsId: string, opts: { interactive?: boolean;
         throw new Error("Orgo didn't make it a Bops workspace");
       }
       await confirmPerWorkspace();
-      bindProject(wsId, made.id, made.name ?? n, made.updated_at);
-      return { id: made.id, name: made.name ?? n, created: true, ...(n !== name ? { renamed: true } : {}) };
+      // orgo-web's create answers created_at, not updated_at: a project just made was last changed then.
+      const at = made.updated_at ?? made.created_at ?? undefined;
+      bindProject(wsId, made.id, made.name ?? n, at);
+      return { id: made.id, name: made.name ?? n, created: true, ...(at ? { updatedAt: at } : {}), ...(n !== name ? { renamed: true } : {}) };
     } catch (e) {
       if (!nameTaken(e) || opts.interactive) throw e;
       // Made meanwhile (another Mac): that's it, if it's tied to this workspace.
       const again = (await ownedWorkspaces()).find((x) => x.bops_ws_id === wsId);
       if (again) {
         bindProject(wsId, again.id, again.name, again.updated_at);
-        return { id: again.id, name: again.name };
+        return { id: again.id, name: again.name, ...(again.updated_at ? { updatedAt: again.updated_at } : {}) };
       }
     }
   }
@@ -944,6 +946,9 @@ export type OrgoDeletePreview = {
   /** The apps its bots made and its CRM files, by name (an orgo-web that keeps them: madeApps [{ title }], crmFiles [{ name }]). */
   madeApps: string[];
   crmFiles: string[];
+  /** Its routines and Orbit issues, by title, from an orgo-web that lists them (routines [{ title }], orbitIssues [{ title }]); none from one that doesn't (Bops lists its own). */
+  routines: string[];
+  issues: string[];
   /** An orgo-web that counted skills and apps (563ed1cf6) instead of naming them: how many it has, names unknown. */
   skillCount?: number;
   appCount?: number;
@@ -970,6 +975,8 @@ export async function deletePreview(projectId: string): Promise<OrgoDeletePrevie
     apps: names(j.apps),
     madeApps: names(j.madeApps),
     crmFiles: names(j.crmFiles),
+    routines: names(j.routines),
+    issues: names(j.orbitIssues ?? j.issues),
     ...(count(j.skills) !== undefined && { skillCount: count(j.skills) }),
     ...(count(j.apps) !== undefined && { appCount: count(j.apps) }),
   };
