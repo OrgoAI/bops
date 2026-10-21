@@ -45,8 +45,13 @@ registerHooks({
 /* ---------------- A window, enough of one ---------------- */
 
 const listeners = new Map();
+// The ones added to be heard first (capture), as a browser keeps them apart.
+const captured = new Set();
 globalThis.window = globalThis;
-globalThis.addEventListener = (k, f) => listeners.set(k, [...(listeners.get(k) ?? []), f]);
+globalThis.addEventListener = (k, f, o) => {
+  listeners.set(k, [...(listeners.get(k) ?? []), f]);
+  if (o === true || o?.capture) captured.add(f);
+};
 globalThis.removeEventListener = (k, f) => listeners.set(k, (listeners.get(k) ?? []).filter((g) => g !== f));
 globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };
 const store = new Map();
@@ -451,6 +456,35 @@ const press = async (key, el = doc.activeElement) => {
   });
   return e;
 };
+/**
+ * A key as the whole window hears it: the window's capture listeners first, then the page (React), then the
+ * window's others unless something stopped it. What the app's own Esc (bops-app.tsx) and an issue's hear.
+ */
+const pressInWindow = async (key, el = doc.activeElement) => {
+  const e = new win.Event("keydown", { bubbles: true, cancelable: true });
+  Object.defineProperty(e, "key", { value: key });
+  let stopped = false;
+  const stop = e.stopPropagation;
+  e.stopPropagation = function () {
+    stopped = true;
+    return stop.call(this);
+  };
+  const heard = { key, target: el, get defaultPrevented() { return e.defaultPrevented; }, preventDefault: () => e.preventDefault(), stopPropagation: () => (stopped = true) };
+  const on = (first) => (listeners.get("keydown") ?? []).filter((f) => captured.has(f) === first);
+  await act(async () => {
+    for (const f of on(true)) f(heard);
+    if (!stopped) el.dispatchEvent(e);
+    if (!stopped) for (const f of on(false)) f(heard);
+    await settle();
+  });
+  return e;
+};
+/** A scroll, as the window's scroll listeners hear it (they listen in capture, so every one in the page). */
+const scrollOf = (target) =>
+  act(async () => {
+    for (const f of listeners.get("scroll") ?? []) f({ target });
+    await settle();
+  });
 /** Typing into a field: its value as the browser sets it, then the input event React listens for. */
 const type = (el, value) =>
   act(async () => {
@@ -665,12 +699,15 @@ await test("a new tag the server refuses comes off again, and why shows in the p
   const m = await mount(opened("issue-9", "u9g"));
   try {
     await click(plusOf(m.box));
-    await type(picker().querySelector("input"), "Refunds");
+    const field = picker().querySelector("input");
+    await type(field, "Refunds");
     await press("Enter");
     assert.deepEqual(chips(m.box), ["Customer"], "back as it was");
     const alert = picker().querySelector('[role="alert"]');
     assert.match(alert?.textContent ?? "", /8 tags of its own at most/);
     assert.equal(m.box.querySelectorAll('[role="alert"]').length, 0, "said once, in the picker");
+    assert.equal(field.value, "Refunds", "the name stays typed, to change or pick another");
+    assert.deepEqual(optionsSaid(), ["Create tag “Refunds”"], "and Create tag with it, to try again");
   } finally {
     refuse = null;
     await m.done();
@@ -685,6 +722,13 @@ await test("the issues list's tag filter: a pill like the others opening the sam
     const pill = m.box.querySelector('button[aria-label="Tag: Any tag"]');
     assert.ok(pill, "a pill saying Any tag");
     assert.equal(pill.textContent, "Any tag");
+    // Each filter pill has a down mark that says it opens (drawn as an svg: the data URL background never was).
+    for (const p of [m.box.querySelector('select[aria-label="Status"]'), pill, m.box.querySelector('select[aria-label="Priority"]')]) {
+      const mark = [...p.parentElement.children].find((c) => c.tagName.toLowerCase() === "svg");
+      assert.ok(mark?.querySelector('path[d="M3 4.5l3 3 3-3"]'), `${p.getAttribute("aria-label")} has its down mark`);
+      assert.match(mark.getAttribute("class"), /pointer-events-none absolute right-2\.5/, "in its right padding, clicks going through to the pill");
+    }
+    assert.doesNotMatch(m.box.innerHTML, /bg-\[url\(/, "no background Tailwind can't make (it had spaces in it)");
     await click(pill);
     assert.equal(picker().querySelector('[role="listbox"]').getAttribute("aria-multiselectable"), null);
     assert.deepEqual(optionsSaid(), ["Any tag ✓", "Customer", "Outage", "Bug", "Office", "FYI"]);
@@ -708,6 +752,86 @@ await test("the issues list's tag filter: a pill like the others opening the sam
     assert.match(m.box.textContent, /Acme down.*Login bug|Login bug.*Acme down/);
   } finally {
     await m.done();
+  }
+});
+
+await test("a scroll that moves + Tag closes the picker (never riding up over the tab bar); its own list scrolling, or another, doesn't", async () => {
+  tagged = [issue("issue-9", { ws: "w9", tags: ["Customer"] })];
+  const m = await mount(opened("issue-9", "u9j"));
+  const chat = doc.createElement("div");
+  doc.body.appendChild(chat);
+  try {
+    const plus = plusOf(m.box);
+    await click(plus);
+    await scrollOf(picker().querySelector('[role="listbox"]'));
+    assert.ok(picker(), "its own list scrolling keeps it");
+    await scrollOf(chat);
+    assert.ok(picker(), "something else scrolling (a chat streaming beside it) keeps it");
+    calls.length = 0;
+    await type(picker().querySelector("input"), "bu");
+    // The issue's page scrolls (the wheel over it): closed, focus back on + Tag, and keys typed after change nothing.
+    const page = plus.closest(".overflow-y-auto");
+    assert.ok(page?.contains(plus), "+ Tag's scrolling page");
+    await scrollOf(page);
+    assert.ok(!picker(), "closed by the page's scroll");
+    assert.equal(plus.getAttribute("aria-expanded"), "false");
+    assert.ok(doc.activeElement === plus, "focus back on + Tag, not left in a field no one sees");
+    await press("Enter");
+    assert.deepEqual(patches(), [], "no tag changed out of sight");
+    assert.deepEqual(chips(m.box), ["Customer"]);
+    // The window's own scroll closes it too.
+    await click(plus);
+    assert.ok(picker());
+    await scrollOf(doc);
+    assert.ok(!picker(), "closed by the window's scroll");
+  } finally {
+    chat.remove();
+    await m.done();
+  }
+});
+
+await test("Esc on the picker, then Esc again, goes back to the list, and the app's Esc doesn't close the Knowledge tab", async () => {
+  // The app's Esc (bops-app.tsx escTab), listening since before the issue opened: closes the tab unless taken.
+  let tabClosed = 0;
+  const appEsc = (e) => {
+    if (e.key === "Escape" && !e.defaultPrevented && !doc.querySelector('[role="dialog"]')) tabClosed++;
+  };
+  globalThis.addEventListener("keydown", appEsc);
+  tagged = [issue("issue-9", { ws: "w9", tags: ["Customer"] })];
+  const m = await mount(opened("issue-9", "u9k"));
+  const elsewhere = doc.createElement("button");
+  doc.body.appendChild(elsewhere);
+  try {
+    const plus = plusOf(m.box);
+    await click(plus);
+    await pressInWindow("Escape");
+    assert.ok(!picker(), "the picker closes");
+    assert.ok(doc.activeElement === plus, "focus on + Tag");
+    assert.ok(m.box.querySelector('button[aria-label="Back to issues"]'), "still on the issue");
+    assert.equal(tabClosed, 0);
+    await pressInWindow("Escape");
+    assert.ok(!m.box.querySelector('button[aria-label="Back to issues"]'), "back to the list");
+    assert.ok(m.box.querySelector('button[aria-label="Tag: Any tag"]'));
+    assert.equal(tabClosed, 0, "the tab stays");
+    await m.done();
+    // Focus somewhere else in the window (the chat, the sidebar): the issue stays, the app's Esc has it.
+    const n = await mount(opened("issue-9", "u9k2"));
+    try {
+      elsewhere.focus();
+      await pressInWindow("Escape");
+      assert.ok(n.box.querySelector('button[aria-label="Back to issues"]'), "the issue stays");
+      assert.equal(tabClosed, 1, "the app's Esc heard it");
+      // On nothing (a click on the page's words): back to the list.
+      focused.on = null;
+      await pressInWindow("Escape", doc.body);
+      assert.ok(!n.box.querySelector('button[aria-label="Back to issues"]'), "back to the list");
+      assert.equal(tabClosed, 1);
+    } finally {
+      await n.done();
+    }
+  } finally {
+    globalThis.removeEventListener("keydown", appEsc);
+    elsewhere.remove();
   }
 });
 

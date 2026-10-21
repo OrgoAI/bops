@@ -355,7 +355,22 @@ type StatusFilter = "active" | IssueStatus | "all";
 const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [{ id: "active", label: "Not done" }, ...STATUSES.map((s) => ({ id: s.id as StatusFilter, label: s.label })), { id: "all", label: "Everything" }];
 
 const SELECT =
-  "h-7 appearance-none rounded-full bg-[#F2F2F0] pl-3 pr-7 text-[12.5px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-[#EAEAE7] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%2210%22 viewBox=%220 0 12 12%22><path d=%22M3 4.5l3 3 3-3%22 fill=%22none%22 stroke=%22%239A9A98%22 stroke-width=%221.6%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>')] bg-[length:10px] bg-[right_10px_center] bg-no-repeat";
+  "h-7 appearance-none rounded-full bg-[#F2F2F0] pl-3 pr-7 text-[12.5px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-[#EAEAE7] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]";
+
+/**
+ * A filter pill and the down mark that says it opens, drawn in its right padding (a select can't hold
+ * one; as keys.tsx and crm.tsx draw theirs).
+ */
+function Opens({ children }: { children: ReactNode }) {
+  return (
+    <span className="relative flex">
+      {children}
+      <svg width="10" height="10" viewBox="0 0 12 12" className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2" aria-hidden>
+        <path d="M3 4.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </span>
+  );
+}
 
 /**
  * The Issues page (a section of Orbit's tab): filters by status, tag and priority, then a row each
@@ -419,22 +434,26 @@ export function IssuesPage({
         {nav}
         {!!issues.length && (
           <div className="flex flex-wrap items-center gap-1.5">
-            <select value={status} onChange={(e) => setStatus(e.target.value as StatusFilter)} aria-label="Status" className={SELECT}>
-              {STATUS_FILTERS.map((f) => (
-                <option key={f.id} value={f.id}>
-                  {f.label}
-                </option>
-              ))}
-            </select>
+            <Opens>
+              <select value={status} onChange={(e) => setStatus(e.target.value as StatusFilter)} aria-label="Status" className={SELECT}>
+                {STATUS_FILTERS.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.label}
+                  </option>
+                ))}
+              </select>
+            </Opens>
             <TagFilter tags={allTags} value={tag} onChange={setTag} />
-            <select value={priority} onChange={(e) => setPriority(e.target.value as "" | IssuePriority)} aria-label="Priority" className={SELECT}>
-              <option value="">Any priority</option>
-              {PRIORITIES.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
+            <Opens>
+              <select value={priority} onChange={(e) => setPriority(e.target.value as "" | IssuePriority)} aria-label="Priority" className={SELECT}>
+                <option value="">Any priority</option>
+                {PRIORITIES.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </Opens>
             {filtered && (
               <button
                 onClick={() => {
@@ -521,8 +540,10 @@ type PickRow = { id: string; label: string; make?: boolean };
  * Tags to pick from, in a popover under `anchor` over everything (the issue's page scrolls, and would cut
  * it off), in the look of the app's small menus (apps.tsx ChipMenu): a search field on top, then every
  * choice with a check on the ones picked, and with `onCreate` a Create tag row for a name that isn't a
- * tag yet. The field is a combobox: Up and Down move through the list, Enter picks (or makes), Esc and
- * Tab close it with focus back on `anchor`; a click outside closes it too. `multi`: picking turns one on
+ * tag yet (the name stays typed until it's made, so a refusal leaves it there to change). The field is a
+ * combobox: Up and Down move through the list, Enter picks (or makes), Esc and Tab close it with focus
+ * back on `anchor`; a click outside closes it too, and so does a scroll that moves `anchor` (as ChipMenu
+ * does), so it never rides the page up over the tab bar. `multi`: picking turns one on
  * or off and it stays open; otherwise picking one closes it. `full`: no room for another (an issue's
  * tags), so what isn't picked can't be, and it says why.
  */
@@ -546,8 +567,9 @@ function TagPicker({
   full?: string;
   error?: string | null;
   onPick: (id: string) => void;
-  onCreate?: (name: string) => void;
-  /** `back`: focus goes back to the anchor (Esc, Tab, a pick that closes it), not after a click elsewhere. */
+  /** Makes the tag and puts it on: true once it's done. */
+  onCreate?: (name: string) => Promise<boolean>;
+  /** `back`: focus goes back to the anchor (Esc, Tab, a pick that closes it, a scroll), not after a click elsewhere. */
   onClose: (back: boolean) => void;
 }) {
   const [q, setQ] = useState("");
@@ -571,15 +593,22 @@ function TagPicker({
   const rowId = (n: number) => `${id}-${n}`;
   const blocked = (r: PickRow) => !!full && !r.make && !picked(r.id);
 
-  // Under its anchor whenever it renders (a tag added before + Tag moves it), and as the page under it scrolls.
+  // Under its anchor whenever it renders (a tag added before + Tag moves it) and as the window changes size.
+  // A scroll that carries the anchor away (the issue's page, the window) closes it, with focus back on the
+  // anchor if it was in here; its own list scrolling, or a chat beside it, doesn't.
   useLayoutEffect(() => placePicker(anchor.current, box.current));
   useEffect(() => {
     const put = () => placePicker(anchor.current, box.current);
+    const scrolled = (e: Event) => {
+      const t = e.target as Node | null;
+      if (!anchor.current || !t?.contains?.(anchor.current)) return;
+      close.current(!!box.current?.contains(document.activeElement));
+    };
     window.addEventListener("resize", put);
-    window.addEventListener("scroll", put, true);
+    window.addEventListener("scroll", scrolled, true);
     return () => {
       window.removeEventListener("resize", put);
-      window.removeEventListener("scroll", put, true);
+      window.removeEventListener("scroll", scrolled, true);
     };
   }, [anchor]);
   useEffect(() => field.current?.focus({ preventScroll: true }), []);
@@ -607,9 +636,13 @@ function TagPicker({
   const choose = (r: PickRow | undefined) => {
     if (!r || blocked(r)) return;
     if (r.make) {
-      onCreate?.(r.label);
-      setQ("");
-      setActive(0);
+      // Cleared for the next once it's made (and only if it's still what was typed); refused, it stays.
+      const typed = q;
+      void onCreate?.(r.label).then((made) => {
+        if (!made) return;
+        setQ((now) => (now === typed ? "" : now));
+        setActive(0);
+      });
       return;
     }
     onPick(r.id);
@@ -731,7 +764,7 @@ function TagFilter({ tags, value, onChange }: { tags: string[]; value: string; o
   const [open, setOpen] = useState(false);
   const pill = useRef<HTMLButtonElement>(null);
   return (
-    <>
+    <Opens>
       <button
         ref={pill}
         type="button"
@@ -752,11 +785,11 @@ function TagFilter({ tags, value, onChange }: { tags: string[]; value: string; o
           onPick={onChange}
           onClose={(back) => {
             setOpen(false);
-            if (back) pill.current?.focus();
+            if (back) pill.current?.focus({ preventScroll: true });
           }}
         />
       )}
-    </>
+    </Opens>
   );
 }
 
@@ -779,32 +812,36 @@ function IssueView({ issue, acts, tags, onBack, onClose }: { issue: Issue; acts:
   // Its history, which the list doesn't carry: read on opening.
   const { history: readHistory } = acts;
   useEffect(() => readHistory(issue.id), [readHistory, issue.id]);
-  // Esc goes back to the list (not while a field or the Delete question has it: they handle Esc themselves).
+  // Esc goes back to the list (not while a field or the Delete question has it: they handle Esc themselves),
+  // when focus is on this page or on nothing and no dialog or menu is open over it (that one closes first).
+  // Heard first (capture), and taken, so the app's own Esc that closes the Knowledge tab (bops-app.tsx
+  // escTab, listening since it opened) leaves it be: Esc on the picker, then Esc again, is back to the list,
+  // not the tab gone.
+  const page = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const esc = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       const t = e.target as HTMLElement | null;
-      if (t?.closest("input, textarea, select, [tabindex='-1']")) return;
+      const here = !t || t === document.body || t === document.documentElement || !!page.current?.contains(t);
+      if (!here || t?.closest?.("input, textarea, select, [tabindex='-1']")) return;
+      if (document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
       e.preventDefault();
       onBack();
     };
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
+    window.addEventListener("keydown", esc, true);
+    return () => window.removeEventListener("keydown", esc, true);
   }, [onBack]);
   // Every tag the workspace has, and any of this issue's it no longer does, where they are: picked ones have a check.
   const tagOptions = [...new Set([...tags, ...issue.tags])].map((t) => ({ id: t, label: t }));
   const toggleTag = (t: string) => void change({ tags: issue.tags.includes(t) ? issue.tags.filter((x) => x !== t) : [...issue.tags, t] });
-  const makeTag = (name: string) => {
-    if (issue.tags.some((x) => x.toLowerCase() === name.toLowerCase())) return;
-    void change({ tags: [...issue.tags, name], newTags: [name] });
-  };
+  const makeTag = async (name: string) => issue.tags.some((x) => x.toLowerCase() === name.toLowerCase()) || (await change({ tags: [...issue.tags, name], newTags: [name] }));
   const history = [...(issue.history ?? [])].sort((a, b) => b.at - a.at);
   const meta = [issue.customer?.name && undash(issue.customer.name), issue.sourceApp && `From ${appName(issue.sourceApp)}`, `Opened ${since(issue.openedAt)}`].filter(Boolean).join(" · ");
   const seg = (on: boolean) =>
     `flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 transition-colors duration-150 ease-out motion-reduce:transition-none ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`;
 
   return (
-    <div className="motion-fade-in flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
+    <div ref={page} className="motion-fade-in flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
       <div className="flex w-full max-w-[560px] flex-col gap-5">
         <div className="flex items-start gap-3">
           <button onClick={onBack} aria-label="Back to issues" title="Back to issues" className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
@@ -872,7 +909,8 @@ function IssueView({ issue, acts, tags, onBack, onClose }: { issue: Issue; acts:
                 onCreate={makeTag}
                 onClose={(back) => {
                   setPicking(false);
-                  if (back) plus.current?.focus();
+                  // Without scrolling back to it: after a scroll it may be out of sight, where it was left.
+                  if (back) plus.current?.focus({ preventScroll: true });
                 }}
               />
             )}
