@@ -1,2 +1,4 @@
 0e7070138c71b77563f40ed5835535bae02e6f0d:scripts/test-render.mjs:generic-api-key:400
 7e52c8555c74565850efe78d41ad4a8fd676cdbf:scripts/test-render.mjs:generic-api-key:406
+52451f6cd78a942408602b8c1ca67eb85ba74eea:scripts/test-vm-identity.mjs:generic-api-key:505
+52451f6cd78a942408602b8c1ca67eb85ba74eea:scripts/test-vm-identity.mjs:generic-api-key:510
