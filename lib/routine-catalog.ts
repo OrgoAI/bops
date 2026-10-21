@@ -57,6 +57,25 @@ export function tagsOf(ws?: Pick<Workspace, "tags">): WorkspaceTag[] {
   return out;
 }
 
+/** The longest a tag's name can be, and the most words in it. */
+export const TAG_NAME_MAX = 24;
+export const TAG_NAME_WORDS = 3;
+
+/**
+ * A tag's name as it's kept (learned ones and the user's alike): a word or up to TAG_NAME_WORDS, at most
+ * TAG_NAME_MAX characters, a capital first, no dashes or marks but & and /. Undefined when it can't be one.
+ */
+export function tagName(s: string): string | undefined {
+  const name = s
+    .replace(/\s*[\u2012-\u2015]\s*/g, " ")
+    .replace(/\s+-\s+/g, " ")
+    .replace(/[^\p{L}\p{N} &/]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!name || name.length > TAG_NAME_MAX || name.split(" ").length > TAG_NAME_WORDS) return undefined;
+  return name[0].toUpperCase() + name.slice(1);
+}
+
 /** A run every few minutes, a meeting check, or a monitor: quiet, so it posts only when something needs the user. */
 export const quietOf = (t: Pick<RoutineTemplate, "kind" | "schedule">) => t.kind === "monitor" || t.schedule?.kind === "every" || t.schedule?.kind === "before_event";
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { live, MAIN_WORKSPACE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
+import { live, MAIN_WORKSPACE, WORKSPACE_APPS_SINCE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
 import { AutopilotButton, AutopilotSections, type AutopilotOpen } from "./autopilot";
 import { categoriesOpen } from "@/lib/memory-categories";
@@ -612,8 +612,22 @@ type DeletePreview = {
 /** How often a rename made on orgo.ai is looked for while the app is open. */
 const NAMES_SYNC_MS = 10 * 60_000;
 
-function WorkspaceSwitcher({ state }: { state: AppState }) {
-  const [open, setOpen] = useState(false);
+/**
+ * Why Orgo still shows the default workspace as "bops" while it has the user's name here, by the reason
+ * it waits (OrgoMigration.defaultRename, lib/server/workspaces.ts HeldReason): an app that's older, that
+ * didn't say its version, none on record yet, or an Orgo that can't tell (old_app, silent_app, no_record,
+ * no_signal) all wait for every app to be updated; the rest say what they wait for. Bops tries again by
+ * itself at each start, sign-in and names sync.
+ */
+export function heldNameNote(reason: string): string {
+  if (reason === "unreachable") return "Orgo keeps the name bops for now: Bops couldn't reach Orgo, and tries again by itself.";
+  if (reason === "no_project") return "Orgo gets this name once its Orgo workspace is made, with your first computer.";
+  if (reason === "no_free_name") return "Orgo keeps the name bops: your Orgo already has workspaces with this name.";
+  return `Orgo keeps the name bops until every Bops app you use is updated to ${WORKSPACE_APPS_SINCE}.`;
+}
+
+export function WorkspaceSwitcher({ state, opened = false }: { state: AppState; /** Tests: open from the start. */ opened?: boolean }) {
+  const [open, setOpen] = useState(opened);
   const [naming, setNaming] = useState<null | { id?: string; name: string }>(null);
   // The workspace whose Delete was pressed: what goes with it once Bops (and Orgo) said, and what went wrong.
   const [deleting, setDeleting] = useState<null | { id: string; preview?: DeletePreview; error?: string; busy?: boolean }>(null);
@@ -671,10 +685,16 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
     setBusy(true);
     try {
       const res = naming?.id ? await post("/api/workspaces", { id: naming.id, name }, "PATCH") : await post("/api/workspaces", { name });
-      const j = (await res.json().catch(() => ({}))) as { error?: string; code?: string; suggestion?: string };
+      const j = (await res.json().catch(() => ({}))) as { error?: string; code?: string; suggestion?: string; waiting?: string };
       if (!res.ok) {
         setProblem(j.error ?? "That didn't work. Try again.");
         if (j.suggestion) setNaming({ id: naming?.id, name: j.suggestion });
+        return;
+      }
+      // The default's name waits for the apps: the menu stays open on why Orgo still shows bops.
+      if (j.waiting) {
+        setNaming(null);
+        setProblem(null);
         return;
       }
       close();
@@ -716,6 +736,14 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
     }
   };
   const renamed = state.orgoMigration?.renamed ?? [];
+  // The default's name, held for the apps: said under it, and under its name field while it's renamed.
+  const held = state.orgoMigration?.defaultRename;
+  const heldNote = (wsId: string) =>
+    wsId === MAIN_WORKSPACE && held ? (
+      <span data-held-name className="px-2.5 pb-1 text-[12px] leading-4 text-[#6B6B6B]">
+        {heldNameNote(held.reason)}
+      </span>
+    ) : null;
   const count = (id: string) => state.bots.filter((b) => workspaceOf(b) === id).length;
 
   return (
@@ -738,51 +766,55 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
               <Fragment key={w.id}>
                 {problem && <span role="alert" className="px-2.5 pt-1 text-[12px] leading-4 text-[#B42318]">{problem}</span>}
                 <NameInput value={naming.name} onChange={editName(w.id)} onSave={save} onCancel={() => setNaming(null)} />
+                {heldNote(w.id)}
               </Fragment>
             ) : (
-              <div key={w.id} className="group/ws flex items-center rounded-[10px] hover:bg-black/[0.04]">
-                <button
-                  onClick={() => {
-                    if (w.id !== current?.id) void post("/api/workspaces", { current: w.id }, "PATCH");
-                    close();
-                  }}
-                  className="flex h-9 min-w-0 flex-1 items-center gap-2 pl-2.5 text-left"
-                >
-                  <span className="flex size-[18px] shrink-0 items-center justify-center">
-                    {w.id === current?.id && (
-                      <svg width="12" height="12" viewBox="0 0 12 12">
-                        <path d="M2.5 6.5l2.3 2.2L9.5 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    )}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-[14px] font-medium">{w.name}</span>
-                  <span className="shrink-0 text-[12px] text-[#9A9A98]">
-                    {count(w.id)} bot{count(w.id) === 1 ? "" : "s"}
-                  </span>
-                </button>
-                <button
-                  onClick={() => setNaming({ id: w.id, name: w.name })}
-                  title={`Rename ${w.name}`}
-                  aria-label={`Rename ${w.name}`}
-                  className="mx-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-ink focus-visible:opacity-100 group-hover/ws:opacity-100 group-has-[:focus-visible]/ws:opacity-100 motion-reduce:transition-none"
-                >
-                  <svg width="12" height="12" viewBox="0 0 16 16">
-                    <path d="M3 13l1-3.5L11 2.5l2.5 2.5L6.5 12 3 13z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
-                  </svg>
-                </button>
-                {workspaces.length > 1 && w.id !== MAIN_WORKSPACE && deleting?.id !== w.id && (
+              <Fragment key={w.id}>
+                <div className="group/ws flex items-center rounded-[10px] hover:bg-black/[0.04]">
                   <button
-                    onClick={() => void askDelete(w.id)}
-                    title={`Delete ${w.name}`}
-                    aria-label={`Delete ${w.name}`}
-                    className="mr-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 group-hover/ws:opacity-100 group-has-[:focus-visible]/ws:opacity-100 motion-reduce:transition-none"
+                    onClick={() => {
+                      if (w.id !== current?.id) void post("/api/workspaces", { current: w.id }, "PATCH");
+                      close();
+                    }}
+                    className="flex h-9 min-w-0 flex-1 items-center gap-2 pl-2.5 text-left"
                   >
-                    <svg width="9" height="9" viewBox="0 0 12 12">
-                      <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                    <span className="flex size-[18px] shrink-0 items-center justify-center">
+                      {w.id === current?.id && (
+                        <svg width="12" height="12" viewBox="0 0 12 12">
+                          <path d="M2.5 6.5l2.3 2.2L9.5 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      )}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[14px] font-medium">{w.name}</span>
+                    <span className="shrink-0 text-[12px] text-[#9A9A98]">
+                      {count(w.id)} bot{count(w.id) === 1 ? "" : "s"}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setNaming({ id: w.id, name: w.name })}
+                    title={`Rename ${w.name}`}
+                    aria-label={`Rename ${w.name}`}
+                    className="mx-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-ink focus-visible:opacity-100 group-hover/ws:opacity-100 group-has-[:focus-visible]/ws:opacity-100 motion-reduce:transition-none"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 16 16">
+                      <path d="M3 13l1-3.5L11 2.5l2.5 2.5L6.5 12 3 13z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
                     </svg>
                   </button>
-                )}
-              </div>
+                  {workspaces.length > 1 && w.id !== MAIN_WORKSPACE && deleting?.id !== w.id && (
+                    <button
+                      onClick={() => void askDelete(w.id)}
+                      title={`Delete ${w.name}`}
+                      aria-label={`Delete ${w.name}`}
+                      className="mr-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 group-hover/ws:opacity-100 group-has-[:focus-visible]/ws:opacity-100 motion-reduce:transition-none"
+                    >
+                      <svg width="9" height="9" viewBox="0 0 12 12">
+                        <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+                {heldNote(w.id)}
+              </Fragment>
             ),
           )}
           {deleting && <DeleteConfirm name={workspaces.find((w) => w.id === deleting.id)?.name ?? "this workspace"} {...deleting} onCancel={() => setDeleting(null)} onDelete={() => void confirmDelete()} />}

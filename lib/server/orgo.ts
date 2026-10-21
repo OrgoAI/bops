@@ -7,7 +7,7 @@ import { onRunner } from "./persist";
 import { RTC_SHRUNK_MS } from "@/lib/rtc";
 import { recordUsage } from "./usage";
 import { getState, stateEpoch, update } from "./store";
-import { MAIN_WORKSPACE, type Workspace } from "@/lib/types";
+import { MAIN_WORKSPACE, WORKSPACE_APPS_SINCE, type Workspace } from "@/lib/types";
 import { folderKey, moveWorkspaceFolder } from "./workspace-skills";
 import { isIdentityToken } from "./vm-identity";
 
@@ -982,12 +982,8 @@ export async function deletePreview(projectId: string): Promise<OrgoDeletePrevie
   };
 }
 
-/**
- * The first Bops release that finds its default workspace by bops_ws_id rather than by the name "bops"
- * (lib/server/workspaces.ts). An app before it looks for a project named "bops", so the default's project
- * keeps that name until every app on the account is at least this one (bopsAppsGate).
- */
-export const WORKSPACE_APPS_SINCE = "0.0.29";
+/** The first Bops release that finds its default workspace by bops_ws_id, not by the name "bops" (lib/types.ts). */
+export { WORKSPACE_APPS_SINCE };
 
 const olderVersion = (a: string, b: string) => {
   const x = a.split(".").map(Number);

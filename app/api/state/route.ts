@@ -15,7 +15,7 @@ import { startComputerChecks } from "@/lib/server/sessions";
 import { startRunsOn } from "@/lib/server/runner";
 import { startBopsSync } from "@/lib/server/bops-sync";
 import { startRunnerInstalls } from "@/lib/server/runner-install";
-import { startProjectBinding } from "@/lib/server/workspaces";
+import { retryHeldRenameOnStart, startProjectBinding } from "@/lib/server/workspaces";
 import { startMadeAppsSync } from "@/lib/server/made-apps-sync";
 import { startCrmSync } from "@/lib/server/crm-sync";
 
@@ -30,7 +30,8 @@ export const dynamic = "force-dynamic";
  * work (runner.ts), which says which routines are this Mac's, the map of the bots in each Orgo
  * workspace (bops-sync.ts), the runners on the bots' computers (runner-install.ts), an Orgo project
  * for each workspace that has none yet (workspaces.ts startProjectBinding), and the apps the bots made
- * and the CRM's files in step with Orgo's record of them (made-apps-sync.ts, crm-sync.ts).
+ * and the CRM's files in step with Orgo's record of them (made-apps-sync.ts, crm-sync.ts), and once a
+ * start the default workspace's name held for the apps is tried again (workspaces.ts retryDefaultRename).
  */
 export async function GET(request: Request) {
   ensureCloud();
@@ -45,6 +46,7 @@ export async function GET(request: Request) {
   startProjectBinding();
   startMadeAppsSync();
   startCrmSync();
+  retryHeldRenameOnStart();
   const have = new URL(request.url).searchParams.get("v");
   const version = getVersion();
   if (have !== null && Number(have) === version) return Response.json({ version });

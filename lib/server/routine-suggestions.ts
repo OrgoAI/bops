@@ -1,5 +1,5 @@
 import "server-only";
-import { CHECK_TEMPLATE, checkerOf, checkGoal, checkTitle, coveredByCheck, quietOf, sameApp, scheduleOf, TAG_LEARNING_APPS, tagsOf, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
+import { CHECK_TEMPLATE, checkerOf, checkGoal, checkTitle, coveredByCheck, quietOf, sameApp, scheduleOf, TAG_LEARNING_APPS, TAG_NAME_MAX, TAG_NAME_WORDS, tagName, tagsOf, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
 import { botChatId, levelOf, MAIN_WORKSPACE, workspaceOf, type AppConnecting, type AppState, type Routine, type Schedule, type Watch, type WorkspaceTag } from "@/lib/types";
 import { createRoutine, deleteRoutine } from "./routines";
 import { addMessage, bot, getState, update } from "./store";
@@ -152,15 +152,45 @@ const APP_WORDS: Record<string, { name: string; items: string }> = {
   discord: { name: "Discord", items: "messages and threads in my channels" },
 };
 
-/** A tag as kept: a short name (a word or two, a capital first) and a line on what it's for, with no dashes. */
+/** A tag as kept: a short name (tagName: a word or a few, a capital first) and a line on what it's for, with no dashes. */
 export function cleanTag(x: unknown): WorkspaceTag | undefined {
   if (!x || typeof x !== "object") return undefined;
   const o = x as { name?: unknown; description?: unknown };
   const nodash = (s: string) => s.replace(/\s*[‒–—―]\s*/g, ", ").replace(/\s+-\s+/g, ", ").replace(/\s+/g, " ").trim();
-  const name = typeof o.name === "string" ? nodash(o.name).replace(/[^\p{L}\p{N} &/]/gu, "").trim() : "";
+  const name = typeof o.name === "string" ? tagName(o.name) : undefined;
   const description = typeof o.description === "string" ? nodash(o.description).slice(0, 140) : "";
-  if (!name || name.length > 24 || name.split(" ").length > 3 || !description) return undefined;
-  return { name: name[0].toUpperCase() + name.slice(1), description };
+  if (!name || !description) return undefined;
+  return { name, description };
+}
+
+/** What a tag the user made says it's for (bots read it beside the name). */
+const MADE_BY_YOU = "Added by you";
+
+/**
+ * Tags the user made (an issue's Create tag, app/api/orbit/issues/[id]): each one the workspace doesn't
+ * have yet joins its own tags (Workspace.tags), within MAX_OWN_TAGS. Answers each name as the workspace
+ * spells it, or why it couldn't (not a tag's name, or no room left), adding none of them then.
+ */
+export function addOwnTags(wsId: string, names: string[]): { names: string[] } | { error: string } {
+  const have = tagsOf(getState().workspaces?.find((w) => w.id === wsId));
+  const out: string[] = [];
+  const added: WorkspaceTag[] = [];
+  for (const n of names) {
+    const name = tagName(n);
+    if (!name) return { error: `A tag's name is a word or up to ${TAG_NAME_WORDS}, ${TAG_NAME_MAX} characters at most.` };
+    const known = [...have, ...added].find((t) => t.name.toLowerCase() === name.toLowerCase());
+    if (!known) added.push({ name, description: MADE_BY_YOU });
+    out.push(known?.name ?? name);
+  }
+  if (!added.length) return { names: out };
+  const own = getState().workspaces?.find((w) => w.id === wsId)?.tags ?? [];
+  if (own.length + added.length > MAX_OWN_TAGS) return { error: `A workspace has ${MAX_OWN_TAGS} tags of its own at most, and this one has ${own.length}. Pick one of its tags.` };
+  update((s) => {
+    let w = s.workspaces?.find((x) => x.id === wsId);
+    if (!w && wsId === MAIN_WORKSPACE) (s.workspaces ??= []).unshift((w = { id: MAIN_WORKSPACE, name: "Main", createdAt: 0 }));
+    if (w) w.tags = [...(w.tags ?? []), ...added];
+  });
+  return { names: out };
 }
 
 /** Tags proposed in a bot's answer ({"tags": [...]}, maybe in a code block): the new ones only, cleaned, a few at most. */

@@ -77,8 +77,11 @@ export function fromShared(blob: Blob, device: string): Blob {
  *   changed on the other) goes, one added on either side stays; this Mac's order, the others' new
  *   ones after. A routine changed on both sides goes field by field, its clock as one (mergeRoutine);
  *   a thread is the copy of the Bops that runs it, with the replies and steps of both (mergeSession);
- *   anything else changed on both keeps this Mac's copy whole, as its fields go together (a watch's
- *   alert and what it was told);
+ *   a workspace goes field by field (each field changed on both is this Mac's), so a rename on one
+ *   Mac and a names sync on the other (workspaces.ts noteOrgoName, which only notes when Orgo last
+ *   changed its project) both stay, and the old name never comes back over the new one; anything
+ *   else changed on both keeps this Mac's copy whole, as its fields go together (a watch's alert and
+ *   what it was told);
  * - usage is both ledgers together; macs, and any other object, key by key;
  * - anything else is this Mac's.
  * `me`: which Bops is merging (its device id, and whether it's a computer's runner), so a thread
@@ -106,7 +109,11 @@ function mergeValue(key: string, b: unknown, m: unknown, t: unknown, top: boolea
   // Both changed it.
   if (top && key === "usage" && Array.isArray(m) && Array.isArray(t)) return usageOf(m, t);
   if ((withIds(m) || withIds(t) || withIds(b)) && (Array.isArray(m) || m === undefined) && (Array.isArray(t) || t === undefined)) {
-    const both = top && key === "routines" ? mergeRoutine : top && key === "sessions" ? (was: Blob, x: Blob, y: Blob) => mergeSession(was, x, y, me) : undefined;
+    const both = !top ? undefined
+      : key === "routines" ? mergeRoutine
+      : key === "sessions" ? (was: Blob, x: Blob, y: Blob) => mergeSession(was, x, y, me)
+      : key === "workspaces" ? (was: Blob, x: Blob, y: Blob) => mergeObject(was, x, y)
+      : undefined;
     return mergeById(Array.isArray(b) ? b : [], (m as { id: string }[]) ?? [], (t as { id: string }[]) ?? [], both);
   }
   if (isObject(m) && isObject(t)) return mergeObject(isObject(b) ? b : {}, m, t);
