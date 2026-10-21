@@ -75,9 +75,9 @@ ul { list-style: none; }
 .hero .fit { flex: 1; }
 .boppy-float { animation: bob 3.2s ease-in-out infinite; }
 @keyframes bob { 0%, 100% { transform: translateY(0) rotate(0deg); } 50% { transform: translateY(-10px) rotate(-2deg); } }
-/* notes.js: music notes drifting out of the hero Boppy's headphones; click it for a burst. It listens with its
-   mouth shut, a flat line that opens as it sings, and its eyes ease toward the pointer. */
-.hero-mouth { transform-box: fill-box; transform-origin: center; transform: scale(1.4, .28); }
+/* notes.js: music notes drifting out of the hero Boppy's headphones; click it and it sings. It listens with its
+   mouth shut (a flat line), its eyes ease toward the pointer, and its cheeks blush as it sings and smiles. */
+.hero-cheeks { opacity: 0; transition: opacity .45s ease; }
 .hero-eyes { transition: transform .35s cubic-bezier(.3, .7, .4, 1); }
 .hero-eyes ellipse { transform-box: fill-box; transform-origin: center; }
 .boppy-float.is-playing { cursor: pointer; -webkit-tap-highlight-color: transparent; }
