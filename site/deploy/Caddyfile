@@ -1,7 +1,7 @@
-# bops.bot: the landing page (site/), as plain files, on the Bops VM. scripts/site-deploy.sh installs
-# this as /etc/caddy/Caddyfile; Caddy gets and renews the certificates itself. HTML is always fresh,
-# everything else is cached a day (as nginx.conf did on Fly). The backend API is not here: it's
-# bops.orgo.ai/api (cloud/, scripts/cloud-deploy.sh).
+# bops.bot: the landing page (site/), as plain files, on the Bops VM. Orgo's site-deploy.sh
+# (OrgoAI/bops-secrets) installs this as /etc/caddy/Caddyfile; Caddy gets and renews the certificates
+# itself. HTML is always fresh, everything else is cached a day (as nginx.conf did on Fly). The backend
+# API is not here: it's bops.orgo.ai/api (cloud/, Orgo's cloud-deploy.sh).
 bops.bot {
 	root * /opt/bops/site
 	encode zstd gzip
@@ -21,7 +21,7 @@ bops.bot {
 		respond "ok" 200
 	}
 	# The Mac app for the page's download buttons: /download/Bops.dmg is always the newest release,
-	# /download/Bops-<version>-arm64.dmg a given one (scripts/download-publish.sh puts them there).
+	# /download/Bops-<version>-arm64.dmg a given one (Orgo's download-publish.sh puts them there).
 	# /download/Bops-<version>-arm64-mac.zip is what the installed app updates itself from, and
 	# /download/latest.json what it reads to learn a newer version is out: no-cache like the pages
 	# (@pages above), so a release shows at once; neither fetch() nor the updater minds the attachment header.

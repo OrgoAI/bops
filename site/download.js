@@ -42,7 +42,7 @@
   let access, ask, form, email, error, done, doneTitle, from;
 
   // What's new in the newest release: its version and a few short lines from /download/latest.json, which
-  // scripts/download-publish.sh writes with each release. Read once on a Mac as the page loads, and shown
+  // Orgo's download-publish.sh writes with each release. Read once on a Mac as the page loads, and shown
   // as text at the foot of Get First Access. When it can't be read or has no lines, the card is as it was.
   let news;
   function whatsNew(latest) {

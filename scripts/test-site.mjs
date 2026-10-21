@@ -278,7 +278,7 @@ await test("an Intel Mac gets the Apple silicon note", async () => {
   await p.context().close();
 });
 
-// latest.json as scripts/download-publish.sh writes it (jq, ASCII with \u escapes), with notes that have
+// latest.json as Orgo's download-publish.sh writes it (jq, ASCII with \u escapes), with notes that have
 // quotes, an apostrophe, other scripts, an emoji and markup, and one line more than the card shows.
 const NOTES = ['Say "hi" to Boppy\'s new voice', "Números en español, 日本語 and 🎧", '<b>Not bold</b> & <img src=x onerror="window.__xss=1">', "Four", "Five", "Six"];
 const LATEST = JSON.stringify({ version: "0.0.11", url: "https://bops.bot", dmg: "https://bops.bot/download/Bops.dmg", released: "2026-10-06T17:00:00Z", notes: NOTES }).replace(

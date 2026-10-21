@@ -1208,7 +1208,7 @@ ipcMain.handle("mac-show-main", () => showMain());
 
 /*
  * New versions. Bops gets them itself: it asks bops.bot for the newest release (download/latest.json,
- * written by scripts/download-publish.sh) at launch and every hour, and when there's a newer one than
+ * written by Orgo's download-publish.sh) at launch and every hour, and when there's a newer one than
  * this app it's downloaded in the app (desktop/updates.cjs). With "Download updates automatically" on
  * (Settings → This Mac, the default) that happens quietly; with it off the page's notice
  * (components/app/update-notice.tsx) says it's out and the user clicks Download. Either way, once it's

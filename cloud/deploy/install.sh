@@ -2,7 +2,8 @@
 # Sets up Bops Cloud on orgo-web's production box (Ubuntu 24.04), as root, next to orgo-web. Safe to
 # run again. Run on the box:
 #   bash /opt/bops/cloud/deploy/install.sh
-# Then scripts/cloud-deploy.sh (on a laptop) puts the code, the settings and the relay binary here.
+# Then Orgo's cloud-deploy.sh (OrgoAI/bops-secrets; on a laptop, from a bops checkout) puts the code,
+# the settings and the relay binary here.
 #
 # What it adds, and nothing else:
 # - Node 24 (official build, checksum checked) under /usr/local/lib/nodejs.
@@ -45,7 +46,7 @@ install -d -m 0750 -o root -g bops /etc/bops-cloud
 install -d -m 0750 -o root -g orgo-relay /etc/orgo-relay
 install -d -m 0750 -o orgo-relay -g orgo-relay /etc/orgo-relay/tls
 
-# The services: installed and enabled; scripts/cloud-deploy.sh starts them once code and settings are in.
+# The services: installed and enabled; Orgo's cloud-deploy.sh starts them once code and settings are in.
 install -m 0644 "$here/bops-cloud.service" "$here/orgo-relay-rendezvous.service" "$here/orgo-relay-cert.service" "$here/orgo-relay-cert.timer" /etc/systemd/system/
 install -m 0755 "$here/orgo-relay-cert-sync.sh" /usr/local/sbin/orgo-relay-cert-sync
 systemctl daemon-reload
@@ -71,4 +72,4 @@ else
   fi
 fi
 
-echo "Box ready (Node $(/usr/local/bin/node --version)). Now run scripts/cloud-deploy.sh."
+echo "Box ready (Node $(/usr/local/bin/node --version)). Now run Orgo's cloud-deploy.sh (OrgoAI/bops-secrets) from a bops checkout."
