@@ -71,11 +71,13 @@
   const trails = TRAIL.map(() => []);
   let gust = 0, windAt = 0, OFF = TRAIL.map(([off]) => off); // OFF: the offsets in use, pulled in on narrow screens
   const calm = () => trails.forEach((t) => (t.length = 0));
-  // Boppy on the badge is its own copy of the symbol, so only these two eyes ever move.
+  // Boppy on the badge is its own copy of the symbol, so only these two eyes ever move. EYE: where they
+  // sit at rest (as index.html draws them) and their size.
   const eyeEls = [...badge.querySelectorAll(".photo .eye")];
+  const EYE = { cx: [15.6, 24.4], cy: 20, rx: 2.4, ry: 3.15 };
   const drawEyes = (dx, cy, rx, ry) =>
     eyeEls.forEach((el, i) => {
-      const at = { cx: dx === 0 ? [15.5, 24.5][i] : f2([15.5, 24.5][i] + dx), cy, rx, ry };
+      const at = { cx: dx === 0 ? EYE.cx[i] : f2(EYE.cx[i] + dx), cy, rx, ry };
       for (const k in at) el.setAttribute(k, at[k]);
     });
 
@@ -116,7 +118,7 @@
     } else {
       badge.style.removeProperty("transform");
       badge.style.removeProperty("transform-origin");
-      drawEyes(0, "22.3", "1.9", "2.6");
+      drawEyes(0, EYE.cy, EYE.rx, EYE.ry);
       eyes.drawn = "";
     }
     stage.classList.toggle("is-moving", on);
@@ -220,7 +222,8 @@
     let lx = 0, ly = falling ? -1 : 0;
     if (ptr.on && !falling) {
       const dx = ptr.x - eyeAt[0], dy = ptr.y - eyeAt[1], d = Math.hypot(dx, dy) || 1, k = (1.1 * Math.min(1, d / 160)) / d;
-      lx = dx * k;
+      // Not as far right: the right eye, already glancing that way (and wider in a squint), would slip under its cup's outline.
+      lx = Math.min(0.3, dx * k);
       ly = dy * k;
     }
     const k = 1 - Math.exp(-dt * 16), happy = grab || now < eyes.happy ? 1 : 0;
@@ -232,7 +235,7 @@
       eyes.next = now + 2 + Math.random() * 3;
     } else if (eyes.blink < 0 && now > eyes.next && !falling) eyes.blink = 0;
     const open = eyes.blink < 0 ? 1 : Math.max(0.12, Math.abs(1 - eyes.blink / 0.08)), sq = eyes.squint;
-    const key = [eyes.x, 22.3 + eyes.y + 0.6 * sq, 1.9 * (1 + 0.12 * sq), 2.6 * open * (1 - 0.62 * sq)].map(f2);
+    const key = [eyes.x, EYE.cy + eyes.y + 0.6 * sq, EYE.rx * (1 + 0.12 * sq), EYE.ry * open * (1 - 0.62 * sq)].map(f2);
     if (key.join() !== eyes.drawn) drawEyes(eyes.x, key[1], key[2], key[3]);
     eyes.drawn = key.join();
     return eyes.blink >= 0 || Math.abs(lx - eyes.x) + Math.abs(ly - eyes.y) > 0.02 || Math.abs(happy - sq) > 0.01;
