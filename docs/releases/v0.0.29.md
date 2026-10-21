@@ -1,0 +1,5 @@
+- Bops now updates itself. Update Bops on every Mac you use.
+- Bots search the web in chat and reply faster while you wait.
+- Screens show which bot is on each, and use less memory.
+- A Routines page with a week view; Knowledge has Issues and Skills.
+- Keys from your Orgo vault; new Connected Apps work for every bot.
