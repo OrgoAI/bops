@@ -241,7 +241,7 @@ const cloudHttp = createServer((req, res) => {
 });
 const wss = new WebSocketServer({ noServer: true });
 cloudHttp.on("upgrade", (req, socket, head) => {
-  cloud.upgrades.push({ path: req.url, auth: req.headers.authorization, version: req.headers["x-bops-version"] });
+  cloud.upgrades.push({ path: req.url, auth: req.headers.authorization, version: req.headers["x-bops-version"], level: req.headers["x-bops-state-level"] });
   if (req.url !== "/v1/connect") return socket.destroy();
   wss.handleUpgrade(req, socket, head, (ws) => {
     const c = { ws, auth: req.headers.authorization, frames: [], closed: null, at: Date.now() };
@@ -280,7 +280,7 @@ const SE = await import(`${root}/app/api/channels/slack/events/route.ts`);
 const K = await import(`${root}/lib/server/skills.ts`);
 const U = await import(`${root}/lib/server/usage.ts`);
 const ACCOUNT = await import(`${root}/app/api/account/route.ts`);
-const { MAIN_WORKSPACE, PAIR_CODE_MS, botChatId } = await import(`${root}/lib/types.ts`);
+const { MAIN_WORKSPACE, PAIR_CODE_MS, botChatId, levelOf } = await import(`${root}/lib/types.ts`);
 const { buildURL: sidebandURL } = await import(`${root}/node_modules/openai/resources/live/sideband/internal-base.mjs`);
 
 const KEY = "orgo_test_key";
@@ -1062,7 +1062,7 @@ await until(() => remembered.length, "the owner's call in memory");
 assert.match(remembered[0].path, /^\/proxy\/honcho\/v3\/workspaces\/u-u1-bops\/sessions\/bops-chat-bot-boppy\/messages$/);
 assert.deepEqual(remembered.map((x) => x.said), [[["user", "Remind me to call Ana"], ["bops-boppy", "Will do."]]]);
 // And the categories look at what memory works out from it, 4 and 10 minutes later.
-await until(() => globalThis.bopsCategories?.banks.get("bops")?.timers.has("chat"), "a look after the call is saved");
+await until(() => [...(globalThis.bopsCategories?.spaces.values() ?? [])].some((s) => s.timers.has("chat")), "a look after the call is saved");
 // Anyone else got a bot that only takes a message (cloud/voice.ts): the message is in the chat, with a chime, once.
 const strangersCall = { botId: "boppy", from: "+14155550123", owner: false, message: { name: "Ana", text: "Send the deck", callback: "+14155550124" }, transcript: "Caller: Can you pass on a message?\nBot: Sure.", startedAt: "2026-10-05T11:00:00Z", endedAt: "2026-10-05T11:01:05Z" };
 for (let i = 0; i < 2; i++) {
@@ -1393,7 +1393,8 @@ S.update((s) => {
     // The Slack connection is how bots get into Slack, not one of their apps: it's in neither list.
     { id: "ca_slackapp", app: "slackbot", appName: "Slack", name: "Acme", status: "active", at: 1 },
   ];
-  s.bots.find((b) => b.isMain).access = { ca_gmail: "act", ca_sheets: "read" };
+  // Every bot has every account by default: Jira is taken away, so it's one the bot can't use.
+  s.bots.find((b) => b.isMain).access = { ca_gmail: "act", ca_sheets: "read", ca_jira: "none" };
 });
 // What the bot is told: each account it may use by name and level, from the user's own accounts (any
 // app), how to use the app gateway, and the user's other apps it can't use yet.
@@ -1436,11 +1437,14 @@ await sleep(1000);
 assert.equal(await S.flushState(5000), true);
 const blobPuts = () => cloud.stateRequests.filter((x) => x.method === "PUT" && x.path === "/v1/state");
 const msgPosts = () => cloud.stateRequests.filter((x) => x.method === "POST" && x.path === "/v1/messages");
-// Every call is the signed-in user's, on their key, naming them, the protocol and this Mac.
+// Every call is the signed-in user's, on their key, naming them, the protocol and this Mac, and which
+// state it may be given (cloud/state.ts keeps a Mac older than the last to write out of it): the
+// protocol stays 2, so a cloud from before (this fake is one) answers this app as it always did.
 const lastCall = cloud.stateRequests.at(-1);
 assert.equal(lastCall.headers.authorization, `Bearer ${KEY}`);
 assert.equal(lastCall.headers["x-bops-user"], "u1");
 assert.equal(lastCall.headers["x-bops-protocol"], "2");
+assert.deepEqual(cloud.stateRequests.filter((r) => r.headers["x-bops-protocol"] !== "2" || r.headers["x-bops-state-level"] !== "3").map((r) => `${r.method} ${r.path}`), []);
 assert.match(lastCall.headers["x-bops-device"], /^[0-9a-f]{16}$/);
 const device = lastCall.headers["x-bops-device"];
 
@@ -1552,7 +1556,7 @@ states.set("u3", {
 await signIn("orgo_key_3", { id: "u3", email: "ana@bakery.com" });
 let st = S.getState();
 assert.deepEqual(st.bots.map((b) => b.name), ["Sam", "Max"]);
-assert.deepEqual(JSON.parse(JSON.stringify(st.accounts)), [{ id: "ca_cal", app: "googlecalendar", appName: "Google Calendar", name: "ana@bakery.com", status: "active", at: 3 }], "an old state's apps become accounts");
+assert.deepEqual(JSON.parse(JSON.stringify(st.accounts)), [{ id: "ca_cal", app: "googlecalendar", appName: "Google Calendar", name: "ana@bakery.com", status: "active", at: 3, workspaceId: "ws_main", onlyGiven: true }], "an old state's apps become accounts, in the workspace of the bots given them and only theirs");
 assert.deepEqual([st.bots[1].access, "connectors" in st.bots[1], "channels" in st.bots[1], "apps" in st], [{ ca_cal: "read" }, false, false, false], "and each bot's access is by account");
 assert.deepEqual([st.owner.name, st.installId, st.messages.map((m) => m.text)], ["Ana", "cafe1234", ["hello"]]);
 assert.equal(st.account.user.id, "u3");
@@ -1566,6 +1570,80 @@ assert.equal(u3.accounts[0].id, "ca_cal");
 await signIn();
 assert.equal(S.getState().owner.about, "written offline");
 assert.equal(S.getState().bots.some((b) => b.name === "Max"), false);
+
+// A state v0.0.28 uploaded, where a bot had an account only where it was given it: each bot keeps exactly
+// what it had there (one set to Just do it too) and a bot made since gets none of those accounts; loaded
+// again, nothing changes; an account a Mac still on v0.0.28 adds later is only its bots' too; one connected
+// from now on (with its workspace, lib/server/composio.ts) is every bot's of that workspace.
+const U4 = { id: "u4", email: "kim@shop.com" };
+const v028 = {
+  workspaces: [
+    { id: MAIN_WORKSPACE, name: "Main", createdAt: 1 },
+    { id: "ws_side", name: "Side", createdAt: 2 },
+  ],
+  workspace: MAIN_WORKSPACE,
+  bots: [
+    { id: "boppy", name: "Boppy", role: "Chief of Staff", color: "#0A0A0A", isMain: true, computerStatus: "none", access: { ca_gmail: "act" } },
+    { id: "iris", name: "Iris", role: "Inbox", color: "#5B8CFF", isMain: false, computerStatus: "none", access: { ca_gmail: "read", ca_stripe: "act" } },
+    { id: "penny", name: "Penny", role: "Finance", color: "#FF6FB5", isMain: false, computerStatus: "none", autoApprove: true },
+    { id: "otto", name: "Otto", role: "Outbound", color: "#E9FF3B", isMain: false, computerStatus: "none", access: {} },
+    { id: "sid", name: "Sid", role: "Chief of Staff", color: "#0A0A0A", isMain: true, computerStatus: "none", workspaceId: "ws_side", access: { ca_notion: "read" } },
+  ],
+  accounts: [
+    { id: "ca_gmail", app: "gmail", appName: "Gmail", name: "kim@shop.com", status: "active", at: 1 },
+    { id: "ca_stripe", app: "stripe", appName: "Stripe", name: "Shop", status: "active", at: 1 },
+    { id: "ca_notion", app: "notion", appName: "Notion", status: "active", at: 1 },
+    { id: "ca_linear", app: "linear", appName: "Linear", status: "expired", at: 1 },
+    { id: "open:hackernews", app: "hackernews", appName: "Hacker News", status: "active", at: 1 },
+  ],
+  sessions: [],
+  routines: [],
+  owner: { name: "Kim" },
+};
+states.set("u4", { version: 4, writer: null, blob: structuredClone(v028), rows: new Map() });
+await signIn("orgo_key_4", U4);
+const kim = (id) => S.getState().bots.find((b) => b.id === id);
+const levelsNow = () => S.getState().bots.flatMap((b) => S.getState().accounts.map((a) => `${b.name} in ${a.appName}: ${levelOf(b, a) ?? "none"}`));
+const levels028 = () => S.getState().bots.flatMap((b) => S.getState().accounts.map((a) => `${b.name} in ${a.appName}: ${v028.bots.find((x) => x.id === b.id)?.access?.[a.id] ?? "none"}`));
+assert.deepEqual(levelsNow(), levels028(), "each bot has what it had on v0.0.28, no more");
+assert.deepEqual(C.accountsOf(kim("penny")), [], "Just do it, with nothing to do it in");
+assert.deepEqual(C.accountsOf(kim("iris")).map((x) => [x.account.id, x.level]), [["ca_gmail", "read"], ["ca_stripe", "act"]]);
+assert.deepEqual(
+  S.getState().accounts.map((a) => [a.id, a.workspaceId, a.onlyGiven]),
+  [
+    ["ca_gmail", MAIN_WORKSPACE, true],
+    ["ca_stripe", MAIN_WORKSPACE, true],
+    ["ca_notion", "ws_side", true],
+    ["ca_linear", MAIN_WORKSPACE, true],
+    ["open:hackernews", MAIN_WORKSPACE, true],
+  ],
+  "each in the workspace of the bots given it, and only theirs",
+);
+assert.deepEqual(S.getState().bots.map((b) => b.access), v028.bots.map((b) => b.access), "no bot's own settings change");
+assert.equal(levelOf({ id: "new" }, S.getState().accounts[0]), null, "a bot made since");
+assert.equal(await S.flushState(5000), true);
+const loaded = JSON.stringify([S.getState().accounts, S.getState().bots.map((b) => b.access)]);
+await signIn();
+await signIn("orgo_key_4", U4);
+assert.equal(JSON.stringify([S.getState().accounts, S.getState().bots.map((b) => b.access)]), loaded, "loaded again: nothing changes");
+// A Mac still on v0.0.28 connects Shopify for Otto, read only: merged in here, it's Otto's alone.
+const u4 = states.get("u4");
+u4.blob = {
+  ...u4.blob,
+  accounts: [...u4.blob.accounts, { id: "ca_shopify", app: "shopify", appName: "Shopify", status: "active", at: 5 }],
+  bots: u4.blob.bots.map((b) => (b.id === "otto" ? { ...b, access: { ...b.access, ca_shopify: "read" } } : b)),
+};
+u4.version++;
+S.update((s) => (s.owner.about = "after the v0.0.28 Mac"));
+assert.equal(await S.flushState(5000), true);
+const shopify = S.getState().accounts.find((a) => a.id === "ca_shopify");
+assert.ok(shopify, "the other Mac's account came in");
+assert.deepEqual(S.getState().bots.map((b) => [b.id, levelOf(b, shopify)]), [["boppy", null], ["iris", null], ["penny", null], ["otto", "read"], ["sid", null]], "only the bot it was given there");
+S.update((s) => s.accounts.push({ id: "ca_new", app: "airtable", appName: "Airtable", status: "active", at: 6, workspaceId: MAIN_WORKSPACE }));
+assert.deepEqual(S.getState().bots.map((b) => [b.id, levelOf(b, S.getState().accounts.at(-1))]), [["boppy", "act"], ["iris", "act"], ["penny", "act"], ["otto", "act"], ["sid", null]], "connected from now on: every bot's of its workspace");
+assert.equal(await S.flushState(5000), true);
+await signIn();
+assert.equal(S.getState().owner.about, "written offline");
 console.log("state: in the cloud per user, one write per burst and one at a time, each message on its own, merged with another Mac's");
 
 /* ---------------- Routing through this Mac: on by default, the user's "off" sticks ---------------- */
@@ -1916,6 +1994,12 @@ assert.deepEqual(web.calls.filter((c) => !stubbed.has(c.host)), []);
 const unsaid = [...cloud.requests, ...cloud.stateRequests].filter((r) => r.headers["x-bops-version"] !== "9.9.9").map((r) => `${r.method} ${r.path}`);
 assert.deepEqual(unsaid, [], "every call to the cloud says the app's version");
 assert.ok(cloud.upgrades.length > 0 && cloud.upgrades.every((u) => u.version === "9.9.9"), `every socket says it: ${JSON.stringify(cloud.upgrades.map((u) => [u.path, u.version]))}`);
+// What the cloud keeps a Mac older than the user's state out of says which state this one may be given:
+// the tunnel and the notices, as the state's calls above.
+const tunnels = cloud.upgrades.filter((u) => u.path === "/v1/connect");
+assert.ok(tunnels.length > 0 && tunnels.every((u) => u.level === "3"), `every tunnel says its state level: ${JSON.stringify(tunnels.map((u) => u.level))}`);
+const noticeCalls = cloud.requests.filter((r) => r.path.startsWith("/v1/notices"));
+assert.ok(noticeCalls.length > 0 && noticeCalls.every((r) => r.headers["x-bops-state-level"] === "3"), "and every call for notices");
 assert.ok(cloud.requests.some((r) => r.path.startsWith("/proxy/openai/")) && cloud.requests.some((r) => r.path.startsWith("/proxy/composio")), "through the providers' proxies too");
 const toOrgo = web.calls.filter((c) => c.host === "www.orgo.ai");
 assert.ok(toOrgo.length > 0 && toOrgo.every((c) => c.headers["x-bops-version"] === "9.9.9"), "every call to Orgo says the app's version");

@@ -2,6 +2,8 @@
 
 Thanks for helping. A few things keep this smooth.
 
+**Where things stand:** we'll open Bops up to outside contributions once the app is more settled. Until then, bug reports and ideas are very welcome in issues, and pull requests from outside the team may wait a while or be closed. The rest of this page is how it will work once we open up.
+
 ## Before you start
 
 - For anything bigger than a small fix, open an issue first so we can agree on the approach.

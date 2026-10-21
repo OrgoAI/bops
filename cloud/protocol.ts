@@ -112,7 +112,7 @@ export type CloudStateBody = { version: number; state: unknown };
  * The app's state in Bops Cloud (cloud/state.ts, lib/server/persist-cloud.ts). A signed-in Mac keeps no
  * copy of its own: it loads the user's state from the cloud at sign-in and writes every change back.
  * The state is two parts: the chat messages, one row each (bops.chat_messages), and everything else,
- * one JSON blob (bops.app_state) without `messages`. Every call carries the three headers below.
+ * one JSON blob (bops.app_state) without `messages`. Every call carries the headers below.
  */
 
 /** Which Orgo user the Mac means to read or write: it must be the key's own, or the call is refused (409 WRONG_USER). */
@@ -122,6 +122,20 @@ export const BOPS_PROTOCOL_HEADER = "x-bops-protocol";
 /** This Mac, as the user's state knows it (state.macs): the cloud keeps who wrote last. */
 export const BOPS_DEVICE_HEADER = "x-bops-device";
 export const STATE_PROTOCOL = 2;
+/**
+ * Which state this app may be given (STATE_LEVEL), sent with every call to the cloud and its tunnel
+ * (lib/server/app-version.ts appHeaders); an app before 0.0.29 sends none, which counts as 2. The
+ * protocol header stays "2", so a cloud from before answers this app as it always did. The cloud keeps
+ * the highest level that wrote each user's state (app_state.protocol); once it's above an app's, that
+ * app's calls for the user's state (but its copy before Start over) and its tunnel are refused (426
+ * STATE_TOO_NEW) and its notices say to update (cloud/state.ts). 3: routines that run every so often,
+ * before meetings or monthly, and a bot with no access to an app, which 0.0.28 runs over and over, runs
+ * daily, or lists as able to use it.
+ */
+export const BOPS_STATE_LEVEL_HEADER = "x-bops-state-level";
+export const STATE_LEVEL = 3;
+/** 426: a Mac of the user's on a newer Bops wrote their state, which this app can't be given (BOPS_STATE_LEVEL_HEADER). */
+export const STATE_TOO_NEW = "state_too_new";
 /** 409: the call named another user than the key's. */
 export const WRONG_USER = "wrong_user";
 /** 409 on PUT /v1/state: someone else wrote since `base` (CloudStateConflict). */
@@ -336,7 +350,8 @@ export const PLAN_LIMIT = "plan_limit";
  *   each plan to its numbers (requireRoomForNumber); the app to its emails (lib/server/mail.ts),
  *   since the Mac makes inboxes in its own AgentMail pod.
  * - `people`: people the user can add to their bots' computers on Orgo (the People sheet), besides
- *   themselves: members of their Orgo workspace named "bops" plus invites still waiting. The plan
+ *   themselves: members of their Bops workspaces (each an Orgo workspace of its own where orgo-web has
+ *   them, else the one named "bops"), counted once each, plus invites still waiting. The plan
  *   cards say it; orgo-web holds the workspace to its own copy (lib/workspace-seats.ts) and sends the
  *   numbers the sheet shows, and nobody is added from the app without them.
  */

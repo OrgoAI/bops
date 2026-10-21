@@ -40,9 +40,12 @@ async function ask(workspaceId: string, tried: string): Promise<Check | { error:
 
 /**
  * The step itself, as a small sheet over the app. `pick`: the workspace's first address; `offer`:
- * Bops picked one, keep it or pick another; `change`: from Settings.
+ * Bops picked one, keep it or pick another; `change`: from Settings. It eases in as it opens, unless
+ * `still` (see MailAddressStep).
  */
-export function AddressSheet({ workspaceId, workspaceName, mode, onClose }: { workspaceId: string; workspaceName?: string; mode: Mode; onClose: () => void }) {
+export function AddressSheet({ workspaceId, workspaceName, mode, still = false, onClose }: { workspaceId: string; workspaceName?: string; mode: Mode; still?: boolean; onClose: () => void }) {
+  // Decided once, as it opens.
+  const [eases] = useState(!still);
   const [value, setValue] = useState("");
   const [check, setCheck] = useState<Check | null>(null);
   const [current, setCurrent] = useState<string | null>(null);
@@ -141,12 +144,12 @@ export function AddressSheet({ workspaceId, workspaceName, mode, onClose }: { wo
           : { tone: "bad", text: check.problem ?? "That one can't be used." };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
+    <div className={`fixed inset-0 z-[60] flex items-center justify-center bg-black/20 backdrop-blur-[2px] ${eases ? "motion-fade-in" : ""}`} onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-labelledby="mail-address-title"
-        className="flex w-[440px] flex-col gap-4 rounded-[22px] bg-white px-[22px] pb-5 pt-[18px] shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
+        className={`flex w-[440px] flex-col gap-4 rounded-[22px] bg-white px-[22px] pb-5 pt-[18px] shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038] ${eases ? "motion-dialog-in" : ""}`}
       >
         <div className="flex flex-col gap-1">
           <span id="mail-address-title" className="text-[18px] font-semibold leading-[22px]">
@@ -226,6 +229,13 @@ export function AddressSheet({ workspaceId, workspaceName, mode, onClose }: { wo
 }
 
 /**
+ * Steps that have been on screen, kept while the step is away (it's unmounted while a sheet is over the
+ * app, and comes back when that closes). Only one not shown before eases in, and not as Bops opens.
+ */
+const shownSteps = new Set<string>();
+let stepMounted = false;
+
+/**
  * Shows the step when a workspace is waiting for its address (or has one Bops picked, to offer a
  * change): the workspace being looked at first. Gone once the user answers (the state says so).
  */
@@ -233,8 +243,13 @@ export function MailAddressStep({ state }: { state: AppState }) {
   const [closed, setClosed] = useState<string | null>(null);
   const waiting = (state.workspaces ?? []).filter((w) => w.mailPick && `${w.id}:${w.mailPick.at}` !== closed);
   const w = waiting.find((x) => x.id === currentWorkspace(state)) ?? waiting[0];
-  if (!w?.mailPick) return null;
-  return <AddressSheet key={w.id} workspaceId={w.id} workspaceName={w.name} mode={w.mailPick.offer ? "offer" : "pick"} onClose={() => setClosed(`${w.id}:${w.mailPick!.at}`)} />;
+  const step = w?.mailPick ? `${w.id}:${w.mailPick.at}` : null;
+  useEffect(() => {
+    stepMounted = true;
+    if (step) shownSteps.add(step);
+  }, [step]);
+  if (!w?.mailPick || !step) return null;
+  return <AddressSheet key={w.id} workspaceId={w.id} workspaceName={w.name} mode={w.mailPick.offer ? "offer" : "pick"} still={!stepMounted || shownSteps.has(step)} onClose={() => setClosed(step)} />;
 }
 
 /** Settings, Email (Bops Cloud): each workspace's address, with Change, or Pick for one that has none yet. */

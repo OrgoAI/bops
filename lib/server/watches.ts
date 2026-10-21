@@ -2,7 +2,8 @@ import "server-only";
 import { screenNo } from "@/lib/screens";
 import { LIGHT, speedFor, tierParam } from "./routing";
 import { trackServerEvent } from "./analytics";
-import { botChatId, DISPLAYS, live, MAIN_WORKSPACE, workspaceOf, type Watch } from "@/lib/types";
+import { botChatId, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, PAGE_WATCH_DEFAULT_MIN, PAGE_WATCH_MIN_MIN, workspaceOf, type Watch } from "@/lib/types";
+import { lineDigest, normalizeLine, normalizeTitle, newLines, pageLinesOf, screenLines, snapshotOf, type PageLine } from "@/cloud/page-diff";
 import { decide, chose, yes } from "./decide";
 import { holdForLater, urgency } from "./attention";
 import { currentPage, navigate, pageLines } from "./local";
@@ -10,7 +11,7 @@ import { appWindows, findWindow, listWindows, mainWindow, windowText } from "./m
 import { orgo } from "./orgo";
 import { sameComputer, screenEndpoint, workComputer } from "./screens";
 import { ensureScreenTools, startSession, stopSession } from "./sessions";
-import { addMessage, bot, getState, id, ownerName, patchSession, session, stateEpoch, stateReady, stateUser, update } from "./store";
+import { addMessage, bot, getState, id, ownerName, patchSession, session, stateEpoch, stateReady, stateUser, touchState, update } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { openaiClient } from "./openai-client";
 import { knownSite, siteOf } from "@/lib/watch-sites";
@@ -25,6 +26,14 @@ import { knownSite, siteOf } from "@/lib/watch-sites";
  * A window on the user's own Mac can be watched the same way (a Messages conversation, a mailbox): its
  * text is read through macOS accessibility, without a screenshot and without touching the window,
  * and the main bot of the workspace gives the heads-up.
+ *
+ * A public web page (a price, a status page, a listing) can be watched with no screen at all (Watch.page):
+ * Bops fetches it every few minutes, keeps a fingerprint of every line with what's certainly noise taken
+ * out (a "5m ago", an "Updated 3:45 PM", a cache buster: cloud/page-diff.ts), and a model reads only the
+ * lines that were added, only when there are some, with the lines they replaced. Every kind of watch
+ * compares pages that way; anything else that moved (a counter, an ad) is the model's to call. A screen
+ * or a Mac window also leaves out counts that tick on a feed (views, likes, comments) when it tells
+ * whether it moved on, since each move there costs a model read (cloud/page-diff.ts screenLines).
  */
 
 /** How often each watched page is checked for changes (a cheap read over the tailnet, no model). */
@@ -33,6 +42,25 @@ const LOOK_MS = 15_000;
 const READ_MS = 30_000;
 /** How sure Jev must be that something is waiting before Bops interrupts the user. */
 const SURE = 0.7;
+/** A web page that keeps failing is fetched less and less often: the gap doubles each time, up to this. */
+const PAGE_BACKOFF_MAX_MS = 6 * 3600_000;
+/**
+ * What a page watch keeps of a page between fetches: every line's fingerprint (Watch.page.digests, about
+ * 13 characters a line, up to the 1500 lines a page is read as), and the text of lines up to
+ * PAGE_TEXT_CHARS (the ones that changed lately first), so the judge sees what a new line replaced.
+ */
+const PAGE_TEXT_CHARS = 30_000;
+/**
+ * A read's new lines are judged in one call: up to this many, in page order, with a count of the rest.
+ * The rest aren't kept as seen, so they're new again at the next read and judged then.
+ */
+const PAGE_JUDGE_LINES = 200;
+/** A page read and found the same is saved at most this often; the window still sees when it was checked (watchesForApp). */
+const CHECKED_SAVE_MS = 60 * 60_000;
+/** ...and is told the state moved on at most this often, so its "Checked" stays fresh without a save. */
+const CHECKED_SHOW_MS = 5 * 60_000;
+/** The longest gap between fetches of a page, in minutes: a day. */
+const PAGE_WATCH_MAX_MIN = 1440;
 
 const watches = () => getState().watches ?? [];
 const watchById = (watchId: string) => watches().find((w) => w.id === watchId);
@@ -117,7 +145,7 @@ export async function suggestWatch(botId: string, display: number): Promise<Sugg
 export async function startWatch(botId: string, display: number, lookFor?: string, siteName?: string) {
   const b = bot(botId);
   if (!b) throw new Error("no such bot");
-  const existing = watches().find((w) => !w.mac && sameComputer(w.botId, botId) && w.display === display);
+  const existing = watches().find((w) => isScreenWatch(w) && sameComputer(w.botId, botId) && w.display === display);
   if (existing?.botId === botId) return existing;
   if (existing) throw new Error(`${bot(existing.botId)?.name ?? "Another bot"} is already watching that screen`);
   if (busy(botId, display)) throw new Error(`That screen is in use right now`);
@@ -178,6 +206,372 @@ export async function startMacWatch(app: string, windowId: number, title: string
   return w;
 }
 
+/* ---------------- Web pages, with no screen ---------------- */
+
+/**
+ * A web address as Bops fetches it: "example.com/prices" gets https:// in front, the part after # goes.
+ * Null for anything that isn't an http or https page (mailto:, javascript:, file:, a bare word).
+ */
+function webUrl(raw: string): string | null {
+  const t = raw.trim();
+  if (!t) return null;
+  // "localhost:3000" is a host and a port; "javascript:" is a scheme Bops never fetches.
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(t) && /^[a-z][a-z0-9+.-]*:(?!\d)/i.test(t)) return null;
+  try {
+    const u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(t) ? t : `https://${t}`);
+    if ((u.protocol !== "http:" && u.protocol !== "https:") || (!u.hostname.includes(".") && u.hostname !== "localhost")) return null;
+    u.hash = "";
+    return u.href;
+  } catch {
+    return null;
+  }
+}
+
+/** The same page, whatever way its address was written: "www.", http or https, a trailing slash aside. */
+function pageKey(url: string) {
+  try {
+    const u = new URL(url);
+    return `${u.hostname.replace(/^www\./, "")}${u.port ? `:${u.port}` : ""}${u.pathname.replace(/\/+$/, "")}${u.search}`;
+  } catch {
+    return url;
+  }
+}
+
+/** A page watch's gap between fetches, in minutes: PAGE_WATCH_MIN_MIN to a day, PAGE_WATCH_DEFAULT_MIN when unset. */
+const everyOf = (n?: number | null) =>
+  typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.min(PAGE_WATCH_MAX_MIN, Math.max(PAGE_WATCH_MIN_MIN, Math.round(n))) : PAGE_WATCH_DEFAULT_MIN;
+
+/** "every 30 minutes", "every 2 hours", "every day". */
+export function everyText(minutes: number) {
+  if (minutes >= PAGE_WATCH_MAX_MIN) return "every day";
+  if (minutes % 60 === 0) return minutes === 60 ? "every hour" : `every ${minutes / 60} hours`;
+  return `every ${minutes} minutes`;
+}
+
+/**
+ * How long a page watch waits after its last fetch: its own gap, doubled for each fetch in a row that
+ * failed, up to 6 hours (never less than its own gap).
+ */
+function pageGap(p: NonNullable<Watch["page"]>) {
+  const every = p.everyMin * 60_000;
+  return Math.max(every, Math.min(every * 2 ** (p.failures ?? 0), PAGE_BACKOFF_MAX_MS));
+}
+
+/**
+ * When each page watch last read its page and found it the same: kept here, not saved on every read (an
+ * idle Mac with ten watches would otherwise save its whole state, to the cloud too, thousands of times a
+ * day). Saved with the next change, once an hour, or when the user checks it. After a restart, a watch
+ * missing here reads once early.
+ */
+const g0 = globalThis as typeof globalThis & { __bopsPageChecked?: Map<string, number>; __bopsPageShown?: number };
+const checkedSame = (g0.__bopsPageChecked ??= new Map<string, number>());
+/** When a page watch last read its page, saved or not. */
+const pageChecked = (w: Watch) => Math.max(w.page?.checkedAt ?? 0, checkedSame.get(w.id) ?? 0);
+
+/** The watches as the window gets them: when each page was last read (saved or not), and none of what's kept to compare (only the server compares). */
+export function watchesForApp(list: Watch[] | undefined): Watch[] | undefined {
+  return list?.map((w) => (w.page ? { ...w, page: { ...w.page, checkedAt: pageChecked(w) || undefined, lines: undefined, hash: undefined, digests: undefined, seen: undefined } } : w));
+}
+
+/**
+ * The text a page watch keeps of its lines, within PAGE_TEXT_CHARS, in page order: the lines just added
+ * first (`first`, by digest; they're what changes next), then the lines kept before (`before`, by text),
+ * then the rest from the top.
+ */
+function keptText(now: PageLine[], first: Set<string>, before: Set<string>): string[] {
+  const pick = new Set<string>();
+  let size = 0;
+  const take = (l: PageLine) => {
+    if (pick.has(l.digest) || size + l.line.length + 1 > PAGE_TEXT_CHARS) return;
+    pick.add(l.digest);
+    size += l.line.length + 1;
+  };
+  for (const l of now) if (first.has(l.digest)) take(l);
+  for (const l of now) if (before.has(l.line)) take(l);
+  for (const l of now) take(l);
+  const out: string[] = [];
+  for (const l of now) if (pick.delete(l.digest)) out.push(l.line);
+  return out;
+}
+
+/**
+ * A page as a watch keeps it from now on: every line's digest and the page's hash, and the text of its
+ * lines (those in `first` first). Nothing is kept of lines that went: one that comes back is new again
+ * (a status that returns, a restock after a sell out). `seen` (from older builds) is cleared.
+ */
+function keepPage(kept: NonNullable<Watch["page"]>, lines: PageLine[], first: Set<string>) {
+  return { ...snapshotOf(lines), seen: undefined, lines: keptText(lines, first, new Set(kept.lines ?? [])) };
+}
+
+/** Numbers aside: "Bitcoin $#" for "Bitcoin $86,200". */
+const shape = (line: string) => normalizeLine(line).replace(/\d[\d,.]*/g, "#");
+
+/**
+ * What a heads-up quotes: the line (bullets in front aside), and the line that went that it's a new
+ * version of, when there is one (the same words with other numbers): "Bitcoin $86,200 (was Bitcoin $85,100)".
+ */
+function quoteOf(line: string, before: string[]) {
+  const quote = (s: string, max: number) => s.replace(/^[•·*\-\s]+/, "").slice(0, max).trim();
+  const s = shape(line);
+  const old = s.includes("#") ? before.find((b) => shape(b) === s && normalizeLine(b) !== normalizeLine(line)) : undefined;
+  return old ? `${quote(line, 120)} (was ${quote(old, 80)})` : quote(line, 120);
+}
+
+/** Why a fetch failed, in a line the user can read. */
+const fetchError = (e: unknown) => ((e as Error)?.message || "it didn't answer").replace(/\s+/g, " ").trim().slice(0, 200);
+
+/**
+ * A web page's lines of text, fetched with no screen (lib/server/web-page.ts: never a private address),
+ * and what kind of page it was (html, json, xml or text).
+ */
+async function webPage(url: string) {
+  const { pageLines: read } = await import("./web-page");
+  return read(url);
+}
+type WebPage = Awaited<ReturnType<typeof webPage>>;
+
+/**
+ * A web page (HTML) with no text at all: it draws itself in a browser, or needs a sign in, so the read
+ * failed. JSON, plain text or a feed with nothing in it is a page that's empty right now, and counts.
+ */
+const noText = (page: WebPage) => page.kind === "html" && !page.lines.length;
+
+/** Why a page with no text can't be watched with no screen: it needs a sign in, or (with no browser to read it in) JavaScript. */
+async function noTextWhy(host: string) {
+  const { browserAvailable } = await import("./web-render");
+  return browserAvailable()
+    ? `${host} shows no text Bops can read, even in a browser (it may need a sign in). Watch it on a computer instead.`
+    : `${host} shows no text Bops can read without a browser (it may need a sign in or JavaScript). Watch it on a computer instead.`;
+}
+
+const patchPage = (watchId: string, patch: Partial<NonNullable<Watch["page"]>>) =>
+  update((state) => {
+    const w = state.watches?.find((x) => x.id === watchId);
+    if (w?.page) Object.assign(w.page, patch);
+  });
+
+/** This bot's watch on this page, if it has one. */
+const pageWatchOf = (botId: string, url: string) => watches().find((w) => w.botId === botId && w.page && pageKey(w.page.url) === pageKey(url));
+
+/**
+ * Watch a public web page with no screen: Bops fetches it every `everyMin` minutes (5 at least, a day at
+ * most, 30 when unset) and the bot gives a heads-up when lines that match `lookFor` are added. The first
+ * fetch happens now and is kept as how the page is. When it fails, or it's a web page (HTML) with no text
+ * Bops can read without a browser, nothing is set up and the error says why in plain words, so the bot can
+ * tell the user at once. JSON, text or a feed with nothing in it yet (an empty list of issues) is how the
+ * page is, and can be watched. A bot watches a page once.
+ */
+export async function startPageWatch(botId: string, a: { url: string; lookFor?: string; everyMin?: number; site?: string }): Promise<Watch> {
+  const b = bot(botId);
+  if (!b) throw new Error("no such bot");
+  const url = webUrl(a.url ?? "");
+  if (!url) throw new Error("That isn't a web page address. It has to be a site like example.com or an http or https link.");
+  if (pageWatchOf(botId, url)) throw new Error(`${b.name} is already watching that page.`);
+  const epoch = stateEpoch();
+  const host = new URL(url).hostname.replace(/^www\./, "");
+  let page: WebPage;
+  try {
+    page = await webPage(url);
+  } catch (e) {
+    throw new Error(`Couldn't read ${host}: ${fetchError(e)}`);
+  }
+  if (noText(page)) throw new Error(await noTextWhy(host));
+  const lines = pageLinesOf(page.lines);
+  // Signed out, or another account in, meanwhile: no watch is made in their state.
+  if (epoch !== stateEpoch()) throw new Error("Bops was signed out meanwhile.");
+  if (pageWatchOf(botId, url)) throw new Error(`${b.name} is already watching that page.`);
+  const usual = siteOf(url, page.title);
+  const site = a.site?.trim().slice(0, 40) || usual.site;
+  const now = Date.now();
+  const w: Watch = {
+    id: id("watch"),
+    botId,
+    display: 0,
+    site,
+    // What the page shows new, by its address (a releases page, new releases); a site's usual (new DMs,
+    // mentions) is for a signed-in screen, which a page read with no sign in never shows.
+    lookFor: a.lookFor?.trim().slice(0, 300) || pageLookFor(url),
+    since: now,
+    target: `${site}: ${page.title || url} (${url})`,
+    page: { url, everyMin: everyOf(a.everyMin), checkedAt: now, ...snapshotOf(lines), lines: keptText(lines, new Set(), new Set()), ...(page.via ? { via: page.via } : {}) },
+  };
+  update((state) => (state.watches ??= []).push(w));
+  trackServerEvent("bops_watch_created", { kind: "site" });
+  return w;
+}
+
+/** What a page watch looks for when the user didn't say: what its address says it lists, else anything new. */
+function pageLookFor(url: string) {
+  const path = new URL(url).pathname.toLowerCase();
+  if (/\/releases?(\/|$)/.test(path)) return "a new release";
+  if (/\/pulls?(\/|$)/.test(path)) return "a new pull request";
+  if (/\/issues(\/|$)/.test(path)) return "a new issue";
+  if (/\/commits?(\/|$)/.test(path)) return "a new commit";
+  if (/\/(changelog|changes|news|blog|posts?|updates)(\/|$)/.test(path)) return "a new post";
+  return "anything new on the page";
+}
+
+/** What one look found: nothing new, a change with nothing to tell, a heads-up given, or it couldn't read the page. */
+export type CheckResult = "same" | "changed" | "told" | "failed";
+
+/**
+ * Fetch a watched page when it's due (`now`: the user asked, so at once, due or not, paused or not). The
+ * page is compared with what was kept of it, every line in its steady form (what's certainly noise aside:
+ * cloud/page-diff.ts). Lines not on the kept page are new, a line that went and came back too. With
+ * none, nothing is written (pageChecked), but for an hourly save that takes in what went or moved, or a
+ * check the user asked for. With some, up to PAGE_JUDGE_LINES of them are judged in one call, with a
+ * count of the rest and the lines they replaced; the page is kept as it is now, but for the lines past
+ * those judged, which are new again at the next read. A failed fetch, or a web page that comes back with
+ * no text, is kept on the watch (error, failures) with the page as it was, and the next waits longer;
+ * one that works clears it.
+ */
+async function checkPage(watchId: string, now = false): Promise<CheckResult | undefined> {
+  const w = watchById(watchId);
+  if (!w?.page || looking.has(watchId)) return;
+  if (!now && (w.paused || Date.now() - pageChecked(w) < pageGap(w.page))) return;
+  const epoch = stateEpoch();
+  looking.add(watchId);
+  try {
+    const failed = (error: string) => {
+      const kept = watchById(watchId)?.page;
+      if (epoch === stateEpoch() && kept) patchPage(watchId, { checkedAt: Date.now(), error, failures: (kept.failures ?? 0) + 1 });
+      return "failed" as const;
+    };
+    let page: WebPage;
+    try {
+      page = await webPage(w.page.url);
+    } catch (e) {
+      return failed(fetchError(e));
+    }
+    const was = watchById(watchId);
+    if (epoch !== stateEpoch() || !was?.page) return;
+    const kept = was.page;
+    if (noText(page)) return failed("The page came back empty.");
+    const lines = pageLinesOf(page.lines);
+    const at = Date.now();
+    const ok = { checkedAt: at, error: undefined, failures: undefined, odd: undefined, via: page.via };
+    // Kept before every line's fingerprint was: the page is taken in as it is.
+    if (!kept.digests) {
+      patchPage(watchId, { ...ok, changedAt: at, ...snapshotOf(lines), seen: undefined, lines: keptText(lines, new Set(), new Set()) });
+      return "changed";
+    }
+    const added = snapshotOf(lines).hash === kept.hash ? [] : newLines(kept.digests, lines);
+    if (!added.length) {
+      checkedSame.set(watchId, at);
+      // Nothing new (the same page, or lines that went, moved or came back). Written only with something
+      // to clear, once an hour (taking in the page as it is), or when the user asked (so the window shows
+      // it at once); else the window is told it moved on now and then.
+      if (now || kept.error || kept.failures || kept.odd || kept.via !== page.via || at - (kept.checkedAt ?? 0) >= CHECKED_SAVE_MS) patchPage(watchId, { ...ok, ...keepPage(kept, lines, new Set()) });
+      else if (at - (g0.__bopsPageShown ?? 0) >= CHECKED_SHOW_MS) {
+        g0.__bopsPageShown = at;
+        touchState();
+      }
+      return "same";
+    }
+    // What went from the page (its lines that are gone, those Bops kept the text of): what new lines may have replaced.
+    const present = new Set(lines.map((l) => l.digest));
+    const before = (kept.lines ?? []).filter((l) => !present.has(lineDigest(l))).slice(0, PAGE_JUDGE_LINES).map((l) => l.slice(0, 300));
+    const judged = added.slice(0, PAGE_JUDGE_LINES);
+    const shown = judged.map((l) => l.raw.slice(0, 300));
+    const j = await judgePage(was, page, shown, added.length - shown.length, before, epoch);
+    if (epoch !== stateEpoch() || !watchById(watchId)) return;
+    // No model answered: the page stays as it was kept, so these lines are judged at the next fetch.
+    if (!j) {
+      patchPage(watchId, ok);
+      return "changed";
+    }
+    // The new lines past those judged aren't kept, so they're new again at the next read and judged then.
+    const later = new Set(added.slice(PAGE_JUDGE_LINES).map((l) => l.digest));
+    const keep = later.size ? lines.filter((l) => !later.has(l.digest)) : lines;
+    patchPage(watchId, { ...ok, changedAt: at, ...keepPage(kept, keep, new Set(judged.map((l) => l.digest))) });
+    if (j.yes < SURE) return "changed";
+    // The line the judge picked, quoted; with none picked, that the page changed and what it's watched for.
+    return (await tell(watchId, j.line ? quoteOf(j.line, before) : null, epoch)) ? "told" : "changed";
+  } catch (e) {
+    console.warn(`[watch] ${watchId}: ${(e as Error).message}`);
+    return "failed";
+  } finally {
+    looking.delete(watchId);
+  }
+}
+
+/**
+ * What changes on a page with nothing new, for a judge: the steady form takes out only what is certainly
+ * noise (cloud/page-diff.ts), so the rest is the judge's to tell apart.
+ */
+const NOT_NEWS =
+  "A stamp or a clock that moved on (when the page was updated, the time now), a count that ticked (views, likes, points, comments, watching), an ad or a banner, the same things in a new order, or a cookie, sign in or error page shown instead of the page (or the page back after one) are not news, unless `look_for` is about them.";
+
+/**
+ * Whether any line new on a watched page is what the user asked to hear about, and which is the newest
+ * that is: one Jev call when Jev is there; else one quick, low-effort OpenAI call that answers the same
+ * question. `before` is what went from the page (what the new lines may have replaced), so a price
+ * crossing a line, or one that moved, can be judged, and a condition that was already true isn't news.
+ * A line that comes back (a status that returns) is judged like any new line: it's news again. `more`:
+ * how many new lines there were past `lines`. `yes` is how sure (0 to 1); null when neither answered.
+ */
+async function judgePage(w: Watch, page: { url: string; title: string }, lines: string[], more: number, before: string[], epoch: number): Promise<{ yes: number; line?: string } | null> {
+  const owner = ownerName();
+  const was = before.length ? before.join("\n") : "(nothing went from the page)";
+  const rest = more > 0 ? { more_added: `${more} more new lines, not shown now (they come next read)` } : {};
+  const rule = `\`added\` are the lines that are new on the page since it was last read (the first ones, when \`more_added\` says there are more); \`before\` are lines that were on it then and are gone now (what the new ones may have replaced). Something already true in \`before\` (the same item, or the same condition, such as a price already above the line) is not news. For a crossing or a move, compare the line in \`added\` with its old value in \`before\`. ${NOT_NEWS}`;
+  const a = await decide(
+    { look_for: w.lookFor, watching: watchTarget(w), page: { site: w.site, url: page.url, title: page.title }, added: lines.join("\n"), ...rest, before: was },
+    {
+      waiting: {
+        type: "noul",
+        instructions: `${owner} is watching the web page \`watching\` and told their bot exactly what to tell them about: \`look_for\`. That is the only test. ${rule} Does any line in \`added\` match \`look_for\` as ${owner} worded it, as news to them? A new line that doesn't match \`look_for\` does not count, however new it is.`,
+        criteria: {
+          true: `Yes: a line in \`added\` matches \`look_for\`, as ${owner} worded it, and it's news to them`,
+          false: "No: nothing in `added` matches `look_for` (other new lines don't count), or it was already true in `before`",
+        },
+      },
+      item: {
+        type: "choice",
+        instructions: "Which line of `added` is the newest thing that matches `look_for`?",
+        criteria: Object.fromEntries([...lines.map((l, i) => [`l${i}`, l]), ["none", "None of these lines"]]),
+      },
+    },
+    { botId: w.botId },
+  );
+  if (a) {
+    const pick = chose(a.item);
+    return { yes: yes(a.waiting) ?? 0, line: pick && pick.choice !== "none" && pick.confidence >= 0.3 ? lines[Number(pick.choice.slice(1))] : undefined };
+  }
+  // No Jev (not set up, or not answering): the same question, once, to OpenAI.
+  try {
+    const res = await client.responses.create(
+      {
+        model: SUGGEST_MODEL(),
+        reasoning: { effort: "low" },
+        instructions: `${owner} is watching a web page (\`watching\`) and told their bot exactly what to tell them about: \`look_for\`. ${rule} \`added\` is numbered from 0. Does any line in \`added\` match \`look_for\` as ${owner} worded it, as news to them? A new line that doesn't match does not count, however new it is. Answer matches (true or false) and line: the number of the newest line that matches, or null.`,
+        input: JSON.stringify({ look_for: w.lookFor, watching: watchTarget(w), page: { url: page.url, title: page.title }, added: lines.map((l, i) => `${i}: ${l}`), ...rest, before }),
+        text: {
+          format: {
+            type: "json_schema",
+            name: "watch_judgment",
+            strict: true,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              required: ["matches", "line"],
+              properties: { matches: { type: "boolean" }, line: { type: ["integer", "null"], description: "The number of the newest matching line in `added`, or null" } },
+            },
+          },
+        },
+      },
+      usageTags("decide", w.botId),
+    );
+    // It does Jev's job, so it's counted as a quick check.
+    recordTokens("decide", res.model, res.usage, w.botId, epoch);
+    const out = JSON.parse(res.output_text) as { matches?: boolean; line?: number | null };
+    return { yes: out.matches ? 1 : 0, line: typeof out.line === "number" ? lines[out.line] : undefined };
+  } catch (e) {
+    console.warn(`[watch] ${w.id}: couldn't judge the page: ${(e as Error).message}`);
+    return null;
+  }
+}
+
 /**
  * Write the watched screens of the computer this bot works on (/root/.bops/watches.json) for its screen
  * tools to read: every bot's that works on it, since one file covers the whole computer.
@@ -186,7 +580,7 @@ async function syncWatchFile(botId: string) {
   const b = bot(botId);
   const computerId = b && workComputer(b).computerId;
   if (getState().host !== "orgo" || !computerId) return;
-  const map = Object.fromEntries(watches().filter((w) => sameComputer(w.botId, botId) && !w.mac).map((w) => [screenNo(w.display), { site: w.site, lookFor: w.lookFor }]));
+  const map = Object.fromEntries(watches().filter((w) => sameComputer(w.botId, botId) && isScreenWatch(w)).map((w) => [screenNo(w.display), { site: w.site, lookFor: w.lookFor }]));
   const body = Buffer.from(JSON.stringify(map)).toString("base64");
   await orgo.bash(computerId, `mkdir -p /root/.bops && echo ${body} | base64 -d > /root/.bops/watches.json`, 15).catch(() => {});
 }
@@ -196,17 +590,48 @@ export async function stopWatch(watchId: string) {
   if (!w) return;
   update((state) => (state.watches = state.watches?.filter((x) => x.id !== watchId)));
   const b = bot(w.botId);
-  if (w.mac) return;
+  // A Mac window or a web page holds no screen.
+  if (!isScreenWatch(w)) return;
   const computerId = b && workComputer(b).computerId;
   if (getState().host === "orgo" && computerId) await orgo.bash(computerId, `bops-screens release watch:${w.id}`, 15).catch(() => {});
   void syncWatchFile(w.botId);
 }
 
-/** Change what a watched screen is watched for. */
-export function editWatch(watchId: string, lookFor: string) {
+/** Change what a watch is watched for, and for a web page how often it's fetched (`everyMin`, in minutes). */
+export function editWatch(watchId: string, lookFor: string, everyMin?: number | null) {
   if (lookFor.trim()) patchWatch(watchId, { lookFor: lookFor.trim().slice(0, 300) });
   const w = watchById(watchId);
-  if (w) void syncWatchFile(w.botId);
+  if (w?.page && typeof everyMin === "number") patchPage(watchId, { everyMin: everyOf(everyMin) });
+  if (w && isScreenWatch(w)) void syncWatchFile(w.botId);
+}
+
+/**
+ * Pause a watch, or resume it. Paused, it isn't looked at (a screen stays kept for it). Resumed, it
+ * looks at once, and what changed while it was paused is judged like any change.
+ */
+export function setWatchPaused(watchId: string, paused: boolean) {
+  const w = watchById(watchId);
+  if (!w) throw new Error("That isn't being watched anymore.");
+  if (!!w.paused === paused) return w;
+  patchWatch(watchId, { paused: paused || undefined });
+  if (!paused) void look(watchId, true);
+  return watchById(watchId) ?? w;
+}
+
+/**
+ * Look at a watch now, as the user asked (Check now): a web page is fetched at once, due or not, paused
+ * or not, and when it was checked is saved, so the window shows it at once; a screen or a Mac window is
+ * read at once. The watch as it is after (as the window gets it), and what the look found.
+ */
+export async function checkNow(watchId: string): Promise<{ watch: Watch; result: CheckResult }> {
+  const w = watchById(watchId);
+  if (!w) throw new Error("That isn't being watched anymore.");
+  if (isScreenWatch(w) && busy(w.botId, w.display)) throw new Error("That screen is in use right now.");
+  // A look already under way (the loop's): let it end, then look again.
+  for (let i = 0; i < 80 && looking.has(watchId); i++) await new Promise((r) => setTimeout(r, 250));
+  const result = (await look(watchId, true)) ?? "failed";
+  // As the window gets it (watchesForApp): what's kept to compare stays on the server.
+  return { watch: watchesForApp([watchById(watchId) ?? w])![0], result };
 }
 
 /** The user looked at what the screen flagged; clear the badge. */
@@ -223,6 +648,7 @@ export function draftReply(watchId: string) {
   if (drafting) return drafting;
   // A window on the Mac: bots can't write in the Mac's apps for now (lib/server/mac.ts).
   if (w.mac) throw new Error(`Bots can't write in ${w.mac.app} on your Mac for now.`);
+  if (w.page) throw new Error(`${w.site} is a web page Bops reads on its own: there's no screen to reply on.`);
   const what = w.alert?.text ?? [w.told ?? []].flat().at(-1) ?? "the newest thing waiting for me";
   patchWatch(watchId, { alert: undefined });
   return startSession({
@@ -239,21 +665,28 @@ const lastLines = new Map<string, string[]>();
 const lastRead = new Map<string, number>();
 const looking = new Set<string>();
 
-/** Check one watched screen: if its page changed, have Jev read it. */
-async function look(watchId: string) {
+/**
+ * Check one watch: a web page when it's due (checkPage); a screen or a Mac window, if its page changed,
+ * has Jev read it. Paused watches are skipped. `now`: the user asked (Check now, Resume), so it looks
+ * at once, paused or not, without waiting out READ_MS.
+ */
+async function look(watchId: string, now = false): Promise<CheckResult | undefined> {
   const w = watchById(watchId);
+  if (w?.page) return checkPage(watchId, now);
   const b = w && bot(w.botId);
-  if (!w || !b || looking.has(watchId) || (!w.mac && busy(w.botId, w.display))) return;
-  const endpoint = w.mac ? null : screenEndpoint(b, w.display);
-  if (!w.mac && !endpoint) return;
+  if (!w || !b || looking.has(watchId) || (w.paused && !now) || (isScreenWatch(w) && busy(w.botId, w.display))) return;
+  const endpoint = isScreenWatch(w) ? screenEndpoint(b, w.display) : null;
+  if (isScreenWatch(w) && !endpoint) return;
   const epoch = stateEpoch();
   looking.add(watchId);
   try {
     const page = w.mac ? await macPage(w).catch(() => null) : await pageLines(endpoint!).catch(() => null);
-    if (!page?.url) return;
-    const fingerprint = `${page.url}|${page.title}|${page.lines.join("\n")}`;
-    if (fingerprint === lastSeen.get(watchId)) return;
-    if (Date.now() - (lastRead.get(watchId) ?? 0) < READ_MS) return; // a later look picks it up
+    if (!page?.url) return "failed";
+    // In its steady form, counts aside: a clock, a "5m ago", an "Updated 3:45 PM" or a feed's "1.2K views"
+    // moving on is not a change, and costs no read (cloud/page-diff.ts screenLines).
+    const fingerprint = `${page.url}|${normalizeTitle(page.title)}|${screenLines(page.lines).join("\n")}`;
+    if (fingerprint === lastSeen.get(watchId)) return "same";
+    if (!now && Date.now() - (lastRead.get(watchId) ?? 0) < READ_MS) return; // a later look picks it up
     lastSeen.set(watchId, fingerprint);
     lastRead.set(watchId, Date.now());
 
@@ -285,7 +718,7 @@ async function look(watchId: string) {
         waiting: {
           type: "noul",
           instructions:
-            `${owner} is watching \`watching\` and told their bot exactly what to tell them about: \`look_for\`. That is the only test. Does \`page\` now show something new since \`before\` that matches \`look_for\` as ${owner} worded it, about \`watching\`? Something new or unread that doesn't match \`look_for\` does not count, however new it is. Lines starting "Me:" are messages ${owner} sent (never news to ${owner}); "Them:" lines are from the other person.`,
+            `${owner} is watching \`watching\` and told their bot exactly what to tell them about: \`look_for\`. That is the only test. Does \`page\` now show something new since \`before\` that matches \`look_for\` as ${owner} worded it, about \`watching\`? Something new or unread that doesn't match \`look_for\` does not count, however new it is. ${NOT_NEWS} Lines starting "Me:" are messages ${owner} sent (never news to ${owner}); "Them:" lines are from the other person.`,
           criteria: {
             true: `Yes: something on the page matches \`look_for\`, as ${owner} worded it, and it's news to them`,
             false: "No: nothing matches `look_for` (other new or unread things don't count), or it was already like this before",
@@ -303,49 +736,88 @@ async function look(watchId: string) {
       },
       { botId: w.botId },
     );
-    if (!a) return;
-    const now = watchById(watchId);
-    if (!now) return;
+    if (!a) return "changed";
+    const cur = watchById(watchId);
+    if (!cur) return;
     patchWatch(watchId, { readAt: Date.now() });
     // Showing something else right now: say so, and judge nothing until the watched thing is back.
     const onTarget = yes(a.on_target) ?? 1;
     if (onTarget < 0.5) {
-      if (!now.away) patchWatch(watchId, { away: true });
-      return;
+      if (!cur.away) patchWatch(watchId, { away: true });
+      return "changed";
     }
     // A watch tells the user what's new: the first look (after setting up, a restart, or coming back
     // from Paused) only takes in how things are now; changes from then on are what count.
     lastLines.set(watchId, lines);
-    if (now.away || !before) {
-      if (now.away) patchWatch(watchId, { away: false });
-      return;
+    if (cur.away || !before) {
+      if (cur.away) patchWatch(watchId, { away: false });
+      return "changed";
     }
     const waiting = yes(a.waiting) ?? 0;
     // Read or answered since: the badge goes away by itself.
     if (waiting < 0.3) {
-      if (now.alert) patchWatch(watchId, { alert: undefined });
-      return;
+      if (cur.alert) patchWatch(watchId, { alert: undefined });
+      return "changed";
     }
-    if (waiting < SURE) return;
+    if (waiting < SURE) return "changed";
     const pick = chose(a.item);
     const line = pick && pick.choice !== "none" && pick.confidence >= 0.3 ? lines[Number(pick.choice.slice(1))] : undefined;
     const text = (line ?? page.title).replace(/^(Me|Them): /, "").replace(/^[•·*\-\s]+/, "").slice(0, 120);
-    // (Watches from before kept only the last one, as a string.)
-    const told: string[] = Array.isArray(now.told) ? now.told : now.told ? [now.told] : [];
-    if (told.includes(text)) return;
-    const where = now.mac ? `in ${now.mac.title} on your Mac` : `on ${now.site}`;
-    // How much of the user's attention it gets: interrupt now, just show it, or hold it for later.
-    const level = await urgency({ kind: "watch", what: now.mac ? `"${now.mac.title}" in ${now.mac.app} on ${owner}'s Mac` : now.site, news: text, lookFor: now.lookFor });
-    // Signed out, or another account in, meanwhile: what this watch saw was the last account's.
-    if (epoch !== stateEpoch()) return;
-    patchWatch(watchId, { alert: { text, at: Date.now(), level }, told: [...told, text].slice(-30) });
-    if (level === "later") holdForLater({ botId: now.botId, text: `${now.mac?.title ?? now.site}: “${text}”`, watchId });
-    else addMessage({ chatId: botChatId(now.botId), role: "bot", botId: now.botId, text: `Heads up, something new ${where}: “${text}”`, watch: { id: watchId } });
+    return (await tell(watchId, text, epoch)) ? "told" : "changed";
   } catch (e) {
     console.warn(`[watch] ${watchId}: ${(e as Error).message}`);
+    return "failed";
   } finally {
     looking.delete(watchId);
   }
+}
+
+/**
+ * What a watch looks for in a few words, for a heads-up with no line to quote: "an outage", "Bitcoin above
+ * $86,000"; at most 8 words and 80 characters, with "…" when it was cut.
+ */
+function fewWords(s: string) {
+  const words = s.replace(/\s+/g, " ").trim().replace(/[.!?]+$/, "").split(" ");
+  const few = words.slice(0, 8).join(" ");
+  return few.length > 80 ? `${few.slice(0, 80).trimEnd()}…` : words.length > 8 ? `${few}…` : few;
+}
+
+/**
+ * Tell the user what a watch found: interrupt, just show it, or hold it for later, as urgency() says.
+ * `found` is the line, quoted in the heads-up; null for a web page the judge said matches with no line
+ * picked: then the heads-up says the page changed, and what it's watched for, in a few words. Not twice:
+ * a screen or a Mac window never tells the same words (times aside) twice (`told`, the last 30); a web
+ * page skips only the words its alert still shows (the user hasn't looked yet), so a status that comes
+ * back, or a restock after a sell out, is told again. False when it wasn't told.
+ */
+async function tell(watchId: string, found: string | null, epoch: number) {
+  const w = watchById(watchId);
+  if (!w) return false;
+  const few = fewWords(w.lookFor);
+  const text = found ?? `Changed: ${few}`;
+  // (Watches from before kept only the last one, as a string.)
+  const told: string[] = Array.isArray(w.told) ? w.told : w.told ? [w.told] : [];
+  const same = (t: string) => (normalizeLine(t) || t) === (normalizeLine(text) || text);
+  if (w.page ? w.alert && same(w.alert.text) : told.some(same)) return false;
+  const owner = ownerName();
+  const where = w.mac ? `in ${w.mac.title} on your Mac` : `on ${w.site}`;
+  const what = w.mac ? `"${w.mac.title}" in ${w.mac.app} on ${owner}'s Mac` : w.page ? `the web page ${w.site} (${w.page.url})` : w.site;
+  // How much of the user's attention it gets: interrupt now, just show it, or hold it for later.
+  const level = await urgency({ kind: "watch", what, news: text, lookFor: w.lookFor });
+  // Signed out, or another account in, meanwhile: what this watch saw was the last account's. Stopped meanwhile: nothing to tell.
+  if (epoch !== stateEpoch() || !watchById(watchId)) return false;
+  patchWatch(watchId, { alert: { text, at: Date.now(), level }, told: [...told, text].slice(-30) });
+  const name = w.mac?.title ?? w.site;
+  if (level === "later") holdForLater({ botId: w.botId, text: found === null ? `${name} changed: ${few}` : `${name}: “${text}”`, watchId });
+  else
+    addMessage({
+      chatId: botChatId(w.botId),
+      role: "bot",
+      botId: w.botId,
+      text: found === null ? `Heads up, ${w.site} changed. It looks like what you're watching for: ${few}${few.endsWith("…") ? "" : "."}` : `Heads up, something new ${where}: “${text}”`,
+      watch: { id: watchId },
+    });
+  return true;
 }
 
 /** A watched Mac window read as a page: its text through accessibility. Following it if its id changed. */
@@ -370,16 +842,57 @@ g.__bopsWatches ??= setInterval(() => {
 /** Names compare loosely: case, emoji and punctuation aside ("jordan" finds "Jordan 🌵✨"). */
 const loose = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
+/** What the bot tells the user about a watch it set up from chat (or already had), in plain words. */
+function watchSaid(w: Watch, already?: boolean) {
+  const owner = ownerName();
+  const what = w.page ? `${w.site} ${everyText(w.page.everyMin)}` : w.site;
+  const state = w.away
+    ? " It's paused right now: the app is showing something else, and it picks up when that's back on screen."
+    : w.paused
+      ? ` It's paused: ${owner} can resume it under Monitors.`
+      : "";
+  return `${already ? "Already watching" : "Watching"} ${what} for: ${w.lookFor}. ${owner} gets a heads-up here when it shows up.${state}`;
+}
+
 /**
  * The user asked a bot in chat to watch something; set it up like the Watch button would. On their Mac:
  * the window of that app whose title matches (a Messages window shows one conversation, so it has to
- * be the one showing). On the bot's computer: a screen already on that site, else a free one opened
- * to it. When it can't tell or can't see it, `reply` says what the user needs to do (the bot passes it on).
+ * be the one showing). On the web: a public page fetched with no screen, every `every_minutes` (30 when
+ * unset; 5 at least, a day at most); a page it already watches is kept, with what the user said now, and
+ * resumed if paused. On the bot's computer: a screen already on that site, else a free one opened to it.
+ * `said` is what to tell the user. When it can't tell or can't see it, `reply` says what the user needs
+ * to do, or why it can't (the bot passes it on).
  */
 export async function watchFromChat(
   botId: string,
-  a: { where: "mac" | "computer"; app?: string; window?: string; url?: string; look_for?: string },
-): Promise<{ watch: Watch; already?: boolean } | { reply: string }> {
+  a: {
+    where: "mac" | "computer" | "web";
+    app?: string | null;
+    window?: string | null;
+    url?: string | null;
+    look_for?: string | null;
+    every_minutes?: number | null;
+  },
+): Promise<{ watch: Watch; already?: boolean; said: string } | { reply: string }> {
+  if (a.where === "web") {
+    if (!bot(botId)) return { reply: "No such bot." };
+    if (!a.url?.trim()) return { reply: "Which page should be watched? Give its address." };
+    const url = webUrl(a.url);
+    if (!url) return { reply: `${a.url.trim()} isn't a web page address. It has to be a site like example.com or an http or https link.` };
+    const had = pageWatchOf(botId, url);
+    if (had) {
+      editWatch(had.id, a.look_for ?? "", a.every_minutes);
+      if (had.paused) setWatchPaused(had.id, false);
+      const w = watchById(had.id) ?? had;
+      return { watch: w, already: true, said: watchSaid(w, true) };
+    }
+    try {
+      const w = await startPageWatch(botId, { url, lookFor: a.look_for ?? undefined, everyMin: a.every_minutes ?? undefined });
+      return { watch: w, said: watchSaid(w) };
+    } catch (e) {
+      return { reply: (e as Error).message };
+    }
+  }
   if (a.where === "mac") {
     const owner = ownerName();
     const app = loose(a.app ?? "");
@@ -389,7 +902,8 @@ export async function watchFromChat(
     const had = watches().find((w) => w.mac && loose(w.mac.app).includes(app) && (!want0 || loose(w.mac.title).includes(want0) || want0.includes(loose(w.mac.title))));
     if (had) {
       if (a.look_for?.trim() && a.look_for.trim() !== had.lookFor) editWatch(had.id, a.look_for);
-      return { watch: watchById(had.id) ?? had, already: true };
+      const w = watchById(had.id) ?? had;
+      return { watch: w, already: true, said: watchSaid(w, true) };
     }
     const wins = (await listWindows()).filter((w) => loose(w.app).includes(app) || app.includes(loose(w.app)));
     if (!wins.length) return { reply: `${a.app} isn't open on ${owner}'s Mac. Ask ${owner} to open it (and the conversation or mailbox to watch), then try again.` };
@@ -397,7 +911,8 @@ export async function watchFromChat(
     const hits = want ? wins.filter((w) => loose(w.title).includes(want) || want.includes(loose(w.title))) : wins;
     if (!hits.length) return { reply: `${wins[0].app} is showing ${wins.map((w) => `"${w.title}"`).join(", ")}, not ${a.window}. Ask ${owner} to open it there, then try again.` };
     if (hits.length > 1) return { reply: `More than one ${wins[0].app} window matches: ${hits.map((w) => `"${w.title}"`).join(", ")}. Ask ${owner} which one.` };
-    return { watch: await startMacWatch(hits[0].app, hits[0].windowId, hits[0].title, a.look_for) };
+    const w = await startMacWatch(hits[0].app, hits[0].windowId, hits[0].title, a.look_for ?? undefined);
+    return { watch: w, said: watchSaid(w) };
   }
   const b = bot(botId);
   if (!b) return { reply: "No such bot." };
@@ -418,11 +933,14 @@ export async function watchFromChat(
   );
   if (!pages.some((p) => p.ep)) return { reply: `${b.name}'s computer isn't ready yet.` };
   // Watched by any bot on this computer (bots that share one share its screens), or just by another one.
-  const watchedBy = (d: number, other = false) => watches().some((w) => !w.mac && sameComputer(w.botId, botId) && (!other || w.botId !== botId) && w.display === d);
+  const watchedBy = (d: number, other = false) => watches().some((w) => isScreenWatch(w) && sameComputer(w.botId, botId) && (!other || w.botId !== botId) && w.display === d);
   const taken = (d: number) => busy(botId, d) || watchedBy(d);
   // A screen already on that site, then a free one (an empty one first).
   const on = pages.find((p) => p.page && host(p.page.url) === host(url) && !busy(botId, p.d) && !watchedBy(p.d, true));
-  if (on) return { watch: await startWatch(botId, on.d, a.look_for) };
+  if (on) {
+    const w = await startWatch(botId, on.d, a.look_for ?? undefined);
+    return { watch: w, said: watchSaid(w) };
+  }
   const free = pages.filter((p) => p.ep && !taken(p.d)).sort((x, y) => Number(!!y.page?.url.startsWith("chrome://")) - Number(!!x.page?.url.startsWith("chrome://")))[0];
   if (!free?.ep) return { reply: `All of ${b.name}'s screens are busy right now.` };
   await navigate(free.ep, url);
@@ -432,7 +950,8 @@ export async function watchFromChat(
     const p = await currentPage(free.ep).catch(() => null);
     if (p && host(p.url) === host(url) && p.title) break;
   }
-  return { watch: await startWatch(botId, free.d, a.look_for) };
+  const w = await startWatch(botId, free.d, a.look_for ?? undefined);
+  return { watch: w, said: watchSaid(w) };
 }
 
 /** The watches a bot can see and change from chat (ids, what, for what), for its instructions. */
@@ -440,9 +959,17 @@ export function watchesNote(botIds: string[], withMac: boolean) {
   const mine = watches().filter((w) => (w.mac ? withMac : botIds.includes(w.botId)));
   if (!mine.length) return "";
   const owner = ownerName();
+  const what = (w: Watch) =>
+    w.mac
+      ? `"${w.mac.title}" in ${w.mac.app} on ${owner}'s Mac`
+      : w.page
+        ? `the web page ${w.site} (${w.page.url}), read ${everyText(w.page.everyMin)}`
+        : `${w.site} on ${bot(w.botId)?.name}'s screen ${screenNo(w.display)}`;
+  const state = (w: Watch) =>
+    `${w.paused ? ` · paused by ${owner}` : ""}${w.away ? " · paused (not showing right now)" : ""}${w.page?.error ? ` · the last ${w.page.failures && w.page.failures > 1 ? `${w.page.failures} reads` : "read"} failed: ${w.page.error}` : ""}`;
   return [
-    `Watches (screens and Mac windows Bops keeps an eye on for ${owner}; stop_watch takes the id):`,
-    ...mine.map((w) => `- ${w.id}: ${w.mac ? `"${w.mac.title}" in ${w.mac.app} on ${owner}'s Mac` : `${w.site} on ${bot(w.botId)?.name}'s screen ${screenNo(w.display)}`} · looking for ${w.lookFor}${w.away ? " · paused (not showing right now)" : ""}`),
+    `Watches (screens, Mac windows and web pages Bops keeps an eye on for ${owner}; stop_watch takes the id):`,
+    ...mine.map((w) => `- ${w.id}: ${what(w)} · looking for ${w.lookFor}${state(w)}`),
   ].join("\n");
 }
 

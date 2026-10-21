@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# The brains a user brings to a Bops computer (lib/server/brains.ts): Claude Code signed in with their
+# own Claude plan, or on their own API key, and Codex on their own OpenAI key. Claude Code is the
+# unmodified one Bops installs under /opt/bops/claude. Each brain has a folder of its own here
+# (/root/.bops/brains/<id>: Claude Code's CLAUDE_CONFIG_DIR, Codex's CODEX_HOME), so two brains are two
+# accounts, and nothing here ever reads, copies or prints what's in it.
+#
+# A folder knows the computer it was signed in on (its Orgo id, in .computer, from Bops). One that
+# says another came with a copy of that computer: a login is never used on a copy, so it's deleted.
+#
+# Everything starts from an empty environment with only what it needs: Claude Code uses an Anthropic
+# key or token in its environment before a plan's login, so none from anywhere else may reach it. Nor
+# may settings from anywhere but the brain's folder (a project's .claude/settings.json in the folder it
+# works in can set its environment: bops-agent runs it with --setting-sources user), and the brain's own
+# settings never route its sign-in or key anywhere (claude_settings).
+#
+# Usage:
+#   bops-brain status <brain> <computer>   Claude Code's own `auth status --json` for that brain
+#   bops-brain login <brain> <display> <computer>
+#                                          Claude Code's own sign-in, in a terminal on that screen
+#   bops-brain cancel <brain>              close that sign-in's terminal, and its Chrome (bops-brain-browser)
+#   bops-brain logout <brain>              Claude Code's own `auth logout` for that brain
+#   bops-brain forget <brain>              sign out, and delete the brain's folder
+#   bops-brain run <brain> claude|codex [--computer <computer>] [--key-file <file>] [--] <args...>
+#       run the brain's CLI. A key brain's key comes in a 0600 file that's read into the environment
+#       (ANTHROPIC_API_KEY for Claude Code, CODEX_API_KEY for Codex) and deleted, never on a command line.
+#       With --computer, a folder signed in on another computer is deleted first, as status does. Of
+#       the caller's environment only DISPLAY carries over (the screen its tools work on). Codex runs
+#       only on a key (never a ChatGPT sign-in), with Bops' settings in its folder (config.toml).
+set -euo pipefail
+BRAINS="${BOPS_BRAINS:-/root/.bops/brains}"
+CLAUDE="${BOPS_CLAUDE:-/opt/bops/claude/bin/claude}"
+CODEX="${BOPS_CODEX:-/usr/local/bin/codex}"
+LOGS="${BOPS_LOGS:-/var/log/bops}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# Read now: the clean environment below has no PATH to find dirname with.
+RUNS="$(dirname "$CLAUDE"):/usr/local/bin:/usr/bin:/bin"
+RUN_HOME="${BOPS_HOME:-/root}"
+CMD="${1:-}"; ID="${2:-}"
+[[ "$ID" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "usage: bops-brain status|login|cancel|logout|forget|run <brain> ..." >&2; exit 2; }
+DIR="$BRAINS/$ID"
+# The Chrome a sign-in's page opens in (bops-brain-browser): a profile of its own, never the bots'.
+SIGNIN="$BRAINS/.signin-$ID"
+folder() { mkdir -p "$DIR" && chmod 700 "$BRAINS" "$DIR"; }
+# Close a sign-in: its terminal, then its Chrome, whose profile (the user's claude.ai sign-in in it) goes.
+close_signin() {
+  pkill -f "[b]ops-brain sign-in $ID( |$)" 2>/dev/null || true
+  pkill -KILL -f "[u]ser-data-dir=$SIGNIN( |$)" 2>/dev/null || true
+  rm -rf "$SIGNIN"
+}
+
+# Empty this shell's environment (a subshell's, or one about to exec), then set only what a run needs.
+bare() {
+  local v
+  for v in $(compgen -e); do unset "$v" 2>/dev/null || true; done
+  export HOME="$RUN_HOME" PATH="$RUNS" LANG=C.UTF-8 TERM=xterm-256color DISABLE_AUTOUPDATER=1
+}
+
+# Bops' settings for Codex in a brain's folder, its CODEX_HOME (never ~/.codex): the user's OpenAI key only,
+# so a ChatGPT sign-in is never used even if one were made here; no update check (Bops pins it); live web
+# search, as Bops agent has; and the commands it runs never get its key (or any other) in their environment,
+# which Codex would otherwise hand them. Written whole and then moved in, as threads of one brain start side
+# by side.
+codex_config() {
+  local want='forced_login_method = "api"
+check_for_update_on_startup = false
+web_search = "live"
+
+[shell_environment_policy]
+exclude = ["CODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_*", "CLAUDE_CODE_OAUTH_TOKEN"]'
+  [ "$(cat "$DIR/config.toml" 2>/dev/null)" = "$want" ] && return 0
+  (umask 077; printf '%s\n' "$want" > "$DIR/config.toml.$$") && mv -f "$DIR/config.toml.$$" "$DIR/config.toml"
+}
+
+# Before Claude Code runs on the brain's folder: nothing in its settings there may send its sign-in or key
+# anywhere but Anthropic, or put a key or token in its environment (env, apiKeyHelper and the cloud
+# credential helpers go: Claude Code itself never writes them there). And its shell commands don't get a
+# key or token in their environment (CLAUDE_ENV_FILE, which it runs before each), so nothing the bot runs
+# there (a script, an SDK, an `env`) uses or prints the user's key.
+claude_settings() {
+  if [ -f "$DIR/settings.json" ]; then
+    python3 -I - "$DIR/settings.json" <<'PY' || rm -f "$DIR/settings.json"
+import json, os, sys
+path = sys.argv[1]
+with open(path) as f:
+    s = json.load(f)
+if not isinstance(s, dict):
+    raise SystemExit(1)
+bad = [k for k in ("env", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper") if k in s]
+if bad:
+    for k in bad:
+        del s[k]
+    with open(path + ".tmp", "w") as f:
+        json.dump(s, f, indent=2)
+    os.chmod(path + ".tmp", 0o600)
+    os.replace(path + ".tmp", path)
+PY
+  fi
+  (umask 077; printf '%s\n' 'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CODEX_API_KEY OPENAI_API_KEY' > "$DIR/.shell-env")
+}
+
+case "$CMD" in
+  status)
+    C="${3:-}"; [[ "$C" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "which computer?" >&2; exit 2; }
+    [ -d "$DIR" ] || { echo '{"loggedIn":false}'; exit 0; }
+    if [ "$(cat "$DIR/.computer" 2>/dev/null)" != "$C" ]; then rm -rf "$DIR"; echo '{"loggedIn":false}'; exit 0; fi
+    (bare; export CLAUDE_CONFIG_DIR="$DIR"; exec "$CLAUDE" auth status --json) || true
+    ;;
+  login)
+    N="${3:-}"; [[ "$N" =~ ^[0-9]+$ ]] || { echo "which display?" >&2; exit 2; }
+    C="${4:-}"; [[ "$C" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "which computer?" >&2; exit 2; }
+    # A folder from another computer (a copy's) starts over.
+    [ -d "$DIR" ] && [ "$(cat "$DIR/.computer" 2>/dev/null)" != "$C" ] && rm -rf "$DIR"
+    folder
+    printf '%s' "$C" > "$DIR/.computer"
+    mkdir -p "$LOGS"
+    # One sign-in per brain: a window still open from the last try goes first, with its Chrome.
+    close_signin
+    TERMINAL="$(command -v xfce4-terminal || command -v xterm || true)"
+    [ -n "$TERMINAL" ] || { echo "no terminal on this computer" >&2; exit 1; }
+    if [ "${TERMINAL##*/}" = xfce4-terminal ]; then ARGS=(--disable-server --title "Sign in to Claude Code" --geometry 96x28+60+40 -x)
+    else ARGS=(-T "Sign in to Claude Code" -geometry 96x28+60+40 -e); fi
+    DISPLAY=":$N" setsid nohup "$TERMINAL" "${ARGS[@]}" "$HERE/bops-brain" sign-in "$ID" "$N" < /dev/null > "$LOGS/brain-$ID.log" 2>&1 &
+    echo "signing in on :$N"
+    ;;
+  sign-in)
+    # In the terminal: Claude Code's own sign-in, as it is by default (its Claude subscription sign-in, its
+    # own pages). The page it opens goes to a Chrome of its own on this screen (bops-brain-browser, also as
+    # xdg-open for a Claude Code that doesn't read BROWSER); if it opens none, its address and code prompt
+    # are right here in the terminal.
+    N="${3:?display}"
+    mkdir -p "$BRAINS/.open"
+    ln -sf "$HERE/bops-brain-browser" "$BRAINS/.open/xdg-open"
+    if (bare; export DISPLAY=":$N" CLAUDE_CONFIG_DIR="$DIR" BROWSER="$HERE/bops-brain-browser" PATH="$BRAINS/.open:$PATH"; exec "$CLAUDE" auth login); then exit 0; fi
+    echo
+    echo "Claude Code didn't finish signing in. Close this window and try again from Bops."
+    read -r _ || true
+    ;;
+  cancel)
+    close_signin
+    echo "closed"
+    ;;
+  logout|forget)
+    close_signin
+    if [ -d "$DIR" ]; then (bare; export CLAUDE_CONFIG_DIR="$DIR"; exec "$CLAUDE" auth logout) > /dev/null 2>&1 || true; fi
+    [ "$CMD" = forget ] && rm -rf "$DIR"
+    echo "signed out"
+    ;;
+  run)
+    KIND="${3:-}"; shift 3
+    KEYFILE=""; C=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --computer) C="${2:?computer}"; shift 2 ;;
+        --key-file) KEYFILE="${2:?key file}"; shift 2 ;;
+        --) shift; break ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$C" ] && [ -f "$DIR/.computer" ] && [ "$(cat "$DIR/.computer")" != "$C" ]; then rm -rf "$DIR"; fi
+    folder
+    # A folder a run makes knows its computer too (a key brain's has no sign-in to say so), so a copy's goes.
+    if [ -n "$C" ] && [ ! -f "$DIR/.computer" ]; then printf '%s' "$C" > "$DIR/.computer"; fi
+    KEY=""
+    if [ -n "$KEYFILE" ]; then
+      [ -f "$KEYFILE" ] || { echo "missing $KEYFILE" >&2; exit 1; }
+      KEY="$(cat "$KEYFILE")"; rm -f "$KEYFILE"
+    fi
+    SCREEN="${DISPLAY:-}"
+    case "$KIND" in
+      claude)
+        claude_settings
+        bare; export CLAUDE_CONFIG_DIR="$DIR" CLAUDE_ENV_FILE="$DIR/.shell-env"; [ -n "$SCREEN" ] && export DISPLAY="$SCREEN"; [ -n "$KEY" ] && export ANTHROPIC_API_KEY="$KEY"; exec "$CLAUDE" "$@" ;;
+      codex)
+        [ -n "$KEY" ] || { echo "Codex runs on your OpenAI key only" >&2; exit 2; }
+        codex_config
+        bare; export CODEX_HOME="$DIR" CODEX_API_KEY="$KEY"; [ -n "$SCREEN" ] && export DISPLAY="$SCREEN"; exec "$CODEX" "$@" ;;
+      *) echo "claude or codex?" >&2; exit 2 ;;
+    esac
+    ;;
+  *)
+    echo "usage: bops-brain status|login|cancel|logout|forget|run <brain> ..." >&2; exit 2
+    ;;
+esac

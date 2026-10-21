@@ -39,6 +39,9 @@ export function duration(from: number, to = Date.now()) {
 
 export const clockTime = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 
+/** A quiet routine's thread that found nothing (lib/types.ts, shared with the server): lists of threads leave it out. */
+export { quietNothing } from "@/lib/types";
+
 export { needsYou };
 
 export function useAppState() {

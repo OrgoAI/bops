@@ -9,9 +9,11 @@ import { afterStateUpload } from "./plans.ts";
 import {
   BOPS_DEVICE_HEADER,
   BOPS_PROTOCOL_HEADER,
+  BOPS_STATE_LEVEL_HEADER,
   BOPS_USER_HEADER,
   STATE_CONFLICT,
   STATE_PROTOCOL,
+  STATE_TOO_NEW,
   WRONG_USER,
   type CloudMessageRow,
   type CloudMessagesPage,
@@ -20,7 +22,7 @@ import {
   type CloudStateConflict,
   type CloudStateHead,
 } from "./protocol.ts";
-import { notifyMac } from "./tunnel.ts";
+import { dropOlderMac, notifyMac } from "./tunnel.ts";
 import { forgetTelemetryChoice } from "./analytics.ts";
 
 /**
@@ -37,6 +39,16 @@ import { forgetTelemetryChoice } from "./analytics.ts";
  * still taken until a newer build writes for the user (the row's protocol becomes 2); then they're
  * refused (426), so an old build can't write over the newer one's work. Their GET gets the messages
  * put back in.
+ *
+ * Each app also says which state it may be given (BOPS_STATE_LEVEL_HEADER, 3 from 0.0.29 on; none is
+ * 2), and the row keeps the highest that wrote (its protocol). Once that's above an app's, every call
+ * of that app's for the user's state is refused (426 STATE_TOO_NEW), reads and merges as well as
+ * writes, but for its copy before Start over (postBackup), and so is its tunnel (tunnel.ts: one it
+ * holds when the row goes above it is closed), and its notices say to update (notices.ts): 0.0.28 runs a
+ * routine that runs every so often or before meetings over and over, a monthly one daily, and lists a
+ * bot with an app it has no access to as able to use it. What such a Mac changes meanwhile waits on it
+ * (persist-cloud.ts keeps it) and goes up once it's updated. A user whose Macs are all older is never
+ * marked, and nothing changes for them.
  *
  * Every call that's for a user's state names that user (X-Bops-User), and it must be the key's: a Mac
  * that signed in as someone else since can't write into the wrong account (409 wrong_user).
@@ -128,6 +140,30 @@ const headerOf = (req: IncomingMessage, name: string) => {
 };
 const newBuild = (req: IncomingMessage) => headerOf(req, BOPS_PROTOCOL_HEADER) === String(STATE_PROTOCOL);
 const deviceOf = (req: IncomingMessage) => headerOf(req, BOPS_DEVICE_HEADER).slice(0, 64) || null;
+
+/** Which state the call's app may be given: what it says (BOPS_STATE_LEVEL_HEADER), else 2 (every app before 0.0.29). */
+export function stateLevelOf(req: IncomingMessage): number {
+  const said = headerOf(req, BOPS_STATE_LEVEL_HEADER);
+  return /^\d{1,4}$/.test(said) ? Math.max(Number(said), STATE_PROTOCOL) : STATE_PROTOCOL;
+}
+
+const TOO_NEW = "Another of your Macs is on a newer Bops. Update Bops on this Mac to keep your chats in sync.";
+
+/** 426 when a newer app than the call's wrote the user's state (`protocol`, the row's). */
+function requireLevel(req: IncomingMessage, protocol: number) {
+  if (protocol > stateLevelOf(req)) throw new HttpError(426, TOO_NEW, { code: STATE_TOO_NEW });
+}
+
+/** Whether a newer app than the call's wrote the user's state: its state's calls and its tunnel are refused, and it's told to update. */
+export async function stateTooNew(req: IncomingMessage, userId: string): Promise<boolean> {
+  const r = await query<{ protocol: number }>("SELECT protocol FROM bops.app_state WHERE user_id = $1", [userId]);
+  return (r.rows[0]?.protocol ?? 0) > stateLevelOf(req);
+}
+
+/** The same, refused: for the calls whose answer holds none of the blob, where a write landing just after the check doesn't matter. */
+async function requireLevelFor(req: IncomingMessage, userId: string) {
+  if (await stateTooNew(req, userId)) throw new HttpError(426, TOO_NEW, { code: STATE_TOO_NEW });
+}
 
 /** The user the call names must be the key's. `required`: calls only a newer build makes must name one (and the phone's, cloud/agent.ts). */
 export function checkUser(req: IncomingMessage, user: CloudUser, required: boolean) {
@@ -333,6 +369,8 @@ const get: Route = {
     const v2 = newBuild(req);
     checkUser(req, user!, v2);
     const row = await readRow(user!.id);
+    // Held to the row as read, so a newer app's write can't slip in between.
+    if (row) requireLevel(req, row.protocol);
     if (!row || row.empty) throw new HttpError(404, "No state saved yet", v2 ? { version: row?.version ?? 0, seq: await lastSeq(user!.id) } : undefined);
     if (v2) {
       const body: CloudState = { version: row.version, seq: await lastSeq(user!.id), protocol: row.protocol, writer: row.writer, state: row.state };
@@ -350,6 +388,7 @@ const getHead: Route = {
   auth: "user",
   handle: async (req, res, { user }) => {
     checkUser(req, user!, true);
+    await requireLevelFor(req, user!.id);
     sendJson(res, 200, await head(user!.id));
   },
 };
@@ -360,13 +399,18 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
   if (!wholeNumber(base)) throw new HttpError(400, "base must be a whole number, 0 or more");
   const json = toJson(blobOf(state));
   const writer = deviceOf(req);
+  const level = stateLevelOf(req);
+  let raised = false;
   const version = await tx(async (c) => {
     const row = await lockUser(c, user.id);
+    // Before the version: an older app is never handed the newer one's state to merge (409).
+    requireLevel(req, row.protocol);
     if (row.version !== base) return null;
     const r = await c.query<{ version: string }>(
-      `UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, protocol = $3, writer = $4, updated_at = now() WHERE user_id = $1 RETURNING version`,
-      [user.id, json, STATE_PROTOCOL, writer],
+      `UPDATE bops.app_state SET state = $2::jsonb, version = version + 1, protocol = GREATEST(protocol, $3), writer = $4, updated_at = now() WHERE user_id = $1 RETURNING version`,
+      [user.id, json, level, writer],
     );
+    raised = level > row.protocol;
     return Number(r.rows[0].version);
   });
   if (version === null) {
@@ -375,6 +419,8 @@ async function putOver(req: IncomingMessage, res: ServerResponse, user: CloudUse
     return sendZipped(req, res, 409, body);
   }
   sendJson(res, 200, { version });
+  // An older Mac of the user's on the tunnel now can't be given this state: off it, before it hears of it.
+  if (raised) dropOlderMac(user.id, level);
   announce(user.id);
   // A paid plan that waited to know the main bot is set up now (plans.ts).
   afterStateUpload(user.id);
@@ -423,6 +469,7 @@ const getMessages: Route = {
   auth: "user",
   handle: async (req, res, { user, url }) => {
     checkUser(req, user!, true);
+    await requireLevelFor(req, user!.id);
     const after = Number(url.searchParams.get("after") ?? 0);
     const limit = Number(url.searchParams.get("limit") ?? PAGE);
     if (!wholeNumber(after)) throw new HttpError(400, "after must be a whole number, 0 or more");
@@ -452,7 +499,7 @@ const postMessages: Route = {
     if (!Array.isArray(upsert) || !Array.isArray(remove) || !remove.every((x) => typeof x === "string")) throw new HttpError(400, "Send { upsert: [messages], remove: [ids] }");
     const msgs = upsert.map(messageOf);
     const seq = await tx(async (c) => {
-      await lockUser(c, user!.id);
+      requireLevel(req, (await lockUser(c, user!.id)).protocol);
       await upsertMessages(c, user!.id, msgs);
       await removeMessages(c, user!.id, remove as string[]);
       return lastSeq(user!.id, c);
@@ -462,7 +509,12 @@ const postMessages: Route = {
   },
 };
 
-/** A copy of the whole state, messages and all, before the user starts over (Settings). */
+/**
+ * A copy of the whole state, messages and all, before the user starts over (Settings). A Mac kept out of
+ * the state (stateTooNew) makes one too: the copy stays here and none of it goes back to it, and its
+ * Start over goes up once it's updated (persist-cloud.ts keeps it), so the copy is all that's left of
+ * what it cleared.
+ */
 const postBackup: Route = {
   method: "POST",
   path: "/v1/state/backups",

@@ -1,4 +1,4 @@
-import { live, workspaceOf, type AppState, type Session } from "@/lib/types";
+import { BRAINS_ON, live, workspaceOf, type AppState, type Session } from "@/lib/types";
 
 /**
  * What a thread needs from the user, the same for the app and the server: one rule decides the
@@ -15,17 +15,21 @@ export function needsYou(s: Session) {
   const lastUser = [...s.replies].reverse().find((r) => r.role === "user");
   const lastBot = [...s.replies].reverse().find((r) => r.role === "bot");
   if (lastUser && (!lastBot || lastUser.at > lastBot.at)) return false;
+  // Its brain waits on them (Session.brainRun), in a build without brains (BRAINS_ON): there's nothing to do
+  // about it here, and a reply carries it on with Bops agent.
+  if (!BRAINS_ON && s.brainRun?.waits && !live(s)) return false;
   if (live(s)) return !!s.blocker;
   if (s.status === "done") return !!s.blocker || (s.waitingOnYou ?? (s.answer ?? "").trim().endsWith("?"));
   return s.status === "failed" && !!s.error && !/stopped by you|paused/i.test(s.error);
 }
 
-/** What a thread waits on, for its card's buttons. */
-export type AskKind = "where" | "blocker" | "safety" | "elsewhere" | "failed" | "question";
+/** What a thread waits on, for its card's buttons. "brain": its brain signed in on its bot's computer (Session.brainRun). */
+export type AskKind = "where" | "blocker" | "brain" | "safety" | "elsewhere" | "failed" | "question";
 
 export function askKind(s: Session): AskKind {
   if (s.askWhere && live(s)) return "where";
   if (s.blocker) return "blocker";
+  if (BRAINS_ON && s.brainRun?.waits === "sign_in" && !live(s)) return "brain";
   if (s.status === "failed") return "failed";
   if (s.owed?.some((o) => o.checks)) return "safety";
   if (s.approveElsewhere) return "elsewhere";

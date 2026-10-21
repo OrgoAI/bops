@@ -2,7 +2,7 @@ import "server-only";
 import { BOPS_TIERS, type BopsTier } from "@/cloud/protocol";
 import type { BopsPlan } from "@/lib/account";
 import { pendingFrom, savedCardFrom, type PendingTopUp, type SavedCard } from "@/lib/credit-topup";
-import { botChatId, freeComputerBot, type Bot } from "@/lib/types";
+import { botChatId, freeComputerBot, workspaceOf, type Bot } from "@/lib/types";
 import { bopsComputerShort, bopsComputers, computerRam, mainOwnShort, ownComputerShort, planComputers, planFix, planName, planShort, planShortText, type OrgoPlan, type PlanShort } from "@/lib/orgo-plans";
 import { orgoHeaders } from "./app-version";
 import { cloudOn, cloudSessionNow } from "./cloud";
@@ -358,7 +358,7 @@ function bopsRefusal(e: unknown) {
  * one is taken), when the Bops plan has room for `more` (lib/orgo-plans.ts bopsComputerShort). Null
  * with `onShort` called when it hasn't, or Orgo turns it down for the plan.
  */
-async function makeBopsComputer<T>(name: string, epoch: number, onShort: (why: PlanLimit) => T): Promise<{ id: string } | T> {
+async function makeBopsComputer<T>(name: string, epoch: number, onShort: (why: PlanLimit) => T, wsId?: string): Promise<{ id: string } | T> {
   let plan = await orgoPlan();
   let short = bopsComputerShort(plan, 1);
   if (short) {
@@ -368,7 +368,7 @@ async function makeBopsComputer<T>(name: string, epoch: number, onShort: (why: P
   if (short) return onShort(bopsLimit(short));
   sameUser(epoch);
   try {
-    return await orgo.create(name, { free: true });
+    return await orgo.create(name, { free: true, wsId });
   } catch (e) {
     const refused = bopsRefusal(e);
     if (!refused) throw e;
@@ -458,10 +458,15 @@ export function makeMainComputer(main: Bot, name: string, epoch = stateEpoch()):
     // The Bops plan decides: one of Max's Bops computers, else this main bot shares the free one.
     if (first?.bops) {
       const holder = freeComputerBot(getState().bots, main.id);
-      return makeBopsComputer(name, epoch, (why) => {
-        if (holder) return shareFree(main, holder, why, epoch);
-        throw why;
-      });
+      return makeBopsComputer(
+        name,
+        epoch,
+        (why) => {
+          if (holder) return shareFree(main, holder, why, epoch);
+          throw why;
+        },
+        workspaceOf(main),
+      );
     }
     const { plan, short } = await planNow((p) => planShort(p, 1, computerRam(p)));
     // Read again just now: the free one may have gone meanwhile (deleted on Orgo's site).
@@ -473,7 +478,7 @@ export function makeMainComputer(main: Bot, name: string, epoch = stateEpoch()):
     }
     sameUser(epoch);
     try {
-      return await orgo.create(name, { ram: computerRam(plan) });
+      return await orgo.create(name, { ram: computerRam(plan), wsId: workspaceOf(main) });
     } catch (e) {
       const refused = await refusedFor(e, main);
       if (!refused) throw e;
@@ -492,7 +497,7 @@ async function makeFree(main: Bot, name: string, epoch: number): Promise<MainCom
   sameUser(epoch);
   let made: { id: string };
   try {
-    made = await orgo.create(name, { free: true });
+    made = await orgo.create(name, { free: true, wsId: workspaceOf(main) });
   } catch (e) {
     throw (await refusedFor(e, main)) ?? e;
   }
@@ -579,14 +584,14 @@ export async function makeOwnComputer(b: Bot, main: Bot, name: string, epoch = s
     const { plan, short } = await planNow((p) => planShort(p, 1, ram));
     // The Bops plan decides: one of Max's Bops computers, fresh from the template (a copy would be an
     // Orgo plan computer), else it shares the main bot's and says why.
-    if (plan?.bops) return makeBopsComputer(name, epoch, (why) => shareInstead(b, main, why, epoch));
+    if (plan?.bops) return makeBopsComputer(name, epoch, (why) => shareInstead(b, main, why, epoch), workspaceOf(b));
     if (short) return shareInstead(b, main, limitOf(short, plan, main), epoch);
     try {
       sameUser(epoch);
-      return await orgo.fork(from).catch((forkErr: Error) => {
+      return await orgo.fork(from, workspaceOf(b)).catch((forkErr: Error) => {
         // Turned down for the plan: a clone would be too.
         if (planRefusal(forkErr)) throw forkErr;
-        return orgo.clone(from, name).catch((cloneErr: Error) => {
+        return orgo.clone(from, name, workspaceOf(b)).catch((cloneErr: Error) => {
           if (planRefusal(cloneErr)) throw cloneErr;
           throw new Error(/insufficient memory/i.test(forkErr.message) ? "the cloud server it has to share with the main bot's computer is full right now" : `${forkErr.message}; ${cloneErr.message}`);
         });

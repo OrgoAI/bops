@@ -39,6 +39,11 @@
 </p>
 
 <p align="center">
+  <b>Contributions:</b> we'll open Bops up to outside contributions once the app is more settled.<br>
+  Until then, bug reports and ideas are very welcome in <a href="../../issues">issues</a>. See <a href="CONTRIBUTING.md">CONTRIBUTING.md</a>.
+</p>
+
+<p align="center">
   <a href="https://www.star-history.com/#orgoai/bops&amp;Date">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=orgoai/bops&amp;type=Date&amp;theme=dark">
@@ -249,6 +254,8 @@ To try your changes in the app, run `npm run app:build`. It makes an unsigned de
 
 Orgo's releases are built from a version tag of this repository by a workflow in Orgo's private repository, which holds the signing and notarization secrets. It builds, signs and notarizes on a GitHub Mac, checks that Gatekeeper accepts the app, and attaches the DMG and zip to the release here with that version's notes from `docs/releases/`. This repository holds no secrets.
 
+Bops updates itself. `scripts/download-publish.sh` puts the release's DMG and its zip (`Bops-<version>-arm64-mac.zip`) on bops.bot and writes `/download/latest.json`, which the app checks at launch and every hour. Next to `version` and `notes`, that file has the keys Electron's updater reads, `currentRelease` and `releases` (each with `updateTo.url`, the zip). A newer version downloads in the background, unless the user turned off **Settings → This Mac → Download updates automatically**, and installs when the user clicks Restart or quits Bops. macOS installs it only when the zip's app is signed by the same team (A47GG9FV27) with the same bundle id (`ai.orgo.bops`), so `release.sh` checks the zip for that. A copy opened from the DMG or Downloads, or in a folder the user can't write, can't replace itself and sends the user to bops.bot instead. Versions 0.0.28 and older don't update themselves: their users download the next version from bops.bot once. To try an update on your Mac, run a build with `BOPS_UPDATE_FEED=http://127.0.0.1:<port>/latest.json` (only this Mac's addresses are taken), from a local server holding that file and the zip.
+
 The app runs with the hardened runtime and three entitlements (`build/entitlements.mac.plist`): JIT for Electron, the microphone for calls, and Apple Events so Full access can use your apps. Bops asks macOS for Screen Recording, the microphone and notifications, and Full access also needs Full Disk Access and Automation. Bops isn't on the Mac App Store because its sandbox would stop Bops from running its own server, starting Codex and Chrome for the bots, and driving other apps.
 
 ## Project layout
@@ -271,7 +278,7 @@ The app runs with the hardened runtime and three entitlements (`build/entitlemen
 
 ## Contributing
 
-Bug reports and pull requests are welcome. For anything bigger than a small fix, open an issue first so we can agree on the approach. Read [CONTRIBUTING.md](CONTRIBUTING.md), which covers the CLA, and the [Code of Conduct](CODE_OF_CONDUCT.md).
+We'll open Bops up to outside contributions once the app is more settled. Until then, bug reports and ideas are very welcome in issues, and pull requests from outside the team may wait a while or be closed. When we open up, [CONTRIBUTING.md](CONTRIBUTING.md) (which covers the CLA) and the [Code of Conduct](CODE_OF_CONDUCT.md) are how it will work. For anything bigger than a small fix, open an issue first so we can agree on the approach.
 
 Before you open a pull request:
 
@@ -311,7 +318,7 @@ The license also gives you our patents for these uses (until you sue someone cla
 | Change it and share my version? | Yes, under the same license, with a different name and logo ([TRADEMARK.md](TRADEMARK.md)). |
 | Build my own product with it? | Yes, as long as that product doesn't compete with Bops (above). |
 | Offer a hosted Bops, or sell an app that does what Bops does? | Not under FSL. Each version allows it two years after its release, under Apache 2.0. |
-| Contribute? | Yes, see [CONTRIBUTING.md](CONTRIBUTING.md). |
+| Contribute? | Soon: we'll open up once the app is more settled. Bug reports and ideas are welcome now. See [CONTRIBUTING.md](CONTRIBUTING.md). |
 
 Some code comes from other projects, under their own licenses: `components/message-ui/` is adapted from [imessage-ui](https://github.com/theswerd/imessage-ui) (MIT). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

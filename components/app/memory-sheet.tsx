@@ -58,13 +58,13 @@ export function MemorySheet({ state, onClose }: { state: AppState; onClose: () =
   }, [onClose]);
 
   return (
-    <div onClick={onClose} className="fixed inset-0 z-50 flex items-start justify-center bg-black/10 p-6 backdrop-blur-[2px]">
+    <div onClick={onClose} className="motion-fade-in fixed inset-0 z-50 flex items-start justify-center bg-black/10 p-6 backdrop-blur-[2px]">
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Memory"
         onClick={(e) => e.stopPropagation()}
-        className="relative flex max-h-full w-full max-w-[560px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]"
+        className="motion-dialog-in relative flex max-h-full w-full max-w-[560px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]"
       >
         <button onClick={onClose} aria-label="Close" className="absolute right-3 top-3 z-10 flex size-8 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0]">
           <svg width="11" height="11" viewBox="0 0 12 12">

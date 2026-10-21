@@ -1,20 +1,22 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { DISPLAYS, live, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { live, MAIN_WORKSPACE, WORKSPACE_APPS_SINCE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
+import { AutopilotButton, AutopilotSections, type AutopilotOpen } from "./autopilot";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
+import { FooterButton, footerPillOf, useFooterHover, type FooterKey, type FooterPage } from "./sidebar-footer";
 import { Mascot } from "./mascot";
-import { KnowledgeIcon, type MemoryOpen } from "./memory-categories";
+import { KnowledgeIcon, useKnowledgeNews, type MemoryOpen } from "./memory-categories";
 import { AppLogo } from "./apps";
 import { BotMenu, type BotMenuActions } from "./bot-menu";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
 import { useSetupNeedsYou } from "./setup";
+import { arrived, DeleteX, forgetShown, rememberShown, usePop, useRise } from "./side-group";
 import { UpdateNotice } from "./update-notice";
-import { WATCH, WatchEye, watchName } from "./watch-overlay";
-import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, NeedsYouDot, post, RoundButton, SideToggleIcon, StatusIcon, teamOf, useNow } from "./ui";
+import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, NeedsYouDot, post, quietNothing, RoundButton, SideToggleIcon, StatusIcon, teamOf, useNow } from "./ui";
 
 /**
  * The sidebar for one workspace (switch at the top). The list: one row per conversation (Sam pinned, then by latest activity), each with its
@@ -35,6 +37,8 @@ export function Sidebar({
   onMembers,
   onOpenWatch,
   onOpenMemory,
+  onOpenAutopilot,
+  footer,
   menuActions,
   onCollapse,
 }: {
@@ -50,10 +54,14 @@ export function Sidebar({
   onVault: () => void;
   /** The People sheet: who can see the bots' computers on Orgo (members.tsx). */
   onMembers: () => void;
-  /** Show a watched screen or Mac window. */
+  /** Show a watched screen or Mac window (a watched page: its row on the Routines page). */
   onOpenWatch: (watch: Watch) => void;
   /** Open Knowledge on the right, on a kind, an item or a search (memory-categories.tsx). */
   onOpenMemory: (open: MemoryOpen) => void;
+  /** Open Routines on the right, at a section and one of its rows (autopilot.tsx). */
+  onOpenAutopilot: (open: AutopilotOpen) => void;
+  /** Which of the footer's buttons is the pill: the page open on the right (sidebar-footer.tsx footerPageOf). */
+  footer?: FooterPage;
   /** What a bot's right-click menu does (bot-menu.tsx). */
   menuActions?: BotMenuActions;
   /** Hide the sidebar (bops-app.tsx brings it back from the title bar). */
@@ -71,6 +79,15 @@ export function Sidebar({
   };
   // The "5m" next to each chat stays current.
   useNow(30_000);
+  // After each paint, every thread, watch, schedule and procedure in the state is known (in every
+  // workspace, whatever a search hides), so only one that turns up from here on rises in (side-group.tsx).
+  useEffect(() => {
+    rememberShown(state.sessions.map((s) => s.id));
+    rememberShown((state.watches ?? []).map((w) => w.id));
+    rememberShown(state.routines.map((r) => r.id));
+  }, [state.sessions, state.watches, state.routines]);
+  // Gone with the sidebar (signing out), so the next sign-in's first paint has nothing new in it either.
+  useEffect(() => forgetShown, []);
 
   const lastMessage = (c: Chat) => [...state.messages].reverse().find((m) => m.chatId === c.id);
   const activity = (c: Chat) => lastMessage(c)?.at ?? c.createdAt;
@@ -87,8 +104,9 @@ export function Sidebar({
   const mainBot = team.find((b) => b.isMain);
   const mainChat = mainBot ? state.chats.find((c) => c.kind === "bot" && c.botIds[0] === mainBot.id) : undefined;
 
+  // A quiet routine's run that found nothing for the user posted nothing, so it isn't listed either.
   const threads = [...state.sessions]
-    .filter((s) => workspaceOf(state.bots.find((b) => b.id === s.botId)) === ws && state.bots.some((b) => b.id === s.botId) && !s.replacedBy)
+    .filter((s) => workspaceOf(state.bots.find((b) => b.id === s.botId)) === ws && state.bots.some((b) => b.id === s.botId) && !s.replacedBy && !quietNothing(s))
     .filter((s) => !q || s.title.toLowerCase().includes(q))
     .sort((a, b) => Number(live(b) || needsYou(b)) - Number(live(a) || needsYou(a)) || (b.endedAt ?? b.createdAt) - (a.endedAt ?? a.createdAt))
     .slice(0, 6);
@@ -107,7 +125,7 @@ export function Sidebar({
             // Clicking away from an empty search closes it (not when the click is on the search button, which toggles it).
             onBlur={(e) => !query.trim() && e.relatedTarget?.getAttribute("aria-label") !== "Search" && setQuery(null)}
             placeholder={categoriesOpen(state) ? "Search bots, chats, threads, people" : "Search bots, chats, threads"}
-            className="mr-2 h-[34px] min-w-0 flex-1 rounded-full bg-white px-3.5 text-[13px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98]"
+            className="motion-fade-in mr-2 h-[34px] min-w-0 flex-1 rounded-full bg-white px-3.5 text-[13px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98]"
           />
         )}
         <div className="flex items-center gap-2">
@@ -154,53 +172,133 @@ export function Sidebar({
           </button>
         )}
 
-        {!q && <Watching state={state} onOpen={onOpenWatch} />}
-
         {threads.length > 0 && (
           <div className="flex flex-col pt-4">
             <div className="px-2.5 pb-1.5 text-[13px] font-medium leading-4 text-[#9A9A98]">Threads</div>
             {threads.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => onOpenThread(s)}
-                className="group/thread flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left hover:bg-black/[0.03]"
-              >
-                <span className={`min-w-0 flex-1 truncate text-[14px] leading-[18px] ${live(s) || needsYou(s) ? "text-ink" : "text-[#6B6B6B]"}`}>{s.title}</span>
-                {(live(s) || needsYou(s)) && <StatusIcon session={s} />}
-                {!live(s) && <DeleteX label={`Delete ${s.title}`} onDelete={() => void post(`/api/sessions/${s.id}`, {}, "DELETE")} className="group-hover/thread:opacity-100" />}
-              </button>
+              <ThreadRow key={s.id} session={s} onClick={() => onOpenThread(s)} />
             ))}
           </div>
         )}
       </div>
 
-      {/* A newer Bops on bops.bot (the Mac app checks; Bops doesn't update itself). */}
+      {/*
+        Pinned under the chats while searching: the routines that match. Routines and Knowledge (with
+        Skills in it) open from the footer.
+      */}
+      {!!query?.trim() && (
+        <div className="-mx-2.5 shrink-0 border-t border-[#ECECEA] px-2.5 empty:hidden">
+          <AutopilotSections state={state} query={query} onOpen={onOpenAutopilot} onOpenWatch={onOpenWatch} />
+        </div>
+      )}
+      {/* A newer Bops: downloading, ready to Restart into, or out on bops.bot (the Mac app checks and downloads it). */}
       <UpdateNotice />
-      {/* You, your apps and logins (the Vault, with the apps you've connected), and Knowledge. New bots are the + at the top. */}
-      <div className="flex items-center gap-1.5 p-1 pt-3">
-        <YouMenu state={state} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />
-        <MembersButton state={state} onClick={onMembers} />
-        <button
-          onClick={onVault}
-          title="Your apps and logins, and which bots can use them"
-          className="flex h-10 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full bg-white px-2.5 text-[13.5px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
-        >
-          <span className="truncate">Apps &amp; logins</span>
-          <AppStack state={state} />
-        </button>
-        {categoriesOpen(state) && (
-          <button
-            onClick={() => onOpenMemory({})}
-            title="Knowledge: what your bots know, learned as you chat"
-            aria-label="Knowledge"
-            className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
-          >
-            <KnowledgeIcon size={16} />
-          </button>
-        )}
-      </div>
+      {/* You, then People, your apps and logins (the Vault, with the apps you've connected), Routines and Knowledge (sidebar-footer.tsx). New bots are the + at the top. */}
+      <SidebarFooter state={state} open={footer} you={(expanded) => <YouMenu state={state} expanded={expanded} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />} onMembers={onMembers} onVault={onVault} onOpenAutopilot={onOpenAutopilot} onOpenMemory={onOpenMemory} />
       {menu && menuBot && menuActions && <BotMenu state={state} bot={menuBot} x={menu.x} y={menu.y} onClose={() => setMenu(null)} actions={menuActions} />}
     </aside>
+  );
+}
+
+/**
+ * The footer's row: `you` (your account: the initials and their menu, given whether it's the pill), then
+ * People, Apps & logins, Routines and Knowledge. The pill (with its label) is the one pointed at or tabbed
+ * to, else the one `open` names (sidebar-footer.tsx footerPageOf, footerPillOf); the others are round.
+ * Picking one opens its page, and that one is the pill at rest. `hover` seeds the pointed-at one, and
+ * `news` whether Knowledge has something new (tests).
+ */
+export function SidebarFooter({
+  state,
+  open = "vault",
+  hover: initialHover,
+  news,
+  you,
+  onMembers,
+  onVault,
+  onOpenAutopilot,
+  onOpenMemory,
+}: {
+  state: AppState;
+  open?: FooterPage;
+  hover?: FooterKey;
+  news?: boolean;
+  you: (expanded: boolean) => ReactNode;
+  onMembers: () => void;
+  onVault: () => void;
+  onOpenAutopilot: (open: AutopilotOpen) => void;
+  onOpenMemory: (open: MemoryOpen) => void;
+}) {
+  const knowledge = categoriesOpen(state);
+  const page = open === "knowledge" && !knowledge ? "vault" : open;
+  const { hover, row } = useFooterHover(initialHover);
+  const pill = footerPillOf({ rest: page, hover: hover === "knowledge" && !knowledge ? null : hover });
+  return (
+    <div {...row} data-footer-row className="flex items-center gap-1.5 p-1 pt-3">
+      {you(pill === "you")}
+      <MembersButton state={state} expanded={pill === "people"} pressed={page === "people"} onClick={onMembers} />
+      <FooterButton
+        name="vault"
+        expanded={pill === "vault"}
+        pressed={page === "vault"}
+        label="Apps & logins"
+        tip="Your apps and logins, and which bots can use them"
+        onClick={onVault}
+        trail={<AppsTrail state={state} expanded={pill === "vault"} />}
+      />
+      <AutopilotButton state={state} expanded={pill === "routines"} pressed={page === "routines"} onOpen={onOpenAutopilot} />
+      {knowledge && <KnowledgeButton state={state} expanded={pill === "knowledge"} pressed={page === "knowledge"} news={news} onOpen={() => onOpenMemory({})} />}
+    </div>
+  );
+}
+
+/**
+ * Knowledge in the footer, with a blue dot on its corner while there's something new in it (what memory
+ * learned since it was last open: memory-categories.tsx useKnowledgeNews), none while it's the open page.
+ * `news` is for the tests.
+ */
+export function KnowledgeButton({ state, expanded, pressed, news: given, onOpen }: { state: AppState; expanded: boolean; pressed: boolean; news?: boolean; onOpen: () => void }) {
+  const fresh = useKnowledgeNews(currentWorkspace(state), state.account?.user.id ?? "");
+  const news = (given ?? fresh) && !pressed;
+  return (
+    <FooterButton
+      name="knowledge"
+      expanded={expanded}
+      pressed={pressed}
+      label="Knowledge"
+      tip={news ? "Knowledge: something new your bots learned" : "Knowledge: what your bots know, learned as you chat"}
+      ariaLabel={news ? "Knowledge, something new" : undefined}
+      onClick={onOpen}
+      icon={<KnowledgeIcon size={16} />}
+      badge={news && <NewDot />}
+    />
+  );
+}
+
+/** A small blue dot with a soft ring that swells out of it and fades, over and over (with reduced motion, it keeps still). */
+function NewDot() {
+  return (
+    <span data-new-dot className="motion-dot-in pointer-events-none absolute -right-px -top-px flex size-2.5">
+      <span className="motion-new-pulse absolute inset-0 rounded-full bg-[#2F7BFF] motion-reduce:hidden" />
+      <span className="relative size-2.5 rounded-full bg-[#2F7BFF] shadow-[0_0_0_2px_#F9F9F8,0_0_0_4px_#2F7BFF2E]" />
+    </span>
+  );
+}
+
+/**
+ * Apps & logins' end: as the pill, the apps you've connected; round, the Vault's key. Both are there
+ * and fade with the label (globals.css .motion-footer-label), so the logos don't pop in or out as it
+ * grows or shrinks; the key sits over the middle of the round button.
+ */
+function AppsTrail({ state, expanded }: { state: AppState; expanded: boolean }) {
+  return (
+    <span className="relative flex items-center">
+      <span aria-hidden className={`motion-footer-label flex min-w-0 overflow-hidden py-0.5 ${expanded ? "max-w-[48px] opacity-100" : "max-w-0 opacity-0"}`}>
+        <AppStack state={state} />
+      </span>
+      <span aria-hidden className={`motion-footer-label pointer-events-none absolute inset-0 flex items-center justify-center ${expanded ? "opacity-0" : "opacity-100"}`}>
+        <KeyIcon />
+      </span>
+    </span>
   );
 }
 
@@ -222,10 +320,24 @@ function AppStack({ state }: { state: AppState }) {
 /**
  * You, at the bottom of the sidebar: your initials, and a menu with your Orgo account (plan and
  * usage), Settings, this Mac's permissions, Restart Bops (in the Mac app; restart.tsx) and signing
- * out. While something on this Mac still needs you (and you haven't skipped it on the setup screen),
- * a badge on your initials opens that screen and the menu item carries the same mark.
+ * out. Like the footer's other buttons it's a slot that grows into the pill while pointed at
+ * (`expanded`), with your name (or email) after the initials. While something on this Mac still needs
+ * you (and you haven't skipped it on the setup screen), a badge on your initials opens that screen and
+ * the menu item carries the same mark.
  */
-function YouMenu({ state, onAccount, onSettings, onSetup }: { state: AppState; onAccount: () => void; onSettings: () => void; onSetup: () => void }) {
+export function YouMenu({
+  state,
+  expanded = false,
+  onAccount,
+  onSettings,
+  onSetup,
+}: {
+  state: AppState;
+  expanded?: boolean;
+  onAccount: () => void;
+  onSettings: () => void;
+  onSetup: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const [restart, setRestart] = useState(false);
   const canRestart = useCanRestart();
@@ -249,15 +361,23 @@ function YouMenu({ state, onAccount, onSettings, onSetup }: { state: AppState; o
     fn();
   };
   const item = "flex h-9 items-center gap-2.5 rounded-[10px] px-2.5 text-left text-[14px] font-medium hover:bg-black/[0.04]";
+  const name = user?.name?.trim() || user?.email || state.owner?.name?.trim() || "You";
   return (
-    <div ref={box} className="relative shrink-0">
+    <div ref={box} data-footer-slot="You" data-footer-key="you" className={`motion-footer-slot relative flex h-10 min-w-10 basis-10 ${expanded ? "grow" : "grow-0"} shrink`}>
       <button
         onClick={() => setOpen(!open)}
-        title={user ? `${user.name ?? user.email ?? "Your account"}: account and settings` : "Account and settings"}
-        className={`flex size-10 items-center justify-center rounded-full text-[13px] font-semibold ${open ? "bg-ink text-highlighter" : "bg-[#EEEEEC] text-[#6B6B6B] hover:bg-[#E6E6E3]"}`}
+        title={expanded ? undefined : user ? `${user.name ?? user.email ?? "Your account"}: account and settings` : "Account and settings"}
+        aria-label={`${name}: account and settings`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={`flex h-10 w-full min-w-0 items-center justify-center overflow-hidden rounded-full px-2.5 text-[13px] font-semibold outline-none transition-[background-color,color,transform] duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] active:scale-[.96] motion-reduce:transition-none ${open ? "bg-ink text-highlighter" : "bg-[#EEEEEC] text-[#6B6B6B] hover:bg-[#E6E6E3]"}`}
       >
-        {initialsOf(state)}
+        <span className="shrink-0">{initialsOf(state)}</span>
+        <span aria-hidden className={`motion-footer-label min-w-0 truncate whitespace-nowrap text-[13.5px] font-medium ${open ? "text-highlighter" : "text-ink"} ${expanded ? "max-w-[160px] translate-x-0 pl-1.5 opacity-100" : "max-w-0 -translate-x-1 pl-0 opacity-0"}`}>
+          {name}
+        </span>
       </button>
+      {/* Pops as it appears: YouMenu stays mounted, so polls don't replay it (at launch it may pop once, as the permissions are first read). */}
       {needsYou && (
         <button
           onClick={() => {
@@ -266,13 +386,13 @@ function YouMenu({ state, onAccount, onSettings, onSetup }: { state: AppState; o
           }}
           title="Something on this Mac needs you"
           aria-label="Something on this Mac needs you"
-          className="absolute -bottom-0.5 -left-0.5 rounded-full shadow-[0_0_0_2px_#F9F9F8]"
+          className="motion-dot-in absolute -bottom-0.5 -left-0.5 rounded-full shadow-[0_0_0_2px_#F9F9F8]"
         >
           <NeedsYouDot />
         </button>
       )}
       {open && (
-        <div className="absolute bottom-[calc(100%+8px)] left-0 z-30 flex w-[248px] flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]">
+        <div className="motion-menu-in absolute bottom-[calc(100%+8px)] left-0 z-30 flex w-[248px] origin-bottom-left flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]">
           <div className="flex flex-col gap-0.5 px-2.5 pb-2 pt-1.5">
             <span className="truncate text-[14px] font-semibold leading-[18px]">{user?.name || state.owner?.name || "You"}</span>
             <span className="truncate text-[12px] leading-4 text-[#9A9A98]">{user ? (user.email ?? "Signed in with Orgo") : "Not signed in"}</span>
@@ -331,6 +451,7 @@ function YouMenu({ state, onAccount, onSettings, onSetup }: { state: AppState; o
 function MainBot({ chat: c, state, selected, onClick, onMenu, last }: { chat: Chat; state: AppState; selected: boolean; onClick: () => void; onMenu?: (e: React.MouseEvent) => void; last?: AppState["messages"][number] }) {
   const b = state.bots.find((x) => x.id === c.botIds[0])!;
   const unread = !!last && last.role !== "user" && last.at > (c.readAt ?? 0) && !selected;
+  const dot = usePop(unread);
   const mine = new Set(teamOf(state).map((x) => x.id));
   const sessions = state.sessions.filter((s) => mine.has(s.botId));
   const working = new Set(sessions.filter((s) => live(s) && !s.askWhere).map((s) => s.botId)).size;
@@ -350,7 +471,7 @@ function MainBot({ chat: c, state, selected, onClick, onMenu, last }: { chat: Ch
             <path d="M6 1l1.5 3.1 3.4.5-2.5 2.4.6 3.4L6 8.8 2.9 10.4l.6-3.4L1 4.6l3.5-.5z" fill="#0A0A0A" />
           </svg>
         </span>
-        {unread && <span data-tip="Unread" className="absolute -left-0.5 top-0.5 size-[11px] rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A,0_0_0_3.5px_#F9F9F8]" />}
+        {unread && <span data-tip="Unread" onAnimationEnd={dot.done} className={`absolute -left-0.5 top-0.5 size-[11px] rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A,0_0_0_3.5px_#F9F9F8] ${dot.pop ? "motion-dot-in" : ""}`} />}
       </span>
       <span className="flex flex-col items-center gap-0.5">
         <span className="text-[16px] font-semibold leading-5">{b.name}</span>
@@ -381,6 +502,7 @@ function ChatRow({
   const members = state.bots.filter((b) => c.botIds.includes(b.id));
   const solo = c.kind === "bot" ? members[0] : undefined;
   const unread = !!last && last.role !== "user" && last.at > (c.readAt ?? 0) && !selected;
+  const dot = usePop(unread);
   const typing = c.typing.length > 0;
   const preview = typing
     ? "typing…"
@@ -412,52 +534,85 @@ function ChatRow({
         </div>
         <div className="flex items-center gap-2">
           <span className={`min-w-0 flex-1 truncate text-[13px] leading-[17px] ${unread ? "font-medium text-ink" : typing ? "text-[#6B6B6B] italic" : "text-[#6B6B6B]"}`}>{preview}</span>
-          {unread && <span data-tip="Unread" className="size-[9px] shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" />}
+          {unread && <span data-tip="Unread" onAnimationEnd={dot.done} className={`size-[9px] shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A] ${dot.pop ? "motion-dot-in" : ""}`} />}
         </div>
       </div>
     </button>
   );
 }
 
-/** A small × that shows on hover and deletes, without opening what it sits on. */
-export function DeleteX({ label, onDelete, className = "" }: { label: string; onDelete: () => void; className?: string }) {
+/** One of the Threads: in ink with its mark while it's working or needs you; × deletes it once it's stopped. */
+function ThreadRow({ session: s, onClick }: { session: Session; onClick: () => void }) {
+  // New since the sidebar opened: rises in, once.
+  const row = useRise(() => arrived(s.id));
+  // Its mark (as StatusIcon draws it) pops when it changes in place, as working turns to needs you.
+  const mark = live(s) && !(s.askWhere && needsYou(s)) ? "working" : needsYou(s) ? "you" : s.status;
+  const pop = usePop(mark);
   return (
-    <span
-      role="button"
-      tabIndex={0}
-      aria-label={label}
-      title={label}
-      onClick={(e) => {
-        e.stopPropagation();
-        onDelete();
-      }}
-      // It's a button to the keyboard too: Enter or Space.
-      onKeyDown={(e) => {
-        if (e.key !== "Enter" && e.key !== " ") return;
-        e.preventDefault();
-        e.stopPropagation();
-        onDelete();
-      }}
-      className={`flex size-5 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 hover:bg-black/[0.06] hover:text-[#B42318] ${className}`}
+    <button
+      onClick={onClick}
+      onAnimationEnd={row.done}
+      className={`group/thread flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left hover:bg-black/[0.03] ${row.rise ? "motion-rise-in" : ""}`}
     >
-      <svg width="9" height="9" viewBox="0 0 12 12">
-        <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-      </svg>
-    </span>
+      <span className={`min-w-0 flex-1 truncate text-[14px] leading-[18px] ${live(s) || needsYou(s) ? "text-ink" : "text-[#6B6B6B]"}`}>{s.title}</span>
+      {(live(s) || needsYou(s)) && (
+        <span key={pop.n} onAnimationEnd={pop.done} className={`flex shrink-0 ${pop.pop ? "motion-dot-in" : ""}`}>
+          <StatusIcon session={s} />
+        </span>
+      )}
+      {!live(s) && (
+        <DeleteX label={`Delete ${s.title}`} onDelete={() => void post(`/api/sessions/${s.id}`, {}, "DELETE")} className="group-hover/thread:opacity-100 group-focus-visible/thread:opacity-100" />
+      )}
+    </button>
   );
 }
+
+/** The small × that deletes from a row (side-group.tsx), as the CRM's rows import it from here. */
+export { DeleteX };
 
 /**
  * The workspace name, in place of a "Messages" title. Click it to switch workspaces, rename this
  * one, or start a new one. Each workspace is its own team: its own main bot, bots, chats and threads.
  */
-function WorkspaceSwitcher({ state }: { state: AppState }) {
-  const [open, setOpen] = useState(false);
+/** What deleting a workspace takes with it (GET /api/workspaces?preview=), for the confirm. */
+type DeletePreview = { id: string; name: string; orgo: boolean; computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[] };
+
+/** How often a rename made on orgo.ai is looked for while the app is open. */
+const NAMES_SYNC_MS = 10 * 60_000;
+
+/**
+ * Why Orgo still shows the default workspace as "bops" while it has the user's name here, by the reason
+ * it waits (OrgoMigration.defaultRename, lib/server/workspaces.ts HeldReason): an app that's older, that
+ * didn't say its version, none on record yet, or an Orgo that can't tell (old_app, silent_app, no_record,
+ * no_signal) all wait for every app to be updated; the rest say what they wait for. Bops tries again by
+ * itself at each start, sign-in and names sync.
+ */
+export function heldNameNote(reason: string): string {
+  if (reason === "unreachable") return "Orgo keeps the name bops for now: Bops couldn't reach Orgo, and tries again by itself.";
+  if (reason === "no_project") return "Orgo gets this name once its Orgo workspace is made, with your first computer.";
+  if (reason === "no_free_name") return "Orgo keeps the name bops: your Orgo already has workspaces with this name.";
+  return `Orgo keeps the name bops until every Bops app you use is updated to ${WORKSPACE_APPS_SINCE}.`;
+}
+
+export function WorkspaceSwitcher({ state, opened = false }: { state: AppState; /** Tests: open from the start. */ opened?: boolean }) {
+  const [open, setOpen] = useState(opened);
   const [naming, setNaming] = useState<null | { id?: string; name: string }>(null);
-  const [deleting, setDeleting] = useState<string | null>(null);
+  // The workspace whose Delete was pressed: what goes with it once Bops (and Orgo) said, and what went wrong.
+  const [deleting, setDeleting] = useState<null | { id: string; preview?: DeletePreview; error?: string; busy?: boolean }>(null);
+  // What Orgo said about a name (one the user's Orgo already has), shown over the field until it changes.
+  const [problem, setProblem] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const workspaces = state.workspaces ?? [];
   const current = workspaces.find((w) => w.id === currentWorkspace(state));
+
+  // A workspace renamed on orgo.ai is renamed here too: now, and every 10 minutes while the app is open.
+  useEffect(() => {
+    const sync = () => void post("/api/workspaces", { syncNames: true }, "PATCH").catch(() => {});
+    sync();
+    const t = setInterval(sync, NAMES_SYNC_MS);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -475,14 +630,74 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
     setOpen(false);
     setNaming(null);
     setDeleting(null);
+    setProblem(null);
   };
+  /**
+   * New workspace or Rename: where each workspace is an Orgo workspace of its own, Orgo makes or renames it
+   * too, and a name the user's Orgo already has comes back to pick another, with one to start from.
+   */
   const save = async () => {
     const name = naming?.name.trim();
-    if (!name) return;
-    if (naming?.id) await post("/api/workspaces", { id: naming.id, name }, "PATCH");
-    else await post("/api/workspaces", { name });
-    close();
+    if (!name || busy) return;
+    setBusy(true);
+    try {
+      const res = naming?.id ? await post("/api/workspaces", { id: naming.id, name }, "PATCH") : await post("/api/workspaces", { name });
+      const j = (await res.json().catch(() => ({}))) as { error?: string; code?: string; suggestion?: string; waiting?: string };
+      if (!res.ok) {
+        setProblem(j.error ?? "That didn't work. Try again.");
+        if (j.suggestion) setNaming({ id: naming?.id, name: j.suggestion });
+        return;
+      }
+      // The default's name waits for the apps: the menu stays open on why Orgo still shows bops.
+      if (j.waiting) {
+        setNaming(null);
+        setProblem(null);
+        return;
+      }
+      close();
+    } catch {
+      setProblem("Couldn't reach Bops. Try again.");
+    } finally {
+      setBusy(false);
+    }
   };
+  const editName = (id?: string) => (name: string) => {
+    setNaming({ id, name });
+    setProblem(null);
+  };
+  /** Delete pressed: ask what goes with it first; nothing is deleted until the user confirms the list. */
+  const askDelete = async (id: string) => {
+    setDeleting({ id, busy: true });
+    try {
+      const res = await fetch(`/api/workspaces?preview=${encodeURIComponent(id)}`, { cache: "no-store" });
+      const j = (await res.json().catch(() => ({}))) as DeletePreview & { error?: string };
+      setDeleting((d) => (d?.id === id ? (res.ok ? { id, preview: j } : { id, error: j.error ?? "Couldn't tell what's in it. Try again." }) : d));
+    } catch {
+      setDeleting((d) => (d?.id === id ? { id, error: "Couldn't reach Bops. Try again." } : d));
+    }
+  };
+  const confirmDelete = async () => {
+    if (!deleting?.preview || deleting.busy) return;
+    const { id, preview } = deleting;
+    setDeleting({ id, preview, busy: true });
+    try {
+      const res = await post("/api/workspaces", { id }, "DELETE");
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
+      if (res.ok) setDeleting(null);
+      else setDeleting({ id, preview, error: j.error ?? "That didn't work, so nothing was deleted. Try again." });
+    } catch {
+      setDeleting({ id, preview, error: "Couldn't reach Bops. Try again." });
+    }
+  };
+  const renamed = state.orgoMigration?.renamed ?? [];
+  // The default's name, held for the apps: said under it, and under its name field while it's renamed.
+  const held = state.orgoMigration?.defaultRename;
+  const heldNote = (wsId: string) =>
+    wsId === MAIN_WORKSPACE && held ? (
+      <span data-held-name className="px-2.5 pb-1 text-[12px] leading-4 text-[#6B6B6B]">
+        {heldNameNote(held.reason)}
+      </span>
+    ) : null;
   const count = (id: string) => state.bots.filter((b) => workspaceOf(b) === id).length;
 
   return (
@@ -493,77 +708,91 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
         className="-ml-1.5 flex min-w-0 items-center gap-1.5 rounded-[10px] px-1.5 py-0.5 hover:bg-black/[0.04]"
       >
         <span className="truncate text-[22px] font-semibold leading-7 tracking-[-0.02em]">{current?.name ?? "Main"}</span>
-        <svg width="12" height="12" viewBox="0 0 12 12" className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`}>
+        <svg width="12" height="12" viewBox="0 0 12 12" className={`shrink-0 transition-transform duration-200 ease-out motion-reduce:transition-none ${open ? "rotate-180" : ""}`}>
           <path d="M3 4.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
       {open && (
-        <div className="absolute left-0 top-[calc(100%+6px)] z-30 flex w-[248px] flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]">
+        <div className="motion-menu-in absolute left-0 top-[calc(100%+6px)] z-30 flex w-[248px] origin-top-left flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]">
           <div className="px-2.5 pb-1 pt-1.5 text-[12px] font-medium text-[#9A9A98]">Workspaces</div>
           {workspaces.map((w) =>
             naming?.id === w.id ? (
-              <NameInput key={w.id} value={naming.name} onChange={(name) => setNaming({ id: w.id, name })} onSave={save} onCancel={() => setNaming(null)} />
+              <Fragment key={w.id}>
+                {problem && <span role="alert" className="px-2.5 pt-1 text-[12px] leading-4 text-[#B42318]">{problem}</span>}
+                <NameInput value={naming.name} onChange={editName(w.id)} onSave={save} onCancel={() => setNaming(null)} />
+                {heldNote(w.id)}
+              </Fragment>
             ) : (
-              <div key={w.id} className="group/ws flex items-center rounded-[10px] hover:bg-black/[0.04]">
-                <button
-                  onClick={() => {
-                    if (w.id !== current?.id) void post("/api/workspaces", { current: w.id }, "PATCH");
-                    close();
-                  }}
-                  className="flex h-9 min-w-0 flex-1 items-center gap-2 pl-2.5 text-left"
-                >
-                  <span className="flex size-[18px] shrink-0 items-center justify-center">
-                    {w.id === current?.id && (
-                      <svg width="12" height="12" viewBox="0 0 12 12">
-                        <path d="M2.5 6.5l2.3 2.2L9.5 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    )}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-[14px] font-medium">{w.name}</span>
-                  <span className="shrink-0 text-[12px] text-[#9A9A98]">
-                    {count(w.id)} bot{count(w.id) === 1 ? "" : "s"}
-                  </span>
-                </button>
-                <button
-                  onClick={() => setNaming({ id: w.id, name: w.name })}
-                  title={`Rename ${w.name}`}
-                  aria-label={`Rename ${w.name}`}
-                  className="mx-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 hover:bg-black/[0.06] hover:text-ink group-hover/ws:opacity-100"
-                >
-                  <svg width="12" height="12" viewBox="0 0 16 16">
-                    <path d="M3 13l1-3.5L11 2.5l2.5 2.5L6.5 12 3 13z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
-                  </svg>
-                </button>
-                {workspaces.length > 1 &&
-                  (deleting === w.id ? (
+              <Fragment key={w.id}>
+                <div className="group/ws flex items-center rounded-[10px] hover:bg-black/[0.04]">
+                  <button
+                    onClick={() => {
+                      if (w.id !== current?.id) void post("/api/workspaces", { current: w.id }, "PATCH");
+                      close();
+                    }}
+                    className="flex h-9 min-w-0 flex-1 items-center gap-2 pl-2.5 text-left"
+                  >
+                    <span className="flex size-[18px] shrink-0 items-center justify-center">
+                      {w.id === current?.id && (
+                        <svg width="12" height="12" viewBox="0 0 12 12">
+                          <path d="M2.5 6.5l2.3 2.2L9.5 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      )}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[14px] font-medium">{w.name}</span>
+                    <span className="shrink-0 text-[12px] text-[#9A9A98]">
+                      {count(w.id)} bot{count(w.id) === 1 ? "" : "s"}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setNaming({ id: w.id, name: w.name })}
+                    title={`Rename ${w.name}`}
+                    aria-label={`Rename ${w.name}`}
+                    className="mx-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-ink focus-visible:opacity-100 group-hover/ws:opacity-100 group-has-[:focus-visible]/ws:opacity-100 motion-reduce:transition-none"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 16 16">
+                      <path d="M3 13l1-3.5L11 2.5l2.5 2.5L6.5 12 3 13z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                  {workspaces.length > 1 && w.id !== MAIN_WORKSPACE && deleting?.id !== w.id && (
                     <button
-                      onClick={() => {
-                        void post("/api/workspaces", { id: w.id }, "DELETE");
-                        setDeleting(null);
-                      }}
-                      title={`Delete ${w.name}, its bots and their computers`}
-                      className="mr-1 h-7 shrink-0 rounded-md bg-[#B42318] px-2 text-[12px] font-medium text-white"
-                    >
-                      Delete
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => setDeleting(w.id)}
+                      onClick={() => void askDelete(w.id)}
                       title={`Delete ${w.name}`}
                       aria-label={`Delete ${w.name}`}
-                      className="mr-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 hover:bg-black/[0.06] hover:text-[#B42318] group-hover/ws:opacity-100"
+                      className="mr-1 flex size-7 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 group-hover/ws:opacity-100 group-has-[:focus-visible]/ws:opacity-100 motion-reduce:transition-none"
                     >
                       <svg width="9" height="9" viewBox="0 0 12 12">
                         <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
                       </svg>
                     </button>
-                  ))}
-              </div>
+                  )}
+                </div>
+                {heldNote(w.id)}
+              </Fragment>
             ),
+          )}
+          {deleting && <DeleteConfirm name={workspaces.find((w) => w.id === deleting.id)?.name ?? "this workspace"} {...deleting} onCancel={() => setDeleting(null)} onDelete={() => void confirmDelete()} />}
+          {/* After each workspace became an Orgo workspace of its own: names Orgo already had (until dismissed). */}
+          {renamed.length > 0 && (
+            <div className="flex flex-col gap-0.5 px-2.5 pt-1 text-[12px] leading-4 text-[#6B6B6B]">
+              {renamed.map((r) => (
+                <span key={r.wsId}>
+                  {r.from} is {r.to} in Orgo: you already had an Orgo workspace named {r.from}.
+                </span>
+              ))}
+              {renamed.length > 0 && (
+                <button onClick={() => void post("/api/workspaces", { noticeSeen: true }, "PATCH").catch(() => {})} className="self-start text-[12px] font-medium text-[#0A0A0A] hover:underline">
+                  Dismiss
+                </button>
+              )}
+            </div>
           )}
           <div className="mx-2 my-1 h-px bg-[#ECECEA]" />
           {naming && !naming.id ? (
-            <NameInput value={naming.name} placeholder="Name the workspace" onChange={(name) => setNaming({ name })} onSave={save} onCancel={() => setNaming(null)} />
+            <>
+              {problem && <span role="alert" className="px-2.5 pb-1 text-[12px] leading-4 text-[#B42318]">{problem}</span>}
+              <NameInput value={naming.name} placeholder="Name the workspace" onChange={editName()} onSave={save} onCancel={() => setNaming(null)} />
+            </>
           ) : (
             <button onClick={() => setNaming({ name: "" })} className="flex h-9 items-center gap-2 rounded-[10px] pl-2.5 text-left text-[14px] font-medium hover:bg-black/[0.04]">
               <span className="flex size-[18px] items-center justify-center">
@@ -580,42 +809,58 @@ function WorkspaceSwitcher({ state }: { state: AppState }) {
   );
 }
 
-/**
- * Everything the team is watching, in one place: what (a conversation, a mailbox, a site), and
- * whether it's live, paused (not showing right now) or has news. Click to see it; × stops it.
- */
-function Watching({ state, onOpen }: { state: AppState; onOpen: (w: Watch) => void }) {
-  const team = new Set(teamOf(state).map((b) => b.id));
-  const list = (state.watches ?? []).filter((w) => team.has(w.botId)).sort((a, b) => Number(!!b.alert) - Number(!!a.alert) || b.since - a.since);
-  if (!list.length) return null;
+/** One line of what goes with a deleted workspace: "Computers (2): Bea's computer, Max's computer". */
+function GoesWith({ label, items }: { label: string; items: string[] }) {
+  if (!items.length) return null;
   return (
-    <div className="flex flex-col pt-4">
-      <div className="px-2.5 pb-1.5 text-[13px] font-medium leading-4 text-[#9A9A98]">Watching</div>
-      {list.map((w) => {
-        const where = w.mac ? w.mac.app : `${state.bots.find((b) => b.id === w.botId)?.name ?? "Bot"}'s screen ${DISPLAYS.indexOf(w.display) + 1}`;
-        return (
-          <button
-            key={w.id}
-            onClick={() => onOpen(w)}
-            title={`${w.lookFor}${w.away ? " · paused: it isn't showing right now" : ""}`}
-            className="group/watch flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left hover:bg-black/[0.03]"
-          >
-            <span className={w.away ? "text-[#C9C9C6]" : ""} style={w.away ? undefined : { color: WATCH }}>
-              <WatchEye size={14} blink={!w.away && !w.alert} />
-            </span>
-            <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px]">
-              <span className={w.away ? "text-[#6B6B6B]" : "text-ink"}>{watchName(w)}</span>
-              <span className="text-[#9A9A98]"> · {where}</span>
-            </span>
-            {w.alert ? (
-              <span className="shrink-0 rounded-full bg-highlighter px-1.5 py-px text-[11px] font-semibold leading-4 text-ink shadow-[0_0_0_1px_#0000001F]">New</span>
-            ) : (
-              w.away && <span className="shrink-0 text-[12px] text-[#9A9A98] group-hover/watch:hidden">Paused</span>
-            )}
-            <DeleteX label={`Stop watching ${watchName(w)}`} onDelete={() => void post(`/api/watches?id=${encodeURIComponent(w.id)}`, {}, "DELETE")} className="group-hover/watch:opacity-100" />
+    <li>
+      <span className="font-medium text-ink">
+        {label} ({items.length}):
+      </span>{" "}
+      {items.join(", ")}
+    </li>
+  );
+}
+
+/**
+ * Delete a workspace, confirmed: what goes with it (its computers, keys, skills and apps, here and in its Orgo
+ * workspace), then Delete. Orgo saying no keeps the workspace whole, with its words here.
+ */
+function DeleteConfirm({ name, preview, error, busy, onCancel, onDelete }: { name: string; preview?: DeletePreview; error?: string; busy?: boolean; onCancel: () => void; onDelete: () => void }) {
+  const nothing = !!preview && !preview.computers.length && !preview.keys.length && !preview.skills.length && !preview.apps.length;
+  return (
+    <div className="mx-1 my-1 flex flex-col gap-1.5 rounded-[10px] bg-[#F7F7F5] p-2.5 text-[12px] leading-4 text-[#6B6B6B]">
+      <span className="text-[13px] font-medium text-ink">Delete {name}?</span>
+      {!preview && !error && <span>Checking what&apos;s in it&hellip;</span>}
+      {preview && (
+        <>
+          <span>{nothing ? "Its bots and chats go. Nothing else is in it." : "Its bots and chats go, and with them:"}</span>
+          {!nothing && (
+            <ul className="flex flex-col gap-0.5">
+              <GoesWith label="Computers" items={preview.computers.map((c) => c.name)} />
+              <GoesWith label="Keys" items={preview.keys} />
+              <GoesWith label="Skills" items={preview.skills} />
+              <GoesWith label="Apps" items={preview.apps} />
+            </ul>
+          )}
+          {preview.orgo && <span>Its Orgo workspace is deleted too.</span>}
+        </>
+      )}
+      {error && (
+        <span role="alert" className="text-[#B42318]">
+          {error}
+        </span>
+      )}
+      <div className="flex justify-end gap-1.5 pt-0.5">
+        <button onClick={onCancel} className="h-7 rounded-md px-2 text-[12px] font-medium text-ink hover:bg-black/[0.06]">
+          Cancel
+        </button>
+        {preview && (
+          <button onClick={onDelete} disabled={busy} className="h-7 rounded-md bg-[#B42318] px-2 text-[12px] font-medium text-white disabled:opacity-50">
+            {busy ? "Deleting" : "Delete"}
           </button>
-        );
-      })}
+        )}
+      </div>
     </div>
   );
 }

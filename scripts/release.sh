@@ -8,6 +8,9 @@
 # APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID. Without a certificate it builds an unsigned app for
 # testing on this Mac only.
 #
+# The zip is what installed apps download to update themselves (desktop/updates.cjs), so it's checked
+# to be signed by Orgo's team (A47GG9FV27) as ai.orgo.bops: a change to either stops every update.
+#
 # Usage: scripts/release.sh [extra electron-builder args, e.g. --dir]
 set -euo pipefail
 
@@ -29,8 +32,10 @@ fi
 [ -x "$relay" ] || { echo "Missing $relay (scripts/fetch-relay.sh puts it there)." >&2; exit 1; }
 file "$relay" | grep -q "arm64" || { echo "$relay is not an arm64 Mac binary." >&2; exit 1; }
 
-# 2. The server. Keys stay out of the app: .env files are never bundled.
-npx next build
+# 2. The server. Keys stay out of the app: .env files are never bundled. A release has no brains
+# (lib/types.ts BRAINS_ON): set here, so a .env file that turns them on for development can't, and
+# built into the server and the window alike, so nothing at run time can either.
+NEXT_PUBLIC_BOPS_BRAINS=0 npx next build
 rm -f .next/standalone/.env*
 rm -rf .next/standalone/.data
 [ -f .next/standalone/server.js ] || { echo "No .next/standalone/server.js: is output \"standalone\" set in next.config.ts?" >&2; exit 1; }
@@ -148,5 +153,39 @@ elif [ -n "$signing" ]; then
   echo "Bops.app isn't signed with a Developer ID Application certificate:" >&2
   grep Authority <<<"$signature" >&2 || echo "  (not signed)" >&2
   exit 1
+fi
+
+# 6. The zip is what installed apps update themselves from (desktop/updates.cjs): macOS installs it only
+# when the app in it is signed by the same team, with the same bundle id. Checked as it will be, from
+# the zip itself. Not with --dir (no zip) or an unsigned test build (it can't update anyone). Squirrel
+# doesn't check notarization, so that's checked here too: the app in the zip notarized, its ticket
+# stapled. A build without notarization settings skips that, and its zip isn't fit to publish.
+dir_only=""
+for a in "$@"; do [ "$a" = --dir ] && dir_only=1; done
+notarizing=""
+[ -n "${APPLE_API_KEY:-}${APPLE_ID:-}${APPLE_KEYCHAIN_PROFILE:-}" ] && notarizing=1
+if [ -n "$signing" ] && [ -z "$dir_only" ]; then
+  for z in dist-desktop/*.zip; do
+    [ -e "$z" ] || continue
+    unz="$(mktemp -d)"
+    ditto -x -k "$z" "$unz"
+    if ! codesign --verify --deep --strict -R='identifier "ai.orgo.bops" and anchor apple generic and certificate leaf[subject.OU] = A47GG9FV27' "$unz/Bops.app"; then
+      rm -rf "$unz"
+      echo "$z: the zip's app isn't signed so Bops can update to it." >&2
+      exit 1
+    fi
+    if [ -n "$notarizing" ]; then
+      if ! xcrun stapler validate "$unz/Bops.app" || ! spctl -a -t exec -vv "$unz/Bops.app"; then
+        rm -rf "$unz"
+        echo "$z: the zip's app isn't notarized and stapled. Not fit to publish." >&2
+        exit 1
+      fi
+      echo "$(basename "$z"): notarized."
+    else
+      echo "$(basename "$z"): no notarization settings, so not notarized. Not fit to publish." >&2
+    fi
+    rm -rf "$unz"
+    echo "$(basename "$z"): signed so Bops can update to it."
+  done
 fi
 ls -lh dist-desktop/*.dmg dist-desktop/*.zip 2>/dev/null || true

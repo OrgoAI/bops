@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { BLOCKER_LABEL, computerAsleep, computerCheckMs, computerInUse, DISPLAYS, live, streamsLive, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
+import { BLOCKER_LABEL, computerAsleep, computerCheckMs, computerInUse, DISPLAYS, isScreenWatch, live, streamsLive, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
 import { freeComputerOpen, setupShort } from "@/lib/orgo-plans";
 import { BotCursor } from "./bot-cursor";
 import { LiveDesktop, Waking } from "./live-desktop";
@@ -204,7 +204,7 @@ export function ComputerView({
   const lastAct = (d: number) => Math.max(acted[d] ?? 0, stepOn(d)?.at ?? 0);
   /** A screen showing something only the user can do: a sign-in, a payment, a draft to approve. */
   /** A screen kept on one site that Jev watches for the user (see lib/server/watches.ts). */
-  const watchOn = (d: number) => state.watches?.find((w) => here(w.botId) && !w.mac && w.display === d);
+  const watchOn = (d: number) => state.watches?.find((w) => here(w.botId) && isScreenWatch(w) && w.display === d);
   const needsYouOn = (d: number) => {
     const r = readOn(d);
     return !!(r?.blocker || (r?.kind === "email_compose" && r.email) || (holding.get(d)?.blocker && holding.get(d)?.display === d) || (!holding.has(d) && watchOn(d)?.alert));
@@ -306,8 +306,10 @@ export function ComputerView({
   const leaving = !takeover && !!held?.leaving;
   // Esc hands control back. It's caught before the live screen gets it (so it doesn't also reach the
   // bot's computer), except while typing in Bops itself (the chat, the address bar), where Esc is Esc.
+  // In a thread's terminal (Takeover.terminal) Esc is Claude Code's, which stops what it's doing with it:
+  // it goes to the screen, and Hand back (or a reply in the thread) closes the terminal.
   useEffect(() => {
-    if (!takeover) return;
+    if (!takeover || takeover.terminal) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const t = e.target as HTMLElement | null;
@@ -611,7 +613,7 @@ export function ComputerView({
             {handoff && (
               <div
                 key={handoff.key}
-                className="pointer-events-none absolute left-1/2 top-3 z-40 flex animate-[handoff_1900ms_ease-in-out_both] items-center gap-2 rounded-full bg-white/95 py-1 pl-1 pr-3 shadow-[0_0_0_1px_#0000000F,0_10px_24px_-10px_#00000066] backdrop-blur"
+                className="pointer-events-none absolute left-1/2 top-3 z-40 flex -translate-x-1/2 animate-[handoff_1900ms_ease-in-out_both] items-center gap-2 rounded-full bg-white/95 py-1 pl-1 pr-3 shadow-[0_0_0_1px_#0000000F,0_10px_24px_-10px_#00000066] backdrop-blur"
               >
                 {handoff.to === "you" ? (
                   <span className="flex size-6 items-center justify-center rounded-full" style={{ background: botBezel(b) }}>
@@ -779,13 +781,13 @@ export function ComputerView({
               )}
               <button
                 onClick={() => void post("/api/takeover", {}, "DELETE")}
-                title={`${(holding.get(display) ? botOn(display) : b).name} picks up from here (Esc)`}
+                title={takeover?.terminal ? "Closes the terminal" : `${(holding.get(display) ? botOn(display) : b).name} picks up from here (Esc)`}
                 className="flex shrink-0 items-center gap-2 rounded-full bg-ink py-1.5 pl-1.5 pr-4 text-[14px] font-semibold leading-[18px] transition-transform active:scale-[0.97]"
                 style={{ color: botOnInk(b) }}
               >
                 <Mascot botId={(holding.get(display) ? botOn(display) : b).id} color={(holding.get(display) ? botOn(display) : b).color} size={22} antenna={false} />
                 Hand back to {(holding.get(display) ? botOn(display) : b).name}
-                <kbd className="rounded-[5px] bg-white/15 px-1.5 py-px font-sans text-[11px] font-medium leading-4 text-white/70">esc</kbd>
+                {!takeover?.terminal && <kbd className="rounded-[5px] bg-white/15 px-1.5 py-px font-sans text-[11px] font-medium leading-4 text-white/70">esc</kbd>}
               </button>
             </div>
             </div>
@@ -1276,7 +1278,8 @@ export function ComputerSummary({ state, bot: b, className = "", onOpen }: { sta
 /** With the right panel collapsed: a round button, like the call button, that reopens the bot's computer. */
 export function ComputerPeek({ state, bot: b, onOpen }: { state: AppState; bot: Bot; onOpen: () => void }) {
   const running = state.sessions.filter((s: Session) => s.botId === b.id && live(s));
-  const needsYou = running.some((s) => s.blocker) || !!state.watches?.some((w) => w.botId === b.id && w.alert);
+  // A page watch's news lives on the Autopilot page, not on a screen (as panel-tabs.tsx counts it).
+  const needsYou = running.some((s) => s.blocker) || !!state.watches?.some((w) => w.botId === b.id && !w.page && w.alert);
   const label = `${b.name}'s computer · ${needsYou ? "needs you" : running.length ? `working on ${running.length} thing${running.length === 1 ? "" : "s"}` : "nothing running"}`;
   return (
     <button

@@ -59,8 +59,12 @@ export type Bot = {
    * besides the plan's main bot gets an inbox only then, while the plan has room (lib/server/mail.ts).
    */
   mailWanted?: boolean;
-  /** Your app accounts this bot may use (by AppAccount id), and how much it may do in each. */
-  access?: Record<string, AppLevel>;
+  /**
+   * What the user set for this bot in your app accounts (by AppAccount id): read, act, or "none". An
+   * account with no entry gets the default (levelOf): every bot may read and act there, except in one
+   * from before that default (AppAccount.onlyGiven), where it has none.
+   */
+  access?: Record<string, AppAccess>;
   /** This bot's Composio session (its allowed apps and actions), and the access it was made for. */
   composio?: { sessionId: string; access: string };
   /** The secret this bot's threads use to reach its apps through Bops (/api/apps/call). */
@@ -83,7 +87,26 @@ export type Bot = {
   dataOff?: boolean;
   /** The workspace (team) it belongs to. Unset means the first one. */
   workspaceId?: string;
+  /**
+   * "How I work": what the user wrote about how this bot should work (tone, habits, what to check first),
+   * up to MAX_PERSONA_CHARS. Given to it in its chat, tasks and calls as the user's preferences; it never
+   * overrides Bops' own rules (approvals, text on pages being information).
+   */
+  persona?: string;
+  /**
+   * Keys (lib/server/keys.ts): the names of the user's API keys in their Orgo vault this bot may call
+   * with call_api ("STRIPE_SECRET_KEY"). Only the names: the keys themselves never leave Orgo.
+   */
+  keys?: string[];
+  /**
+   * Its brain (Brain.id, lib/server/brains.ts): the agent its tasks run on, when it isn't Bops' own. Unset is
+   * Bops agent, on AI credit. One that names a brain this bot isn't on any more, or one that's gone, is Bops
+   * agent too (brainOf).
+   */
+  brain?: string;
 };
+
+export const MAX_PERSONA_CHARS = 1500;
 
 /** A workspace: one team with its own main bot, bots, chats and work. The user switches between them. */
 export type Workspace = {
@@ -114,7 +137,97 @@ export type Workspace = {
    * bot hands work to the others. `previous` is the AgentPhone agent the number came from, for rollback.
    */
   line?: WorkspaceLine;
+  /**
+   * The Orgo workspace (an orgo-web project marked product "bops") this workspace is, once Orgo has
+   * one for it (lib/server/workspaces.ts). Unset on an Orgo without per workspace projects: every
+   * workspace's computers then live in the one "bops" project, as before.
+   */
+  orgoProjectId?: string;
+  /**
+   * The secret Orbit's hashes of what was forgotten are keyed with (HMAC-SHA256: lib/server/memory-categories.ts),
+   * made once by the first Mac that needs it and synced to the others with the state, so each Mac knows what
+   * the others forgot. Never sent to Orgo, and never to the window.
+   */
+  orbitKey?: string;
+  /**
+   * Its Orgo project's name as Orgo has it, last seen or set here; `orgoUpdatedAt` its updated_at then. A
+   * list that names the project otherwise was renamed on orgo.ai, and the name comes here too
+   * (syncWorkspaceNames). It may differ from `name`: "orgo (Bops)" for a workspace named "orgo" here, or
+   * "bops" for a default the user renamed while an older Bops app is still on the account.
+   */
+  orgoName?: string;
+  orgoUpdatedAt?: string;
+  /** Its skills and apps (lib/server/workspace-skills.ts): what each is, by slug. The files are on this Mac. */
+  skills?: SkillRef[];
+  apps?: SkillRef[];
+  /** Scripts someone approved to run in this workspace, by the content's sha256. */
+  approvals?: ScriptApproval[];
+  /**
+   * Tags this workspace sorts mail and messages with besides the defaults (lib/routine-catalog.ts
+   * DEFAULT_TAGS: Customer, Outage, Bug, Office, FYI). Proposed by a bot from a sample of recent mail
+   * or messages when a Gmail, Slack or Discord starter routine is turned on
+   * (lib/server/routine-suggestions.ts learnTags), or added by the user.
+   */
+  tags?: WorkspaceTag[];
+  /** The Connected Apps whose recent items tags were already learned from (one sample per app). */
+  tagsLearnedFrom?: string[];
 };
+
+/** A tag routines sort by: a short name and what it's for. */
+export type WorkspaceTag = { name: string; description: string };
+
+/**
+ * Where a routine or watch came from, when it was a starter (lib/routine-catalog.ts): the Connected App's
+ * slug or the vault key's name it's for, and the catalog template's id. One per template per bot. A
+ * Connected App's check (CHECK_TEMPLATE, the How often picked when it was connected) keeps the account it
+ * checks too: one per account per bot.
+ */
+export type RoutineSource = { app: string; template: string; account?: string };
+
+/** A skill (how a bot does a kind of job) or an app (a tool Bops builds and bots run). */
+export type SkillKind = "skill" | "app";
+export type SkillRisk = "read" | "write" | "destructive";
+
+/**
+ * One skill or app of a workspace: a folder in the Agent Skill shape (SKILL.md and its files) at
+ * <userDir>/workspaces/<id>/skills/<slug>/ (apps/<slug>/ for an app). This is what the app and the
+ * bots list without reading the folder; the folder holds the rest.
+ */
+export type SkillRef = {
+  slug: string;
+  kind: SkillKind;
+  name: string;
+  /** What it does and when to use it: all a bot sees until it reads it (read_skill). */
+  description: string;
+  /** draft: its bots don't see it yet; published: they do, at `version`. */
+  status: "draft" | "published";
+  /** The version its bots read (published), and every version kept, newest last. */
+  version?: string;
+  versions?: { version: string; at: number; sha256: string }[];
+  risk?: SkillRisk;
+  runsOn?: string;
+  /** The bots that have it. Empty: every bot in the workspace. */
+  botIds: string[];
+  /** Where it came from: written in Bops, imported from a folder, made in Orgo, or a procedure from before. */
+  source: "bops" | "import" | "orgo" | "procedure";
+  createdAt: number;
+  updatedAt: number;
+  /** The id it had as a procedure (Procedure.id), so routines and threads that named it still find it. */
+  legacyId?: string;
+  /** Orgo's id for it and when Orgo last changed it (lib/server/workspace-skills.ts sync). */
+  remoteId?: string;
+  remoteAt?: string;
+  /** When this Mac and Orgo last agreed on it: a change here after this goes to Orgo. */
+  syncedAt?: number;
+  /** How many times a bot read it for a job, and when it last did. */
+  uses?: number;
+  usedAt?: number;
+  /** The chat it was drafted from. */
+  from?: { chatId: string; sessionIds?: string[] };
+};
+
+/** A script someone approved to run, by its content (an unchanged script carried into a new version stays approved). */
+export type ScriptApproval = { sha256: string; path: string; at: number };
 
 export type WorkspaceLine = {
   phone: string;
@@ -138,6 +251,14 @@ export const pairChatId = (a: string, b: string) => `pair:${[a, b].sort().join("
 
 /** The workspace every older bot and chat belongs to. */
 export const MAIN_WORKSPACE = "ws_main";
+
+/**
+ * The first Bops release that finds its default workspace by bops_ws_id rather than by the name "bops"
+ * (lib/server/workspaces.ts). An app before it looks for a project named "bops", so the default's project
+ * keeps that name until every app on the account is at least this one (lib/server/orgo.ts bopsAppsGate),
+ * and the switcher says so (sidebar.tsx heldNameNote).
+ */
+export const WORKSPACE_APPS_SINCE = "0.0.29";
 export const workspaceOf = (b: { workspaceId?: string } | undefined) => b?.workspaceId ?? MAIN_WORKSPACE;
 
 /**
@@ -152,6 +273,23 @@ export const sharesComputer = (b: Pick<Bot, "isMain" | "computer" | "computerId"
 export const freeComputerBot = (bots: Bot[], except?: string) => bots.find((x) => x.isMain && x.freeComputer && x.computerId && x.id !== except);
 
 /**
+ * The free Bops computer when the workspace `wsId` is deleted: null when no bot of it holds it. It sits in
+ * the default's "bops" project, so Orgo's preview of the workspace never lists it, and main bots of other
+ * workspaces may work on it (computer "shared", lib/server/plan.ts shareFree) or have it on record too. Then
+ * it stays (`kept`): `heir` is the main bot of another workspace that takes it up, none when another bot
+ * has it already. Otherwise it is deleted with the workspace, and the confirm says so.
+ */
+export function freeComputerOnDelete(bots: Bot[], wsId: string): { id: string; holder: Bot; kept: boolean; heir?: Bot } | null {
+  const holder = bots.find((x) => x.isMain && x.freeComputer && x.computerId && workspaceOf(x) === wsId);
+  if (!holder) return null;
+  const id = holder.computerId!;
+  const others = bots.filter((x) => workspaceOf(x) !== wsId);
+  if (others.some((x) => x.computerId === id)) return { id, holder, kept: true };
+  const heir = others.find((x) => x.isMain && sharesComputer(x));
+  return heir ? { id, holder, kept: true, heir } : { id, holder, kept: false };
+}
+
+/**
  * The bot whose Orgo computer `b` works on: itself, or its main bot when it shares (and that main
  * bot's own host, when it shares the free Bops computer). Anything about the machine (its id, status,
  * tailnet address, screens) comes from this bot; the work stays `b`'s.
@@ -161,6 +299,109 @@ export function workBot(b: Bot, bots: Bot[]): Bot {
   if (b.isMain) return freeComputerBot(bots, b.id) ?? b;
   const main = bots.find((x) => x.isMain && workspaceOf(x) === workspaceOf(b));
   return main ? workBot(main, bots) : b;
+}
+
+/**
+ * The coding agents a user can bring for their bots' tasks instead of Bops agent (lib/server/brains.ts):
+ * Claude Code, the unmodified one Bops installs on the bot's computer, and Codex. They run on the user's
+ * own account, never on Bops' AI credit.
+ */
+export type BrainKind = "claude" | "codex";
+/**
+ * Whether this build has brains: NEXT_PUBLIC_BOPS_BRAINS=1 where it's built (or where `next dev` starts,
+ * .env.local too). Next writes the value into the server and the window alike as it builds them, and a
+ * release builds with it 0 (scripts/release.sh). Without brains nothing about them shows (Settings, a bot's
+ * profile, a thread's badge and Open in terminal), every bot is on Bops agent (brainOf) and every task runs
+ * there, a thread a brain ran included (sessions.ts brainRecord), and the brain routes answer 404. The brains
+ * saved in the state stay as they are, for a build that has them.
+ */
+export const BRAINS_ON = process.env.NEXT_PUBLIC_BOPS_BRAINS === "1";
+export const BRAIN_NAMES: Record<BrainKind, string> = { claude: "Claude Code", codex: "Codex" };
+/** The Vault key a key brain runs on (lib/server/keys.ts KEY_PROVIDERS): the user's own Anthropic or OpenAI key. */
+export const BRAIN_KEYS: Record<BrainKind, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY" };
+/**
+ * How a brain signs in: with the user's own Claude plan (Pro, Max, Team), through Claude Code's own sign-in
+ * on each computer it works on, or with an API key of theirs from the Vault. Codex takes a key only.
+ */
+export type BrainAuth = "plan" | "key";
+
+/**
+ * Claude Code signed in with a plan on one computer, as its own `claude auth status --json` said when Bops
+ * last asked: how it signed in ("claude.ai") and whose account it is (the email, the organization, the
+ * plan: "max", "pro", "team"). Never the login itself: that stays in the brain's folder on that computer,
+ * which Bops never reads, copies or sends anywhere.
+ */
+export type BrainSignIn = { computerId: string; at: number; method?: string; account?: { email?: string; orgName?: string; plan?: string } };
+
+/**
+ * A brain the user added (Settings, Brain): Claude Code or Codex, how it signs in, and which bots may use it.
+ * A bot uses it once it's that bot's (Bot.brain). Nothing secret is here: a key brain names its Vault key
+ * (`keyName`, scoped as the Vault's keys are: lib/server/keys.ts KeyScope) and the key stays in the user's
+ * Orgo vault; a plan brain's logins stay on the computers, one folder per brain on each
+ * (/root/.bops/brains/<id>), and only what `signIns` says comes back.
+ */
+export type Brain = {
+  id: string;
+  kind: BrainKind;
+  /** "Claude Code", "Claude Code (work)": the user can rename it. */
+  name: string;
+  auth: BrainAuth;
+  keyName?: string;
+  keyScope?: "workspace" | "all";
+  /** The bots that may use it: each one's profile offers it. Empty: none yet. */
+  bots: BotId[];
+  workspaceId: string;
+  createdAt: number;
+  /** A plan brain: the computers it's signed in on. A bot on another computer needs its own sign-in there. */
+  signIns?: BrainSignIn[];
+  /**
+   * A plan brain signing in now: Claude Code's own sign-in is open in a terminal on `display` of that
+   * computer, the user drives that screen, and Bops asks Claude Code until it says it's signed in.
+   * `failed`: it didn't finish, and why (kept until the next try).
+   */
+  signingIn?: { botId: BotId; computerId: string; display: number; at: number; failed?: string };
+};
+
+/** "Max plan", "Pro plan": a Claude plan as Claude Code names it (BrainSignIn's plan); "Claude plan" when it didn't say. */
+export const planName = (plan?: string) => (plan ? `${plan.charAt(0).toUpperCase()}${plan.slice(1)} plan` : "Claude plan");
+
+/** A bot's brain, or undefined for Bops agent: one it picked that still lets it in, and is still there, in a build with brains (BRAINS_ON). */
+export function brainOf(b: Pick<Bot, "id" | "brain">, state: Pick<AppState, "brains">): Brain | undefined {
+  if (!BRAINS_ON || !b.brain) return undefined;
+  const x = state.brains?.find((y) => y.id === b.brain);
+  return x && x.bots.includes(b.id) ? x : undefined;
+}
+
+/** Where a plan brain is signed in on a computer, if it is. */
+export const signInOn = (x: Pick<Brain, "signIns">, computerId: string | undefined) => (computerId ? x.signIns?.find((s) => s.computerId === computerId) : undefined);
+
+/**
+ * Whether a brain can run `b`'s tasks now: a key brain with its key named, or a plan brain signed in on the
+ * computer `b` works on (workBot). Bots on this Mac's browsers (host "mac") have no computer of their own to sign in on.
+ */
+export function brainReady(x: Brain, b: Bot, state: Pick<AppState, "bots" | "host">): boolean {
+  if (x.auth === "key") return !!x.keyName;
+  return state.host !== "mac" && !!signInOn(x, workBot(b, state.bots).computerId);
+}
+
+/**
+ * Who runs a thread now (sessions.ts brainFor): its brain's CLI once that began it (Session.brainRun), until
+ * Bops agent runs any of it (its agent session or response chain, or the user had it finish there), from when
+ * on it stays Bops agent's ("agent"), which knows what it did; nobody yet while nothing has run it.
+ */
+export function threadRunner(s: Pick<Session, "brainRun" | "onBopsAgent" | "agentSessionId" | "responseId">): BrainKind | "agent" | undefined {
+  if (s.onBopsAgent || s.agentSessionId || s.responseId) return "agent";
+  return s.brainRun?.started ? s.brainRun.kind : undefined;
+}
+
+/**
+ * Which of a bot's tasks its brain runs (sessions.ts run: a task on the user's Mac always runs on Bops agent):
+ * all of them, those in the cloud when it picks per task and this Mac can take some ("some"), or none, when
+ * its tasks all run on this Mac (bots in this Mac's browsers, or a bot set to work on the user's Mac).
+ */
+export function brainRuns(b: Pick<Bot, "runsOn">, state: Pick<AppState, "host" | "mac">): "all" | "some" | "none" {
+  if (state.host === "mac" || b.runsOn === "mac") return "none";
+  return b.runsOn === "cloud" || !state.mac?.ready ? "all" : "some";
 }
 
 export type Effort = "auto" | "low" | "medium" | "high";
@@ -230,8 +471,17 @@ export type Message = {
   sms?: { dir: "in" | "out"; from: string; to: string; id?: string };
   /** Set on the note an app action leaves when the user answered its approval: what the app answered, so the bot sees whether it worked. */
   appResult?: { action: string; ok: boolean; output: string };
+  /** Set on a bot's reply: the API calls it made with the user's keys for it (call_api), "Called Stripe GET /v1/customers". */
+  called?: string[];
   /** Set on a heads-up from a watched screen: which watch, so the message can offer to show it or reply. */
   watch?: { id: string };
+  /**
+   * Posted by a routine's run in the chat (Routine.run "chat"), or a reminder: which routine. `manual`:
+   * a run someone asked for (Run now), so a turn in Slack or by text that asked for it sends it back there.
+   */
+  routine?: { id: string; manual?: true };
+  /** The user asked to keep this from someone ("between us"): never read into memory, a procedure's draft, or anywhere shared. */
+  secret?: true;
   /** An inline reply (like iMessage's): the message it starts from. Replies to a reply join the same one. */
   replyTo?: string;
   /** Tapbacks on this message, the user's and the bots'. One each. */
@@ -348,6 +598,10 @@ export type Session = {
   title: string;
   /** The kickoff message the bot works from, pinned at the top of the thread. */
   goal: string;
+  /** The routine whose run this is (sentVia "routine"), so its result can be quiet, delivered and recorded on it. */
+  routineId?: string;
+  /** The procedure (Procedure.id) it follows, given to it in full. */
+  procedure?: string;
   host: Host;
   status: SessionStatus;
   /** X display number of the screen this session holds (99-102), while it holds one. */
@@ -375,6 +629,18 @@ export type Session = {
    * `ui`: it had the Mac tools (Cua Driver), through Bops' own MCP server ("bops"; true was Cua's own, which a thread doesn't pick up again).
    */
   env?: { id: string; remoteUrl: string; workspace?: string; fullAccess?: boolean; sockets?: string; apps?: boolean; data?: boolean; ui?: boolean | "bops"; display?: number };
+  /**
+   * Run by its bot's brain (Brain, lib/server/cli-agents.ts) rather than Bops agent: which brain, on which
+   * computer, and the CLI's own session there (`cli`: Claude Code's session id), which a later turn, or a
+   * restart of the CLI, picks back up. `started`: the CLI has that session (it said so as it began).
+   * `waits`: it can't go on until the user does something: sign the brain in on that computer ("sign_in"),
+   * or say what's next after the CLI stopped at its plan's usage limit or its sign-in or key was turned
+   * down ("limit": Finish on Bops agent, or Wait). `said` is what Bops told them then (not the bot's own
+   * answer). The replies that turn took are marked not delivered again, so they go in when it carries on.
+   */
+  brainRun?: { brainId: string; kind: BrainKind; computerId: string; cli: string; started?: true; waits?: "sign_in" | "limit"; said?: string };
+  /** The user had Bops agent finish it after its brain stopped (brainRun.waits "limit"): it runs on Bops agent from then on. */
+  onBopsAgent?: true;
   steps: SessionStep[];
   replies: ThreadReply[];
   answer?: string;
@@ -428,35 +694,182 @@ export type Session = {
   endedAt?: number;
 };
 
+/**
+ * When a routine runs. Times ("HH:MM", 24h) are wall clock times in the routine's zone (Routine.timeZone),
+ * else the user's (Owner.timeZone), else the Mac's. The math lives in cloud/schedule.ts (ScheduleLike is
+ * the same shape), so Bops Cloud can run the same schedules later. Every older shape is still one.
+ */
 export type Schedule =
-  | { kind: "daily"; time: string }
-  | { kind: "weekdays"; time: string }
-  | { kind: "weekly"; day: number; time: string }
-  | { kind: "once"; at: number };
+  /** `times`: several a day ("HH:MM", sorted, each once, at most 6); `time` is times[0]. */
+  | { kind: "daily"; time: string; times?: string[] }
+  | { kind: "weekdays"; time: string; times?: string[] }
+  /** `days`: several days (0 Sunday to 6, sorted); `day` is days[0]. */
+  | { kind: "weekly"; day: number; days?: number[]; time: string; times?: string[] }
+  /** `dayOfMonth` 1 to 31, or -1 for the last day; a day the month doesn't have runs on its last day. */
+  | { kind: "monthly"; dayOfMonth: number; time: string; times?: string[] }
+  | { kind: "once"; at: number }
+  /**
+   * Every `minutes` (MIN_EVERY_MINUTES at least, a day at most). `hours`: only between these local times
+   * ("08:00" to "22:00"; a run that falls outside waits for the next start); `days` (0 Sunday to 6): only
+   * on these. A check-in is a quiet routine on this kind.
+   */
+  | { kind: "every"; minutes: number; hours?: { from: string; to: string }; days?: number[] }
+  /**
+   * `minutes` (5 to 240) before each meeting in the user's Google Calendar (meetings inside `hours` and
+   * `days` when set): a check every 15 minutes, each run told the meetings that start in its window
+   * (cloud/schedule.ts eventWindow), which starts where the runs before it got to (Routine.eventsThrough),
+   * so every meeting is handled once.
+   */
+  | { kind: "before_event"; minutes: number; source: "googlecalendar"; hours?: { from: string; to: string }; days?: number[] };
 
-/** A routine or one-off scheduled ask. When it fires it becomes a thread in the bot's chat. */
+/** The shortest gap an "every" routine may have, in minutes. */
+export const MIN_EVERY_MINUTES = 15;
+
+/**
+ * Where a routine's result goes besides the bot's chat in Bops (which always gets it): a text to the
+ * user from the bot's number, an email to the user from the bot's inbox, or a Slack, Telegram or Discord
+ * place the bot was added to (a ChannelLink; `chat` is the channel or DM there, unset is the DM with the
+ * person paired).
+ */
+export type Delivery = { kind: "text" } | { kind: "email" } | { kind: "channel"; linkId: string; chat?: string };
+
+/** How a routine's last run went. Running and delivering are told apart: a run can go well and its text not arrive. */
+export type RoutineRun = {
+  at: number;
+  /**
+   * running: still going (a task); ok: it ran and said something; quiet: it ran and had nothing for the
+   * user (a quiet routine), so nothing was posted; failed: the run itself failed; skipped: it didn't run
+   * (the last run was still going, or the bot or its computer wasn't there).
+   */
+  status: "running" | "ok" | "quiet" | "failed" | "skipped";
+  error?: string;
+  /** The task it started, when it ran on a computer. */
+  sessionId?: string;
+  /**
+   * On a running record: how the run before this one failed, if it did. A thread that fails the same
+   * way again is recorded but not said or sent again (routines.ts onRoutineTaskEnd), like a chat run.
+   */
+  prevError?: string;
+  /**
+   * On a skipped record whose thread is still going (it stays the routine's run): when that thread's run
+   * began, so its end records the window it handled (a meeting routine's), not the time of the skip.
+   */
+  threadAt?: number;
+  /** Whether the result reached `deliverTo`; unset when there was nothing to send or nowhere besides the chat. */
+  delivery?: { status: "sent" | "failed"; to: string; error?: string; at: number };
+};
+
+/** A routine or one-off scheduled ask. When it fires it becomes a reminder, a turn in the bot's chat, or a thread. */
 export type Routine = {
   id: string;
   botId: BotId;
   title: string;
   goal: string;
   schedule: Schedule;
+  /** The IANA zone its times are in ("Europe/London"); unset: the user's (Owner.timeZone). */
+  timeZone?: string;
   enabled: boolean;
   nextRunAt?: number;
   lastRunAt?: number;
+  /** Its last run was a late one that took the place of the time after it (routines.ts tick), so the next missed one isn't put off either. */
+  lateRun?: boolean;
+  /**
+   * Its times the user skipped (routines.ts skipRoutine): each one of its own coming times, sorted. It
+   * doesn't run then; nextRunAt is the first time it isn't skipping. Pausing it, or changing when it runs,
+   * clears them; each goes once its time has passed.
+   */
+  skips?: number[];
   /** Where its task runs (as the user asked); auto lets Bops decide each time. */
   where?: "auto" | "cloud" | "mac";
   /** A plain reminder: this message is sent to the user at the time, and no computer is used. */
   reminder?: string;
   /** Set up by text from the user's phone: the reminder, or the task's result, is texted to them too. */
   textTo?: { botId: string; to: string };
+  /**
+   * How a run that isn't a reminder works: "chat" is a turn in the bot's chat with its tools (web search,
+   * reading pages, email, apps, memory) and no computer, cheap and quick; "task" (also when unset, as
+   * routines from before are) starts a thread on a computer.
+   */
+  run?: "chat" | "task";
+  /** Quiet: a run that finds nothing that needs the user posts nothing and sends nothing (the bot answers NOTHING). */
+  quiet?: boolean;
+  /** Where each run's result goes besides the chat. */
+  deliverTo?: Delivery;
+  /** A procedure (Procedure.id) each run follows. */
+  procedure?: string;
+  /** How the last run went. */
+  last?: RoutineRun;
+  /**
+   * A meeting routine (before_event): the meetings starting before this moment (epoch ms) were handled
+   * by a run that finished. The next run starts its window here (cloud/schedule.ts eventWindow).
+   */
+  eventsThrough?: number;
+  /**
+   * Set up on a turn someone else started (an email, a text or a call from outside Bops): who it came
+   * from ("an email from desk@hotel.example"). Such a routine runs as a task in the cloud, marked as from
+   * outside (Session.fromOutside), never as a chat run with the user's data; its reminder is a note, not
+   * the bot's own words; and the user sees who set it up.
+   */
+  fromOutside?: string;
+  /** The starter it was made from (lib/routine-catalog.ts), when it was one. */
+  source?: RoutineSource;
+  /** Tags it sorts what it reads with (the defaults and Workspace.tags), as its bot is told. */
+  tags?: string[];
 };
+
+/** A one-off whose time has passed: done. Run now before then doesn't finish it (it can still be paused and resumed). */
+export const onceDone = (r: Routine, now = Date.now()) => !r.enabled && r.schedule.kind === "once" && r.schedule.at <= now;
+
+/**
+ * A routine's run going right now, as far as the app can tell: its thread is still running, or a chat
+ * run began less than 15 minutes ago (one takes a minute or two). A record a restart or a quit left
+ * "running" is never changed (it may be another Mac's, still running there), and it stops counting as
+ * running by itself: a thread's run once its thread isn't running anymore, a chat run after 15 minutes.
+ * So it never locks Run now for long, and the routine's next run replaces it.
+ */
+export const runningNow = (r: Routine, sessions: Session[], now = Date.now()) =>
+  r.last?.status === "running" && (r.last.sessionId ? sessions.some((s) => s.id === r.last!.sessionId && live(s)) : now - r.last.at < 15 * 60_000);
+
+/**
+ * A procedure, from before skills: how a bot did one kind of job, private to it. Each is moved into its
+ * workspace's skills (lib/server/workspace-skills.ts adoptProcedures) and kept in proceduresBackup.
+ */
+export type Procedure = {
+  id: string;
+  botId: BotId;
+  /** A short name for the kind of job: "Weekly invoice summary". */
+  name: string;
+  /** When it applies, in one line: "When the user sends an invoice CSV and asks for a summary". */
+  whenToUse: string;
+  /** What to do, in order, as plain numbered lines. */
+  steps: string;
+  /** What went wrong before or is easy to get wrong, as plain lines. Empty when nothing yet. */
+  pitfalls?: string;
+  createdAt: number;
+  updatedAt: number;
+  /** The chat (and threads) it was learned from. */
+  from?: { chatId: string; sessionIds?: string[] };
+  /** How many times a bot read it for a job, and when it last did. */
+  uses?: number;
+  usedAt?: number;
+};
+
+/** A skill's name as compared (and a procedure's before it): case, spacing and dashes (a bot writes them as commas) don't count. */
+export const procedureKey = (s: string) =>
+  s
+    .replace(/[ \t]*[—–][ \t]*/g, ", ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
 
 /**
  * You've taken control of a bot's screen (`display`), or of the Chrome a task of the bot's has of its
  * own on your Mac (`macScreen`, Session.macScreen); the bot is paused there until you hand it back.
+ * `terminal`: you opened the thread's Claude Code in a terminal on that screen (sessions.ts openInTerminal),
+ * and `paused` it as it worked; the screen is yours until you reply in the thread or hand it back.
  */
-export type Takeover = { botId: BotId; sessionId?: string; since: number } & ({ display: number; macScreen?: undefined } | { macScreen: number; display?: undefined });
+export type Takeover = { botId: BotId; sessionId?: string; since: number; terminal?: { paused?: true } } & ({ display: number; macScreen?: undefined } | { macScreen: number; display?: undefined });
 
 export type Blocker = "sign_in" | "two_factor" | "captcha" | "payment" | "error";
 export const BLOCKER_LABEL: Record<Blocker, string> = {
@@ -506,7 +919,12 @@ export type ScreenRead = {
 };
 
 /** The person this install of Bops works for: what the bots call them, and what they should know about them (Settings → You). */
-export type Owner = { name: string; about?: string };
+export type Owner = {
+  name: string;
+  about?: string;
+  /** Their IANA time zone ("America/New_York"), kept by the Mac app, so routines run at their local times wherever they run. */
+  timeZone?: string;
+};
 
 export type AppState = {
   /** Who the bots work for. Empty until set in Settings. */
@@ -516,6 +934,25 @@ export type AppState = {
   messages: Message[];
   sessions: Session[];
   routines: Routine[];
+  /**
+   * How each bot did the kinds of jobs it was shown, from before skills (Procedure). Each is moved into
+   * its workspace's skills (lib/server/workspace-skills.ts adoptProcedures) and the list is emptied; what was
+   * moved is kept in `proceduresBackup`.
+   */
+  procedures?: Procedure[];
+  proceduresBackup?: Procedure[];
+  /**
+   * Moving each workspace onto an Orgo workspace of its own (lib/server/workspaces.ts
+   * migrateWorkspacesToOrgo): the step it got to, the Orgo workspaces it made (for a rollback), the
+   * default's name still waiting for every app to be new, and when it was done. Saved after every step,
+   * so a stop resumes.
+   */
+  orgoMigration?: OrgoMigration;
+  /**
+   * When the move onto Orgo workspaces was undone (revertWorkspaceMigration): from then on this app keeps
+   * every workspace's computers in the one "bops" project and never runs the move again by itself.
+   */
+  orgoMigrationRevertedAt?: string;
   host: Host;
   takeover?: Takeover;
   /** Latest read of each watched screen, keyed `${botId}:${display}`. */
@@ -529,6 +966,8 @@ export type AppState = {
   watches?: Watch[];
   /** Logins bots can sign in with. Only what's safe to show is here; secrets live in the Keychain. */
   vault?: VaultLogin[];
+  /** The brains the user added for their bots (Brain, lib/server/brains.ts). Bops agent is every bot without one. */
+  brains?: Brain[];
   /** The user's own Mac, where bots can work in a Chrome of their own. */
   mac?: MacState;
   /** The user's real app accounts, connected through Composio (lib/server/composio.ts). Several per app is fine. */
@@ -586,6 +1025,12 @@ export type AppState = {
    * the plan (GET /api/plan, /api/account) shows credit again. Unset otherwise.
    */
   credits?: { out: boolean; at: number };
+  /**
+   * A Connected App (or a vault key) just finished connecting for a bot, and the window offers that bot's
+   * starter routines for it (GET /api/routines/suggestions). One at a time; cleared once answered or
+   * dismissed (POST /api/routines/suggestions, /api/routines/suggestions/dismiss).
+   */
+  suggest?: { app: string; botId: BotId; at: number };
   /** What running Bops cost, as it happened (lib/server/usage.ts); the account page totals it. */
   usage?: UsageEvent[];
   /** The Orgo user whose account the bots' computers are in (lib/server/orgo-sign-in.ts adoptComputers). */
@@ -697,6 +1142,17 @@ export type AppAccount = {
   at: number;
   /** When a bot last used it (lib/server/composio.ts runAppAction), for the Vault's "not used lately". */
   usedAt?: number;
+  /**
+   * The workspace it was connected in: its bots have it by default (levelOf). Unset: written by a build
+   * from before that default (v0.0.28 and older, or a Mac still on one), so only the bots given it have it.
+   */
+  workspaceId?: string;
+  /**
+   * Connected before every bot had every app by default (lib/server/store.ts set its workspace when it
+   * loaded it), or found in Composio connected where Bops didn't see who was picked for it (syncApps): only
+   * the bots the user gave it may use it, as there.
+   */
+  onlyGiven?: boolean;
 };
 
 /** An account being connected: its sign-in page is open, and Bops waits for it to finish. */
@@ -709,8 +1165,13 @@ export type AppConnecting = {
   error?: string;
   at: number;
   replaces?: string;
-  /** Bots that get access once it's connected (picked when connecting), and how much. */
-  grant?: { bots: BotId[]; level: AppLevel };
+  /**
+   * Who may use it once it's connected (picked when connecting), and how much: the bots picked get
+   * `level`, and the other bots of `workspaceId` (the workspace it was picked in) get none. `check`: How
+   * often one of them looks at it (lib/server/routine-suggestions.ts makeCheck), a routine made once it's
+   * connected; unset is only when asked.
+   */
+  grant?: { bots: BotId[]; level: AppLevel; workspaceId?: string; check?: Schedule };
 };
 
 /** What a bot may do in an account: read, or read and act (anything that sends, changes or pays still asks the user first). */
@@ -719,6 +1180,57 @@ export const APP_LEVELS: { id: AppLevel; name: string; hint: string }[] = [
   { id: "read", name: "Read only", hint: "Can look things up. Can't change anything." },
   { id: "act", name: "Read & act", hint: "Can also draft and make changes. Asks you before it sends, posts, deletes or pays." },
 ];
+
+/** What the user can set for one bot in one account (Bot.access): a level, or "none" for no access. */
+export type AppAccess = AppLevel | "none";
+
+/**
+ * Connections that put bots somewhere rather than apps they use: Bops' Slack app ("slackbot"), how bots
+ * get into Slack (lib/server/channels.ts). No bot gets one by default, only when the user gives it.
+ */
+export const CHANNEL_APPS = new Set(["slackbot"]);
+
+/**
+ * Whether the bots of an account's workspace have it by default: not one from before that default (no
+ * workspace, or AppAccount.onlyGiven), which is only the bots' the user gave it.
+ */
+export const openToTeam = (a: Pick<AppAccount, "workspaceId" | "onlyGiven">) => !!a.workspaceId && !a.onlyGiven;
+
+/**
+ * What a bot may do in one account: what the user set for it (Bot.access), else the default, Read & act,
+ * for every bot of the account's workspace (bots made later too). A bot of another workspace, a channel
+ * app (CHANNEL_APPS), or an account from before that default (openToTeam) has no default. Null: no access.
+ */
+export function levelOf(b: Pick<Bot, "access" | "workspaceId">, a: Pick<AppAccount, "id" | "app" | "workspaceId" | "onlyGiven">): AppLevel | null {
+  const set = b.access?.[a.id];
+  if (set === "read" || set === "act") return set;
+  if (set === "none" || CHANNEL_APPS.has(a.app) || !openToTeam(a) || workspaceOf(a) !== workspaceOf(b)) return null;
+  return "act";
+}
+
+/** Whether a bot's access to an account is the default (the user didn't set it for this bot). */
+export const accessIsDefault = (b: Pick<Bot, "access">, a: Pick<AppAccount, "id">) => b.access?.[a.id] === undefined;
+
+/**
+ * One use of an app account or an API key by a bot, or a thread of its (lib/server/access-sync.ts): which
+ * one, the action (GMAIL_SEND_EMAIL, "GET /v1/balance"), where it ran, and how it ended. `approvedBy`: who
+ * said yes to it (the user, or Bops itself for a low risk one or "Just do it"); unset when it needed no yes.
+ */
+export type AccessUse = {
+  bot: BotId;
+  kind: "app" | "key";
+  target: string;
+  targetName: string;
+  action: string;
+  via: "chat" | "thread" | "routine" | "call";
+  viaId?: string;
+  outcome: "ok" | "failed" | "refused" | "waiting";
+  approvedBy?: "user" | "auto";
+  at: number;
+};
+
+/** The last time each account or key was used (GET /api/apps/log), by its target: which bot, and when. */
+export type LastUses = Record<string, { bot: BotId; at: number }>;
 
 /** Where a bot can be added like a teammate. Slack goes through Composio; Telegram and Discord are the bot's own accounts there. */
 export type ChannelKind = "slack" | "telegram" | "discord";
@@ -813,7 +1325,11 @@ export type Watch = {
    * was held for a "While you were busy" message.
    */
   alert?: { text: string; at: number; level?: "now" | "quiet" | "later" };
-  /** What Bops already told the user about (newest last), so the same DM never pings twice. */
+  /**
+   * What Bops told the user about (newest last, the last 30). A screen or a Mac window never tells the
+   * same words twice (the same DM never pings twice); a web page only skips the words its alert still
+   * shows, so a status that comes back is told again.
+   */
   told?: string[];
   /** When Jev last read the page (it only reads when the page changed). */
   readAt?: number;
@@ -826,7 +1342,57 @@ export type Watch = {
   target?: string;
   /** The screen shows something else right now (another conversation, page or view): no alerts until it's back. */
   away?: boolean;
+  /** The starter it was made from (lib/routine-catalog.ts), when it was one. */
+  source?: RoutineSource;
+  /**
+   * A web page watched with no screen (then `display` is 0): Bops fetches `url` every `everyMin` minutes,
+   * keeps a fingerprint of every line with what's certainly noise taken out (a "5m ago", an "Updated 3:45
+   * PM": `digests`, in order, and the page's `hash`; cloud/page-diff.ts) and the text of some lines
+   * (`lines`, capped: the ones that changed lately first, so a model can see what a new line replaced),
+   * and asks a model only when lines were added (a line that went and came back is added too). `error`
+   * and `failures`: the last fetches failed, or a web page came back with no text (it backs off). `seen`
+   * (lines that went lately) and `odd` (reads that looked nothing like the page): from older builds;
+   * never set now, only cleared.
+   */
+  page?: {
+    url: string;
+    everyMin: number;
+    checkedAt?: number;
+    changedAt?: number;
+    hash?: string;
+    digests?: string[];
+    seen?: string[];
+    lines?: string[];
+    error?: string;
+    failures?: number;
+    odd?: number;
+    /** Read in a browser at the last look, since the page draws itself or checks for a human (lib/server/web-render.ts). */
+    via?: "browser";
+  };
+  /** Paused by the user: not looked at until resumed. */
+  paused?: boolean;
 };
+
+/**
+ * Whether a bot message posted while a turn that came by text or from Slack, Telegram or Discord ran is
+ * that turn's own, to send back there: its words, or the result of a thread it started (`started`). A
+ * routine's run that happened meanwhile isn't (it goes where the routine sends it, never into that
+ * conversation or twice), unless that turn asked for it (Run now); nor is an older thread's result.
+ */
+export const turnsOwn = (m: Message, started: { id: string }[]) => (!m.routine || !!m.routine.manual) && (!m.resultOf || started.some((s) => s.id === m.resultOf));
+
+/**
+ * A routine's thread that finished with NOTHING: a quiet run that found nothing for the user, so it posted
+ * nothing (lib/server/routines.ts isNothing). Lists of threads leave it out, in the app and on the server.
+ */
+export const quietNothing = (s: Session) => !!s.routineId && s.status === "done" && /^\s*NOTHING\.?\s*$/i.test(s.answer ?? "");
+
+/** A watch on a bot's screen (not a window on the user's Mac, not a web page with no screen). */
+export const isScreenWatch = (w: Watch) => !w.mac && !w.page;
+
+/** How often a web page watch is fetched, in minutes: the default, and the least. */
+export const PAGE_WATCH_DEFAULT_MIN = 30;
+export const PAGE_WATCH_MIN_MIN = 5;
 
 export const MAX_SCREENS = 4;
 /** Created screens first; the boot screen (with Orgo's own desktop) last. */
@@ -880,6 +1446,27 @@ export function computerCheckMs(status: string | undefined, { visible, inUse }: 
   if (!computerAsleep(status)) return 8000;
   return inUse ? 2000 : 60_000;
 }
+
+export type OrgoMigration = {
+  /** 1: the first build, which moved computers (`moves`, `pending` may still be in a state from it, and are ignored). 2: nothing moves. */
+  v: number;
+  step: string;
+  /** Orgo workspaces made by the move, for a rollback (deleted when empty). */
+  created: string[];
+  /** A workspace renamed because the user's Orgo already had that name: shown until the user dismisses it. */
+  renamed?: { wsId: string; from: string; to: string }[];
+  /**
+   * The default workspace is `to` here, and its Orgo project keeps the name "bops" until every Bops app on
+   * the account is new enough (orgo.ts bopsAppsGate); `reason` is the gate's last answer, `checkedAt` when
+   * it was asked, `at` when the user gave the name (a wish kept before `at` was goes by `checkedAt`). The
+   * default's name here is `to` for as long as it waits (workspaces.ts holdDefaultName puts it back when
+   * another Mac's copy or an older one brings "bops" back). Tried again at each start, sign-in and names
+   * sync (workspaces.ts retryDefaultRename); gone once the project has the name, or once the project was
+   * renamed on orgo.ai after `at` (that name wins).
+   */
+  defaultRename?: { to: string; reason: string; checkedAt: string; at?: string };
+  doneAt?: string;
+};
 
 /** The chat id for talking to one bot directly. */
 export const botChatId = (botId: BotId) => `bot:${botId}`;

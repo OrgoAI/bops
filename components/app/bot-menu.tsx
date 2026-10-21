@@ -117,7 +117,7 @@ export function BotMenu({ state, bot: b, x, y, onClose, actions }: { state: AppS
         <button role="menuitem" onClick={go(() => actions.onNewTask(b.id))} className={row}>
           <span className="flex-1">New task for {b.name}…</span>
         </button>
-        <button role="menuitem" onClick={go(() => actions.onProfile(b.id, "details"))} className={row}>
+        <button role="menuitem" onClick={go(() => actions.onProfile(b.id, "routines"))} className={row}>
           <span className="flex-1">Routines</span>
           <span className="truncate text-[12px] text-[#9A9A98]">{routines.length ? `${routines.filter((r) => r.enabled).length} on` : "None yet"}</span>
         </button>

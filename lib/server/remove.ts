@@ -1,9 +1,14 @@
 import "server-only";
-import { botChatId, live, workspaceOf } from "@/lib/types";
+import { botChatId, freeComputerOnDelete, live, MAIN_WORKSPACE, workspaceOf } from "@/lib/types";
 import { dropGuestKey, resetComputer, stopSession } from "./sessions";
 import { bot, getState, session, update } from "./store";
 import { stopWatch } from "./watches";
 import { deleteInboxes } from "./mail";
+import { dropBotFromSkills } from "./workspace-skills";
+import { DEFAULT_UNDELETABLE, deleteOrgoWorkspace, WorkspaceError } from "./workspaces";
+import { orgo as orgoApi, OrgoError, perWorkspaceProjects } from "./orgo";
+import { routinesRemovedInWorkspace } from "./routine-sync";
+import { brainsOf, removeBrain } from "./brains";
 
 /** Delete one message from a chat. */
 export function deleteMessage(messageId: string) {
@@ -28,7 +33,8 @@ export function deleteThread(sessionId: string) {
 
 /**
  * Delete a bot: stop its work, stop watching its screens, delete its own computer if it has one
- * (only ever one in the Bops workspace; a bot that shares the main bot's leaves that one alone), then remove it with its chat, threads and routines. Group chats keep their
+ * (only ever one in the Bops workspace; a bot that shares the main bot's leaves that one alone), then remove it with its chat, threads, routines and
+ * the skills only it had (a skill other bots have too stays theirs). Group chats keep their
  * history without it, unless only one bot is left in them. The main bot can't be deleted.
  */
 export async function deleteBot(botId: string, withWorkspace = false) {
@@ -44,6 +50,9 @@ export async function deleteBot(botId: string, withWorkspace = false) {
   // Its email inboxes go too (they count against the AgentMail plan).
   await deleteInboxes(b);
   const chatId = botChatId(botId);
+  const wsId = workspaceOf(b);
+  const hadRoutines = getState().routines.some((r) => r.botId === botId);
+  dropBotFromSkills(botId, workspaceOf(b));
   update((state) => {
     state.bots = state.bots.filter((x) => x.id !== botId);
     state.chats = state.chats
@@ -55,23 +64,78 @@ export async function deleteBot(botId: string, withWorkspace = false) {
     state.messages = state.messages.filter((m) => chats.has(m.chatId));
     state.sessions = state.sessions.filter((s) => s.botId !== botId);
     state.routines = state.routines.filter((r) => r.botId !== botId);
+    state.procedures = state.procedures?.filter((p) => p.botId !== botId);
     for (const key of Object.keys(state.screens ?? {})) if (key.startsWith(`${botId}:`)) delete state.screens![key];
     if (state.takeover?.botId === botId) state.takeover = undefined;
   });
+  // Its routines go from the workspace's Orgo copy too (the bot is gone, so by its workspace).
+  if (hadRoutines) routinesRemovedInWorkspace(wsId);
 }
 
-/** Delete a workspace and its whole team (their computers too). The last workspace stays. */
+/**
+ * Delete a workspace and its whole team (their computers too), and its Orgo workspace with everything in it,
+ * once the user confirmed what goes (workspaces.ts deletePreview). The default workspace stays, and so does
+ * the last one. Orgo first, in an order that never leaves it half deleted: the Orgo workspace (orgo-web
+ * refuses before it deletes anything, so a refusal throws with the workspace still here, whole, computers
+ * and all), then the team's computers outside it (most are in the default's "bops" project, since nothing
+ * moved; one that went with the project is already gone, and a failure here leaves the project gone, which
+ * Delete again takes as done and goes on). The free Bops computer stays when another workspace's main bot
+ * works on it or has it (freeComputerOnDelete): it passes to that one instead. Only then is it taken off
+ * this Mac.
+ */
 export async function deleteWorkspace(workspaceId: string) {
+  const gone = (getState().workspaces ?? []).find((w) => w.id === workspaceId);
+  if (!gone) return;
+  if (workspaceId === MAIN_WORKSPACE) throw new WorkspaceError(DEFAULT_UNDELETABLE);
   const left = (getState().workspaces ?? []).filter((w) => w.id !== workspaceId);
   if (left.length === 0) throw new Error("You need at least one workspace");
   const team = getState().bots.filter((b) => workspaceOf(b) === workspaceId);
+  // Its brains first, while its bots' computers are still there: each signs out and its folder goes on them.
+  for (const x of brainsOf(workspaceId)) removeBrain(x.id);
   // The main bot last: the others' computers were cloned from its computer.
-  for (const b of [...team.filter((x) => !x.isMain), ...team.filter((x) => x.isMain)]) await deleteBot(b.id, true);
+  const order = [...team.filter((x) => !x.isMain), ...team.filter((x) => x.isMain)];
+  const orgo = !!gone.orgoProjectId && (await perWorkspaceProjects().catch(() => null)) === true;
+  if (orgo) await deleteOrgoWorkspace(gone);
+  await passFreeComputer(workspaceId);
+  for (const b of order) if (bot(b.id)?.computerId) await resetComputer(b.id);
+  for (const b of order) await deleteBot(b.id, true);
   update((state) => {
     state.workspaces = left;
     state.chats = state.chats.filter((c) => c.workspaceId !== workspaceId);
     const chats = new Set(state.chats.map((c) => c.id));
     state.messages = state.messages.filter((m) => chats.has(m.chatId));
     if (state.workspace === workspaceId) state.workspace = left[0].id;
+  });
+}
+
+/**
+ * The free Bops computer a main bot of the workspace being deleted holds, kept when other workspaces' bots
+ * work on it: let go of here, so deleting the team never deletes it, and taken up by the main bot that
+ * worked on it (as plan.ts holdFree does), which its bots then work on. Unless it went with the Orgo
+ * workspace just deleted (made in its project): then it is gone, and the heir gets one again with its next
+ * task. Orgo not saying keeps it, so a later setup finds out.
+ */
+async function passFreeComputer(workspaceId: string) {
+  const free = freeComputerOnDelete(getState().bots, workspaceId);
+  if (!free?.kept) return;
+  const there = free.heir
+    ? await orgoApi.computer(free.id).then(
+        () => true,
+        (e: unknown) => !(e instanceof OrgoError && (e.status === 403 || e.status === 404)),
+      )
+    : true;
+  update(() => {
+    if (free.heir && there && getState().bots.includes(free.heir) && !free.heir.computerId) {
+      free.heir.computerId = free.id;
+      free.heir.freeComputer = true;
+      free.heir.computer = undefined;
+      free.heir.computerRam = undefined;
+      free.heir.computerStatus = free.holder.computerStatus;
+      free.heir.tailnet = free.holder.tailnet;
+    }
+    free.holder.computerId = undefined;
+    free.holder.freeComputer = undefined;
+    free.holder.computerStatus = "none";
+    free.holder.tailnet = undefined;
   });
 }

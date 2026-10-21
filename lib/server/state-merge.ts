@@ -67,7 +67,10 @@ export function fromShared(blob: Blob, device: string): Blob {
  * - lists of things with ids (bots, chats, sessions, routines, watches, workspaces, accounts, vault…)
  *   go thing by thing: one changed here keeps this Mac's copy, one removed on either side (and not
  *   changed on the other) goes, one added on either side stays; this Mac's order, the others' new
- *   ones after;
+ *   ones after. A workspace changed on both sides goes field by field (each field changed on both is
+ *   this Mac's), so a rename on one Mac and a names sync on the other (workspaces.ts noteOrgoName,
+ *   which only notes when Orgo last changed its project) both stay, and the old name never comes back
+ *   over the new one;
  * - usage is both ledgers together; macs, and any other object, key by key;
  * - anything else is this Mac's.
  */
@@ -90,13 +93,16 @@ function mergeValue(key: string, b: unknown, m: unknown, t: unknown, top: boolea
   if (same(t, b)) return m;
   // Both changed it.
   if (top && key === "usage" && Array.isArray(m) && Array.isArray(t)) return usageOf(m, t);
-  if ((withIds(m) || withIds(t) || withIds(b)) && (Array.isArray(m) || m === undefined) && (Array.isArray(t) || t === undefined))
-    return mergeById(Array.isArray(b) ? b : [], (m as { id: string }[]) ?? [], (t as { id: string }[]) ?? []);
+  if ((withIds(m) || withIds(t) || withIds(b)) && (Array.isArray(m) || m === undefined) && (Array.isArray(t) || t === undefined)) {
+    const both = top && key === "workspaces" ? (was: Blob, x: Blob, y: Blob) => mergeObject(was, x, y) : undefined;
+    return mergeById(Array.isArray(b) ? b : [], (m as { id: string }[]) ?? [], (t as { id: string }[]) ?? [], both);
+  }
   if (isObject(m) && isObject(t)) return mergeObject(isObject(b) ? b : {}, m, t);
   return m;
 }
 
-function mergeById(base: { id: string }[], mine: { id: string }[], theirs: { id: string }[]) {
+/** `both`: how one changed on both sides goes together; without it, this Mac's copy. */
+function mergeById(base: { id: string }[], mine: { id: string }[], theirs: { id: string }[], both?: (was: Blob, mine: Blob, theirs: Blob) => Blob) {
   const b = new Map(base.map((x) => [x.id, x]));
   const t = new Map(theirs.map((x) => [x.id, x]));
   const m = new Map(mine.map((x) => [x.id, x]));
@@ -104,7 +110,7 @@ function mergeById(base: { id: string }[], mine: { id: string }[], theirs: { id:
   for (const x of mine) {
     const was = b.get(x.id);
     const other = t.get(x.id);
-    if (other) out.push(was && same(x, was) ? other : x);
+    if (other) out.push(was && same(x, was) ? other : was && both && !same(other, was) ? (both(was as Blob, x as Blob, other as Blob) as { id: string }) : x);
     // Gone on their side: gone here too, unless this Mac changed it since (or added it).
     else if (!was || !same(x, was)) out.push(x);
   }

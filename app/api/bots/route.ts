@@ -1,7 +1,7 @@
 import { createBot, renameBot, setComputer } from "@/lib/server/bots";
 import { deleteBot } from "@/lib/server/remove";
 import { requestInbox } from "@/lib/server/mail";
-import type { AppLevel, Effort } from "@/lib/types";
+import { MAX_PERSONA_CHARS, type AppAccess, type Effort } from "@/lib/types";
 import { bot, update } from "@/lib/server/store";
 import { notReady } from "@/lib/server/ready";
 import { fromBopsWindow } from "@/lib/server/ui-token";
@@ -27,14 +27,18 @@ export async function POST(request: Request) {
   return Response.json(made);
 }
 
-/** Give or take access to an account (a null level takes it away), rename the bot, set how hard it thinks, where it works, whether it asks first and whether it has business data, or get it an email. */
+/**
+ * Set the bot's access to an account (read, act or none; null puts it back to the default), rename it, set how hard it thinks,
+ * where it works, whether it asks first, whether it has business data and how it should work (persona),
+ * or get it an email.
+ */
 export async function PATCH(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
   if (unready) return unready;
   const body = (await request.json()) as {
     botId?: string;
-    /** Access to one of the user's app accounts: read, act, or null for none. */
-    access?: { account: string; level: AppLevel | null };
+    /** Access to one of the user's app accounts: read, act, none, or null for the default (levelOf). */
+    access?: { account: string; level: AppAccess | null };
     effort?: Effort;
     runsOn?: "auto" | "cloud" | "mac";
     /** "Just do it": act in apps and email without asking first (see Bot.autoApprove). */
@@ -47,6 +51,8 @@ export async function PATCH(request: Request) {
     computer?: "shared" | "own";
     /** Get this bot an email (Max: up to 5; see requestInbox). */
     email?: true;
+    /** "How I work" (Bot.persona): trimmed, cut to MAX_PERSONA_CHARS; empty clears it. */
+    persona?: string;
   };
   const b = body.botId ? bot(body.botId) : undefined;
   if (!b) return Response.json({ error: "no such bot" }, { status: 404 });
@@ -63,14 +69,16 @@ export async function PATCH(request: Request) {
     if ("error" in r) return Response.json(r, { status: 400 });
   }
   update(() => {
-    if (body.access) {
-      if (body.access.level === "read" || body.access.level === "act") (b.access ??= {})[body.access.account] = body.access.level;
+    if (body.access && typeof body.access.account === "string") {
+      const level = body.access.level;
+      if (level === "read" || level === "act" || level === "none") (b.access ??= {})[body.access.account] = level;
       else if (b.access) delete b.access[body.access.account];
     }
     if (body.effort && ["auto", "low", "medium", "high"].includes(body.effort)) b.effort = body.effort;
     if (body.runsOn && ["auto", "cloud", "mac"].includes(body.runsOn)) b.runsOn = body.runsOn;
     if (typeof body.autoApprove === "boolean") b.autoApprove = body.autoApprove || undefined;
     if (typeof body.dataOff === "boolean") b.dataOff = body.dataOff || undefined;
+    if (typeof body.persona === "string") b.persona = body.persona.trim().slice(0, MAX_PERSONA_CHARS).trim() || undefined;
   });
   return Response.json({ ok: true });
 }

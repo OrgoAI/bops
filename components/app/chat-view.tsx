@@ -2,8 +2,8 @@
 
 import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
-import { createContext, Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BLOCKER_ASK, live, pairChatId, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
+import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { BLOCKER_ASK, BRAINS_ON, brainOf, live, pairChatId, threadRunner, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Bot, type Chat, type Message, type Session, type Tapback } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
 import { OpenLink } from "./panel-tabs";
@@ -13,6 +13,11 @@ import { MacIcon } from "./mac-tab";
 import { AttachmentTray, MessageImages, useAttachments } from "./attachments";
 import { ComposerInput } from "./composer-input";
 import { MicButton } from "./mic-button";
+import { Fold } from "./fold";
+import { SaveSkillDialog } from "./skill-dialog";
+import { undash } from "./side-group";
+import { ApiAsk, apiAskOf, apiCallOf, ApiNote } from "./keys";
+import { BrainBadge, brainSignIn, openInTerminal, threadBadge } from "./brains";
 import { ChatAvatar, chatName, clockTime, needsYou, post, StatusIcon, teamOf, useNow } from "./ui";
 
 /** Light markdown for bot text: **bold** and [links](url). */
@@ -186,6 +191,8 @@ export function ChatView({
   call,
   onCall,
   callSlot,
+  prefill,
+  onPrefilled,
 }: {
   state: AppState;
   chat: Chat;
@@ -205,8 +212,36 @@ export function ChatView({
   onCall: (botId: string) => void;
   /** Where the call bar sits while you're in the caller's chat (the app draws it there). */
   callSlot: (el: HTMLElement | null) => void;
+  /**
+   * Words asked to be in chat `chatId`'s message box (bops-app.tsx askBot), to change and send: put in
+   * once, after what's typed already, on a line of its own, and the box focused. `at` tells one ask from
+   * the next, so it's never put in again; `onPrefilled` says it's in.
+   */
+  prefill?: { chatId: string; text: string; at: number } | null;
+  onPrefilled?: () => void;
 }) {
   const [draft, setDraft] = useState("");
+  // The last ask put in the box (its prefill.at): in once, while this chat shows, then left alone.
+  const [prefilled, setPrefilled] = useState<number | null>(null);
+  if (prefill && prefill.chatId === c.id && prefilled !== prefill.at) {
+    setPrefilled(prefill.at);
+    const add = prefill.text;
+    if (add) setDraft((d) => (d.trim() ? `${d.trimEnd()}\n${add}` : add));
+  }
+  // Kept current for the effect below, which runs once for each ask.
+  const prefilledDone = useRef(onPrefilled);
+  useLayoutEffect(() => {
+    prefilledDone.current = onPrefilled;
+  });
+  useEffect(() => {
+    if (prefilled === null) return;
+    const box = document.getElementById("composer");
+    if (box instanceof HTMLTextAreaElement) {
+      box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
+    }
+    prefilledDone.current?.();
+  }, [prefilled]);
   // The message an inline reply is to (iMessage's swipe-to-reply), and the reply view that's open.
   const [replyingTo, setReplying] = useState<Message | null>(null);
   const [repliesOpen, setRepliesOpen] = useState<string | null>(null);
@@ -255,6 +290,10 @@ export function ChatView({
   };
   // Two bots' conversation, open over the chat ("Asked ● Sam").
   const [pair, setPair] = useState<{ id: string; focus?: string } | null>(null);
+  // "Save as skill" from the chat's menu: the bot rereads this chat and drafts one (skill-dialog.tsx).
+  const [saving, setSaving] = useState<{ botId: string; chatId: string } | null>(null);
+  // Stable, so the dialog's own timers aren't reset by every state poll.
+  const closeSaving = useCallback(() => setSaving(null), []);
   const rowProps = (m: Message) => ({
     replyCount: replyCount.get(m.id) ?? 0,
     root: m.replyTo ? messages.find((x) => x.id === m.replyTo) : undefined,
@@ -269,7 +308,7 @@ export function ChatView({
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: shownChat.current === c.id ? "smooth" : "instant" });
+    el.scrollTo({ top: el.scrollHeight, behavior: shownChat.current === c.id && !matchMedia("(prefers-reduced-motion: reduce)").matches ? "smooth" : "instant" });
     shownChat.current = c.id;
   }, [messages.length, c.typing.length, c.id]);
 
@@ -282,6 +321,8 @@ export function ChatView({
 
   // What the user just sent shows at once, before the server has it (then the real message takes its place).
   const [pending, setPending] = useState<{ id: string; chatId: string; text: string; at: number; previews?: string[] }[]>([]);
+  // When each of the last few messages went, so the real copy can carry on its pending one's motion (arrivalOf).
+  const [sent, setSent] = useState<{ chatId: string; text: string; at: number }[]>([]);
   // Images about to go with the next message (the + button, pasting, or dropping them on the chat).
   const attach = useAttachments();
   const filePicker = useRef<HTMLInputElement>(null);
@@ -298,21 +339,50 @@ export function ChatView({
     const text = draft.trim();
     if (!text && !attaching.length) return;
     const items = attaching;
+    // Every preview in the tray (the failed ones too), let go once the pending copy showing them has gone.
+    const previews = attach.items.map((a) => a.preview);
     setDraft("");
     setReplying(null);
     attach.clear();
     const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now(), previews: items.length ? items.map((a) => a.preview) : undefined };
+    const drop = () => {
+      setPending((p) => p.filter((x) => x.id !== mine.id));
+      previews.forEach((u) => URL.revokeObjectURL(u));
+    };
     setPending((p) => [...p, mine]);
+    setSent((s) => [...s.slice(-19), { chatId: c.id, text, at: mine.at }]);
     // Shows at once; goes once its images have finished uploading (usually they already have).
     const images = (await Promise.all(items.map((a) => a.done))).filter((x) => !!x);
-    if (!text && !images.length) return setPending((p) => p.filter((x) => x.id !== mine.id));
-    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined }).finally(() =>
-      setPending((p) => p.filter((x) => x.id !== mine.id)),
-    );
+    if (!text && !images.length) return drop();
+    await post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: replying?.id, images: images.length ? images : undefined }).finally(drop);
   };
   const filesOf = (d: DataTransfer | null) => [...(d?.files ?? [])].filter((f) => f.type.startsWith("image/"));
   // Sent messages the server's state doesn't have yet.
   const waiting = pending.filter((p) => p.chatId === c.id && !messages.some((m) => m.role === "user" && m.text === p.text && m.at >= p.at - 5000));
+
+  // What was already here when the chat opened just shows; only what arrives while it's open moves
+  // in. Seeded once per chat, during render (an effect would be a frame late), with every message,
+  // not only those drawn, so "Show earlier messages" never animates.
+  const typingKey = (botId: string) => `typing:${botId}:${messages.at(-1)?.id ?? ""}`;
+  const seed = () => new Set([...messages.map((m) => m.id), ...waiting.map((p) => p.id), ...c.typing.map(typingKey), ...appAsks.map((a) => a.id)]);
+  const [opened, setOpened] = useState(() => ({ chat: c.id, seen: seed() }));
+  if (opened.chat !== c.id) setOpened({ chat: c.id, seen: seed() });
+  const seen = opened.seen;
+  const arrivalOf = (m: Message): Arrival | undefined => {
+    if (seen.has(m.id)) return undefined;
+    // The bots' messages and notes rise in, and so do yours sent from your phone or Slack (new here too).
+    if (m.role !== "user" || m.via) return { kind: "rise" };
+    // Sent from here: its pending copy already moved in, so the real one carries on from where that is
+    // (matched the way `waiting` matches it). Anything else of yours, say from the replies view, just shows.
+    const went = sent.findLast((s) => s.chatId === m.chatId && s.text === m.text && m.at >= s.at - 5000);
+    return went ? { kind: "send", since: went.at } : undefined;
+  };
+  // The first reply to your last message, which is what puts "Read" under it.
+  const readBy = messages.slice(lastUserIdx + 1).find((m) => m.role === "bot");
+  // The reply bar folds shut still saying what it was to (the reply itself is gone by then).
+  const [barReply, setBarReply] = useState<Message | null>(null);
+  if (replying && replying !== barReply) setBarReply(replying);
+  const bar = replying ?? (barReply?.chatId === c.id ? barReply : null);
 
   const status = c.typing.length
     ? c.kind === "group"
@@ -352,7 +422,17 @@ export function ChatView({
         </div>
       )}
       {pair && <PairSheet state={state} pairId={pair.id} focusId={pair.focus} onClose={() => setPair(null)} />}
+      {saving && <SaveSkillDialog botId={saving.botId} chatId={saving.chatId} onClose={closeSaving} />}
       <div className="absolute right-5 top-[18px] z-10 flex items-center gap-2">
+        {/* The chat's own menu (a bot's chat, like Call): Save as skill rereads this chat for how the bot did a job. */}
+        {solo && !call && (
+          <MoreMenu
+            key={c.id}
+            label="More"
+            size="chat"
+            items={[{ label: "Save as skill", icon: <SkillIcon />, onClick: () => setSaving({ botId: solo.id, chatId: c.id }) }]}
+          />
+        )}
         {solo && !call && (
           <button
             onClick={() => onCall(solo.id)}
@@ -412,7 +492,7 @@ export function ChatView({
             const gap = !prev || m.at - prev.at > 15 * 60_000;
             return (
               <Fragment key={m.id}>
-                {gap && <div className="self-center py-1.5 text-[12px] leading-4 text-[#9A9A98]">{dayTime(m.at)}</div>}
+                {gap && <div className={`self-center py-1.5 text-[12px] leading-4 text-[#9A9A98] ${seen.has(m.id) ? "" : "motion-rise-in"}`}>{dayTime(m.at)}</div>}
                 <MessageRow
                   m={m}
                   state={state}
@@ -422,16 +502,18 @@ export function ChatView({
                   chipIds={chipsFor(m)}
                   onOpenThread={onOpenThread}
                   onShowScreen={onShowScreen}
+                  arrival={arrivalOf(m)}
                   {...rowProps(m)}
                 />
                 {i + hiddenCount === lastUserIdx && repliedAfterUser && (
-                  <div className="self-end px-1 pb-1 text-[11px] leading-[14px] text-[#9A9A98]">Read {clockTime(m.at)}</div>
+                  <div className={`self-end px-1 pb-1 text-[11px] leading-[14px] text-[#9A9A98] ${readBy && !seen.has(readBy.id) ? "motion-fade-in" : ""}`}>Read {clockTime(m.at)}</div>
                 )}
               </Fragment>
             );
           })}
           {waiting.map((p) => (
-            <div key={p.id} className="flex max-w-[86%] flex-col items-end gap-1 self-end">
+            // Up from the composer as you send it (not again when you come back to the chat before it lands).
+            <div key={p.id} className={`flex max-w-[86%] flex-col items-end gap-1 self-end ${seen.has(p.id) ? "" : "motion-send-in"}`}>
               {p.previews && <MessageImages previews={p.previews} />}
               {p.text && <div className="whitespace-pre-wrap rounded-[18px] bg-[#0A0A0A] px-3.5 py-2 text-[14px] leading-5 text-white [overflow-wrap:anywhere]">{p.text}</div>}
             </div>
@@ -440,8 +522,9 @@ export function ChatView({
             const tb = state.bots.find((x) => x.id === b);
             // Waiting on a teammate's answer: "Asking ● Max…" over the typing dots.
             const asking = c.asking?.[b] ? state.bots.find((x) => x.id === c.asking![b]) : undefined;
+            // Rises in when the bot starts typing; one already typing as the chat opens is just there.
             return (
-              <div key={b} className="flex flex-col gap-1 self-start">
+              <RiseIn key={b} fresh={!seen.has(typingKey(b))} className="flex flex-col gap-1 self-start">
                 {asking && (
                   <span className="flex items-center gap-1.5 pl-3 text-[12.5px] leading-4 text-[#9A9A98]">
                     Asking
@@ -452,12 +535,14 @@ export function ChatView({
               <div className="flex items-end gap-2">
                 {c.kind === "group" && tb && <Mascot botId={tb.id} color={tb.color} size={24} />}
                 <div className="flex items-center gap-[5px] rounded-[18px] bg-[#F2F2F0] px-4 py-[13px]">
-                  <span className="size-[7px] animate-pulse rounded-full bg-[#9A9A98]" />
-                  <span className="size-[7px] animate-pulse rounded-full bg-[#B5B5B2] [animation-delay:150ms]" />
-                  <span className="size-[7px] animate-pulse rounded-full bg-[#D9D9D6] [animation-delay:300ms]" />
+                  {/* A wave, each dot 150 ms behind the last. The delays are a whole 1.2 s wave early, so
+                      no dot sits dark and still before its turn comes. */}
+                  {[0, 150, 300].map((delay) => (
+                    <span key={delay} className="motion-typing-dot size-[7px] rounded-full bg-[#9A9A98]" style={{ animationDelay: `${delay - 1200}ms` }} />
+                  ))}
                 </div>
               </div>
-              </div>
+              </RiseIn>
             );
           })}
         </div>
@@ -480,6 +565,7 @@ export function ChatView({
                   quote
                   pinned
                   onShow={() => (x.display ?? x.lastDisplay) !== undefined ? onShowScreen(x.botId, (x.display ?? x.lastDisplay)!) : onOpenThread(x)}
+                  onShowScreen={onShowScreen}
                   onSomethingElse={() => onOpenThread(x)}
                   onOpen={() => onOpenThread(x)}
                 />
@@ -490,25 +576,33 @@ export function ChatView({
                 </button>
               )}
               {appAsks.map((a) => (
-                <AppApprovalCard key={a.id} state={state} approval={a} />
+                <AppApprovalCard key={a.id} state={state} approval={a} className={seen.has(a.id) ? "" : "motion-rise-in"} />
               ))}
             </div>
           )}
-          {replying && (
-            <div className="mx-2 -mb-px flex items-center gap-2 rounded-t-[16px] bg-[#F7F7F6] px-3.5 py-2 shadow-[0_0_0_1px_#ECECEA]">
-              <ReplyArrow />
-              <span className="min-w-0 flex-1 truncate text-[12.5px] leading-4 text-[#6B6B6B]">
-                Replying to <span className="font-medium text-ink">{replying.role === "user" ? "yourself" : (state.bots.find((x) => x.id === replying.botId)?.name ?? "the bot")}</span>
-                {" · "}
-                {replying.text}
-              </span>
-              <button onClick={() => setReplying(null)} aria-label="Cancel reply" className="flex size-5 items-center justify-center rounded-md text-[#9A9A98] hover:bg-black/[0.06] hover:text-ink">
-                <svg width="9" height="9" viewBox="0 0 12 12">
-                  <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-                </svg>
-              </button>
-            </div>
-          )}
+          {/* Folds open over the composer. Keyed by chat, so switching chats shows it as it is there, with
+              no fold. Relative even while shut (aria-hidden), so it folds away above the scrim, not under it.
+              pt-px keeps its top ring inside the fold's clip; its last row was under the form's anyway. */}
+          <Fold key={c.id} open={!!replying} className="relative">
+            {bar && (
+              <div className="pt-px">
+                <div className="mx-2 -mb-px flex items-center gap-2 rounded-t-[16px] bg-[#F7F7F6] px-3.5 py-2 shadow-[0_0_0_1px_#ECECEA]">
+                  <ReplyArrow />
+                  <span className="min-w-0 flex-1 truncate text-[12.5px] leading-4 text-[#6B6B6B]">
+                    Replying to <span className="font-medium text-ink">{bar.role === "user" ? "yourself" : (state.bots.find((x) => x.id === bar.botId)?.name ?? "the bot")}</span>
+                    {" · "}
+                    {bar.text}
+                  </span>
+                  <button onClick={() => setReplying(null)} aria-label="Cancel reply" className="flex size-5 items-center justify-center rounded-md text-[#9A9A98] hover:bg-black/[0.06] hover:text-ink">
+                    <svg width="9" height="9" viewBox="0 0 12 12">
+                      <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            )}
+          </Fold>
+
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -575,11 +669,15 @@ export function ChatView({
 
       {openReplies && (
         <RepliesView
+          key={openReplies}
           state={state}
           rootId={openReplies}
           messages={messages}
           showSender={c.kind === "group"}
-          onClose={() => setRepliesOpen(null)}
+          onClose={() => {
+            repliesShown = null;
+            setRepliesOpen(null);
+          }}
           onSend={(text) => post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: openReplies })}
           rowProps={rowProps}
           sessionById={sessionById}
@@ -591,6 +689,9 @@ export function ChatView({
     </PairOpen.Provider>
   );
 }
+
+/** The replies sheet showing last: coming back to its chat shows it in place, without its entrance again (closing it clears this). */
+let repliesShown: string | null = null;
 
 /**
  * One inline-reply conversation on its own, like tapping "2 Replies" in Messages: the message it
@@ -626,9 +727,18 @@ function RepliesView({
     end.current?.scrollIntoView({ block: "end" });
   }, [list.length]);
   const typing = state.chats.find((x) => x.id === list[0]?.chatId)?.typing ?? [];
+  // What was here when it opened just shows; a reply that comes in while it's open moves in, and
+  // yours (sent from here, with nothing pending before it) goes up from the composer.
+  const [seen] = useState(() => new Set(list.map((m) => m.id)));
+  const arrivalOf = (m: Message): Arrival | undefined => (seen.has(m.id) ? undefined : { kind: m.role === "user" ? "send" : "rise" });
+  // Opened now (not shown again with its chat): the scrim fades in (its blur stays as it is) and the card comes up from below.
+  const [opening] = useState(() => repliesShown !== rootId);
+  useEffect(() => {
+    repliesShown = rootId;
+  }, [rootId]);
   return (
-    <div className="absolute inset-0 z-20 flex flex-col bg-white/80 px-3 pb-3 pt-[52px] backdrop-blur-md" onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} className="mx-auto flex min-h-0 w-full max-w-[640px] flex-1 flex-col overflow-hidden rounded-[28px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000038]">
+    <div className={`${opening ? "motion-fade-in " : ""}absolute inset-0 z-20 flex flex-col bg-white/80 px-3 pb-3 pt-[52px] backdrop-blur-md`} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className={`${opening ? "motion-sheet-in " : ""}mx-auto flex min-h-0 w-full max-w-[640px] flex-1 flex-col overflow-hidden rounded-[28px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000038]`}>
         <div className="flex items-center gap-2 border-b border-[#F0F0EE] py-3 pl-4 pr-3">
           <ReplyArrow />
           <span className="flex-1 text-[14px] font-semibold leading-[18px]">
@@ -652,6 +762,7 @@ function RepliesView({
                 chipIds={[]}
                 onOpenThread={onOpenThread}
                 onShowScreen={onShowScreen}
+                arrival={arrivalOf(m)}
                 {...rowProps(m)}
                 inReplies
               />
@@ -685,6 +796,84 @@ function RepliesView({
         </form>
       </div>
     </div>
+  );
+}
+
+/** A row of a small menu (the message menu, and the "⋯" ones). */
+const MENU_ITEM = "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-4 hover:bg-[#F2F2F0]";
+
+/**
+ * A round "⋯" button and the small menu it opens under it, out of its right corner: the chat's (next to
+ * Call) and a thread's (next to Stop). A click outside or Esc closes it; Esc closes only it, not the
+ * sheet or page under it.
+ */
+function MoreMenu({ label, size, items }: { label: string; size: "chat" | "sheet"; items: { label: string; icon: React.ReactNode; onClick: () => void }[] }) {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+    };
+    window.addEventListener("keydown", esc, true);
+    return () => window.removeEventListener("keydown", esc, true);
+  }, [open]);
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        aria-label={label}
+        title={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={
+          size === "chat"
+            ? "flex size-11 items-center justify-center rounded-full bg-white shadow-[0_0_0_1px_#E6E6E3,0_8px_20px_-10px_#00000040] hover:shadow-[0_0_0_1px_#C9C9C6,0_8px_20px_-10px_#00000040]"
+            : "flex size-[34px] items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]"
+        }
+      >
+        <svg width={size === "chat" ? 18 : 14} height={size === "chat" ? 18 : 14} viewBox="0 0 16 16" aria-hidden>
+          <circle cx="3.2" cy="8" r="1.35" fill="#0A0A0A" />
+          <circle cx="8" cy="8" r="1.35" fill="#0A0A0A" />
+          <circle cx="12.8" cy="8" r="1.35" fill="#0A0A0A" />
+        </svg>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} onContextMenu={(e) => (e.preventDefault(), setOpen(false))} />
+          <div role="menu" className="motion-menu-in absolute right-0 top-[calc(100%+6px)] z-40 flex w-[184px] origin-top-right flex-col rounded-xl bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040]">
+            {items.map((x) => (
+              <button
+                key={x.label}
+                role="menuitem"
+                onClick={() => {
+                  setOpen(false);
+                  x.onClick();
+                }}
+                className={MENU_ITEM}
+              >
+                {x.icon}
+                {x.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** "Save as skill": steps in a list, with a mark for keeping them. */
+function SkillIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" className="shrink-0 text-[#6B6B6B]" aria-hidden>
+      <path d="M6 4h7.5M6 8h7.5M6 12h5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <circle cx="2.8" cy="4" r="1" fill="currentColor" />
+      <circle cx="2.8" cy="8" r="1" fill="currentColor" />
+      <circle cx="2.8" cy="12" r="1" fill="currentColor" />
+    </svg>
   );
 }
 
@@ -730,7 +919,27 @@ type RowProps = {
   onOpenReplies: () => void;
   /** Drawn inside the replies view: no quote or count, they'd say what's already on screen. */
   inReplies?: boolean;
+  /** New since the chat opened, and how it moves in (undefined: it was already here, so it just shows). */
+  arrival?: Arrival;
 };
+
+/**
+ * How a new message moves in: rising into the list, or, for yours, up from the composer. `since` is
+ * when you sent it, so the real copy picks up where its pending one was instead of starting again.
+ */
+type Arrival = { kind: "rise" } | { kind: "send"; since?: number };
+
+/**
+ * A div that rises in if it's new when it mounts. Decided then, once, so a later render (a poll, a
+ * message landing above it) can't start it again.
+ */
+function RiseIn({ fresh, className, children }: { fresh: boolean; className: string; children: React.ReactNode }) {
+  const [rise] = useState(fresh);
+  return <div className={`${className} ${rise ? "motion-rise-in" : ""}`}>{children}</div>;
+}
+
+/** A tapback's identity: a different one from the same person is a new reaction (it pops in). */
+const reactionKey = (r: NonNullable<Message["reactions"]>[number]) => `${r.by}:${r.type ?? r.emoji}`;
 
 const QUICK_EMOJI = ["🔥", "🙏", "👀", "🎉"];
 
@@ -749,9 +958,19 @@ function lasts(all: Message[]) {
   return v;
 }
 
-function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onOpenThread, onShowScreen, onShowMac, replyCount, root, onReply, onOpenReplies, inReplies }: RowProps) {
+function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onOpenThread, onShowScreen, onShowMac, replyCount, root, onReply, onOpenReplies, inReplies, arrival }: RowProps) {
+  // Decided once, as the row mounts: a poll or a new tapback draws it again but never replays it.
+  // Yours carries on its pending copy's motion (a negative delay starts it partway, or past the end).
+  const [enter] = useState(() =>
+    !arrival ? undefined : arrival.kind === "send" ? { className: "motion-send-in", style: arrival.since ? { animationDelay: `${arrival.since - Date.now()}ms` } : undefined } : { className: "motion-rise-in", style: undefined },
+  );
+  const enterClass = enter?.className ?? "";
+  // What was already here when the row mounted sits still: its tapbacks.
+  const [reactedAtMount] = useState(() => new Set(m.reactions?.map(reactionKey)));
   const [picking, setPicking] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Links open as a tab on the right (a watched web page's "Open page" too).
+  const openLink = useContext(OpenLink);
   // Right-click or long-press opens the message's menu: tapbacks above, Reply / Copy / Delete below.
   const [menu, setMenu] = useState(false);
   const press = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -788,7 +1007,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     >
       {m.reactions.slice(-3).map((r, i) => (
         <span key={r.by} className="pointer-events-auto" style={{ marginLeft: outgoing && i ? -8 : 0, marginRight: !outgoing && i ? -8 : 0 }}>
-          <TapbackBalloon reaction={r.type} emoji={r.emoji} own={r.by === "owner"} side={outgoing ? "left" : "right"} platform="macos" />
+          <TapbackBalloon reaction={r.type} emoji={r.emoji} own={r.by === "owner"} side={outgoing ? "left" : "right"} platform="macos" animateIn={!reactedAtMount.has(reactionKey(r))} />
         </span>
       ))}
     </span>
@@ -837,9 +1056,10 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     setPicking(false);
     setMenu(false);
   };
-  const menuItem = "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-4 hover:bg-[#F2F2F0]";
+  const menuItem = MENU_ITEM;
+  // Both open out of the bubble's corner they hang from: right for yours, left for the bot's.
   const actionMenu = menu && (
-    <div className={`absolute top-[calc(100%+6px)] z-40 flex w-[168px] flex-col rounded-xl bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040] ${outgoing ? "right-0" : "left-0"}`}>
+    <div className={`motion-menu-in absolute top-[calc(100%+6px)] z-40 flex w-[168px] flex-col rounded-xl bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040] ${outgoing ? "right-0 origin-top-right" : "left-0 origin-top-left"}`}>
       {!inReplies && (
         <button
           onClick={() => {
@@ -883,7 +1103,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     <>
       <div className="fixed inset-0 z-30" onClick={close} onContextMenu={(e) => (e.preventDefault(), close())} />
       <div
-        className={`absolute bottom-[calc(100%+6px)] z-40 flex items-center gap-0.5 rounded-full bg-white px-1.5 py-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040] ${outgoing ? "right-0" : "left-0"}`}
+        className={`motion-menu-in absolute bottom-[calc(100%+6px)] z-40 flex items-center gap-0.5 rounded-full bg-white px-1.5 py-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040] ${outgoing ? "right-0 origin-bottom-right" : "left-0 origin-bottom-left"}`}
       >
         {TAPBACKS.map((t) => (
           <button key={t} onClick={() => setReaction({ type: t })} aria-label={t} className={`flex size-[34px] items-center justify-center rounded-full hover:bg-[#F2F2F0] ${mine?.type === t ? "bg-[#0088FF]/15" : ""}`}>
@@ -917,10 +1137,33 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   // A thread a newer one took over shows as that newer one (its id was moved over), so skip leftovers.
   const chips = (chipIds.map(sessionById).filter(Boolean) as Session[]).filter((s) => !s.replacedBy);
   // A heads-up from a watched screen offers to show it, or to have the bot draft a reply right there.
+  // A web page watched with no screen offers the page itself (as a tab here, like a link; ⌘-click: the
+  // browser), and to stop watching it.
   // Only the latest heads-up about a screen keeps its buttons; older ones are just history.
   const latest = m.watch && lasts(state.messages).byWatch.get(m.watch.id) === m.id;
   const watch = latest ? state.watches?.find((w) => w.id === m.watch!.id) : undefined;
-  const watchActions = watch && (
+  const page = watch?.page;
+  const watchActions = watch && page ? (
+    <div className="flex gap-1.5 pl-0.5">
+      <button
+        onClick={(e) => {
+          if (openLink && !(e.metaKey || e.ctrlKey || e.shiftKey)) openLink(page.url);
+          else window.open(page.url, "_blank", "noreferrer");
+          if (watch.alert) void post("/api/watches", { id: watch.id, action: "seen" }, "PATCH");
+        }}
+        title={page.url}
+        className="rounded-full bg-white px-3 py-1 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]"
+      >
+        Open page
+      </button>
+      <button
+        onClick={() => void post(`/api/watches?id=${encodeURIComponent(watch.id)}`, {}, "DELETE")}
+        className="rounded-full bg-white px-3 py-1 text-[12.5px] font-medium leading-4 text-[#6B6B6B] shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#FEF3F2] hover:text-[#B42318]"
+      >
+        Stop watching
+      </button>
+    </div>
+  ) : watch && (
     <div className="flex gap-1.5 pl-0.5">
       <button
         onClick={() => {
@@ -1014,10 +1257,10 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
 
   if (m.role === "user")
     return (
-      <div className="group/msg flex max-w-[78%] flex-col items-end gap-1 self-end">
+      <div className={`group/msg flex max-w-[78%] flex-col items-end gap-1 self-end ${enterClass}`} style={enter?.style}>
         {quote}
-        {/* Room above the bubble for its tapbacks, so they don't cover the quote or sender line. */}
-        <div className={`flex min-w-0 max-w-full items-center gap-1 ${m.reactions?.length ? "mt-3.5" : ""}`}>
+        {/* Room above the bubble for its tapbacks, so they don't cover the quote or sender line (it eases open as the first one pops in). */}
+        <div className={`flex min-w-0 max-w-full items-center gap-1 transition-[margin] duration-200 ease-out motion-reduce:transition-none ${m.reactions?.length ? "mt-3.5" : ""}`}>
           {actions}
           <div className="relative min-w-0" {...holdable}>
             {picker}
@@ -1051,7 +1294,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     );
 
   // A text or call to the bot's number from someone else.
-  if (m.role === "system" && m.sms) return <TextCard m={m} state={state} />;
+  if (m.role === "system" && m.sms) return <TextCard m={m} state={state} className={enterClass} />;
 
   // A call shows as a bubble from you in the bot's color, like a call in Messages.
   if (m.call) {
@@ -1060,7 +1303,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     const mins = Math.floor(m.call.seconds / 60);
     return (
       <div
-        className="flex items-center gap-2 self-end rounded-[18px] px-3.5 py-2 text-[14px] leading-5"
+        className={`flex items-center gap-2 self-end rounded-[18px] px-3.5 py-2 text-[14px] leading-5 ${enterClass}`}
         style={{ background: fill, color: readableOn(fill) }}
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round">
@@ -1072,30 +1315,46 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     );
   }
 
-  if (m.role === "system" && m.email) return <EmailCard m={m} state={state} />;
+  if (m.role === "system" && m.email) return <EmailCard m={m} state={state} className={enterClass} />;
 
-  if (m.role === "system" && m.memory) return <MemoryNote m={m} />;
+  // Something just remembered rises in with the soft wash Orbit gives what it learns.
+  if (m.role === "system" && m.memory) return <MemoryNote m={m} className={enter ? "motion-new-item" : ""} />;
 
   // A bot's save to the CRM: Open the file, or Undo it (only where the CRM is open: lib/crm-access.ts).
-  if (m.role === "system" && m.crm) return crmOpen(state) ? <CrmNote m={m} /> : null;
+  // CrmNote takes no class, so a new one rises in inside a box that leaves its own alignment as it was.
+  if (m.role === "system" && m.crm)
+    return crmOpen(state) ? (
+      enter ? (
+        <div className={`flex w-full flex-col ${enterClass}`}>
+          <CrmNote m={m} />
+        </div>
+      ) : (
+        <CrmNote m={m} />
+      )
+    ) : null;
 
+  // A call a bot made with one of your keys (keys.tsx): the service, the method and the path.
+  const api = apiCallOf(m);
   if (m.role === "system")
     return (
-      <div className="flex w-full flex-col items-center gap-1.5 self-center py-0.5">
-        <SystemNote text={m.text} />
+      <div className={`flex w-full flex-col items-center gap-1.5 self-center py-0.5 ${enterClass}`}>
+        {api ? <ApiNote call={api} /> : <SystemNote text={m.text} />}
         {chipList}
       </div>
     );
 
   const b = state.bots.find((x) => x.id === m.botId);
+  // Posted by a routine (a reminder, or a run in the chat): which one, by its name while it's there.
+  const fromRoutine = m.routine && state.routines.find((r) => r.id === m.routine!.id);
   return (
-    <div className="group/msg flex max-w-[86%] items-end gap-2 self-start">
+    <div className={`group/msg flex max-w-[86%] items-end gap-2 self-start ${enterClass}`}>
       {showSender && (b && !continued ? <Mascot botId={b.id} color={b.color} size={24} /> : <span className="w-6 shrink-0" />)}
       <div className="flex min-w-0 flex-col gap-1">
         {showSender && b && !continued && <div className="pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{b.name}</div>}
+        {m.routine && <div className="truncate pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{fromRoutine ? `From a routine · ${undash(fromRoutine.title)}` : "From a routine"}</div>}
         {!!m.asked?.length && <AskedLine state={state} asked={m.asked} by={m.botId} />}
         {quote}
-        <div className={`flex min-w-0 max-w-full items-center gap-1 self-start ${m.reactions?.length ? "mt-3.5" : ""}`}>
+        <div className={`flex min-w-0 max-w-full items-center gap-1 self-start transition-[margin] duration-200 ease-out motion-reduce:transition-none ${m.reactions?.length ? "mt-3.5" : ""}`}>
           <div className="relative min-w-0" {...holdable}>
             {picker}
             {actionMenu}
@@ -1275,13 +1534,13 @@ const prettyPhone = (n: string) => {
 };
 
 /** A text or a call to the bot's number from someone other than the user: who, and what they said. */
-function TextCard({ m, state }: { m: Message; state: AppState }) {
+function TextCard({ m, state, className = "" }: { m: Message; state: AppState; className?: string }) {
   const t = m.sms!;
   const b = state.bots.find((x) => `bot:${x.id}` === m.chatId);
   const call = !!m.call;
   const mins = m.call ? Math.floor(m.call.seconds / 60) : 0;
   return (
-    <div className="flex w-full max-w-[460px] flex-col gap-1.5 self-start">
+    <div className={`flex w-full max-w-[460px] flex-col gap-1.5 self-start ${className}`}>
       <div className="flex items-center gap-1.5 pl-1 text-[11.5px] leading-4 text-[#9A9A98]">
         <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="shrink-0">
           {call ? (
@@ -1315,7 +1574,7 @@ const person = (s: string) => {
 };
 
 /** An email the bot got or sent, as a card in its chat: who, the subject, the text (opens in full), images and files. */
-function EmailCard({ m, state }: { m: Message; state: AppState }) {
+function EmailCard({ m, state, className = "" }: { m: Message; state: AppState; className?: string }) {
   const e = m.email!;
   const [open, setOpen] = useState(false);
   const b = state.bots.find((x) => `bot:${x.id}` === m.chatId);
@@ -1323,7 +1582,7 @@ function EmailCard({ m, state }: { m: Message; state: AppState }) {
   const long = m.text.length > 280 || m.text.split("\n").length > 4;
   const label = e.dir === "in" ? (e.fromOwner ? `You emailed ${b?.name ?? "the bot"}` : `Email to ${b?.name ?? "the bot"}`) : `${b?.name ?? "The bot"} sent an email`;
   return (
-    <div className={`flex w-full max-w-[460px] flex-col gap-1.5 self-start ${e.bulk ? "opacity-75" : ""}`}>
+    <div className={`flex w-full max-w-[460px] flex-col gap-1.5 self-start ${e.bulk ? "opacity-75" : ""} ${className}`}>
       <div className="flex items-center gap-1.5 pl-1 text-[11.5px] leading-4 text-[#9A9A98]">
         <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="shrink-0">
           <rect x="1.8" y="3.2" width="12.4" height="9.6" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
@@ -1393,7 +1652,7 @@ function SystemNote({ text }: { text: string }) {
   );
 }
 
-function MemoryNote({ m }: { m: Message }) {
+function MemoryNote({ m, className = "" }: { m: Message; className?: string }) {
   const mem = m.memory!;
   const [busy, setBusy] = useState(false);
   const act = (action: "undo" | "forget-old") => {
@@ -1402,7 +1661,7 @@ function MemoryNote({ m }: { m: Message }) {
   };
   const button = "shrink-0 rounded-full px-2 py-0.5 text-[12px] font-medium leading-4 text-ink hover:bg-black/[0.05] disabled:opacity-40";
   return (
-    <div className="flex w-full max-w-[400px] flex-col self-center rounded-[14px] bg-[#F7F7F6] py-2 pl-3 pr-1.5 text-[12px] leading-4">
+    <div className={`flex w-full max-w-[400px] flex-col self-center rounded-[14px] bg-[#F7F7F6] py-2 pl-3 pr-1.5 text-[12px] leading-4 ${className}`}>
       <div className="flex items-start gap-2">
         <svg width="13" height="13" viewBox="0 0 16 16" className="mt-[1.5px] shrink-0 text-[#9A9A98]" aria-hidden>
           <path d="M8 2.5c-2.6 0-4.5 1.9-4.5 4.3 0 1.5.8 2.6 1.8 3.4v2.3h5.4v-2.3c1-.8 1.8-1.9 1.8-3.4 0-2.4-1.9-4.3-4.5-4.3zM6.3 14.5h3.4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" strokeLinecap="round" />
@@ -1450,6 +1709,7 @@ function readableOn(hex: string) {
 function SessionChip({ session: s, state, onClick }: { session: Session; state: AppState; onClick: () => void }) {
   const b = state.bots.find((x) => x.id === s.botId);
   const waiting = needsYou(s);
+  const badge = threadBadge(s, state);
   return (
     <button
       onClick={onClick}
@@ -1457,6 +1717,8 @@ function SessionChip({ session: s, state, onClick }: { session: Session; state: 
     >
       <StatusIcon session={s} size={14} dark />
       <span className={`truncate text-[14px] leading-[18px] ${live(s) || waiting ? "text-ink" : "text-[#6B6B6B]"}`}>{s.title}</span>
+      {/* The brain that runs it, when one does (threadRunner); Bops agent only where its bot is on a brain now. */}
+      {badge && <BrainBadge kind={badge.kind} title={badge.title} />}
       {/* Where it runs: the user's Mac or the cloud (deciding: nothing yet). */}
       {s.runsOn === "mac" ? (
         <span title="On your Mac" className="flex shrink-0 items-center gap-1 rounded-full bg-[#F2F2F0] px-1.5 py-px text-[11px] leading-[14px] text-[#3A3A38]">
@@ -1505,18 +1767,72 @@ function timeline(s: Session): Line[] {
   return lines.sort((a, b) => a.at - b.at);
 }
 
-export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { state: AppState; session: Session; onClose: () => void; onShowComputer: () => void }) {
+/** The thread whose sheet was showing last (see ThreadSheet: coming back to it doesn't replay its opening). */
+let sheetShown: string | null = null;
+/** The thread sheet was closed, however that happened (Esc, a chat opened): its next opening plays again (bops-app). */
+export function forgetSheet() {
+  sheetShown = null;
+}
+
+export function ThreadSheet({
+  state,
+  session: s,
+  onClose: close,
+  onShowComputer,
+  onShowScreen,
+}: {
+  state: AppState;
+  session: Session;
+  onClose: () => void;
+  onShowComputer: () => void;
+  /** Show one of a bot's screens up close: where its brain's sign-in opened (NeedsYouCard). */
+  onShowScreen?: (botId: string, display: number) => void;
+}) {
   // "Working for 1m 23s" counts up while it's open.
   useNow(live(s) ? 1000 : 60_000);
+  // Opening it plays its entrance; coming back to it (the chat column is drawn again after a
+  // full-screen computer) doesn't. Closing it from here lets the next opening play again.
+  const [opening] = useState(() => sheetShown !== s.id);
+  useEffect(() => {
+    sheetShown = s.id;
+  }, [s.id]);
+  const onClose = () => {
+    sheetShown = null;
+    close();
+  };
+  // Asking for you when it opened: the card is just there. One that comes up while it's open rises in.
+  const [askedAtOpen, setAskedAtOpen] = useState(() => ({ id: s.id, asked: needsYou(s) }));
+  if (askedAtOpen.id !== s.id) setAskedAtOpen({ id: s.id, asked: needsYou(s) });
   const [draft, setDraft] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [openSteps, setOpenSteps] = useState<number[]>([]);
+  // "Save as skill" for this thread alone (skill-dialog.tsx), by the thread it's for.
+  const [saving, setSaving] = useState<string | null>(null);
+  const closeSaving = useCallback(() => setSaving(null), []);
   const end = useRef<HTMLDivElement>(null);
   const b = state.bots.find((x) => x.id === s.botId)!;
   const via = s.sentVia === "routine" ? undefined : s.sentVia === "you" ? b : state.bots.find((x) => x.id === s.sentVia);
+  // The routine whose run this is, while it's there (Session.routineId).
+  const routine = s.routineId ? state.routines.find((r) => r.id === s.routineId) : undefined;
   const lines = timeline(s);
   const toolCount = s.steps.filter((x) => x.tool !== "note" && x.tool !== "setup").length;
   const started = s.startedAt ?? s.createdAt;
+  // The brain that runs it (threadRunner). One Claude Code runs, for a bot still on that brain, opens in a
+  // terminal on its screen for the user (sessions.ts openInTerminal); while it's open there (the takeover's
+  // `terminal`), a reply closes it.
+  const runner = threadRunner(s);
+  const badge = threadBadge(s, state);
+  const terminal = state.takeover?.terminal && state.takeover.sessionId === s.id ? state.takeover.display : undefined;
+  const canTerminal = runner === "claude" && brainOf(b, state)?.id === s.brainRun?.brainId && s.runsOn !== "mac" && state.host !== "mac" && terminal === undefined && !!onShowScreen;
+  const [termBusy, setTermBusy] = useState(false);
+  const [termError, setTermError] = useState<{ id: string; text: string } | null>(null);
+  const toTerminal = async () => {
+    if (!onShowScreen) return;
+    setTermBusy(true);
+    const why = await openInTerminal(s.id, onShowScreen);
+    setTermError(why ? { id: s.id, text: why } : null);
+    setTermBusy(false);
+  };
 
   useEffect(() => {
     end.current?.scrollIntoView({ block: "end" });
@@ -1530,16 +1846,22 @@ export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { st
   };
 
   return (
-    // Clicking anywhere outside the sheet closes it, like the × does.
-    <div onClick={onClose} className="absolute inset-0 z-20 flex flex-col bg-white/70 px-3 pb-3 pt-[52px] backdrop-blur-[2px]">
-      <div onClick={(e) => e.stopPropagation()} className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000038]">
+    // Clicking anywhere outside the sheet closes it, like the × does. Opening, the scrim fades in
+    // (its blur stays as it is) and the sheet comes up from below.
+    <div onClick={onClose} className={`absolute inset-0 z-20 flex flex-col bg-white/70 px-3 pb-3 pt-[52px] backdrop-blur-[2px] ${opening ? "motion-fade-in" : ""}`}>
+      <div onClick={(e) => e.stopPropagation()} className={`flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000038] ${opening ? "motion-sheet-in" : ""}`}>
+        {/* Portalled over everything; inside the card, so its clicks never reach the scrim and close the sheet. */}
+        {saving === s.id && <SaveSkillDialog botId={s.botId} chatId={s.chatId} sessionId={s.id} onClose={closeSaving} />}
         <div className="flex items-center gap-2.5 border-b border-[#F0F0EE] py-3.5 pl-4 pr-3.5">
           <Mascot botId={b.id} color={b.color} size={32} />
           <div className="flex min-w-0 flex-1 flex-col gap-px">
-            <span className="truncate text-[15px] font-semibold leading-[18px]">{s.title}</span>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="truncate text-[15px] font-semibold leading-[18px]">{s.title}</span>
+              {badge && <BrainBadge kind={badge.kind} title={badge.title} />}
+            </div>
             <button onClick={onShowComputer} className="flex items-center gap-1.5 text-left text-[12px] leading-4 text-[#6B6B6B] hover:text-ink">
               {b.name} · {s.runsOn === "mac" ? "on your Mac · " : ""}
-              {s.askWhere && live(s) ? "waiting for you" : live(s) ? "working" : s.status === "done" ? "finished" : "stopped"} · {toolCount} steps
+              {terminal !== undefined ? "in the terminal" : s.askWhere && live(s) ? "waiting for you" : live(s) ? "working" : s.status === "done" ? "finished" : "stopped"} · {toolCount} steps
               {/* Its screen, by the number the panel and the bots use. */}
               {s.runsOn !== "mac" && (live(s) && s.display !== undefined ? ` · screen ${screenNo(s.display)}` : !live(s) && s.lastDisplay !== undefined ? ` · left off on screen ${screenNo(s.lastDisplay)}` : "")}
             </button>
@@ -1552,6 +1874,16 @@ export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { st
             >
               <MacIcon size={13} />
               {s.offerMac && live(s) && !s.blocker ? "Move to your Mac" : "Try on your Mac"}
+            </button>
+          )}
+          {canTerminal && (
+            <button
+              disabled={termBusy}
+              onClick={() => void toTerminal()}
+              title={live(s) ? "Pause it and work with Claude Code yourself, in a terminal on its screen" : "Work with Claude Code yourself, in a terminal on its screen"}
+              className="shrink-0 rounded-full px-3 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6] disabled:opacity-50"
+            >
+              Open in terminal
             </button>
           )}
           {live(s) ? (
@@ -1569,6 +1901,8 @@ export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { st
               Delete
             </button>
           )}
+          {/* Save as skill: the bot rereads this thread for how it did the job. Keyed by thread, so another one's sheet starts it shut. */}
+          <MoreMenu key={s.id} label="More" size="sheet" items={[{ label: "Save as skill", icon: <SkillIcon />, onClick: () => setSaving(s.id) }]} />
           <button onClick={onClose} aria-label="Close thread" className="flex size-[34px] items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
             <svg width="12" height="12" viewBox="0 0 12 12">
               <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
@@ -1580,7 +1914,7 @@ export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { st
           <div className="flex w-[86%] flex-col items-end gap-1.5 self-end">
             <div className="flex items-center gap-1.5 text-[12px] leading-4 text-[#6B6B6B]">
               {via && <Mascot botId={via.id} color={via.color} size={16} antenna={false} />}
-              {s.sentVia === "routine" ? "Sent by a routine" : `Sent via ${via?.name ?? "the main bot"}`}
+              {s.sentVia === "routine" ? (routine ? `Sent by a routine · ${undash(routine.title)}` : "Sent by a routine") : `Sent via ${via?.name ?? "the main bot"}`}
             </div>
             <div className="flex flex-col gap-2 rounded-[18px] bg-[#FBFFE0] px-[15px] pb-2.5 pt-[11px] shadow-[0_0_0_1px_#EEF7A8]">
               <div className={`whitespace-pre-wrap text-[14px] leading-[21px] ${expanded ? "" : "line-clamp-3"}`}>{s.goal}</div>
@@ -1671,16 +2005,30 @@ export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { st
               </div>
             ),
           )}
-          {s.status === "failed" && s.error && (
-            <div className="rounded-xl bg-[#FBFFE0] px-3 py-2.5 text-[13px] leading-5 shadow-[0_0_0_1px_#E6F57A]">{s.error}</div>
+          {terminal !== undefined ? (
+            <div className="flex items-center gap-2 rounded-xl bg-[#FBFFE0] px-3 py-2.5 text-[13px] leading-5 shadow-[0_0_0_1px_#E6F57A]">
+              <span className="min-w-0 flex-1">Open in the terminal on screen {screenNo(terminal)}. Your next reply closes it, and it carries on here.</span>
+              {onShowScreen && (
+                <button onClick={() => onShowScreen(s.botId, terminal)} className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
+                  Show
+                </button>
+              )}
+            </div>
+          ) : (
+            s.status === "failed" && s.error && <div className="rounded-xl bg-[#FBFFE0] px-3 py-2.5 text-[13px] leading-5 shadow-[0_0_0_1px_#E6F57A]">{s.error}</div>
+          )}
+          {termError?.id === s.id && (
+            <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+              {termError.text}
+            </span>
           )}
           {live(s) && <span className="animate-pulse text-[14px] leading-[18px] text-[#B5B5B2]">{s.status === "queued" ? "Queued" : "Thinking"}</span>}
           <div ref={end} />
         </div>
 
         {needsYou(s) && (
-          <div className="px-3 pb-2">
-            <NeedsYouCard session={s} state={state} onShow={onShowComputer} onSomethingElse={() => document.getElementById("thread-reply")?.focus()} />
+          <div className={`px-3 pb-2 ${askedAtOpen.asked ? "" : "motion-rise-in"}`}>
+            <NeedsYouCard session={s} state={state} onShow={onShowComputer} onShowScreen={onShowScreen} onSomethingElse={() => document.getElementById("thread-reply")?.focus()} />
           </div>
         )}
         <form
@@ -1695,7 +2043,16 @@ export function ThreadSheet({ state, session: s, onClose, onShowComputer }: { st
               id="thread-reply"
               value={draft}
               onChange={setDraft}
-              placeholder={live(s) ? "Reply in thread · it sees this as it works" : "Reply in thread · picks it back up"}
+              placeholder={
+                terminal !== undefined
+                  ? "Reply in thread · closes the terminal and carries on"
+                  : live(s)
+                    ? // Codex takes a reply as its next turn, once it's done with this one (cli-agents.ts codexDriver).
+                      BRAINS_ON && s.brainRun?.kind === "codex" && runner !== "agent"
+                      ? "Reply in thread · it takes this next"
+                      : "Reply in thread · it sees this as it works"
+                    : "Reply in thread · picks it back up"
+              }
               className="min-w-0 flex-1 bg-transparent py-[6px] text-[14px] leading-[18px] outline-none placeholder:text-[#9A9A98]"
             />
             <button type="submit" aria-label="Send" disabled={!draft.trim()} className="flex size-[30px] items-center justify-center rounded-full bg-ink disabled:opacity-30">
@@ -1892,7 +2249,8 @@ function CloudIcon() {
  * replies it offered, say they approved it on their phone, let a flagged step go on, retry, or move it
  * to their Mac, instead of working out what to type back. `pinned`: over a chat's composer (lib/asks.ts
  * chatAsks), where it names the thread and says the bot's words, since its message may be far above
- * or in another bot's chat.
+ * or in another bot's chat. A thread waiting for its brain to sign in (Session.brainRun) has Sign in, which
+ * opens Claude Code's own sign-in on a screen of the bot's computer and shows it (`onShowScreen`).
  */
 function NeedsYouCard({
   session: s,
@@ -1900,6 +2258,7 @@ function NeedsYouCard({
   quote,
   pinned,
   onShow,
+  onShowScreen,
   onSomethingElse,
   onOpen,
 }: {
@@ -1908,10 +2267,12 @@ function NeedsYouCard({
   quote?: boolean;
   pinned?: boolean;
   onShow: () => void;
+  onShowScreen?: (botId: string, display: number) => void;
   onSomethingElse: () => void;
   onOpen?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const b = state.bots.find((x) => x.id === s.botId);
   const name = b?.name ?? "The bot";
   const reply = async (text: string) => {
@@ -1928,9 +2289,18 @@ function NeedsYouCard({
   const kind = askKind(s);
   const failed = kind === "failed";
   const display = s.display ?? s.lastDisplay;
+  const brain = kind === "brain" ? state.brains?.find((x) => x.id === s.brainRun?.brainId) : undefined;
+  const signIn = async () => {
+    if (!brain) return;
+    setBusy(true);
+    setError(await brainSignIn(brain.id, s.botId, onShowScreen ?? (() => onShow())));
+    setBusy(false);
+  };
   const title = s.blocker
     ? `${name} needs ${BLOCKER_ASK[s.blocker]}`
-    : failed
+    : kind === "brain"
+      ? `${name} needs ${brain?.name ?? "Claude Code"} signed in`
+      : failed
       ? `${name} couldn't finish`
       : kind === "elsewhere"
         ? `${name} needs you to approve it on your phone`
@@ -1973,6 +2343,15 @@ function NeedsYouCard({
                 Try on your Mac
               </button>
             )}
+            <button disabled={busy} onClick={dismiss} className={plain}>
+              Dismiss
+            </button>
+          </>
+        ) : kind === "brain" ? (
+          <>
+            <button disabled={busy || !brain} onClick={() => void signIn()} className={primary}>
+              Sign in
+            </button>
             <button disabled={busy} onClick={dismiss} className={plain}>
               Dismiss
             </button>
@@ -2028,6 +2407,11 @@ function NeedsYouCard({
           </>
         )}
       </div>
+      {error && (
+        <span role="alert" className="pl-1 text-[12px] leading-4 text-[#B42318]">
+          {error}
+        </span>
+      )}
     </div>
   );
 }
@@ -2055,30 +2439,36 @@ const withoutBriefing = (text: string) =>
     .filter((p) => !/^\s*(computer briefing|briefing)\s*:/i.test(p) && !/^\s*computer\s*:.*\b(screens?|idle|free|untouched|home screen)\b/i.test(p))
     .join("\n\n") || text;
 
-/** A bot wants to do something in one of your apps that changes it (send, create, pay): you see what, and say yes or no. */
+/**
+ * A bot wants to do something in one of your apps that changes it (send, create, pay), or its brain wants to
+ * use a tool it may not use by itself (app "brain": cli-agents.ts approveTool): you see what, and say yes or no.
+ */
 const CHANNEL_NAME: Record<string, string> = { slack: "Slack", telegram: "Telegram", discord: "Discord" };
 
-function AppApprovalCard({ state, approval: a }: { state: AppState; approval: AppApproval }) {
+function AppApprovalCard({ state, approval: a, className = "" }: { state: AppState; approval: AppApproval; className?: string }) {
   const [busy, setBusy] = useState(false);
   const b = state.bots.find((x) => x.id === a.botId);
   const s = state.sessions.find((x) => x.id === a.sessionId);
+  // A call to an API with one of your keys (keys.tsx): which service, and the method and path in full.
+  const api = apiAskOf(a);
   const decide = async (yes: boolean) => {
     setBusy(true);
     await post("/api/apps/approvals", { id: a.id, yes });
   };
   const btn = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
   return (
-    <div className="flex flex-col gap-2.5 rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#0000000F,0_10px_30px_-16px_#00000059]">
+    <div className={`flex flex-col gap-2.5 rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#0000000F,0_10px_30px_-16px_#00000059] ${className}`}>
       <div className="flex items-start gap-2.5">
         {b && <Mascot botId={b.id} color={b.color} size={26} />}
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="text-[13.5px] font-semibold leading-[18px]">
-            {b?.name ?? "A bot"} wants to: {a.title}
+            {api ? `${b?.name ?? "A bot"} wants to call ${api.label}` : a.app === "brain" ? `${b?.name ?? "A bot"} wants to run: ${a.title}` : `${b?.name ?? "A bot"} wants to: ${a.title}`}
           </span>
           {s && <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">For &ldquo;{s.title}&rdquo;</span>}
         </div>
       </div>
-      {a.detail && <pre className={`${a.app === "email" ? "max-h-[280px]" : "max-h-[180px]"} overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#F7F7F6] px-3 py-2 font-sans text-[12.5px] leading-[18px] text-[#3A3A38] [overflow-wrap:anywhere]`}>{a.detail}</pre>}
+      {api && <ApiAsk ask={api} detail={a.detail} botName={b?.name ?? "The bot"} />}
+      {a.detail && !api && <pre className={`${a.app === "email" ? "max-h-[280px]" : "max-h-[180px]"} overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#F7F7F6] px-3 py-2 font-sans text-[12.5px] leading-[18px] text-[#3A3A38] [overflow-wrap:anywhere]`}>{a.detail}</pre>}
       <div className="flex gap-1.5">
         <button disabled={busy} onClick={() => void decide(true)} className={`${btn} bg-ink text-white`}>
           {a.app === "email" ? "Send" : "Do it"}

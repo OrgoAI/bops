@@ -71,6 +71,8 @@ function migrate(raw: Record<string, unknown>): AppState {
   }
   state.sessions ??= [];
   state.routines ??= [];
+  // Each bot's procedures from before skills: moved into its workspace's skills when there's somewhere to keep them (workspace-skills.ts).
+  state.procedures ??= [];
   state.host ??= "orgo";
   state.owner ??= { name: "" };
   state.takeover = undefined;
@@ -84,7 +86,35 @@ function migrate(raw: Record<string, unknown>): AppState {
   if (state.relay?.deviceId && !state.relay.on) state.relay.turnedOff ??= true;
   // Accounts and each bot's access, from the one-account-per-app shape (any saved state, a backup too).
   appAccounts(state);
+  brains(state);
   return state;
+}
+
+/**
+ * Brains (lib/server/brains.ts) as this build keeps them: Claude Code or Codex (Codex on a key only), each
+ * with a workspace that's still here (a deleted workspace's go with it) and the bots still here that may use
+ * it, and signed in only on computers a bot still has (one replaced since says nothing now). A sign-in that
+ * was going when the server stopped can't be watched any more, so it goes (one that failed stays, saying
+ * why); a bot whose brain is gone is on Bops agent again. Safe to run repeatedly.
+ */
+function brains(state: AppState) {
+  if (!state.brains) return;
+  const here = new Set(state.bots.map((b) => b.id));
+  const computers = new Set(state.bots.map((b) => b.computerId).filter(Boolean));
+  const spaces = state.workspaces?.length ? new Set(state.workspaces.map((w) => w.id)) : undefined;
+  state.brains = state.brains.filter((x) => !!x && typeof x.id === "string" && (x.kind === "claude" || x.kind === "codex"));
+  for (const x of state.brains) {
+    x.bots = (Array.isArray(x.bots) ? x.bots : []).filter((botId) => here.has(botId));
+    if (x.kind === "codex" || (x.auth !== "plan" && x.auth !== "key")) x.auth = "key";
+    x.workspaceId ??= MAIN_WORKSPACE;
+    if (x.signingIn && !x.signingIn.failed) delete x.signingIn;
+    if (x.signIns) {
+      x.signIns = x.signIns.filter((s) => computers.has(s.computerId));
+      if (!x.signIns.length) delete x.signIns;
+    }
+  }
+  if (spaces) state.brains = state.brains.filter((x) => spaces.has(x.workspaceId));
+  for (const b of state.bots) if (b.brain && !state.brains.some((x) => x.id === b.brain)) delete b.brain;
 }
 
 /**
@@ -141,19 +171,30 @@ function appAccounts(state: AppState) {
     delete ob.connectors;
     if (!Array.isArray(ob.channels)) delete ob.channels;
   }
+  // An account from before every bot had every app by default (no workspace: v0.0.28 and older wrote
+  // none) is kept in the workspace it was connected in, the one whose bots were given it, else the main
+  // one, and stays only the bots' it was given there (onlyGiven, levelOf): no bot gets one it didn't have.
+  for (const a of state.accounts ?? []) {
+    if (a.workspaceId) continue;
+    const given = new Set(state.bots.filter((b) => b.access?.[a.id] === "read" || b.access?.[a.id] === "act").map((b) => workspaceOf(b)));
+    a.workspaceId = given.size === 1 ? [...given][0] : MAIN_WORKSPACE;
+    a.onlyGiven = true;
+  }
 }
 
-const g = globalThis as unknown as { __bops2?: { state: AppState; version: number; swaps?: number }; __bopsWatchers?: Map<string, () => void> };
+const g = globalThis as unknown as { __bops2?: { state: AppState; version: number; swaps?: number; arrivals?: number }; __bopsWatchers?: Map<string, () => void> };
 const access: StateAccess = {
   get: () => box.state,
   replace(raw) {
     box.state = migrate(raw ?? {});
     box.swaps = (box.swaps ?? 0) + 1;
+    box.arrivals = (box.arrivals ?? 0) + 1;
     tidyResults(box.state);
     ownerMarks(box.state);
     box.version++;
   },
   touch() {
+    box.arrivals = (box.arrivals ?? 0) + 1;
     box.version++;
   },
 };
@@ -221,6 +262,12 @@ export const getState = () => box.state;
  */
 export const stateEpoch = () => box.swaps ?? 0;
 /**
+ * How many times the state took in things from elsewhere: loaded whole (a sign-in, another server's
+ * row) or another Mac's changes merged in. Changes made here don't count. What's kept beside the state
+ * for quick asking (memory.ts's secret marks) reads the state again when this moves.
+ */
+export const stateArrivals = () => box.arrivals ?? 0;
+/**
  * For work that waits on something (a bot's turn on the model, an email's attachments): whether the
  * state in memory is still the one it started on. On the Mac app a sign-out lets the user's state go
  * and the next sign-in brings in another account's; what the work had in hand then is dropped, never
@@ -273,6 +320,11 @@ export function update(fn: (state: AppState) => void) {
   fn(box.state);
   box.version++;
   changed();
+}
+
+/** Something the app shows changed that isn't saved (a page watch's last read, kept in memory): polls get the state again; nothing is written. */
+export function touchState() {
+  box.version++;
 }
 
 /** A change the app doesn't show (the usage ledger): saved like any other, but polls aren't sent the state again for it. */
@@ -345,7 +397,8 @@ export async function resetState() {
   // Starting over isn't signing out: who's signed in stays (their key stays in the Keychain), and
   // the bots call them by their Orgo name again, as on a first sign-in. What Bops has cost so far
   // stays too, and so do this Mac's routing switch and the user's other Macs' own settings.
-  // The user's usage data switch stays as they set it.
+  // The user's usage data switch stays as they set it. Everything else goes: the bots with their
+  // chats, threads, routines and procedures.
   const { host, account, usage, relay, macs, analyticsOff } = box.state;
   const name = account?.user.name?.slice(0, 80);
   box.state = migrate({ host, account, usage, relay, macs, analyticsOff, owner: name ? { name } : undefined });

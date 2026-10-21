@@ -105,8 +105,8 @@ export function Account({ state, onClose, onThisMac }: { state: AppState; onClos
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} className="flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
+    <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="motion-dialog-in flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
         <div className="flex items-center gap-3.5 border-b border-[#F0F0EE] px-[22px] py-[18px]">
           <span className="flex size-12 shrink-0 items-center justify-center rounded-full bg-ink text-[16px] font-semibold tracking-[0.02em] text-highlighter">{initialsOf(state)}</span>
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -739,13 +739,13 @@ function ConfirmCredit({
   const warning = error ?? copy.error;
   const pill = "rounded-full px-3.5 py-1.5 text-[13px] font-medium leading-4 disabled:opacity-50";
   return createPortal(
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onCancel()}>
+    <div className="motion-fade-in fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onCancel()}>
       <div
         role="alertdialog"
         aria-labelledby="add-credit-title"
         aria-describedby="add-credit-line"
         onClick={(e) => e.stopPropagation()}
-        className="flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
+        className="motion-dialog-in flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
       >
         <span id="add-credit-title" className="text-[15px] font-semibold leading-5">
           {copy.title}

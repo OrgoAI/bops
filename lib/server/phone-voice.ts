@@ -1,7 +1,7 @@
 import "server-only";
 import { speedFor, tierParam, withSpeed } from "./routing";
 import type { CallerVerdict } from "@/cloud/protocol";
-import { botChatId, live, type Bot } from "@/lib/types";
+import { botChatId, live, MAX_PERSONA_CHARS, type Bot } from "@/lib/types";
 import { callEnded, callStarted } from "./attention";
 import { delegate, voicePrompt } from "./call";
 import { saveToMemory, wsOf } from "./memory";
@@ -9,6 +9,7 @@ import { openaiClient } from "./openai-client";
 import { callLog, fromOwner, isOwner, linkClaimed, routeFor, type ApEvent } from "./phone";
 import { addMessage, bot, getState, ownerLine, ownerName, patchSession, stateEpoch } from "./store";
 import { SPEAKING } from "./style";
+import { howIWork } from "@/cloud/style";
 import { recordCallMinutes, recordTokens, usageTags } from "./usage";
 
 /**
@@ -92,11 +93,15 @@ function quickPrompt(b: Bot) {
   const owner = ownerName();
   return [
     `You are ${b.name}, ${b.isMain ? `${owner}'s chief of staff` : `${owner}'s ${b.role} bot`} in Bops, on a phone call with ${owner}. ${ownerLine()}`,
+    // How I work, short (the full prompt has it too): the owner's preferences, never Bops' rules.
+    howIWork(owner, b.persona?.slice(0, MAX_PERSONA_CHARS), true),
     "Talk like a capable teammate on a call: short, warm, natural.",
     SPEAKING,
     `Whenever ${owner} asks for something to be done, looked up, checked, scheduled, or handed to another bot, call delegate with what they asked, in their words, and say in a few words that you're on it.`,
     `Each of your replies is spoken aloud by a voice that reads your text: write only the words to say, one or two short sentences, plain words, no markdown, lists, links, emoji or symbols. When ${owner} is done, call end_call with a short goodbye.`,
-  ].join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 /** Anyone but the owner: chat, take a message, and nothing about the person the bot works for (it isn't told anything). */

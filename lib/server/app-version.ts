@@ -1,4 +1,4 @@
-import { APP_VERSION_HEADER, TELEMETRY_HEADER } from "@/cloud/protocol";
+import { APP_VERSION_HEADER, BOPS_STATE_LEVEL_HEADER, STATE_LEVEL, TELEMETRY_HEADER } from "@/cloud/protocol";
 
 /**
  * This app's version: package.json's, set in the build (next.config.ts). Undefined when it isn't
@@ -18,12 +18,13 @@ export function telemetryHere(): boolean {
 }
 
 /**
- * What tells Bops Cloud which app is calling, for every call to it (cloud/app-version.ts), and, on a
- * Mac that sends no usage events, that the cloud should send none for what it does either.
+ * What tells Bops Cloud which app is calling, for every call to it (cloud/app-version.ts), which state
+ * it may be given (STATE_LEVEL: once it has written a user's state, older Macs are kept out of it), and,
+ * on a Mac that sends no usage events, that the cloud should send none for what it does either.
  */
 export const appHeaders = (): Record<string, string> => {
   const v = appVersion();
-  return { ...(v ? { [APP_VERSION_HEADER]: v } : {}), ...(telemetryHere() ? {} : { [TELEMETRY_HEADER]: "off" }) };
+  return { ...(v ? { [APP_VERSION_HEADER]: v } : {}), [BOPS_STATE_LEVEL_HEADER]: String(STATE_LEVEL), ...(telemetryHere() ? {} : { [TELEMETRY_HEADER]: "off" }) };
 };
 
 /**
@@ -35,5 +36,13 @@ export const appHeaders = (): Record<string, string> => {
  */
 export const orgoHeaders = (): Record<string, string> => {
   const v = appVersion();
-  return v ? { [APP_VERSION_HEADER]: v } : {};
+  return { ...(v ? { [APP_VERSION_HEADER]: v } : {}), [BOPS_APP_HEADER]: v ?? "dev" };
 };
+
+/**
+ * Says this Bops knows a Bops workspace is an Orgo workspace of its own (lib/server/workspaces.ts): an
+ * orgo-web with per workspace projects answers it with each project's own computers. An app before this
+ * one doesn't send it, and orgo-web lists every Bops project's computers in its "bops" one for it, so it
+ * never takes a computer moved to another workspace for gone.
+ */
+export const BOPS_APP_HEADER = "x-bops-app";

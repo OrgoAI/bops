@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# The browser Claude Code opens while it signs in (bops-brain login): its sign-in page opens in a Chrome of
+# its own on the screen its terminal is on (DISPLAY), so it shows on the live screen in Bops and the user
+# signs in right there. Never the bots' Chrome on that screen: Bops agent and the browser tools drive that
+# one through its DevTools port, the page mirror reads it, and its profile stays with the bots (and with any
+# copy of the computer), so the user's claude.ai sign-in must never land there. This one has a throwaway
+# profile (and is incognito on top), no DevTools port and a window class nothing else looks for, and
+# bops-brain cancel closes it and deletes its folder. Usage: bops-brain-browser <url>
+set -euo pipefail
+URL="${1:?url}"
+N="${DISPLAY:-}"; N="${N#:}"; N="${N%%.*}"
+[[ "$N" =~ ^[0-9]+$ ]] || { echo "no screen" >&2; exit 1; }
+# The brain signing in is the folder Claude Code runs on (/root/.bops/brains/<id>): its Chrome's profile is
+# beside it, where bops-brain cancel looks (.signin-<id>). Without one, none opens, and the terminal has the page.
+CFG="${CLAUDE_CONFIG_DIR:?which brain}"; CFG="${CFG%/}"
+PROFILE="$(dirname "$CFG")/.signin-$(basename "$CFG")"
+mkdir -p "$PROFILE" && chmod 700 "$PROFILE"
+CHROME="$(command -v google-chrome-stable || echo /usr/bin/google-chrome-stable)"
+# Sized to the screen, over the terminal, as the bots' Chrome is (bops-chrome).
+read -r W H < <(xdotool getdisplaygeometry 2>/dev/null) || true
+[[ "${W:-}" =~ ^[0-9]+$ && "${H:-}" =~ ^[0-9]+$ ]] || { W=1280; H=720; }
+GTK_THEME=Arc-Lighter setsid nohup "$CHROME" \
+  --no-sandbox --disable-gpu --no-first-run --no-default-browser-check --hide-crash-restore-bubble --incognito \
+  --user-data-dir="$PROFILE" --class=BopsSignIn --new-window \
+  --window-position=120,80 --window-size="$((W - 240)),$((H - 190))" "$URL" \
+  < /dev/null > /dev/null 2>&1 &

@@ -1,7 +1,7 @@
 import "server-only";
 import { LIGHT } from "./routing";
 import { setting } from "./models";
-import { Honcho, type Peer, type Session as HonchoSession } from "@honcho-ai/sdk";
+import { Honcho, Session as HonchoSessionRef, type Peer, type Session as HonchoSession } from "@honcho-ai/sdk";
 import { openaiClient } from "./openai-client";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -9,7 +9,7 @@ import { MAIN_WORKSPACE, workspaceOf, type MemoryGroup } from "@/lib/types";
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudProxy, cloudSessionNow } from "./cloud";
 import { chose, decide, yes, type Question } from "./decide";
-import { addMessage, bot, getState, ownerName, sameState, stateEpoch, update, userDir } from "./store";
+import { addMessage, bot, getState, ownerName, sameState, stateArrivals, stateEpoch, update, userDir } from "./store";
 import { recordTokens, usageTags } from "./usage";
 
 /**
@@ -49,6 +49,48 @@ const ownBank = (ws: string): Binding =>
 
 export function bindingOf(ws: string): Binding {
   return getState().workspaces?.find((w) => w.id === ws)?.memory ?? ownBank(ws);
+}
+
+/** The workspace uses its own bank (not one it shares from another workspace). */
+export const ownsBank = (ws: string) => bindingOf(ws).bank === ownBank(ws).bank;
+
+/**
+ * The workspace a bank belongs to: the one whose own bank it is (the first workspace for the user's
+ * own bank), else the first workspace using it. The bank's card and the facts from no Bops chat are its.
+ */
+export function bankOwner(bank: string): string {
+  const all = [MAIN_WORKSPACE, ...(getState().workspaces ?? []).map((w) => w.id).filter((id) => id !== MAIN_WORKSPACE)];
+  return all.find((ws) => ownBank(ws).bank === bank && bindingOf(ws).bank === bank) ?? all.find((ws) => bindingOf(ws).bank === bank) ?? MAIN_WORKSPACE;
+}
+
+/** Where a workspace that shares another's bank keeps the facts it saves (a bot's remember, Orbit's Add): a session of its own, so they stay its. */
+const notesSession = (ws: string) => `bops-notes-${clean(ws)}`;
+
+/**
+ * The Bops workspace a memory session belongs to: a chat's (by its bot), a task's (by its bot), or a
+ * workspace's notes; null for a session Bops doesn't know (the user's other agents, a chat since deleted).
+ */
+export function sessionWorkspace(sessionId: string | null): string | null {
+  if (!sessionId) return null;
+  const st = getState();
+  if (sessionId.startsWith("bops-notes-")) return (st.workspaces ?? []).find((w) => notesSession(w.id) === sessionId)?.id ?? (notesSession(MAIN_WORKSPACE) === sessionId ? MAIN_WORKSPACE : null);
+  if (sessionId.startsWith("bops-chat-")) {
+    const c = st.chats.find((x) => sessionId === `bops-chat-${clean(x.id)}`);
+    return c ? workspaceOf(bot(c.botIds[0])) : null;
+  }
+  if (sessionId.startsWith("bops-task-")) {
+    const t = st.sessions.find((x) => sessionId === `bops-task-${clean(x.id)}`);
+    return t ? workspaceOf(bot(t.botId)) : null;
+  }
+  return null;
+}
+
+/** The user said something in this Bops chat after `at` (this Mac's clock): what a forgotten item needs to come back. */
+export function saidSince(sessionId: string | null, at: number): boolean {
+  if (!sessionId?.startsWith("bops-chat-")) return false;
+  const st = getState();
+  const c = st.chats.find((x) => sessionId === `bops-chat-${clean(x.id)}`);
+  return !!c && st.messages.some((m) => m.chatId === c.id && m.role === "user" && m.at > at);
 }
 
 /** The workspace a bot's memory comes from. */
@@ -233,7 +275,8 @@ export function saveToMemory(ws: string, kind: "chat" | "task", id: string, mess
   const sid = `bops-${kind}-${clean(id)}`;
   void (async () => {
     const who = [...new Set(["owner", ...msgs.map((m) => m.who)])];
-    const s = await session(b, sid, who, { kind, ...metadata });
+    // The workspace it's from, so a bank two workspaces share knows whose it is.
+    const s = await session(b, sid, who, { kind, ws, ...metadata });
     const peers = await Promise.all(msgs.map((m) => peer(b, m.who)));
     await s.addMessages(msgs.map((m, i) => peers[i].message(m.text.slice(0, 8000), { metadata: { app: "bops", kind } })));
     // Memory works out new facts from it in the background, minutes later: the categories look again then.
@@ -292,7 +335,9 @@ export function learn(ws: string, fact: string, chatId?: string, opts: { auto?: 
     const same = ids.findIndex((_, i) => prob(i, "same") >= 0.6);
     if (same >= 0) return `Already known: ${known.get(ids[same])}`;
     if (!ours()) return "Not saved: another account signed in.";
-    const [made] = await p.conclusions.create([{ content: text }]);
+    // A workspace sharing another's bank saves into a session of its own: its Orbit, not the other's, shows it.
+    const notes = ownsBank(ws) ? undefined : await notesFor(b, ws);
+    const [made] = await p.conclusions.create([{ content: text, ...(notes ? { sessionId: notes } : {}) }]);
     x.recent.push({ id: made.id, text, at: Date.now() });
     // A fact saved by hand or by a bot is sorted into the categories in seconds; one Bops noted on its
     // own from what the user said waits to be sorted with the next few (each sort is a model call).
@@ -307,6 +352,19 @@ export function learn(ws: string, fact: string, chatId?: string, opts: { auto?: 
   return run;
 }
 
+/** A workspace's notes session in a bank (made once): nothing in it is ever worked out into facts. */
+async function notesFor(b: Binding, ws: string) {
+  const x = bankFor(b);
+  const id = notesSession(ws);
+  if (!x.sessions.has(id)) {
+    const s = x.client.session(id, { metadata: { app: "bops", kind: "notes", ws }, configuration: { reasoning: { enabled: false } }, peers: [[b.peer, { observeMe: false, observeOthers: false }]] });
+    s.catch(() => x.sessions.delete(id));
+    x.sessions.set(id, s);
+  }
+  await x.sessions.get(id);
+  return id;
+}
+
 /** Jev: does what the user just said tell their bots something lasting about them? */
 const WORTH_REMEMBERING = (said: string): Question => ({
   type: "noul",
@@ -319,9 +377,31 @@ const openai = openaiClient();
 /** Asking to keep something from someone ("don't tell Sam yet", "keep this between us"): caught at once, before Jev. */
 const SECRET = /\b(don'?t|do not|never) (tell|share|mention|let)\b|\bkeep (it|this|that)? ?(from|between|private|quiet)|\bbetween (us|you and me)\b|\b(this is|it's|that's) private\b|\boff the record\b/i;
 
-/** Messages the user asked to keep from someone: never sent to the shared memory, nor the bot's reply to them. */
+/**
+ * Messages the user asked to keep from someone: never sent to the shared memory, nor the bot's reply to
+ * them, nor into a procedure's draft. Marked on the message itself (Message.secret), so the mark outlasts
+ * a restart, is there with memory off and reaches the user's other Macs. The set is those marks, quick to
+ * ask (a draft asks about every message in a chat): this server's own as they're made, and the others read
+ * from the messages once each time messages come in from elsewhere (stateArrivals: a sign-in, another
+ * Mac's changes).
+ */
 const secrets = new Set<string>();
-export const isSecret = (messageId: string | undefined) => !!messageId && secrets.has(messageId);
+let secretsRead = -1;
+export function isSecret(messageId: string | undefined) {
+  if (!messageId) return false;
+  if (secretsRead !== stateArrivals()) {
+    secretsRead = stateArrivals();
+    for (const m of getState().messages) if (m.secret) secrets.add(m.id);
+  }
+  return secrets.has(messageId);
+}
+function markSecret(messageId: string) {
+  secrets.add(messageId);
+  update((s) => {
+    const m = s.messages.find((x) => x.id === messageId);
+    if (m) m.secret = true;
+  });
+}
 
 /**
  * The user's message, into the workspace's memory (which all its bots share), with two checks first
@@ -331,11 +411,13 @@ export const isSecret = (messageId: string | undefined) => !!messageId && secret
  * it; learn() checks it against what's known). Fire and forget.
  */
 export function rememberMessage(ws: string, chatId: string, messageId: string, said: string, metadata: Record<string, unknown> = {}) {
-  if (!on() || !said.trim()) return;
+  if (!said.trim()) return;
+  // Marked with memory off too: a procedure's draft reads the chat whether or not there's a memory.
   if (SECRET.test(said)) {
-    secrets.add(messageId);
+    markSecret(messageId);
     return;
   }
+  if (!on()) return;
   // The account whose message this is: a sign-out or another account's sign-in meanwhile, and nothing of it goes into the new one's memory.
   const ours = sameState();
   const epoch = stateEpoch();
@@ -353,7 +435,7 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
       },
     );
     if ((yes(a?.secret) ?? 0) >= 0.4) {
-      secrets.add(messageId);
+      if (ours()) markSecret(messageId);
       return;
     }
     if (!ours()) return;
@@ -684,7 +766,7 @@ export async function memoryInfo(ws: string) {
 
 /** Where a fact was learned, in words: a chat or task in Bops, or the user's other agents. */
 function sourceOf(sessionId: string | null) {
-  if (!sessionId) return "Saved by hand";
+  if (!sessionId || sessionId.startsWith("bops-notes-")) return "Saved by hand";
   const st = getState();
   for (const c of st.chats) if (sessionId === `bops-chat-${clean(c.id)}`) return c.kind === "bot" ? `Chat with ${bot(c.botIds[0])?.name ?? "a bot"}` : (c.title ?? "Group chat");
   for (const s of st.sessions) if (sessionId === `bops-task-${clean(s.id)}`) return `Task: ${s.title}`;
@@ -807,11 +889,95 @@ function categoriesDropped(bank: string, ids: string[]) {
   if (ids.length) void import("./memory-categories").then((m) => m.dropFacts(bank, ids)).catch(() => {});
 }
 
-/** Of these fact ids, the ones still in memory (free: listed by id, 100 a call). */
+/** Of these fact ids, the ones still in memory, with the session each was learned in (free: listed by id, 100 a call). */
 export async function existingFacts(ws: string, ids: string[]) {
-  if (!ids.length) return new Set<string>();
+  if (!ids.length) return new Map<string, string | null>();
   const got = await (await peer(bindingOf(ws))).conclusions.getMany(ids);
-  return new Set(got.map((c) => c.id));
+  return new Map(got.map((c) => [c.id, c.sessionId] as [string, string | null]));
+}
+
+/** These facts as the categories read them (the ones still in memory). */
+export async function factsByIds(ws: string, ids: string[]): Promise<FactRow[]> {
+  if (!ids.length) return [];
+  const got = await (await peer(bindingOf(ws))).conclusions.getMany(ids);
+  return got.map(rowOf);
+}
+
+const rowOf = (c: { id: string; content: string; createdAt: string; sessionId: string | null; level?: string; sourceIds?: string[] | null }): FactRow => ({
+  id: c.id,
+  text: c.content,
+  at: Date.parse(c.createdAt) || 0,
+  session: c.sessionId,
+  level: c.level ?? "explicit",
+  ...(c.sourceIds?.length ? { from: c.sourceIds } : {}),
+});
+
+/** A session by its id, without asking memory for it (or making it). */
+export const sessionRef = (client: Honcho, id: string) => new HonchoSessionRef(id, client.workspaceId, client.http);
+
+const notFound = (e: unknown) => (e as { status?: number }).status === 404;
+
+/**
+ * Remove from memory for good (Orbit's Forget and Delete everywhere): facts, the card lines `cardLine`
+ * picks, and whole sessions (a chat's or a call's copy in memory, all its messages). In the bank's queue,
+ * with learn and the other forgets; the card written once. Then checked with memory itself: what's still
+ * there (a delete that failed, or one memory didn't apply) is returned, to be tried again. Gone already is fine.
+ */
+export function purgeMemory(
+  ws: string,
+  what: { facts: string[]; cardLine?: (line: string) => boolean; sessions: string[] },
+  /** Another bank than the workspace's now (one it used before: what was still to delete there). */
+  on?: Binding,
+): Promise<{ facts: string[]; card: boolean; sessions: string[] }> {
+  const b = on ?? bindingOf(ws);
+  const x = bankFor(b);
+  const run = x.queue.then(async () => {
+    const p = await peer(b);
+    const failed = { facts: new Set<string>(), sessions: new Set<string>(), card: false };
+    for (const id of what.facts) {
+      try {
+        await p.conclusions.delete(id);
+      } catch (e) {
+        if (!notFound(e)) failed.facts.add(id);
+      }
+      x.recent = x.recent.filter((r) => r.id !== id);
+    }
+    if (what.cardLine) {
+      try {
+        const lines = (await p.getCard()) ?? [];
+        if (lines.some(what.cardLine)) await p.setCard(lines.filter((l) => !what.cardLine!(l)));
+      } catch {
+        failed.card = true;
+      }
+      x.card = undefined;
+    }
+    for (const id of what.sessions) {
+      try {
+        // By id, not get-or-create: one that's gone already isn't made again to be deleted.
+        await sessionRef(x.client, id).delete();
+      } catch (e) {
+        if (!notFound(e)) failed.sessions.add(id);
+      }
+      // Saved again later, it's made anew.
+      x.sessions.delete(id);
+    }
+    // What memory still has, asked by id: a delete it answered but didn't apply is tried again too.
+    const asked = what.facts.filter((id) => !failed.facts.has(id));
+    const still = asked.length ? await p.conclusions.getMany(asked).catch(() => asked.map((id) => ({ id }))) : [];
+    for (const c of still) failed.facts.add(c.id);
+    if (what.cardLine && !failed.card) failed.card = ((await p.getCard().catch(() => null)) ?? []).some(what.cardLine);
+    const gone = new Set(what.facts.filter((id) => !failed.facts.has(id)));
+    categoriesDropped(b.bank, [...gone]);
+    // Nothing keeps their words: the memory review's flags go too.
+    if (gone.size && reviews()[b.bank])
+      setReview(b.bank, (r) => {
+        r.flagged = r.flagged.filter((f) => !gone.has(f.id));
+        r.kept = r.kept.filter((id) => !gone.has(id));
+      });
+    return { facts: [...failed.facts], card: failed.card, sessions: [...failed.sessions] };
+  });
+  x.queue = run.catch(() => {});
+  return run;
 }
 
 /**
@@ -844,7 +1010,7 @@ export function forgetFacts(ws: string, ids: string[]): Promise<void> {
 }
 
 /** A fact in memory as the categories read it. */
-export type FactRow = { id: string; text: string; at: number; session: string | null; level: string };
+export type FactRow = { id: string; text: string; at: number; session: string | null; level: string; /** The facts it was worked out from (memory's dreaming). */ from?: string[] };
 
 /**
  * The newest facts in a workspace's memory, newest first, up to `max` (listing is free; 100 a page).
@@ -856,7 +1022,7 @@ export async function scanFacts(ws: string, max: number, enough?: (page: FactRow
   let page: Awaited<ReturnType<typeof p.conclusions.list>> | null = await p.conclusions.list({ size: 100 });
   const total = page.total;
   while (page) {
-    const rows = page.items.map((c) => ({ id: c.id, text: c.content, at: Date.parse(c.createdAt) || 0, session: c.sessionId, level: c.level ?? "explicit" }));
+    const rows = page.items.map(rowOf);
     out.push(...rows);
     if (out.length >= max || !rows.length || enough?.(rows)) break;
     page = page.hasNextPage ? await page.getNextPage() : null;
@@ -867,6 +1033,17 @@ export async function scanFacts(ws: string, max: number, enough?: (page: FactRow
 /** The user's card (who they are, their people, their rules), as memory keeps it now. */
 export async function cardOf(ws: string) {
   return card(bindingOf(ws));
+}
+
+/**
+ * A workspace's bank as Orbit's issues use it (orbit-issues.ts): the Honcho client, the user's peer id,
+ * and a bot's peer (made once, never modelled). Null with memory off.
+ */
+export function bankClient(ws: string) {
+  if (!on()) return null;
+  const b = bindingOf(ws);
+  const x = bankFor(b);
+  return { client: x.client, bank: b.bank, owner: b.peer, peerId: (who: string) => peerId(b, who), peer: (who: string) => peer(b, who), forget: (id: string) => x.sessions.delete(id) };
 }
 
 /** Which bank (Honcho workspace) a workspace's memory is in: workspaces can share one. */

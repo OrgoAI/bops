@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppState, Bot, Session } from "@/lib/types";
 import { MemorySheet } from "./memory-sheet";
-import { ago, post, StatusIcon } from "./ui";
+import { ago, post, quietNothing, StatusIcon } from "./ui";
 
 type Fact = { id: string; text: string; private: boolean; at?: number; source?: string };
 type Data = { workspace: string; ws: string; card: Fact[]; facts: Fact[]; error?: string };
@@ -80,7 +80,7 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
   };
 
   const searching = !!q.trim();
-  const done = state.sessions.filter((s) => s.botId === b.id && (s.answer || s.status === "done")).reverse();
+  const done = state.sessions.filter((s) => s.botId === b.id && (s.answer || s.status === "done") && !quietNothing(s)).reverse();
   const learned = data?.facts ?? [];
 
   return (

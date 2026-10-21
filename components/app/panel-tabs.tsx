@@ -1,14 +1,15 @@
 "use client";
 
 import { createContext, createElement, useEffect, useRef, useState } from "react";
-import { GROUP_NAME, type KnowledgeFilter } from "@/lib/memory-categories";
+import { GROUP_NAME } from "@/lib/memory-categories";
 import { live, type AppState } from "@/lib/types";
 import { computerOf } from "@/lib/screens";
+import { AutopilotIcon, type AutopilotSection } from "./autopilot";
 import type { Section } from "./bot-panel";
 import { CrmFileIcon } from "./crm";
 import { Mascot } from "./mascot";
 import { MacIcon } from "./mac-tab";
-import { KnowledgeIcon } from "./memory-categories";
+import { KnowledgeIcon, type OrbitSection } from "./memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MonitorIcon, teamOf } from "./ui";
 
@@ -23,20 +24,39 @@ export type PanelTab =
   | { id: string; kind: "bot"; botId: string; section: Section }
   | { id: string; kind: "web"; url: string; title?: string }
   | { id: string; kind: "new" }
-  | { id: string; kind: "vault" }
+  | { id: string; kind: "vault"; keysFor?: string }
   | { id: string; kind: "mac" }
   /** A CRM file (crm.tsx), in the workspace it belongs to. */
   | { id: string; kind: "crm"; ws: string; file: string }
   /**
-   * What Bops knows, one category at a time (memory-categories.tsx): one tab per workspace, at the item
+   * What Bops knows, one section at a time (memory-categories.tsx; Issues, orbit-issues.tsx): one tab per workspace, at the item
    * asked for (`focus`), or with a search filled in (`query`: Show all, from the sidebar's search; it's
    * taken off once the page has filled it in). `focusAt` is when they were asked for, so asking again
    * for the same one shows it again.
    */
-  | { id: string; kind: "memory"; ws: string; category: KnowledgeFilter; focus?: string; focusAt?: number; query?: string };
+  | { id: string; kind: "memory"; ws: string; category: OrbitSection; focus?: string; focusAt?: number; query?: string }
+  /**
+   * Autopilot (autopilot.tsx): what the workspace's bots do on their own, a section at a time. One tab per
+   * workspace, at the row asked for (`focus`) and the bot asked for (`bot`: only its, from its profile);
+   * `focusAt` is when they were asked for, so asking again shows them again.
+   */
+  | { id: string; kind: "autopilot"; ws: string; section: AutopilotSection; focus?: string; focusAt?: number; bot?: string };
 
 /** The tab that follows the chat. */
 export const CHAT_TAB = "chat";
+
+/** A tab you're reading (a page, the Vault, a CRM file, Knowledge and Skills in it, a profile, Routines): a new "Needs you" doesn't take the panel from it. */
+export const isReading = (t?: PanelTab) =>
+  !!t && (t.kind === "web" || t.kind === "vault" || t.kind === "crm" || t.kind === "memory" || t.kind === "bot" || t.kind === "autopilot");
+
+/**
+ * The Knowledge tab, opened again for a kind, an item or a search: on the kind asked for, else where it
+ * was, except that a search asked for on Issues (whose page doesn't search) goes to All.
+ */
+export function memoryAgain(t: Extract<PanelTab, { kind: "memory" }>, { category, focus, query }: { category?: OrbitSection; focus?: string; query?: string }, focusAt: number): PanelTab {
+  const to = category ?? (query && t.category === "issues" ? "all" : t.category);
+  return { ...t, category: to, focus, focusAt, query };
+}
 
 /** Open a link as a tab on the right; null outside the app (links then open in the browser). */
 export const OpenLink = createContext<((url: string, title?: string) => void) | null>(null);
@@ -50,6 +70,17 @@ export const hostOf = (url: string) => {
     return url;
   }
 };
+
+/**
+ * The tabs the bar has shown, kept while it's away (it's unmounted while the side panel is hidden). A
+ * tab that opens later slides in; the ones there when Bops opened, or back as the panel shows again,
+ * are simply there.
+ */
+const shownTabs = new Set<string>();
+let barShown = false;
+
+/** A tab closed (not just out of sight): opened again, it slides in again. */
+export const forgetTab = (id: string) => void shownTabs.delete(id);
 
 export function TabBar({
   state,
@@ -68,6 +99,9 @@ export function TabBar({
   onClose: (id: string) => void;
   onNew: () => void;
 }) {
+  useEffect(() => {
+    barShown = true;
+  }, []);
   const all: PanelTab[] = [{ id: CHAT_TAB, kind: "computer", botId: chatBotId }, ...tabs];
   return (
     <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
@@ -89,13 +123,19 @@ export function TabBar({
 }
 
 function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState; tab: PanelTab; on: boolean; closable: boolean; onPick: () => void; onClose: () => void }) {
+  // New since the bar first showed, decided once as it mounts (see shownTabs).
+  const [opening] = useState(() => barShown && !shownTabs.has(t.id));
+  useEffect(() => {
+    shownTabs.add(t.id);
+  }, [t.id]);
   const b = "botId" in t ? state.bots.find((x) => x.id === t.botId) : undefined;
   // A computer tab says when its bot is working, or when something there needs you.
   const working =
     (t.kind === "computer" && state.sessions.some((s) => s.botId === t.botId && live(s) && s.runsOn !== "mac")) ||
     (t.kind === "mac" && state.sessions.some((s) => s.runsOn === "mac" && live(s)));
   const needsYou =
-    t.kind === "computer" && (state.watches?.some((w) => w.botId === t.botId && w.alert) || state.sessions.some((s) => s.botId === t.botId && live(s) && s.blocker));
+    // (A watched web page has no screen there: its news shows on Autopilot instead.)
+    t.kind === "computer" && (state.watches?.some((w) => w.botId === t.botId && !w.page && w.alert) || state.sessions.some((s) => s.botId === t.botId && live(s) && s.blocker));
   // The computer it works on: its own, or the main bot's it shares (lib/screens.ts), named for whose it is.
   const host = b ? computerOf(state, b) : undefined;
   const label =
@@ -115,15 +155,18 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
                 ? t.file
                 : t.kind === "memory"
                   ? GROUP_NAME
-                  : "New tab";
+                  : t.kind === "autopilot"
+                    ? "Routines"
+                    : "New tab";
   return (
     <div
       onClick={onPick}
       onAuxClick={(e) => e.button === 1 && closable && onClose()}
       title={t.kind === "web" ? t.url : label}
-      className={`group/tab flex h-[30px] min-w-0 max-w-[220px] shrink cursor-default items-center gap-1.5 rounded-[10px] pl-2.5 ${closable ? "pr-1" : "pr-3"} text-[13px] leading-4 [-webkit-app-region:no-drag] ${
-        on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F,0_2px_6px_-3px_#00000026]" : "text-[#6B6B6B] hover:bg-[#EEEEEC]"
-      }`}
+      // Clipped, so what's in a tab stays inside it while it opens up.
+      className={`group/tab flex h-[30px] min-w-0 max-w-[220px] shrink cursor-default items-center gap-1.5 overflow-hidden rounded-[10px] pl-2.5 ${closable ? "pr-1" : "pr-3"} text-[13px] leading-4 transition-[background-color,box-shadow,color] duration-150 ease-out motion-reduce:transition-none [-webkit-app-region:no-drag] ${
+        opening ? "motion-tab-in" : ""
+      } ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F,0_2px_6px_-3px_#00000026]" : "text-[#6B6B6B] hover:bg-[#EEEEEC]"}`}
     >
       {t.kind === "computer" ? (
         <MonitorIcon size={14} color={on ? "#0A0A0A" : "#6B6B6B"} />
@@ -137,6 +180,8 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
         <CrmFileIcon />
       ) : t.kind === "memory" ? (
         <KnowledgeIcon />
+      ) : t.kind === "autopilot" ? (
+        <AutopilotIcon />
       ) : (
         <GlobeIcon />
       )}
@@ -313,7 +358,7 @@ export function NewTab({
   const target = typed ? toAddress(typed) : "";
   const site = target && !target.startsWith("https://www.google.com/search?") ? hostOf(target).replace(/^www\./, "") : null;
   return (
-    <div className="flex min-h-0 flex-1 flex-col items-center gap-6 overflow-y-auto px-8 pt-[12vh]">
+    <div className="motion-fade-in flex min-h-0 flex-1 flex-col items-center gap-6 overflow-y-auto px-8 pt-[12vh]">
       <form
         onSubmit={(e) => {
           e.preventDefault();

@@ -8,6 +8,8 @@ import { computerAsleepError, computerWakingError, orgo, OrgoTimeout, screenId }
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
+import { callApi, callApiTool, usableKeys } from "./keys";
+import { readSkill, READ_SKILL_TOOL, skillsFor } from "./workspace-skills";
 import { bot, patchSession, session, stateEpoch } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import type { Session } from "@/lib/types";
@@ -109,7 +111,25 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   const started = Date.now();
   // Business data and the user's CRM run in this process (treg.ts, crm.ts), so the task has them wherever its computer is.
   // Not the CRM for a task someone outside Bops started (Session.fromOutside), as for a chat turn of theirs.
-  const tools = [{ type: "computer" }, { type: "web_search" }, SHELL_TOOL, PAGE_TOOL, VAULT_TOOL, ...(t.parts ? PART_TOOLS : []), ...(t.apps ? APP_TOOLS(b) : []), ...DATA_TOOLS(b), ...(s.fromOutside ? [] : CRM_TOOLS(b))];
+  // read_skill only when the bot has skills to read (sessions.ts lists them in its instructions).
+  // call_api with the user's keys (keys.ts) reads only (GET): anything that changes something is asked for in the chat.
+  // Not for a task someone outside Bops started, like the CRM. Not bank, payroll or compliance keys (chatOnly):
+  // the task's browser and shell can reach any site, so a page could have it type what they answer anywhere.
+  const outside = outsideTask(t.sessionId);
+  const keyed = outside ? [] : (await usableKeys(b)).filter((k) => !k.chatOnly);
+  const tools = [
+    { type: "computer" },
+    { type: "web_search" },
+    SHELL_TOOL,
+    PAGE_TOOL,
+    VAULT_TOOL,
+    ...(t.parts ? PART_TOOLS : []),
+    ...(skillsFor(b.id).length ? [READ_SKILL_TOOL] : []),
+    ...(t.apps ? APP_TOOLS(b) : []),
+    ...DATA_TOOLS(b),
+    ...(outside ? [] : CRM_TOOLS(b)),
+    ...(keyed.length ? [callApiTool(keyed, { getOnly: true })] : []),
+  ];
   // A turn that was stopped mid-step owes OpenAI the outputs of the calls it was answering.
   let input: unknown[] = [...(await settle(t, s.owed ?? [])), { role: "user", content: [{ type: "input_text", text: t.input }] }];
   let prev = s.responseId;
@@ -475,7 +495,6 @@ const VAULT_TOOL = {
   parameters: { type: "object", additionalProperties: false, required: [], properties: {} },
   strict: true,
 };
-
 const clip = (s: string, max = 12_000) => (s.length > max ? `${s.slice(0, max / 2)}\n… (cut) …\n${s.slice(-max / 2)}` : s);
 
 /** What a page script's runner sends back (vm/page-script.cjs): its answer, the page it ended on, and its receipt. */
@@ -560,8 +579,15 @@ export function pageLook(g: PageGuard, script: string, r: { text: string; run?: 
   return { look, note };
 }
 
+/** A task someone outside Bops started (Session.fromOutside), or a part of one (split_task: Session.partOf), whether or not the part was marked so. */
+function outsideTask(id: string) {
+  const s = session(id);
+  return !!s?.fromOutside || (!!s?.partOf && !!session(s.partOf)?.fromOutside);
+}
+
 async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard()) {
   const s = session(t.sessionId)!;
+  const outside = outsideTask(t.sessionId);
   let args: Record<string, unknown> = {};
   try {
     args = JSON.parse(o.arguments || "{}");
@@ -597,16 +623,25 @@ async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = ne
     } else if (o.name === "sign_in_from_vault") {
       t.step("vault", "signing in from your vault");
       output = await (await import("./vault")).vaultSignIn(s.botId, t.display, t.sessionId);
+    } else if (o.name === "read_skill") {
+      const name = String(args.name ?? "").trim();
+      const file = typeof args.file === "string" && args.file.trim() ? args.file.trim() : null;
+      t.step("skill", file ? `read ${file.slice(0, 60)} of the skill "${name.slice(0, 60)}"` : `read the skill "${name.slice(0, 60)}"`);
+      output = readSkill(s.botId, name, file);
     } else if (o.name === "find_app_actions") {
       t.step("find_app_actions", `looked for "${String(args.query ?? "").slice(0, 60)}" in your apps`);
-      output = await findAppActions(s.botId, String(args.query ?? ""));
+      output = await findAppActions(s.botId, String(args.query ?? ""), { sessionId: t.sessionId });
     } else if (o.name === "use_app") {
       t.step("use_app", `used ${String(args.action ?? "an app")}`);
       output = await runAppAction(s.botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId: t.sessionId }, undefined, (args.account as string | null) ?? null);
+    } else if (o.name === "call_api" && !outside) {
+      const r = await callApi(s.botId, args, { sessionId: t.sessionId });
+      t.step("call_api", r.did ?? `tried to call ${String(args.key ?? "an API")}`);
+      output = r.text;
     } else if (o.name && DATA_TOOL_NAMES.has(o.name)) {
       t.step(o.name, o.name === "business_search" ? `looked up ${String(args.job ?? "business data")}` : o.name === "find_data" ? `looked for "${String(args.query ?? "").slice(0, 60)}" in business data` : `got ${String(args.endpoint_id ?? "data")}`);
       output = await runDataTool(s.botId, o.name, args, { sessionId: t.sessionId });
-    } else if (o.name && CRM_TOOL_NAMES.has(o.name) && !s.fromOutside) {
+    } else if (o.name && CRM_TOOL_NAMES.has(o.name) && !outside) {
       t.step(o.name, crmStep(o.name, args));
       output = await runCrmTool(s.botId, o.name, args, { sessionId: t.sessionId });
     } else output = `Unknown tool ${o.name}.`;

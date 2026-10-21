@@ -7,8 +7,8 @@ native `computer` tool loop. A thread works on its own screen; with multi-agent 
 free screens for helpers (subagents), who pass their screen number to every tool. The screen
 ledger (bops-screens) makes sure no two agents ever drive the same screen.
 
-Usage (stdio, started by the executor):
-    DISPLAY=:100 python3 screen_mcp.py stdio --session <bops session id> [--bot <bops bot id>]
+Usage (stdio, started by the executor, or by Claude Code for a thread a brain runs, with --approve):
+    DISPLAY=:100 python3 screen_mcp.py stdio --session <bops session id> [--bot <bops bot id>] [--approve]
 """
 
 import json
@@ -334,6 +334,26 @@ if os.path.exists(APPS):
     def sign_in_from_vault(screen: int | None = None) -> str:
         """Sign in on a sign-in or verification code page from the user's vault. Bops finds the page on your screen (or a helper's: pass its screen number), fills the saved username, password or 2FA code straight into it and submits; you never see them. Call it whenever a page asks you to sign in, and never type a password yourself. It says whether that worked."""
         return _apps("vault_sign_in", {"display": int(_display(screen).lstrip(":"))})
+
+
+# A thread a brain runs (Claude Code: lib/server/cli-agents.ts, vm/bin/bops-agent) asks the user before a tool
+# it may not use by itself: Claude Code calls this as its --permission-prompt-tool, and Bops shows the user
+# the tool and what it would do, and waits for their yes or no (or says no once it's waited long enough).
+# Anything but a yes from Bops, or no Bops to ask, is a no.
+if "--approve" in sys.argv:
+
+    @server.tool()
+    def approve(tool_name: str, input: dict, tool_use_id: str = "") -> str:
+        """Claude Code calls this itself to ask the user whether you may use a tool. Never call it yourself."""
+        said = _apps("approve", {"tool": tool_name, "input": input}) if os.path.exists(APPS) else "Bops can't be reached from this computer, so nothing that needs the user's OK can run."
+        try:
+            answer = json.loads(said)
+        except ValueError:
+            answer = {}
+        if isinstance(answer, dict) and answer.get("behavior") == "allow":
+            return json.dumps({"behavior": "allow", "updatedInput": input})
+        message = answer.get("message") if isinstance(answer, dict) and isinstance(answer.get("message"), str) else said[:300]
+        return json.dumps({"behavior": "deny", "message": message or "Not approved."})
 
 
 if __name__ == "__main__":

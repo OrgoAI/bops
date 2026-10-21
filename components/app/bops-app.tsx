@@ -3,24 +3,28 @@
 import { screenMap } from "@/lib/screens";
 import { chatAsks } from "@/lib/asks";
 import { useEffect, useRef, useState } from "react";
-import { botChatId, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
+import { botChatId, BRAINS_ON, isScreenWatch, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
 import { Account } from "./account";
+import { AutopilotPage, type AutopilotSection } from "./autopilot";
 import { Members } from "./members";
 import { BotPanel, type Section } from "./bot-panel";
+import { BrainSettings } from "./brains";
 import { CallBar } from "./call-bar";
-import { ChatView, ThreadSheet, ToPicker } from "./chat-view";
+import { ChatView, forgetSheet, ThreadSheet, ToPicker } from "./chat-view";
 import { ComputerPeek, ComputerView, defaultDisplay } from "./computer";
 import { crmOpen } from "@/lib/crm-access";
 import { categoriesOpen } from "@/lib/memory-categories";
+import { tagsOf } from "@/lib/routine-catalog";
 import { CrmView, OpenCrm } from "./crm";
 import { BoppyLoading, BusyBots, Mascot } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
-import { CHAT_TAB, hostOf, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
+import { CHAT_TAB, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
 
 /** Your Mac's tab, and the chat's bot's profile (it follows the chat, like the computer tab); both open on demand. */
 const MAC_TAB = "tab_mac";
 const PROFILE_TAB = "tab_profile";
 import { Sidebar } from "./sidebar";
+import { footerPageOf } from "./sidebar-footer";
 import { CloudUnreachable, SignIn, useAuthStatus } from "./sign-in";
 import { Setup, ThisMacSettings } from "./setup";
 import { TooltipLayer } from "./tooltip";
@@ -94,7 +98,13 @@ const tabId = () => `tab_${Date.now().toString(36)}${Math.random().toString(36).
 function Bops({ state }: { state: AppState | null }) {
   // Empty until a chat is picked: the workspace's main bot's chat shows (see `chat` below).
   const [chatId, setChatId] = useState("");
+  // What to put in a chat's message box once, to change and send (askBot; ChatView prefill): until it's in.
+  const [prefill, setPrefill] = useState<{ chatId: string; text: string; at: number } | null>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
+  // Closed by any way (Esc, a chat opened, its own close): the thread sheet's next opening plays its entrance again.
+  useEffect(() => {
+    if (!threadId) forgetSheet();
+  }, [threadId]);
   const [composing, setComposing] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
   // The sidebar on the left, shown unless you hid it (this Mac remembers; ⌘\ or the toggle).
@@ -152,6 +162,7 @@ function Bops({ state }: { state: AppState | null }) {
   const [shownScreen, setShownScreen] = useState("");
   // Screens you picked yourself stay put; otherwise the panel follows the action (see ComputerView).
   const [pinned, setPinned] = useState<Record<string, boolean>>({});
+  // Settings, or Settings at Keys to add one for a bot (from its profile).
   const [settings, setSettings] = useState(false);
   const [account, setAccount] = useState(false);
   const [setup, setSetup] = useState(false);
@@ -234,12 +245,14 @@ function Bops({ state }: { state: AppState | null }) {
   // running time keeps its own: the open thread, the sidebar's "5m", watch pills, the call timer.)
 
   // Clicking into a computer takes over its screen; leaving the full view hands it back (a CRM file full width took nothing).
+  // Not a thread's terminal (Takeover.terminal): it stays open on its screen until a reply or Hand back closes it.
   const wasFocused = useRef(false);
   const computerFocus = focus && !crmFocus;
+  const inTerminal = !!state?.takeover?.terminal;
   useEffect(() => {
-    if (wasFocused.current && !computerFocus) void post("/api/takeover", {}, "DELETE");
+    if (wasFocused.current && !computerFocus && !inTerminal) void post("/api/takeover", {}, "DELETE");
     wasFocused.current = computerFocus;
-  }, [computerFocus]);
+  }, [computerFocus, inTerminal]);
 
   // What Esc does to the tab on the right, set on every render (see escTab.current below).
   const escTab = useRef<(e: KeyboardEvent) => void>(() => {});
@@ -298,8 +311,13 @@ function Bops({ state }: { state: AppState | null }) {
     .map((t) => (t.id === PROFILE_TAB && t.kind === "bot" ? { ...t, botId: chatBotId } : t))
     .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId))
     .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)))
-    .filter((t) => t.kind !== "memory" || (memory && t.ws === currentWorkspace(state)));
+    // Skills are this Mac's folders and need no account, so a Knowledge tab on Skills stays without one.
+    .filter((t) => t.kind !== "memory" || (t.ws === currentWorkspace(state) && (memory || t.category === "skills" || t.category === "apps")))
+    // Routines shows its own workspace's bots only: another workspace's tab goes on a switch.
+    .filter((t) => t.kind !== "autopilot" || t.ws === currentWorkspace(state));
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
+  // The footer's pill: People while its sheet is open, else the page in sight on the right.
+  const footer = footerPageOf({ people: members, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory });
   if (recent.at(-1) !== active) {
     setRecent([...recent.filter((id) => id !== active), active].slice(-20));
     // Gone on to another tab: leaving that one later shouldn't hide the panel this one opened.
@@ -313,7 +331,14 @@ function Bops({ state }: { state: AppState | null }) {
   if (leadKey !== followed) {
     setFollowed(leadKey);
     const browsing =
-      tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || tab.kind === "memory" || (tab.kind === "computer" && tab.botId !== chatBotId) || (tab.kind === "bot" && tab.id !== PROFILE_TAB));
+      tab &&
+      (tab.kind === "web" ||
+        tab.kind === "vault" ||
+        tab.kind === "crm" ||
+        tab.kind === "memory" ||
+        tab.kind === "autopilot" ||
+        (tab.kind === "computer" && tab.botId !== chatBotId) ||
+        (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
       // Its screen comes up with it, even with the side panel hidden, and the panel follows the action
       // again (several at once show side by side), even if you'd picked a screen before.
@@ -388,7 +413,7 @@ function Bops({ state }: { state: AppState | null }) {
   const askKey = ask ? `${ask.id}:${ask.endedAt ?? ""}:${ask.blocker ?? ""}` : "";
   if (shownAsk !== askKey) {
     setShownAsk(askKey);
-    const reading = tab && (tab.kind === "web" || tab.kind === "vault" || tab.kind === "crm" || tab.kind === "memory" || tab.kind === "bot");
+    const reading = isReading(tab);
     const d = ask && (ask.display ?? ask.lastDisplay);
     if (shownAsk !== undefined && ask && d !== undefined && ask.runsOn !== "mac" && ask.host !== "mac" && !reading && !focus) {
       // As showScreen does, with the tab named for the ask (rendering can't make a new id).
@@ -407,7 +432,8 @@ function Bops({ state }: { state: AppState | null }) {
       () => ({ id: id === chatBotId ? PROFILE_TAB : tabId(), kind: "bot", botId: id, section }),
       (t) => ({ ...t, section }) as PanelTab,
     );
-  const openVault = () => openTab((t) => t.kind === "vault", () => ({ id: tabId(), kind: "vault" }));
+  const openVault = (keysFor?: string) =>
+    openTab((t) => t.kind === "vault", () => ({ id: tabId(), kind: "vault", keysFor }), (t) => ({ ...t, kind: "vault", keysFor }) as PanelTab);
   /** A CRM file, as a tab (one per file). */
   const openCrm = (ws: string, file: string) =>
     openTab(
@@ -422,12 +448,30 @@ function Bops({ state }: { state: AppState | null }) {
   const openMemory = ({ category, focus: item, query }: MemoryOpen = {}) => {
     const ws = currentWorkspace(state);
     const focusAt = Date.now();
+    // A search with no kind goes to All: left on Skills or Issues, the tab would show a page that has no search.
+    const cat = category ?? (query !== undefined ? "all" : undefined);
     openTab(
       (t) => t.kind === "memory" && t.ws === ws,
-      () => ({ id: tabId(), kind: "memory", ws, category: category ?? "all", focus: item, focusAt, query }),
-      (t) => ({ ...t, ...(category ? { category } : {}), focus: item, focusAt, query }) as PanelTab,
+      () => ({ id: tabId(), kind: "memory", ws, category: cat ?? "all", focus: item, focusAt, query }),
+      (t) => (t.kind === "memory" ? memoryAgain(t, { category: cat, focus: item, query }, focusAt) : t),
     );
   };
+  /**
+   * What the bots do on their own (autopilot.tsx): the workspace's one Routines tab, switched to the
+   * section asked for, at the row asked for and showing only the bot asked for (from its profile), or opened.
+   * `bot` null is every bot's (the sidebar: the whole workspace); left out, the bot shown stays.
+   */
+  const openAutopilot = (section: AutopilotSection, item?: string, bot?: string | null) => {
+    const ws = currentWorkspace(state);
+    const focusAt = Date.now();
+    openTab(
+      (t) => t.kind === "autopilot" && t.ws === ws,
+      () => ({ id: tabId(), kind: "autopilot", ws, section, focus: item, focusAt, bot: bot ?? undefined }),
+      (t) => ({ ...t, section, focus: item, focusAt, bot: bot === undefined && t.kind === "autopilot" ? t.bot : (bot ?? undefined) }) as PanelTab,
+    );
+  };
+  /** Skills or Apps (skills.tsx), kinds in Knowledge: the Knowledge tab on the one asked for ("skill:<slug>" or "app:<slug>"). */
+  const openSkills = (item?: string) => openMemory({ category: item?.startsWith("app:") ? "apps" : "skills", focus: item });
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
   // eslint-disable-next-line react-hooks/refs -- kept current for the storage listener above
   openMacRef.current = openMac;
@@ -454,6 +498,7 @@ function Bops({ state }: { state: AppState | null }) {
     }
     const rest = tabs.filter((t) => t.id !== id);
     setTabs(rest);
+    forgetTab(id);
     setRecent(recent.filter((r) => r !== id));
     if (active === id) leave(id, rest, rest[i - 1]?.id ?? rest[i]?.id ?? CHAT_TAB);
   };
@@ -467,7 +512,7 @@ function Bops({ state }: { state: AppState | null }) {
   // a search) stays there.
   // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
   escTab.current = (e) => {
-    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm" || tab?.kind === "memory") ? tab : undefined;
+    const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot") ? tab : undefined;
     if (!page || e.defaultPrevented || thread || composing || settings || account || setup || members || document.querySelector('[role="dialog"]')) return;
     const el = e.target instanceof HTMLElement ? e.target : null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && !panelRef.current?.contains(el)) return;
@@ -479,9 +524,13 @@ function Bops({ state }: { state: AppState | null }) {
     setPanelOpen(true);
   };
 
-  /** Show a watched thing: its Mac window in Your Mac, or the bot's screen it's on. Seeing it clears its news. */
+  /**
+   * Show a watched thing: its Mac window in Your Mac, the bot's screen it's on, or (a web page, which has
+   * no screen) its row on the Routines page. Seeing it clears its news.
+   */
   const showWatch = (w: Watch) => {
-    if (w.mac) openMac();
+    if (w.page) openAutopilot("monitors", w.id);
+    else if (w.mac) openMac();
     else {
       setDisplays((x) => ({ ...x, [w.botId]: w.display }));
       setPinned((p) => ({ ...p, [w.botId]: true }));
@@ -495,11 +544,14 @@ function Bops({ state }: { state: AppState | null }) {
   // eslint-disable-next-line react-hooks/refs -- kept current for the effect that runs it
   bringForward.current = () => {
     const key = (w: Watch) => `${w.id}:${w.alert?.at}`;
-    // Only news Jev judged worth interrupting for (older alerts have no level: they interrupt too).
-    const alerting = (state.watches ?? []).filter((w) => w.alert && (w.alert.level ?? "now") === "now" && team.some((b) => b.id === w.botId));
+    // Only news Jev judged worth interrupting for (older alerts have no level: they interrupt too), on a
+    // screen or a Mac window: a web page has no screen to cut to (its chime and sidebar mark say it).
+    const alerting = (state.watches ?? []).filter(
+      (w) => w.alert && (w.alert.level ?? "now") === "now" && (isScreenWatch(w) || !!w.mac) && team.some((b) => b.id === w.botId),
+    );
     if (cutAlerts === null) return setCutAlerts(new Set(alerting.map(key)));
     const fresh = alerting.find((w) => !cutAlerts.has(key(w)));
-    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault" || tab?.kind === "crm" || tab?.kind === "memory") return;
+    if (!fresh || document.hidden || focus || tab?.kind === "web" || tab?.kind === "vault" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot") return;
     const el = document.activeElement as HTMLInputElement | null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && (el.value ?? el.textContent ?? "").trim()) return;
     setCutAlerts(new Set([...cutAlerts, key(fresh)]));
@@ -513,10 +565,20 @@ function Bops({ state }: { state: AppState | null }) {
   };
   const openChat = (id: string) => {
     setChatId(id);
+    setPrefill(null);
     setThreadId(null);
     setComposing(false);
     setFocus(false);
     setActive(CHAT_TAB);
+  };
+  /**
+   * Ask a bot something (an example on Routines, or Ask <name>): its chat, with `text` in the message box
+   * to change and send, never sent by itself, and the box focused.
+   */
+  const askBot = (botId: string, text?: string) => {
+    const id = botChatId(botId);
+    openChat(id);
+    if (state.chats.some((c) => c.id === id)) setPrefill({ chatId: id, text: text ?? "", at: Date.now() });
   };
   const openThread = (s: Session) => {
     const inView = s.chatId === chat.id || chat.botIds.includes(s.botId);
@@ -570,6 +632,8 @@ function Bops({ state }: { state: AppState | null }) {
         call={call}
         onCall={setCall}
         callSlot={setCallSlot}
+        prefill={prefill}
+        onPrefilled={() => setPrefill(null)}
       />
       {thread && (
         <ThreadSheet
@@ -580,6 +644,7 @@ function Bops({ state }: { state: AppState | null }) {
             setPanelOpen(true);
             setActive(CHAT_TAB);
           }}
+          onShowScreen={showScreen}
         />
       )}
     </div>
@@ -620,7 +685,7 @@ function Bops({ state }: { state: AppState | null }) {
       <TooltipLayer />
       <NoticePopup />
       <ViewReporter chatId={chat.id} threadId={thread?.id ?? null} />
-      <div className="flex h-screen flex-col bg-white font-sans text-ink antialiased">
+      <div className="flex h-screen flex-col overflow-clip bg-white font-sans text-ink antialiased">
         <TitleBar
           columns={titleColumns}
           sidebarOpen={sidebarOpen}
@@ -650,10 +715,12 @@ function Bops({ state }: { state: AppState | null }) {
             onSettings={() => setSettings(true)}
             onAccount={() => setAccount(true)}
             onSetup={() => setSetup(true)}
-            onVault={openVault}
+            onVault={() => openVault()}
             onMembers={() => setMembers(true)}
             onOpenWatch={showWatch}
             onOpenMemory={openMemory}
+            onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item, null)}
+            footer={footer}
             menuActions={{
               onChat: (id) => openChat(botChatId(id)),
               onCall: (id) => {
@@ -746,8 +813,13 @@ function Bops({ state }: { state: AppState | null }) {
                       onSection={(section) => setTabs(tabs.map((t) => (t.id === tab.id ? { ...tab, section } : t)))}
                       onOpenChat={openChat}
                       onOpenThread={openThread}
-                      onOpenVault={openVault}
+                      onOpenVault={() => openVault()}
                       onOpenComputer={openComputer}
+                      onOpenKeys={(keysFor) => openVault(keysFor)}
+                      onShowScreen={showScreen}
+                      onOpenAutopilot={openAutopilot}
+                      onOpenSkills={openSkills}
+                      onAsk={askBot}
                       onUpgrade={() => {
                         trackEvent("bops_upgrade_clicked", { surface: "bot_panel" });
                         setAccount(true);
@@ -780,35 +852,56 @@ function Bops({ state }: { state: AppState | null }) {
                       onMac={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "mac" } : t)))}
                     />
                   ) : tab?.kind === "vault" ? (
-                    <VaultTab state={state} onClose={() => leaveTab(tab.id)} />
+                    <VaultTab state={state} keysFor={tab.keysFor} onOpenWatch={showWatch} onClose={() => leaveTab(tab.id)} />
                   ) : tab?.kind === "crm" ? (
-                    <CrmView
-                      key={`${tab.id}:${tab.file}`}
-                      state={state}
-                      ws={tab.ws}
-                      file={tab.file}
-                      mode="panel"
-                      onClose={() => leaveTab(tab.id)}
-                      onFocus={() => {
-                        setMacFocus(false);
-                        setCrmFocus({ ws: tab.ws, file: tab.file });
-                        setFocus(true);
-                      }}
-                    />
+                    // These two pages fade in from here (the others in their own files). The key is on the
+                    // wrapper, so the page remounts exactly when it did before.
+                    <div key={`${tab.id}:${tab.file}`} className="motion-fade-in flex min-h-0 flex-1 flex-col">
+                      <CrmView
+                        state={state}
+                        ws={tab.ws}
+                        file={tab.file}
+                        mode="panel"
+                        onClose={() => leaveTab(tab.id)}
+                        onFocus={() => {
+                          setMacFocus(false);
+                          setCrmFocus({ ws: tab.ws, file: tab.file });
+                          setFocus(true);
+                        }}
+                      />
+                    </div>
                   ) : tab?.kind === "memory" ? (
-                    <MemoryView
-                      key={tab.id}
-                      user={state.account?.user.id}
-                      ws={tab.ws}
-                      category={tab.category}
-                      focus={tab.focus}
-                      focusAt={tab.focusAt}
-                      query={tab.query}
-                      // The search asked for is used once: off the tab, so coming back doesn't fill it in again.
-                      onQueryUsed={() => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, query: undefined } : t)))}
-                      onCategory={(category) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, category, focus: undefined } : t)))}
-                      onClose={() => leaveTab(tab.id)}
-                    />
+                    <div key={tab.id} className="motion-fade-in flex min-h-0 flex-1 flex-col">
+                      <MemoryView
+                        state={state}
+                        user={state.account?.user.id}
+                        ws={tab.ws}
+                        category={tab.category}
+                        focus={tab.focus}
+                        focusAt={tab.focusAt}
+                        query={tab.query}
+                        last={state.messages[state.messages.length - 1]?.id}
+                        tags={tagsOf(state.workspaces?.find((w) => w.id === tab.ws)).map((t) => t.name)}
+                        // The search asked for is used once: off the tab, so coming back doesn't fill it in again.
+                        onQueryUsed={() => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, query: undefined } : t)))}
+                        onCategory={(category) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "memory" ? { ...t, category, focus: undefined } : t)))}
+                        onClose={() => leaveTab(tab.id)}
+                      />
+                    </div>
+                  ) : tab?.kind === "autopilot" ? (
+                    <div key={tab.id} className="motion-fade-in flex min-h-0 flex-1 flex-col">
+                      <AutopilotPage
+                        state={state}
+                        focus={tab.focus}
+                        focusAt={tab.focusAt}
+                        bot={tab.bot}
+                        onBot={(bot) => setTabs((all) => all.map((t) => (t.id === tab.id && t.kind === "autopilot" ? { ...t, bot } : t)))}
+                        onOpenWatch={showWatch}
+                        onOpenSkills={() => openSkills()}
+                        onAsk={askBot}
+                        onClose={() => leaveTab(tab.id)}
+                      />
+                    </div>
                   ) : null}
                   {/* Your Mac stays capturing, hidden, for two minutes after you leave it (restarting capture is slow). */}
                   {(showingMac || macHeld) && (
@@ -868,7 +961,20 @@ function Bops({ state }: { state: AppState | null }) {
             }}
           />
         )}
-        {settings && <Settings state={state} onClose={() => setSettings(false)} />}
+        {settings && (
+          <Settings
+            state={state}
+            onClose={() => setSettings(false)}
+            onShowScreen={(id, d) => {
+              setSettings(false);
+              showScreen(id, d);
+            }}
+            onOpenVault={() => {
+              setSettings(false);
+              openVault();
+            }}
+          />
+        )}
         {account && (
           <Account
             state={state}
@@ -1290,16 +1396,22 @@ function SelfHosting({ state }: { state: AppState }) {
   );
 }
 
-function Settings({ state, onClose }: { state: AppState; onClose: () => void }) {
+/**
+ * Settings, over the app. `onShowScreen`: a brain's sign-in started on a bot's screen, so Settings closes and
+ * that screen shows; `onOpenVault`: to add a key there (brains.tsx). Exported for the tests.
+ */
+export function Settings({ state, onClose, onShowScreen, onOpenVault }: { state: AppState; onClose: () => void; onShowScreen: (botId: string, display: number) => void; onOpenVault: () => void }) {
   const setHost = (host: Host) => void post("/api/host", { host });
   const selfHosted = useSelfHosted();
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} className="flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
+    <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="motion-dialog-in flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
         <div className="flex items-center justify-between border-b border-[#F0F0EE] px-[22px] py-[18px]">
           <div className="flex flex-col gap-0.5">
             <span className="text-[18px] font-semibold leading-[22px]">Settings</span>
-            <span className="text-[13px] leading-[17px] text-[#6B6B6B]">You, how your bots reach you, this Mac, and where your bots work</span>
+            <span className="text-[13px] leading-[17px] text-[#6B6B6B]">
+              {BRAINS_ON ? "You, how your bots reach you, this Mac, where your bots work and their brain" : "You, how your bots reach you, this Mac, and where your bots work"}
+            </span>
           </div>
           <button onClick={onClose} aria-label="Close" className="flex size-8 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3]">
             <svg width="12" height="12" viewBox="0 0 12 12">
@@ -1330,6 +1442,8 @@ function Settings({ state, onClose }: { state: AppState; onClose: () => void }) 
             ))}
           </div>
         </div>
+
+        {BRAINS_ON && <BrainSettings state={state} onShowScreen={onShowScreen} onOpenVault={onOpenVault} />}
 
         <div className={`flex flex-col px-[22px] pt-4 ${selfHosted ? "" : "pb-5"}`}>
           <span className="pb-1 text-[13px] font-semibold">Your bots&apos; computers</span>

@@ -1,15 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AppState, BotId, VaultLogin } from "@/lib/types";
+import { levelOf, type AppState, type BotId, type LastUses, type VaultLogin, type Watch } from "@/lib/types";
 import { FOLD_AFTER_MS, FOLD_OVER, isMcp, lastUsed, servicesOf, signedOut, type Service } from "@/lib/vault-services";
-import { AccountBlock, AppLogo, AppPicker, Connecting, QuickStart } from "./apps";
+import { AccountBlock, AppLogo, AppPicker, Connecting, QuickStart, useLastUses } from "./apps";
+import { KeysSettings } from "./keys";
 import { Mascot } from "./mascot";
+import { anchorOf, AppRoutines, hasTemplates, routineCount, routinesOfApp, RoutineSuggest, usePendingSuggest } from "./routines";
 import { ago, CloseButton, post, teamOf } from "./ui";
 
 /*
  * The vault: everything your bots can get into, in one place. Apps (any of Composio's catalog, several
- * accounts each) with how much each bot may do in them, and logins bots sign in with. For logins, Bops shows the site,
+ * accounts each) with how much each bot may do in them, API keys in the Orgo vault (keys.tsx), and logins bots sign in with. For logins, Bops shows the site,
  * the username and who may use each; the password and 2FA setup key live in the Mac's Keychain and
  * are filled straight into the sign-in page, so no AI ever sees them.
  */
@@ -20,9 +22,12 @@ import { ago, CloseButton, post, teamOf } from "./ui";
  * needs the user (an account signed out) comes first, with a way to fix it; bots show on a row only
  * where access differs from "all of them"; with more than FOLD_OVER services, the ones not used lately
  * fold into one line. A row opens to its accounts (each bot's access, rename, disconnect) and logins.
+ * An app with routines to offer (routines.tsx) has Add routines there, opening them on the row's mark; a
+ * connect that just finished opens them there by itself, the bot it was for picked. API keys sit under
+ * the list (keys.tsx), `keysFor` opening a new one for that bot.
  * Its X (or Esc, see bops-app.tsx) closes it, back to where you were.
  */
-export function VaultTab({ state, onClose }: { state: AppState; onClose: () => void }) {
+export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppState; keysFor?: string; onOpenWatch: (w: Watch) => void; onClose: () => void }) {
   const [editing, setEditing] = useState<string | "new" | null>(null);
   const [picking, setPicking] = useState<{ app?: string; replaces?: string } | null>(null);
   const [adding, setAdding] = useState(false);
@@ -40,6 +45,8 @@ export function VaultTab({ state, onClose }: { state: AppState; onClose: () => v
   useEffect(() => {
     void post("/api/apps", {}, "PATCH");
   }, []);
+  // When each account and key was last used, and by which bot: read again each minute.
+  const uses = useLastUses(`${now}:${state.workspace ?? ""}`);
   const services = useMemo(() => servicesOf(state.accounts ?? [], state.vault ?? []), [state.accounts, state.vault]);
   // A sign-in just finished: open its service, so the user sees who can use it.
   const before = useRef(new Set((state.accounts ?? []).map((a) => a.id)));
@@ -48,6 +55,11 @@ export function VaultTab({ state, onClose }: { state: AppState; onClose: () => v
     before.current = new Set((state.accounts ?? []).map((a) => a.id));
     if (fresh) setOpen(services.find((s) => s.accounts.some((a) => a.id === fresh.id))?.key ?? null);
   }, [state.accounts, services]);
+  // Routines for an app: asked for from its row (the main bot picked), or offered as a connect finished.
+  const icons = useRef(new Map<string, HTMLElement>());
+  const [asked, setAsked] = useState<string | null>(null);
+  const suggest = usePendingSuggest(state, (x) => (state.accounts ?? []).some((a) => a.app === x.app && a.status === "active"));
+  const routinesFor = asked ? { app: asked, botId: undefined } : suggest.pending ? { app: suggest.pending.app, botId: suggest.pending.botId } : null;
 
   const needing = services.filter((s) => signedOut(s).length);
   const term = q.trim().toLowerCase();
@@ -65,7 +77,7 @@ export function VaultTab({ state, onClose }: { state: AppState; onClose: () => v
   const first = needing[0] && signedOut(needing[0])[0];
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
+    <div className="motion-fade-in relative flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
       <div className="flex w-full max-w-[600px] flex-col gap-4">
         <div className="flex items-start gap-3">
           <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -169,6 +181,10 @@ export function VaultTab({ state, onClose }: { state: AppState; onClose: () => v
                 editing={editing}
                 onEdit={setEditing}
                 onPick={setPicking}
+                onRoutines={setAsked}
+                onOpenWatch={onOpenWatch}
+                uses={uses}
+                iconRef={(el) => s.accounts.forEach((a) => void (el ? icons.current.set(a.app, el) : icons.current.delete(a.app)))}
               />
             ))}
             {rest.length > 0 && (
@@ -191,7 +207,23 @@ export function VaultTab({ state, onClose }: { state: AppState; onClose: () => v
             )}
           </div>
         )}
+
+        <KeysSettings state={state} keysFor={keysFor} uses={uses} onOpenWatch={onOpenWatch} />
       </div>
+      {routinesFor && (
+        <RoutineSuggest
+          key={`${routinesFor.app}:${routinesFor.botId ?? ""}`}
+          state={state}
+          app={routinesFor.app}
+          botId={routinesFor.botId}
+          pickBot
+          anchor={() => anchorOf(icons.current, routinesFor.app)}
+          onClose={() => {
+            setAsked(null);
+            suggest.handled();
+          }}
+        />
+      )}
       {picking && <AppPicker state={state} start={picking.app} replaces={picking.replaces} onClose={() => setPicking(null)} />}
     </div>
   );
@@ -221,6 +253,10 @@ function ServiceRow({
   editing,
   onEdit,
   onPick,
+  onRoutines,
+  onOpenWatch,
+  uses,
+  iconRef,
 }: {
   state: AppState;
   service: Service;
@@ -230,12 +266,20 @@ function ServiceRow({
   editing: string | "new" | null;
   onEdit: (id: string | null) => void;
   onPick: (p: { app?: string; replaces?: string }) => void;
+  /** Open an app's routines (one of its apps with routines to offer and an account that works). */
+  onRoutines: (app: string) => void;
+  /** Show a watched screen or Mac window, from one of its routines. */
+  onOpenWatch: (w: Watch) => void;
+  /** When each account was last used, and by which bot. */
+  uses: LastUses;
+  /** Its mark, where its routines open. */
+  iconRef: (el: HTMLSpanElement | null) => void;
 }) {
   const team = teamOf(state);
   const out = signedOut(s);
   const kinds = [s.accounts.some((a) => !isMcp(a)) && "App", s.accounts.some(isMcp) && "MCP", s.logins.length > 0 && "Login"].filter(Boolean) as string[];
   // Who can use any of it: every bot (said nowhere, it's the usual), some (shown), or none yet.
-  const users = team.filter((b) => s.accounts.some((a) => b.access?.[a.id]) || s.logins.some((l) => l.bots === "all" || l.bots.includes(b.id)));
+  const users = team.filter((b) => s.accounts.some((a) => levelOf(b, a)) || s.logins.some((l) => l.bots === "all" || l.bots.includes(b.id)));
   const everyone = users.length === team.length;
   // What's connected, in a few words: several apps by name ("Gmail ×3, Google Calendar"), then whose (the first account or login, and how many more).
   const apps = [...new Set(s.accounts.map((a) => a.appName))];
@@ -247,12 +291,20 @@ function ServiceRow({
         .filter(Boolean)
         .join(" · ") || (s.accounts.some((a) => a.id.startsWith("open:")) ? "No sign-in needed" : "");
   const byApp = [...new Set(s.accounts.map((a) => a.app))].map((app) => s.accounts.filter((a) => a.app === app));
+  // What bots run from it on their own (its routines, on the row's line and inside).
+  const runs = byApp.reduce((n, accounts) => n + routinesOfApp(state, accounts[0].app), 0);
   return (
     <div className={last ? "" : "border-b border-[#F0F0EE]"}>
-      <button onClick={onToggle} aria-expanded={open} className="flex h-[52px] w-full items-center gap-3 px-3.5 text-left hover:bg-[#FCFCFB]">
-        <ServiceLogo service={s} size={26} />
+      {/* Where focus goes when the last of its routines is deleted (autopilot.tsx, focusAfterRemove). */}
+      <button data-list-heading onClick={onToggle} aria-expanded={open} className="flex h-[52px] w-full items-center gap-3 px-3.5 text-left hover:bg-[#FCFCFB]">
+        <span ref={iconRef} className="flex shrink-0">
+          <ServiceLogo service={s} size={26} />
+        </span>
         <span className="w-[120px] shrink-0 truncate text-[14px] font-medium leading-[18px]">{s.name}</span>
-        <span className={`min-w-0 flex-1 truncate text-[12.5px] leading-4 ${out.length ? "text-[#B54708]" : "text-[#6B6B6B]"}`}>{line}</span>
+        <span className={`min-w-0 flex-1 truncate text-[12.5px] leading-4 ${out.length ? "text-[#B54708]" : "text-[#6B6B6B]"}`}>
+          {line}
+          {runs > 0 && <span className="text-[#9A9A98]">{line ? " · " : ""}{routineCount(runs)}</span>}
+        </span>
         {!everyone &&
           (users.length ? (
             <span className="flex shrink-0 items-center gap-1" title={`Only ${users.map((b) => b.name).join(", ")}`}>
@@ -290,13 +342,24 @@ function ServiceRow({
                 </span>
               )}
               {accounts.map((a) => (
-                <AccountBlock key={a.id} state={state} account={a} many={accounts.length > 1} onSignIn={() => onPick({ app: a.app, replaces: a.id })} />
+                <AccountBlock key={a.id} state={state} account={a} many={accounts.length > 1} last={uses[a.id]} onSignIn={() => onPick({ app: a.app, replaces: a.id })} />
               ))}
-              {!accounts[0].id.startsWith("open:") && (
-                <button onClick={() => onPick({ app: accounts[0].app })} className="self-start rounded-full px-2 py-1 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0]">
-                  + Add another {accounts[0].appName} account
-                </button>
-              )}
+              <AppRoutines state={state} app={accounts[0].app} onOpenWatch={onOpenWatch} />
+              <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
+                {!accounts[0].id.startsWith("open:") && (
+                  <button onClick={() => onPick({ app: accounts[0].app })} className="rounded-full px-2 py-1 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0]">
+                    + Add another {accounts[0].appName} account
+                  </button>
+                )}
+                {hasTemplates(accounts[0].app) && accounts.some((a) => a.status === "active") && (
+                  <button
+                    onClick={() => onRoutines(accounts[0].app)}
+                    className="rounded-full bg-[#F2F2F0] px-2.5 py-1 text-[12px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-[#EAEAE7] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+                  >
+                    Add routines
+                  </button>
+                )}
+              </div>
             </div>
           ))}
           {s.logins.length > 0 && (
@@ -352,7 +415,7 @@ function LoginRow({ state, login: l, last, onEdit }: { state: AppState; login: V
         ))}
       </span>
       {sure ? (
-        <span className="flex shrink-0 items-center gap-1">
+        <span className="motion-rise-in flex shrink-0 items-center gap-1">
           <button onClick={() => void post("/api/vault", { id: l.id }, "DELETE")} className="rounded-full bg-[#B42318] px-2.5 py-1 text-[12px] font-semibold text-white">
             Delete
           </button>
@@ -423,7 +486,7 @@ function LoginForm({ state, login, onDone }: { state: AppState; login?: VaultLog
         e.preventDefault();
         onDone();
       }}
-      className="flex flex-col gap-3 rounded-2xl bg-white p-4 shadow-[0_0_0_1px_#ECECEA,0_10px_30px_-18px_#00000040]"
+      className="motion-rise-in flex flex-col gap-3 rounded-2xl bg-white p-4 shadow-[0_0_0_1px_#ECECEA,0_10px_30px_-18px_#00000040]"
     >
       <div className="grid grid-cols-2 gap-2.5">
         <label className="flex flex-col gap-1">

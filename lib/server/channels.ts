@@ -3,7 +3,7 @@ import { randomInt, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import type { SlackLinkIn, SlackLinksBody, SlackLinksResult } from "@/cloud/protocol";
 import { pictureName } from "@/lib/mascot";
-import { botChatId, pairCodeLive, PAIR_CODE_MS, type Bot, type ChannelKind, type ChannelLink, type ChannelPlace, type Message } from "@/lib/types";
+import { botChatId, pairCodeLive, PAIR_CODE_MS, turnsOwn, type Bot, type ChannelKind, type ChannelLink, type ChannelPlace, type Message } from "@/lib/types";
 import { cloudJson, cloudOn, cloudSession, cloudSessionNow } from "./cloud";
 import { deleteUserSecret, getUserSecret, setUserSecret } from "./keychain";
 import { composio, composioUser, publicUrl, runAs } from "./composio";
@@ -214,9 +214,19 @@ async function messageIn(linkId: string, m: Incoming, pool?: ChannelLink[]) {
     stopTyping();
   }
   if (!mine) return;
-  // Work it started (its own threads, or a teammate's it handed off) reports back here too.
-  for (const t of getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && !x.channelBack && !x.textBack)) patchSession(t.id, { channelBack: place });
-  const replies = getState().messages.filter((x) => x.chatId === chatId && x.role === "bot" && x.botId === b.id && x.at >= mine.at);
+  // Work it started (its own threads, or a teammate's it handed off) reports back here too, and so does a
+  // routine's thread this message asked for (Run now), unless the routine already posts its results on
+  // this link. A routine's run on its time, or one asked for in the app or by another message, that
+  // happened meanwhile isn't this message's: it goes where the routine sends it, never into this
+  // conversation (a shared channel, maybe) or twice.
+  const { ranNow } = await import("./routines");
+  const askedFor = (id: string) => {
+    const r = ranNow(id, mine.id);
+    return !!r && !(r.deliverTo?.kind === "channel" && r.deliverTo.linkId === l.id);
+  };
+  const started = getState().sessions.filter((x) => x.chatId === chatId && x.createdAt >= mine.at && (!x.routineId || askedFor(x.id)));
+  for (const t of started.filter((x) => !x.channelBack && !x.textBack)) patchSession(t.id, { channelBack: place });
+  const replies = getState().messages.filter((x) => x.chatId === chatId && x.role === "bot" && x.botId === b.id && x.at >= mine.at && turnsOwn(x, started));
   const failed = (err: Error) => addMessage({ chatId, role: "system", text: `Couldn't send this back to ${KIND_NAME[l.kind]}: ${err.message}` });
   for (const r of replies) await send(l, place, r.text).catch(failed);
   if (!replies.length) {
@@ -349,15 +359,41 @@ async function slackPost(l: ChannelLink, channel: string, text: string, thread?:
 
 /**
  * A thread started from a channel finished (or failed): its result goes back there, naming the bot
- * that did it when it wasn't the one asked.
+ * that did it when it wasn't the one asked. Markdown links read as words and an address, like the bot's
+ * replies there (chat.ts).
  */
 export function channelResult(s: { channelBack?: ChannelPlace; botId: string }, text: string) {
   const l = s.channelBack && linkOf(s.channelBack.linkId);
   if (!l || !s.channelBack) return;
   const by = s.botId !== l.botId ? bot(s.botId)?.name : undefined;
-  void send(l, s.channelBack, by ? `${by}: ${text}` : text).catch((err: Error) =>
+  const words = plainLinks(text);
+  void send(l, s.channelBack, by ? `${by}: ${words}` : words).catch((err: Error) =>
     addMessage({ chatId: botChatId(l.botId), role: "system", text: `Couldn't post this result to ${KIND_NAME[l.kind]}: ${err.message}` }),
   );
+}
+
+/**
+ * Post the bot's words there without being asked there first (a routine's result, Routine.deliverTo):
+ * in `chat` (a channel or chat id there), or by default the direct message with the person paired.
+ * Telegram: their chat with the bot. Slack: the DM, once they've written there. Discord: a DM it opens.
+ * Throws a plain error when it can't: the link is gone, not working, or nobody is paired yet.
+ */
+export async function postTo(linkId: string, text: string, chat?: string): Promise<void> {
+  const l = linkOf(linkId);
+  if (!l) throw new Error("That Slack, Telegram or Discord link isn't there anymore");
+  const name = KIND_NAME[l.kind];
+  if (l.status !== "live") throw new Error(`${name} isn't working right now${l.error ? `: ${l.error}` : ""}`);
+  if (!l.owner) throw new Error(`Nobody is paired with the bot in ${name} yet. Send it the pairing code from Bops first`);
+  if (!text.trim()) throw new Error("There's nothing to post");
+  let place = chat?.trim();
+  if (!place && l.kind === "telegram") place = l.owner;
+  if (!place && l.kind === "slack") {
+    place = l.slack?.dm;
+    if (!place) throw new Error("Write to the bot in Slack once first, so it can message you there");
+  }
+  if (!place && l.kind === "discord") place = (await dc<{ id: string }>(await tokenOf(l), "POST", "/users/@me/channels", { recipient_id: l.owner })).id;
+  if (!place) throw new Error(`Bops doesn't know where to post in ${name}`);
+  await send(l, { linkId, chat: place }, text);
 }
 
 /** Images sent with a message, saved like attachments (the bot sees them; at most 4). */

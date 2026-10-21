@@ -134,8 +134,8 @@ function placesLine(v: AgentView, b: AgentBot, owner: string) {
  * Where the bot is answering now: Bops for iPhone. What it can and can't do from there (a user with no
  * Mac is told Bops on a Mac can do the rest, never to ask a Mac they don't have), what the iPhone app
  * has, no words that send the user to buy (the iPhone app sells nothing: App Store 3.1.1 and 3.1.3(f)),
- * and no diagrams: WRITING's ASCII diagrams scroll sideways on a narrow screen, and screen readers
- * can't read them.
+ * and no diagrams: ASCII diagrams scroll sideways on a narrow screen, and screen readers can't read
+ * them.
  */
 function phoneLines(v: AgentView, name: string | null) {
   return [

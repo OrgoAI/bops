@@ -3,13 +3,16 @@
  * isn't already running, opens the window with the Mac title bar from the design, and on quit
  * stops what it started, including the bots' background browsers.
  */
-const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, nativeImage, Notification, screen, session, shell, systemPreferences } = require("electron");
+const { app, autoUpdater, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, nativeImage, Notification, powerMonitor, screen, session, shell, systemPreferences } = require("electron");
 const { execFile, execFileSync, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { startRenderService } = require("./render.cjs");
+const { createUpdates } = require("./updates.cjs");
 
 const PORT = 3210;
 const URL = `http://localhost:${PORT}`;
@@ -43,6 +46,17 @@ function windowToken() {
   fs.writeFileSync(file, token, { mode: 0o600 });
   return token;
 }
+/**
+ * Where the server asks this app to read a page in a browser (desktop/render.cjs): a socket in Bops'
+ * Application Support folder, readable by this user only, the same each start (so a server found running
+ * from an earlier start reaches it too). A path too long for a socket goes in this user's own temp folder.
+ */
+function renderSocket() {
+  const file = path.join(app.getPath("userData"), "render.sock");
+  return Buffer.byteLength(file) < 100 ? file : path.join(os.tmpdir(), "bops-render.sock");
+}
+let renderService;
+
 /** The window's session carries it to the server on every request, as a cookie no page script can read. */
 const giveWindowToken = () => session.defaultSession.cookies.set({ url: URL, name: "bops_window", value: windowToken(), httpOnly: true, sameSite: "strict" });
 const REPO = (() => {
@@ -358,6 +372,7 @@ async function spawnServer() {
           NEXT_MANUAL_SIG_HANDLE: "true",
           PORT: String(PORT),
           BOPS_UI_TOKEN: windowToken(),
+          BOPS_RENDER_SOCKET: renderSocket(),
           // Only this Mac can reach the bundled server, unless its settings say BOPS_LISTEN_ALL=1:
           // bot computers' app calls and phone webhooks reach Bops over the tailnet, so they need
           // it (proxy.ts then lets other addresses reach only those paths).
@@ -368,7 +383,7 @@ async function spawnServer() {
       })
     : spawn("npx", ["next", "dev", "--port", String(PORT)], {
         cwd: REPO,
-        env: { ...process.env, PATH, BOPS_UI_TOKEN: windowToken() },
+        env: { ...process.env, PATH, BOPS_UI_TOKEN: windowToken(), BOPS_RENDER_SOCKET: renderSocket() },
         stdio: "ignore",
         detached: true,
       });
@@ -703,13 +718,98 @@ async function createWindow() {
   await openApp(win);
 }
 
+/*
+ * The tabs' sessions (persist:bops-web-<user>) answer what a page may use. Electron says yes to everything
+ * unless told otherwise; a site in a tab never gets to read the clipboard (a key copied in the Vault sits
+ * there for a minute) or reach USB, HID, serial or MIDI devices. The rest stays as a browser has it.
+ */
+const TAB_DENIED = new Set(["clipboard-read", "hid", "serial", "usb", "midi", "midiSysex"]);
+const fencedTabs = new WeakSet();
+function fenceTabSession(s) {
+  if (fencedTabs.has(s)) return;
+  fencedTabs.add(s);
+  s.setPermissionRequestHandler((_wc, permission, callback) => callback(!TAB_DENIED.has(permission)));
+  s.setPermissionCheckHandler((_wc, permission) => !TAB_DENIED.has(permission));
+  s.setDevicePermissionHandler(() => false);
+}
+
 // A page in a tab that opens a new window opens it in your browser instead.
 app.on("web-contents-created", (_, contents) => {
   if (contents.getType() !== "webview") return;
+  fenceTabSession(contents.session);
   contents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: "deny" };
   });
+});
+
+/*
+ * A key copied in the Vault (components/app/keys.tsx). On the Mac it's marked concealed and transient
+ * (nspasteboard.org), so clipboard managers skip it, and kept to this Mac, so Universal Clipboard doesn't
+ * send it to your iPhone. The value goes to osascript on stdin, never in its arguments. After a minute it's
+ * cleared if it's still there; here, unlike the page, that works with the window in the background.
+ */
+const SECRET_CLIPBOARD_MS = 60_000;
+const COPY_CONCEALED = `ObjC.import("AppKit");
+const text = $.NSString.alloc.initWithDataEncoding($.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile, $.NSUTF8StringEncoding);
+const pb = $.NSPasteboard.generalPasteboard;
+pb.prepareForNewContentsWithOptions(1);
+pb.setStringForType(text, "public.utf8-plain-text");
+pb.setDataForType($.NSData.data, "org.nspasteboard.ConcealedType");
+pb.setDataForType($.NSData.data, "org.nspasteboard.TransientType");
+"ok";`;
+let secretClear;
+const copyConcealed = (value) =>
+  new Promise((resolve) => {
+    const child = execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", COPY_CONCEALED], { timeout: 5000, killSignal: "SIGKILL" }, (err, out) => resolve(!err && String(out).trim() === "ok"));
+    child.stdin?.end(value);
+  });
+ipcMain.handle("copy-secret", async (_, value) => {
+  if (typeof value !== "string" || !value) return false;
+  const ok = process.platform === "darwin" ? await copyConcealed(value) : (clipboard.writeText(value), true);
+  if (!ok) return false;
+  clearTimeout(secretClear);
+  secretClear = setTimeout(() => {
+    if (clipboard.readText() === value) clipboard.clear();
+  }, SECRET_CLIPBOARD_MS);
+  return true;
+});
+
+/*
+ * Skills on this Mac (lib/server/workspace-skills.ts): a folder picked in Finder to import as a skill (only
+ * its path goes to the page; Bops' own server reads it), and a skill's folder shown in Finder. Only a
+ * folder under a workspaces folder Bops keeps skills in is shown, never any other path the page names.
+ */
+ipcMain.handle("pick-folder", async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+  const r = await dialog.showOpenDialog(win, { title: "Import a skill", buttonLabel: "Import", properties: ["openDirectory"] });
+  return r.canceled || !r.filePaths[0] ? null : r.filePaths[0];
+});
+/** The real path of a folder the page may show: under a Bops data folder's workspaces (no "..", no link out), and never a bundle such as an .app. */
+function skillFolderToShow(dir) {
+  if (typeof dir !== "string" || !path.isAbsolute(dir)) return null;
+  let real;
+  try {
+    real = fs.realpathSync(dir);
+    if (!fs.statSync(real).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  const roots = [path.join(serverHome(), ".data"), path.join(REPO, ".data")].flatMap((r) => {
+    try {
+      return [fs.realpathSync(r)];
+    } catch {
+      return [];
+    }
+  });
+  const under = roots.some((r) => real.startsWith(r + path.sep) && path.relative(r, real).split(path.sep).includes("workspaces"));
+  if (!under || real.split(path.sep).some((seg) => /\.(app|bundle|framework|plugin|kext|prefPane|appex|workflow|pkg|mpkg)$/i.test(seg))) return null;
+  return real;
+}
+ipcMain.handle("reveal-folder", async (_, dir) => {
+  const real = skillFolderToShow(dir);
+  if (!real) return false;
+  return (await shell.openPath(real)) === "";
 });
 
 /*
@@ -755,7 +855,8 @@ ipcMain.handle("mac-screens", async () => {
     primary: d.id === screen.getPrimaryDisplay().id,
   }));
   // The display Bops is on: showing it shows Bops inside Bops, so the tab prefers another.
-  const win = BrowserWindow.getAllWindows()[0];
+  // The Bops window itself (a page being read in a hidden window is a window too).
+  const win = mainWin && !mainWin.isDestroyed() ? mainWin : BrowserWindow.getAllWindows().find((w) => w.isVisible());
   const bopsOn = win ? String(screen.getDisplayMatching(win.getBounds()).id) : undefined;
   if (access !== "granted") return { access, displays, sources: [], bopsOn };
   const list = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 0, height: 0 } });
@@ -946,7 +1047,11 @@ async function permStatus(id) {
   return "unknown";
 }
 
-ipcMain.handle("perm-status", async () => Object.fromEntries(await Promise.all(PERM_IDS.map(async (id) => [id, await permStatus(id)]))));
+// The ones the page names, else all of them: the account menu's badge leaves out Automation, whose read runs osascript.
+ipcMain.handle("perm-status", async (_, ids) => {
+  const asked = Array.isArray(ids) ? PERM_IDS.filter((id) => ids.includes(id)) : PERM_IDS;
+  return Object.fromEntries(await Promise.all(asked.map(async (id) => [id, await permStatus(id)])));
+});
 // Full access's apps, each with its Automation answer (null without Full Disk Access to read them).
 ipcMain.handle("perm-automation-apps", () => (mac ? automationApps() : null));
 ipcMain.handle("perm-request", async (_, id) => {
@@ -971,7 +1076,8 @@ ipcMain.handle("perm-settings", (_, id) => (PANES[id] ? shell.openExternal(PANES
 ipcMain.handle("perm-screen-restart", () => mac && screenAtLaunch !== "granted" && systemPreferences.getMediaAccessStatus("screen") === "granted");
 
 /*
- * Restart Bops (components/app/restart.tsx, and the Screen Recording card's Restart). A clean one:
+ * Restart Bops (components/app/restart.tsx, the Screen Recording card's Restart, and the update notice's
+ * Restart, which installs a new version downloaded meanwhile: see "New versions"). A clean one:
  * the server lets go first (POST /api/restart: the signed-in user's state saved to Bops Cloud, the cached
  * Bops Cloud session and Orgo plan dropped), then it's stopped, and Bops
  * opens again and starts a new one. Who's signed in stays (the key is in the Keychain), and so does
@@ -982,38 +1088,66 @@ ipcMain.handle("perm-screen-restart", () => mac && screenAtLaunch !== "granted" 
  * Bops' own; a development server someone started themselves is left running.
  */
 let restarting;
+/** The clean stop a restart starts with (and a quit with a new version staged): the server let go and stopped, its port free. */
+async function stopForRestart(why = "Restart Bops") {
+  mainLog(why);
+  let pid;
+  // A server that doesn't answer isn't asked (that only waited out the 20s).
+  const who = await whoAnswers();
+  if (who.up && who.mine)
+    try {
+      const res = await fetch(`${LOCAL}/api/restart`, { method: "POST", headers: { "x-bops-window": windowToken() }, signal: AbortSignal.timeout(20_000) });
+      pid = (await res.json()).pid;
+    } catch (e) {
+      mainLog(`restart: the server didn't let go cleanly: ${e?.message ?? e}`);
+    }
+  else mainLog(`restart: ${who.up ? "the server answering isn't this Bops'" : "the server isn't answering"}`);
+  leaving = true;
+  // Wait for the port to close (its last save gets up to 5s), so the new Bops starts its own server
+  // instead of finding the old one still answering and then losing it. One that won't let go is
+  // stopped hard.
+  if (stopServer() || (await stopOtherServer(pid))) for (let i = 0; i < 28 && (await portTaken()); i++) await sleep(250);
+  if (await portTaken()) {
+    const l = await listener();
+    if (stoppable(l)) {
+      mainLog(`restart: the server (pid ${l.pid}) still holds the port: SIGKILL`);
+      try {
+        process.kill(-l.pid, "SIGKILL");
+      } catch {
+        try {
+          process.kill(l.pid, "SIGKILL");
+        } catch {}
+      }
+      for (let i = 0; i < 20 && (await portTaken()); i++) await sleep(250);
+    }
+  }
+}
 function restart() {
   restarting ??= (async () => {
-    mainLog("Restart Bops");
-    let pid;
-    // A server that doesn't answer isn't asked (that only waited out the 20s).
-    const who = await whoAnswers();
-    if (who.up && who.mine)
+    await stopForRestart();
+    // A new version staged: macOS puts it in place of this one and opens it (Squirrel.Mac's ShipIt),
+    // once the server above is gone. Otherwise this same app opens again.
+    if (updates?.ready()) {
+      mainLog(`restart: installing Bops ${updates.state().version}`);
+      // Squirrel can still fail to install it (its staged copy gone, say): it then says so ("error") and
+      // Bops stays open with no server. So this same app opens again instead, when it hasn't quit within
+      // 15s or says it can't.
+      let fellBack = false;
+      const fallBack = (why) => {
+        if (fellBack) return;
+        fellBack = true;
+        mainLog(`restart: the new version didn't install (${why}): opening this one again`);
+        app.relaunch();
+        app.exit(0);
+      };
+      autoUpdater.once("error", (e) => fallBack(e?.message ?? e));
+      setTimeout(() => fallBack("Bops was still open after 15s"), 15_000).unref?.();
       try {
-        const res = await fetch(`${LOCAL}/api/restart`, { method: "POST", headers: { "x-bops-window": windowToken() }, signal: AbortSignal.timeout(20_000) });
-        pid = (await res.json()).pid;
+        autoUpdater.quitAndInstall();
       } catch (e) {
-        mainLog(`restart: the server didn't let go cleanly: ${e?.message ?? e}`);
+        fallBack(e?.message ?? e);
       }
-    else mainLog(`restart: ${who.up ? "the server answering isn't this Bops'" : "the server isn't answering"}`);
-    leaving = true;
-    // Wait for the port to close (its last save gets up to 5s), so the new Bops starts its own server
-    // instead of finding the old one still answering and then losing it. One that won't let go is
-    // stopped hard.
-    if (stopServer() || (await stopOtherServer(pid))) for (let i = 0; i < 28 && (await portTaken()); i++) await sleep(250);
-    if (await portTaken()) {
-      const l = await listener();
-      if (stoppable(l)) {
-        mainLog(`restart: the server (pid ${l.pid}) still holds the port: SIGKILL`);
-        try {
-          process.kill(-l.pid, "SIGKILL");
-        } catch {
-          try {
-            process.kill(l.pid, "SIGKILL");
-          } catch {}
-        }
-        for (let i = 0; i < 20 && (await portTaken()); i++) await sleep(250);
-      }
+      return;
     }
     app.relaunch();
     app.exit(0);
@@ -1073,18 +1207,26 @@ ipcMain.handle("mac-pip-close", () => pipWin?.close());
 ipcMain.handle("mac-show-main", () => showMain());
 
 /*
- * New versions. Bops doesn't update itself: it asks bops.bot for the newest release
- * (download/latest.json, written by scripts/download-publish.sh) at launch and every hour, and while
- * there's a newer one than this app the page shows a notice (components/app/update-notice.tsx) that
- * sends the user to bops.bot, with what's new in it when the file says (its "notes", a few short
- * lines; an older file has none). Only release builds ask. Nothing here throws or shows an error: what
- * goes wrong is only logged, in ~/Library/Logs/Bops/updates.log (each change once, not every hour).
+ * New versions. Bops gets them itself: it asks bops.bot for the newest release (download/latest.json,
+ * written by scripts/download-publish.sh) at launch and every hour, and when there's a newer one than
+ * this app it's downloaded in the app (desktop/updates.cjs). With "Download updates automatically" on
+ * (Settings → This Mac, the default) that happens quietly; with it off the page's notice
+ * (components/app/update-notice.tsx) says it's out and the user clicks Download. Either way, once it's
+ * downloaded the notice says it's ready, with Restart: a clean restart installs it, and so does
+ * quitting Bops. What's new in it shows under that when the file says (its "notes", a few short lines;
+ * an older file has none). A copy that can't replace itself (opened from the DMG or Downloads, or in a
+ * folder this user can't write) sends the user to bops.bot instead, as before.
+ *
+ * Only release builds ask. Nothing here throws or shows an error: what goes wrong is only logged, in
+ * ~/Library/Logs/Bops/updates.log (each change once, not every hour).
  */
 const LATEST_URL = "https://bops.bot/download/latest.json";
 const SITE_URL = "https://bops.bot";
 const dismissedFile = () => path.join(app.getPath("userData"), "update-dismissed.json");
-// The newer release bops.bot offers ({ version: "0.0.11", notes: ["…"] }), if any.
+// The newer release bops.bot offers ({ version: "0.0.11", notes: ["…"] }), if any, and what's
+// getting it (desktop/updates.cjs; release builds only).
 let newer;
+let updates;
 let lastNote = "";
 
 function updateNote(text) {
@@ -1127,23 +1269,40 @@ function releaseNotes(notes) {
     .slice(0, 5);
 }
 
-/** What the page shows: the newer version and what's new in it, unless the user put its notice away. */
-const updateInfo = () => (newer && newer.version !== dismissedVersion() ? newer : null);
+/**
+ * What the page shows: the newer version, what's new in it and where it's at ({ version, notes, phase,
+ * asked, failed }), unless there's none or the user put its notice away. One put away while it's ready
+ * still installs when Bops quits.
+ */
+function updateInfo() {
+  const u = updates?.state();
+  if (!u || u.phase === "none" || u.version === dismissedVersion()) return null;
+  return { version: u.version, notes: u.notes, phase: u.phase, asked: u.asked, failed: u.failed };
+}
+const sendUpdate = () => mainWin && !mainWin.isDestroyed() && mainWin.webContents.send("update", updateInfo());
 
 async function checkForUpdate() {
   try {
-    const res = await fetch(LATEST_URL, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) return updateNote(`couldn't check: ${LATEST_URL} answered ${res.status}`);
+    // The same file the download reads (a test build may point both at this Mac: BOPS_UPDATE_FEED).
+    const feed = updates?.feedUrl() ?? LATEST_URL;
+    const res = await fetch(feed, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) return updateNote(`couldn't check: ${feed} answered ${res.status}`);
     // Caddy sends it as an attachment, which fetch doesn't mind; parsed from the text whatever its type.
     const latest = JSON.parse(await res.text());
     const version = String(latest?.version ?? "");
-    if (!versionParts(version)) return updateNote(`couldn't check: no version in ${LATEST_URL}`);
+    if (!versionParts(version)) return updateNote(`couldn't check: no version in ${feed}`);
     const found = isNewer(version, app.getVersion()) ? { version, notes: releaseNotes(latest.notes) } : undefined;
     updateNote(found ? `Bops ${version} is out (this is ${app.getVersion()})` : `up to date (${app.getVersion()}, bops.bot has ${version})`);
-    // The page hears again only when the version or what's said about it changes.
-    if (JSON.stringify(found) === JSON.stringify(newer)) return;
     newer = found;
-    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("update", updateInfo());
+    if (!found || !updates) return;
+    // The zip it names must be this version's, on bops.bot: otherwise nothing's fetched and the notice
+    // sends the user there.
+    const wrong = updates.offers(latest, version);
+    if (wrong) return updates.manual(found, `${feed}: ${wrong}`);
+    // Every hour: one that's downloading or ready is left alone, and a download that didn't finish is
+    // tried again (not every hour: see desktop/updates.cjs). The page hears only when what it shows
+    // changes (updates' send).
+    updates.found(found);
   } catch (e) {
     updateNote(`couldn't check: ${e?.message ?? e}`);
   }
@@ -1156,7 +1315,16 @@ ipcMain.handle("update-dismiss", (_, version) => {
     fs.writeFileSync(dismissedFile(), JSON.stringify({ version, at: Date.now() }));
   } catch {}
 });
-ipcMain.handle("update-download", () => shell.openExternal(SITE_URL));
+// Download: in the app, or on bops.bot for a copy that can't replace itself. Also the notice's Try again.
+ipcMain.handle("update-download", () => {
+  if (!updates || updates.state().phase === "manual") return shell.openExternal(SITE_URL);
+  if (newer) updates.download(newer.version, { asked: true });
+});
+// Restart: installs the downloaded version, the same clean restart as Restart Bops.
+ipcMain.handle("update-install", () => restart());
+// Settings → This Mac's switch. Not there (null) in a build that doesn't update.
+ipcMain.handle("update-auto", () => (updates ? { auto: updates.auto(), canSelfUpdate: updates.canSelfUpdate() } : null));
+ipcMain.handle("update-set-auto", (_, on) => updates?.setAuto(!!on) ?? null);
 
 app.setName("Bops");
 /*
@@ -1177,14 +1345,42 @@ app.whenReady().then(() => {
   if (process.platform === "darwin" && fs.existsSync(ICON)) app.dock.setIcon(nativeImage.createFromPath(ICON));
   // Release builds only: not `npm run app`, nor a build that runs the source folder (desktop/repo.json).
   if (isRelease()) {
+    updates = createUpdates({ autoUpdater, app, fs, path, note: updateNote, send: sendUpdate });
+    // macOS logging out or shutting down quits Bops itself: that quit isn't held (see before-quit).
+    powerMonitor.on("shutdown", () => (systemQuit = true));
     void checkForUpdate();
     setInterval(() => void checkForUpdate(), 60 * 60_000);
+  }
+  // Pages the server can't read with a plain fetch (one that draws itself, one that checks for a human), read in a hidden window.
+  try {
+    renderService = startRenderService({ socketPath: renderSocket(), token: windowToken(), log: mainLog });
+  } catch (e) {
+    mainLog(`render service didn't start: ${e?.message ?? e}`);
   }
   void createWindow();
   app.on("activate", () => showMain());
 });
 
 app.on("window-all-closed", () => app.quit());
+
+/*
+ * Quitting with a new version downloaded installs it: macOS swaps it in once Bops is gone. So the
+ * server is stopped cleanly first (as a restart does), not left exiting while the app is replaced.
+ * Once: the quit after it goes through. A restart already running did its own stop. At most 10s, so
+ * Cmd+Q never hangs for long; will-quit stops whatever is left.
+ *
+ * Not when macOS itself quits Bops (log out, shut down, restart): holding that quit cancels the log
+ * out ("Bops interrupted log out"). Then will-quit stops the server as on any quit, and the new
+ * version still goes in once Bops is gone.
+ */
+let quitStopped = false;
+let systemQuit = false;
+app.on("before-quit", (e) => {
+  if (quitStopped || restarting || systemQuit || !updates?.ready()) return;
+  quitStopped = true;
+  e.preventDefault();
+  void Promise.race([stopForRestart(`Quit: installing Bops ${updates.state().version}`), sleep(10_000)]).finally(() => app.quit());
+});
 
 /** Stops the server Bops started or uses (and the bots' browsers). Says whether there was one. */
 function stopServer() {
@@ -1207,6 +1403,7 @@ function stopServer() {
 
 app.on("will-quit", () => {
   leaving = true;
+  renderService?.close();
   if (lettingGo)
     try {
       process.kill(-lettingGo, "SIGKILL");

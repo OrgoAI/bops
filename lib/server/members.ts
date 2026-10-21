@@ -198,7 +198,7 @@ type Loaded = { kind: "ready"; workspace: string; info: Ready } | { kind: "state
  * the user into (the workspace deleted or renamed on orgo.ai) is looked up again once.
  */
 async function load(key: string, { fresh = false } = {}): Promise<Loaded> {
-  let found = await findBopsWorkspace(key, { fresh });
+  let found = await findBopsWorkspace(key, { fresh, wsId: getState().workspace });
   for (let again = true; ; again = false) {
     if (found.kind === "none") return { kind: "state", info: { state: "no_computers" } };
     if (found.kind === "denied") return { kind: "state", info: { state: "signed_out", why: "rejected" } };
@@ -206,7 +206,7 @@ async function load(key: string, { fresh = false } = {}): Promise<Loaded> {
     if (found.kind === "error") return { kind: "refused", answer: no(502, "ORGO_ERROR", WORDS.orgoLoadError) };
     const got = (await orgoMembers.list(key, found.id)) as Got;
     if (got && (got.status === 403 || got.status === 404) && found.cached && again) {
-      found = await findBopsWorkspace(key, { fresh: true });
+      found = await findBopsWorkspace(key, { fresh: true, wsId: getState().workspace });
       continue;
     }
     if (!got) return { kind: "refused", answer: no(502, "UNREACHABLE", WORDS.unreachable) };
@@ -258,7 +258,7 @@ export async function membersCount(): Promise<Answer> {
   if (!key) return ok({ state: "signed_out" });
   const kept = g.bopsMembersCount;
   if (kept?.key === key && Date.now() - kept.at < COUNT_MS) return ok({ count: kept.count });
-  const found = await findBopsWorkspace(key, { fresh: true });
+  const found = await findBopsWorkspace(key, { fresh: true, wsId: getState().workspace });
   if (found.kind !== "found") return ok({ state: found.kind === "none" ? "no_computers" : found.kind === "denied" ? "signed_out" : "unknown" });
   let n = found.memberCount !== undefined ? Math.max(0, found.memberCount - 1) : undefined;
   if (n === undefined) {
@@ -281,7 +281,7 @@ async function signedIn(): Promise<{ key: string } | Answer> {
 
 /** The user's "bops" workspace for a change, looked up now (never an id kept from before, never the app's). */
 async function workspaceFor(key: string): Promise<{ workspace: string } | Answer> {
-  const found = await findBopsWorkspace(key, { fresh: true });
+  const found = await findBopsWorkspace(key, { fresh: true, wsId: getState().workspace });
   if (found.kind === "found") return { workspace: found.id };
   if (found.kind === "none") return no(409, "NO_COMPUTERS", WORDS.noComputers);
   if (found.kind === "denied") return no(401, "SIGNED_OUT", WORDS.rejected, { why: "rejected" });

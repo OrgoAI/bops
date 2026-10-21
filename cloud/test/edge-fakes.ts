@@ -297,9 +297,15 @@ export type FakeMac = {
 export async function connectMac(
   cloudUrl: string,
   userId: string,
-  opts: { pong?: boolean; ack?: boolean; answer?: (req: Extract<CloudToMac, { t: "req" }>) => Omit<Extract<MacToCloud, { t: "res" }>, "t" | "id"> | null | Promise<Omit<Extract<MacToCloud, { t: "res" }>, "t" | "id"> | null> } = {},
+  opts: {
+    pong?: boolean;
+    ack?: boolean;
+    answer?: (req: Extract<CloudToMac, { t: "req" }>) => Omit<Extract<MacToCloud, { t: "res" }>, "t" | "id"> | null | Promise<Omit<Extract<MacToCloud, { t: "res" }>, "t" | "id"> | null>;
+    /** More headers, as an app sends them (x-bops-state-level). */
+    headers?: Record<string, string>;
+  } = {},
 ): Promise<FakeMac> {
-  const ws = new WebSocket(`${cloudUrl.replace(/^http/, "ws")}/v1/connect`, { headers: { Authorization: `Bearer ${keyOf(userId)}` } });
+  const ws = new WebSocket(`${cloudUrl.replace(/^http/, "ws")}/v1/connect`, { headers: { Authorization: `Bearer ${keyOf(userId)}`, ...opts.headers } });
   const frames: CloudToMac[] = [];
   const send = (frame: MacToCloud) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(frame));
   const closed = new Promise<{ code: number; reason: string }>((r) => ws.on("close", (code, reason) => r({ code, reason: String(reason) })));

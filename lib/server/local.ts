@@ -9,6 +9,7 @@ import { executorKey } from "./cloud";
 import { codexPath, findCodex } from "./codex-cli";
 import { codexInSandbox, installDir, remotePort, SANDBOX_EXEC, sandboxArgs } from "./executor-sandbox";
 import { closeMirrors, mirroredTarget } from "./mirror";
+import { writeSkillFiles } from "./workspace-skills";
 import { userChrome, userHome } from "./store";
 import { bopsHome, chromeRoot } from "./user-paths";
 
@@ -53,7 +54,8 @@ export const taskSockets = (dir: string) => join(/*turbopackIgnore: true*/ bopsH
 export const taskWorkspace = (sessionId: string) => join(taskDir(sessionId), "workspace");
 const CHROME_VERSION = (() => {
   try {
-    return execFileSync("defaults", ["read", "/Applications/Google Chrome.app/Contents/Info", "CFBundleShortVersionString"])
+    // Bounded: it runs as the server starts, and a stalled read would hold up everything after it.
+    return execFileSync("defaults", ["read", "/Applications/Google Chrome.app/Contents/Info", "CFBundleShortVersionString"], { timeout: 2000 })
       .toString()
       .trim();
   } catch {
@@ -307,11 +309,14 @@ export function executorCommand(sessionId: string, codex: string, args: string[]
   return { command: SANDBOX_EXEC, args: sandboxArgs(box, [run.command, ...args]), cwd: join(dir, "workspace"), env: env as NodeJS.ProcessEnv };
 }
 
+/** Where a Mac task's skills are, in its folder: its agent session's capability directory (sessions.ts). */
+const SKILLS_DIR = "workspace/capabilities/skills";
+
 /** A fresh folder for a Mac task (whatever an earlier run of it left is gone). */
 export function prepareTaskDir(sessionId: string, dir = taskDir(sessionId)) {
   rmSync(dir, { recursive: true, force: true });
   rmSync(taskSockets(dir), { recursive: true, force: true });
-  for (const sub of ["workspace/capabilities/skills", "codex", "tmp"]) mkdirSync(join(/*turbopackIgnore: true*/ dir, sub), { recursive: true, mode: 0o700 });
+  for (const sub of [SKILLS_DIR, "codex", "tmp"]) mkdirSync(join(/*turbopackIgnore: true*/ dir, sub), { recursive: true, mode: 0o700 });
   mkdirSync(taskSockets(dir), { recursive: true, mode: 0o700 });
 }
 
@@ -319,12 +324,20 @@ export function prepareTaskDir(sessionId: string, dir = taskDir(sessionId)) {
  * Start `codex exec-server` for one Mac task; it dials out to OpenAI and runs the agent's tools here,
  * in the sandbox (executorCommand), or without it with `fullAccess`. It runs on Bops' executor key alone (CODEX_API_KEY, from Bops Cloud),
  * so Codex never uses the user's ChatGPT sign-in or their Codex settings for it.
+ * `botId`: the bot whose skills go in the task's skills folder as their folders (workspace-skills.ts
+ * writeSkillFiles), fresh each run, so Codex finds them as skills. A folder it can't write costs the task nothing.
  */
-export async function startExecutor(sessionId: string, envId: string, remoteUrl: string, port: number, dir = taskDir(sessionId), fullAccess = false): Promise<ChildProcess> {
+export async function startExecutor(sessionId: string, envId: string, remoteUrl: string, port: number, dir = taskDir(sessionId), fullAccess = false, botId?: string): Promise<ChildProcess> {
   if (!fullAccess && !existsSync(SANDBOX_EXEC)) throw new Error("this Mac has no sandbox for bots (/usr/bin/sandbox-exec)");
   const codex = findCodex();
   if (!codex) throw new Error("the Codex CLI isn't on this Mac yet");
   prepareTaskDir(sessionId, dir);
+  if (botId)
+    try {
+      writeSkillFiles(botId, join(/*turbopackIgnore: true*/ dir, SKILLS_DIR));
+    } catch (e) {
+      console.warn(`[skills] ${sessionId}: ${(e as Error).message}`);
+    }
   const run = executorCommand(sessionId, codex, ["exec-server", "--remote", remoteUrl, "--environment-id", envId], {
     key: await executorKey(),
     cdpPort: port,

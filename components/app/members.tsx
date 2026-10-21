@@ -18,6 +18,7 @@ import {
   type Person,
 } from "@/lib/members";
 import { peopleAside, peopleShort, upgradeLabel } from "@/lib/plan-includes";
+import { FooterButton } from "./sidebar-footer";
 import type { AppState } from "@/lib/types";
 import { initialsFrom, LoadFailed, Notice, Placeholder, Section, signOutOfOrgo } from "./account";
 import { Spinner } from "./mascot";
@@ -75,28 +76,35 @@ export function useMembersCount(state: AppState) {
 
 /**
  * The People button, beside the user's initials: two people, and a grey count of who has access besides
- * the user (guests too, invites not). Grey, not highlighter: nothing here needs the user.
+ * the user (guests too, invites not). Grey, not highlighter: nothing here needs the user. The pill, with
+ * its name, while the People sheet is open (sidebar-footer.tsx).
  */
-export function MembersButton({ state, onClick }: { state: AppState; onClick: () => void }) {
+export function MembersButton({ state, expanded = false, pressed = expanded, onClick }: { state: AppState; expanded?: boolean; pressed?: boolean; onClick: () => void }) {
   const count = useMembersCount(state);
   return (
-    <button
+    <FooterButton
+      name="people"
+      expanded={expanded}
+      pressed={pressed}
+      label="People"
+      tip="People: who can see your bots' computers"
+      ariaLabel={count ? `People, ${count} with access` : "People"}
       onClick={onClick}
-      title="People: who can see your bots' computers"
-      aria-label={count ? `People, ${count} with access` : "People"}
-      className="relative flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-ink shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
-    >
-      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
-        <circle cx="6" cy="5.6" r="2.4" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />
-        <path d="M1.8 13.2c.6-2.3 2.2-3.5 4.2-3.5s3.6 1.2 4.2 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
-        <path d="M10.4 3.5a2.4 2.4 0 010 4.4M12 9.9c1.2.4 2 1.5 2.3 3.3" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
-      </svg>
-      {count ? (
-        <span className="absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[#EEEEEC] px-1 text-[11px] font-semibold leading-none tabular-nums text-[#3A3A38] shadow-[0_0_0_2px_#F9F9F8]">
-          {count}
-        </span>
-      ) : null}
-    </button>
+      icon={
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
+          <circle cx="6" cy="5.6" r="2.4" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />
+          <path d="M1.8 13.2c.6-2.3 2.2-3.5 4.2-3.5s3.6 1.2 4.2 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
+          <path d="M10.4 3.5a2.4 2.4 0 010 4.4M12 9.9c1.2.4 2 1.5 2.3 3.3" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
+        </svg>
+      }
+      badge={
+        count ? (
+          <span className="pointer-events-none absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[#EEEEEC] px-1 text-[11px] font-semibold leading-none tabular-nums text-[#3A3A38] shadow-[0_0_0_2px_#F9F9F8]">
+            {count}
+          </span>
+        ) : null
+      }
+    />
   );
 }
 
@@ -199,13 +207,13 @@ export function Members({ state, onClose, onUpgrade }: { state: AppState; onClos
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
+    <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="members-title"
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
+        className="motion-dialog-in flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
       >
         <div className="flex items-center justify-between gap-3 border-b border-[#F0F0EE] px-[22px] py-[18px]">
           <div className="flex flex-col gap-0.5">
@@ -766,7 +774,7 @@ function InviteRow({ invite: i, fullAccess, canSend, act }: { invite: Invite; fu
           </span>
         </div>
         {sure ? (
-          <span className="flex shrink-0 items-center gap-1">
+          <span className="motion-rise-in flex shrink-0 items-center gap-1">
             <button disabled={!!busy} onClick={() => void cancel()} className="rounded-full bg-[#B42318] px-2.5 py-1 text-[12px] font-semibold leading-4 text-white disabled:opacity-50">
               {busy === "cancel" ? "Cancelling…" : "Cancel invite"}
             </button>
@@ -858,13 +866,13 @@ function Confirm({
   }, [busy, onClose]);
   const button = "rounded-full px-3.5 py-1.5 text-[13px] font-medium leading-4 disabled:opacity-50";
   return createPortal(
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onClose()}>
+    <div className="motion-fade-in fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onClose()}>
       <div
         role="alertdialog"
         aria-labelledby="member-confirm-title"
         aria-describedby="member-confirm-line"
         onClick={(e) => e.stopPropagation()}
-        className="flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
+        className="motion-dialog-in flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
       >
         <span id="member-confirm-title" className="text-[15px] font-semibold leading-5">
           {title}

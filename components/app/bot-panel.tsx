@@ -1,11 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { botChatId, live, MAIN_WORKSPACE, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Routine, type Session } from "@/lib/types";
+import { botChatId, BRAIN_NAMES, BRAINS_ON, brainOf, brainRuns, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
 import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
 import { BotMemory } from "./bot-memory";
+import { BotSkills } from "./bot-skills";
+import type { AutopilotSection } from "./autopilot";
+import { AppRoutinesButton, BotRoutines, hasTemplates, routineCount, routinesFrom, RoutineSuggest, usePendingSuggest } from "./routines";
+import { BotKeys } from "./keys";
+import { BotBrain, BrainBadge } from "./brains";
 import { ComputerSummary } from "./computer";
 import { Mascot } from "./mascot";
 import { PlanNote, usePlan } from "./plan-note";
@@ -14,11 +19,12 @@ import { LineLink } from "./line-link";
 import { botWash, CloseButton, post } from "./ui";
 import { accountTitle, AppLogo, botApps } from "./apps";
 import { WhereToFind } from "./channels";
+import { undash } from "./side-group";
 import { BOOK_A_CALL } from "@/lib/links";
 
 /** The parts of a bot's profile. Its computer has a tab of its own (see panel-tabs.tsx). */
-export type Section = "details" | "memory" | "phone";
-const SECTIONS: Section[] = ["details", "memory", "phone"];
+export type Section = "details" | "skills" | "routines" | "memory" | "phone";
+const SECTIONS: Section[] = ["details", "skills", "routines", "memory", "phone"];
 
 export function BotPanel({
   state,
@@ -29,6 +35,11 @@ export function BotPanel({
   onOpenThread,
   onOpenVault,
   onOpenComputer,
+  onOpenKeys,
+  onShowScreen,
+  onOpenAutopilot,
+  onOpenSkills,
+  onAsk,
   onUpgrade,
   onClose,
 }: {
@@ -41,11 +52,28 @@ export function BotPanel({
   onOpenVault: () => void;
   /** Open this bot's computer tab. */
   onOpenComputer: (botId: string) => void;
+  /** Open Settings at Keys, to add a key for this bot. */
+  onOpenKeys: (botId: string) => void;
+  /** Show one of a bot's screens up close: where its brain's sign-in opened (brains.tsx BotBrain). */
+  onShowScreen?: (botId: string, display: number) => void;
+  /** Open the workspace's Routines page at a section, at one of its rows (a schedule or monitor), and at one bot's. */
+  onOpenAutopilot: (section: AutopilotSection, item?: string, bot?: string) => void;
+  /** Open Skills, in Knowledge, at one of them ("skill:<slug>"). */
+  onOpenSkills: (focus?: string) => void;
+  /** Ask a bot: its chat, with `text` in the message box to change and send (bops-app.tsx askBot). */
+  onAsk: (botId: string, text?: string) => void;
   /** Open the plans (Account), where Pro and Max are bought. */
   onUpgrade: () => void;
   /** Leave the profile, back to where you were (its X; Esc does it too, see bops-app.tsx). */
   onClose: () => void;
 }) {
+  // The Connected App the Routines tab shows only, when it was opened from one (Details, Uses); per bot.
+  const [only, setOnly] = useState<{ bot: string; app: string | null }>({ bot: b.id, app: null });
+  const app = only.bot === b.id ? only.app : null;
+  const openRoutines = (forApp: string | null) => {
+    setOnly({ bot: b.id, app: forApp });
+    onTab("routines");
+  };
   // The way out, top right, as on the Vault and the Account sheet.
   const close = <CloseButton onClick={onClose} className="absolute right-4 top-4 bg-white/60" />;
   const tabs = (
@@ -53,7 +81,7 @@ export function BotPanel({
       {SECTIONS.map((t) => (
         <button
           key={t}
-          onClick={() => onTab(t)}
+          onClick={() => (t === "routines" ? openRoutines(null) : onTab(t))}
           className={`rounded-[10px] px-3 py-1.5 text-[14px] capitalize leading-[18px] ${
             tab === t ? (t === "details" ? "bg-white/70 font-medium text-ink shadow-[0_0_0_1px_#0000000F]" : "bg-[#EEEEEC] font-medium text-ink") : "text-[#6B6B6B] hover:text-ink"
           }`}
@@ -65,23 +93,52 @@ export function BotPanel({
     </div>
   );
 
-  if (tab === "details") return <Details state={state} bot={b} tabs={tabs} close={close} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenComputer={onOpenComputer} onUpgrade={onUpgrade} />;
+  // Each part fades in as it opens (motion-fade-in, opacity only); another bot's profile in the same tab just changes in place.
+  if (tab === "details")
+    return (
+      <Details
+        state={state}
+        bot={b}
+        tabs={tabs}
+        close={close}
+        onOpenChat={onOpenChat}
+        onOpenVault={onOpenVault}
+        onOpenComputer={onOpenComputer}
+        onOpenKeys={onOpenKeys}
+        onShowScreen={onShowScreen}
+        onOpenRoutines={openRoutines}
+        onUpgrade={onUpgrade}
+      />
+    );
 
   return (
-    <section className="relative flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto bg-white px-5 py-4">
+    <section className="motion-fade-in relative flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto bg-white px-5 py-4">
       {close}
       <div className="flex flex-col items-center gap-2">
         <Mascot botId={b.id} color={b.color} size={52} />
         <div className="flex flex-col items-center gap-px">
           <div className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{b.name}</div>
-          <div className="text-[13px] leading-4 text-[#6B6B6B]">{b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}</div>
+          <div className="flex items-center gap-1.5 text-[13px] leading-4 text-[#6B6B6B]">
+            {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}
+            <BotBrainBadge state={state} bot={b} />
+          </div>
         </div>
         {tabs}
       </div>
+      {tab === "skills" && <BotSkills state={state} bot={b} onOpenChat={onOpenChat} onOpenVault={onOpenVault} onOpenKeys={onOpenKeys} onOpenSkills={onOpenSkills} />}
+      {tab === "routines" && (
+        <BotRoutines state={state} bot={b} app={app} onApp={(a) => setOnly({ bot: b.id, app: a })} onOpenAutopilot={onOpenAutopilot} onAsk={onAsk} />
+      )}
       {tab === "memory" && <BotMemory state={state} bot={b} onOpenThread={onOpenThread} />}
       {tab === "phone" && <Phone bot={b} />}
     </section>
   );
+}
+
+/** By the bot's role: the brain its cloud tasks run on, when it's one the user brought (brains.tsx BotBrain picks it). Nothing for Bops agent (every bot, in a build without brains: brainOf), or where its tasks all run on this Mac (brainRuns). */
+function BotBrainBadge({ state, bot: b, className }: { state: AppState; bot: Bot; className?: string }) {
+  const x = brainRuns(b, state) === "none" ? undefined : brainOf(b, state);
+  return x ? <BrainBadge kind={x.kind} title={`${b.name}'s tasks on its computer run on ${BRAIN_NAMES[x.kind]}`} className={className} /> : null;
 }
 
 /* ---------------- Details: the bot's contact card ---------------- */
@@ -101,6 +158,9 @@ function Details({
   onOpenChat,
   onOpenVault,
   onOpenComputer,
+  onOpenKeys,
+  onShowScreen,
+  onOpenRoutines,
   onUpgrade,
 }: {
   state: AppState;
@@ -110,6 +170,10 @@ function Details({
   onOpenChat: (chatId: string) => void;
   onOpenVault: () => void;
   onOpenComputer: (botId: string) => void;
+  onOpenKeys: (botId: string) => void;
+  onShowScreen?: (botId: string, display: number) => void;
+  /** This bot's Routines tab, showing one Connected App's only, or all. */
+  onOpenRoutines: (app: string | null) => void;
   onUpgrade: () => void;
 }) {
   const plan = usePhonePlan();
@@ -119,7 +183,6 @@ function Details({
   const emailRoom = plan.room && !b.email ? emailShort(plan.room.tier, plan.room.emails, { isPlanBot: planBot }) : null;
   // Max has room for this bot's email, which it gets when the user asks (Get an email).
   const emailOnAsk = !!plan.room && plan.room.tier === "max_bops" && !planBot && !b.email && !emailRoom;
-  const routines = state.routines.filter((r) => r.botId === b.id);
   const running = state.sessions.filter((s) => s.botId === b.id && live(s)).length;
   // The workspace's number belongs to its main bot; the other bots are reached through it.
   const line = state.workspaces?.find((w) => w.id === workspaceOf(b))?.line;
@@ -135,14 +198,17 @@ function Details({
   };
 
   return (
-    <section className="relative flex min-h-0 min-w-0 flex-col items-center gap-3.5 overflow-y-auto px-6 pb-5 pt-6" style={{ backgroundImage: `linear-gradient(180deg, transparent 40%, #FFFFFF 100%), ${botWash(b)}`, backgroundSize: "100% 520px", backgroundRepeat: "no-repeat", backgroundColor: "#FFFFFF" }}>
+    <section className="motion-fade-in relative flex min-h-0 min-w-0 flex-col items-center gap-3.5 overflow-y-auto px-6 pb-5 pt-6" style={{ backgroundImage: `linear-gradient(180deg, transparent 40%, #FFFFFF 100%), ${botWash(b)}`, backgroundSize: "100% 520px", backgroundRepeat: "no-repeat", backgroundColor: "#FFFFFF" }}>
       {close}
       <div className={`flex size-[104px] items-center justify-center rounded-full ${glass} shadow-[inset_0_0_0_2px_#FFFFFF,0_14px_30px_-12px_#2832002E,0_0_0_1px_#0000000F]`}>
         <Mascot botId={b.id} color={b.color} size={70} />
       </div>
       <div className="flex flex-col items-center gap-0.5">
         <div className="text-[26px] font-bold leading-[30px] tracking-[-0.02em]">{b.name}</div>
-        <div className="text-[13px] font-medium leading-4 text-[#3A3A38]">{b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}</div>
+        <div className="flex items-center gap-1.5 text-[13px] font-medium leading-4 text-[#3A3A38]">
+          {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}
+          <BotBrainBadge state={state} bot={b} className="bg-white/60 shadow-[0_0_0_1px_#0000000F]" />
+        </div>
       </div>
       <div className="flex gap-3">
         {/* With a number, it texts the bot from Messages (it answers by text, as it would anyone); without one, its chat here. */}
@@ -187,7 +253,10 @@ function Details({
       </div>
 
       <ComputerSummary state={state} bot={b} className={`w-full ${glass}`} onOpen={() => onOpenComputer(b.id)} />
-      <Uses state={state} bot={b} onOpenVault={onOpenVault} className={glass} />
+      <Uses state={state} bot={b} onOpenVault={onOpenVault} onOpenRoutines={onOpenRoutines} className={glass} />
+      <BotKeys state={state} bot={b} onAdd={() => onOpenKeys(b.id)} className={glass} />
+
+      {BRAINS_ON && <BotBrain state={state} bot={b} onShowScreen={onShowScreen} className={glass} />}
 
       <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
         <div className="flex min-w-0 flex-1 flex-col">
@@ -269,21 +338,10 @@ function Details({
         </div>
       )}
 
-      {(!b.isMain || sharesComputer(b)) && state.host !== "mac" && <ComputerChoice state={state} bot={b} className={glass} onUpgrade={onUpgrade} />}
+      {/* Keyed by bot: another bot's profile in this tab starts from that bot's own words. */}
+      <HowIWork key={b.id} bot={b} className={glass} />
 
-      <div className={`flex w-full flex-col rounded-2xl ${glass}`}>
-        <div className="flex items-center justify-between px-4 pb-1 pt-[11px]">
-          <span className="text-[13px] font-semibold leading-4">Routines and scheduled</span>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">Ask {b.name} to add one</span>
-        </div>
-        {routines.length === 0 ? (
-          <div className="px-4 pb-3.5 pt-1 text-[13px] leading-5 text-[#6B6B6B]">
-            Nothing scheduled. Try texting {b.name}: &ldquo;every weekday at 9, {b.isMain ? "send me a summary of what the team did" : "check on anything waiting"}.&rdquo;
-          </div>
-        ) : (
-          routines.map((r, i) => <RoutineRow key={r.id} routine={r} last={i === routines.length - 1} />)
-        )}
-      </div>
+      {(!b.isMain || sharesComputer(b)) && state.host !== "mac" && <ComputerChoice state={state} bot={b} className={glass} onUpgrade={onUpgrade} />}
 
       <WhereToFind state={state} bot={b} />
 
@@ -362,7 +420,7 @@ function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppSta
         </div>
       </div>
       {sure && (
-        <div className="flex flex-col gap-2 rounded-xl bg-[#FEF3F2] px-3 py-2.5 shadow-[0_0_0_1px_#FECDCA]">
+        <div className="motion-rise-in flex flex-col gap-2 rounded-xl bg-[#FEF3F2] px-3 py-2.5 shadow-[0_0_0_1px_#FECDCA]">
           <span className="text-[12.5px] leading-[17px] text-[#3A3A38]">
             {`Move ${b.name} to ${main.name}'s computer? Its own computer is deleted, with anything saved on it that ${main.name}'s doesn't have.`}
           </span>
@@ -409,7 +467,7 @@ function DeleteBot({ bot: b }: { bot: Bot }) {
       </button>
     );
   return (
-    <div className="flex w-full flex-col gap-2.5 rounded-2xl bg-[#FEF3F2] px-4 py-3 shadow-[0_0_0_1px_#FECDCA]">
+    <div className="motion-rise-in flex w-full flex-col gap-2.5 rounded-2xl bg-[#FEF3F2] px-4 py-3 shadow-[0_0_0_1px_#FECDCA]">
       <span className="text-[13px] leading-[18px] text-[#3A3A38]">
         {sharesComputer(b)
           ? `Delete ${b.name}? Its chat, threads and routines go with it; the computer it works on stays. This can't be undone.`
@@ -764,64 +822,134 @@ function Field({ label, value, empty }: { label: string; value?: string; empty: 
   );
 }
 
-function RoutineRow({ routine: r, last }: { routine: Routine; last: boolean }) {
+/**
+ * "How I work": what the user wants this bot to keep in mind as it works (Bot.persona), in their own
+ * words. It gets it in its chat, tasks and calls as their preferences, under Bops' own rules. Saving it
+ * empty clears it. Esc with unsaved words puts back what's saved.
+ */
+function HowIWork({ bot: b, className }: { bot: Bot; className: string }) {
+  const [text, setText] = useState(b.persona ?? "");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const changed = text.trim() !== (b.persona ?? "");
+  const left = MAX_PERSONA_CHARS - text.length;
+  const save = async () => {
+    if (!changed || busy) return;
+    setBusy(true);
+    setError(null);
+    // What was sent: words typed while it saves stay (only the sent text is tidied).
+    const sent = text;
+    try {
+      const res = await post("/api/bots", { botId: b.id, persona: sent }, "PATCH");
+      const r = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok || r.error) return setError(r.error ? undash(r.error) : "That didn't save. Try again.");
+      setText((now) => (now === sent ? sent.trim() : now));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+    } catch {
+      setError("Couldn't reach Bops. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <div className={`group flex items-center gap-2.5 px-4 py-[9px] ${last ? "" : "border-b border-black/[0.05]"}`}>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <span className="truncate text-[14px] leading-[18px]">{r.title}</span>
-        <span className="text-[12px] leading-4 text-[#6B6B6B]">
-          {describe(r)}
-          {r.nextRunAt && r.enabled ? ` · next ${new Date(r.nextRunAt).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}` : ""}
-        </span>
+    <div className={`flex w-full flex-col gap-2 rounded-2xl px-4 py-3 ${className}`}>
+      <div className="flex flex-col">
+        <span className="text-[13px] font-semibold leading-4">How I work</span>
+        <span className="text-[12px] leading-4 text-[#6B6B6B]">{b.name} keeps this in mind in chats, tasks and calls</span>
       </div>
-      <button onClick={() => void post("/api/routines", { id: r.id }, "DELETE")} className="hidden text-[12px] text-[#9A9A98] hover:text-[#B42318] group-hover:block">
-        Delete
-      </button>
-      {r.schedule.kind === "once" && !r.enabled ? (
-        <span className="rounded-full bg-[#F2F2F0] px-2.5 py-0.5 text-[12px] leading-4 text-[#3A3A38]">Done</span>
-      ) : (
-        <button
-          onClick={() => void post("/api/routines", { id: r.id, enabled: !r.enabled }, "PATCH")}
-          aria-label={r.enabled ? "Turn off" : "Turn on"}
-          className={`flex h-[22px] w-[38px] items-center rounded-full p-0.5 ${r.enabled ? "justify-end bg-ink" : "justify-start bg-[#D9D9D6]"}`}
-        >
-          <span className={`size-[18px] rounded-full ${r.enabled ? "bg-highlighter" : "bg-white"}`} />
+      <textarea
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          setSaved(false);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            void save();
+          } else if (e.key === "Escape" && changed) {
+            // Puts back what's saved, and keeps the profile open (the app's Esc would leave it).
+            e.preventDefault();
+            setText(b.persona ?? "");
+            setError(null);
+          }
+        }}
+        rows={3}
+        maxLength={MAX_PERSONA_CHARS}
+        aria-label={`How ${b.name} works`}
+        placeholder={`How should ${b.name} work? For example: keep replies short, check my calendar before suggesting times, never email clients before 9 AM.`}
+        className="w-full resize-none rounded-[12px] bg-white/70 px-3 py-2 text-[13px] leading-[18px] outline-none shadow-[0_0_0_1px_#E6E6E3] placeholder:text-[#9A9A98] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+      />
+      <div className="flex items-center gap-2">
+        <button disabled={!changed || busy} onClick={() => void save()} className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-40">
+          {busy ? "Saving…" : "Save"}
         </button>
-      )}
+        {saved && <span className="motion-fade-in text-[12px] leading-4 text-[#6B6B6B]">Saved</span>}
+        {error && (
+          <span role="alert" className="min-w-0 text-[12px] leading-4 text-[#B42318]">
+            {error}
+          </span>
+        )}
+        {left <= MAX_PERSONA_CHARS / 10 && <span className="ml-auto shrink-0 text-[12px] tabular-nums leading-4 text-[#9A9A98]">{left === 1 ? "1 character left" : `${left} characters left`}</span>}
+      </div>
     </div>
   );
 }
 
-const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-function describe(r: Routine) {
-  const s = r.schedule;
-  const clock = (t: string) => {
-    const [h, m] = t.split(":").map(Number);
-    return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
-  };
-  if (s.kind === "daily") return `Every day ${clock(s.time)}`;
-  if (s.kind === "weekdays") return `Weekdays ${clock(s.time)}`;
-  if (s.kind === "weekly") return `${DAYS[s.day]}s ${clock(s.time)}`;
-  return `Once · ${new Date(s.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`;
-}
-
 /* ---------------- What the bot uses, and where to find it ---------------- */
 
-/** The apps and logins this bot can use, at a glance; they're managed together in the Vault. */
-function Uses({ state, bot: b, onOpenVault, className }: { state: AppState; bot: Bot; onOpenVault: () => void; className: string }) {
+/**
+ * The apps and logins this bot can use, at a glance; they're managed together in the Vault. A Connected
+ * App with routines to offer opens them on its icon (routines.tsx), and one the bot runs routines from
+ * says how many: that opens its Routines tab at that app. A connect that just finished for this bot
+ * opens its routines here by itself.
+ */
+function Uses({ state, bot: b, onOpenVault, onOpenRoutines, className }: { state: AppState; bot: Bot; onOpenVault: () => void; onOpenRoutines: (app: string | null) => void; className: string }) {
   const apps = botApps(state, b);
   const logins = (state.vault ?? []).filter((l) => l.bots === "all" || l.bots.includes(b.id));
+  const anchors = useRef(new Map<string, HTMLElement>());
+  const [asked, setAsked] = useState<string | null>(null);
+  const suggest = usePendingSuggest(state, (s) => s.botId === b.id && apps.some((x) => x.app === s.app));
+  const popover = asked ?? suggest.pending?.app ?? null;
+  const tip = (x: (typeof apps)[number]) => `${x.appName}: ${x.accounts.map((a) => `${accountTitle(a.account)} (${a.level === "read" ? "read only" : "read & act"})`).join(", ")}`;
   return (
-    <button onClick={onOpenVault} className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left hover:bg-white/80 ${className}`}>
+    <div className={`flex w-full items-start gap-3 rounded-2xl px-4 py-3 ${className}`}>
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <span className="text-[13px] font-semibold leading-4">Uses</span>
         {apps.length || logins.length ? (
           <span className="flex flex-wrap items-center gap-1.5">
-            {apps.map((x) => (
-              <span key={x.app} title={`${x.appName}: ${x.accounts.map((a) => `${accountTitle(a.account)} (${a.level === "read" ? "read only" : "read & act"})`).join(", ")}`}>
-                <AppLogo app={x.app} name={x.appName} size={22} />
-              </span>
-            ))}
+            {apps.map((x) => {
+              const n = routinesFrom(state, b.id, x.app);
+              return (
+                <span key={x.app} className="flex items-center gap-1">
+                  {hasTemplates(x.app) ? (
+                    <AppRoutinesButton
+                      app={x.app}
+                      name={x.appName}
+                      size={22}
+                      label={`${tip(x)}. Add routines`}
+                      onClick={() => setAsked(x.app)}
+                      anchorRef={(el) => void (el ? anchors.current.set(x.app, el) : anchors.current.delete(x.app))}
+                    />
+                  ) : (
+                    <span title={tip(x)} className="flex">
+                      <AppLogo app={x.app} name={x.appName} size={22} />
+                    </span>
+                  )}
+                  {n > 0 && (
+                    <button
+                      onClick={() => onOpenRoutines(x.app)}
+                      aria-label={`${routineCount(n)} from ${x.appName}`}
+                      className="h-[22px] rounded-full bg-black/[0.05] px-2 text-[11.5px] tabular-nums leading-4 text-[#3A3A38] outline-none hover:bg-black/[0.08] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+                    >
+                      {routineCount(n)}
+                    </button>
+                  )}
+                </span>
+              );
+            })}
             {logins.map((l) => (
               <span key={l.id} title={`${l.username} on ${l.site}`} className="flex h-[22px] items-center gap-1 rounded-full bg-black/[0.05] px-2 text-[11.5px] leading-4">
                 <KeyIcon />
@@ -833,8 +961,23 @@ function Uses({ state, bot: b, onOpenVault, className }: { state: AppState; bot:
           <span className="text-[12px] leading-4 text-[#6B6B6B]">No apps or logins yet</span>
         )}
       </div>
-      <span className="shrink-0 text-[12px] font-medium leading-4 text-ink">Manage in Vault ›</span>
-    </button>
+      <button onClick={onOpenVault} className="shrink-0 text-[12px] font-medium leading-4 text-ink">
+        Manage in Vault ›
+      </button>
+      {popover && (
+        <RoutineSuggest
+          key={popover}
+          state={state}
+          app={popover}
+          botId={b.id}
+          anchor={() => anchors.current.get(popover) ?? null}
+          onClose={() => {
+            setAsked(null);
+            suggest.handled();
+          }}
+        />
+      )}
+    </div>
   );
 }
 

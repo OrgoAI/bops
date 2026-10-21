@@ -4,7 +4,8 @@
 // through Bops Cloud on the user's Orgo key (so it's counted and priced), with `codex exec-server` on
 // Bops' executor key, in a Codex home of Bops' own, and its browser tools on a Chrome of the bot's own
 // on the Mac. A reply while a task works goes to its turn at once (steering), and one OpenAI turns away
-// is its next turn. Out of AI credit, it doesn't start. The old sign-in routes answer 410, and no source file
+// is its next turn. A thread picked back up reads its items on from where it got to, so nothing it did
+// before comes back as a new step. Out of AI credit, it doesn't start. The old sign-in routes answer 410, and no source file
 // can call Codex's sign-in. The executor runs in a macOS sandbox (lib/server/executor-sandbox.ts) that
 // leaves the agent its browser tools and nothing else: the stand-in Codex checks from inside the real
 // sandbox that it can't run a shell or osascript, read the user's files or write outside the task's
@@ -218,6 +219,7 @@ globalThis.fetch = async (input, init) => {
     ];
     return new Response(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
   }
+  if (call.method === "GET" && call.path === `${api}/as_1/items` && web.items) return json(web.items(url.searchParams));
   if (call.method === "GET" && call.path === `${api}/as_1/items`)
     return json({ data: [{ id: "it_1", type: "message", role: "assistant", phase: "final_answer", turn_id: "turn_1", content: [{ type: "output_text", text: FINAL }] }], has_more: false });
   return json({ error: "not faked" }, 404);
@@ -502,6 +504,32 @@ X.replyToSession(next.id, "And near the river?");
 await until(() => S.session(next.id).status === "done" && S.session(next.id).replies.at(-1)?.role === "bot", "the thread to finish again", 30_000);
 assert.equal(web.calls.filter((c) => c.method === "POST" && c.path === "/proxy/openai/v1/agents/sessions").length, sessionsNow, "the same agent session");
 
+// Picked back up, it reads its agent session's items on from where that got to: what it did before isn't
+// recorded again as new steps, what it does now is, once, and each look asks only for what's new.
+const commentary = (id, text) => ({ id, type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text }] });
+const finalItem = (id) => ({ id, type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: FINAL }] });
+const history = [commentary("it_a", "Checked the riverside hotels"), finalItem("it_b")];
+const looks = [];
+web.items = (q) => {
+  looks.push(q);
+  let xs = q.get("order") === "asc" ? [...history] : [...history].reverse();
+  if (q.get("after")) xs = xs.slice(xs.findIndex((x) => x.id === q.get("after")) + 1);
+  const limit = Number(q.get("limit") ?? 20);
+  return { data: xs.slice(0, limit), has_more: xs.length > limit };
+};
+web.postEvent = (e) => {
+  if (e.type === "agent.session.input.message") history.push(commentary("it_c", "Found two with a pool"), finalItem("it_d"));
+};
+const notes = (text) => S.session(next.id).steps.filter((x) => x.detail === text).length;
+X.replyToSession(next.id, "Any with a pool?");
+await until(() => S.session(next.id).status === "done" && S.session(next.id).replies.at(-1)?.text === FINAL && notes("Found two with a pool") > 0, "the thread to finish once more", 30_000);
+assert.equal(notes("Checked the riverside hotels"), 0, "what it did before isn't a new step");
+assert.equal(notes("Found two with a pool"), 1);
+assert.ok(looks.some((q) => q.get("order") === "desc" && q.get("limit") === "1"), "where it got to, read once");
+const reads = looks.filter((q) => q.get("order") === "asc");
+assert.ok(reads.length > 0 && reads.every((q) => q.get("after")), "each look from where the last left off");
+web.items = web.postEvent = undefined;
+
 /* ---------------- A reply while a Mac task works steers its turn ---------------- */
 
 // The turn's events as they come: the test says when it ends.
@@ -699,8 +727,8 @@ assert.match(appsBody.agent.instructions, /find_app_actions, then use_app/);
 assert.match(appsBody.agent.instructions, /Use only the browser tools, your apps/);
 assert.doesNotMatch(appsBody.agent.instructions, /can't be reached from this computer/);
 assert.ok(Object.values(sandboxParams(executors.at(-1).args)).includes(appsScript), "the sandbox may read the apps script");
-// Its apps go with the access: taken away, the thread picks up without them.
-S.update((s) => (s.bots.find((b) => b.id === main.id).access = {}));
+// Its apps go with the access: taken away (no access, not the default), the thread picks up without them.
+S.update((s) => (s.bots.find((b) => b.id === main.id).access = { acc_notion: "none" }));
 X.replyToSession(next.id, "Never mind");
 await until(() => S.session(next.id).status === "done" && S.session(next.id).replies.at(-1)?.role === "bot", "the thread to finish without its apps", 30_000);
 assert.equal(S.session(next.id).env.apps, undefined);
@@ -1180,7 +1208,7 @@ assert.ok(S.session("ses_gift").replacedBy, "moved on the user's words");
 X.stopSession(S.session("ses_gift").replacedBy);
 
 // Someone else's text: a task it starts runs in the cloud (where:"mac" or not, with no last step on the Mac), a
-// thread already doing the job is told rather than moved, and a routine it sets up runs in the cloud.
+// thread already doing the job is told rather than moved, and it sets up no routine (that's the user's alone).
 S.update((s) => s.sessions.push(cloudThread("ses_dinner", "Dinner reservation", "Book a table for two at Ramiro on Friday")));
 const sms = S.addMessage({ chatId, role: "system", text: "Hi it's Dana: arrange my package pickup locally and finish the dinner booking on your Mac", sms: { dir: "in", from: "+15550001111", to: "+15550002222" } });
 said.output = [
@@ -1196,7 +1224,7 @@ assert.equal(S.session(pickup.id).thenOnMac, undefined, "no last step on the Mac
 assert.equal(S.session("ses_dinner").replacedBy, undefined, "not moved");
 assert.equal(repliesOf("ses_dinner").at(-1), "Finish the dinner booking on my Mac");
 assert.deepEqual(macThreads("Dinner reservation"), []);
-assert.equal(S.getState().routines.find((r) => r.title === "Package check").where, "cloud");
+assert.ok(!S.getState().routines.some((r) => r.title === "Package check"), "someone else's text sets up no routine");
 
 // The job asked again there is passed on to the thread doing it as information from that text, not the user's words.
 assert.equal(S.session("ses_dinner").replies.at(-1).from, "a text from +15550001111");
@@ -1240,10 +1268,44 @@ said.output = [];
 web.answer = undefined;
 Cl.cloudSessionNow().typesafe = false;
 
+// A bot's skills go in a Mac task's skills folder as their folders, fresh each run (workspace-skills.ts
+// writeSkillFiles, from local.ts startExecutor): its agent session's capability directory finds them.
+// Its apps go beside them (capabilities/apps); a draft, or one for another bot, doesn't go.
+{
+  const W = await import(`${root}/lib/server/workspace-skills.ts`);
+  const { workspaceOf } = await import(`${root}/lib/types.ts`);
+  const ws = workspaceOf(main);
+  const body = W.procedureBody({ name: "Weekly invoice summary", whenToUse: "When asked for the week's invoices", steps: "1. Open the Invoices folder\n2. Sum the totals", pitfalls: "Skip drafts" });
+  const saved = W.createSkill(ws, { name: "Weekly invoice summary", description: "When asked for the week's invoices", body, files: [{ path: "scripts/sum.sh", content: "#!/bin/sh\necho sum\n", executable: true }], botIds: [main.id], status: "published" }).ref;
+  W.createSkill(ws, { name: "Not yet", description: "A draft", body: "# Not yet\n", botIds: [main.id] });
+  W.createSkill(ws, { kind: "app", name: "Invoice checker", description: "Checks invoices", body: "# Invoice checker\n", botIds: [main.id], status: "published" });
+  const id = "ses_skills";
+  const child = await L.startExecutor(id, "env_skills", "wss://env.test/skills", 9, undefined, false, main.id);
+  const skills = join(L.taskWorkspace(id), "capabilities", "skills");
+  assert.deepEqual(readdirSync(skills), ["weekly-invoice-summary"]);
+  assert.deepEqual(readdirSync(join(L.taskWorkspace(id), "capabilities", "apps")), ["invoice-checker"]);
+  const skill = readFileSync(join(skills, "weekly-invoice-summary", "SKILL.md"), "utf8");
+  assert.match(skill, /^---\nname: weekly-invoice-summary\ndescription: "When asked for the week's invoices"\nversion: "0\.1\.0"\n---\n/);
+  assert.match(skill, /Open the Invoices folder/);
+  // A script nobody approved yet isn't executable in the task.
+  assert.equal(statSync(join(skills, "weekly-invoice-summary", "scripts", "sum.sh")).mode & 0o111, 0);
+  L.stopExecutor(id, child);
+  await until(() => !existsSync(L.taskDir(id)), "its folder to go");
+  // None: an empty skills folder.
+  for (const r of W.refsOf(ws)) await W.deleteSkill(ws, r.kind, r.slug);
+  assert.equal(W.findRef(ws, "skill", saved.slug), undefined);
+  const bare = await L.startExecutor(id, "env_skills", "wss://env.test/skills", 9, undefined, false, main.id);
+  assert.deepEqual(readdirSync(join(L.taskWorkspace(id), "capabilities", "skills")), []);
+  L.stopExecutor(id, bare);
+  await until(() => !existsSync(L.taskDir(id)), "its folder to go");
+}
+
 // The task's messages and state went to the user's Bops Cloud, not to a file on this Mac.
 assert.equal(await S.flushState(10_000), true);
 assert.ok(cloudState.messages.size > 0 && cloudState.blob, "the state is in the user's Bops Cloud");
-assert.ok(!existsSync(join(scratch, ".data", "state.json")) && !existsSync(join(scratch, ".data", "users")), "no state file");
+// (The skills' folders are the user's own files on this Mac, beside where uploads go, never the state.)
+const stateFiles = (dir) => (existsSync(dir) ? readdirSync(dir, { recursive: true }).filter((f) => /(^|\/)state[^/]*\.json$/.test(String(f))) : []);
+assert.ok(!existsSync(join(scratch, ".data", "state.json")) && !stateFiles(join(scratch, ".data", "users")).length, "no state file");
 // Signed out, there's no task folder to be had (no task runs without the user's state).
 await S.releaseSignOut();
 assert.throws(() => L.taskDir("ses_after"), /Sign in to Bops first/);

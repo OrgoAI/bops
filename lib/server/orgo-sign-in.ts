@@ -204,12 +204,23 @@ async function finish(p: Pending, apiKey: string, user: OrgoUser): Promise<SignI
   // Then a main bot left with no computer takes up the free Bops computer again, if it's still on Orgo.
   void adoptComputers(user.id)
     .catch((e: Error) => console.warn(`[sign-in] checking the bots' computers: ${e.message}`))
-    .then(() => reattachFreeComputer(user.id));
+    .then(() => reattachFreeComputer(user.id))
+    .then(() => moveOntoOrgoWorkspaces(user.id));
   // Bops Cloud starts over on this key (its session, the tunnel), and routing through this Mac turns
   // on by itself where Orgo offers it.
   void startCloud({ signedIn: true });
   relayAfterSignIn();
   return { status: "approved", user };
+}
+
+/**
+ * Each Bops workspace onto an Orgo workspace of its own, where Orgo has them (workspaces.ts): run at every
+ * sign-in until it's done. On an Orgo without them it does nothing and says nothing.
+ */
+async function moveOntoOrgoWorkspaces(userId: string) {
+  if (signedInUser()?.id !== userId) return;
+  const { migrateWorkspacesToOrgo } = await import("./workspaces");
+  await migrateWorkspacesToOrgo().catch((e: Error) => console.warn(`[sign-in] moving onto Orgo workspaces: ${e.message}`));
 }
 
 /** Orgo answered that this key can't see the computer (gone, or another account's). */
@@ -307,7 +318,7 @@ function loadForKey(key: string, now: boolean): Promise<void> {
     update((s) => (s.account = { user, signedInAt: Date.now() }));
     seedOwnerName(user);
     void checkMac().catch(() => {});
-    void reattachFreeComputer(user.id);
+    void Promise.resolve(reattachFreeComputer(user.id)).then(() => moveOntoOrgoWorkspaces(user.id));
     // Now that it's known who, Bops Cloud's tunnel opens for them.
     void startCloud();
   })().then(

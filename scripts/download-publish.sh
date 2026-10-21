@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Puts a release's Mac app on bops.bot for the landing page's download buttons:
-# https://bops.bot/download/Bops.dmg (always the newest release) and /download/Bops-<version>-arm64.dmg.
-# Takes the DMG from the GitHub release on OrgoAI/bops, checks it against the release's latest-mac.yml,
-# copies it to the Bops VM (BOPS_SITE_BOX), then checks the VM serves the same bytes. Then it writes
-# /download/latest.json, which the Mac app reads to tell its users a newer version is out and what's new
-# in it (Bops doesn't update itself; see "New versions" in desktop/main.cjs), and bops.bot's download card
-# reads for its "What's new". Run from the repo after a release:
+# Puts a release's Mac app on bops.bot: the DMG for the landing page's download buttons,
+# https://bops.bot/download/Bops.dmg (always the newest release) and /download/Bops-<version>-arm64.dmg,
+# and the zip the app updates itself from, /download/Bops-<version>-arm64-mac.zip (the newest three kept).
+# Takes both from the GitHub release on OrgoAI/bops, checks them against the release's latest-mac.yml,
+# copies them to the Bops VM (BOPS_SITE_BOX), then checks the VM serves the same bytes. Then it writes
+# /download/latest.json, which the Mac app reads to learn a newer version is out and what's new in it,
+# and downloads it from (its "currentRelease" and "releases" are what Electron's autoUpdater reads; see
+# "New versions" in desktop/main.cjs), and bops.bot's download card reads for its "What's new". Apps
+# before 0.0.29 read only "version" and "notes", and send their users to bops.bot. Run from the repo
+# after a release:
 #   scripts/download-publish.sh           # the newest release
 #   scripts/download-publish.sh v0.0.2    # a given one
 # Needs Orgo's private OrgoAI/bops-secrets next to this repo (its prod/bops-public.env names the VM;
@@ -31,18 +34,32 @@ box() { ssh "${ssh_opts[@]}" "$BOPS_SITE_BOX" "$@"; }
 
 tag="${1:-$(gh release list -R OrgoAI/bops --exclude-drafts --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName')}"
 dmg="Bops-${tag#v}-arm64.dmg"
+zip="Bops-${tag#v}-arm64-mac.zip"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "1/4 $dmg from the $tag release"
-gh release download "$tag" -R OrgoAI/bops -p "$dmg" -p latest-mac.yml -D "$tmp" >/dev/null
+echo "1/4 $dmg and $zip from the $tag release"
+gh release download "$tag" -R OrgoAI/bops -p "$dmg" -p "$zip" -p latest-mac.yml -D "$tmp" >/dev/null
 # latest-mac.yml (written by electron-builder) lists each file's sha512, base64.
-want="$(awk -v f="$dmg" '$0 ~ "url: "f"$" {getline; sub(/^ *sha512: */, ""); print; exit}' "$tmp/latest-mac.yml")"
-got="$(openssl dgst -sha512 -binary "$tmp/$dmg" | base64 | tr -d '\n')"
-if [ -z "$want" ] || [ "$got" != "$want" ]; then
+sha() { openssl dgst -sha512 -binary "$1" | base64 | tr -d '\n'; }
+listed() { awk -v f="$1" '$0 ~ "url: "f"$" {getline; sub(/^ *sha512: */, ""); print; exit}' "$tmp/latest-mac.yml"; }
+want="$(listed "$dmg")"
+zip_want="$(listed "$zip")"
+if [ -z "$want" ] || [ "$(sha "$tmp/$dmg")" != "$want" ]; then
   echo "$dmg doesn't match the release's latest-mac.yml: not publishing it." >&2
   exit 1
 fi
+if [ -z "$zip_want" ] || [ "$(sha "$tmp/$zip")" != "$zip_want" ]; then
+  echo "$zip doesn't match the release's latest-mac.yml: not publishing it." >&2
+  exit 1
+fi
+# The apps install the zip's app without checking it's notarized (only its signature): checked here.
+ditto -x -k "$tmp/$zip" "$tmp/unz"
+if ! xcrun stapler validate "$tmp/unz/Bops.app" >/dev/null; then
+  echo "The app in $zip isn't notarized and stapled: not publishing it." >&2
+  exit 1
+fi
+rm -rf "$tmp/unz"
 
 # latest.json, made now, so nothing changes on the VM when it can't be: the version, where to get it, when
 # it came out, and "notes", what's new in it. Those are the "- " lines of docs/releases/<tag>.md as tagged
@@ -55,15 +72,24 @@ if ! md="$(gh api -H "Accept: application/vnd.github.raw" "repos/OrgoAI/bops/con
   md="$(cat "docs/releases/$tag.md" 2>/dev/null || true)"
 fi
 printf '%s\n' "$md" | tr -d '\r' | sed -nE 's/^-[[:space:]]+//p' > "$tmp/notes.txt"
-jq -nac --arg version "${tag#v}" --arg released "${released:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" --rawfile notes "$tmp/notes.txt" '
-  {version: $version, url: "https://bops.bot", dmg: "https://bops.bot/download/Bops.dmg", released: $released}
-  + ([$notes | splits("\n") | sub("\\s+$"; "") | select(length > 0)] | if length > 0 then {notes: .} else {} end)' > "$tmp/latest.json"
+# currentRelease and releases are Squirrel.Mac's (Electron's autoUpdater, "json" feed): the version to
+# update to and its zip. It fetches whatever currentRelease names, so this file only ever names the newest.
+jq -nac --arg version "${tag#v}" --arg released "${released:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" --arg zip "https://bops.bot/download/$zip" --rawfile notes "$tmp/notes.txt" '
+  [$notes | splits("\n") | sub("\\s+$"; "") | select(length > 0)] as $lines
+  | {version: $version, url: "https://bops.bot", dmg: "https://bops.bot/download/Bops.dmg", released: $released}
+  + (if ($lines | length) > 0 then {notes: $lines} else {} end)
+  + {currentRelease: $version,
+     releases: [{version: $version, updateTo: {version: $version, name: $version, notes: ($lines | join("\n")), pub_date: $released, url: $zip}}]}' > "$tmp/latest.json"
 
 echo "2/4 to the VM"
 box 'install -d -m 0755 /opt/bops/download'
 rsync -a --partial -e "ssh ${ssh_opts[*]}" "$tmp/$dmg" "$BOPS_SITE_BOX:/opt/bops/download/$dmg.part"
 # Renamed into place, then Bops.dmg is pointed at it in one step, so nobody gets half a file.
 box "cd /opt/bops/download && chmod 0644 '$dmg.part' && mv -f '$dmg.part' '$dmg' && ln -f '$dmg' Bops.dmg.new && mv -f Bops.dmg.new Bops.dmg"
+# The zip the apps update from, the same way. About 155 MB each: the newest three are kept (an app
+# mid-download of the one before keeps its file).
+rsync -a --partial -e "ssh ${ssh_opts[*]}" "$tmp/$zip" "$BOPS_SITE_BOX:/opt/bops/download/$zip.part"
+box "cd /opt/bops/download && chmod 0644 '$zip.part' && mv -f '$zip.part' '$zip' && ls -1t -- *-arm64-mac.zip | tail -n +4 | xargs -r rm -f --"
 
 echo "3/4 check"
 remote="$(box "openssl dgst -sha512 -binary /opt/bops/download/Bops.dmg | base64 | tr -d '\n'")"
@@ -74,8 +100,17 @@ if [ "$remote" != "$want" ] || [ "$size" != "$(wc -c < "$tmp/$dmg" | tr -d ' ')"
   exit 1
 fi
 echo "https://bops.bot/download/Bops.dmg is $dmg ($((size / 1048576)) MB)"
+# The zip as an app gets it: every byte, through Caddy.
+curl -fsS --max-time 600 --resolve "bops.bot:443:$ip" -o "$tmp/served.zip" "https://bops.bot/download/$zip"
+if [ "$(sha "$tmp/served.zip")" != "$zip_want" ] || [ "$(wc -c < "$tmp/served.zip")" != "$(wc -c < "$tmp/$zip")" ]; then
+  echo "bops.bot doesn't serve $zip correctly yet (checksum or size differs)." >&2
+  exit 1
+fi
+rm -f "$tmp/served.zip"
+echo "https://bops.bot/download/$zip is served"
 
-# Only once the DMG is served: the apps that read this send their users to it.
+# Only once the DMG and the zip are served: the apps that read this download the zip, or send their
+# users to the DMG.
 echo "4/4 latest.json"
 # Written next to it, then renamed into place, so an app never reads half a file.
 box "cat > /opt/bops/download/latest.json.new && chmod 0644 /opt/bops/download/latest.json.new && mv -f /opt/bops/download/latest.json.new /opt/bops/download/latest.json" < "$tmp/latest.json"

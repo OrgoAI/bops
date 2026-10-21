@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { ensureUserRow, query } from "./db.ts";
-import type { Route, Upgrade } from "./http.ts";
+import { refuseUpgrade, type Route, type Upgrade } from "./http.ts";
 import { CLOUD_TUNNEL_HEADER, type CloudToMac, type MacToCloud, type PendingKind } from "./protocol.ts";
-import { toJson } from "./state.ts";
+import { stateLevelOf, stateTooNew, toJson } from "./state.ts";
 
 /**
  * GET /v1/connect: one WebSocket per signed-in Mac (frames in protocol.ts). The cloud replays
@@ -30,6 +30,8 @@ const MAX_FRAME = 16 * 1024 * 1024;
 type Mac = {
   userId: string;
   ws: WebSocket;
+  /** Which state the Mac's app may be given (state.ts stateLevelOf): a newer one's write puts it off (dropOlderMac). */
+  level: number;
   /** When the Mac last sent anything (a pong, an answer, an ack): any frame shows it's there. */
   heardAt: number;
   ticker: ReturnType<typeof setInterval>;
@@ -59,6 +61,20 @@ export function closeAll(): void {
 export function notifyMac(userId: string, frame: CloudToMac): boolean {
   const mac = macs.get(userId);
   return mac ? send(mac, frame) : false;
+}
+
+/**
+ * A Mac of the user's on a newer Bops wrote their state at `level` (state.ts): their Mac on the tunnel,
+ * if it's older, is told it was replaced and closed, as when another Mac connects. 0.0.28 then stays off
+ * until it starts again, and is refused then (the upgrade below). Left on, it would answer the user's
+ * texts, calls and mail from a state it can't be given any more.
+ */
+export function dropOlderMac(userId: string, level: number): void {
+  const mac = macs.get(userId);
+  if (!mac || mac.level >= level) return;
+  detach(mac);
+  send(mac, { t: "replaced" });
+  mac.ws.close(4000, "replaced");
 }
 
 /** Send a request to the user's Mac and wait for its answer; null when the Mac isn't connected or doesn't answer in time. */
@@ -117,14 +133,14 @@ export async function clearOldEvents(): Promise<void> {
 }
 
 /** A Mac connected: it replaces any older connection of the same user, gets pinged, and gets what waited. */
-function attach(userId: string, ws: WebSocket) {
+function attach(userId: string, ws: WebSocket, level: number) {
   const older = macs.get(userId);
   if (older) {
     detach(older);
     send(older, { t: "replaced" });
     older.ws.close(4000, "replaced");
   }
-  const mac: Mac = { userId, ws, heardAt: Date.now(), ticker: setInterval(() => tick(mac), timing.pingMs), waiting: new Map(), sent: new Set(), caughtUp: Promise.resolve() };
+  const mac: Mac = { userId, ws, level, heardAt: Date.now(), ticker: setInterval(() => tick(mac), timing.pingMs), waiting: new Map(), sent: new Set(), caughtUp: Promise.resolve() };
   macs.set(userId, mac);
   ws.on("message", (data, isBinary) => onFrame(mac, data, isBinary));
   ws.on("close", () => detach(mac));
@@ -214,6 +230,12 @@ export const routes: Route[] = [];
 export const upgrades: Upgrade[] = [
   {
     path: "/v1/connect",
-    handle: (req, socket, head, { user }) => wss.handleUpgrade(req, socket, head, (ws) => attach(user.id, ws)),
+    // A Mac older than the one that wrote the user's state can't be given it (state.ts), nor the user's
+    // webhooks: it would take the tunnel from the newer one (each new one replaces the last) and answer
+    // them from what it had. If Postgres can't say, it connects as before.
+    handle: (req, socket, head, { user }) =>
+      void stateTooNew(req, user.id)
+        .catch(() => false)
+        .then((old) => (old ? refuseUpgrade(socket, 426, "Update Bops on this Mac") : wss.handleUpgrade(req, socket, head, (ws) => attach(user.id, ws, stateLevelOf(req))))),
   },
 ];

@@ -225,7 +225,7 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
       <div className="h-11 shrink-0 [-webkit-app-region:drag]" />
       <div className="flex flex-1 flex-col items-center justify-center px-6 pb-16">
         <div className="flex w-[400px] animate-[call-in_220ms_ease-out] flex-col items-center rounded-[22px] bg-white px-8 pb-7 pt-9 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
-          <span className={step.kind === "waiting" || step.kind === "starting" || step.kind === "saving" ? "animate-[bob_2.4s_ease-in-out_infinite]" : ""}>
+          <span className={step.kind === "waiting" || step.kind === "starting" || step.kind === "saving" ? "animate-[bob_2.4s_ease-in-out_infinite] motion-reduce:animate-none" : ""}>
             <Mascot botId="boppy" color="#0A0A0A" size={56} />
           </span>
           {step.kind === "waiting" ? (

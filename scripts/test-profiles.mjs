@@ -148,11 +148,18 @@ async function stopCloudServer() {
 }
 await startCloudServer();
 
-/** A call to the cloud as a user's newer build would make it (to look at what's there, or be another Mac). */
+/** A call to the cloud as a user's newer build would make it (to look at what's there, or be another Mac). `old`: as 0.0.28 makes it, which says no state level. */
 async function asUser(id, path, init = {}) {
   const res = await fetch(`${CLOUD}${path}`, {
     method: init.method ?? "GET",
-    headers: { Authorization: `Bearer ${keyOf(id)}`, "x-bops-user": id, "x-bops-protocol": "2", "x-bops-device": init.device ?? "other-mac", "content-type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${keyOf(id)}`,
+      "x-bops-user": id,
+      "x-bops-protocol": "2",
+      "x-bops-device": init.device ?? "other-mac",
+      "content-type": "application/json",
+      ...(init.old ? { "x-bops-version": "0.0.28" } : { "x-bops-state-level": "3" }),
+    },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
   });
   return { status: res.status, body: await res.json().catch(() => null) };
@@ -303,7 +310,7 @@ try {
   await until(() => !existsSync(waiting), "the file from before to be removed once it's all up");
   assert.ok((await cloudMessages(A)).some((m) => m.text === LEGACY_TEXT), "in A's cloud");
   const a0 = await cloudState(A);
-  assert.equal(a0.protocol, 2);
+  assert.equal(a0.protocol, 3, "written at this app's state level");
   assert.ok(a0.state.bots.some((b) => b.name === "Lex"));
   assert.equal(a0.state.messages, undefined, "messages are rows, never in the blob");
   assert.equal(a0.state.account, undefined, "who's signed in stays on the Mac");
@@ -691,6 +698,30 @@ try {
   assert.equal(readFileSync(join(scratch, "keychain", "orgo-api-key"), "utf8"), keyOf(A));
   assert.equal(S.getState().account?.user.id, A);
   console.log("signing in over another account: the new key comes in with the new state, before the Keychain is written");
+
+  /* ---------------- A Mac still on 0.0.28 on the same account ---------------- */
+
+  // This Mac wrote A's state, so the cloud keeps it from a Mac that can't run all of it: 0.0.28 reads
+  // none of it (a routine that runs every so often would start a task every 20 seconds there), and
+  // nothing it sends lands. This Mac goes on as before.
+  S.update((s) => (s.owner = { ...s.owner, about: "Written here" }));
+  assert.equal(await S.flushState(10_000), true);
+  assert.equal((await db.query("SELECT protocol FROM bops.app_state WHERE user_id = $1", [A])).rows[0].protocol, 3, "the level this Mac wrote at");
+  const oldMac = { device: "old-mac", old: true };
+  const oldRead = await asUser(A, "/v1/state", oldMac);
+  assert.deepEqual([oldRead.status, oldRead.body.code, oldRead.body.state], [426, "state_too_new", undefined]);
+  assert.equal((await asUser(A, "/v1/state/head", oldMac)).status, 426);
+  const now = (await asUser(A, "/v1/state/head")).body;
+  assert.equal((await asUser(A, "/v1/state", { method: "PUT", body: { base: now.version, state: { owner: { name: "Old" } } }, ...oldMac })).status, 426);
+  assert.equal((await asUser(A, "/v1/messages", { method: "POST", body: { upsert: [{ id: "msg_oldmac", chatId: "chat_boppy", role: "user", text: "From 0.0.28", at: Date.now() }], remove: [] }, ...oldMac })).status, 426);
+  assert.equal((await cloudState(A)).state.owner.about, "Written here");
+  assert.equal((await cloudMessages(A)).some((m) => m.id === "msg_oldmac"), false);
+  S.update((s) => (s.owner = { ...s.owner, about: "Still written here" }));
+  S.addMessage({ chatId: "chat_boppy", role: "user", text: "A: after the old Mac" });
+  assert.equal(await S.flushState(10_000), true);
+  assert.equal((await cloudState(A)).state.owner.about, "Still written here");
+  assert.ok((await cloudMessages(A)).some((m) => m.text === "A: after the old Mac"));
+  console.log("a Mac on 0.0.28 on the same account: none of the state once this Mac wrote, nothing of its lands, and this Mac goes on");
 
   /* ---------------- Merging, on its own ---------------- */
 
