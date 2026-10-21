@@ -5,7 +5,10 @@
 // projects, the move on sign-in ties the default workspace to the "bops" project and makes an EMPTY marked
 // project for every other workspace at once (the free computer's too; a name the user's Orgo already has gets
 // " (Bops)"), and moves nothing; the default's project takes the user's name for it only once every Bops app on
-// the account is new (both ways of the gate); run again it changes nothing; stopped after any call it resumes to
+// the account is new (both ways of the gate), and meanwhile that name is held: it stays the default's here (put
+// back over a "bops" another Mac's copy or an older Bops brings back, never dropped for it), survives a restart,
+// is tried again at each start, sign-in and names sync, and gives way only to a rename on orgo.ai made after it;
+// a default renamed while Orgo doesn't answer is held too; run again it changes nothing; stopped after any call it resumes to
 // the same end; a rollback deletes only the empty projects it made, and a refused delete leaves it whole. New
 // workspace, Rename (orgo.ai's renames come here too) and Delete (a preview of what goes, then orgo-web's POST
 // .../delete; a refusal keeps the workspace whole; the default can't be) follow it; keys are this workspace's or
@@ -80,8 +83,9 @@ process.on("unhandledRejection", (e) => rejections.push(String(e?.stack ?? e)));
  * refuses (409, before deleting anything, as orgo-web does). `noPreview`: delete-preview fails.
  * `previewCounts`: delete-preview counts skills and apps (orgo-web's first build, 563ed1cf6) instead of
  * naming them as orgo-web does now. `skillsOf`: per project, its public.skills rows ({ name, slug, type }).
+ * `down`: the list of projects and the apps on record answer 503 (Orgo not answering what Rename asks).
  */
-const orgo = { modern: false, columnOnly: false, projects: [], computers: new Map(), secrets: [], calls: [], changes: 0, failAt: 0, seq: 0, clock: 0, apps: null, refuseDelete: new Set(), noPreview: false, previewCounts: false, skillsOf: {} };
+const orgo = { modern: false, columnOnly: false, projects: [], computers: new Map(), secrets: [], calls: [], changes: 0, failAt: 0, seq: 0, clock: 0, apps: null, refuseDelete: new Set(), noPreview: false, previewCounts: false, skillsOf: {}, down: false };
 // `columnOnly`: the migration is applied (GET answers every column, so `product` shows) but the routes are still today's.
 const stamp = () => new Date(Date.UTC(2026, 9, 15) + ++orgo.clock * 1000).toISOString();
 const project = (p) => ({ id: p.id, name: p.name, role: "owner", created_at: p.created_at, updated_at: p.updated_at, member_count: 1, desktops: [...orgo.computers.values()].filter((c) => c.project === p.id).map((c) => ({ id: c.id, name: c.name })), ...(orgo.modern || orgo.columnOnly ? { product: p.product, bops_ws_id: p.bops_ws_id ?? null } : {}) });
@@ -96,6 +100,7 @@ function world({ modern, columnOnly = false }) {
   orgo.noPreview = false;
   orgo.previewCounts = false;
   orgo.skillsOf = {};
+  orgo.down = false;
   orgo.projects = [
     { id: "p_bops", name: "bops", product: "bops", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
     // An older Bops one by name (another case): the free computer decides which is the default's.
@@ -135,6 +140,7 @@ const server = createServer(async (req, res) => {
   const call = { method: req.method, path: url.pathname, search: url.search, body, app: req.headers["x-bops-app"] };
   orgo.calls.push(call);
   if (req.headers.authorization !== `Bearer ${ORGO_KEY}`) return send(res, 401, { error: "Not authenticated" });
+  if (orgo.down && /^\/api\/(workspaces|projects|bops\/apps)$/.test(url.pathname)) return send(res, 503, { error: "Service unavailable" });
   // A change, done; the one asked to fail answers 500 after doing it.
   const changed = (status, obj) => {
     orgo.changes++;
@@ -280,6 +286,7 @@ const Sk = await import(`${root}/lib/server/workspace-skills.ts`);
 const K = await import(`${root}/lib/server/keys.ts`);
 const Rm = await import(`${root}/lib/server/remove.ts`);
 const Route = await import(`${root}/app/api/workspaces/route.ts`);
+const Merge = await import(`${root}/lib/server/state-merge.ts`);
 const KeysRoute = await import(`${root}/app/api/keys/route.ts`);
 
 /**
@@ -730,6 +737,172 @@ await check("A rename on orgo.ai reaches Bops: at sign-in and when the sidebar a
   q.updated_at = stamp();
   assert.deepEqual((await Wk.syncWorkspaceNames()).renamed, [{ wsId: "ws_quiet", from: "Quiet", to: "orgo 2" }]);
   assert.ok(!changes().some((c) => c.path === `/api/workspaces/${q.id}` && c.method === "PATCH"), "nothing sent back to Orgo for it");
+});
+
+/* ---------------- The default's name, held for the apps ---------------- */
+
+const OLD = () => [NEW("0.0.28")];
+const appsAsked = () => orgo.calls.filter((c) => c.path === "/api/bops/apps").length;
+const held = () => S.getState().orgoMigration?.defaultRename;
+const sync = async () => (await Route.PATCH(req("PATCH", { syncNames: true }))).json();
+/** The owner's account as prod had it on 10-20: the default tied to its "bops" project, the move done, the one app on record 0.0.28. */
+async function heldWorld() {
+  world({ modern: true });
+  orgo.projects = orgo.projects.filter((p) => p.id !== "p_bops_old");
+  seed();
+  orgo.apps = OLD();
+  assert.equal((await Wk.migrateWorkspacesToOrgo()).status, "done");
+  assert.deepEqual([ws("ws_main").name, ws("ws_main").orgoName, held()], ["bops", "bops", undefined]);
+  Wk.heldRenameForTests?.reset();
+}
+/** The owner's rename in the switcher. */
+const renameMain = async (name) => (await Route.PATCH(req("PATCH", { id: "ws_main", name }))).json();
+
+await check("Held default name: renamed to bops- with an app on 0.0.28 it stays bops- here and bops on Orgo, each names sync asks again, and once every app is 0.0.29 the project takes it", async () => {
+  await heldWorld();
+  assert.deepEqual(await renameMain("bops-"), { ok: true, waiting: "old_app" });
+  assert.equal(ws("ws_main").name, "bops-");
+  assert.equal(byId("p_bops").name, "bops", "the project keeps bops for the old app");
+  assert.equal(held().to, "bops-");
+  assert.ok(Number.isFinite(Date.parse(held().at)), "when the owner gave it");
+  assert.ok(!changes().some((c) => c.path === "/api/workspaces/p_bops" && c.body?.name !== undefined), "no rename sent");
+  // The sidebar's names sync (every 10 minutes): the name stays, and the gate is asked again.
+  const asked = appsAsked();
+  assert.deepEqual(await sync(), { ok: true, renamed: [] });
+  assert.equal(appsAsked(), asked + 1, "the names sync tried the held name again");
+  assert.deepEqual([ws("ws_main").name, byId("p_bops").name, held().reason], ["bops-", "bops", "old_app"]);
+  assert.deepEqual(Wk.migrationNotice().defaultWaits?.to, "bops-", "Settings and the switcher see it waiting");
+  // This Mac's app is 0.0.29 now: the next names sync gives the project the name.
+  orgo.apps = [NEW("0.0.29")];
+  assert.deepEqual(await sync(), { ok: true, renamed: [] });
+  assert.equal(byId("p_bops").name, "bops-");
+  assert.deepEqual([ws("ws_main").name, ws("ws_main").orgoName, held()], ["bops-", "bops-", undefined]);
+  // And nothing more goes at the next sync or sign-in.
+  const n = changes().length;
+  await sync();
+  await Wk.migrateWorkspacesToOrgo();
+  assert.equal(changes().length, n);
+});
+
+await check("Held default name, never reverted: a project changed on Orgo without a rename, another Mac's names sync merged in, and bops brought back by an older Bops's copy all leave it bops- (the 10-20 revert)", async () => {
+  await heldWorld();
+  const before = structuredClone({ workspaces: S.getState().workspaces, orgoMigration: S.getState().orgoMigration });
+  assert.deepEqual(await renameMain("bops-"), { ok: true, waiting: "old_app" });
+  // Orgo changed the project without renaming it (prod's row moved to 00:20:48 with its name still bops).
+  byId("p_bops").updated_at = stamp();
+  await sync();
+  assert.deepEqual([ws("ws_main").name, ws("ws_main").orgoUpdatedAt, held()?.to], ["bops-", byId("p_bops").updated_at, "bops-"]);
+  // Another Bops with this state (another Mac, or this Mac's app under its other device id) saw the same
+  // change in its names sync before it heard of the rename: its copy of the default has the new
+  // orgoUpdatedAt and the old name. Its save merges this Mac's over the last synced (state-merge.ts):
+  // the default changed on both sides goes field by field, so its orgoUpdatedAt and the rename both stay.
+  // (Merged whole, as before, its copy brought bops back.)
+  const mine = structuredClone({ workspaces: S.getState().workspaces, orgoMigration: S.getState().orgoMigration });
+  const theirs = structuredClone(before);
+  theirs.workspaces.find((w) => w.id === "ws_main").orgoUpdatedAt = "2026-10-21T00:20:48.660Z";
+  for (const merged of [Merge.merge3(before, theirs, mine), Merge.merge3(before, mine, theirs)]) {
+    const main = merged.workspaces.find((w) => w.id === "ws_main");
+    assert.deepEqual([main.name, main.orgoName, merged.orgoMigration.defaultRename?.to], ["bops-", "bops", "bops-"], "the rename stays, whichever Mac merges");
+  }
+  // A field both changed is the merging Mac's, the rest come from where they changed.
+  const here = structuredClone(before);
+  here.workspaces.find((w) => w.id === "ws_main").name = "bops-";
+  const other = structuredClone(before);
+  other.workspaces.find((w) => w.id === "ws_main").name = "Elsewhere";
+  other.workspaces.find((w) => w.id === "ws_main").orgoUpdatedAt = "2026-10-21T00:20:48.660Z";
+  const both = Merge.merge3(before, here, other).workspaces.find((w) => w.id === "ws_main");
+  assert.deepEqual([both.name, both.orgoUpdatedAt], ["bops-", "2026-10-21T00:20:48.660Z"]);
+  // An older Bops's copy merged whole (0.0.28 and before) brings bops back over the rename here:
+  // before the fix the next sign-in took that bops for "the user didn't name it" and dropped the wish
+  // (renameDefault settled), leaving bops with nothing waiting, as the owner's app was. Now the names
+  // sync puts the held name back, and so does a sign-in.
+  S.update((s) => (s.workspaces.find((w) => w.id === "ws_main").name = "bops"));
+  assert.deepEqual(await sync(), { ok: true, renamed: [] });
+  assert.deepEqual([ws("ws_main").name, held()?.to], ["bops-", "bops-"]);
+  S.update((s) => (s.workspaces.find((w) => w.id === "ws_main").name = "bops"));
+  const r = await Wk.migrateWorkspacesToOrgo();
+  assert.deepEqual(r.defaultName, { local: "bops-", project: "bops", renamed: false, reason: "old_app" });
+  assert.deepEqual([ws("ws_main").name, held()?.to, byId("p_bops").name], ["bops-", "bops-", "bops"]);
+  // Renamed back to bops by the owner: that's the name, sent as it is, and nothing waits.
+  assert.deepEqual(await renameMain("bops"), { ok: true });
+  assert.deepEqual([ws("ws_main").name, held(), byId("p_bops").name], ["bops", undefined, "bops"]);
+});
+
+await check("Held default name survives a restart: saved with the state, put back from it, tried at the start, given to the project at a start once the apps are new", async () => {
+  await heldWorld();
+  assert.deepEqual(await renameMain("bops-"), { ok: true, waiting: "old_app" });
+  const at = held().at;
+  // Quit and start again: the state is saved, read back from its file, and what lived in memory is gone.
+  assert.equal(await S.flushState(5000), true);
+  const epoch = S.stateEpoch();
+  await S.bindSignIn("u_restart");
+  await S.releaseSignOut();
+  assert.notEqual(S.stateEpoch(), epoch, "read back from the file");
+  globalThis.bopsWsRenamedAt.clear();
+  globalThis.bopsOrgoPerWorkspace = undefined;
+  globalThis.bopsOrgoWorkspace = undefined;
+  Wk.heldRenameForTests.reset();
+  assert.deepEqual([ws("ws_main").name, held()?.to, held()?.at], ["bops-", "bops-", at]);
+  // The start: the window's first state poll tries it once; the app is still 0.0.28.
+  const asked = appsAsked();
+  Wk.retryHeldRenameOnStart();
+  await globalThis.bopsWsHeldRetry;
+  assert.equal(appsAsked(), asked + 1);
+  Wk.retryHeldRenameOnStart();
+  assert.equal(globalThis.bopsWsHeldRetry, undefined, "once a start");
+  assert.deepEqual([ws("ws_main").name, byId("p_bops").name, held()?.at], ["bops-", "bops", at], "kept with when it was given");
+  // The names sync after a restart (renamedAt forgotten) doesn't take bops back either.
+  await sync();
+  assert.equal(ws("ws_main").name, "bops-");
+  // Updated meanwhile, and started again: the start gives the project the name.
+  orgo.apps = [NEW("0.0.29")];
+  Wk.heldRenameForTests.reset();
+  Wk.retryHeldRenameOnStart();
+  await globalThis.bopsWsHeldRetry;
+  assert.deepEqual([ws("ws_main").name, byId("p_bops").name, held()], ["bops-", "bops-", undefined]);
+});
+
+await check("Held default name and orgo.ai: a rename there after the owner's wins (here too, nothing waits); one from before it gives way to the owner's, which goes with no gate", async () => {
+  await heldWorld();
+  assert.deepEqual(await renameMain("bops-"), { ok: true, waiting: "old_app" });
+  const newer = byId("p_bops");
+  newer.name = "Headquarters";
+  newer.updated_at = new Date(Date.now() + 60_000).toISOString();
+  assert.deepEqual(await sync(), { ok: true, renamed: [{ wsId: "ws_main", from: "bops-", to: "Headquarters" }] });
+  assert.deepEqual([ws("ws_main").name, ws("ws_main").orgoName, held(), byId("p_bops").name], ["Headquarters", "Headquarters", undefined, "Headquarters"]);
+  // The same at a sign-in (the move's retry sees it first).
+  await heldWorld();
+  assert.deepEqual(await renameMain("bops-"), { ok: true, waiting: "old_app" });
+  byId("p_bops").name = "Head office";
+  byId("p_bops").updated_at = new Date(Date.now() + 60_000).toISOString();
+  await Wk.migrateWorkspacesToOrgo();
+  assert.deepEqual([ws("ws_main").name, held(), byId("p_bops").name], ["Head office", undefined, "Head office"]);
+  // Renamed on orgo.ai before the owner's rename here (its updated_at is older than the wish): the owner's
+  // stands, and as no app finds the project by bops any more, it goes now, with the app still 0.0.28.
+  await heldWorld();
+  assert.deepEqual(await renameMain("bops-"), { ok: true, waiting: "old_app" });
+  const older = byId("p_bops");
+  older.name = "HQ";
+  older.updated_at = stamp();
+  assert.ok(Date.parse(older.updated_at) < Date.parse(held().at));
+  assert.deepEqual(await sync(), { ok: true, renamed: [] });
+  assert.deepEqual([ws("ws_main").name, held(), byId("p_bops").name, ws("ws_main").orgoName], ["bops-", undefined, "bops-", "bops-"]);
+});
+
+await check("Held default name while Orgo doesn't answer: kept as unreachable, never renamed here alone and forgotten; asked for once Orgo answers", async () => {
+  await heldWorld();
+  orgo.down = true;
+  globalThis.bopsOrgoPerWorkspace = undefined;
+  assert.deepEqual(await renameMain("bops-"), { ok: true, waiting: "unreachable" });
+  assert.deepEqual([ws("ws_main").name, held()?.reason], ["bops-", "unreachable"]);
+  assert.deepEqual(await sync(), { ok: true, renamed: [] });
+  assert.equal(held()?.reason, "unreachable", "still waiting");
+  orgo.down = false;
+  await sync();
+  assert.deepEqual([ws("ws_main").name, held()?.reason, byId("p_bops").name], ["bops-", "old_app", "bops"]);
+  orgo.apps = [NEW("0.0.30")];
+  await sync();
+  assert.deepEqual([held(), byId("p_bops").name], [undefined, "bops-"]);
 });
 
 /* ---------------- Delete ---------------- */

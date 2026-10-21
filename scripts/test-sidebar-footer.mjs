@@ -3,7 +3,8 @@
 // Knowledge; none: Apps & logins), that the one pointed at wins over it (your account too) and leaving
 // goes back to it, that the others are round with their tooltips, that the Routines badge shows in both
 // shapes, that Knowledge's blue dot shows while it has something new (and when that is), and that the
-// motion is a flex-grow swap the reduced-motion setting turns off and touch skips.
+// motion is a flex-grow swap the reduced-motion setting turns off and touch skips. Also the workspace
+// switcher's line under the default while its name waits for the apps (why Orgo still shows bops).
 //
 // The .tsx files are compiled with the TypeScript in node_modules as they load, and rendered to HTML.
 // Usage: node scripts/test-sidebar-footer.mjs   (not with --conditions=react-server: these are client components)
@@ -48,7 +49,7 @@ globalThis.matchMedia = () => ({ matches: false });
 globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
 
 const { footerPageOf, footerPillOf, canHover, FOOTER_LEAVE_MS } = await import(pathToFileURL(`${root}/components/app/sidebar-footer.tsx`).href);
-const { SidebarFooter, YouMenu } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
+const { SidebarFooter, YouMenu, WorkspaceSwitcher, heldNameNote } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
 const { newSince, newestOf, markSeen, seenOf } = await import(pathToFileURL(`${root}/components/app/memory-categories.tsx`).href);
 const { renderToStaticMarkup } = await import("react-dom/server");
 const { createElement: h } = await import("react");
@@ -282,6 +283,29 @@ await test("the motion: a flex-grow swap on one curve, inside the row, and none 
   // Reduced motion: the swap is instant.
   const reduced = [...css.matchAll(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join("\n");
   assert.match(reduced, /\.motion-footer-slot,\s*\.motion-footer-label \{\s*transition: none;/);
+});
+
+await test("the workspace switcher says under the default why Orgo still shows bops while its name waits for the apps", () => {
+  const ws = [
+    { id: "ws_main", name: "bops-", createdAt: 0, orgoProjectId: "p_bops", orgoName: "bops" },
+    { id: "ws_acme", name: "Acme", createdAt: 1, orgoProjectId: "p_acme", orgoName: "Acme" },
+  ];
+  const switcher = (defaultRename) =>
+    renderToStaticMarkup(h(WorkspaceSwitcher, { opened: true, state: { ...base, workspaces: ws, workspace: "ws_main", orgoMigration: { v: 2, step: "done", created: [], ...(defaultRename ? { defaultRename } : {}) } } }));
+  const old = switcher({ to: "bops-", reason: "old_app", checkedAt: "2026-10-21T01:00:00Z", at: "2026-10-21T01:00:00Z" });
+  const notes = [...old.matchAll(/<span data-held-name[^>]*>([^<]*)<\/span>/g)].map((m) => m[1]);
+  assert.deepEqual(notes, ["Orgo keeps the name bops until every Bops app you use is updated to 0.0.29."], "once, for the default only");
+  // Right under the default's row, before the next workspace.
+  assert.ok(old.indexOf("data-held-name") > old.indexOf(">bops-<") && old.indexOf("data-held-name") < old.indexOf(">Acme<"), old);
+  assert.ok(!switcher(null).includes("data-held-name"), "nothing waits: nothing said");
+  // Every reason the gate or the retry gives says something plain, with no dashes.
+  const say = Object.fromEntries(["old_app", "silent_app", "no_record", "no_signal", "unreachable", "no_project", "no_free_name"].map((r) => [r, heldNameNote(r)]));
+  for (const r of ["old_app", "silent_app", "no_record", "no_signal"]) assert.equal(say[r], "Orgo keeps the name bops until every Bops app you use is updated to 0.0.29.", r);
+  assert.equal(say.unreachable, "Orgo keeps the name bops for now: Bops couldn't reach Orgo, and tries again by itself.");
+  assert.equal(say.no_project, "Orgo gets this name once its Orgo workspace is made, with your first computer.");
+  assert.equal(say.no_free_name, "Orgo keeps the name bops: your Orgo already has workspaces with this name.");
+  for (const t of Object.values(say)) assert.ok(!/[\u2013\u2014]/.test(t), t);
+  assert.match(switcher({ to: "bops-", reason: "unreachable", checkedAt: "2026-10-21T01:00:00Z" }), /couldn&#x27;t reach Orgo/);
 });
 
 await test("no em or en dashes in what the footer shows", () => {

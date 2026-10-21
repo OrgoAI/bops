@@ -12,6 +12,7 @@ import { fullAccessOn } from "@/lib/server/full-access";
 import { tregOn } from "@/lib/server/treg";
 import { startActivityBeat } from "@/lib/server/free-hours";
 import { startComputerChecks } from "@/lib/server/sessions";
+import { retryHeldRenameOnStart } from "@/lib/server/workspaces";
 
 export const dynamic = "force-dynamic";
 
@@ -19,8 +20,9 @@ export const dynamic = "force-dynamic";
  * Full app state plus a version counter; the UI polls this. With ?v= (the version the page has),
  * an unchanged state answers with just the version, not the whole state. Importing routines and
  * watches starts their loops; the first poll starts mail (bots' inboxes, and listening for email),
- * Bops Cloud's tunnel if the server's start didn't (the Keychain gave the key only later), and the
- * look at the bots' computers on Orgo (one deleted there since is replaced).
+ * Bops Cloud's tunnel if the server's start didn't (the Keychain gave the key only later), the
+ * look at the bots' computers on Orgo (one deleted there since is replaced), and once a start the
+ * default workspace's name held for the apps is tried again (workspaces.ts retryDefaultRename).
  */
 export async function GET(request: Request) {
   ensureCloud();
@@ -29,6 +31,7 @@ export async function GET(request: Request) {
   startChannels();
   startComputerChecks();
   startActivityBeat();
+  retryHeldRenameOnStart();
   const have = new URL(request.url).searchParams.get("v");
   const version = getVersion();
   if (have !== null && Number(have) === version) return Response.json({ version });

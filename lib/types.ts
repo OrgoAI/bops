@@ -251,6 +251,14 @@ export const pairChatId = (a: string, b: string) => `pair:${[a, b].sort().join("
 
 /** The workspace every older bot and chat belongs to. */
 export const MAIN_WORKSPACE = "ws_main";
+
+/**
+ * The first Bops release that finds its default workspace by bops_ws_id rather than by the name "bops"
+ * (lib/server/workspaces.ts). An app before it looks for a project named "bops", so the default's project
+ * keeps that name until every app on the account is at least this one (lib/server/orgo.ts bopsAppsGate),
+ * and the switcher says so (sidebar.tsx heldNameNote).
+ */
+export const WORKSPACE_APPS_SINCE = "0.0.29";
 export const workspaceOf = (b: { workspaceId?: string } | undefined) => b?.workspaceId ?? MAIN_WORKSPACE;
 
 /**
@@ -1449,10 +1457,14 @@ export type OrgoMigration = {
   renamed?: { wsId: string; from: string; to: string }[];
   /**
    * The default workspace is `to` here, and its Orgo project keeps the name "bops" until every Bops app on
-   * the account is new enough (orgo.ts bopsAppsGate); `reason` is the gate's last answer. Tried again at
-   * every sign-in and at every rename; gone once the project has the name, or it was renamed on orgo.ai.
+   * the account is new enough (orgo.ts bopsAppsGate); `reason` is the gate's last answer, `checkedAt` when
+   * it was asked, `at` when the user gave the name (a wish kept before `at` was goes by `checkedAt`). The
+   * default's name here is `to` for as long as it waits (workspaces.ts holdDefaultName puts it back when
+   * another Mac's copy or an older one brings "bops" back). Tried again at each start, sign-in and names
+   * sync (workspaces.ts retryDefaultRename); gone once the project has the name, or once the project was
+   * renamed on orgo.ai after `at` (that name wins).
    */
-  defaultRename?: { to: string; reason: string; checkedAt: string };
+  defaultRename?: { to: string; reason: string; checkedAt: string; at?: string };
   doneAt?: string;
 };
 

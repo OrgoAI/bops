@@ -1,7 +1,7 @@
 import "server-only";
 import { botChatId, freeComputerOnDelete, MAIN_WORKSPACE, sharesComputer, workspaceOf, type Bot, type OrgoMigration, type Workspace } from "@/lib/types";
 import { freeBotId } from "./bots";
-import { getState, id, stateEpoch, update } from "./store";
+import { getState, id, stateEpoch, stateReady, update } from "./store";
 import { ensureInbox } from "./mail";
 import {
   bindProject,
@@ -111,12 +111,117 @@ export function ensureMain() {
   });
 }
 
-const g = globalThis as unknown as { bopsWsMigration?: Promise<MigrationResult>; bopsWsRenamedAt?: Map<string, number>; bopsWsSync?: Promise<SyncResult | null> };
+const g = globalThis as unknown as {
+  bopsWsMigration?: Promise<MigrationResult>;
+  bopsWsRenamedAt?: Map<string, number>;
+  bopsWsSync?: Promise<SyncResult | null>;
+  bopsWsHeldRetry?: Promise<DefaultName | null>;
+  bopsWsHeldStarted?: boolean;
+};
 /** When each workspace was last renamed here: a list Orgo started answering before that is older than the rename. */
 const renamedAt = (g.bopsWsRenamedAt ??= new Map());
 
 const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 const isBopsName = (n: string) => sameName(n, "bops");
+
+/* ---------------- The default's name, held for the apps ---------------- */
+
+/** Why the default's project still has the name "bops" while the user named it otherwise here. */
+export type HeldReason = AppsGateReason | "no_project" | "no_free_name";
+
+/** The default's name waiting for the apps (OrgoMigration.defaultRename), if one does. */
+const heldName = () => getState().orgoMigration?.defaultRename;
+
+/** When the user gave the held name: `at`, else (a wish kept before `at` was) its last check, which is no earlier. */
+const heldAt = (h: NonNullable<OrgoMigration["defaultRename"]>) => Date.parse(h.at ?? h.checkedAt ?? "");
+
+/**
+ * Whether Orgo changed the default's project after the user gave the held name: a rename on orgo.ai since
+ * then wins over it. Either time unknown: Orgo's rename wins, as it does for every other workspace.
+ */
+function orgoNewer(p: Pick<OrgoWorkspace, "updated_at">, h: NonNullable<OrgoMigration["defaultRename"]>) {
+  const there = Date.parse(p.updated_at ?? "");
+  const here = heldAt(h);
+  return !Number.isFinite(there) || !Number.isFinite(here) || there > here;
+}
+
+/**
+ * The default's name `to` waits for the apps (`reason`), with when the user gave it: now when they just did
+ * (`asked`, a rename here) or it's a name that wasn't waiting, else when it was first given (a retry).
+ */
+function holdName(to: string, reason: string, asked = false) {
+  update((s) => {
+    if (!s.orgoMigration) return;
+    const was = s.orgoMigration.defaultRename;
+    const now = new Date().toISOString();
+    const at = !asked && was && was.to === to ? (was.at ?? was.checkedAt) : now;
+    s.orgoMigration.defaultRename = { to, reason, checkedAt: now, at };
+  });
+}
+
+/**
+ * The held name is the default's name here for as long as it waits: whatever put another back (another
+ * Mac's copy of the state merged in over this one's, an older Bops, a names sync from before this one) is
+ * undone, never taken for the user's choice. True when it was put back.
+ */
+function holdDefaultName(): boolean {
+  const h = heldName();
+  const main = getState().workspaces?.find((w) => w.id === MAIN_WORKSPACE);
+  if (!h || !main || main.name === h.to) return false;
+  update((s) => {
+    const x = s.workspaces?.find((w) => w.id === MAIN_WORKSPACE);
+    if (x) x.name = h.to;
+  });
+  return true;
+}
+
+/** Orgo's name for the default's project wins (renamed on orgo.ai after the held name): it's the name here too, and nothing waits. */
+function takeOrgoName(p: OrgoWorkspace) {
+  update((s) => {
+    const x = s.workspaces?.find((w) => w.id === MAIN_WORKSPACE);
+    if (x) {
+      x.name = freeLocalName(p.name.trim().slice(0, NAME_MAX) || x.name, MAIN_WORKSPACE);
+      x.orgoName = p.name;
+      if (p.updated_at) x.orgoUpdatedAt = p.updated_at;
+    }
+    if (s.orgoMigration) delete s.orgoMigration.defaultRename;
+  });
+}
+
+/**
+ * Try the held default name again (renameDefault): at each start (retryHeldRenameOnStart), sign-in
+ * (migrateWorkspacesToOrgo) and names sync (syncWorkspaceNames), so it reaches Orgo as soon as every Bops
+ * app on the account is new enough, without waiting for a sign-in. One at a time; null when nothing
+ * waits, the move onto Orgo workspaces isn't done or was undone, or Orgo can't be asked now (it stays
+ * held, and the next one tries).
+ */
+export function retryDefaultRename(): Promise<DefaultName | null> {
+  return (g.bopsWsHeldRetry ??= (async () => {
+    const m = getState().orgoMigration;
+    if (!m?.defaultRename || m.step !== "done" || getState().orgoMigrationRevertedAt) return null;
+    holdDefaultName();
+    if ((await perWorkspaceProjects().catch(() => null)) !== true) return null;
+    const epoch = stateEpoch();
+    return renameDefault(() => {
+      if (stateEpoch() !== epoch) throw new Stopped();
+    });
+  })()
+    .catch((e: unknown) => {
+      if (!(e instanceof Stopped)) console.warn(`[workspaces] the default's name for Orgo (tried again later): ${(e as Error).message}`);
+      return null;
+    })
+    .finally(() => (g.bopsWsHeldRetry = undefined)));
+}
+
+/** Once a start, on the Mac (the state route): a held default name is tried again, as the apps may have updated while Bops was closed. */
+export function retryHeldRenameOnStart() {
+  if (g.bopsWsHeldStarted || !stateReady()) return;
+  g.bopsWsHeldStarted = true;
+  if (heldName()) void retryDefaultRename();
+}
+
+/** Tests: forget the start. */
+export const heldRenameForTests = { reset: () => (g.bopsWsHeldStarted = false) };
 
 /** Keep what Orgo said a project is named now (after a rename here): the next sync takes it for no change. */
 function noteOrgoName(wsId: string, name: string, updatedAt?: string | null) {
@@ -135,7 +240,9 @@ export type RenameResult = { ok: true; waiting?: AppsGateReason } | { error: str
  * has is said back (`name_taken`) and nothing changes. The default workspace's project, while it's still
  * named "bops", takes the new name only once every Bops app on the account is new enough (bopsAppsGate):
  * until then the name changes here only, the project keeps "bops" for the older apps, and the result says
- * why (`waiting`); the next sign-in tries again.
+ * why (`waiting`); the next start, sign-in or names sync tries again (retryDefaultRename). So does a default
+ * renamed while Orgo can't say whether it has per workspace projects (`unreachable`): never renamed here
+ * alone and forgotten.
  */
 export async function renameWorkspace(workspaceId: string, name: string): Promise<RenameResult> {
   const clean = name.trim().slice(0, NAME_MAX);
@@ -149,6 +256,8 @@ export async function renameWorkspace(workspaceId: string, name: string): Promis
     const owned = await ownedWorkspaces().catch(() => null);
     if (owned?.some((p) => sameName(p.name, clean))) return { error: `You already have an Orgo workspace named ${clean}. Pick another name.`, code: "name_taken" };
   }
+  // The default's project, with Orgo not saying now whether it has per workspace projects: held, to go when it does.
+  if (!per && w.orgoProjectId && workspaceId === MAIN_WORKSPACE && !sameName(w.orgoName ?? "bops", clean)) waiting = "unreachable";
   if (per && w.orgoProjectId) {
     renamedAt.set(workspaceId, Date.now());
     // The default's project still named "bops", to a name that isn't: only when no older app looks for "bops".
@@ -168,11 +277,11 @@ export async function renameWorkspace(workspaceId: string, name: string): Promis
   update((s) => {
     const x = s.workspaces?.find((y) => y.id === workspaceId);
     if (x) x.name = clean;
-    if (workspaceId !== MAIN_WORKSPACE || !s.orgoMigration) return;
-    // The default's name waits for the apps (or no longer does).
-    if (waiting) s.orgoMigration.defaultRename = { to: clean, reason: waiting, checkedAt: new Date().toISOString() };
-    else delete s.orgoMigration.defaultRename;
+    // The default's name no longer waits (it went, or it's the project's own).
+    if (workspaceId === MAIN_WORKSPACE && !waiting && s.orgoMigration) delete s.orgoMigration.defaultRename;
   });
+  // The default's name waits for the apps, given now.
+  if (workspaceId === MAIN_WORKSPACE && waiting) holdName(clean, waiting, true);
   return waiting ? { ok: true, waiting } : { ok: true };
 }
 
@@ -194,11 +303,18 @@ export type SyncResult = { renamed: { wsId: string; from: string; to: string }[]
  * (Workspace.orgoName) was renamed there: the local name follows it. Never for a list Orgo started on
  * before a rename here (that rename is newer), nor for one older than what was seen (`updated_at`). A
  * default whose project is still "bops" shows as "bops" unless the user named it here (its name then
- * waits for the apps: OrgoMigration.defaultRename). A project gone from the list is left alone. Null on an
- * Orgo without per workspace projects (nothing is called there but the check).
+ * waits for the apps: OrgoMigration.defaultRename): that held name stays the default's here (it's put
+ * back if something brought "bops" back), and a rename on orgo.ai takes its place only when it's newer.
+ * Then a held name is tried again (retryDefaultRename). A project gone from the list is left alone. Null
+ * on an Orgo without per workspace projects (nothing is called there but the check).
  */
-export function syncWorkspaceNames(): Promise<SyncResult | null> {
-  return (g.bopsWsSync ??= runSync().finally(() => (g.bopsWsSync = undefined)));
+export function syncWorkspaceNames({ retry = true }: { retry?: boolean } = {}): Promise<SyncResult | null> {
+  return (g.bopsWsSync ??= runSync()
+    .then(async (r) => {
+      if (retry && r && heldName()) await retryDefaultRename();
+      return r;
+    })
+    .finally(() => (g.bopsWsSync = undefined)));
 }
 
 async function runSync(): Promise<SyncResult | null> {
@@ -214,9 +330,19 @@ async function runSync(): Promise<SyncResult | null> {
     const seenAt = Date.parse(w.orgoUpdatedAt ?? "");
     const at = Date.parse(p.updated_at ?? "");
     if (Number.isFinite(seenAt) && Number.isFinite(at) && at < seenAt) continue;
+    const held = w.id === MAIN_WORKSPACE ? heldName() : undefined;
     // First sight (tied before names were kept): learnt, never taken for a rename.
     if (w.orgoName === undefined || p.name === w.orgoName) {
       if (w.orgoName === undefined || (p.updated_at && p.updated_at !== w.orgoUpdatedAt)) noteOrgoName(w.id, p.name, p.updated_at);
+      // The default's held name is its name here, whatever brought "bops" back meanwhile.
+      if (held) holdDefaultName();
+      continue;
+    }
+    // The default's project renamed on orgo.ai before the user named it here: Orgo's name is noted (the
+    // retry gives the project the user's), and the user's stays.
+    if (held && !orgoNewer(p, held)) {
+      noteOrgoName(w.id, p.name, p.updated_at);
+      holdDefaultName();
       continue;
     }
     const from = w.name;
@@ -300,7 +426,7 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
 /* ---------------- Moving onto Orgo workspaces ---------------- */
 
 /** What happened to the default workspace's name: its name here, its project's, and why the project kept "bops" when it did. */
-export type DefaultName = { local: string; project: string | null; renamed: boolean; reason?: AppsGateReason | "no_project" | "same" | "unchanged" };
+export type DefaultName = { local: string; project: string | null; renamed: boolean; reason?: HeldReason | "same" | "unchanged" };
 
 export type MigrationResult =
   /** An Orgo without per workspace projects (or none to tell by yet): nothing was done or sent. */
@@ -333,7 +459,8 @@ const after = (m: OrgoMigration | undefined, step: Step) => !!m && STEPS.indexOf
 export function migrateWorkspacesToOrgo(): Promise<MigrationResult> {
   return (g.bopsWsMigration ??= runMigration()
     .then(async (r) => {
-      if (r.status === "done") await syncWorkspaceNames().catch((e: Error) => console.warn(`[workspaces] names from Orgo: ${e.message}`));
+      // The names only: the move just tried the default's held name.
+      if (r.status === "done") await syncWorkspaceNames({ retry: false }).catch((e: Error) => console.warn(`[workspaces] names from Orgo: ${e.message}`));
       return r;
     })
     .catch((e: unknown): MigrationResult => {
@@ -456,21 +583,24 @@ function currentDefault(): DefaultName {
  * name the user gave it here becomes its project's name too, but only once every Bops app on the account is
  * new enough (orgo.ts bopsAppsGate): an older app finds its workspace by the name "bops". Until then the
  * project keeps "bops", Bops shows the user's name, and OrgoMigration.defaultRename says why; the next
- * sign-in tries again. A name the user's Orgo already has gets "<name> (Bops)", said in the switcher.
+ * start, sign-in or names sync tries again (retryDefaultRename). A held name is the default's name here
+ * meanwhile: one that "bops" came back over is put back, never dropped for it (holdDefaultName). A rename
+ * on orgo.ai after the user's wins (it's the name here too); one from before it is the name the user's
+ * replaces, with no gate (no older app finds the project by "bops" then). A name the user's Orgo already
+ * has gets "<name> (Bops)", said in the switcher.
  */
 async function renameDefault(same: () => void): Promise<DefaultName> {
   const main = getState().workspaces?.find((w) => w.id === MAIN_WORKSPACE);
   if (!main) return { local: "", project: null, renamed: false, reason: "no_project" };
-  if (/^main$/i.test(main.name.trim()))
+  const held = heldName();
+  if (held) holdDefaultName();
+  else if (/^main$/i.test(main.name.trim()))
     update((s) => {
       const x = s.workspaces?.find((w) => w.id === MAIN_WORKSPACE);
       if (x) x.name = "bops";
     });
   const local = getState().workspaces!.find((w) => w.id === MAIN_WORKSPACE)!.name;
-  const wait = (reason: string) =>
-    update((s) => {
-      if (s.orgoMigration) s.orgoMigration.defaultRename = { to: local, reason, checkedAt: new Date().toISOString() };
-    });
+  const wait = (reason: HeldReason) => holdName(local, reason);
   const settled = () =>
     update((s) => {
       if (s.orgoMigration) delete s.orgoMigration.defaultRename;
@@ -484,17 +614,29 @@ async function renameDefault(same: () => void): Promise<DefaultName> {
     else wait("no_project");
     return { local, project: null, renamed: false, reason: "no_project" };
   }
-  // The user didn't name it, or the project has that name already, or was renamed away from "bops" on orgo.ai
-  // (syncWorkspaceNames brings that name here).
-  if (isBopsName(local) || sameName(p.name, local) || !isBopsName(p.name)) {
+  // Renamed on orgo.ai after the user named it here: Orgo's name wins, here too.
+  if (held && main.orgoName !== undefined && p.name !== main.orgoName && orgoNewer(p, held)) {
+    takeOrgoName(p);
+    const now = getState().workspaces!.find((w) => w.id === MAIN_WORKSPACE)!.name;
+    return { local: now, project: p.name, renamed: false, reason: "unchanged" };
+  }
+  // The user didn't name it, or the project has that name already, or (nothing held) it was renamed away
+  // from "bops" on orgo.ai (syncWorkspaceNames brings that name here).
+  if (isBopsName(local) || sameName(p.name, local) || (!held && !isBopsName(p.name))) {
     settled();
+    if (sameName(p.name, local) && p.name !== main.orgoName) noteOrgoName(MAIN_WORKSPACE, p.name, p.updated_at);
     return { local, project: p.name, renamed: false, reason: sameName(p.name, local) ? "same" : "unchanged" };
   }
-  const gate = await bopsAppsGate();
-  same();
-  if (!gate.ok) {
-    wait(gate.reason);
-    return { local, project: p.name, renamed: false, reason: gate.reason };
+  // Still "bops" on Orgo: the user's name goes once every app is new. Renamed away from it before the user's
+  // name (on orgo.ai): no app finds it by "bops" any more, so it goes now.
+  const gated = isBopsName(p.name);
+  if (gated) {
+    const gate = await bopsAppsGate();
+    same();
+    if (!gate.ok) {
+      wait(gate.reason);
+      return { local, project: p.name, renamed: false, reason: gate.reason };
+    }
   }
   const taken = new Set((await ownedWorkspaces()).filter((x) => x.id !== p.id).map((x) => x.name.trim().toLowerCase()));
   for (const n of collisionNames(local)) {
@@ -513,10 +655,10 @@ async function renameDefault(same: () => void): Promise<DefaultName> {
       delete s.orgoMigration.defaultRename;
       if (n !== local) (s.orgoMigration.renamed ??= []).push({ wsId: MAIN_WORKSPACE, from: local, to: n });
     });
-    return { local, project: n, renamed: true, reason: "all_new" };
+    return { local, project: n, renamed: true, ...(gated ? { reason: "all_new" as const } : {}) };
   }
   wait("no_free_name");
-  return { local, project: p.name, renamed: false };
+  return { local, project: p.name, renamed: false, reason: "no_free_name" };
 }
 
 /**
