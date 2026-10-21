@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useContext, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { appNameFor } from "@/lib/routine-catalog";
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
+import { createPortal } from "react-dom";
+import { MAX_ISSUE_TAGS } from "@/lib/orbit-issues";
+import { appNameFor, TAG_NAME_MAX, TAG_NAME_WORDS, tagName } from "@/lib/routine-catalog";
 import { AppLogo } from "./apps";
 import { Spinner } from "./mascot";
 import { OpenLink } from "./panel-tabs";
@@ -15,7 +17,7 @@ import { CloseButton, useNow } from "./ui";
  * (app/api/orbit/issues); this file reads them for the sidebar and the page, and asks for changes:
  *
  *   GET    /api/orbit/issues?ws=            { issues: Issue[], tags?: string[] }  (or Issue[])
- *   PATCH  /api/orbit/issues/{id}?ws=       { status?, priority?, tags?, note? }  -> { issue } (or Issue)
+ *   PATCH  /api/orbit/issues/{id}?ws=       { status?, priority?, tags?, note?, newTags? }  -> { issue } (or Issue)
  *   DELETE /api/orbit/issues/{id}?ws=       -> anything ok
  *
  * One copy per account and workspace, shared by the sidebar and the page, read when the first of them
@@ -49,7 +51,8 @@ export type Issue = {
   history?: IssueEvent[];
 };
 
-export type IssuePatch = { status?: IssueStatus; priority?: IssuePriority; tags?: string[]; note?: string };
+/** `newTags`: the ones in `tags` the user just made (Create tag), which the server adds to the workspace's tags. */
+export type IssuePatch = { status?: IssueStatus; priority?: IssuePriority; tags?: string[]; note?: string; newTags?: string[] };
 
 export const STATUSES: { id: IssueStatus; label: string; dot: string }[] = [
   { id: "open", label: "Open", dot: "#2F6FEB" },
@@ -225,7 +228,8 @@ async function update(user: string, ws: string, id: string, patch: IssuePatch): 
   const before = s.list?.issues.find((i) => i.id === id);
   const now = Date.now();
   if (before) {
-    const { note, ...fields } = patch;
+    const { note, status, priority, tags } = patch;
+    const fields = { ...(status ? { status } : {}), ...(priority ? { priority } : {}), ...(tags ? { tags } : {}) };
     patchHere(s, (all) =>
       all.map((i) =>
         i.id !== id
@@ -422,14 +426,7 @@ export function IssuesPage({
                 </option>
               ))}
             </select>
-            <select value={tag} onChange={(e) => setTag(e.target.value)} aria-label="Tag" className={SELECT}>
-              <option value="">Any tag</option>
-              {allTags.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
+            <TagFilter tags={allTags} value={tag} onChange={setTag} />
             <select value={priority} onChange={(e) => setPriority(e.target.value as "" | IssuePriority)} aria-label="Priority" className={SELECT}>
               <option value="">Any priority</option>
               {PRIORITIES.map((p) => (
@@ -495,14 +492,282 @@ function IssueRow({ issue, last, onOpen }: { issue: Issue; last: boolean; onOpen
   );
 }
 
+/* ---------------- Picking tags ---------------- */
+
+const PICK_W = 232;
+
+/**
+ * Puts a picker under its anchor, or over it when there's more room above, inside the window: straight on
+ * the element (it's fixed, over everything), before it's painted.
+ */
+function placePicker(anchor: HTMLElement | null, box: HTMLElement | null) {
+  const r = anchor?.getBoundingClientRect();
+  if (!r || !box) return;
+  const left = Math.round(Math.max(8, Math.min(r.left, window.innerWidth - PICK_W - 8)));
+  const below = Math.round(window.innerHeight - r.bottom - 14);
+  const above = Math.round(r.top - 14);
+  const down = below >= 220 || below >= above;
+  box.style.left = `${left}px`;
+  box.style.top = down ? `${Math.round(r.bottom + 6)}px` : "";
+  box.style.bottom = down ? "" : `${Math.round(window.innerHeight - r.top + 6)}px`;
+  box.style.maxHeight = `${Math.max(160, down ? below : above)}px`;
+  box.style.transformOrigin = down ? "top left" : "bottom left";
+}
+
+/** A row of a picker: one of its choices, or Create tag for a name that isn't one yet. */
+type PickRow = { id: string; label: string; make?: boolean };
+
+/**
+ * Tags to pick from, in a popover under `anchor` over everything (the issue's page scrolls, and would cut
+ * it off), in the look of the app's small menus (apps.tsx ChipMenu): a search field on top, then every
+ * choice with a check on the ones picked, and with `onCreate` a Create tag row for a name that isn't a
+ * tag yet. The field is a combobox: Up and Down move through the list, Enter picks (or makes), Esc and
+ * Tab close it with focus back on `anchor`; a click outside closes it too. `multi`: picking turns one on
+ * or off and it stays open; otherwise picking one closes it. `full`: no room for another (an issue's
+ * tags), so what isn't picked can't be, and it says why.
+ */
+function TagPicker({
+  anchor,
+  label,
+  options,
+  picked,
+  multi,
+  full,
+  error,
+  onPick,
+  onCreate,
+  onClose,
+}: {
+  anchor: RefObject<HTMLElement | null>;
+  label: string;
+  options: { id: string; label: string }[];
+  picked: (id: string) => boolean;
+  multi?: boolean;
+  full?: string;
+  error?: string | null;
+  onPick: (id: string) => void;
+  onCreate?: (name: string) => void;
+  /** `back`: focus goes back to the anchor (Esc, Tab, a pick that closes it), not after a click elsewhere. */
+  onClose: (back: boolean) => void;
+}) {
+  const [q, setQ] = useState("");
+  const [active, setActive] = useState(() => (multi ? 0 : Math.max(0, options.findIndex((o) => picked(o.id)))));
+  const box = useRef<HTMLDivElement>(null);
+  const field = useRef<HTMLInputElement>(null);
+  const moved = useRef(false);
+  const id = useId();
+  const close = useRef(onClose);
+  useLayoutEffect(() => {
+    close.current = onClose;
+  });
+
+  const term = q.trim().toLowerCase();
+  // What a new tag would be called (and the tag it is already, typed with a mark or two).
+  const name = onCreate && term ? tagName(q) : undefined;
+  const shown: PickRow[] = term ? options.filter((o) => o.label.toLowerCase().includes(term) || o.label.toLowerCase() === name?.toLowerCase()) : options;
+  // Made only when no tag matches what's typed (a workspace keeps the ones it makes).
+  const rows: PickRow[] = [...shown, ...(name && !shown.length && !full ? [{ id: "", label: name, make: true }] : [])];
+  const at = rows.length ? Math.min(active, rows.length - 1) : -1;
+  const rowId = (n: number) => `${id}-${n}`;
+  const blocked = (r: PickRow) => !!full && !r.make && !picked(r.id);
+
+  // Under its anchor whenever it renders (a tag added before + Tag moves it), and as the page under it scrolls.
+  useLayoutEffect(() => placePicker(anchor.current, box.current));
+  useEffect(() => {
+    const put = () => placePicker(anchor.current, box.current);
+    window.addEventListener("resize", put);
+    window.addEventListener("scroll", put, true);
+    return () => {
+      window.removeEventListener("resize", put);
+      window.removeEventListener("scroll", put, true);
+    };
+  }, [anchor]);
+  useEffect(() => field.current?.focus({ preventScroll: true }), []);
+  // The row the keys moved to stays in sight.
+  useEffect(() => {
+    if (!moved.current || at < 0) return;
+    moved.current = false;
+    document.getElementById(rowId(at))?.scrollIntoView({ block: "nearest" });
+  });
+  // A click or focus anywhere else closes it (the anchor toggles it itself).
+  useEffect(() => {
+    const away = (e: Event) => {
+      const t = e.target as Node | null;
+      if (!t || box.current?.contains(t) || anchor.current?.contains(t)) return;
+      close.current(false);
+    };
+    document.addEventListener("pointerdown", away, true);
+    document.addEventListener("focusin", away);
+    return () => {
+      document.removeEventListener("pointerdown", away, true);
+      document.removeEventListener("focusin", away);
+    };
+  }, [anchor]);
+
+  const choose = (r: PickRow | undefined) => {
+    if (!r || blocked(r)) return;
+    if (r.make) {
+      onCreate?.(r.label);
+      setQ("");
+      setActive(0);
+      return;
+    }
+    onPick(r.id);
+    if (!multi) close.current(true);
+  };
+  const keys = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!rows.length) return;
+      moved.current = true;
+      setActive((at + (e.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      choose(rows[at]);
+    } else if (e.key === "Escape" || e.key === "Tab") {
+      // Only the picker closes: the issue under it stays (its own Esc goes back to the list).
+      e.preventDefault();
+      e.stopPropagation();
+      close.current(true);
+    }
+  };
+
+  // Typed what can't be a tag's name, and nothing matches it: why there's no Create tag.
+  const hint = onCreate && term && !name && !shown.length ? `A tag's name is a word or up to ${TAG_NAME_WORDS}, ${TAG_NAME_MAX} characters at most.` : null;
+  return createPortal(
+    <div
+      ref={box}
+      role="dialog"
+      aria-label={label}
+      style={{ width: PICK_W }}
+      className="motion-menu-in fixed z-[61] flex flex-col overflow-hidden rounded-xl bg-white shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040]"
+    >
+      <label className="flex h-9 shrink-0 items-center gap-2 border-b border-[#F0F0EE] px-3 text-[#9A9A98]">
+        <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
+          <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+          <path d="M10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+        <input
+          ref={field}
+          role="combobox"
+          aria-expanded="true"
+          aria-controls={`${id}-list`}
+          aria-autocomplete="list"
+          aria-activedescendant={at >= 0 ? rowId(at) : undefined}
+          aria-label={onCreate ? "Find or create a tag" : "Find a tag"}
+          placeholder={onCreate ? "Find or create a tag" : "Find a tag"}
+          value={q}
+          maxLength={30}
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setActive(0);
+          }}
+          onKeyDown={keys}
+          className="min-w-0 flex-1 bg-transparent text-[13px] leading-[18px] text-ink outline-none placeholder:text-[#9A9A98]"
+        />
+      </label>
+      <div id={`${id}-list`} role="listbox" aria-label={label} aria-multiselectable={multi || undefined} className="flex min-h-0 flex-1 flex-col overflow-y-auto p-1">
+        {rows.map((r, n) => {
+          const on = !r.make && picked(r.id);
+          const off = blocked(r);
+          return (
+            <div
+              key={r.make ? "make " : `tag ${r.id}`}
+              id={rowId(n)}
+              role="option"
+              aria-selected={on}
+              aria-disabled={off || undefined}
+              data-tag={r.make ? undefined : r.id}
+              data-make={r.make || undefined}
+              onMouseDown={(e) => e.preventDefault()}
+              onMouseMove={() => n !== at && setActive(n)}
+              onClick={() => choose(r)}
+              className={`flex h-7 shrink-0 cursor-default items-center gap-2 rounded-lg px-2 text-[12.5px] leading-4 ${off ? "text-[#C9C9C6]" : "text-ink"} ${n === at ? "bg-[#F2F2F0]" : ""}`}
+            >
+              <span className="flex w-3 shrink-0 justify-center">
+                {r.make ? (
+                  <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+                    <path d="M5 1v8M1 5h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                ) : (
+                  on && (
+                    <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden>
+                      <path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )
+                )}
+              </span>
+              {r.make ? (
+                <span className="min-w-0 truncate">
+                  Create tag <span className="font-medium">{`“${r.label}”`}</span>
+                </span>
+              ) : (
+                <span className={`min-w-0 truncate ${on ? "font-medium" : ""}`}>{r.label}</span>
+              )}
+            </div>
+          );
+        })}
+        {!rows.length && <div className="px-2 py-1.5 text-[12.5px] leading-4 text-[#9A9A98]">{hint ?? (term ? "No tag matches" : "No tags yet")}</div>}
+      </div>
+      {(full || error) && (
+        <div className="flex flex-col gap-1 border-t border-[#F0F0EE] px-3 py-2 text-[11.5px] leading-4">
+          {full && <span className="text-[#9A9A98]">{full}</span>}
+          {error && (
+            <span role="alert" className="text-[#B42318]">
+              {error}
+            </span>
+          )}
+        </div>
+      )}
+    </div>,
+    document.body,
+  );
+}
+
+/** The issues list's tag filter: a pill like the others, opening a picker of the workspace's tags (one at a time, or Any tag). */
+function TagFilter({ tags, value, onChange }: { tags: string[]; value: string; onChange: (tag: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const pill = useRef<HTMLButtonElement>(null);
+  return (
+    <>
+      <button
+        ref={pill}
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={`Tag: ${value || "Any tag"}`}
+        onClick={() => setOpen(!open)}
+        className={`${SELECT} max-w-[180px] truncate text-left aria-expanded:bg-[#EAEAE7]`}
+      >
+        {value || "Any tag"}
+      </button>
+      {open && (
+        <TagPicker
+          anchor={pill}
+          label="Filter by tag"
+          options={[{ id: "", label: "Any tag" }, ...tags.map((t) => ({ id: t, label: t }))]}
+          picked={(t) => t === value}
+          onPick={onChange}
+          onClose={(back) => {
+            setOpen(false);
+            if (back) pill.current?.focus();
+          }}
+        />
+      )}
+    </>
+  );
+}
+
 /** One issue: what it's about, where it came from, its status, priority and tags to change, its history, a note to add, and Delete. */
 function IssueView({ issue, acts, tags, onBack, onClose }: { issue: Issue; acts: IssueActs; tags: string[]; onBack: () => void; onClose: () => void }) {
   const openLink = useContext(OpenLink);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
-  const [adding, setAdding] = useState(false);
-  const [tagText, setTagText] = useState("");
+  const [picking, setPicking] = useState(false);
+  const plus = useRef<HTMLButtonElement>(null);
   const [sure, setSure] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const change = async (patch: IssuePatch) => {
@@ -526,12 +791,12 @@ function IssueView({ issue, acts, tags, onBack, onClose }: { issue: Issue; acts:
     window.addEventListener("keydown", esc);
     return () => window.removeEventListener("keydown", esc);
   }, [onBack]);
-  const addTag = (t: string) => {
-    const name = t.trim();
-    setTagText("");
-    setAdding(false);
-    if (!name || issue.tags.some((x) => x.toLowerCase() === name.toLowerCase())) return;
-    void change({ tags: [...issue.tags, tags.find((x) => x.toLowerCase() === name.toLowerCase()) ?? name] });
+  // Every tag the workspace has, and any of this issue's it no longer does, where they are: picked ones have a check.
+  const tagOptions = [...new Set([...tags, ...issue.tags])].map((t) => ({ id: t, label: t }));
+  const toggleTag = (t: string) => void change({ tags: issue.tags.includes(t) ? issue.tags.filter((x) => x !== t) : [...issue.tags, t] });
+  const makeTag = (name: string) => {
+    if (issue.tags.some((x) => x.toLowerCase() === name.toLowerCase())) return;
+    void change({ tags: [...issue.tags, name], newTags: [name] });
   };
   const history = [...(issue.history ?? [])].sort((a, b) => b.at - a.at);
   const meta = [issue.customer?.name && undash(issue.customer.name), issue.sourceApp && `From ${appName(issue.sourceApp)}`, `Opened ${since(issue.openedAt)}`].filter(Boolean).join(" · ");
@@ -584,45 +849,35 @@ function IssueView({ issue, acts, tags, onBack, onClose }: { issue: Issue; acts:
                 </button>
               </span>
             ))}
-            {adding ? (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  addTag(tagText);
+            <button
+              ref={plus}
+              type="button"
+              aria-haspopup="dialog"
+              aria-expanded={picking}
+              onClick={() => setPicking(!picking)}
+              className={`flex h-7 items-center rounded-full px-2.5 text-[12.5px] font-medium leading-4 hover:bg-[#F2F2F0] hover:text-ink ${picking ? "bg-[#F2F2F0] text-ink" : "text-[#6B6B6B]"}`}
+            >
+              + Tag
+            </button>
+            {picking && (
+              <TagPicker
+                anchor={plus}
+                label="Tags"
+                multi
+                options={tagOptions}
+                picked={(t) => issue.tags.includes(t)}
+                full={issue.tags.length >= MAX_ISSUE_TAGS ? `An issue has ${MAX_ISSUE_TAGS} tags at most. Take one off to add another.` : undefined}
+                error={error}
+                onPick={toggleTag}
+                onCreate={makeTag}
+                onClose={(back) => {
+                  setPicking(false);
+                  if (back) plus.current?.focus();
                 }}
-              >
-                <input
-                  autoFocus
-                  value={tagText}
-                  onChange={(e) => setTagText(e.target.value)}
-                  onBlur={() => addTag(tagText)}
-                  onKeyDown={(e) => {
-                    if (e.key !== "Escape") return;
-                    e.preventDefault();
-                    setTagText("");
-                    setAdding(false);
-                  }}
-                  list={`issue-tags-${issue.id}`}
-                  placeholder="Tag"
-                  aria-label="Add a tag"
-                  maxLength={30}
-                  className="h-7 w-[120px] rounded-full bg-white px-3 text-[12.5px] leading-4 outline-none shadow-[0_0_0_1.5px_#0A0A0A]"
-                />
-                <datalist id={`issue-tags-${issue.id}`}>
-                  {tags
-                    .filter((t) => !issue.tags.includes(t))
-                    .map((t) => (
-                      <option key={t} value={t} />
-                    ))}
-                </datalist>
-              </form>
-            ) : (
-              <button onClick={() => setAdding(true)} className="flex h-7 items-center rounded-full px-2.5 text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:bg-[#F2F2F0] hover:text-ink">
-                + Tag
-              </button>
+              />
             )}
           </div>
-          {error && (
+          {error && !picking && (
             <span role="alert" className="text-[12.5px] leading-[17px] text-[#B42318]">
               {error}
             </span>

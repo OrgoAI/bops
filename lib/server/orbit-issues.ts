@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { join } from "node:path";
 import type { Session as HonchoSession } from "@honcho-ai/sdk";
 import { categoriesOpen, type MemorySnapshot } from "@/lib/memory-categories";
-import { isIssueId, PRIORITY_IDS, priorityLabel, STATUS_IDS, statusLabel, type Issue, type IssueEvent, type IssueOpen, type IssuePatch, type IssuePriority, type IssueStatus } from "@/lib/orbit-issues";
+import { isIssueId, MAX_ISSUE_TAGS, PRIORITY_IDS, priorityLabel, STATUS_IDS, statusLabel, type Issue, type IssueEvent, type IssueOpen, type IssuePatch, type IssuePriority, type IssueStatus } from "@/lib/orbit-issues";
 import { tagsOf } from "@/lib/routine-catalog";
 import { bankClient, memoryOn, sessionRef } from "./memory";
 import { categoriesOn, snapshot } from "./memory-categories";
@@ -33,7 +33,6 @@ import { bot, getState, ownerName, sameState, userDir } from "./store";
  */
 
 const STALE_MS = 60_000;
-const MAX_TAGS = 6;
 
 /** Signed in, with memory set up (where the window and the bots can use them). */
 export const issuesOn = () => memoryOn() && categoriesOpen(getState());
@@ -164,7 +163,7 @@ function tagsFor(ws: string, tags: unknown): string[] {
     const k = known.find((x) => typeof t === "string" && x.name.toLowerCase() === t.trim().toLowerCase());
     if (k && !out.includes(k.name)) out.push(k.name);
   }
-  return out.slice(0, MAX_TAGS);
+  return out.slice(0, MAX_ISSUE_TAGS);
 }
 
 /** A web address worth keeping (http or https), or nothing. */
@@ -494,7 +493,7 @@ export function openIssue(ws: string, input: IssueOpen, by: IssueBy = {}): Promi
         ...was,
         title: fresh ? title : was.title,
         summary: fresh ? summary || was.summary : was.summary,
-        tags: [...new Set([...was.tags, ...tags])].slice(0, MAX_TAGS),
+        tags: [...new Set([...was.tags, ...tags])].slice(0, MAX_ISSUE_TAGS),
         ...(priority ? { priority } : {}),
         ...(url ? { url } : {}),
         ...(customer ? { customer } : {}),

@@ -3,7 +3,8 @@
 // metadata the issue and its messages the history, each saying who; memory never works anything out from
 // it (reasoning off, nobody observed). Opening one, opening it again for the same thread or ticket (the
 // same issue, updated; another workspace gets its own), changing it, its history, the list and its
-// filters (a cache on this Mac, made again from memory's list), deleting it (its session goes), workspaces
+// filters (a cache on this Mac, made again from memory's list), a tag the user makes on one (it joins the
+// workspace's own, within their limit; a bot can't make one), deleting it (its session goes), workspaces
 // kept apart (even sharing a bank), what memory failing looks like, the starters that keep issues, and
 // which turns have the tools (the user's own and a routine's run; never one someone else started; and
 // orbit_forget only on the user's own). Every user-facing and bot-facing line is checked for dashes.
@@ -516,6 +517,54 @@ await check("a routine opening the same thread again with nothing newer: no line
   const newer = await open(MAIN, { title: "Plain: Beta can't export", summary: "They wrote again.", status: "waiting_us", sourceApp: "plain", externalId: "th_wait", lastMessageAt: at + 60_000 });
   assert.deepEqual([newer.body.issue.status, newer.body.issue.summary], ["waiting_us", "They wrote again."]);
   assert.ok(s().messages.some((m) => m.content === "Opened again"));
+});
+
+await check("a tag the user makes on an issue (Create tag) joins the workspace's own, in its spelling, and the issue has it; a bad name or no room says why and changes nothing; unasked, or from a bot, an unknown tag is still left out", async () => {
+  const own = () => S.getState().workspaces?.find((w) => w.id === MAIN)?.tags ?? [];
+  const before = own().map((t) => ({ ...t }));
+  const made = await open(MAIN, { title: "Globex was charged twice", tags: ["Customer"] });
+  const id = made.body.issue.id;
+  try {
+    // Not said to be new: left out, as before.
+    let r = await patch(MAIN, id, { tags: ["Customer", "Billing"] });
+    assert.deepEqual(r.body.issue.tags, ["Customer"]);
+    assert.ok(!own().some((t) => t.name === "Billing"));
+    // Made: the workspace has it, said as the user's, and the issue too.
+    r = await patch(MAIN, id, { tags: ["Customer", "billing"], newTags: ["billing"] });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.issue.tags, ["Customer", "Billing"]);
+    assert.deepEqual(own().slice(before.length), [{ name: "Billing", description: "Added by you" }]);
+    assert.equal(r.body.issue.history.at(-1).text, "Tags: Customer, Billing");
+    assert.ok((await list(MAIN)).body.tags.includes("Billing"), "in the workspace's tags for the window");
+    // Said to be new but it's one already: the workspace's, nothing added.
+    r = await patch(MAIN, id, { tags: ["Customer", "Billing", "outage"], newTags: ["outage"] });
+    assert.deepEqual(r.body.issue.tags, ["Customer", "Billing", "Outage"]);
+    assert.equal(own().length, before.length + 1);
+    // Not a tag's name: why, and nothing changed.
+    r = await patch(MAIN, id, { tags: ["Customer", "one two three four"], newTags: ["one two three four"] });
+    assert.deepEqual([r.status, r.body.error], [400, "A tag's name is a word or up to 3, 24 characters at most."]);
+    // No room: a workspace keeps 8 of its own.
+    S.update((s) => {
+      const w = s.workspaces.find((x) => x.id === MAIN);
+      w.tags = [...w.tags, ...["Hiring", "Investors", "Invoices", "Legal", "Press", "Travel", "Vendors"].slice(0, 8 - w.tags.length).map((name) => ({ name, description: "Learned" }))];
+    });
+    assert.equal(own().length, 8);
+    r = await patch(MAIN, id, { tags: ["Customer", "Vip"], newTags: ["Vip"] });
+    assert.deepEqual([r.status, r.body.error], [400, "A workspace has 8 tags of its own at most, and this one has 8. Pick one of its tags."]);
+    assert.ok(!own().some((t) => t.name === "Vip"));
+    assert.deepEqual((await one(MAIN, id)).body.issue.tags, ["Customer", "Billing", "Outage"], "the issue as it was");
+    // A bot can't make one.
+    await O.runOrbitTool("boppy", "orbit_issue_update", { issue_id: id, status: null, priority: null, tags: ["Customer", "Invented"], note: null, reply_draft: null }, {});
+    assert.deepEqual((await one(MAIN, id)).body.issue.tags, ["Customer"]);
+    assert.ok(!own().some((t) => t.name === "Invented"));
+  } finally {
+    S.update((s) => {
+      const w = s.workspaces.find((x) => x.id === MAIN);
+      if (before.length) w.tags = before;
+      else delete w.tags;
+    });
+    await remove(MAIN, id);
+  }
 });
 
 await check("memory off, or signed out: no issues, and the routes say so", async () => {

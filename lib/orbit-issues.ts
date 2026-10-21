@@ -58,6 +58,9 @@ export type Issue = {
   orgoId?: string;
 };
 
+/** The most tags an issue has (more are left off). */
+export const MAX_ISSUE_TAGS = 6;
+
 /** What the window and the bots may change. `draft`: a reply drafted for it (in its history). */
 export type IssuePatch = { status?: IssueStatus; priority?: IssuePriority; tags?: string[]; note?: string; draft?: string };
 

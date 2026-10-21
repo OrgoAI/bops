@@ -2,7 +2,11 @@
 // at once with 5 seconds to undo before anything is sent, a new Forget sends the one before, a failed one
 // puts the items back; Delete everywhere's preview is read as sent; issues change at once and go back
 // when the server says no; and the sidebar and pages, rendered to HTML, show what they should (Issues
-// first with its open count, the blank lines, Select, the issue filters).
+// first with its open count, the blank lines, Select, the issue filters). And an issue's tags, rendered into
+// a DOM (linkedom), clicked and typed in: + Tag's picker over the page with every workspace tag, the ones on
+// the issue checked in place, a click turning one off and on, typing to filter, Create tag for a new name
+// (sent as new, refused with why), the keys (Up, Down, Enter, Esc and Tab, focus back on + Tag), a click
+// outside, an issue's 6 at most; and the list's tag filter as the same picker, one tag at a time.
 //
 // Nothing reaches a server: fetch is a fake that answers like app/api/memory/categories and
 // app/api/orbit/issues. The .tsx files are compiled with the TypeScript in node_modules as they load.
@@ -387,6 +391,337 @@ await test("Knowledge opened again: a search on Issues goes to All", async () =>
 await test("groupsOf still orders a category", async () => {
   const g = groupsOf("todos", [item("aaaaaaaaaa", "todos", "A", { done: true }), item("bbbbbbbbbb", "todos", "B")]);
   assert.deepEqual(g.map((x) => x.label), ["Open", "Done"]);
+});
+
+/* ---------------- Tags on an issue, picked in a DOM ---------------- */
+
+// A DOM to render into, click and type in (linkedom), with what these need of a browser: focus that moves and
+// the element that has it, a window's size, and keys and typing as React hears them.
+const { parseHTML } = await import("linkedom");
+const { window: win } = parseHTML("<!doctype html><html><body></body></html>");
+const doc = win.document;
+const focused = { on: null };
+win.HTMLElement.prototype.focus = function () {
+  focused.on = this;
+};
+win.HTMLElement.prototype.scrollIntoView = () => {};
+Object.defineProperty(doc, "activeElement", { configurable: true, get: () => (focused.on?.isConnected ? focused.on : doc.body) });
+globalThis.document = doc;
+globalThis.innerWidth = 1200;
+globalThis.innerHeight = 800;
+// Typing as React hears it: by the input event, when the document says it has one (linkedom's doesn't), in a
+// text field (a field with no type is one, as in a browser; linkedom says none).
+doc.oninput = null;
+Object.defineProperty(win.HTMLInputElement.prototype, "type", {
+  configurable: true,
+  get() {
+    return this.getAttribute("type") || "text";
+  },
+  set(v) {
+    this.setAttribute("type", v);
+  },
+});
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const { createRoot } = await import("react-dom/client");
+const { act } = await import("react");
+const { IssuesPage } = await import(pathToFileURL(`${root}/components/app/orbit-issues.tsx`).href);
+
+async function mount(el) {
+  const box = doc.createElement("div");
+  doc.body.appendChild(box);
+  const r = createRoot(box);
+  await act(async () => {
+    r.render(el);
+    await settle();
+  });
+  return { box, done: async () => (await act(async () => r.unmount()), box.remove()) };
+}
+const click = (el) =>
+  act(async () => {
+    el.dispatchEvent(new win.Event("click", { bubbles: true }));
+    await settle();
+  });
+/** A key pressed where focus is: the event, to see whether it was taken. */
+const press = async (key, el = doc.activeElement) => {
+  const e = new win.Event("keydown", { bubbles: true, cancelable: true });
+  Object.defineProperty(e, "key", { value: key });
+  await act(async () => {
+    el.dispatchEvent(e);
+    await settle();
+  });
+  return e;
+};
+/** Typing into a field: its value as the browser sets it, then the input event React listens for. */
+const type = (el, value) =>
+  act(async () => {
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value").set.call(el, value);
+    el.dispatchEvent(new win.Event("input", { bubbles: true }));
+    await settle();
+  });
+const picker = () => doc.querySelector('body > [role="dialog"]');
+const options = () => [...(picker()?.querySelectorAll('[role="option"]') ?? [])];
+const optionsSaid = () => options().map((o) => `${o.textContent}${o.getAttribute("aria-selected") === "true" ? " ✓" : ""}`);
+const option = (name) => options().find((o) => o.getAttribute("data-tag") === name);
+const chips = (box) => [...box.querySelectorAll('button[aria-label^="Remove "]')].map((b) => b.getAttribute("aria-label").slice(7));
+const plusOf = (box) => [...box.querySelectorAll("button")].find((b) => b.textContent === "+ Tag");
+
+const WS_TAGS = ["Customer", "Outage", "Bug", "Office", "FYI"];
+let tagged = [];
+let refuse = null;
+answer = (url, method, body) => {
+  if (url.startsWith("/api/orbit/issues?ws=w9") && method === "GET") return { status: 200, body: { issues: tagged, tags: WS_TAGS } };
+  const m = url.match(/^\/api\/orbit\/issues\/([^?]+)\?ws=w9$/);
+  const at = m && tagged.find((i) => i.id === decodeURIComponent(m[1]));
+  if (at && method === "GET") return { status: 200, body: { issue: { ...at, history: [] } } };
+  if (at && method === "PATCH") {
+    const no = refuse?.(body);
+    if (no) return no;
+    tagged = tagged.map((i) => (i === at ? { ...i, tags: body.tags ?? i.tags } : i));
+    return { status: 200, body: { issue: { ...tagged.find((i) => i.id === at.id), history: [] } } };
+  }
+  return { status: 404, body: { error: "no" } };
+};
+const opened = (id, user = "u9") => h(IssuesPage, { user, ws: "w9", focus: id, tags: WS_TAGS, nav: null, onClose: noop });
+const patches = () => calls.filter((c) => c.method === "PATCH").map((c) => c.body);
+
+await test("an issue's + Tag opens a Bops picker over the page, not a datalist: every workspace tag, the ones on it checked in place", async () => {
+  tagged = [issue("issue-9", { ws: "w9", tags: ["Customer", "Outage"] })];
+  const m = await mount(opened("issue-9", "u9a"));
+  try {
+    const plus = plusOf(m.box);
+    assert.equal(plus.getAttribute("aria-haspopup"), "dialog");
+    assert.equal(plus.getAttribute("aria-expanded"), "false");
+    plus.getBoundingClientRect = () => ({ left: 300, right: 350, top: 272, bottom: 300, width: 50, height: 28 });
+    await click(plus);
+    assert.equal(plus.getAttribute("aria-expanded"), "true");
+    assert.ok(!doc.querySelector("datalist"), "no datalist, nor the browser's own box");
+    const pop = picker();
+    assert.ok(pop && !m.box.contains(pop), "in the body, over everything, so the issue's scrolling page can't cut it off");
+    assert.match(pop.className, /\bfixed\b/);
+    assert.match(pop.className, /rounded-xl bg-white shadow-\[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040\]/, "the app's small menu look");
+    assert.deepEqual([pop.style.left, pop.style.top, pop.style.bottom], ["300px", "306px", ""], "under + Tag");
+    assert.deepEqual(optionsSaid(), ["Customer ✓", "Outage ✓", "Bug", "Office", "FYI"], "every tag, the ones on it checked, where they are");
+    assert.equal(options().filter((o) => o.querySelector("svg path[d^='M2.5 6.2']")).length, 2, "a check mark on each picked one");
+    const field = pop.querySelector("input");
+    assert.equal(doc.activeElement, field, "focus in its search field");
+    assert.equal(field.getAttribute("role"), "combobox");
+    assert.equal(field.getAttribute("aria-expanded"), "true");
+    const list = pop.querySelector('[role="listbox"]');
+    assert.equal(field.getAttribute("aria-controls"), list.id);
+    assert.equal(list.getAttribute("aria-multiselectable"), "true");
+    assert.equal(field.getAttribute("aria-activedescendant"), options()[0].id, "the first row is the active one");
+    assert.equal(field.getAttribute("maxlength") ?? field.getAttribute("maxLength"), "30", "30 characters at most, as before");
+    assert.deepEqual(chips(m.box), ["Customer", "Outage"], "the chips stay as they are");
+  } finally {
+    await m.done();
+  }
+});
+
+await test("clicking a tag takes it off the issue and puts it back (the chips' own change), and the picker stays open", async () => {
+  tagged = [issue("issue-9", { ws: "w9", tags: ["Customer", "Outage"] })];
+  const m = await mount(opened("issue-9", "u9b"));
+  try {
+    await click(plusOf(m.box));
+    calls.length = 0;
+    await click(option("Outage"));
+    assert.deepEqual(patches(), [{ tags: ["Customer"], ws: "w9" }]);
+    assert.deepEqual(chips(m.box), ["Customer"]);
+    assert.deepEqual(optionsSaid(), ["Customer ✓", "Outage", "Bug", "Office", "FYI"], "still listed, unchecked");
+    await click(option("Outage"));
+    assert.deepEqual(patches().at(-1), { tags: ["Customer", "Outage"], ws: "w9" });
+    assert.deepEqual(chips(m.box), ["Customer", "Outage"]);
+    await click(option("Bug"));
+    assert.deepEqual(chips(m.box), ["Customer", "Outage", "Bug"]);
+    assert.ok(picker(), "open for the next one");
+    // A chip's x still takes one off.
+    await click(m.box.querySelector('button[aria-label="Remove Bug"]'));
+    assert.deepEqual(patches().at(-1), { tags: ["Customer", "Outage"], ws: "w9" });
+  } finally {
+    await m.done();
+  }
+});
+
+await test("typing filters; a name that's no tag yet gets Create tag, which adds it (sent as new) and checks it", async () => {
+  tagged = [issue("issue-9", { ws: "w9", tags: ["Customer"] })];
+  const m = await mount(opened("issue-9", "u9c"));
+  try {
+    await click(plusOf(m.box));
+    const field = picker().querySelector("input");
+    await type(field, "o");
+    assert.deepEqual(optionsSaid(), ["Customer ✓", "Outage", "Office"], "the tags with an o");
+    await type(field, "OUT");
+    assert.deepEqual(optionsSaid(), ["Outage"], "any case");
+    await type(field, "Outage");
+    assert.ok(!picker().querySelector("[data-make]"), "no Create tag for a tag there is");
+    await type(field, "billing");
+    assert.deepEqual(optionsSaid(), ["Create tag “Billing”"], "named as it'll be kept");
+    calls.length = 0;
+    await press("Enter");
+    assert.deepEqual(patches(), [{ tags: ["Customer", "Billing"], newTags: ["Billing"], ws: "w9" }]);
+    assert.deepEqual(chips(m.box), ["Customer", "Billing"]);
+    assert.equal(field.value, "", "the field is clear for the next");
+    assert.deepEqual(optionsSaid(), ["Customer ✓", "Outage", "Bug", "Office", "FYI", "Billing ✓"]);
+    // Clicked, the same.
+    await type(field, "Vip list");
+    await click(picker().querySelector("[data-make]"));
+    assert.deepEqual(patches().at(-1), { tags: ["Customer", "Billing", "Vip list"], newTags: ["Vip list"], ws: "w9" });
+    // Too long or too many words for a tag: no Create tag, and why.
+    await type(field, "one two three four");
+    assert.deepEqual(optionsSaid(), []);
+    assert.match(picker().textContent, /A tag's name is a word or up to 3, 24 characters at most\./);
+    await type(field, "zzz");
+    assert.deepEqual(optionsSaid(), ["Create tag “Zzz”"]);
+  } finally {
+    await m.done();
+  }
+});
+
+await test("keys: Down and Up move the active row, Enter turns it on or off, Esc closes it and only it, with focus back on + Tag", async () => {
+  tagged = [issue("issue-9", { ws: "w9", tags: ["Customer"] })];
+  const m = await mount(opened("issue-9", "u9d"));
+  try {
+    const plus = plusOf(m.box);
+    await click(plus);
+    const field = picker().querySelector("input");
+    const active = () => doc.getElementById(field.getAttribute("aria-activedescendant"))?.getAttribute("data-tag");
+    assert.equal(active(), "Customer");
+    await press("ArrowDown");
+    assert.equal(active(), "Outage");
+    await press("ArrowDown");
+    await press("ArrowUp");
+    assert.equal(active(), "Outage");
+    await press("ArrowUp");
+    await press("ArrowUp");
+    assert.equal(active(), "FYI", "round to the last");
+    calls.length = 0;
+    await press("Enter");
+    assert.deepEqual(patches(), [{ tags: ["Customer", "FYI"], ws: "w9" }]);
+    await press("Enter");
+    assert.deepEqual(patches().at(-1), { tags: ["Customer"], ws: "w9" }, "Enter again: off");
+    await type(field, "bu");
+    assert.equal(active(), "Bug", "typing starts at the first match");
+    await press("Enter");
+    assert.deepEqual(chips(m.box), ["Customer", "Bug"]);
+    const esc = await press("Escape");
+    assert.ok(esc.defaultPrevented, "taken, so the issue doesn't go back to the list");
+    assert.equal(picker(), null);
+    assert.equal(doc.activeElement, plus, "back on + Tag");
+    assert.equal(plus.getAttribute("aria-expanded"), "false");
+    assert.ok(m.box.querySelector('button[aria-label="Back to issues"]'), "still on the issue");
+    // Tab closes it too, back on + Tag.
+    await click(plus);
+    assert.ok(picker());
+    await press("Tab");
+    assert.equal(picker(), null);
+    assert.equal(doc.activeElement, plus);
+  } finally {
+    await m.done();
+  }
+});
+
+await test("a click outside closes it; + Tag again closes it too", async () => {
+  tagged = [issue("issue-9", { ws: "w9", tags: [] })];
+  const m = await mount(opened("issue-9", "u9e"));
+  try {
+    const plus = plusOf(m.box);
+    await click(plus);
+    assert.ok(picker());
+    await act(async () => void m.box.querySelector("span").dispatchEvent(new win.Event("pointerdown", { bubbles: true })));
+    assert.equal(picker(), null, "closed by a click on the page");
+    await click(plus);
+    // A click in it doesn't.
+    await act(async () => void picker().querySelector("input").dispatchEvent(new win.Event("pointerdown", { bubbles: true })));
+    assert.ok(picker());
+    await act(async () => void plus.dispatchEvent(new win.Event("pointerdown", { bubbles: true })));
+    await click(plus);
+    assert.equal(picker(), null, "+ Tag shuts it");
+  } finally {
+    await m.done();
+  }
+});
+
+await test("with an issue's 6 tags: the others can't be added and it says why, no Create tag; taking one off still works", async () => {
+  const six = ["Customer", "Outage", "Bug", "Office", "FYI", "Billing"];
+  tagged = [issue("issue-9", { ws: "w9", tags: six })];
+  const m = await mount(opened("issue-9", "u9f"));
+  try {
+    await click(plusOf(m.box));
+    assert.match(picker().textContent, /An issue has 6 tags at most\. Take one off to add another\./);
+    await type(picker().querySelector("input"), "Refunds");
+    assert.deepEqual(optionsSaid(), [], "no Create tag");
+    await type(picker().querySelector("input"), "");
+    calls.length = 0;
+    await click(option("Billing"));
+    assert.deepEqual(patches(), [{ tags: six.slice(0, 5), ws: "w9" }]);
+    assert.ok(!/6 tags at most/.test(picker().textContent), "room again");
+  } finally {
+    await m.done();
+  }
+});
+
+await test("a new tag the server refuses comes off again, and why shows in the picker", async () => {
+  tagged = [issue("issue-9", { ws: "w9", tags: ["Customer"] })];
+  refuse = (body) => (body.newTags ? { status: 400, body: { error: "A workspace has 8 tags of its own at most, and this one has 8. Pick one of its tags." } } : null);
+  const m = await mount(opened("issue-9", "u9g"));
+  try {
+    await click(plusOf(m.box));
+    await type(picker().querySelector("input"), "Refunds");
+    await press("Enter");
+    assert.deepEqual(chips(m.box), ["Customer"], "back as it was");
+    const alert = picker().querySelector('[role="alert"]');
+    assert.match(alert?.textContent ?? "", /8 tags of its own at most/);
+    assert.equal(m.box.querySelectorAll('[role="alert"]').length, 0, "said once, in the picker");
+  } finally {
+    refuse = null;
+    await m.done();
+  }
+});
+
+await test("the issues list's tag filter: a pill like the others opening the same picker, one tag at a time, focus back on it", async () => {
+  tagged = [issue("issue-9", { ws: "w9", tags: ["Customer"], title: "Acme down" }), issue("issue-8", { ws: "w9", tags: ["Bug"], title: "Login bug" })];
+  const m = await mount(h(IssuesPage, { user: "u9h", ws: "w9", tags: WS_TAGS, nav: null, onClose: noop }));
+  try {
+    assert.ok(!m.box.querySelector('select[aria-label="Tag"]'), "not a native select");
+    const pill = m.box.querySelector('button[aria-label="Tag: Any tag"]');
+    assert.ok(pill, "a pill saying Any tag");
+    assert.equal(pill.textContent, "Any tag");
+    await click(pill);
+    assert.equal(picker().querySelector('[role="listbox"]').getAttribute("aria-multiselectable"), null);
+    assert.deepEqual(optionsSaid(), ["Any tag ✓", "Customer", "Outage", "Bug", "Office", "FYI"]);
+    assert.ok(!picker().querySelector("[data-make]"));
+    await click(option("Bug"));
+    assert.equal(picker(), null, "a pick closes it");
+    assert.equal(doc.activeElement, m.box.querySelector('button[aria-label="Tag: Bug"]'), "focus back on the pill");
+    assert.match(m.box.textContent, /Login bug/);
+    assert.doesNotMatch(m.box.textContent, /Acme down/);
+    // From the keys: typed, Enter, and Any tag again.
+    await click(m.box.querySelector('button[aria-label="Tag: Bug"]'));
+    assert.equal(doc.getElementById(picker().querySelector("input").getAttribute("aria-activedescendant")).getAttribute("data-tag"), "Bug", "starts on the one picked");
+    await type(picker().querySelector("input"), "cust");
+    await press("Enter");
+    assert.ok(m.box.querySelector('button[aria-label="Tag: Customer"]'));
+    assert.match(m.box.textContent, /Acme down/);
+    await click(m.box.querySelector('button[aria-label="Tag: Customer"]'));
+    await type(picker().querySelector("input"), "any");
+    await press("Enter");
+    assert.ok(m.box.querySelector('button[aria-label="Tag: Any tag"]'));
+    assert.match(m.box.textContent, /Acme down.*Login bug|Login bug.*Acme down/);
+  } finally {
+    await m.done();
+  }
+});
+
+await test("near the bottom of the window it opens above its anchor", async () => {
+  tagged = [issue("issue-9", { ws: "w9", tags: [] })];
+  const m = await mount(opened("issue-9", "u9i"));
+  try {
+    const plus = plusOf(m.box);
+    plus.getBoundingClientRect = () => ({ left: 1190, right: 1240, top: 700, bottom: 728, width: 50, height: 28 });
+    await click(plus);
+    assert.deepEqual([picker().style.left, picker().style.top, picker().style.bottom], [`${1200 - 232 - 8}px`, "", "106px"], "over it, inside the window");
+  } finally {
+    await m.done();
+  }
 });
 
 await test("no em or en dashes in what these files show", async () => {
