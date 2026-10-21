@@ -403,7 +403,7 @@ if (process.platform !== "darwin" || !existsSync(ELECTRON)) {
 } else {
   const sockDir = mkdtempSync(join(tmpdir(), "bops-render-"));
   process.env.BOPS_RENDER_SOCKET = join(sockDir, "r.sock");
-  process.env.BOPS_UI_TOKEN = "0123456789abcdef".repeat(4);
+  process.env.BOPS_UI_TOKEN = "0123456789abcdef".repeat(4); // gitleaks:allow (a made-up token for this test)
   const harnessEnv = { ...process.env };
   delete harnessEnv.BOPS_FETCH_ALLOW;
   const electron = spawn(ELECTRON, [join(root, "scripts/render-harness.cjs")], { env: harnessEnv, stdio: ["pipe", "pipe", "pipe"] });
