@@ -1017,6 +1017,21 @@ n = asked("POST", "/api/computers");
 await assert.rejects(L.makeMainComputer(main(), "boppy-unread"), { message: "Orgo didn't say whether your free Bops computer is made yet" });
 assert.equal(asked("POST", "/api/computers"), n, "nothing made");
 assert.equal(fo.inUse, 0);
+// Another user's state swapped in (a hosted server) while that read is out, for a user who owns no
+// workspace yet: nothing is made for either, the main bot's workspace included.
+fo = freeOrgo("hacker_v2", 1);
+fo.replies["GET /api/workspaces"] = () => json(200, { workspaces: [] });
+const subscription = fo.replies["GET /api/user/subscription"];
+const unswapped = S.getState();
+fo.replies["GET /api/user/subscription"] = (c) => {
+  if (S.getState() === unswapped) swap(JSON.parse(JSON.stringify(unswapped)));
+  return subscription(c);
+};
+globalThis.bopsOrgoWorkspace = undefined;
+n = calls.length;
+await assert.rejects(L.makeMainComputer(main(), "boppy-swapped"), { message: "Another Orgo account signed in meanwhile" });
+assert.deepEqual(calls.slice(n).filter((c) => c.method === "POST").map((c) => c.path), [], "no workspace or computer made");
+swap(unswapped);
 
 /* ---------------- A computer deleted on Orgo's site: the bot moves on, once ---------------- */
 

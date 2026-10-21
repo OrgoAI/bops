@@ -438,6 +438,8 @@ async function planNow(short: (plan: OrgoPlan | null) => PlanShort | null | unde
 async function freeKnown(main: Bot, epoch: number) {
   const plan = await orgoPlan();
   if (!(await loadOrgoKey()) || (plan && !plan.limitsUnread)) return plan;
+  // Found or made for this user only: another's state may have come in while Orgo was asked.
+  sameUser(epoch);
   await orgoProjectFor(workspaceOf(main));
   sameUser(epoch);
   const again = await orgoPlan({ fresh: true });
