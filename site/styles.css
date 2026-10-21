@@ -75,7 +75,11 @@ ul { list-style: none; }
 .hero .fit { flex: 1; }
 .boppy-float { animation: bob 3.2s ease-in-out infinite; }
 @keyframes bob { 0%, 100% { transform: translateY(0) rotate(0deg); } 50% { transform: translateY(-10px) rotate(-2deg); } }
-/* notes.js: music notes drifting out of the hero Boppy's headphones; click it for a burst. */
+/* notes.js: music notes drifting out of the hero Boppy's headphones; click it for a burst. It listens with its
+   mouth shut, a flat line that opens as it sings, and its eyes ease toward the pointer. */
+.hero-mouth { transform-box: fill-box; transform-origin: center; transform: scale(1.4, .28); }
+.hero-eyes { transition: transform .35s cubic-bezier(.3, .7, .4, 1); }
+.hero-eyes ellipse { transform-box: fill-box; transform-origin: center; }
 .boppy-float.is-playing { cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .boppy-float.is-playing:focus { outline: none; }
 .boppy-float.is-playing:focus-visible { outline: 2px solid var(--ink); outline-offset: 6px; border-radius: 50%; }
@@ -196,7 +200,7 @@ html.lanyard-grabbing, html.lanyard-grabbing * { cursor: grabbing !important; }
 
 /* 6. Close */
 .s5 { gap: 30px; padding: 120px var(--gutter) 130px; }
-.final-disc { display: flex; align-items: center; justify-content: center; width: 132px; height: 132px; border-radius: 999px; background: var(--lime); }
+.final-disc { display: flex; align-items: center; justify-content: center; width: 132px; height: 132px; border-radius: 22.5%; background: var(--lime); }
 .h2-final { font-weight: 900; font-size: clamp(52px, 6.7vw, 96px); line-height: 0.96; letter-spacing: -0.06em; color: #fff; }
 .final-lede { color: #a3a3a0; }
 .s5 .ctas { justify-content: center; padding-top: 8px; }
@@ -329,7 +333,7 @@ button.pill { border: 0; font-family: inherit; cursor: pointer; }
 .mac-note:focus { outline: none; }
 .mac-note::backdrop { background: rgba(10, 10, 10, 0.55); }
 .mac-note [hidden] { display: none !important; }
-.mac-note-disc { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 84px; height: 84px; margin-bottom: 18px; border-radius: 999px; background: var(--lime); }
+.mac-note-disc { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 84px; height: 84px; margin-bottom: 18px; border-radius: 22.5%; background: var(--lime); }
 .mac-note h2 { font-weight: 800; font-size: 28px; line-height: 32px; letter-spacing: -0.035em; }
 .mac-note p { max-width: 320px; margin-top: 10px; font-size: 16px; line-height: 23px; color: var(--graphite); }
 .mac-note-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; width: 100%; margin-top: 24px; }
@@ -376,7 +380,7 @@ button.pill { border: 0; font-family: inherit; cursor: pointer; }
   .access-new { display: none; }
   .mac-note { padding-top: 22px; }
   .mac-note-disc { width: 64px; height: 64px; margin-bottom: 12px; }
-  .mac-note-disc svg { width: 46px; height: 46px; }
+  .mac-note-disc svg { width: 61px; height: 61px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .mac-note[open], .access-done { animation: none; }
