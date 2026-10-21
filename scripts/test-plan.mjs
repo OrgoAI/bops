@@ -139,7 +139,7 @@ assert.deepEqual(plain(await L.orgoPlan({ fresh: true })), { computers: 1_000_00
 for (const [tier, deal, computers] of [["hacker_v2", null, 1], ["hacker", null, 5], ["team", null, 10], ["enterprise", { maxDesktops: 3 }, 3], ["free", null, 0]]) {
   onPlan(tier, 0, 0, { deal, replies: { "GET /api/billing/compute-limits": () => json(503, { error: "Compute limits are unavailable" }) } });
   const p = await L.orgoPlan({ fresh: true });
-  assert.deepEqual(plain(p), { tier, name: P.planName(tier), computers, ...(deal ? { deal: true } : {}) }, tier);
+  assert.deepEqual(plain(p), { tier, name: P.planName(tier), computers, ...(deal ? { deal: true } : {}), limitsUnread: true }, tier);
   assert.equal(P.planShort(p), undefined, `${tier}: unknown in use holds nothing back`);
 }
 onPlan("hacker_v2", 1, 1, { replies: { "GET /api/billing/compute-limits": () => json(200, { max_cpu: 1, max_ram_gb: 8 }) } });
@@ -163,7 +163,7 @@ await L.orgoPlan({ fresh: true });
 assert.equal(calls.filter((c) => c.path === "/api/billing/compute-limits").at(-1).query, "?workspace_id=ws_mine");
 onPlan("hacker_v2", 1, 0, { replies: { "GET /api/workspaces": () => json(200, { workspaces: [{ id: "ws_shared", name: "Team", role: "member" }] }) } });
 n = asked("GET", "/api/billing/compute-limits");
-assert.deepEqual(plain(await L.orgoPlan({ fresh: true })), { tier: "hacker_v2", name: "Hacker", computers: 1 }, "owns no workspace: the plan's own count");
+assert.deepEqual(plain(await L.orgoPlan({ fresh: true })), { tier: "hacker_v2", name: "Hacker", computers: 1, limitsUnread: true }, "owns no workspace: the plan's own count");
 assert.equal(asked("GET", "/api/billing/compute-limits"), n);
 assert.equal(asked("POST", "/api/workspaces"), 0, "reading the plan never makes a workspace");
 
@@ -986,6 +986,37 @@ assert.equal(fo.inUse, 0, "nothing on the plan");
 await X.ensureComputer("kai");
 assert.equal(kai().computer, "shared");
 assert.equal(workBotOf(kai()).id, "boppy");
+
+// One read of the plan that Orgo didn't answer (compute-limits failed, or the 8 s wait ran out) when the
+// main bot's computer is made: Orgo is asked again, and the free one is made, never one on the plan in
+// its place. Before, Hacker with its one computer in use outside Bops had that one refused, and the setup
+// said the plan was full; with room, it took the plan's computer, and the free one was never made.
+for (const inUse of [1, 0]) {
+  S.update(() => {
+    Object.assign(main(), { computerId: undefined, freeComputer: undefined, computerStatus: "none" });
+    Object.assign(kai(), { computer: undefined, computerId: undefined, computerStatus: "none" });
+  });
+  fo = freeOrgo("hacker_v2", 1, { inUse });
+  const limits = fo.replies["GET /api/billing/compute-limits"];
+  let read = 0;
+  fo.replies["GET /api/billing/compute-limits"] = (c) => (read++ ? limits(c) : json(503, { error: "Failed to load compute limits" }));
+  n = calls.length;
+  assert.deepEqual(plain(await L.makeMainComputer(main(), "boppy-unread")), { id: "c-free-1", free: true }, `${inUse} in use outside Bops`);
+  assert.deepEqual(
+    calls.slice(n).filter((c) => c.method === "POST" && c.path === "/api/computers").map((c) => c.body.bops_free === true),
+    [true],
+    "only the free one is asked for",
+  );
+  assert.equal(fo.inUse, inUse, "nothing on the plan");
+}
+// Orgo doesn't answer again: nothing is made, and the setup says why (the next task tries again).
+S.update(() => Object.assign(main(), { computerId: undefined, freeComputer: undefined, computerStatus: "none" }));
+fo = freeOrgo("hacker_v2", 1);
+fo.replies["GET /api/billing/compute-limits"] = () => json(503, { error: "Failed to load compute limits" });
+n = asked("POST", "/api/computers");
+await assert.rejects(L.makeMainComputer(main(), "boppy-unread"), { message: "Orgo didn't say whether your free Bops computer is made yet" });
+assert.equal(asked("POST", "/api/computers"), n, "nothing made");
+assert.equal(fo.inUse, 0);
 
 /* ---------------- A computer deleted on Orgo's site: the bot moves on, once ---------------- */
 

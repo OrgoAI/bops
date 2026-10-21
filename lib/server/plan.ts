@@ -6,7 +6,7 @@ import { botChatId, freeComputerBot, workspaceOf, type Bot } from "@/lib/types";
 import { bopsComputerShort, bopsComputers, computerRam, mainOwnShort, ownComputerShort, planComputers, planFix, planName, planShort, planShortText, type OrgoPlan, type PlanShort } from "@/lib/orgo-plans";
 import { orgoHeaders } from "./app-version";
 import { cloudOn, cloudSessionNow } from "./cloud";
-import { callOrgo, computerChanges, orgo, OrgoError, ownedWorkspace } from "./orgo";
+import { callOrgo, computerChanges, orgo, orgoProjectFor, OrgoError, ownedWorkspace } from "./orgo";
 import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
 import { addMessage, getState, stateEpoch, update } from "./store";
 
@@ -294,7 +294,7 @@ async function readPlan(key: string): Promise<OrgoPlan | null> {
     session?.limits && typeof l?.bops_computers_limit === "number"
       ? { bops: { tier: session.tier, limit: l.bops_computers_limit, extras: Array.isArray(l.bops_max_computer_ids) ? l.bops_max_computer_ids.filter((x): x is string => typeof x === "string") : [] } }
       : {};
-  return { tier, name: tier ? planName(tier) : undefined, computers, inUse: counted?.inUse, ...(memory ? { memory } : {}), ...(deal ? { deal } : {}), ...free, ...bops };
+  return { tier, name: tier ? planName(tier) : undefined, computers, inUse: counted?.inUse, ...(memory ? { memory } : {}), ...(deal ? { deal } : {}), ...free, ...bops, ...(l ? {} : { limitsUnread: true as const }) };
 }
 
 /** Orgo's codes for a computer turned down for the plan (orgo-web lib/quota.ts validateComputerLimits, the create, fork and clone routes). */
@@ -429,6 +429,23 @@ async function planNow(short: (plan: OrgoPlan | null) => PlanShort | null | unde
 }
 
 /**
+ * The plan, with whether the user's free Bops computer is made known. When Orgo didn't answer for it
+ * (limitsUnread, or nothing came back), it's asked again, after the main bot's workspace is found or
+ * made, in case the user owned none to ask about. Still unknown, nothing is made: a computer on the
+ * plan in its place would take the plan's room, or be refused for it, while the free one is still
+ * theirs. Not signed in (a self-hosted install on its own key), Orgo's own limit decides, as before.
+ */
+async function freeKnown(main: Bot, epoch: number) {
+  const plan = await orgoPlan();
+  if (!(await loadOrgoKey()) || (plan && !plan.limitsUnread)) return plan;
+  await orgoProjectFor(workspaceOf(main));
+  sameUser(epoch);
+  const again = await orgoPlan({ fresh: true });
+  if (again && !again.limitsUnread) return again;
+  throw new Error("Orgo didn't say whether your free Bops computer is made yet");
+}
+
+/**
  * Work for one user's state (stateEpoch) stops once a hosted server has swapped in another's: their bots
  * have the same ids, and Orgo is asked with their key now.
  */
@@ -446,12 +463,13 @@ export type MainComputer = { id: string; free?: boolean };
  * - Else one on the plan, at the plan's size (computerRam), when the plan has room for it.
  * - Else, when another workspace's main bot has the free computer, this one works there too (null,
  *   and it says so in its chat). Only one free computer is ever made.
- * Throws a PlanLimit, in plain words, when none of those can be, or Orgo turns it down for the plan.
+ * Throws a PlanLimit, in plain words, when none of those can be, or Orgo turns it down for the plan,
+ * and an Error when Orgo doesn't say whether the free one is made (freeKnown).
  */
 export function makeMainComputer(main: Bot, name: string, epoch = stateEpoch()): Promise<MainComputer | null> {
   return oneAtATime(async () => {
     sameUser(epoch);
-    const first = await orgoPlan();
+    const first = await freeKnown(main, epoch);
     if (first?.freeComputerId === null) return makeFree(main, name, epoch);
     const kept = first?.freeComputerId;
     if (kept && !getState().bots.some((b) => b.computerId === kept)) return holdFree(main, kept, epoch);
