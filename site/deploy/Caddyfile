@@ -1,10 +1,14 @@
 # bops.bot: the landing page (site/), as plain files, on the Bops VM. Orgo's site-deploy.sh
 # (OrgoAI/bops-secrets) installs this as /etc/caddy/Caddyfile; Caddy gets and renews the certificates
 # itself. HTML is always fresh, everything else is cached a day (as nginx.conf did on Fly). The backend
-# API is not here: it's bops.orgo.ai/api (cloud/, Orgo's cloud-deploy.sh).
+# API is not here: it's bops.orgo.ai/api (cloud/, Orgo's cloud-deploy.sh). Ingot, Orgo's source control
+# for the workspaces' apps, is: /api/ingot/* goes to the ingot-hosted service on this VM (OrgoAI/ingot
+# deploy/install-hosted.sh, with INGOT_PUBLIC_URL=https://bops.bot/api/ingot).
 bops.bot {
 	root * /opt/bops/site
-	encode zstd gzip
+	# Not Ingot's answers: git packs and commits stream, and are compressed already.
+	@compress not path /api/ingot/*
+	encode @compress zstd gzip
 
 	header {
 		X-Content-Type-Options nosniff
@@ -29,6 +33,16 @@ bops.bot {
 		root * /opt/bops
 		header Content-Disposition attachment
 		file_server
+	}
+	# Ingot's API and git, with the /api/ingot prefix taken off. Packs and commits stream both ways
+	# (flush_interval -1), up to a push's 400 MB.
+	handle_path /api/ingot/* {
+		request_body {
+			max_size 450MB
+		}
+		reverse_proxy 127.0.0.1:7979 {
+			flush_interval -1
+		}
 	}
 	# The old review address goes to the page itself.
 	redir /preview* / 308
