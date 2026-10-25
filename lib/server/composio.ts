@@ -1,17 +1,16 @@
 import "server-only";
 import { execFile, execFileSync } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, rmSync } from "node:fs";
-import { createServer } from "node:net";
 import { Composio } from "@composio/core";
 import { USAGE_APP_HEADER, USAGE_BOT_HEADER } from "@/cloud/protocol";
-import { CHANNEL_APPS, levelOf, live as running, MAIN_WORKSPACE, openToTeam, workspaceOf, type AccessUse, type AppAccount, type AppApproval, type AppConnecting, type AppLevel, type Bot } from "@/lib/types";
-import { logUse, placeOf, targetNameOf, viaOf, type UseWhere } from "./access-sync";
+import { CHANNEL_APPS, levelOf, live as running, MAIN_WORKSPACE, openToTeam, workspaceOf, type AccessUse, type AppAccount, type AppConnecting, type AppLevel, type Bot } from "@/lib/types";
+import { logUse, targetNameOf, viaOf, type UseWhere } from "./access-sync";
 import { trackServerEvent } from "./analytics";
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudProxy, cloudSession, cloudSessionNow, cloudUrl } from "./cloud";
 import { lowRisk, movesMoney } from "./judgment";
-import { addMessage, bot, getState, id, installId, ownerName, session as threadOf, update } from "./store";
+import { allows, declined, heldAsk, NeedsOk, type AskSpec } from "./permission";
+import { addMessage, bot, getState, installId, ownerName, session as threadOf, update } from "./store";
 import { DATA_TOOL_NAMES, dataOn, foundByBots, runDataTool } from "./treg";
 
 /**
@@ -57,12 +56,11 @@ type Live = {
   /** Clients that tell Bops Cloud which bot and app a run is for (cxFor), by key, bot and app. */
   tagged?: Map<string, Composio>;
   tools: Map<string, ToolInfo>;
-  waiting: Map<string, (yes: boolean) => void>;
   catalog?: { at: number; v: number; via: Via; apps: CatalogApp[] };
   loadingCatalog?: { via: Via; apps: Promise<CatalogApp[]> };
 };
 const g = globalThis as unknown as { bopsComposio2?: Live };
-const live: Live = (g.bopsComposio2 ??= { sessions: new Map(), tools: new Map(), waiting: new Map() });
+const live: Live = (g.bopsComposio2 ??= { sessions: new Map(), tools: new Map() });
 
 /**
  * Composio on the key in use. Through Bops Cloud the user's Orgo key goes as a Bearer token (how the
@@ -644,7 +642,7 @@ export async function findAppActions(botId: string, query: string, where: { sess
   if (fromOutside(where.sessionId)) return NOT_FOR_OUTSIDE();
   const b = bot(botId);
   const session = b && (await sessionFor(b));
-  if (!session) return `You have no apps; ${ownerName()} can give you access in the Vault.`;
+  if (!session) return `You have no apps; ${ownerName()} can give you access in Logins.`;
   const r = (await session.search({ query })) as unknown as {
     results: { useCase: string; primaryToolSlugs: string[]; relatedToolSlugs: string[]; executionGuidance?: string; knownPitfalls?: string[] }[];
     toolSchemas?: Record<string, { description?: string; inputSchema?: unknown }>;
@@ -661,7 +659,7 @@ export async function findAppActions(botId: string, query: string, where: { sess
 /** Which of the bot's accounts in an app it means: the one it named, or its only one. */
 function pickAccount(b: Bot, app: string, hint?: string | null) {
   const mine = accountsOf(b).filter((x) => x.account.app === app);
-  if (!mine.length) return { error: `You don't have that app; ${ownerName()} can give you access in the Vault.` };
+  if (!mine.length) return { error: `You don't have that app; ${ownerName()} can give you access in Logins.` };
   const h = hint?.trim().toLowerCase();
   const named = h ? mine.filter((x) => [x.account.label, x.account.name, x.account.id].some((v) => v && v.toLowerCase().includes(h))) : [];
   if (named.length === 1) return named[0];
@@ -669,12 +667,6 @@ function pickAccount(b: Bot, app: string, hint?: string | null) {
   return { error: `You have ${mine.length} ${mine[0].account.appName} accounts: ${mine.map((x) => `"${accountTitle(x.account)}"`).join(", ")}. Call use_app again with account set to the one you mean.` };
 }
 
-/**
- * use_app. Only an action Composio marks read-only (readOnlyHint) runs at once. Anything else waits
- * for the user, unless Jev judges it low-stakes, only the user's own and easy to undo (a draft for
- * them, a label): never by its name, so GMAIL_SEND_DRAFT, which sends, asks like any send. `onAsk`
- * lets a chat turn go on while the user decides; a thread just waits.
- */
 /** An account a bot just used, for the Vault (AppAccount.usedAt): at most once an hour, so the state isn't rewritten on every call. */
 function markUsed(accountId: string) {
   const a = getState().accounts?.find((x) => x.id === accountId);
@@ -685,14 +677,22 @@ function markUsed(accountId: string) {
   });
 }
 
+/**
+ * use_app. Only an action Composio marks read-only (readOnlyHint) runs at once. Anything else asks the user,
+ * unless the bot's rules allow it (lib/permission.ts: an Always allow they saved for this action, in this account,
+ * whoever it's for; or Just do it, which still asks before what could move money or reaches someone found through
+ * business data), or Jev judges it low-stakes, only the user's own and easy to undo (a draft for them, a label):
+ * never by its name, so GMAIL_SEND_DRAFT, which sends, asks like any send. Asking is the engine's pause (NeedsOk,
+ * lib/server/permission.ts): the run waits for the reply and does it then (`approved`), wherever it runs. Its
+ * request shows who and what its inputs name (resourcesOf) and the inputs themselves, for the user to read.
+ */
 export async function runAppAction(
   botId: string,
   action: string,
   args: Record<string, unknown>,
   where: UseWhere,
-  onAsk?: (ask: Promise<string>) => void,
   accountHint?: string | null,
-  opts: { readOnly?: boolean } = {},
+  opts: { readOnly?: boolean; approved?: boolean } = {},
 ): Promise<string> {
   const b = bot(botId);
   if (!b) return "Unknown bot.";
@@ -706,12 +706,14 @@ export async function runAppAction(
   const { account, level } = picked;
   const reads = info.tags.includes("readOnlyHint");
   const where_ = account.id.startsWith("open:") ? account.appName : `${account.appName} (${accountTitle(account)})`;
+  // What goes to Composio, and what the request shows: the inputs with their fixed values filled in.
+  const sent = withConsts(info.input, args) as Record<string, unknown>;
   // Each use, for the Vault and Orgo (access-sync.ts): which bot, which account, where, and how it ended.
   const used = (outcome: AccessUse["outcome"], approvedBy?: AccessUse["approvedBy"]) =>
     logUse({ bot: b.id, kind: "app", target: account.id, targetName: targetNameOf(account), action, ...viaOf(where), outcome, ...(approvedBy ? { approvedBy } : {}) });
   if (level === "read" && !reads) {
     used("refused");
-    return `You can only read ${where_}. Ask ${ownerName()} for more access in the Vault if you need it.`;
+    return `You can only read ${where_}. Ask ${ownerName()} for more access in Logins if you need it.`;
   }
   const run = async (approvedBy?: AccessUse["approvedBy"]) => {
     let res: { data?: unknown; error?: string | null; successful?: boolean };
@@ -719,7 +721,7 @@ export async function runAppAction(
       res = (await cxFor(b.id, app).tools.execute(action, {
         userId: userId(),
         ...(account.id.startsWith("open:") ? {} : { connectedAccountId: account.id }),
-        arguments: withConsts(info.input, args),
+        arguments: sent,
         dangerouslySkipVersionCheck: true,
       } as never)) as unknown as typeof res;
     } catch (e) {
@@ -734,44 +736,93 @@ export async function runAppAction(
   if (reads) return run();
   // A look for Bops itself (chat.ts BackgroundJob.sample) only reads.
   if (opts.readOnly) return `Not done: this run only reads, and ${info.name} changes something. Use a read action.`;
+  // The user said yes to this very call (its run paused for it and carries on now).
+  if (opts.approved) return run("user");
   const destructive = info.tags.includes("destructiveHint");
-  // Low-stakes and easy to undo, only touching the user's own things (marking read, a label, an event
-  // only they attend): done without asking, and said so in the chat. Never anything that reaches
-  // someone else, deletes, or costs money (Jev, strict; if it can't tell, the user is asked).
-  // A bot set to "Just do it" (Bot.autoApprove) asks only before what could move money (as its setting
-  // says), or reaches someone it found through business data (treg.ts); said in the chat the same way.
   const what = `${info.name} in ${where_}`;
-  const autoOk = b.autoApprove && !foundByBots(JSON.stringify(args)) && !(await movesMoney(what, describe(args)));
-  if (b.autoApprove ? autoOk : !destructive && (await lowRisk(what, describe(args)))) {
+  const ask: AskSpec = { action: what, resources: resourcesOf(sent), preview: describe(sent), kind: "app" };
+  // Done without asking, and said so in the chat: what the user always allows (a rule they saved for this action); with
+  // Just do it on, anything but what could move money (by what it is, or as Jev judges it) or reaches someone found
+  // through business data (treg.ts); otherwise what Jev judges low-stakes and easy to undo, only touching the user's own
+  // things (marking read, a label, an event only they attend): never anything that reaches someone else, deletes, or
+  // costs money (strict; if it can't tell, the user is asked).
+  const saved = allows(b, ask, { justDoIt: false });
+  const just = !saved && !!b.autoApprove && allows(b, ask, { guarded: foundByBots(JSON.stringify(sent)) || surelyMoney(action, app) || (await movesMoney(what, ask.preview)) });
+  const low = !saved && !b.autoApprove && !destructive && !surelyMoney(action, app) && (await lowRisk(what, ask.preview));
+  if (saved || just || low) {
     const out = await run("auto");
     const chatId = where.chatId ?? (where.sessionId ? getState().sessions.find((x) => x.id === where.sessionId)?.chatId : undefined);
-    if (chatId && !out.startsWith("Failed")) addMessage({ chatId, role: "system", text: `${b.name}: ${info.name} in ${where_} · ${b.autoApprove ? "Just do it is on, so didn't ask" : "low risk, so didn't ask"}` });
+    const why = saved ? "you always allow it" : just ? "Just do it is on" : "low risk";
+    if (chatId && !out.startsWith("Failed")) addMessage({ chatId, role: "system", text: `${b.name}: ${info.name} in ${where_} · ${why}, so didn't ask` });
     return out;
   }
-
   used("waiting");
-  const ask = askOwner({ botId, app, action, title: `${info.name} in ${where_}`, detail: describe(args), ...placeOf(where) }).then(async (yes) => {
-    if (!yes) {
-      used("refused");
-      return `Not approved: ${ownerName()} said no. Don't do it.`;
-    }
-    return run("user");
-  });
-  if (onAsk) {
-    onAsk(ask);
-    return `This needs ${ownerName()}'s approval first: ${info.name} in ${where_}. Bops is showing them the details. Tell them in one short line, and don't call it again.`;
-  }
-  return ask;
+  throw new NeedsOk(ask);
 }
 
-/** The action's inputs for the user to check, short: who it goes to, the subject, the start of the text. */
-function describe(args: Record<string, unknown>) {
+/** An input's name in snake case (toRecipients is to_recipients). */
+const snake = (k: string) => k.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+/** Inputs that name to whom or what an action goes, by name (snake case). */
+const WHO =
+  /^(?:(?:.+_)?(?:to|cc|bcc|recipients?|emails?|email_address(?:es)?|attendees?|invitees?|participants?|guests?|members?|users?|channels?|phones?|phone_numbers?|ids)|(?:to|recipient|mobile|whatsapp|sms|contact|destination)_numbers?|(?:user|chat|conversation|database|page|parent|board|list|calendar|project|team|channel|contact|recipient|member|participant)_id|channel_name|number|url|link|repo|repository|owner)$/;
+
+/** The addresses `v` is made of ("ava@acme.example", "Ava <ava@acme.example>, max@acme.example"), or null when it's anything more. */
+function addressesIn(v: string): string[] | null {
+  if (!v.includes("@")) return null;
+  const parts = v.split(/[,;]/).map((x) => x.trim()).filter(Boolean);
+  const addresses = parts.map((x) => x.match(/^(?:[^<>@]*<)?\s*([^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+?)\s*>?$/)?.[1]);
+  return parts.length && addresses.every(Boolean) ? (addresses as string[]) : null;
+}
+
+/**
+ * To whom or what an action goes, as a request names it (AppApproval.resources): every recipient, channel, address
+ * or place its inputs name, lowercased. Found two ways, so an input Bops doesn't know by name still counts: by its
+ * name, at any depth (to, cc_emails, extra_recipients, invitees, user_ids, channel, …), and any value anywhere that is
+ * only email addresses (a body or subject that mentions one reaches no one). None for an action whose inputs name no
+ * one. Shown on its card for the user to read; a rule is for the action, whoever it's for (lib/permission.ts).
+ */
+export function resourcesOf(args: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const add = (v: string) => {
+    const x = v.trim().toLowerCase().slice(0, 200);
+    if (x && !out.includes(x)) out.push(x);
+  };
+  const walk = (v: unknown, who: boolean) => {
+    if (typeof v === "string") {
+      const addresses = addressesIn(v);
+      if (addresses) addresses.forEach(add);
+      else if (who) add(v);
+    } else if (typeof v === "number") {
+      if (who) add(String(v));
+    } else if (Array.isArray(v)) v.forEach((x) => walk(x, who));
+    // Someone named by an object (an attendee): its address or id; any address deeper in it counts anyway.
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) walk(x, WHO.test(snake(k)) || (who && /^(email|address|id|phone|number)$/i.test(k)));
+  };
+  walk(args, false);
+  return out;
+}
+
+/** An action's inputs for the user to check, short: who it goes to, the subject, the start of the text. */
+function describe(args: Record<string, unknown>): string {
   return Object.entries(args)
     .filter(([, v]) => v !== null && v !== undefined && v !== "" && v !== false)
     .map(([k, v]) => `${k.replace(/_/g, " ")}: ${(typeof v === "string" ? v : JSON.stringify(v)).slice(0, 400)}`)
     .join("\n")
     .slice(0, 1500);
 }
+
+/** Apps where every change is about money: payments, banking, payroll, accounting and billing. */
+const MONEY_APPS = new Set(["stripe", "paypal", "square", "braintree", "adyen", "wise", "plaid", "mercury", "brex", "ramp", "coinbase", "quickbooks", "xero", "freshbooks", "zoho_books", "chargebee", "recurly", "paddle", "lemon_squeezy", "gumroad", "razorpay", "venmo", "revolut", "expensify", "gusto", "deel", "payoneer", "bill"]);
+/** Actions whose name says they move money or commit to a payment. */
+const MONEY = /(?:^|_)(?:PAY|PAYS|PAYMENTS?|PAYOUTS?|PAYROLL|CHARGES?|REFUNDS?|TRANSFERS?|INVOICES?|PURCHASES?|BUY|ORDERS?|CHECKOUTS?|SUBSCRIBE|SUBSCRIPTIONS?|WITHDRAW(?:AL)?S?|DEPOSITS?|DONATE|DONATIONS?|BILLS?|BILLING)(?:_|$)/;
+
+/**
+ * Whether app action `slug` in `app` could move money by what it is, whatever its inputs say: one in a payments,
+ * banking or accounting app, or one whose name says so (a charge, a refund, an invoice, an order). Just do it never
+ * covers these, without Jev being asked (lib/server/judgment.ts movesMoney): its inputs are the bot's own words, which
+ * could talk Jev out of it.
+ */
+const surelyMoney = (slug: string, app: string) => MONEY_APPS.has(app.toLowerCase()) || MONEY.test(slug.toUpperCase());
 
 /**
  * Run an action for Bops itself (not a bot's request), in one of the user's accounts: posting a bot's
@@ -791,24 +842,6 @@ export async function runAs(accountId: string, action: string, args: Record<stri
 /** Composio's client, for the other parts of Bops that listen to apps (Slack messages for channels.ts): for a bot and an app when they're known, so Bops Cloud counts its calls for them. */
 export const composio = (botId?: string, app?: string) => cxFor(botId, app);
 export const composioUser = userId;
-
-/* ---------------- Asking the user ---------------- */
-
-/** Show the user an app approval card and wait for their yes or no. `approvalId`: its id, for a caller that may take the card back (answerApp). */
-export function askOwner(a: Omit<AppApproval, "id" | "at">, approvalId = id("apr")) {
-  const approval: AppApproval = { ...a, id: approvalId, at: Date.now() };
-  update((s) => (s.appApprovals ??= []).push(approval));
-  return new Promise<boolean>((resolve) => live.waiting.set(approval.id, resolve));
-}
-
-/** The user's answer to an app approval. */
-export function answerApp(approvalId: string, yes: boolean) {
-  update((s) => {
-    s.appApprovals = (s.appApprovals ?? []).filter((x) => x.id !== approvalId);
-  });
-  live.waiting.get(approvalId)?.(yes);
-  live.waiting.delete(approvalId);
-}
 
 /* ---------------- Apps inside threads ---------------- */
 
@@ -843,7 +876,7 @@ export function bopsAddress() {
   return null;
 }
 
-/** A thread's app call (from screen_mcp.py on a bot computer). It waits for the user when asked. */
+/** A thread's app call (from screen_mcp.py on a bot computer: a thread its brain runs). It waits for the user when asked (held). */
 export async function appCall(sessionId: string, key: string, tool: string, args: Record<string, unknown>) {
   const s = threadOf(sessionId);
   const b = s && bot(s.botId);
@@ -861,39 +894,33 @@ async function threadApps(botId: string, sessionId: string, tool: string, args: 
   // Business data (treg.ts), when the bot has it.
   if (DATA_TOOL_NAMES.has(tool)) {
     const b = bot(botId);
-    return b && dataOn(b) ? { status: 200, text: await runDataTool(botId, tool, args, { sessionId }) } : { status: 403, text: "You don't have business data." };
+    return b && dataOn(b) ? { status: 200, text: await held(botId, sessionId, (approved) => runDataTool(botId, tool, args, { sessionId }, { approved })) } : { status: 403, text: "You don't have business data." };
   }
   if (tool === "find_app_actions") return { status: 200, text: await findAppActions(botId, String(args.query ?? ""), { sessionId }) };
   if (tool === "use_app")
-    return { status: 200, text: await runAppAction(botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId }, undefined, (args.account as string | null) ?? null) };
+    return {
+      status: 200,
+      text: await held(botId, sessionId, (approved) => runAppAction(botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId }, (args.account as string | null) ?? null, { approved })),
+    };
   return { status: 404, text: `unknown tool ${tool}` };
 }
 
+/** How long a call through the screen tools waits for the user's reply (screen_mcp.py waits 20 minutes for Bops). */
+export const HELD_ASK_MS = 19 * 60_000;
+
 /**
- * A Mac thread's apps: a socket at `path`, in the task's own sockets folder (local.ts taskSockets),
- * that vm/apps-mcp.mjs calls from inside the executor's sandbox, which reaches nothing else on this
- * Mac. It answers only this thread, while it runs, so no secret goes into the task. Returns how to close it.
+ * A call through the screen tools (a thread its brain runs: Claude Code holds the call until Bops answers) that
+ * needs the user's OK: it can't pause, so it waits for the reply (permission.ts heldAsk), HELD_ASK_MS at most or
+ * while its thread runs, and is done on a yes. Every engine Bops runs itself pauses instead (askFor).
  */
-export function serveApps(sessionId: string, path: string) {
-  rmSync(path, { force: true });
-  const server = createServer({ allowHalfOpen: true }, (c) => {
-    let body = "";
-    c.setEncoding("utf8");
-    c.on("data", (d) => (body += d));
-    c.on("error", () => {});
-    c.on("end", async () => {
-      let r: { status: number; text: string };
-      try {
-        const { tool, args } = JSON.parse(body) as { tool?: string; args?: Record<string, unknown> };
-        const s = threadOf(sessionId);
-        r = s && running(s) && bot(s.botId) ? await threadApps(s.botId, sessionId, tool ?? "", args ?? {}) : { status: 403, text: "not allowed" };
-      } catch (e) {
-        r = { status: 200, text: `Failed: ${(e as Error).message}` };
-      }
-      c.end(JSON.stringify({ text: r.text, ok: r.status < 400 }));
-    });
-  });
-  server.on("error", (e) => console.warn(`[apps] ${sessionId}: ${e.message}`));
-  server.listen(path, () => chmodSync(path, 0o600));
-  return () => server.close();
+async function held(botId: string, sessionId: string, work: (approved: boolean) => Promise<string>): Promise<string> {
+  try {
+    return await work(false);
+  } catch (e) {
+    if (!(e instanceof NeedsOk)) throw e;
+    const answer = await heldAsk(e.ask, { botId, threadId: sessionId }, { ms: HELD_ASK_MS, alive: () => !!threadOf(sessionId) && running(threadOf(sessionId)!) });
+    if (answer === "late") return `${ownerName()} didn't answer in time, so it wasn't done. Don't do it another way: say in your answer what you needed.`;
+    if (answer === "gone") return "This task was stopped.";
+    return answer.reply === "reject" ? declined({ reply: answer }) : work(true);
+  }
 }

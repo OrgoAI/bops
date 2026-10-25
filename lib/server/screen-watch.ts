@@ -205,6 +205,8 @@ export function watchScreen(botId: string, display: number, endpoint: string, se
       if (await autoSignIn(botId, display, read).catch(() => false)) return;
     }
     // The thread's chip shows it ("needs you to sign in"), and its computer draws the card; no extra chat line.
+    // On a computer's runner too, which signs nothing in by itself (its saved logins' passwords are in the
+    // Mac's Keychain): the thread waits for the user to sign in on its screen, and goes on from there.
     const s = session(sessionId);
     if (s && live(s) && !s.dismissed && s.blocker !== read.blocker) patchSession(sessionId, { blocker: read.blocker });
   };

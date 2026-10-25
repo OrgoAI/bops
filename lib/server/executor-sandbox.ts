@@ -18,7 +18,7 @@ import { delimiter, dirname, join, sep } from "node:path";
  * - it writes only in the task's own folder and its browser tools' sockets folder (both deleted when
  *   the task ends), and can't run code from there;
  * - its network reaches OpenAI (the port of its remote) and the task's own Chrome on this Mac, nothing else
- *   (Bops answers its app calls on a socket in its sockets folder: composio.ts serveApps);
+ *   (its apps and business data are its agent session's function tools, which Bops answers itself: sessions.ts agentTool);
  * - it can't send Apple Events, so it can't script other apps.
  */
 

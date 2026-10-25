@@ -14,6 +14,8 @@ import { call, dropUsers, fakeOrgo, fakeProvider, keyOf, newUserId, prepareDb, s
  */
 
 const alice = newUserId("version");
+/** Two Macs: one on this app wrote her state, the other is still on 0.0.29 (state level 3). */
+const bea = newUserId("version-behind");
 let orgo: Listening, cloud: Listening, openai: Awaited<ReturnType<typeof fakeProvider>>;
 
 const seen = async (userId: string) =>
@@ -35,6 +37,7 @@ const socketStatus = (version: string | undefined) =>
 before(async () => {
   await prepareDb();
   await seedUser(alice);
+  await seedUser(bea);
   orgo = await fakeOrgo();
   openai = await fakeProvider((g) => (g.method === "POST" && g.path === "/v1/responses" ? { json: { id: `resp_${alice}_${Date.now()}`, object: "response", output: [], usage: null } } : { status: 418, json: {} }));
   Object.assign(process.env, { OPENAI_API_KEY: "sk-test-main", BOPS_UPSTREAM_OPENAI: openai.url });
@@ -54,7 +57,7 @@ beforeEach(async () => {
 
 after(async () => {
   await block(null);
-  await dropUsers([alice]);
+  await dropUsers([alice, bea]);
   await Promise.all([cloud?.close(), orgo?.close(), openai?.close()]);
   await closeDb();
 });
@@ -134,4 +137,41 @@ test("a block that isn't a version turns nobody away, and lifting it serves ever
   await block(null);
   const r = await as(undefined, "POST", "/proxy/openai/v1/responses", { model: "gpt-6.1-sol", input: "hi" });
   assert.equal(r.status, 200, r.text);
+});
+
+test("a Mac whose state a newer app wrote, on an app that doesn't stop its routines for that (0.0.29), is refused the proxies too; its state's calls and notices answer", async () => {
+  /** A call with these headers on top of Bea's key: the ones each app really sends. */
+  const at = (headers: Record<string, string>, method: string, path: string, json?: unknown) => call(cloud.url, method, path, { key: keyOf(bea), json, headers });
+  const ask = (headers: Record<string, string>) => at(headers, "POST", "/proxy/openai/v1/responses", { model: "gpt-6.1-sol", input: "hi" });
+  // What OpenAI's SDK client says (lib/server/openai-client.ts): 0.0.29's its version only, this app's its state level too.
+  const sdk29 = { "x-bops-version": "0.0.29", "x-bops-source": "chat" };
+  const sdk30 = { "x-bops-version": "0.0.30", "x-bops-state-level": "4", "x-bops-source": "chat" };
+  // What every other call says (appHeaders): 0.0.29's level is 3.
+  const app29 = { "x-bops-version": "0.0.29", "x-bops-state-level": "3", "x-bops-user": bea, "x-bops-protocol": "2" };
+  // The Mac on this app wrote her state.
+  await query("UPDATE bops.app_state SET protocol = 4 WHERE user_id = $1", [bea]);
+  const asked = openai.got.length;
+  assert.equal((await ask(sdk30)).status, 200, "the Mac on this app");
+  assert.equal((await ask({ "x-bops-version": "0.0.30" })).status, 200, "this app's version alone says it stops its routines");
+  // The one still on 0.0.29, as its SDK calls and as its other calls: told to update, as OpenAI's SDK reads it, and nothing reaches OpenAI.
+  for (const headers of [sdk29, app29]) {
+    const r = await ask(headers);
+    assert.equal(r.status, 426, `${JSON.stringify(headers)}: ${r.text}`);
+    assert.deepEqual(r.json, { error: { message: r.json.error.message, code: "state_too_new" }, code: "state_too_new" });
+    assert.match(r.json.error.message, /^Another of your Macs is on a newer Bops\. Update Bops on this Mac/);
+  }
+  assert.equal(openai.got.length, asked + 2, "only the new Mac's reached OpenAI");
+  // A call that says neither isn't taken for 0.0.29 (block_below keeps such apps out).
+  assert.equal((await ask({})).status, 200, "no version and no level");
+  // Its state's calls are refused as before, and its notices say to update.
+  assert.equal((await at(app29, "GET", "/v1/state/head")).status, 426);
+  const notices = await at(app29, "GET", "/v1/notices");
+  assert.equal(notices.status, 200, notices.text);
+  assert.equal(notices.json.notices[0]?.title, "Update Bops on this Mac");
+  // Alice's Macs are all on 0.0.29, which wrote her state at level 3: every call of hers is served, its SDK's included.
+  await query("UPDATE bops.app_state SET protocol = 3 WHERE user_id = $1", [alice]);
+  for (const headers of [sdk29, { ...app29, "x-bops-user": alice }]) {
+    const r = await call(cloud.url, "POST", "/proxy/openai/v1/responses", { key: keyOf(alice), json: { model: "gpt-6.1-sol", input: "hi" }, headers });
+    assert.equal(r.status, 200, `${JSON.stringify(headers)}: ${r.text}`);
+  }
 });

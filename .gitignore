@@ -46,9 +46,10 @@ next-env.d.ts
 
 # desktop app
 /dist-desktop
+/dist-runner
 /desktop/repo.json
 
-# relay agent (scripts/fetch-relay.sh)
+# relay agent and ingot (scripts/fetch-relay.sh, scripts/fetch-ingot.sh)
 /vendor/
 
 # Bops Cloud installs its two dependencies here on its box

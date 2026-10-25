@@ -10,8 +10,11 @@ import {
   BOPS_DEVICE_HEADER,
   BOPS_PROTOCOL_HEADER,
   BOPS_USER_HEADER,
+  COMPUTER_NOT_ALLOWED,
   STATE_CONFLICT,
+  STATE_LEVEL,
   STATE_PROTOCOL,
+  STATE_TOO_NEW,
   type CloudMessageRow,
   type CloudMessagesPage,
   type CloudState,
@@ -19,12 +22,16 @@ import {
   type CloudStateHead,
   type CloudStateSaved,
 } from "@/cloud/protocol";
+import { botIdsOn, chatsOn, computersMessage, keepAllowed, runsBy, threadsOf } from "@/cloud/computer-scope";
+import { deviceIdOf } from "@/cloud/device";
+import { nextRun, validTimeZone, type ScheduleLike } from "@/cloud/schedule";
 import type { AppState, Message } from "@/lib/types";
 import { appHeaders } from "./app-version";
 import { cloudUrl } from "./cloud-url";
-import { hookExit, onExit, StateLoadError, type Persistence, type StateAccess } from "./persist";
+import { hookExit, onExit, onRunner, StateLoadError, type Persistence, type StateAccess } from "./persist";
 import { applyShared, fromShared, merge3, same, toShared, type Blob } from "./state-merge";
 import { moveLegacyState, userDataDir } from "./user-paths";
+import { vmIdentityRejected } from "./vm-identity";
 
 /**
  * The Mac app's state lives in Bops Cloud, under the signed-in Orgo user (cloud/state.ts). There is
@@ -45,12 +52,22 @@ import { moveLegacyState, userDataDir } from "./user-paths";
  * - Hearing from the user's other Macs: the tunnel says when the state changed (a "state" frame,
  *   cloud-tunnel.ts), and every 30 seconds the head is looked at anyway (only one Mac holds the tunnel).
  *   What changed is merged in, so changes not sent yet are kept.
+ * - A newer Bops of the user's wrote their state (426 STATE_TOO_NEW to a read or a write): this one
+ *   keeps what it changes, as when offline, and its routines and in-use beat stop (tooNew), so an app
+ *   that's still open after its state moved on runs nothing twice. It's told to update.
  * - Signing out, or another account signing in: what's still unsent is kept aside with that user's key
  *   and sent in the background, never into the next user's state.
  * - The cloud out of reach when a save fails, or when Bops quits or restarts: what's unsent is also
  *   written to the user's folder on this Mac (unsent-state.json, with what it was based on), and goes
  *   up at their next sign-in here, merged over what the cloud has by then (their other Macs' changes
  *   stand beside it). It goes once it's all up.
+ * - A computer's runner sends only what its computer may change (cloud/computer-scope.ts keepAllowed:
+ *   its own threads, its bots' routines' runs and how they're doing), over the state it read, and chat
+ *   messages only in its bots' chats; the rest stays on the runner, said once in its log, so Bops Cloud
+ *   never refuses it (a path Bops Cloud refuses anyway is held from then on too). It never sends a state
+ *   of its own making. And the Mac takes of a computer's write only what that computer may change: a
+ *   version it reads that a computer's runner wrote, right after the one it had, has the rest put back
+ *   and written again (the second guard behind Bops Cloud's).
  */
 
 const SAVE_MS = 1000;
@@ -105,7 +122,11 @@ type Kept = {
   at: number;
   /** It holds the state file from before (loaded, not yet all up when it was kept). */
   legacy?: boolean;
+  /** The state level of the app that kept it (STATE_LEVEL); none from an app before 0.0.30 (KEPT_LEVEL_BEFORE). */
+  level?: number;
 };
+/** The level of a kept copy that doesn't say: 0.0.29's, the last app to keep one without saying. */
+const KEPT_LEVEL_BEFORE = 3;
 type Aside = { sync: Sync; state: AppState; failures: number; timer?: ReturnType<typeof setTimeout>; sending?: Promise<boolean> };
 type Box = {
   sync?: Sync;
@@ -116,15 +137,25 @@ type Box = {
   aside: Map<string, Aside>;
   poll?: ReturnType<typeof setInterval>;
   hooked?: boolean;
+  /** The cloud answered 426 STATE_TOO_NEW: a newer Bops of the user's wrote their state (Persistence.tooNew). Cleared by the next read or write that lands. */
+  tooNew?: boolean;
+  /** A runner: paths Bops Cloud refused it ("routines.<id>", "workspaces"), held back from then on, and what its log already said it holds. */
+  refused?: Set<string>;
+  heldSaid?: Set<string>;
 };
 
 class CallError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
+
+/** The cloud keeps this Bops out of the user's state: a newer one of theirs wrote it (cloud/state.ts). */
+const tooNewError = (e: unknown) => e instanceof CallError && e.status === 426 && e.code === STATE_TOO_NEW;
 
 /** A fingerprint of a value as this Mac serializes it (the same object, the same text). */
 const fp = (v: unknown) => createHash("sha1").update(typeof v === "string" ? v : JSON.stringify(v)).digest("base64");
@@ -132,7 +163,7 @@ const byTime = (a: Message, b: Message) => (a.at ?? 0) - (b.at ?? 0);
 
 /* ---------------- This Mac ---------------- */
 
-/** This Mac's hardware id (IOPlatformUUID); BOPS_DEVICE_SEED stands in for it (a test's second Mac). */
+/** This Mac's hardware id (IOPlatformUUID); BOPS_DEVICE_SEED stands in for it (a test's second Mac, a computer's runner: its computer id). */
 function platformId(): string {
   const g = globalThis as unknown as { bopsPlatformId?: string };
   if (g.bopsPlatformId) return g.bopsPlatformId;
@@ -146,8 +177,28 @@ function platformId(): string {
   return (g.bopsPlatformId = id || `${hostname()}:${homedir()}`);
 }
 
-/** This Mac as the user's state knows it (state.macs): the same Mac is another device for another user. */
-export const deviceIdFor = (userId: string) => createHash("sha256").update(`${userId}\n${platformId()}`).digest("hex").slice(0, 16);
+/**
+ * This Mac as the user's state knows it (state.macs, Session.by): the same Mac is another device for
+ * another user. `platform`: another's hardware id instead, as a computer's runner is (its computer id,
+ * its BOPS_DEVICE_SEED), so a Mac can tell which threads are that runner's.
+ */
+export const deviceIdFor = (userId: string, platform = platformId()) => deviceIdOf(userId, platform);
+
+/** On a computer's runner: its computer and device, what its writes are held to (cloud/computer-scope.ts). */
+const runnerScope = (sync: Who) => {
+  const desktopId = process.env.BOPS_RUNNER_COMPUTER;
+  return onRunner() && desktopId ? { desktopId, device: sync.device } : null;
+};
+
+/** The computer whose runner is `device` for this user, from the computer ids these states know (its bots' and its runners'). */
+function computerOfDevice(user: string, device: string, ...states: (Blob | null)[]): string | null {
+  for (const st of states) {
+    if (!st) continue;
+    const ids = [...(Array.isArray(st.bots) ? st.bots.map((b: Blob) => b?.computerId) : []), ...Object.keys(st.runners && typeof st.runners === "object" ? st.runners : {})];
+    for (const id of ids) if (typeof id === "string" && id && deviceIdOf(user, id.toLowerCase()) === device) return id.toLowerCase();
+  }
+  return null;
+}
 
 /* ---------------- Calls ---------------- */
 
@@ -175,12 +226,16 @@ async function call<T>(who: Who, path: string, init: { method?: string; body?: u
   } catch {
     throw new CallError("Couldn't reach Bops Cloud", 0);
   }
-  return { status: res.status, body: (await res.json().catch(() => null)) as T };
+  const answer = (await res.json().catch(() => null)) as T;
+  // A runner's identity token Bops Cloud turned down (orgo-web said why): the runner takes its next credential (vm-identity.ts).
+  if (res.status === 401) vmIdentityRejected(who.key, typeof (answer as { code?: unknown } | null)?.code === "string" ? (answer as { code: string }).code : undefined);
+  return { status: res.status, body: answer };
 }
 
 function refused(what: string, r: { status: number; body: unknown }): never {
-  const said = (r.body as { error?: unknown } | null)?.error;
-  throw new CallError(`${what}: Bops Cloud answered ${r.status}${typeof said === "string" ? ` (${said})` : ""}`, r.status);
+  const body = r.body as { error?: unknown; code?: unknown } | null;
+  const said = body?.error;
+  throw new CallError(`${what}: Bops Cloud answered ${r.status}${typeof said === "string" ? ` (${said})` : ""}`, r.status, typeof body?.code === "string" ? body.code : undefined);
 }
 
 /* ---------------- Loading ---------------- */
@@ -271,6 +326,7 @@ function keepUnsent(sync: Sync, state: AppState) {
       messages: state.messages,
       at: Date.now(),
       legacy: !!sync.legacyFile,
+      level: STATE_LEVEL,
     };
     writeFileSync(`${file}.tmp`, JSON.stringify(kept), { mode: 0o600 });
     renameSync(`${file}.tmp`, file);
@@ -282,25 +338,78 @@ function keepUnsent(sync: Sync, state: AppState) {
 }
 
 /**
+ * A routine's next time worked out from its schedule, its zone (its own, else the owner's in `owner`,
+ * else this Mac's: routines.ts zoneOf) and its last run, as routines.ts works it out when it's edited:
+ * for a merge that takes a routine's clock from a side with another schedule (state-merge.ts mergeRoutine).
+ */
+const nextRunWith = (owner: unknown) => (r: Blob) => {
+  const ownerZone = owner && typeof owner === "object" ? (owner as { timeZone?: unknown }).timeZone : undefined;
+  const tz = [r.timeZone, ownerZone].find((z): z is string => typeof z === "string" && validTimeZone(z));
+  return nextRun(r.schedule as ScheduleLike, Date.now(), tz, typeof r.lastRunAt === "number" ? r.lastRunAt : undefined);
+};
+
+/** Why Bops Cloud refused an app older than the one that wrote the user's state (cloud/state.ts TOO_NEW), as a thread it ran failed with it. */
+const REFUSED_TOO_OLD = /state_too_new|Another of your Macs is on a newer Bops/i;
+
+/**
+ * What an older app's routines made while Bops Cloud refused it (a copy it kept: buildKept), to leave out:
+ * it went on running every routine from memory, so each reminder it posted, each run's chip and note, and
+ * each thread it started (failed at Bops Cloud's 426 for its AI, and then waiting on the user) is one the
+ * newer Bops ran meanwhile, or a failure that never was. `threads`: the ones its copy added (in neither
+ * its base nor the cloud's state) that a routine started, or that failed for the refusal; `made`: a
+ * message it added of a routine's (Message.routine, a routine's chip) or of one of those threads. The
+ * user's own messages and threads still go in.
+ */
+function refusedWork(kept: Kept, cloud: Blob | null) {
+  const ids = (b: Blob | null | undefined) => new Set((Array.isArray(b?.sessions) ? (b.sessions as Blob[]) : []).map((x) => x?.id));
+  const known = new Set([...ids(kept.base), ...ids(cloud)]);
+  const threads = new Set<string>();
+  for (const x of Array.isArray(kept.blob.sessions) ? (kept.blob.sessions as Blob[]) : []) {
+    if (!x || typeof x.id !== "string" || known.has(x.id)) continue;
+    if (x.sentVia === "routine" || typeof x.routineId === "string" || (x.status === "failed" && typeof x.error === "string" && REFUSED_TOO_OLD.test(x.error))) threads.add(x.id);
+  }
+  const made = (m: Message) =>
+    m.role !== "user" &&
+    (!!m.routine ||
+      (m.role === "system" && typeof m.text === "string" && m.text.startsWith("Routine · ")) ||
+      (!!m.resultOf && threads.has(m.resultOf)) ||
+      (!!m.sessionIds?.length && m.sessionIds.every((id) => threads.has(id))));
+  return { threads, made };
+}
+
+/**
  * The state to start from when changes were kept on this Mac: the cloud's, with this Mac's changes
  * since its base merged over it, as a save would have (merge3 for the blob; each message new or changed
  * here stands, each removed here goes, the rest are the cloud's). The state file from before isn't
  * read with it (see load).
+ *
+ * A copy kept by an older app than the one that wrote the cloud's state since (Kept.level below the
+ * row's; a copy that doesn't say is 0.0.29's) may be what a Mac Bops Cloud refused as too old went on
+ * doing in memory until it updated: it never overrides the newer work. Where both changed something the
+ * cloud's stands (state-merge.ts Me.older), and of its messages only the ones it added go in, never what
+ * its routines made while it was refused (refusedWork): the newer Bops ran them meanwhile.
  */
 function buildKept(who: Who, loaded: Loaded, kept: Kept) {
   const rows = loaded.rows.map((r) => r.json as unknown as Message);
   const cloud = loaded.got?.state ?? null;
+  const older = (typeof kept.level === "number" ? kept.level : KEPT_LEVEL_BEFORE) < (loaded.got?.protocol ?? 0);
   const sync: Sync = { ...who, version: loaded.version, base: cloud ? structuredClone(cloud) : null, blobHash: "", msgHashes: new Map(rows.map((m) => [m.id, fp(m)])), seq: loaded.seq, pulledAt: Date.now(), blobAt: 0 };
-  const blob = cloud ? merge3(kept.base, kept.blob, structuredClone(cloud)) : kept.blob;
+  const all = cloud ? merge3(kept.base, kept.blob, structuredClone(cloud), { device: who.device, runner: onRunner(), older, nextRunOf: nextRunWith(cloud.owner ?? kept.blob.owner) }) : kept.blob;
+  // A runner's held to what its computer may change over the cloud's, as mergeIn holds it.
+  const scope = runnerScope(who);
+  const allowed = cloud && scope ? keepAllowed(cloud, all, scope).blob : all;
+  if (older) console.info(`[store] the changes kept on this Mac are from an older Bops than the one that wrote ${who.user}'s state since: only what they add goes in`);
+  const refused = older ? refusedWork(kept, cloud) : null;
+  const blob = refused?.threads.size && Array.isArray(allowed.sessions) ? { ...allowed, sessions: (allowed.sessions as Blob[]).filter((x) => !refused.threads.has(x.id as string)) } : allowed;
   const synced = new Map(kept.msgHashes);
   const byId = new Map(rows.map((m) => [m.id, m]));
   const here = new Set<string>();
   for (const m of kept.messages) {
     if (!m || typeof m.id !== "string") continue;
     here.add(m.id);
-    if (synced.get(m.id) !== fp(m)) byId.set(m.id, m);
+    if (older ? !synced.has(m.id) && !byId.has(m.id) && !refused?.made(m) : synced.get(m.id) !== fp(m)) byId.set(m.id, m);
   }
-  for (const id of synced.keys()) if (!here.has(id)) byId.delete(id);
+  if (!older) for (const id of synced.keys()) if (!here.has(id)) byId.delete(id);
   return { state: { ...fromShared(blob, who.device), messages: [...byId.values()].sort(byTime) }, sync };
 }
 
@@ -319,6 +428,31 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
 
   const shared = (state: AppState, device: string) => JSON.stringify(toShared(state as unknown as Blob, device));
 
+  /** Paths a runner holds back, said in its log once each. */
+  function sayHeld(held: string[]) {
+    const said = (box.heldSaid ??= new Set());
+    const fresh = held.filter((p) => !said.has(p));
+    if (!fresh.length) return;
+    for (const p of fresh) said.add(p);
+    if (said.size > 5000) said.clear();
+    console.warn(`[store] kept on this runner, not sent to Bops Cloud (a computer may not change it): ${fresh.slice(0, 10).join(", ")}${fresh.length > 10 ? `, and ${fresh.length - 10} more` : ""}`);
+  }
+
+  /**
+   * The blob as it goes up: on a computer's runner, only what its computer may change over the blob it
+   * read (cloud/computer-scope.ts keepAllowed), and none at all with no blob read (a runner never starts
+   * a state).
+   */
+  function blobText(sync: Sync, state: AppState): string | null {
+    const text = shared(state, sync.device);
+    const scope = runnerScope(sync);
+    if (!scope) return text;
+    if (!sync.base || !Object.keys(sync.base).length) return null;
+    const { blob, held } = keepAllowed(sync.base, JSON.parse(text) as Blob, scope, box.refused ?? []);
+    sayHeld(held);
+    return JSON.stringify(blob);
+  }
+
   /** Messages that differ from what was last synced (new or changed), and ids synced but gone. */
   function diff(sync: Sync, state: AppState) {
     const now = new Map<string, string>();
@@ -334,7 +468,8 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
 
   function hasUnsent(sync: Sync, state: AppState) {
     const d = diff(sync, state);
-    return d.upsert.length > 0 || d.remove.length > 0 || fp(shared(state, sync.device)) !== sync.blobHash;
+    const text = blobText(sync, state);
+    return d.upsert.length > 0 || d.remove.length > 0 || (text !== null && fp(text) !== sync.blobHash);
   }
 
   /** A message as it goes up: one too big for the cloud goes with its text cut. */
@@ -344,16 +479,47 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     return out;
   }
 
-  /** Another Mac's blob (what PUT's 409 or a read brought), merged into `state` over what was last synced. */
-  function mergeIn(sync: Sync, state: AppState, theirs: { version: number; state: Blob }) {
+  /**
+   * Another Mac's blob (what PUT's 409 or a read brought), merged into `state` over what was last synced.
+   * `actual`: the blob as the cloud has it, when `theirs` is it with a computer's write held back (the
+   * second guard): that's the base, and what was put back goes up next.
+   *
+   * On a computer's runner the merge is then held to what its computer may change over theirs
+   * (keepAllowed): where it changed something it can't send (a routine's clock while the Mac took the
+   * routine out, a bot the Mac moved off its computer), Bops Cloud's copy stands here too. Else its copy
+   * would stay apart for good: it never sends those, and later merges would keep its side.
+   */
+  function mergeIn(sync: Sync, state: AppState, theirs: { version: number; state: Blob }, actual?: Blob) {
     const mine = JSON.parse(shared(state, sync.device)) as Blob;
-    const merged = merge3(sync.base, mine, theirs.state);
+    const scope = runnerScope(sync);
+    const all = merge3(sync.base, mine, theirs.state, { device: sync.device, runner: onRunner(), nextRunOf: nextRunWith(state.owner) });
+    // Not held to what Bops Cloud refused it anyway (box.refused): what it keeps of that, a routine's clock, stays here as before.
+    const merged = scope ? keepAllowed(theirs.state, all, scope).blob : all;
     // A copy into memory: the merge shares objects with theirs, which is the base from now on (see build()).
     applyShared(state as unknown as Blob, fromShared(structuredClone(merged), sync.device));
     sync.base = theirs.state;
     sync.version = theirs.version;
     // Nothing of this Mac's left to send for the blob, or it goes up next.
     sync.blobHash = same(merged, theirs.state) ? fp(shared(state, sync.device)) : "";
+    if (actual && !same(actual, theirs.state)) {
+      sync.base = actual;
+      sync.blobHash = "";
+    }
+  }
+
+  /**
+   * The second guard (Bops Cloud's is the first): a version a computer's runner wrote, read right after
+   * the one this Mac had (so all it changed is that runner's), with what that computer may not change put
+   * back (cloud/computer-scope.ts keepAllowed). Never on a runner, and as it came when it can't say.
+   */
+  function heldFromComputer(sync: Sync, got: CloudState): { version: number; state: Blob } {
+    if (onRunner() || !got.writer || got.writer === sync.device || !sync.base || got.version !== sync.version + 1) return got;
+    const desktopId = computerOfDevice(sync.user, got.writer, sync.base, got.state);
+    if (!desktopId) return got;
+    const { blob, held } = keepAllowed(sync.base, got.state, { desktopId, device: got.writer });
+    if (!held.length) return got;
+    console.warn(`[store] computer ${desktopId}'s runner wrote what a computer may not change (${held.slice(0, 10).join(", ")}): not taken here, and put back`);
+    return { version: got.version, state: blob };
   }
 
   /**
@@ -367,12 +533,36 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     if (!st) return 0;
     const kept = sync.keptCount;
     const { now, upsert, remove } = diff(sync, st);
+    // A runner writes only its bots' messages and Bops' notes, in their chats, and those about its own threads
+    // and routines' runs in theirs, their bot moved off its computer or not (cloud/computer-scope.ts computersMessage): the rest stay here.
+    const scope = runnerScope(sync);
+    const chats = scope ? chatsOn(st as unknown as Blob, scope.desktopId) : null;
+    const bots = scope ? botIdsOn(st as unknown as Blob, scope.desktopId) : null;
+    const threads = scope ? threadsOf(st as unknown as Blob, scope.device) : undefined;
+    // Its routines' runs, here and as Bops Cloud has them, ended or not: a run's words (its result, a ping on it, a
+    // "Couldn't send") may go up after its end recorded here did, which a save in flight sends first.
+    const runs = scope ? new Map([...runsBy(sync.base ?? {}, scope.device), ...runsBy(st as unknown as Blob, scope.device)]) : undefined;
+    const hold = (m: Message) => {
+      sync.msgHashes.set(m.id, now.get(m.id)!);
+      sayHeld([`messages in ${m.chatId || "no chat"}`]);
+    };
     // Batches the cloud takes: a few MB each.
     let batch: { upsert: Message[]; remove: string[] } = { upsert: [], remove };
     let size = 0;
-    const flushBatch = async () => {
+    const flushBatch = async (): Promise<void> => {
       if (!batch.upsert.length && !batch.remove.length) return;
       const r = await call<{ seq: number }>(sync, "/v1/messages", { method: "POST", body: { upsert: batch.upsert.map(forCloud), remove: batch.remove } });
+      const no = r.body as unknown as { code?: unknown; paths?: unknown } | null;
+      if (r.status === 403 && scope && no?.code === COMPUTER_NOT_ALLOWED && Array.isArray(no.paths)) {
+        // Refused anyway (a newer Bops Cloud's rules): those stay here, the rest go.
+        const ids = new Set(no.paths.filter((x): x is string => typeof x === "string" && x.startsWith("messages.")).map((x) => x.slice("messages.".length)));
+        if (ids.size) {
+          for (const m of batch.upsert) if (ids.has(m.id)) hold(m);
+          for (const id of batch.remove) if (ids.has(id)) sync.msgHashes.delete(id);
+          batch = { upsert: batch.upsert.filter((m) => !ids.has(m.id)), remove: batch.remove.filter((id) => !ids.has(id)) };
+          return flushBatch();
+        }
+      }
       if (r.status !== 200) refused("Saving messages", r);
       for (const m of batch.upsert) sync.msgHashes.set(m.id, now.get(m.id)!);
       for (const id of batch.remove) sync.msgHashes.delete(id);
@@ -380,6 +570,10 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
       size = 0;
     };
     for (const m of upsert) {
+      if (chats && bots && !computersMessage(m as unknown as Blob, bots, chats, threads, runs)) {
+        hold(m);
+        continue;
+      }
       const bytes = JSON.stringify(m).length;
       if (size + bytes > BATCH_BYTES || batch.upsert.length >= PAGE) await flushBatch();
       batch.upsert.push(m);
@@ -392,9 +586,19 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     for (let tries = 0; tries < 5; tries++) {
       const current = state();
       if (!current) return 0;
-      const text = shared(current, sync.device);
+      const text = blobText(sync, current);
+      if (text === null) {
+        up = true;
+        break;
+      }
       const h = fp(text);
       if (h === sync.blobHash) {
+        up = true;
+        break;
+      }
+      // A runner's change that's all held back is no change.
+      if (scope && same(JSON.parse(text), sync.base)) {
+        sync.blobHash = h;
         up = true;
         break;
       }
@@ -412,6 +616,13 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
         break;
       }
       const conflict = r.body as CloudStateConflict | null;
+      const no = r.body as unknown as { code?: unknown; paths?: unknown } | null;
+      if (r.status === 403 && scope && no?.code === COMPUTER_NOT_ALLOWED && Array.isArray(no.paths)) {
+        // Refused anyway (a newer Bops Cloud's rules): held back from now on, and the rest sent again.
+        const had = (box.refused ??= new Set()).size;
+        for (const x of no.paths) if (typeof x === "string") box.refused.add(x);
+        if (box.refused.size > had) continue;
+      }
       if (r.status !== 409 || conflict?.code !== STATE_CONFLICT) refused("Saving your Bops", r);
       // Another Mac wrote first: theirs and this Mac's together, then written over theirs.
       const target = state();
@@ -456,11 +667,13 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
         .then((wait) => {
           if (box.failures) console.info(`[store] saving to Bops Cloud again after ${box.failures} failed ${box.failures === 1 ? "try" : "tries"}`);
           box.failures = 0;
+          box.tooNew = false;
           // The blob went up a moment ago: it goes again a little later.
           if (wait > 0 && box.sync === sync) schedule(wait);
         })
         .catch((e: Error) => {
           if (box.sync !== sync) return;
+          if (tooNewError(e)) box.tooNew = true;
           box.failures++;
           // Keep working from memory; say so on the first failure and then now and then, not every retry.
           if (box.failures === 1 || box.failures % 10 === 0) console.warn(`[store] saving to Bops Cloud failed (${box.failures}x, trying again in ${retryDelay() / 1000}s): ${e.message}`);
@@ -527,7 +740,8 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
       const r = await call<CloudState>(sync, "/v1/state");
       if (box.sync !== sync) return;
       if (r.status === 200 && r.body.version !== sync.version) {
-        mergeIn(sync, get(), r.body);
+        const theirs = heldFromComputer(sync, r.body);
+        mergeIn(sync, get(), theirs, theirs === r.body ? undefined : r.body.state);
         changed = true;
       } else if (r.status !== 200 && r.status !== 404) refused("Reading your Bops", r);
     }
@@ -557,6 +771,7 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
       sync.seq = after;
     }
     sync.pulledAt = Date.now();
+    box.tooNew = false;
     if (changed) {
       touch();
       // Merged with changes of this Mac's own: those go up.
@@ -564,11 +779,16 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     }
   }
 
+  /** A read the cloud refused for a newer Bops's state: this one stops its routines and beats (Persistence.tooNew). */
+  function noteTooNew(e: unknown) {
+    if (tooNewError(e)) box.tooNew = true;
+  }
+
   function startPoll() {
     if (box.poll) return;
     box.poll = setInterval(() => {
       const sync = box.sync;
-      if (sync && !box.timer) void lane(() => pullOnce(sync)).catch(() => {});
+      if (sync && !box.timer) void lane(() => pullOnce(sync)).catch(noteTooNew);
     }, POLL_MS);
     box.poll.unref?.();
   }
@@ -631,8 +851,10 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
       );
       box.aside.delete(userId);
       if (!sent) {
-        replace(a.state as unknown as Record<string, unknown>);
+        // Whose state it is first: bringing it up to date (store.ts migrate) asks which device this is.
         box.sync = a.sync;
+        box.tooNew = false;
+        replace(a.state as unknown as Record<string, unknown>);
         console.info(`[store] ${userId}'s Bops, with changes still to send to Bops Cloud`);
         schedule(0);
         return;
@@ -651,8 +873,10 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     const kept = readKept(userId);
     const legacy = kept ? null : readJson(legacyFile);
     const { state, sync } = kept ? buildKept(who, loaded, kept) : build(who, loaded, legacy);
-    replace(state);
+    // Whose state it is first: bringing it up to date (store.ts migrate) asks which device this is.
     box.sync = sync;
+    box.tooNew = false;
+    replace(state);
     if (kept) {
       sync.unsentFile = unsentFileOf(userId);
       if (kept.legacy && existsSync(legacyFile)) sync.legacyFile = legacyFile;
@@ -676,8 +900,13 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     if (box.timer) clearTimeout(box.timer);
     box.timer = undefined;
     const done = lane(() => send(sync, live(sync), true)).then(
-      () => box.sync !== sync || !hasUnsent(sync, get()),
+      () => {
+        if (box.sync !== sync) return true;
+        box.tooNew = false;
+        return !hasUnsent(sync, get());
+      },
       (e: Error) => {
+        noteTooNew(e);
         console.warn(`[store] saving to Bops Cloud: ${e.message}`);
         schedule(retryDelay());
         return false;
@@ -757,7 +986,16 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     unsent: () => !!box.sync && (!!box.timer || hasUnsent(box.sync, get())),
     pull: () => {
       const sync = box.sync;
-      return sync ? lane(() => pullOnce(sync)).catch((e: Error) => console.warn(`[store] reading from Bops Cloud: ${e.message}`)) : Promise.resolve();
+      return sync
+        ? lane(() => pullOnce(sync)).catch((e: Error) => {
+            noteTooNew(e);
+            console.warn(`[store] reading from Bops Cloud: ${e.message}`);
+          })
+        : Promise.resolve();
     },
+    pulledAt: () => box.sync?.pulledAt ?? 0,
+    device: () => box.sync?.device ?? null,
+    tooNew: () => !!box.sync && !!box.tooNew,
+    cloudCopy: () => box.sync?.base ?? null,
   };
 }

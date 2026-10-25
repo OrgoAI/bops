@@ -4,7 +4,7 @@ import type { CallerVerdict } from "@/cloud/protocol";
 import { botChatId, live, MAX_PERSONA_CHARS, type Bot } from "@/lib/types";
 import { callEnded, callStarted } from "./attention";
 import { delegate, voicePrompt } from "./call";
-import { saveToMemory, wsOf } from "./memory";
+import { OWNER_WHO, saveToMemory, wsOf } from "./memory";
 import { openaiClient } from "./openai-client";
 import { callLog, fromOwner, isOwner, linkClaimed, routeFor, type ApEvent } from "./phone";
 import { addMessage, bot, getState, ownerLine, ownerName, patchSession, stateEpoch } from "./store";
@@ -357,7 +357,7 @@ function finish(c: PhoneCall) {
   const card = { sms: { dir: "in" as const, from: c.from, to: c.to, id: `call:${c.id}` }, call: { seconds, phone: c.from } };
   if (c.owner) {
     callEnded();
-    if (turns.length) saveToMemory(wsOf(b.id), "chat", chatId, turns.slice(-200).map((t) => ({ who: t.who === "caller" ? "owner" : b.id, text: t.text.slice(0, 2000) })), { chat: "call" });
+    if (turns.length) saveToMemory(wsOf(b.id), "chat", chatId, turns.slice(-200).map((t) => ({ who: t.who === "caller" ? OWNER_WHO : b.id, text: t.text.slice(0, 2000) })), { chat: "call" });
     addMessage({ chatId, role: "system", text: (lines || "(nothing was said)").slice(0, 8000), ...card });
     return;
   }

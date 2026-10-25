@@ -2,3 +2,4 @@
 7e52c8555c74565850efe78d41ad4a8fd676cdbf:scripts/test-render.mjs:generic-api-key:406
 52451f6cd78a942408602b8c1ca67eb85ba74eea:scripts/test-vm-identity.mjs:generic-api-key:505
 52451f6cd78a942408602b8c1ca67eb85ba74eea:scripts/test-vm-identity.mjs:generic-api-key:510
+52a1f2bfe92531162a1b20007509c22786a12b1e:cloud/test/core-members.test.ts:generic-api-key:211

@@ -503,9 +503,9 @@ delete process.env.BOPS_CLOUD_URL;
 assert.equal(M.telemetryEnvironment(), "production");
 
 // The header that tells Bops Cloud to send nothing for this Mac (beside the version and which state it may be given).
-assert.deepEqual(V.appHeaders(), { "x-bops-version": "0.0.22", "x-bops-state-level": "3" });
+assert.deepEqual(V.appHeaders(), { "x-bops-version": "0.0.22", "x-bops-state-level": "4" });
 process.env.DO_NOT_TRACK = "1";
-assert.deepEqual(V.appHeaders(), { "x-bops-version": "0.0.22", "x-bops-state-level": "3", "x-bops-telemetry": "off" });
+assert.deepEqual(V.appHeaders(), { "x-bops-version": "0.0.22", "x-bops-state-level": "4", "x-bops-telemetry": "off" });
 delete process.env.DO_NOT_TRACK;
 process.env.NODE_ENV = "test";
 assert.equal(V.telemetryHere(), false);

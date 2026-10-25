@@ -554,7 +554,7 @@ export function BotRoutines({
   const popover = asked ?? suggest.pending?.app ?? null;
   const total = mine.schedules.length + mine.monitors.length;
   // What needs the user, of what's shown (the Connected App's when one is picked): each is a line below.
-  const needs = [...shown.schedules.filter((r) => scheduleNeedsYou(r, state)), ...shown.monitors.filter(monitorNeedsYou)].length;
+  const needs = [...shown.schedules.filter((r) => scheduleNeedsYou(r, state)), ...shown.monitors.filter((w) => monitorNeedsYou(w, state))].length;
   const withKeys = (b.keys ?? []).some(hasTemplates);
   // Its apps' icons, the popover's anchors: in the Add routines row, or in the empty state while it runs none.
   const logos = offers.map((x) => (
@@ -665,7 +665,7 @@ export function BotRoutines({
                   news={w.alert ? undash(w.alert.text) : undefined}
                   app={w.source?.app}
                   dim={!!w.paused || !!w.away}
-                  note={monitorNeedsYou(w) ? "Needs you" : w.paused || w.away ? "Paused" : null}
+                  note={monitorNeedsYou(w, state) ? "Needs you" : w.paused || w.away ? "Paused" : null}
                   onClick={() => onOpenAutopilot("monitors", w.id)}
                 />
               ))}
@@ -783,7 +783,7 @@ export function AppRoutines({ state, app, onOpenWatch }: { state: AppState; app:
   const { openId, toggle, list } = useOpenRow(undefined, undefined, false);
   const total = shown.schedules.length + shown.monitors.length;
   if (!total) return null;
-  const needs = shown.schedules.filter((r) => scheduleNeedsYou(r, state)).length + shown.monitors.filter(monitorNeedsYou).length;
+  const needs = shown.schedules.filter((r) => scheduleNeedsYou(r, state)).length + shown.monitors.filter((w) => monitorNeedsYou(w, state)).length;
   const groups = teamOf(state)
     .map((b) => ({ bot: b, schedules: shown.schedules.filter((r) => r.botId === b.id), monitors: shown.monitors.filter((w) => w.botId === b.id) }))
     .filter((g) => g.schedules.length + g.monitors.length);

@@ -1,5 +1,10 @@
 /** Shared shapes for the Bops app state, used by both the server and the UI. */
 
+import type { AppHosting, IngotToken } from "./hosted-apps";
+import type { MemberAccessMap } from "./member-access";
+import type { Ping } from "./pings";
+import type { SharedOpen } from "./shared";
+
 export type BotId = string;
 
 export type Bot = {
@@ -78,8 +83,15 @@ export type Bot = {
   /**
    * "Just do it": it sends, posts, changes and deletes in the user's apps and email without waiting for
    * their OK (said in its chat after), and its tasks don't stop to confirm. Paying on a website still asks. Off by default.
+   * For what asks the user, it allows what no rule of the bot's says (lib/permission.ts allows).
    */
   autoApprove?: boolean;
+  /**
+   * What this bot may do without asking the user, as rules (lib/permission.ts): Always allow on a request for
+   * their OK saves one for that action, so that action never asks again, whoever it's for. Only the user's own
+   * Bops writes them (a computer never may: cloud/computer-scope.ts).
+   */
+  permissions?: PermissionRule[];
   /**
    * Business data (lib/server/treg.ts: companies, people, work emails, signals, places) is off for this
    * bot. On for every bot unless the user turns it off, whenever treg is set up.
@@ -171,6 +183,28 @@ export type Workspace = {
   tags?: WorkspaceTag[];
   /** The Connected Apps whose recent items tags were already learned from (one sample per app). */
   tagsLearnedFrom?: string[];
+  /**
+   * The workspace's apps on the web, by Ingot repo name (lib/hosted-apps.ts): which bot's computer holds
+   * each one's working folder and runs its site, and its deploy project and URL once deployed.
+   */
+  hostedApps?: Record<string, AppHosting>;
+  /**
+   * The agent token each of its computers signs in to Ingot with, by computer id (lib/hosted-apps.ts): its
+   * id, never the token. Revoked once no app of the workspace is on that computer, or it's gone.
+   */
+  ingotTokens?: Record<string, IngotToken>;
+  /**
+   * Knowledge's kinds pinned to the sidebar's Favorites, in the user's order (lib/favorites.ts): unset
+   * until the user first pins or unpins one (the defaults show until then), then their list as it is,
+   * an empty one included. Synced with the state, so it follows them to their other Macs.
+   */
+  favorites?: string[];
+  /**
+   * What each person the owner added may do with this workspace's bots, by email (lib/member-access.ts):
+   * none, read or write per bot, and for the bots not named (new ones too). Someone not here sees no
+   * bot. Bops Cloud reads it from the owner's state to build a member's view; it never goes to them.
+   */
+  memberAccess?: MemberAccessMap;
 };
 
 /** A tag routines sort by: a short name and what it's for. */
@@ -199,6 +233,8 @@ export type SkillRef = {
   name: string;
   /** What it does and when to use it: all a bot sees until it reads it (read_skill). */
   description: string;
+  /** The label it's listed under (lib/skill-labels.ts); unset is Other. Kept in its SKILL.md, so it syncs with Orgo. */
+  label?: string;
   /** draft: its bots don't see it yet; published: they do, at `version`. */
   status: "draft" | "published";
   /** The version its bots read (published), and every version kept, newest last. */
@@ -216,7 +252,17 @@ export type SkillRef = {
   legacyId?: string;
   /** Orgo's id for it and when Orgo last changed it (lib/server/workspace-skills.ts sync). */
   remoteId?: string;
+  /** The Orgo project that id is in: once set, a sync that no longer finds it there takes it as deleted there. */
+  remotePid?: string;
   remoteAt?: string;
+  /** The version Orgo had when they last agreed ("" for none), so a sync that reads only what changed since (?since=) knows Orgo's copy of one that didn't. */
+  remoteVersion?: string;
+  /**
+   * The label in Orgo's SKILL.md when they last agreed (sent or brought here). A move here reaches Orgo only
+   * with the next version (orgo-web's PATCH doesn't take a label), so a pull that brings this same one back
+   * keeps the label here; one Orgo changed comes here.
+   */
+  remoteLabel?: string;
   /** When this Mac and Orgo last agreed on it: a change here after this goes to Orgo. */
   syncedAt?: number;
   /** How many times a bot read it for a job, and when it last did. */
@@ -227,7 +273,18 @@ export type SkillRef = {
 };
 
 /** A script someone approved to run, by its content (an unchanged script carried into a new version stays approved). */
-export type ScriptApproval = { sha256: string; path: string; at: number };
+export type ScriptApproval = {
+  sha256: string;
+  path: string;
+  at: number;
+  /** Orgo has it (sent from here, or made on orgo.ai): one it no longer lists was revoked there (lib/server/workspace-skills.ts). */
+  synced?: boolean;
+  /**
+   * Made in a Bops window by the person signed in (approveScript), not taken from Orgo. One taken from
+   * Orgo counts only while Orgo says that person made it: another member's approval never runs a script here.
+   */
+  inBops?: boolean;
+};
 
 export type WorkspaceLine = {
   phone: string;
@@ -453,6 +510,11 @@ export type Message = {
   role: "user" | "bot" | "system";
   /** Who wrote it, for bot messages. */
   botId?: BotId;
+  /**
+   * Set on the note a bot leaves when it hands work to another ("Sam handed this to Max"): the bot it came
+   * from, so a shared workspace never shows it to someone that bot is hidden from (cloud/ws-slice.ts).
+   */
+  from?: BotId;
   text: string;
   at: number;
   /** Threads this message started or reports on; shown as session chips under it. */
@@ -469,8 +531,12 @@ export type Message = {
   phone?: { apId?: string; conversationId?: string; from?: string };
   /** A text someone else sent the bot's number (in), or the bot sent (out). */
   sms?: { dir: "in" | "out"; from: string; to: string; id?: string };
-  /** Set on the note an app action leaves when the user answered its approval: what the app answered, so the bot sees whether it worked. */
-  appResult?: { action: string; ok: boolean; output: string };
+  /**
+   * Set on the note an app action leaves when the user answered its approval: what the app answered, so
+   * the bot sees whether it worked. `unasked`: a call that went out without asking them (a GET that
+   * failed: keys.ts callApi), which is never read as their approval.
+   */
+  appResult?: { action: string; ok: boolean; output: string; unasked?: true };
   /** Set on a bot's reply: the API calls it made with the user's keys for it (call_api), "Called Stripe GET /v1/customers". */
   called?: string[];
   /** Set on a heads-up from a watched screen: which watch, so the message can offer to show it or reply. */
@@ -480,7 +546,10 @@ export type Message = {
    * a run someone asked for (Run now), so a turn in Slack or by text that asked for it sends it back there.
    */
   routine?: { id: string; manual?: true };
-  /** The user asked to keep this from someone ("between us"): never read into memory, a procedure's draft, or anywhere shared. */
+  /**
+   * The user asked to keep this from someone ("between us"): never read into the shared memory or a
+   * procedure's draft. Someone the owner gave its bot still sees it in a shared workspace (cloud/ws-slice.ts).
+   */
   secret?: true;
   /** An inline reply (like iMessage's): the message it starts from. Replies to a reply join the same one. */
   replyTo?: string;
@@ -496,6 +565,8 @@ export type Message = {
   email?: EmailInfo;
   /** A bot reply that also went to the user by email (they emailed the bot): the address it went to. */
   emailed?: string;
+  /** On the user's message: the app (lib/server/made-apps.ts) open next to the chat as they sent it, which a change they ask for is about. */
+  lookingAt?: string;
   /** Images attached to it (shown from /api/uploads/<id>; bots see them too). */
   images?: { id: string; type: string; w?: number; h?: number }[];
   /** A picture the bot made (make_image): what it was asked to show, so it knows what it sent. */
@@ -513,7 +584,69 @@ export type Message = {
    * file's version after it, so the note can open the file and undo the save while nothing changed since.
    */
   crm?: { ws: string; file: string; added: number; changed: number; created?: true; snapshot?: string; after: string; undone?: true };
+  /**
+   * Set on the line a bot's app build leaves (lib/server/made-apps.ts): the app, and the version the
+   * build made (or is making), so the line can open the app, show it building, and undo the change.
+   */
+  madeApp?: { appId: string; version: number };
+  /**
+   * Bops' own words in the bot's voice (a line it fills in: why a thread stopped, where to run one, a plan's
+   * limit), never the model's: a shared workspace reads it in the owner's voice (lib/server/shared-core.ts viewState).
+   */
+  bops?: true;
+  /**
+   * Set on the "While you were busy" message (lib/server/attention.ts flush), which the workspace's main bot
+   * posts for every bot's watches: each line it tells and the bot whose watch it came from, so a shared
+   * workspace shows someone only the lines of bots they were given (cloud/ws-slice.ts).
+   */
+  held?: { botId: BotId; text: string }[];
 };
+
+/**
+ * An app a bot made for the user (lib/server/made-apps.ts): a small React app that runs in a tab of
+ * Bops' right panel, locked down, and keeps its own data. Each change is a new version; going back
+ * to one is a change too.
+ */
+export type MadeApp = {
+  id: string;
+  title: string;
+  /** The bot that made it, and the chat it was asked for in (its builds report there). */
+  botId: BotId;
+  chatId: string;
+  ws: string;
+  /** The version that runs now (0 while the first one is being built). */
+  version: number;
+  versions: { n: number; note: string; at: number }[];
+  /** Being built: the change asked for, when it started, and how much code is written so far. */
+  building?: { change: string; since: number; chars: number };
+  /** The last build failed: why, in a line (the version before it keeps running). */
+  error?: string;
+  /** What the user let it do, and when: ask its bot, which looks things up in their connected apps (`bops.bot`). */
+  allowed?: { bot?: number };
+  createdAt: number;
+  updatedAt: number;
+  /** The Mac that built it (its device id), as Orgo's record says (lib/server/made-apps-sync.ts). */
+  deviceId?: string;
+  /** This Mac's updatedAt Orgo has, and Orgo's updatedAt as last seen: a change here after the first goes to Orgo, one there after the second comes here. */
+  syncedAt?: number;
+  remoteAt?: string;
+  /** The sha256 of the data this Mac and Orgo last agreed on, and of what Orgo holds as last heard (fetched when the app reads it). */
+  dataSha?: string;
+  orgoData?: { sha256: string; at: number };
+  /** Versions Orgo refused for what looked like a secret, by number: the sha256 of the code it refused (not sent again while the code is the same). */
+  refused?: Record<string, string>;
+};
+
+/**
+ * What a bot's delete says of the apps it made: they stay, under its workspace's main bot (their builds
+ * report in its chat; lib/server/made-apps-sync.ts appsToMainBot). Null when it made none.
+ */
+export function appsStayLine(state: Pick<AppState, "bots" | "madeApps">, b: Pick<Bot, "id" | "workspaceId">): string | null {
+  const n = (state.madeApps ?? []).filter((a) => a.botId === b.id).length;
+  const main = state.bots.find((x) => x.isMain && x.id !== b.id && workspaceOf(x) === workspaceOf(b));
+  if (!n || !main) return null;
+  return n === 1 ? `The app it made stays, under ${main.name}.` : `The ${n} apps it made stay, under ${main.name}.`;
+}
 
 export type EmailInfo = {
   dir: "in" | "out";
@@ -576,6 +709,12 @@ export type Session = {
    * a stranger's words, or a page it opens, can't have it read the user's customers out.
    */
   fromOutside?: true;
+  /**
+   * Started for a message the user kept "between us" (Message.secret): kept between us too, and so is
+   * what's said about it in a chat, its result and notes (store.ts addMessage), so none of that goes into
+   * a procedure's draft. Someone the owner gave its bot still sees it in a shared workspace (cloud/ws-slice.ts).
+   */
+  secret?: true;
   /** The user dismissed it: it stopped, and it doesn't ask for them again. */
   dismissed?: boolean;
   /** A newer thread took over this job (moved to the Mac, or asked for again); this one stays quiet. */
@@ -592,8 +731,14 @@ export type Session = {
   botId: BotId;
   /** The chat it was started from; its chip lives there. */
   chatId: string;
-  /** Who kicked it off: the user directly, another bot handing it over, or a routine. */
+  /** Who kicked it off: the user directly, another bot handing it over, or a routine. Read it with ownerSent, routineSent and sentByBot. */
   sentVia: BotId | "you" | "routine";
+  /**
+   * `sentVia` names a bot though it's "you" or "routine": a bot from before ids couldn't be those (lib/server/bots.ts
+   * freeBotId) handed it on, made it for a new bot or split it off. Never the user's words or a routine's run
+   * (ownerSent, routineSent). Set only then.
+   */
+  sentViaBot?: true;
   /** Short label for chips and lists. */
   title: string;
   /** The kickoff message the bot works from, pinned at the top of the thread. */
@@ -602,6 +747,12 @@ export type Session = {
   routineId?: string;
   /** The procedure (Procedure.id) it follows, given to it in full. */
   procedure?: string;
+  /**
+   * The app on the web it works on (work_on_app, lib/server/hosted-apps.ts), by workspace and Ingot repo
+   * name: as it starts, the app's working folder is made ready on its computer (/workspace/apps/<name>),
+   * and a brain's thread gets Ingot's MCP tools.
+   */
+  app?: { wsId: string; name: string };
   host: Host;
   status: SessionStatus;
   /** X display number of the screen this session holds (99-102), while it holds one. */
@@ -620,15 +771,19 @@ export type Session = {
   /** On the computer runner: the last response, which the next turn follows on from. */
   responseId?: string;
   /**
-   * On the computer runner: calls in that response not answered yet (a turn stopped mid-step, or a step OpenAI
-   * flagged), answered when it picks up: a tool call with what it answered when it ran, a flagged step's call with its safety checks.
+   * On the computer runner: calls in that response not answered yet (a turn stopped mid-step, a step OpenAI
+   * flagged, or a run paused at a call that needs the user's OK: AppApproval.resume), answered when it picks up:
+   * a tool call with what it answered when it ran, a flagged step's call with its safety checks, the paused call
+   * with what the user's reply made of it.
    */
   owed?: { id: string; type: "computer" | "function"; output?: string; checks?: { id: string; code?: string | null; message?: string | null }[] }[];
   /**
    * The Agents API environment its executor connects to, and the workspace (and Full access on this Mac, MacState.fullAccess, its browser tools' sockets folder, and whether it had the user's apps there; on a computer, the screen its browser tools drive) it was made with, kept so a finished thread can pick up again.
    * `ui`: it had the Mac tools (Cua Driver), through Bops' own MCP server ("bops"; true was Cua's own, which a thread doesn't pick up again).
+   * `fn`: its apps and business data are function tools Bops answers (sessions.ts agentTool), so a call that needs the user's OK
+   * pauses it; one from before had them as MCP tools, and starts a fresh agent session.
    */
-  env?: { id: string; remoteUrl: string; workspace?: string; fullAccess?: boolean; sockets?: string; apps?: boolean; data?: boolean; ui?: boolean | "bops"; display?: number };
+  env?: { id: string; remoteUrl: string; workspace?: string; fullAccess?: boolean; sockets?: string; apps?: boolean; data?: boolean; ui?: boolean | "bops"; display?: number; fn?: true };
   /**
    * Run by its bot's brain (Brain, lib/server/cli-agents.ts) rather than Bops agent: which brain, on which
    * computer, and the CLI's own session there (`cli`: Claude Code's session id), which a later turn, or a
@@ -662,6 +817,14 @@ export type Session = {
   onWatch?: string;
   /** Where it runs: the bot's cloud computer (also when unset, as older threads are), or a Chrome of its own on the user's Mac. */
   runsOn?: "cloud" | "mac";
+  /**
+   * The Bops that runs it, as the user's state knows it (persist-cloud.ts deviceIdFor): the Mac it was
+   * started on, or a computer's runner (lib/server/runner.ts). Only that one starts it, picks it up again,
+   * stops it, or marks it failed when it restarts. Unset on threads from before: the Mac's, never a runner's.
+   */
+  by?: string;
+  /** Stop asked for on another Bops than the one that runs it (sessions.ts stopSession), and why: that one stops it when it hears. */
+  stopAsked?: string;
   /** Bops is still deciding where it runs. */
   routing?: boolean;
   /** Bops couldn't tell where it should run, so it's asking the user. */
@@ -757,6 +920,12 @@ export type RoutineRun = {
   threadAt?: number;
   /** Whether the result reached `deliverTo`; unset when there was nothing to send or nowhere besides the chat. */
   delivery?: { status: "sent" | "failed"; to: string; error?: string; at: number };
+  /**
+   * The computer's runner that ran it (its device, as Session.by), on a run a runner recorded: that run
+   * stays the runner's to end if its bot moves off that computer meanwhile, and what the run says in the
+   * chat stays the runner's to write until another run is recorded (cloud/computer-scope.ts runsOf, runsBy).
+   */
+  by?: string;
 };
 
 /** A routine or one-off scheduled ask. When it fires it becomes a reminder, a turn in the bot's chat, or a thread. */
@@ -781,6 +950,13 @@ export type Routine = {
   skips?: number[];
   /** Where its task runs (as the user asked); auto lets Bops decide each time. */
   where?: "auto" | "cloud" | "mac";
+  /**
+   * For a task left to Bops (where auto), where the Mac would send its runs, worked out on the Mac ahead
+   * of them for its goal then (routines.ts pickWhere, as where.ts chooseWhere decides a run: the user's
+   * app rules, then Jev). "mac" keeps it the Mac's in Cloud while its goal is still `goal` (runner.ts
+   * pinnedToMac): a computer's runner can't tell, having no Mac.
+   */
+  macPick?: { goal: string; where: "mac" | "cloud" };
   /** A plain reminder: this message is sent to the user at the time, and no computer is used. */
   reminder?: string;
   /** Set up by text from the user's phone: the reminder, or the task's result, is texted to them too. */
@@ -817,7 +993,11 @@ export type Routine = {
   tags?: string[];
 };
 
-/** A one-off whose time has passed: done. Run now before then doesn't finish it (it can still be paused and resumed). */
+/**
+ * A one-off whose time has passed: done. It's turned off as it fires (lib/server/routines.ts tick), on the one
+ * Bops that runs it start to finish, so nothing runs it twice; a run of it that fails shows failed, with Run
+ * now to run it again. Run now before its time doesn't finish it (it can still be paused and resumed).
+ */
 export const onceDone = (r: Routine, now = Date.now()) => !r.enabled && r.schedule.kind === "once" && r.schedule.at <= now;
 
 /**
@@ -868,9 +1048,25 @@ export const procedureKey = (s: string) =>
  * own on your Mac (`macScreen`, Session.macScreen); the bot is paused there until you hand it back.
  * `terminal`: you opened the thread's Claude Code in a terminal on that screen (sessions.ts openInTerminal),
  * and `paused` it as it worked; the screen is yours until you reply in the thread or hand it back.
+ * `found`: "left", thread `sessionId` ended there waiting on you at the screen (a sign in, a code), not paused
+ * for the takeover: handing back carries it on only while it's still so (sessions.ts returnControl). A run that
+ * waits for your OK (AppApproval) holds no screen while it waits, so a takeover never finds it.
  */
-export type Takeover = { botId: BotId; sessionId?: string; since: number; terminal?: { paused?: true } } & ({ display: number; macScreen?: undefined } | { macScreen: number; display?: undefined });
+export type Takeover = { botId: BotId; sessionId?: string; found?: "left"; since: number; terminal?: { paused?: true } } & ({ display: number; macScreen?: undefined } | { macScreen: number; display?: undefined });
 
+/**
+ * A screen of a bot's computer the user drives from this Mac (its Takeover, which isn't synced), said to their other
+ * Bops and to the computer's runner, so none of them puts a run on it: this Mac's own (AppState.driving, under
+ * macs[deviceId] in Bops Cloud). Said again every few minutes while the takeover lasts (`at`), so one left by a Mac
+ * that quit or crashed meanwhile counts no longer than a few minutes more (sessions.ts drivenElsewhere).
+ */
+export type Driving = { botId: BotId; display: number; at: number };
+
+/**
+ * What a thread waits on at its screen that only the user can give: a sign-in, a code, a captcha, a payment,
+ * an error page (screen-watch.ts). Waiting for the user's OK isn't one: that's a request (AppApproval), and the
+ * thread's status says so while one of its own is unanswered (waitsForOk).
+ */
 export type Blocker = "sign_in" | "two_factor" | "captcha" | "payment" | "error";
 export const BLOCKER_LABEL: Record<Blocker, string> = {
   sign_in: "a sign-in",
@@ -879,6 +1075,8 @@ export const BLOCKER_LABEL: Record<Blocker, string> = {
   payment: "a payment to confirm",
   error: "an error page",
 };
+/** What a thread's status says while a request for the user's OK of its is unanswered (waitsForOk). */
+export const WAITING_FOR_OK = "Waiting for your OK";
 
 export type PageKind = "email_compose" | "article" | "checkout" | "results" | "other";
 
@@ -976,11 +1174,13 @@ export type AppState = {
   connecting?: AppConnecting[];
   /** Where the user added bots like a teammate: a Slack channel, a Telegram bot, a Discord bot (lib/server/channels.ts). */
   channels?: ChannelLink[];
-  /** App actions a bot wants to take that change something (send, create, pay), waiting for the user. */
+  /** Actions a bot wants to take that change something (send, create, pay): waiting for the user, or answered a moment ago. Shared by every Bops of the user's (AppApproval). */
   appApprovals?: AppApproval[];
   /** Teams the user keeps apart, and the one they're looking at. */
   workspaces?: Workspace[];
   workspace?: string;
+  /** Apps the bots made for the user (lib/server/made-apps.ts): recorded in Orgo, with a copy on this Mac (made-apps-sync.ts); never in Bops Cloud's shared state. */
+  madeApps?: MadeApp[];
   /**
    * The user's own mobile numbers (Settings, How your bots reach you): when they agreed to get texts
    * from their bots, and when they proved the number is theirs with a texted code
@@ -1050,9 +1250,18 @@ export type AppState = {
   /**
    * What's each of the user's other Macs' own (routing through it, whether bots can work on it, its setup), by device
    * id, as Bops Cloud keeps the state (lib/server/state-merge.ts). This Mac's own is at the top level
-   * (relay, relayRoutes, mac, setup) and goes up under its id.
+   * (relay, relayRoutes, mac, setup, driving) and goes up under its id.
    */
-  macs?: Record<string, { relay?: AppState["relay"]; relayRoutes?: AppState["relayRoutes"]; mac?: MacState; setup?: AppState["setup"] }>;
+  macs?: Record<string, { relay?: AppState["relay"]; relayRoutes?: AppState["relayRoutes"]; mac?: MacState; setup?: AppState["setup"]; driving?: Driving }>;
+  /** The screen of a bot's computer the user drives from this Mac, for their other Bops and its runner (Driving). */
+  driving?: Driving;
+  /**
+   * The Bops runner on each of the bots' computers, by Orgo computer id (lib/server/runner.ts): a Bops of
+   * its own there that runs the routines of the bots working on that computer while the user's Mac is
+   * closed (where their bots work: Cloud). Shared by every Mac and runner of the user's, so each knows
+   * whose routines are whose.
+   */
+  runners?: Record<string, RunnerState>;
   /**
    * Whether the computers' other screens stream live through Orgo too, not only over the tailnet
    * (BOPS_SCREEN_STREAM=1, screenStreamWanted in lib/server/orgo.ts). Filled in by /api/state for the
@@ -1061,7 +1270,154 @@ export type AppState = {
   screenStream?: boolean;
   /** Whether business data (treg) is there for the bots: lib/server/treg.ts tregOn. Filled in by /api/state for the app; never stored. */
   businessData?: boolean;
+  /**
+   * What the user's bots are doing on their other devices right now (thinking, working…; and the chat,
+   * when typing), by bot id, from Bops Cloud's live stream (lib/server/live.ts). Filled in by /api/state
+   * for the app; never stored or synced.
+   */
+  liveMoods?: Record<BotId, { mood: "thinking" | "writing" | "speaking" | "working"; chatId?: string }>;
+  /**
+   * The workspace shared with the user that's open now, read only (lib/shared.ts, lib/server/shared.ts):
+   * its bots, chats, threads, routines and watches are the owner's, in place of the user's own. Filled
+   * in by /api/state for the app; never stored or synced.
+   */
+  shared?: SharedOpen;
+  /**
+   * While a shared workspace is open (shared): what of the user's own is worth a chime (lib/pings.ts
+   * duePings), as the window would find it in their own state, which it isn't shown then. Filled in by
+   * /api/state for the app; never stored or synced.
+   */
+  ownPings?: Ping[];
 };
+
+/**
+ * A computer's Bops runner (AppState.runners). `status`: being set up, up (its health check passed: it
+ * runs that computer's routines, and the Mac leaves them to it), couldn't start (`error` says why: those
+ * routines stay on the Mac), or being stopped (where the bots work switched to This Mac, the computer was
+ * deleted, its bots moved off). `version` and `buildId`: the Bops it runs, set up by the Mac `by` (its
+ * device id). The runner signs in with its computer's own Orgo key (ORGO_API_KEY, which Orgo writes on
+ * it). `keyMade`: Bops gave the computer that key (PUT orgo-web /api/computers/{id}/orgo-key, from the
+ * Mac that set the runner up on a computer without one), so Bops takes it back when it stops the runner
+ * (DELETE, from any Mac of the user's); `keyId` is its id, to show. A computer that came with its key (a
+ * template that asks for one: bops-base 0.1.9 on) keeps it: it's the computer's, and Orgo revokes it with
+ * the computer. An entry from before keyMade that has a keyId (made by the old bops-runner-key route)
+ * counts as keyMade (runnerKeyMade), and its old `keyBy` is ignored. `at`: when the status was set.
+ * `upgrading`: one that's up being set up again with a newer Bops by the Mac `by` since `at`: it stays up
+ * and keeps its routines meanwhile (runner-install.ts). `auth`: what it said it signs in with at its last
+ * health check or look (its log's `[runner] auth:` line): its computer's Orgo identity, its key, or
+ * nothing yet. `down`: a Mac's look found its computer down and not coming back by itself (stopped,
+ * frozen, in error), or asleep with one of its routines well past its time (Orgo's waker didn't wake it:
+ * Free hours used up, paused, unfunded), as Orgo said (`status`) at `at`: its routines wait for it, saying
+ * why, and run on it once it's up again; the Mac never takes them over (runner-install.ts lookDown). A look
+ * that finds it up clears it. Only a Mac writes it.
+ */
+export type RunnerState = {
+  status: "installing" | "running" | "failed" | "stopping";
+  version: string;
+  buildId: string;
+  keyMade?: boolean;
+  keyId?: string;
+  auth?: "identity" | "key" | "none";
+  by: string;
+  error?: string;
+  at: number;
+  upgrading?: { version: string; buildId: string; by: string; at: number };
+  down?: { status: string; at: number };
+};
+
+/** A new task's words that put it on the user's Mac (lib/server/where.ts chooseWhere), and a routine's (routineOnMac). */
+export const MAC_WORDS = /\b(on|from|using|use|with) my (mac|macbook|laptop|computer)\b|\blocally\b|\bon this mac\b/i;
+
+/**
+ * A routine that needs no computer: a reminder, or a chat run (a turn with the bot's tools; someone else's
+ * routine is never one: lib/server/routines.ts run). It's always the Mac's (routineOnMac), as before runners:
+ * a runner never runs one, whether a Mac is up or not, and Orgo never wakes a computer for one nor keeps one up
+ * for it (the routines mirror's onMac). Bops Cloud can't run a turn with the bot's tools yet (cloud/agent.ts
+ * answers the phone with none), so one due while no Mac is up runs once a Mac is up again, late.
+ */
+export const needsNoComputer = (r: Pick<Routine, "reminder" | "run" | "fromOutside">) => !!r.reminder || (r.run === "chat" && !r.fromOutside);
+
+/**
+ * The bot has skills or apps of its workspace published for it (lib/server/workspace-skills.ts skillsFor, read
+ * from the state alone so every Bops agrees): their files are synced to the Mac alone. Bops' own built-in
+ * skills come with every Bops, a runner too.
+ */
+function skillsOnMac(s: Pick<AppState, "bots" | "workspaces">, botId: string): boolean {
+  const b = s.bots?.find((x) => x.id === botId);
+  if (!b) return false;
+  const w = s.workspaces?.find((x) => x.id === workspaceOf(b));
+  return [...(w?.skills ?? []), ...(w?.apps ?? [])].some((x) => x.status === "published" && (!x.botIds?.length || x.botIds.includes(botId)));
+}
+
+/**
+ * Whether a routine's runs need the user's Mac (lib/server/runner.ts pinnedToMac), decided before a run starts
+ * from what every Bops of theirs sees alike in the state (never a Mac's own rules, state.mac, but what a Mac
+ * picked and kept with the routine), and never changed by how a run went:
+ * - a reminder or a chat run (needsNoComputer), always for now: chat is the backend's, and a bot's computer
+ *   is only for work that needs one (a chat run that needs a computer starts a task, which runs on its bot's);
+ * - any whose result goes to Slack, Telegram or Discord (a runner can't post there: their tokens are in
+ *   the Mac's Keychain, and Bops Cloud gives a computer no raw Composio calls), or that follows a skill
+ *   (skills' files are synced to the Mac alone);
+ * - a task whose bot has skills or apps of its workspace published for it: on a runner its instructions
+ *   would lack their steps, and read_skill finds none;
+ * - a task set to run there, or one left to Bops whose bot works on the Mac, whose job says so ("on my
+ *   Mac", "locally"), or that the Mac would send there (Routine.macPick for its goal now: the user's app
+ *   rules, an app only on their Mac; only while its bot is left to Bops too, as a bot's own setting comes
+ *   first: where.ts chooseWhere).
+ * A task that reaches something only the user can give on its computer (their OK, a sign in) waits for it
+ * there, its status saying so: it's never the Mac's for that.
+ */
+export function routineOnMac(
+  state: Pick<AppState, "bots" | "workspaces">,
+  r: Pick<Routine, "botId" | "where" | "goal" | "reminder" | "run" | "fromOutside" | "deliverTo" | "procedure" | "macPick">,
+  b: Pick<Bot, "runsOn"> | undefined,
+): boolean {
+  if (needsNoComputer(r)) return true;
+  if (r.deliverTo?.kind === "channel" || r.procedure) return true;
+  if (skillsOnMac(state, r.botId)) return true;
+  if (r.where === "mac") return true;
+  if (r.where === "cloud") return false;
+  const leftToBops = b?.runsOn !== "mac" && b?.runsOn !== "cloud";
+  return b?.runsOn === "mac" || MAC_WORDS.test(r.goal) || (leftToBops && r.macPick?.where === "mac" && r.macPick.goal === r.goal);
+}
+
+/**
+ * Why a routine's runs wait for its bot's computer, in a few words ("Max's computer is stopped"), when a
+ * Mac's look found that computer down or asleep with its routines overdue (RunnerState.down) while its
+ * runner runs them: they run there once it's up, never moved to the Mac. Undefined when nothing holds them
+ * up, and for one the Mac runs (routineOnMac).
+ */
+export function computerWait(state: Pick<AppState, "bots" | "runners" | "workspaces">, r: Pick<Routine, "botId" | "enabled" | "where" | "goal" | "reminder" | "run" | "fromOutside" | "deliverTo" | "procedure" | "macPick">): string | undefined {
+  const b = state.bots.find((x) => x.id === r.botId);
+  const w = b && workBot(b, state.bots);
+  const id = w?.computerId?.toLowerCase();
+  const x = id ? Object.entries(state.runners ?? {}).find(([k]) => k.toLowerCase() === id)?.[1] : undefined;
+  if (!r.enabled || !w || x?.status !== "running" || !x.down || routineOnMac(state, r, b)) return undefined;
+  const st = x.down.status;
+  return `${w.name}'s computer is ${st === "error" ? "broken" : st === "suspended" ? "asleep" : st}`;
+}
+
+/** Whether Bops gave the computer its Orgo key, and takes it back when it stops the runner: keyMade, or an entry from before keyMade with a keyId. */
+export const runnerKeyMade = (x: Pick<RunnerState, "keyMade" | "keyId"> | undefined): boolean => !!x && (x.keyMade ?? !!x.keyId);
+
+/** Why a runner couldn't start, when it was its key: it came up but couldn't sign in, or Orgo didn't give its computer one (runner-install.ts). */
+export const RUNNER_NO_SIGN_IN = "it couldn't sign in on its computer";
+export const RUNNER_NO_KEY = "Orgo didn't give its computer its key";
+
+/**
+ * Whether computer's runner counts on its computer's own Orgo key now: one that's up signs in with it
+ * (not one up on its computer's Orgo identity), and one that couldn't start for want of it.
+ */
+export const runnerNeedsKey = (x: RunnerState | undefined): boolean =>
+  !!x && ((x.status === "running" && x.auth !== "identity") || (x.status === "failed" && (x.error === RUNNER_NO_SIGN_IN || x.error === RUNNER_NO_KEY)));
+
+/**
+ * A computer's own Orgo key as Settings shows it (orgo-web GET /api/computers/{id}/orgo-key, read by
+ * app/api/runs-on/keys): what names it, never the key. `prefix`: its first characters as Orgo shows them
+ * ("sk_live_ab12"), empty when Orgo gave none that short. Times in ms; `lastUsed` and `expiresAt` null
+ * when it was never used, or never expires.
+ */
+export type ComputerOrgoKey = { keyId: string; prefix: string; name: string; createdAt: number | null; lastUsed: number | null; expiresAt: number | null };
 
 /**
  * One computer's switch to this Mac's route. `before` is how Orgo had it (proxy on or off, and through
@@ -1283,8 +1639,105 @@ export const pairCodeLive = (l: Pick<ChannelLink, "owner" | "pairCode" | "pairCo
 /** A conversation in a channel: which link, which chat or channel there, and the message (or thread) to answer under. */
 export type ChannelPlace = { linkId: string; chat: string; messageId?: string; thread?: string; from?: string };
 
-/** A bot asks before an app action that changes something: the user sees what it is and says yes or no. */
-export type AppApproval = { id: string; botId: string; chatId?: string; sessionId?: string; app: string; action: string; title: string; detail: string; at: number };
+/**
+ * A request for the user's OK (OpenCode's permission request, Codex's approval): a bot's run reached a tool call
+ * that changes something (an app action, an email to someone else, a key's call that changes something, a dear
+ * lookup, a tool its brain may not use by itself) and its rules don't allow it (lib/permission.ts). A plain record
+ * in the state every Bops of the user's shares, so every Bops of theirs shows the card, wherever the run runs:
+ * - `threadId`: the run's thread (a chat turn has `chatId` only); `routineId`, the routine whose run it is;
+ *   `askedBy`, the device running the run (its Bops, as Session.by), the only one that resumes it and that
+ *   takes the record out, once it has read the reply;
+ * - `action`: what kind of thing ("Send an email", "Send Message in Slack (work)"), what Always allow saves a rule
+ *   for (lib/permission.ts); `resources`: to whom or what, as best Bops can tell from its inputs (recipients, a
+ *   channel, a URL), for the user to read; `preview`: exactly what will happen, as the card shows it; `kind` and
+ *   `api`, how the card shows it;
+ * - `resume`: what carries the run on from where it paused (lib/server/permission.ts), held by OpenAI, not by
+ *   a Bops process: nothing in memory matters while it waits, and a restart of the device that asked loses nothing;
+ * - `reply`: the user's answer, from one of their own Bops (`by` its device): once, always (a rule saved too) or
+ *   reject (`message`, what to do instead, the bot is told); Stop on its thread writes reject with reason
+ *   "stopped". Set once, never taken back (state-merge.ts mergeApproval). Nothing else resolves it.
+ */
+export type AppApproval = {
+  id: string;
+  threadId?: string;
+  chatId?: string;
+  botId: string;
+  routineId?: string;
+  askedBy?: string;
+  action: string;
+  resources: string[];
+  preview: string;
+  kind?: "app" | "email" | "api" | "data" | "brain";
+  /** A call to an API with one of the user's keys: the key, its service, the method and the whole path. */
+  api?: { key: string; label: string; method: string; path: string };
+  at: number;
+  resume?: AskResume;
+  reply?: AskAnswer;
+};
+
+/** How the user answers a request (OpenCode's reply, Codex's ReviewDecision approved / approved_for_session / denied). */
+export type AskReply = "once" | "always" | "reject";
+export type AskAnswer = { reply: AskReply; message?: string; reason?: "stopped"; by?: string; at: number };
+/** The tool call a run paused at, as the model made it: its name and its arguments (JSON). */
+export type AskCall = { name: string; arguments: string };
+
+/**
+ * What carries a paused run on (lib/server/permission.ts), by the engine that ran it:
+ * - "responses": a thread on the Responses API's computer tool (computer-task.ts): the response it paused in,
+ *   and the call whose output it owes (function_call_output with previous_response_id);
+ * - "agents": a thread on an Agents API session (sessions.ts runTurn): the session, waiting in requires_action
+ *   for agent.session.input.tool_result to the call in that turn;
+ * - "chat": a chat turn (chat.ts): the response, the call, the other calls' outputs of that round, the calls
+ *   the turn handles after its answer (start_task and the like), and the turn as it was (chat.ts ChatPause);
+ * - "held": a run that holds the call itself (a brain's tool, through the screen tools: cli-agents.ts), which
+ *   can't pause, and waits in memory for the reply.
+ */
+export type AskResume =
+  | { engine: "responses"; responseId: string; callId: string; call: AskCall }
+  | { engine: "agents"; sessionId: string; turnId: string; callId: string; call: AskCall }
+  | { engine: "chat"; responseId: string; callId: string; call: AskCall; outputs: { callId: string; output: string }[]; later?: unknown[]; turn?: unknown }
+  | { engine: "held" };
+
+/**
+ * A rule for what a bot does without asking (lib/permission.ts): one action, whatever the recipients or details. The
+ * last for an action wins. `resource`: "*" in one Always allow saves (a Bops from before reads rules by action and
+ * resource); a rule saved before with one resource reads as a rule for its action all the same.
+ */
+export type PermissionRule = { action: string; resource?: string; effect: "allow" | "ask" };
+
+/**
+ * Whether request `a` is of the run thread `s` is now: asked by the Bops that runs it (Session.by). One another Bops
+ * asked before the thread became this one's (a runner whose run was ended for it, its computer deleted) waits on
+ * nothing. Where either isn't said (a thread from before Session.by, a self-hosted Bops, a member's copy, which has
+ * neither), it is.
+ */
+export const askedByRunner = (a: Pick<AppApproval, "askedBy">, s: Pick<Session, "by">) => !a.askedBy || !s.by || a.askedBy === s.by;
+
+/**
+ * The requests still waiting on the user, of one thread when `threadId` is given: unanswered, and of a thread
+ * that's still going (one that ended some other way, its computer deleted, waits on nothing), asked by the Bops
+ * that runs it now (askedByRunner).
+ */
+export const waitingAsks = (state: Pick<AppState, "appApprovals"> & Partial<Pick<AppState, "sessions">>, threadId?: string) =>
+  (state.appApprovals ?? []).filter(
+    (a) => !a.reply && (threadId === undefined || a.threadId === threadId) && (!a.threadId || !state.sessions || state.sessions.some((s) => s.id === a.threadId && live(s) && askedByRunner(a, s))),
+  );
+
+/**
+ * Whether thread `s` is Waiting for your OK: a request of its, asked by the Bops that runs it now (askedByRunner), is
+ * unanswered. Derived from the request alone, wherever the run runs.
+ */
+export const waitsForOk = (s: Pick<Session, "id" | "status" | "by">, state: Pick<AppState, "appApprovals">) =>
+  live(s as Session) && (state.appApprovals ?? []).some((a) => a.threadId === s.id && !a.reply && askedByRunner(a, s));
+
+/**
+ * Whether thread `s`'s run is paused at a request its own Bops made (AppApproval.askedBy, Session.by), answered
+ * or not, until that Bops reads the reply: nothing of it is held anywhere but in the request and at OpenAI, so
+ * nothing sweeps it up (store.ts leftBehind, routines.ts strayRun, runner-install.ts, a restart): only the
+ * user's reply carries it on, and Stop ends it. A brain's held call (resume "held") is a run going, not a pause.
+ */
+export const pausedForOk = (s: Pick<Session, "id" | "by">, state: Pick<AppState, "appApprovals">) =>
+  (state.appApprovals ?? []).some((a) => a.threadId === s.id && (a.askedBy ?? undefined) === (s.by ?? undefined) && a.resume?.engine !== "held");
 
 /**
  * A saved login. The password and 2FA setup key are in the Mac's Keychain (lib/server/keychain.ts);
@@ -1426,6 +1879,16 @@ export const computerUp = (status: string | undefined) => status === undefined |
  */
 export const computerAsleep = (status: string | undefined) => status === "suspended";
 
+/** Orgo statuses a computer doesn't come back from by itself (computerStaysDown). */
+const STAYS_DOWN: ReadonlySet<string> = new Set(["error", "stopped", "frozen", "deleted"]);
+/**
+ * An Orgo computer that's down and doesn't come back by itself: in error, stopped or frozen (a Stop on
+ * orgo.ai, or a Bops Max computer parked when the plan ended), or deleted (one that's been deleted isn't
+ * usually listed at all). Unlike one asleep, nothing wakes it for a task: a setup there ends saying so
+ * (sessions.ts), and its runner runs nothing, so its routines wait for it, saying why (runner-install.ts).
+ */
+export const computerStaysDown = (status: string | undefined) => status !== undefined && STAYS_DOWN.has(status);
+
 /**
  * Something is using a computer in the cloud right now: a task working there (starting or running, not
  * one on the user's Mac), or the user driving one of its screens. `onIt`: whether a bot works on it.
@@ -1471,7 +1934,27 @@ export type OrgoMigration = {
 /** The chat id for talking to one bot directly. */
 export const botChatId = (botId: BotId) => `bot:${botId}`;
 
+type SentBy = Pick<Session, "sentVia" | "sentViaBot">;
+/** Whether the user gave a thread themselves (Session.sentVia "you"), never a bot from before whose id is "you" (Session.sentViaBot). */
+export const ownerSent = (s: SentBy) => s.sentVia === "you" && !s.sentViaBot;
+/** Whether a thread is a routine's run (Session.sentVia "routine"), never one a bot from before whose id is "routine" started. */
+export const routineSent = (s: SentBy) => s.sentVia === "routine" && !s.sentViaBot;
+/** The bot that started a thread (handed it on), when neither the user nor a routine did. */
+export const sentByBot = (s: SentBy): BotId | undefined => (ownerSent(s) || routineSent(s) ? undefined : s.sentVia);
+
 export const live = (s: Session) => s.status === "queued" || s.status === "starting" || s.status === "running";
+
+/**
+ * When the Bops that runs thread `s` (Session.by: a Mac, a computer's runner) last showed a sign of work (a
+ * thread begun, a step, a frame, a reply) on `s` or on any of its live threads in `sessions`. One queued there
+ * waits behind its others (all its bot's screens busy), so that Bops at work on them says it's still there,
+ * never the queued one's own quiet: how a thread another Bops runs is told from one it left behind
+ * (store.ts leftBehind, routines.ts strayRun).
+ */
+export function lastWorkOf(s: Session, sessions: Session[]): number {
+  const signs = (x: Session) => [x.startedAt, x.createdAt, x.lastFrameAt, ...(x.steps ?? []).map((y) => y.at), ...(x.replies ?? []).map((y) => y.at)].filter((y): y is number => typeof y === "number");
+  return Math.max(0, ...sessions.filter((x) => x.by === s.by && live(x)).flatMap(signs), ...signs(s));
+}
 
 /**
  * A brand's real logo, in public/logos (official files: Wikimedia Commons, Simple Icons, or the

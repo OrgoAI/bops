@@ -231,7 +231,7 @@ test("builds from before: their whole-state upload is taken until a newer build 
 });
 
 /** What 0.0.29 and later send besides (lib/server/app-version.ts appHeaders): which state they may be given. */
-const NEWER = { "x-bops-state-level": "3" };
+const NEWER = { "x-bops-state-level": "4" };
 /** A routine 0.0.28 would start over and over (its nextRun throws on `time` after the task started). */
 const EVERY = { id: "rtn_every", botId: "boppy", title: "Inbox", goal: "Check my inbox", schedule: { kind: "every", minutes: 30 }, enabled: true, nextRunAt: 1 };
 const noticesOf = async (userId: string, headers: Record<string, string> = {}) =>
@@ -250,7 +250,7 @@ test("once a Mac on a newer Bops wrote the user's state, an older Mac is kept ou
   // The newer Mac writes what the older one can't run: the row is its level from then on.
   assert.equal((await putState(id, 1, { owner: { name: "Old" }, routines: [EVERY] }, newer)).status, 200);
   got = (await (await call(id, "/v1/state", newer)).json()) as CloudState;
-  assert.deepEqual([got.version, got.protocol, got.writer], [2, 3, "mac-new"]);
+  assert.deepEqual([got.version, got.protocol, got.writer], [2, 4, "mac-new"]);
 
   // The older Mac gets none of it, nor a 409 with it to merge, and nothing it sends lands.
   const refused = async (res: Response, what: string) => {
@@ -293,7 +293,7 @@ test("once a Mac on a newer Bops wrote the user's state, an older Mac is kept ou
     assert.equal((await putState(id, 2, { owner: { name: "New" }, routines: [EVERY] }, newer)).status, 200);
     await until(() => mac.frames.find((f) => f.t === "state" && f.version === 3), "the newer Mac hearing of its write");
     got = (await (await call(id, "/v1/state", newer)).json()) as CloudState;
-    assert.deepEqual([got.version, got.protocol, got.state.owner], [3, 3, { name: "New" }]);
+    assert.deepEqual([got.version, got.protocol, got.state.owner], [3, 4, { name: "New" }]);
   } finally {
     mac.ws.close();
   }

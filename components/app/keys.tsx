@@ -675,8 +675,18 @@ function AddKey({
 
 /* ---------------- A bot's profile ---------------- */
 
-/** On a bot's profile: the keys in the vault, on or off for this bot, and the way to the Vault to add one. */
-export function BotKeys({ state, bot: b, onAdd, className }: { state: AppState; bot: Bot; onAdd: () => void; className: string }) {
+type BotKeysProps = { state: AppState; bot: Bot; onAdd: () => void; className: string };
+
+/**
+ * On a bot's profile: the keys in the vault, on or off for this bot, and the way to the Vault to add one.
+ * Never in a workspace shared with the user: GET /api/keys answers with the viewer's own Orgo vault, and
+ * the owner's keys are never shown to them, so it would list the viewer's keys as the owner's bot's.
+ */
+export function BotKeys(props: BotKeysProps) {
+  return props.state.shared ? null : <BotKeysCard {...props} />;
+}
+
+function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
   const { info, failed, retry } = useKeys(workspaceOf(b));
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -711,7 +721,7 @@ export function BotKeys({ state, bot: b, onAdd, className }: { state: AppState; 
         <span className="text-[13px] font-semibold leading-4">Keys</span>
         {info.signedIn && (
           <button onClick={onAdd} className="text-[12px] font-medium leading-4 text-ink">
-            Add in Vault ›
+            Add in Logins ›
           </button>
         )}
       </div>
@@ -815,12 +825,10 @@ export function ApiNote({ call: c }: { call: ApiCall }) {
   );
 }
 
-/** An approval for a call_api write: the service, method and path, and the vault key Orgo sends it with. Null for another app's. */
+/** A request for a call_api write: the service, method and path, and the vault key Orgo sends it with (AppApproval.api). Null for another kind. */
 export function apiAskOf(a: AppApproval): { name: string; label: string; method: string; path: string } | null {
-  if (a.app !== "api") return null;
-  const x = /^(\S+) (GET|POST|PUT|PATCH|DELETE) (\S+)$/.exec(a.action);
-  if (!x) return null;
-  return { name: x[1], method: x[2], path: x[3], label: / in (.+)$/.exec(a.title)?.[1] ?? x[1] };
+  if (a.kind !== "api" || !a.api) return null;
+  return { name: a.api.key ?? a.api.label, label: a.api.label, method: a.api.method, path: a.api.path };
 }
 
 /** The call an approval card asks about, plainly: the method, the whole path, then what goes with it. */

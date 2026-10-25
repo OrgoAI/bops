@@ -1,10 +1,12 @@
 // Who may call Bops' API (proxy.ts): the app on this Mac only, and on the Mac app, only its window (the
 // httpOnly cookie desktop/main.cjs sets, or its own header), so a bot's Chrome that reached the server
 // can neither act nor read. The tailnet's and the cloud tunnel's paths prove themselves; the app's health
-// and bots' pages are open reads.
+// and bots' pages are open reads. main.cjs's own calls (desktop/own-call.cjs: a restart, the Mac going to
+// sleep), sent as it sends them, get through, and it makes no other call to the API but the open health read.
 // Run: node --conditions=react-server scripts/test-proxy.mjs
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import { readFileSync } from "node:fs";
+import { createRequire, registerHooks } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -56,10 +58,25 @@ assert.ok(passes(call("HEAD", "/api/health", { origin: null })));
 assert.ok(passes(call("GET", "/api/health", { origin: null })));
 assert.ok(passes(call("GET", "/api/pages/p_123", { origin: null })));
 assert.equal(call("POST", "/api/pages/p_123").status, 403, "but nothing else on them");
+// An app a bot made: its page (code only) is an open read; what it keeps, its code and its bridge are the window's.
+assert.ok(passes(call("GET", "/api/made-apps/app_123/view?v=2", { origin: null })));
+for (const [method, path] of [["POST", "/api/made-apps/app_123/bridge"], ["GET", "/api/made-apps/app_123"], ["POST", "/api/made-apps/app_123"], ["GET", "/api/made-apps/app_123/view/x"]])
+  assert.equal(call(method, path).status, 403, `${method} ${path} without the window's token`);
 assert.ok(passes(call("OPTIONS", "/api/state")));
 // The tailnet's paths and the tunnel's prove themselves (a bot's secret, a webhook signature, the tunnel's token).
 assert.ok(passes(call("POST", "/api/apps/call", { host: "100.64.0.3:3210", origin: null })));
 assert.ok(passes(call("POST", "/api/phone/agentphone", { origin: null })));
 assert.ok(passes(call("POST", "/api/cloud/event", { host: "127.0.0.1:3210", origin: null })));
+// desktop/main.cjs's own calls, as Node's fetch sends them: to 127.0.0.1, no Origin, no cookie, the token in a header.
+const { ownCall } = createRequire(import.meta.url)(`${root}/desktop/own-call.cjs`);
+const asSent = ([url, init]) => proxy(new NextRequest(url, { method: init.method, headers: { host: new URL(url).host, ...init.headers } }));
+assert.ok(passes(asSent(ownCall("http://127.0.0.1:3210", TOKEN, "/api/restart", { method: "POST", timeoutMs: 20_000 }))), "a restart");
+assert.equal(asSent(ownCall("http://127.0.0.1:3210", "x".repeat(64), "/api/restart", { method: "POST", timeoutMs: 20_000 })).status, 403, "another token still can't");
+// Every call main.cjs makes to the API goes as its own (ownCall), but the open health read.
+const main = readFileSync(`${root}/desktop/main.cjs`, "utf8");
+const bare = [...main.matchAll(/fetch\(\s*`\$\{(?:LOCAL|URL)\}(\/api\/[^`?]*)/g)].map((m) => m[1]).filter((path) => path !== "/api/health");
+assert.deepEqual(bare, [], "main.cjs calls the API without the window's token");
+assert.ok(/fetch\(\.\.\.ownCall\(LOCAL, windowToken\(\), "\/api\/restart", \{ method: "POST", timeoutMs: 20_000 \}\)\)/.test(main), "main.cjs's restart call is the one checked above");
+assert.ok(!main.includes("sleeping: true"), "the Mac going to sleep hands nothing back: a computer's routines are never the Mac's to hold");
 delete process.env.BOPS_UI_TOKEN;
 console.log("proxy: ok");

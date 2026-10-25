@@ -1,28 +1,38 @@
 "use client";
 
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { live, MAIN_WORKSPACE, WORKSPACE_APPS_SINCE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
+import { MAIN_WORKSPACE, waitingAsks, WORKSPACE_APPS_SINCE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
 import { AutopilotButton, AutopilotSections, type AutopilotOpen } from "./autopilot";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { KeyIcon } from "./screen-cards";
 import { MembersButton } from "./members";
 import { FooterButton, footerPillOf, useFooterHover, type FooterKey, type FooterPage } from "./sidebar-footer";
-import { Mascot } from "./mascot";
+import { AppsIcon } from "./made-apps";
 import { KnowledgeIcon, useKnowledgeNews, type MemoryOpen } from "./memory-categories";
 import { AppLogo } from "./apps";
 import { BotMenu, type BotMenuActions } from "./bot-menu";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
-import { useSetupNeedsYou } from "./setup";
-import { arrived, DeleteX, forgetShown, rememberShown, usePop, useRise } from "./side-group";
+import { useSetupNeedsYou, useSetupWaiting } from "./setup";
+import { DeleteX, forgetShown, rememberShown, undash, usePop } from "./side-group";
+import { attentionOf, FavoritesSection, needsByBot, threadOrder, threadsByBot, threadsOf, ThreadRow, WithThreads } from "./sidebar-sections";
+import { useIssues } from "./orbit-issues";
 import { UpdateNotice } from "./update-notice";
-import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, needsYou, NeedsYouDot, post, quietNothing, RoundButton, SideToggleIcon, StatusIcon, teamOf, useNow } from "./ui";
+import { forgetWorkspaceHere } from "@/lib/workspace-local";
+import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, NeedsYouDot, post, RoundButton, SideToggleIcon, useNow } from "./ui";
+import { ownerWho, roleLabel, sharedBy, type SharedWorkspace } from "@/lib/shared";
+import { appsOpen } from "@/lib/apps-access";
 
 /**
- * The sidebar for one workspace (switch at the top). The list: one row per conversation (Sam pinned, then by latest activity), each with its
- * last message and a dot when there's something you haven't read, like iMessage. Work lives in one
- * place: the Threads list below (and each thread's chip in its chat) shows what's running and what
- * needs you, so the chat rows don't repeat it.
+ * The sidebar for one workspace (switch at the top). On top, Favorites: Needs your attention while
+ * anything waits on the user, then the Knowledge kinds they pinned (sidebar-sections.tsx). Then the list:
+ * one row per conversation (Sam pinned, with a star on its avatar, then by latest activity), each with
+ * its last message and a dot when there's something you haven't read, like iMessage. Under each bot's
+ * own row, folded until opened: what waits on the user from it, as cards (the issues its routines opened
+ * that wait on us, its urgent alerts, Setup under the main bot), then its threads, with a chip that says
+ * how many there are and, folded, whether something needs you or a thread is working. Needs your
+ * attention opens every bot with something waiting. A search lists everything together: the chats,
+ * then the threads that match, flat.
  */
 export function Sidebar({
   state,
@@ -34,13 +44,15 @@ export function Sidebar({
   onAccount,
   onSetup,
   onVault,
+  onApps,
   onMembers,
   onOpenWatch,
   onOpenMemory,
   onOpenAutopilot,
   footer,
-  menuActions,
+  menuActions: actions,
   onCollapse,
+  search = null,
 }: {
   state: AppState;
   chatId: string;
@@ -52,6 +64,8 @@ export function Sidebar({
   /** The setup screen: what this Mac gives Bops (setup.tsx). */
   onSetup: () => void;
   onVault: () => void;
+  /** The apps the bots made (made-apps.tsx). */
+  onApps: () => void;
   /** The People sheet: who can see the bots' computers on Orgo (members.tsx). */
   onMembers: () => void;
   /** Show a watched screen or Mac window (a watched page: its row on the Routines page). */
@@ -66,9 +80,13 @@ export function Sidebar({
   menuActions?: BotMenuActions;
   /** Hide the sidebar (bops-app.tsx brings it back from the title bar). */
   onCollapse?: () => void;
+  /** Tests: searching for this from the start. */
+  search?: string | null;
 }) {
-  const [query, setQuery] = useState<string | null>(null);
+  const [query, setQuery] = useState<string | null>(search);
   const q = query?.trim().toLowerCase();
+  // A workspace shared with the user is read only: no bot menu, and nothing new is made in it.
+  const menuActions = state.shared ? undefined : actions;
   // A bot's right-click menu (bot-menu.tsx): which bot, and where it was asked for.
   const [menu, setMenu] = useState<{ botId: string; x: number; y: number } | null>(null);
   const menuBot = menu ? state.bots.find((b) => b.id === menu.botId) : undefined;
@@ -81,18 +99,23 @@ export function Sidebar({
   useNow(30_000);
   // After each paint, every thread, watch, schedule and procedure in the state is known (in every
   // workspace, whatever a search hides), so only one that turns up from here on rises in (side-group.tsx).
+  // The cards under the bots too, each by what it's for (an alert, an issue, a setup item), so one that
+  // comes to need the user later rises in.
+  const setup = useSetupWaiting(state);
   useEffect(() => {
     rememberShown(state.sessions.map((s) => s.id));
     rememberShown((state.watches ?? []).map((w) => w.id));
     rememberShown(state.routines.map((r) => r.id));
-  }, [state.sessions, state.watches, state.routines]);
+    rememberShown((state.watches ?? []).flatMap((w) => (w.alert ? [`alert:${w.id}:${w.alert.at}`] : [])));
+    rememberShown((state.appApprovals ?? []).map((a) => `ask:${a.id}`));
+  }, [state.sessions, state.watches, state.routines, state.appApprovals]);
+  useEffect(() => rememberShown(setup.map((i) => `setup:${i}`)), [setup]);
   // Gone with the sidebar (signing out), so the next sign-in's first paint has nothing new in it either.
   useEffect(() => forgetShown, []);
 
   const lastMessage = (c: Chat) => [...state.messages].reverse().find((m) => m.chatId === c.id);
   const activity = (c: Chat) => lastMessage(c)?.at ?? c.createdAt;
   const ws = currentWorkspace(state);
-  const team = teamOf(state);
   const chats = [...state.chats]
     .filter((c) => chatInWorkspace(state, c))
     .filter((c) => !q || chatName(c, state.bots).toLowerCase().includes(q) || state.messages.some((m) => m.chatId === c.id && m.text.toLowerCase().includes(q)))
@@ -101,15 +124,58 @@ export function Sidebar({
       return pin(b) - pin(a) || activity(b) - activity(a);
     });
 
-  const mainBot = team.find((b) => b.isMain);
-  const mainChat = mainBot ? state.chats.find((c) => c.kind === "bot" && c.botIds[0] === mainBot.id) : undefined;
-
-  // A quiet routine's run that found nothing for the user posted nothing, so it isn't listed either.
-  const threads = [...state.sessions]
-    .filter((s) => workspaceOf(state.bots.find((b) => b.id === s.botId)) === ws && state.bots.some((b) => b.id === s.botId) && !s.replacedBy && !quietNothing(s))
-    .filter((s) => !q || s.title.toLowerCase().includes(q))
-    .sort((a, b) => Number(live(b) || needsYou(b)) - Number(live(a) || needsYou(a)) || (b.endedAt ?? b.createdAt) - (a.endedAt ?? a.createdAt))
-    .slice(0, 6);
+  // Each bot's threads, under its row (a quiet routine's run that found nothing for the user posted
+  // nothing, so it isn't listed either). A search lists the ones that match, flat, under Threads.
+  const byBot = threadsByBot(state);
+  const found = q ? threadsOf(state).filter((s) => s.title.toLowerCase().includes(q)).sort(threadOrder).slice(0, 6) : [];
+  const user = state.account?.user.id ?? "";
+  // What waits on the user, under the bot it's from. Issues are read as Knowledge reads them (the same
+  // copy as Favorites' Issues), while Knowledge is there. Neither the user's issues nor this Mac's setup
+  // go under a shared workspace's bots: they're the user's own, not its owner's.
+  const { list: issues } = useIssues(ws, user, categoriesOpen(state) && !state.shared);
+  useEffect(() => rememberShown((issues?.issues ?? []).map((i) => `issue:${i.id}`)), [issues]);
+  const needs = needsByBot(state, issues?.issues ?? null, state.shared ? [] : setup);
+  // The threads Waiting for your OK: a request of theirs is unanswered (lib/types.ts waitsForOk), wherever they run.
+  const okWaits = new Set(waitingAsks(state).flatMap((a) => (a.threadId ? [a.threadId] : [])));
+  const attention = attentionOf(state, needs);
+  // Needs your attention opens every bot with something waiting (how many times it's been asked, and which bots).
+  const [opened, setOpened] = useState<{ at: number; bots: Set<string> } | null>(null);
+  const openAttention = () => {
+    setOpened({ at: (opened?.at ?? 0) + 1, bots: attention.bots });
+    // The first of them (the main bot, pinned first, when it has some) comes into view.
+    const sel = [...attention.bots].map((id) => `[data-bot-threads="${CSS.escape(id)}"]`).join(",");
+    requestAnimationFrame(() => sel && document.querySelector<HTMLElement>(sel)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+  };
+  /** A bot's chat row with what's under it (none for a group's). */
+  const withThreads = (c: Chat, row: (space: ReactNode) => ReactNode) => {
+    const b = c.kind === "bot" ? state.bots.find((x) => x.id === c.botIds[0]) : undefined;
+    if (!b) return row(null);
+    return (
+      <WithThreads
+        key={c.id}
+        user={user}
+        ws={ws}
+        botId={b.id}
+        name={b.name}
+        threads={byBot.get(b.id) ?? []}
+        needs={needs.get(b.id)}
+        okWaits={okWaits}
+        openAt={opened?.bots.has(b.id) ? opened.at : 0}
+        selected={c.id === chatId}
+        readOnly={!!state.shared}
+        row={row}
+        onOpenThread={onOpenThread}
+        onOpenIssue={(i) => onOpenMemory({ category: "issues", focus: i.id })}
+        onOpenWatch={onOpenWatch}
+        onSetup={onSetup}
+        onOpenAsk={(a) => {
+          const t = a.threadId ? state.sessions.find((x) => x.id === a.threadId) : undefined;
+          if (t) onOpenThread(t);
+          else onOpenChat(a.chatId ?? c.id);
+        }}
+      />
+    );
+  };
 
   return (
     <aside className="flex min-h-0 flex-col border-r border-[#ECECEA] bg-[#F9F9F8] px-2.5 pb-3 pt-3.5">
@@ -143,21 +209,25 @@ export function Sidebar({
             <circle cx="7" cy="7" r="4.5" fill="none" stroke="#0A0A0A" strokeWidth="1.5" />
             <path d="M10.5 10.5L14 14" fill="none" stroke="#0A0A0A" strokeWidth="1.5" strokeLinecap="round" />
           </RoundButton>
-          <RoundButton label="New chat or bot" onClick={onCompose}>
-            <path d="M8 3v10M3 8h10" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
-          </RoundButton>
+          {!state.shared && (
+            <RoundButton label="New chat or bot" onClick={onCompose}>
+              <path d="M8 3v10M3 8h10" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
+            </RoundButton>
+          )}
         </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-        {/* The main bot runs the team, so it sits above it (once you type a search, everything lists together). */}
-        {!q && mainChat && <MainBot chat={mainChat} state={state} selected={mainChat.id === chatId} onClick={() => onOpenChat(mainChat.id)} onMenu={openMenu(mainChat)} last={lastMessage(mainChat)} />}
+        {/* What needs you and what you pinned: over everything, and gone while you search. */}
+        {!q && <FavoritesSection state={state} attention={attention.count} onAttention={openAttention} onOpenMemory={onOpenMemory} />}
+        {/* The main bot's row first (it runs the team), then the rest by latest activity. */}
         <div className="flex flex-col gap-0.5">
-          {chats
-            .filter((c) => !!q || c !== mainChat)
-            .map((c) => (
-              <ChatRow key={c.id} chat={c} state={state} selected={c.id === chatId} onClick={() => onOpenChat(c.id)} onMenu={openMenu(c)} menuOpen={!!menu && c.kind === "bot" && c.botIds[0] === menu.botId} last={lastMessage(c)} />
-            ))}
+          {chats.map((c) => {
+            const row = (space: ReactNode) => (
+              <ChatRow key={c.id} chat={c} state={state} selected={c.id === chatId} onClick={() => onOpenChat(c.id)} onMenu={openMenu(c)} menuOpen={!!menu && c.kind === "bot" && c.botIds[0] === menu.botId} last={lastMessage(c)} trail={space} />
+            );
+            return q ? row(null) : withThreads(c, row);
+          })}
         </div>
 
         {/* A search looks in Knowledge too: one row that opens it with the search filled in. */}
@@ -172,11 +242,11 @@ export function Sidebar({
           </button>
         )}
 
-        {threads.length > 0 && (
+        {found.length > 0 && (
           <div className="flex flex-col pt-4">
             <div className="px-2.5 pb-1.5 text-[13px] font-medium leading-4 text-[#9A9A98]">Threads</div>
-            {threads.map((s) => (
-              <ThreadRow key={s.id} session={s} onClick={() => onOpenThread(s)} />
+            {found.map((s) => (
+              <ThreadRow key={s.id} session={s} onClick={() => onOpenThread(s)} readOnly={!!state.shared} okWait={okWaits.has(s.id)} />
             ))}
           </div>
         )}
@@ -193,8 +263,17 @@ export function Sidebar({
       )}
       {/* A newer Bops: downloading, ready to Restart into, or out on bops.bot (the Mac app checks and downloads it). */}
       <UpdateNotice />
-      {/* You, then People, your apps and logins (the Vault, with the apps you've connected), Routines and Knowledge (sidebar-footer.tsx). New bots are the + at the top. */}
-      <SidebarFooter state={state} open={footer} you={(expanded) => <YouMenu state={state} expanded={expanded} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />} onMembers={onMembers} onVault={onVault} onOpenAutopilot={onOpenAutopilot} onOpenMemory={onOpenMemory} />
+      {/* You, then People, your logins (the Vault, with the apps you've connected), Routines, Knowledge and the apps your bots made (sidebar-footer.tsx). New bots are the + at the top. */}
+      <SidebarFooter
+        state={state}
+        open={footer}
+        you={(expanded) => <YouMenuView state={state} expanded={expanded} needsYou={setup.length > 0} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />}
+        onMembers={onMembers}
+        onVault={onVault}
+        onOpenAutopilot={onOpenAutopilot}
+        onOpenMemory={onOpenMemory}
+        onApps={onApps}
+      />
       {menu && menuBot && menuActions && <BotMenu state={state} bot={menuBot} x={menu.x} y={menu.y} onClose={() => setMenu(null)} actions={menuActions} />}
     </aside>
   );
@@ -202,8 +281,9 @@ export function Sidebar({
 
 /**
  * The footer's row: `you` (your account: the initials and their menu, given whether it's the pill), then
- * People, Apps & logins, Routines and Knowledge. The pill (with its label) is the one pointed at or tabbed
- * to, else the one `open` names (sidebar-footer.tsx footerPageOf, footerPillOf); the others are round.
+ * People, Logins, Routines, Knowledge and Apps (the apps your bots made). The pill (with its label) is
+ * the one pointed at or tabbed to, else the one `open` names (sidebar-footer.tsx footerPageOf,
+ * footerPillOf); the others are round.
  * Picking one opens its page, and that one is the pill at rest. `hover` seeds the pointed-at one, and
  * `news` whether Knowledge has something new (tests).
  */
@@ -217,6 +297,7 @@ export function SidebarFooter({
   onVault,
   onOpenAutopilot,
   onOpenMemory,
+  onApps,
 }: {
   state: AppState;
   open?: FooterPage;
@@ -227,26 +308,31 @@ export function SidebarFooter({
   onVault: () => void;
   onOpenAutopilot: (open: AutopilotOpen) => void;
   onOpenMemory: (open: MemoryOpen) => void;
+  /** The Apps home: the apps the bots made (made-apps.tsx). */
+  onApps: () => void;
 }) {
   const knowledge = categoriesOpen(state);
-  const page = open === "knowledge" && !knowledge ? "vault" : open;
+  // Apps only for an @orgo.ai account for now (lib/apps-access.ts), and never in a shared workspace (they're its owner's).
+  const apps = appsOpen(state) && !state.shared;
+  const page = (open === "knowledge" && !knowledge) || (open === "apps" && !apps) ? "vault" : open;
   const { hover, row } = useFooterHover(initialHover);
-  const pill = footerPillOf({ rest: page, hover: hover === "knowledge" && !knowledge ? null : hover });
+  const pill = footerPillOf({ rest: page, hover: (hover === "knowledge" && !knowledge) || (hover === "apps" && !apps) ? null : hover });
   return (
-    <div {...row} data-footer-row className="flex items-center gap-1.5 p-1 pt-3">
+    <div {...row} data-footer-row className="flex items-center gap-1 pb-1 pt-3">
       {you(pill === "you")}
       <MembersButton state={state} expanded={pill === "people"} pressed={page === "people"} onClick={onMembers} />
       <FooterButton
         name="vault"
         expanded={pill === "vault"}
         pressed={page === "vault"}
-        label="Apps & logins"
-        tip="Your apps and logins, and which bots can use them"
+        label="Logins"
+        tip="Your accounts and logins, and which bots can use them"
         onClick={onVault}
         trail={<AppsTrail state={state} expanded={pill === "vault"} />}
       />
       <AutopilotButton state={state} expanded={pill === "routines"} pressed={page === "routines"} onOpen={onOpenAutopilot} />
       {knowledge && <KnowledgeButton state={state} expanded={pill === "knowledge"} pressed={page === "knowledge"} news={news} onOpen={() => onOpenMemory({})} />}
+      {apps && <FooterButton name="apps" expanded={pill === "apps"} pressed={page === "apps"} label="Apps" tip="Apps your bots made for you" onClick={onApps} icon={<AppsIcon size={16} />} />}
     </div>
   );
 }
@@ -265,7 +351,7 @@ export function KnowledgeButton({ state, expanded, pressed, news: given, onOpen 
       expanded={expanded}
       pressed={pressed}
       label="Knowledge"
-      tip={news ? "Knowledge: something new your bots learned" : "Knowledge: what your bots know, learned as you chat"}
+      tip={state.shared ? "Knowledge: what the owner's bots know" : news ? "Knowledge: something new your bots learned" : "Knowledge: what your bots know, learned as you chat"}
       ariaLabel={news ? "Knowledge, something new" : undefined}
       onClick={onOpen}
       icon={<KnowledgeIcon size={16} />}
@@ -285,7 +371,7 @@ function NewDot() {
 }
 
 /**
- * Apps & logins' end: as the pill, the apps you've connected; round, the Vault's key. Both are there
+ * Logins' end: as the pill, the apps you've connected; round, the Vault's key. Both are there
  * and fade with the label (globals.css .motion-footer-label), so the logos don't pop in or out as it
  * grows or shrinks; the key sits over the middle of the round button.
  */
@@ -325,15 +411,22 @@ function AppStack({ state }: { state: AppState }) {
  * you (and you haven't skipped it on the setup screen), a badge on your initials opens that screen and
  * the menu item carries the same mark.
  */
-export function YouMenu({
+export function YouMenu(props: { state: AppState; expanded?: boolean; onAccount: () => void; onSettings: () => void; onSetup: () => void }) {
+  return <YouMenuView {...props} needsYou={useSetupNeedsYou(props.state)} />;
+}
+
+/** YouMenu, told whether this Mac needs something (the sidebar reads that once, for Needs you too). */
+function YouMenuView({
   state,
   expanded = false,
+  needsYou,
   onAccount,
   onSettings,
   onSetup,
 }: {
   state: AppState;
   expanded?: boolean;
+  needsYou: boolean;
   onAccount: () => void;
   onSettings: () => void;
   onSetup: () => void;
@@ -341,7 +434,6 @@ export function YouMenu({
   const [open, setOpen] = useState(false);
   const [restart, setRestart] = useState(false);
   const canRestart = useCanRestart();
-  const needsYou = useSetupNeedsYou(state);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -363,14 +455,14 @@ export function YouMenu({
   const item = "flex h-9 items-center gap-2.5 rounded-[10px] px-2.5 text-left text-[14px] font-medium hover:bg-black/[0.04]";
   const name = user?.name?.trim() || user?.email || state.owner?.name?.trim() || "You";
   return (
-    <div ref={box} data-footer-slot="You" data-footer-key="you" className={`motion-footer-slot relative flex h-10 min-w-10 basis-10 ${expanded ? "grow" : "grow-0"} shrink`}>
+    <div ref={box} data-footer-slot="You" data-footer-key="you" className={`motion-footer-slot relative flex h-9 min-w-9 basis-9 ${expanded ? "grow" : "grow-0"} shrink`}>
       <button
         onClick={() => setOpen(!open)}
         title={expanded ? undefined : user ? `${user.name ?? user.email ?? "Your account"}: account and settings` : "Account and settings"}
         aria-label={`${name}: account and settings`}
         aria-haspopup="menu"
         aria-expanded={open}
-        className={`flex h-10 w-full min-w-0 items-center justify-center overflow-hidden rounded-full px-2.5 text-[13px] font-semibold outline-none transition-[background-color,color,transform] duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] active:scale-[.96] motion-reduce:transition-none ${open ? "bg-ink text-highlighter" : "bg-[#EEEEEC] text-[#6B6B6B] hover:bg-[#E6E6E3]"}`}
+        className={`flex h-9 w-full min-w-0 items-center justify-center overflow-hidden rounded-full px-2.5 text-[13px] font-semibold outline-none transition-[background-color,color,transform] duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] active:scale-[.96] motion-reduce:transition-none ${open ? "bg-ink text-highlighter" : "bg-[#EEEEEC] text-[#6B6B6B] hover:bg-[#E6E6E3]"}`}
       >
         <span className="shrink-0">{initialsOf(state)}</span>
         <span aria-hidden className={`motion-footer-label min-w-0 truncate whitespace-nowrap text-[13.5px] font-medium ${open ? "text-highlighter" : "text-ink"} ${expanded ? "max-w-[160px] translate-x-0 pl-1.5 opacity-100" : "max-w-0 -translate-x-1 pl-0 opacity-0"}`}>
@@ -445,39 +537,24 @@ export function YouMenu({
 }
 
 /**
- * The main bot (Sam) as the head of the team, like Grok's: big, starred, with how the team is doing
- * at a glance. Click it to talk to Sam.
+ * The main bot's mark: a small star on its avatar's corner, cut out of the row with a ring of the row's
+ * own color (selected, hovered or not), so it reads as a badge and not as part of the mascot.
  */
-function MainBot({ chat: c, state, selected, onClick, onMenu, last }: { chat: Chat; state: AppState; selected: boolean; onClick: () => void; onMenu?: (e: React.MouseEvent) => void; last?: AppState["messages"][number] }) {
-  const b = state.bots.find((x) => x.id === c.botIds[0])!;
-  const unread = !!last && last.role !== "user" && last.at > (c.readAt ?? 0) && !selected;
-  const dot = usePop(unread);
-  const mine = new Set(teamOf(state).map((x) => x.id));
-  const sessions = state.sessions.filter((s) => mine.has(s.botId));
-  const working = new Set(sessions.filter((s) => live(s) && !s.askWhere).map((s) => s.botId)).size;
-  const waiting = sessions.filter((s) => needsYou(s)).length + (state.watches?.filter((w) => w.alert && mine.has(w.botId)).length ?? 0);
-  // One line: what needs you, else who's working, else just the role.
-  const status = c.typing.length ? "typing…" : waiting ? `${waiting} need${waiting === 1 ? "s" : ""} you` : working ? `${working} working` : "Chief of Staff";
+function MainStar({ selected }: { selected: boolean }) {
   return (
-    <button
-      onClick={onClick}
-      onContextMenu={onMenu}
-      className={`relative mb-2 flex flex-col items-center gap-1.5 rounded-[18px] px-3 pb-3 pt-4 text-center ${selected ? "bg-[#EEEEEC]" : "hover:bg-black/[0.03]"}`}
+    <span
+      role="img"
+      aria-label="Runs the team"
+      title="Runs the team"
+      className={`absolute -bottom-px -right-px flex size-4 items-center justify-center rounded-full bg-highlighter ${selected ? "shadow-[inset_0_0_0_1px_#0A0A0A,0_0_0_2px_#EEEEEC]" : "shadow-[inset_0_0_0_1px_#0A0A0A,0_0_0_2px_#F9F9F8] group-hover/chat:shadow-[inset_0_0_0_1px_#0A0A0A,0_0_0_2px_#F2F2F1]"}`}
     >
-      <span className="relative">
-        <Mascot botId={b.id} color={b.color} size={64} />
-        <span className="absolute -bottom-0.5 -right-0.5 flex size-[22px] items-center justify-center rounded-full bg-highlighter shadow-[0_0_0_2.5px_#F9F9F8,0_0_0_3.5px_#0A0A0A]" title="Runs the team">
-          <svg width="11" height="11" viewBox="0 0 12 12">
-            <path d="M6 1l1.5 3.1 3.4.5-2.5 2.4.6 3.4L6 8.8 2.9 10.4l.6-3.4L1 4.6l3.5-.5z" fill="#0A0A0A" />
-          </svg>
-        </span>
-        {unread && <span data-tip="Unread" onAnimationEnd={dot.done} className={`absolute -left-0.5 top-0.5 size-[11px] rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A,0_0_0_3.5px_#F9F9F8] ${dot.pop ? "motion-dot-in" : ""}`} />}
-      </span>
-      <span className="flex flex-col items-center gap-0.5">
-        <span className="text-[16px] font-semibold leading-5">{b.name}</span>
-        <span className={`text-[12.5px] leading-4 ${waiting ? "font-medium text-ink" : "text-[#9A9A98]"}`}>{status}</span>
-      </span>
-    </button>
+      <svg width="11" height="11" viewBox="0 0 24 24" aria-hidden>
+        <path
+          d="M11.54 3.54Q12 2.5 12.46 3.54L14.61 8.36Q14.9 9.01 15.61 9.08L20.85 9.64Q21.99 9.76 21.14 10.52L17.22 14.05Q16.69 14.53 16.84 15.22L17.94 20.38Q18.17 21.5 17.18 20.93L12.62 18.29Q12 17.94 11.38 18.29L6.82 20.93Q5.83 21.5 6.06 20.38L7.16 15.22Q7.31 14.53 6.78 14.05L2.86 10.52Q2.01 9.76 3.15 9.64L8.39 9.08Q9.1 9.01 9.39 8.36Z"
+          fill="#0A0A0A"
+        />
+      </svg>
+    </span>
   );
 }
 
@@ -489,6 +566,7 @@ function ChatRow({
   onMenu,
   menuOpen,
   last,
+  trail,
 }: {
   chat: Chat;
   state: AppState;
@@ -498,29 +576,47 @@ function ChatRow({
   /** Its bot's right-click menu is open: the row is outlined. */
   menuOpen?: boolean;
   last?: AppState["messages"][number];
+  /** At the end of the preview line: the room its threads' chip takes (sidebar-sections.tsx WithThreads). */
+  trail?: ReactNode;
 }) {
   const members = state.bots.filter((b) => c.botIds.includes(b.id));
   const solo = c.kind === "bot" ? members[0] : undefined;
-  const unread = !!last && last.role !== "user" && last.at > (c.readAt ?? 0) && !selected;
+  // A shared workspace's chats have no read mark of the viewer's (readAt is the owner's): none are unread.
+  const unread = !!last && last.role !== "user" && last.at > (c.readAt ?? 0) && !selected && !state.shared;
   const dot = usePop(unread);
   const typing = c.typing.length > 0;
+  // A routine's post says which routine, as the chat does above it ("From a routine · …"): an alert on its
+  // own ("someone@example.com requests…") read as if it were the bot's own address.
+  const routine = last?.routine && (state.routines.find((r) => r.id === last.routine!.id)?.title ?? "Routine");
   const preview = typing
     ? "typing…"
     : last
       ? last.role === "user"
-        ? `You: ${last.text}`
-        : c.kind === "group" && last.botId
+        ? `${ownerWho(state.shared)}: ${last.text}`
+        : routine
+          ? `${undash(routine)}: ${last.text}`
+          : c.kind === "group" && last.botId
           ? `${state.bots.find((b) => b.id === last.botId)?.name}: ${last.text}`
           : last.text
       : solo
-        ? solo.isMain
-          ? "Your chief of staff. Ask for anything."
-          : `${solo.role}. Say hi.`
-        : `${members.map((m) => m.name).join(", ")} and you`;
+        ? // A shared workspace's chats aren't the user's to start.
+          state.shared
+          ? solo.role
+          : solo.isMain
+            ? "Your chief of staff. Ask for anything."
+            : `${solo.role}. Say hi.`
+        : `${members.map((m) => m.name).join(", ")}${state.shared ? "" : " and you"}`;
 
   return (
-    <button onClick={onClick} onContextMenu={onMenu} className={`flex items-center gap-3 rounded-[14px] p-2.5 text-left ${selected ? "bg-[#EEEEEC]" : "hover:bg-black/[0.03]"} ${menuOpen ? "shadow-[inset_0_0_0_1.5px_#0A0A0A]" : ""}`}>
-      <ChatAvatar chat={c} bots={state.bots} size={44} />
+    <button onClick={onClick} onContextMenu={onMenu} className={`group/chat flex items-center gap-3 rounded-[14px] p-2.5 text-left ${selected ? "bg-[#EEEEEC]" : "hover:bg-black/[0.03]"} ${menuOpen ? "shadow-[inset_0_0_0_1.5px_#0A0A0A]" : ""}`}>
+      {solo?.isMain ? (
+        <span className="relative shrink-0">
+          <ChatAvatar chat={c} bots={state.bots} size={44} />
+          <MainStar selected={selected} />
+        </span>
+      ) : (
+        <ChatAvatar chat={c} bots={state.bots} size={44} />
+      )}
       <div className="flex min-w-0 flex-1 flex-col gap-[3px]">
         <div className="flex items-center gap-1.5">
           <span className="truncate text-[15px] font-semibold leading-[18px]">{c.title ?? (solo ? solo.name : members.map((m) => m.name).join(", "))}</span>
@@ -535,34 +631,9 @@ function ChatRow({
         <div className="flex items-center gap-2">
           <span className={`min-w-0 flex-1 truncate text-[13px] leading-[17px] ${unread ? "font-medium text-ink" : typing ? "text-[#6B6B6B] italic" : "text-[#6B6B6B]"}`}>{preview}</span>
           {unread && <span data-tip="Unread" onAnimationEnd={dot.done} className={`size-[9px] shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A] ${dot.pop ? "motion-dot-in" : ""}`} />}
+          {trail}
         </div>
       </div>
-    </button>
-  );
-}
-
-/** One of the Threads: in ink with its mark while it's working or needs you; × deletes it once it's stopped. */
-function ThreadRow({ session: s, onClick }: { session: Session; onClick: () => void }) {
-  // New since the sidebar opened: rises in, once.
-  const row = useRise(() => arrived(s.id));
-  // Its mark (as StatusIcon draws it) pops when it changes in place, as working turns to needs you.
-  const mark = live(s) && !(s.askWhere && needsYou(s)) ? "working" : needsYou(s) ? "you" : s.status;
-  const pop = usePop(mark);
-  return (
-    <button
-      onClick={onClick}
-      onAnimationEnd={row.done}
-      className={`group/thread flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 text-left hover:bg-black/[0.03] ${row.rise ? "motion-rise-in" : ""}`}
-    >
-      <span className={`min-w-0 flex-1 truncate text-[14px] leading-[18px] ${live(s) || needsYou(s) ? "text-ink" : "text-[#6B6B6B]"}`}>{s.title}</span>
-      {(live(s) || needsYou(s)) && (
-        <span key={pop.n} onAnimationEnd={pop.done} className={`flex shrink-0 ${pop.pop ? "motion-dot-in" : ""}`}>
-          <StatusIcon session={s} />
-        </span>
-      )}
-      {!live(s) && (
-        <DeleteX label={`Delete ${s.title}`} onDelete={() => void post(`/api/sessions/${s.id}`, {}, "DELETE")} className="group-hover/thread:opacity-100 group-focus-visible/thread:opacity-100" />
-      )}
     </button>
   );
 }
@@ -575,7 +646,20 @@ export { DeleteX };
  * one, or start a new one. Each workspace is its own team: its own main bot, bots, chats and threads.
  */
 /** What deleting a workspace takes with it (GET /api/workspaces?preview=), for the confirm. */
-type DeletePreview = { id: string; name: string; orgo: boolean; computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[] };
+type DeletePreview = {
+  id: string;
+  name: string;
+  orgo: boolean;
+  memory?: boolean;
+  computers: { id: string; name: string }[];
+  keys: string[];
+  skills: string[];
+  apps: string[];
+  madeApps?: string[];
+  crmFiles?: string[];
+  routines?: string[];
+  issues?: string[];
+};
 
 /** How often a rename made on orgo.ai is looked for while the app is open. */
 const NAMES_SYNC_MS = 10 * 60_000;
@@ -594,8 +678,20 @@ export function heldNameNote(reason: string): string {
   return `Orgo keeps the name bops until every Bops app you use is updated to ${WORKSPACE_APPS_SINCE}.`;
 }
 
-export function WorkspaceSwitcher({ state, opened = false }: { state: AppState; /** Tests: open from the start. */ opened?: boolean }) {
+export function WorkspaceSwitcher({
+  state,
+  opened = false,
+  sharedList,
+}: {
+  state: AppState;
+  /** Tests: open from the start. */
+  opened?: boolean;
+  /** Tests: the workspaces shared with the user, as if Orgo had listed them. */
+  sharedList?: SharedWorkspace[];
+}) {
   const [open, setOpen] = useState(opened);
+  // Workspaces others shared with the user (lib/shared.ts), read each time the menu opens.
+  const [shared, setShared] = useState<SharedWorkspace[]>(sharedList ?? []);
   const [naming, setNaming] = useState<null | { id?: string; name: string }>(null);
   // The workspace whose Delete was pressed: what goes with it once Bops (and Orgo) said, and what went wrong.
   const [deleting, setDeleting] = useState<null | { id: string; preview?: DeletePreview; error?: string; busy?: boolean }>(null);
@@ -603,8 +699,33 @@ export function WorkspaceSwitcher({ state, opened = false }: { state: AppState; 
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const box = useRef<HTMLDivElement>(null);
-  const workspaces = state.workspaces ?? [];
+  // The user's own: a shared one open now is in the state too, under its own id, and listed below instead.
+  const workspaces = (state.workspaces ?? []).filter((w) => w.id !== state.shared?.wsId);
   const current = workspaces.find((w) => w.id === currentWorkspace(state));
+  const sharedRows = state.shared && !shared.some((x) => x.projectId === state.shared!.projectId) ? [state.shared, ...shared] : shared;
+
+  useEffect(() => {
+    if (!open || sharedList) return;
+    let gone = false;
+    void fetch("/api/workspaces/shared", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j: { workspaces?: SharedWorkspace[] }) => !gone && setShared(j.workspaces ?? []))
+      .catch(() => {});
+    return () => {
+      gone = true;
+    };
+  }, [open, sharedList]);
+
+  // A workspace deleted (here, or on another Mac) takes what this window kept for it in localStorage.
+  const listed = useRef<{ user: string; ids: Set<string> } | null>(null);
+  const user = state.account?.user.id ?? "";
+  const ids = workspaces.map((w) => w.id).join(" ");
+  useEffect(() => {
+    const now = new Set(ids.split(" ").filter(Boolean));
+    const was = listed.current;
+    if (was && was.user === user && now.size) for (const id of was.ids) if (!now.has(id)) forgetWorkspaceHere(id);
+    listed.current = { user, ids: now };
+  }, [user, ids]);
 
   // A workspace renamed on orgo.ai is renamed here too: now, and every 10 minutes while the app is open.
   useEffect(() => {
@@ -661,6 +782,22 @@ export function WorkspaceSwitcher({ state, opened = false }: { state: AppState; 
       setBusy(false);
     }
   };
+  /** Open a workspace shared with the user, read only, in place of the one open now. */
+  const openShared = async (projectId: string) => {
+    if (busy) return;
+    if (state.shared?.projectId === projectId) return close();
+    setBusy(true);
+    try {
+      const res = await post("/api/workspaces/shared", { open: projectId });
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) return setProblem(j.error ?? "Couldn't open it. Try again.");
+      close();
+    } catch {
+      setProblem("Couldn't reach Bops. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
   const editName = (id?: string) => (name: string) => {
     setNaming({ id, name });
     setProblem(null);
@@ -683,7 +820,10 @@ export function WorkspaceSwitcher({ state, opened = false }: { state: AppState; 
     try {
       const res = await post("/api/workspaces", { id }, "DELETE");
       const j = (await res.json().catch(() => ({}))) as { error?: string };
-      if (res.ok) setDeleting(null);
+      if (res.ok) {
+        setDeleting(null);
+        forgetWorkspaceHere(id);
+      }
       else setDeleting({ id, preview, error: j.error ?? "That didn't work, so nothing was deleted. Try again." });
     } catch {
       setDeleting({ id, preview, error: "Couldn't reach Bops. Try again." });
@@ -698,7 +838,8 @@ export function WorkspaceSwitcher({ state, opened = false }: { state: AppState; 
         {heldNameNote(held.reason)}
       </span>
     ) : null;
-  const count = (id: string) => state.bots.filter((b) => workspaceOf(b) === id).length;
+  // A shared workspace open: the window's bots are its, so the user's own are counted from what it says.
+  const count = (id: string) => (state.shared ? (state.shared.ownBots?.[id] ?? 0) : state.bots.filter((b) => workspaceOf(b) === id).length);
 
   return (
     <div ref={box} className="relative min-w-0">
@@ -707,7 +848,7 @@ export function WorkspaceSwitcher({ state, opened = false }: { state: AppState; 
         title="Switch workspace"
         className="-ml-1.5 flex min-w-0 items-center gap-1.5 rounded-[10px] px-1.5 py-0.5 hover:bg-black/[0.04]"
       >
-        <span className="truncate text-[22px] font-semibold leading-7 tracking-[-0.02em]">{current?.name ?? "Main"}</span>
+        <span className="truncate text-[22px] font-semibold leading-7 tracking-[-0.02em]">{state.shared?.name ?? current?.name ?? "Main"}</span>
         <svg width="12" height="12" viewBox="0 0 12 12" className={`shrink-0 transition-transform duration-200 ease-out motion-reduce:transition-none ${open ? "rotate-180" : ""}`}>
           <path d="M3 4.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
@@ -772,6 +913,37 @@ export function WorkspaceSwitcher({ state, opened = false }: { state: AppState; 
             ),
           )}
           {deleting && <DeleteConfirm name={workspaces.find((w) => w.id === deleting.id)?.name ?? "this workspace"} {...deleting} onCancel={() => setDeleting(null)} onDelete={() => void confirmDelete()} />}
+          {sharedRows.length > 0 && (
+            <>
+              <div className="px-2.5 pb-1 pt-2.5 text-[12px] font-medium text-[#9A9A98]">Shared with you</div>
+              {sharedRows.map((x) => (
+                <button
+                  key={x.projectId}
+                  data-shared={x.projectId}
+                  onClick={() => void openShared(x.projectId)}
+                  className="flex min-h-9 items-center gap-2 rounded-[10px] py-1.5 pl-2.5 pr-2 text-left hover:bg-black/[0.04]"
+                >
+                  <span className="flex size-[18px] shrink-0 items-center justify-center">
+                    {x.projectId === state.shared?.projectId && (
+                      <svg width="12" height="12" viewBox="0 0 12 12">
+                        <path d="M2.5 6.5l2.3 2.2L9.5 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    )}
+                  </span>
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate text-[14px] font-medium">{x.name}</span>
+                    <span className="truncate text-[12px] leading-4 text-[#9A9A98]">{sharedBy(x)}</span>
+                  </span>
+                  <span className="shrink-0 text-[12px] text-[#9A9A98]">{roleLabel(x.role)}</span>
+                </button>
+              ))}
+              {problem && !naming && (
+                <span role="alert" className="px-2.5 pb-1 text-[12px] leading-4 text-[#B42318]">
+                  {problem}
+                </span>
+              )}
+            </>
+          )}
           {/* After each workspace became an Orgo workspace of its own: names Orgo already had (until dismissed). */}
           {renamed.length > 0 && (
             <div className="flex flex-col gap-0.5 px-2.5 pt-1 text-[12px] leading-4 text-[#6B6B6B]">
@@ -823,24 +995,39 @@ function GoesWith({ label, items }: { label: string; items: string[] }) {
 }
 
 /**
- * Delete a workspace, confirmed: what goes with it (its computers, keys, skills and apps, here and in its Orgo
- * workspace), then Delete. Orgo saying no keeps the workspace whole, with its words here.
+ * Delete a workspace, confirmed: what goes with it (its computers, keys, skills and apps, the apps its bots
+ * made, its CRM files, routines and Orbit issues, here and in its Orgo workspace, and its memory when its bank
+ * goes), then Delete. Orgo saying no keeps the workspace whole, with its words here.
  */
-function DeleteConfirm({ name, preview, error, busy, onCancel, onDelete }: { name: string; preview?: DeletePreview; error?: string; busy?: boolean; onCancel: () => void; onDelete: () => void }) {
-  const nothing = !!preview && !preview.computers.length && !preview.keys.length && !preview.skills.length && !preview.apps.length;
+export function DeleteConfirm({ name, preview, error, busy, onCancel, onDelete }: { name: string; preview?: DeletePreview; error?: string; busy?: boolean; onCancel: () => void; onDelete: () => void }) {
+  const nothing =
+    !!preview &&
+    !preview.computers.length &&
+    !preview.keys.length &&
+    !preview.skills.length &&
+    !preview.apps.length &&
+    !preview.madeApps?.length &&
+    !preview.crmFiles?.length &&
+    !preview.routines?.length &&
+    !preview.issues?.length;
+  const team = preview?.memory ? "Its bots, chats and memory go" : "Its bots and chats go";
   return (
     <div className="mx-1 my-1 flex flex-col gap-1.5 rounded-[10px] bg-[#F7F7F5] p-2.5 text-[12px] leading-4 text-[#6B6B6B]">
       <span className="text-[13px] font-medium text-ink">Delete {name}?</span>
       {!preview && !error && <span>Checking what&apos;s in it&hellip;</span>}
       {preview && (
         <>
-          <span>{nothing ? "Its bots and chats go. Nothing else is in it." : "Its bots and chats go, and with them:"}</span>
+          <span>{nothing ? `${team}. Nothing else is in it.` : `${team}, and with them:`}</span>
           {!nothing && (
             <ul className="flex flex-col gap-0.5">
               <GoesWith label="Computers" items={preview.computers.map((c) => c.name)} />
               <GoesWith label="Keys" items={preview.keys} />
               <GoesWith label="Skills" items={preview.skills} />
               <GoesWith label="Apps" items={preview.apps} />
+              <GoesWith label="Apps its bots made" items={preview.madeApps ?? []} />
+              <GoesWith label="CRM files" items={preview.crmFiles ?? []} />
+              <GoesWith label="Routines" items={preview.routines ?? []} />
+              <GoesWith label="Issues" items={preview.issues ?? []} />
             </ul>
           )}
           {preview.orgo && <span>Its Orgo workspace is deleted too.</span>}

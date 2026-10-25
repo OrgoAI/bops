@@ -8,13 +8,15 @@ import { bearer, type CloudUser } from "./auth.ts";
 import { config } from "./config.ts";
 import { creditLeft, creditsOn, outOfCredit, requireCredit } from "./credit.ts";
 import { seal } from "./crypto.ts";
+import { banksOn, botIdsOn, grantsOn, inboxesOn, linesOn, ownerNumbers, type Blob as StateBlob, type Level } from "./computer-scope.ts";
 import { objectInfo, objectOwner, ownObject, query, sessionUsed } from "./db.ts";
 import { HttpError, readBody, refuseUpgrade, type Route, type Upgrade } from "./http.ts";
 import { recordLine } from "./lines.ts";
 import { refuseSecondPlanNumber, requireRoomForNumber, sendingStopped } from "./plans.ts";
 import { imageModelPriced, numberCost, smsSegments } from "./pricing.ts";
-import { PLAN_REQUIRED, USAGE_APP_HEADER, USAGE_BOT_HEADER, USAGE_SOURCE_HEADER } from "./protocol.ts";
-import { accountFor, composioUserId, honchoPrefix, ownsWorkspace } from "./session.ts";
+import { COMPUTER_NOT_ALLOWED, PLAN_REQUIRED, USAGE_APP_HEADER, USAGE_BOT_HEADER, USAGE_SOURCE_HEADER } from "./protocol.ts";
+import { accountFor, composioUserId, honchoPrefix, ownsWorkspace, podKeyOf } from "./session.ts";
+import { loadState } from "./state.ts";
 import { admitTurn, follow, userStopped, verdict, watchSession, type Start } from "./turn-guard.ts";
 import { isWebSearch, liveSecondsOf, recordImages, recordJev, recordTokens, recordTranscription, recordTreg, recordUsage, recordUsageFor, recordWebSearch } from "./usage.ts";
 
@@ -41,11 +43,19 @@ import { isWebSearch, liveSecondsOf, recordImages, recordJev, recordTokens, reco
  *   item, Jev's tokens, Composio's and Honcho's calls. The Mac says which bot and what kind of work a
  *   call is for (x-bops-bot, x-bops-source: read here, never sent on), and an agent session keeps the
  *   bot it was made for.
+ * - A computer's runner (auth.ts CloudUser.computer) reaches only what its own bots may use, from its
+ *   user's state as Bops Cloud keeps it (computer-scope.ts; a computer can't change who works where or
+ *   what they may use): the models, Typesafe and treg as the Mac does; Honcho in its bots' workspaces'
+ *   memory banks only; Composio's catalog, and its bots' own sessions and actions in the accounts the
+ *   user gave them (read-only ones read only), never connecting, deleting or linking accounts, sign-in
+ *   setups, raw API calls or triggers; AgentPhone only to text the user's verified numbers from its
+ *   bots' lines; and AgentMail (computers only: the Mac uses its pod key) in its bots' own inboxes. Any
+ *   other route is 403 computer_not_allowed (Spec.computers, Rule.computer).
  */
 
 const MAX_BODY = 25 * 1024 * 1024;
 
-type Provider = "openai" | "agentphone" | "honcho" | "composio" | "typesafe" | "treg";
+type Provider = "openai" | "agentphone" | "honcho" | "composio" | "typesafe" | "treg" | "agentmail";
 
 /** A call on its way through: who's asking and where to, and what the rules may check or change before it goes. */
 type Call = {
@@ -84,6 +94,8 @@ type Call = {
   app?: string;
   /** The Mac's own request headers, for a rule that reads one it doesn't send on (treg's x-treg-route-max-cost). */
   asked: IncomingHttpHeaders;
+  /** A computer's call: what its bots may use, from its user's state (viewOf), once looked up. */
+  view?: Promise<ComputerView>;
 };
 
 type Hook<T> = (call: Call, value: T) => Promise<unknown> | unknown;
@@ -122,6 +134,11 @@ type Rule = {
   headers?: (call: Call, status: number, headers: IncomingHttpHeaders) => void;
   /** A refusal (status 400 or more), read whole: what the Mac gets instead ({status, body}), or undefined to pass it on as it came. */
   refused?: (call: Call, status: number, headers: IncomingHttpHeaders, body: Buffer) => { status: number; body: Record<string, unknown> } | undefined;
+  /**
+   * A computer's runner may call it (where its provider lets computers call only the rules that say so,
+   * Spec.computers "rules"): true, or a check of its own for a computer's call (refuse with HttpError).
+   */
+  computer?: true | ((call: Call) => Promise<void> | void);
 };
 
 /** "GET v1/agents/sessions/:session/events", with what to do on it. "*" as the method is any; "*" at the end of the path is anything below. */
@@ -139,10 +156,74 @@ type Spec = {
   body: "json" | "json-or-upload" | "pipe";
   /** For every call to this provider, before its route's own check. */
   check?: (call: Call) => Promise<void> | void;
+  /**
+   * What a computer's runner may call: every rule ("all", with `computerCheck` first), only the rules
+   * marked `computer` ("rules"). A provider without it refuses computers.
+   */
+  computers?: "all" | "rules";
+  computerCheck?: (call: Call) => Promise<void> | void;
+  /** The key for this call, when it's the user's own rather than the cloud's (AgentMail's pod key). */
+  keyFor?: (call: Call) => Promise<string>;
   rules: Rule[];
   /** How long to wait for the provider to start answering. */
   timeoutMs: number;
 };
+
+/* ---------------- A computer's runner: what its bots may use ---------------- */
+
+/** What a computer's bots may use, from its user's state as Bops Cloud keeps it (computer-scope.ts). */
+type ComputerView = {
+  state: StateBlob;
+  bots: Set<string>;
+  /** Honcho workspace ids: the user's prefix and its bots' memory banks. */
+  workspaces: Set<string>;
+  inboxes: Set<string>;
+  lines: { numberIds: Set<string>; agentIds: Set<string> };
+  /** The user's verified numbers, last 10 digits. */
+  owners: Set<string>;
+};
+
+/** The calling computer's view, looked up once per call. */
+function viewOf(call: Call): Promise<ComputerView> {
+  return (call.view ??= (async () => {
+    const c = call.user.computer!;
+    const state = ((await loadState(call.user.id))?.state ?? {}) as StateBlob;
+    const prefix = honchoPrefix(call.user.id);
+    return {
+      state,
+      bots: botIdsOn(state, c.desktopId),
+      workspaces: new Set([...banksOn(state, c.desktopId)].map((bank) => `${prefix}-${bank}`)),
+      inboxes: inboxesOn(state, c.desktopId),
+      lines: linesOn(state, c.desktopId),
+      owners: ownerNumbers(state, call.user.id),
+    };
+  })());
+}
+
+const notForComputer = (what: string) => new HttpError(403, `A computer's identity can't do this: ${what}`, { code: COMPUTER_NOT_ALLOWED });
+
+/** A computer's call is for one of its own bots (x-bops-bot): which one. */
+async function computerBot(call: Call): Promise<string> {
+  const v = await viewOf(call);
+  if (!call.bot || !v.bots.has(call.bot)) throw notForComputer("only for a bot that works on this computer.");
+  return call.bot;
+}
+
+/** What a computer's bot may use of each account (grantsOn), and the most it may do in each app. */
+async function computerGrants(call: Call, botId: string) {
+  const grants = grantsOn((await viewOf(call)).state, call.user.computer!.desktopId, botId);
+  const apps = new Map<string, Level>();
+  for (const g of grants.values()) apps.set(g.app.toLowerCase(), apps.get(g.app.toLowerCase()) === "act" || g.level === "act" ? "act" : "read");
+  return { grants, apps };
+}
+
+/** Whether a computer's call may go: its provider lets computers make it (Spec.computers, Rule.computer), and its checks pass. */
+async function forComputer(spec: Spec, r: Rule, call: Call) {
+  const allowed = spec.computers === "all" || (spec.computers === "rules" && r.computer);
+  if (!allowed) throw new HttpError(403, "A computer's identity can't do this.", { code: COMPUTER_NOT_ALLOWED });
+  await spec.computerCheck?.(call);
+  if (typeof r.computer === "function") await r.computer(call);
+}
 
 /* ---------------- Paths, queries and bodies ---------------- */
 
@@ -445,6 +526,7 @@ const openai: Spec = {
   auth: (key) => ({ authorization: `Bearer ${key}` }),
   body: "json",
   check: openaiRefs,
+  computers: "all",
   timeoutMs: 15 * 60_000,
   rules: [
     rule("POST v1/responses", {
@@ -689,6 +771,22 @@ async function notFromPausedNumber(call: Call) {
     throw new HttpError(402, "This number is paused while you're on Free. Upgrade to text from it again.", { code: PLAN_REQUIRED, upgrade: true });
 }
 
+/**
+ * A computer's text (a routine's result, a bot's text_me during a runner's task): only from a line its
+ * bots text from (computer-scope.ts linesOn: a bot's own, else its workspace's main bot's), and only to
+ * one of the user's verified numbers.
+ */
+async function computerTextsOwner(call: Call) {
+  const v = await viewOf(call);
+  const body = isObject(call.json) ? call.json : {};
+  const id = (x: unknown) => (typeof x === "string" ? x : "");
+  const numberId = id(body.number_id ?? body.numberId);
+  const agentId = id(body.agent_id ?? body.agentId);
+  const to = id(body.to_number ?? body.toNumber).replace(/\D/g, "").slice(-10);
+  if (!numberId || !v.lines.numberIds.has(numberId) || (agentId && !v.lines.agentIds.has(agentId))) throw notForComputer("texts only from the number of a bot on this computer.");
+  if (to.length !== 10 || !v.owners.has(to)) throw notForComputer("texts only to your own verified numbers.");
+}
+
 /** A webhook registration goes to the cloud's own address, whatever the Mac asked for. */
 function webhookToCloud(call: Call) {
   if (!config.publicUrl()) throw new HttpError(503, "This cloud has no public address for webhooks yet.");
@@ -727,6 +825,7 @@ const agentphone: Spec = {
   auth: (key) => ({ authorization: `Bearer ${key}` }),
   body: "json",
   check: inSubAccount,
+  computers: "rules",
   timeoutMs: 2 * 60_000,
   rules: [
     rule("GET v1/numbers", { json: recordNumbers }),
@@ -770,7 +869,7 @@ const agentphone: Spec = {
     rule("DELETE v1/agents/:agent/numbers/:number"),
     rule("GET v1/agents/:agent/webhook", { json: keepWebhookSecret }),
     rule("POST v1/agents/:agent/webhook", { check: webhookToCloud, json: keepWebhookSecret }),
-    rule("POST v1/messages", { check: notFromPausedNumber, spends: true, done: countText }),
+    rule("POST v1/messages", { check: notFromPausedNumber, spends: true, done: countText, computer: computerTextsOwner }),
     rule("POST v1/messages/:message/reactions"),
     rule("POST v1/conversations/:conversation/typing"),
     rule("GET v1/register/status"),
@@ -793,10 +892,20 @@ function workspaceInPath(call: Call) {
   if (!ownsWorkspace(call.user.id, call.params.workspace)) throw notYours(call);
 }
 
-/** Only the user's workspaces, whatever else is in the project: the list is filtered after Honcho answers. */
-function ownWorkspacesOnly(call: Call, data: unknown) {
+/** A computer's Honcho call: every workspace it names, in its path, body or query, is one of its bots' memory banks (computer-scope.ts banksOn). */
+async function computerBanks(call: Call) {
+  const v = await viewOf(call);
+  const named = [...queryValues(call.query), ...keysIn(call.json)].filter((x) => x.key === "workspaceid" || x.key === "workspaceids").flatMap((x) => idsIn(x.value));
+  if (call.params.workspace) named.push(call.params.workspace);
+  if (call.method === "POST" && call.path.join("/") === "v3/workspaces" && isObject(call.json) && typeof call.json.id === "string") named.push(call.json.id);
+  if (named.some((w) => !v.workspaces.has(w))) throw notForComputer("memory only in the workspaces of the bots on this computer.");
+}
+
+/** Only the user's workspaces, whatever else is in the project (and for a computer, its bots' only): the list is filtered after Honcho answers. */
+async function ownWorkspacesOnly(call: Call, data: unknown) {
   const items = isObject(data) && Array.isArray(data.items) ? data.items : [];
-  const mine = items.filter((w) => isObject(w) && typeof w.id === "string" && ownsWorkspace(call.user.id, w.id));
+  const theirs = call.user.computer ? (await viewOf(call)).workspaces : null;
+  const mine = items.filter((w) => isObject(w) && typeof w.id === "string" && ownsWorkspace(call.user.id, w.id) && (!theirs || theirs.has(w.id)));
   return { items: mine, total: mine.length, page: 1, size: mine.length, pages: 1 };
 }
 
@@ -820,6 +929,8 @@ const honcho: Spec = {
   auth: (key) => ({ authorization: `Bearer ${key}` }),
   body: "json-or-upload",
   check: honchoScope,
+  computers: "all",
+  computerCheck: computerBanks,
   timeoutMs: 5 * 60_000,
   rules: [
     // Get-or-create: the workspace is named in the body.
@@ -1040,6 +1151,85 @@ const sessionTool = (call: Call) => {
   return typeof slug === "string" ? slug.slice(0, 120) : "session";
 };
 
+/** An action's app (its toolkit) and whether it only reads, as Composio says (asked with the cloud's key, kept). */
+const actionsSeen = new Map<string, { toolkit: string; readOnly: boolean } | null>();
+async function actionOf(slug: string) {
+  if (actionsSeen.has(slug)) return actionsSeen.get(slug)!;
+  const t = await askComposio(`/api/v3.1/tools/${encodeURIComponent(slug)}`);
+  const toolkit = isObject(t?.toolkit) && typeof t.toolkit.slug === "string" ? t.toolkit.slug.toLowerCase() : "";
+  const info = t && toolkit ? { toolkit, readOnly: Array.isArray(t.tags) && t.tags.includes("readOnlyHint") } : null;
+  if (actionsSeen.size > 2000) actionsSeen.clear();
+  actionsSeen.set(slug, info);
+  return info;
+}
+
+/** The accounts a Composio call names (connected_account_id and the like). */
+const accountsNamed = (call: Call) => [...queryValues(call.query), ...keysIn(call.json)].filter((x) => ACCOUNT_KEYS.has(x.key)).flatMap((x) => idsIn(x.value));
+
+/**
+ * A computer's action (POST tools/execute/:tool, lib/server/composio.ts runAppAction): for one of its bots,
+ * in an account the user gave that bot in the action's app (an app with no sign-in: `open:<app>`), and in
+ * one it may only read, a reading action only.
+ */
+async function computerAction(call: Call) {
+  const { grants } = await computerGrants(call, await computerBot(call));
+  const action = await actionOf(call.params.tool);
+  if (!action) throw new HttpError(404, "Composio doesn't know that action.");
+  const named = accountsNamed(call);
+  for (const id of named.length ? named : [`open:${action.toolkit}`]) {
+    const g = grants.get(id);
+    if (!g || g.app.toLowerCase() !== action.toolkit) throw notForComputer("actions only in the accounts its bot was given.");
+    if (g.level === "read" && !action.readOnly) throw notForComputer("only reading actions in an account its bot may only read.");
+  }
+}
+
+/**
+ * A computer's Composio session (lib/server/composio.ts sessionFor): for one of its bots, with that bot's
+ * apps and accounts only, a read-only app's actions read-only, and nothing past them (no connecting
+ * accounts, no sandbox, no sign-in setups or saved configs).
+ */
+async function computerSession(call: Call) {
+  const { grants, apps } = await computerGrants(call, await computerBot(call));
+  const body = isObject(call.json) ? call.json : {};
+  const refuse = () => notForComputer("a session only with its bot's own apps and accounts.");
+  const enabled = isObject(body.toolkits) && Array.isArray(body.toolkits.enable) ? body.toolkits.enable : null;
+  if (!enabled || !enabled.every((t) => typeof t === "string" && apps.has(t.toLowerCase()))) throw refuse();
+  for (const [toolkit, ids] of Object.entries(isObject(body.connected_accounts) ? body.connected_accounts : {}))
+    for (const id of Array.isArray(ids) ? ids : [ids]) {
+      const g = typeof id === "string" ? grants.get(id) : undefined;
+      if (!g || g.app.toLowerCase() !== toolkit.toLowerCase()) throw refuse();
+    }
+  const tools = isObject(body.tools) ? body.tools : {};
+  for (const t of enabled as string[]) {
+    if (apps.get(t.toLowerCase()) !== "read") continue;
+    const cfg = Object.entries(tools).find(([k]) => k.toLowerCase() === t.toLowerCase())?.[1];
+    const tags = isObject(cfg) && isObject(cfg.tags) && Array.isArray(cfg.tags.enable) ? cfg.tags.enable : null;
+    if (!tags?.includes("readOnlyHint")) throw refuse();
+  }
+  const off = (v: unknown) => v === false || (isObject(v) && v.enable === false);
+  const authConfigs = Array.isArray(body.auth_configs) ? body.auth_configs.length : isObject(body.auth_configs) ? Object.keys(body.auth_configs).length : 0;
+  if (!off(body.manage_connections) || !off(body.workbench) || authConfigs || body.experimental !== undefined) throw refuse();
+}
+
+/** A computer's use of a Composio session: one made for one of its bots (recorded with it). Its bot, else 404. */
+async function computerSessionBot(call: Call): Promise<string> {
+  const botId = (await objectInfo("composio", call.params.session)).botId;
+  if (!botId || !(await viewOf(call)).bots.has(botId)) throw new HttpError(404, "Not found");
+  return botId;
+}
+
+/** An action in a computer's session: the account it names, if it names one, is one that session's bot was given. */
+async function computerSessionAction(call: Call) {
+  const { grants } = await computerGrants(call, await computerSessionBot(call));
+  const account = isObject(call.json) ? call.json.account : undefined;
+  if (account !== undefined && !(typeof account === "string" && grants.has(account))) throw notForComputer("actions only in the accounts its bot was given.");
+}
+
+/** One of the accounts the computer's bots were given. */
+async function computerAccount(call: Call) {
+  if (!grantsOn((await viewOf(call)).state, call.user.computer!.desktopId).has(call.params.account)) throw new HttpError(404, "Not found");
+}
+
 /** These checks, one after the other. */
 const both =
   (...checks: ((call: Call) => Promise<void> | void)[]) =>
@@ -1060,11 +1250,12 @@ const composio: Spec = {
   auth: (key) => ({ "x-api-key": key }),
   body: "json",
   check: composioScope,
+  computers: "rules",
   timeoutMs: 5 * 60_000,
   rules: [
-    rule("GET api/v3.1/toolkits"),
-    rule("GET api/v3.1/toolkits/:toolkit"),
-    rule("GET api/v3.1/tools/:tool"),
+    rule("GET api/v3.1/toolkits", { computer: true }),
+    rule("GET api/v3.1/toolkits/:toolkit", { computer: true }),
+    rule("GET api/v3.1/tools/:tool", { computer: true }),
     rule("GET api/v3.1/auth_configs", { json: usableAuthConfigsOnly }),
     rule("POST api/v3.1/auth_configs", { check: signInSetupWithoutSecrets, json: recordSignInSetup }),
     rule("GET api/v3.1/connected_accounts", {
@@ -1075,27 +1266,32 @@ const composio: Spec = {
       json: async (call, data) => {
         const me = composioUserId(call.user.id);
         const items = isObject(data) && Array.isArray(data.items) ? data.items : [];
-        const mine = items.filter((a) => isObject(a) && a.user_id === me && typeof a.id === "string") as { id: string }[];
+        // A computer sees only the accounts its bots were given.
+        const given = call.user.computer ? grantsOn((await viewOf(call)).state, call.user.computer.desktopId) : null;
+        const mine = items.filter((a) => isObject(a) && a.user_id === me && typeof a.id === "string" && (!given || given.has(a.id))) as { id: string }[];
         for (const a of mine) await own(call, "composio", "connected_account", a.id);
         return { ...(isObject(data) ? data : {}), items: mine.map((a) => masked(a)) };
       },
+      computer: true,
     }),
     // Connecting an account: only with a sign-in setup a Mac may use, and another account in the same app is fine.
     rule("POST api/v3.1/connected_accounts", { check: both(asUser(["connection"]), usableSignIns(true)), json: recordAccount("id") }),
     rule("POST api/v3.1/connected_accounts/link", { check: both(asUser([]), usableSignIns(true)), json: recordAccount("connected_account_id") }),
-    rule("GET api/v3.1/connected_accounts/:account", { own: ["account"], json: (_call, data) => masked(data) }),
+    rule("GET api/v3.1/connected_accounts/:account", { own: ["account"], json: (_call, data) => masked(data), computer: computerAccount }),
     rule("DELETE api/v3.1/connected_accounts/:account", { own: ["account"] }),
     rule("POST api/v3.1/tool_router/session", {
       check: both(asUser([]), usableSignIns(false)),
+      computer: computerSession,
       json: async (call, data) => {
         const id = isObject(data) ? data.session_id : undefined;
         if (typeof id === "string") await own(call, "composio", "tool_router_session", id, undefined, call.bot);
       },
     }),
-    rule("GET api/v3.1/tool_router/session/:session", { own: ["session"] }),
-    rule("POST api/v3.1/tool_router/session/:session/search", { own: ["session"] }),
+    rule("GET api/v3.1/tool_router/session/:session", { own: ["session"], computer: async (call) => void (await computerSessionBot(call)) }),
+    rule("POST api/v3.1/tool_router/session/:session/search", { own: ["session"], computer: async (call) => void (await computerSessionBot(call)) }),
     rule("POST api/v3.1/tool_router/session/:session/execute", {
       own: ["session"],
+      computer: computerSessionAction,
       done: countComposio(sessionTool),
       // Which of the session's accounts to use: only one of the user's.
       check: async (call) => {
@@ -1106,7 +1302,7 @@ const composio: Spec = {
     // An app's own API through the user's account (Slack's chat.postMessage and auth.test, an app's "who am I").
     rule("POST api/v3.1/tools/execute/proxy", { check: namesAccount, done: countComposio(() => "proxy") }),
     // One action in one of the user's accounts, or in an app that needs no account.
-    rule("POST api/v3.1/tools/execute/:tool", { check: asUser([]), done: countComposio((call) => call.params.tool) }),
+    rule("POST api/v3.1/tools/execute/:tool", { check: asUser([]), done: countComposio((call) => call.params.tool), computer: computerAction }),
     // Triggers (Slack messages for channels.ts): only on the user's own accounts. Their live delivery
     // (triggers.subscribe, a Pusher channel for the whole project) isn't passed through at all.
     rule("GET api/v3.1/triggers_types/:trigger"),
@@ -1127,6 +1323,52 @@ const composio: Spec = {
   ],
 };
 
+/* ---------------- AgentMail (a computer's runner) ---------------- */
+
+/**
+ * A computer's mail (lib/server/mail.ts on a runner: a routine's email to the user, a bot's check_email,
+ * read_email, send_email and reply_email): its session has no pod key (session.ts), so it comes here,
+ * sent on with the user's pod key, and only in the inboxes of the bots on that computer (computer-scope.ts
+ * inboxesOn), never another's, a new inbox, a domain or a key. A Mac keeps using its pod key.
+ */
+async function computerInbox(call: Call) {
+  if (!call.user.computer) throw new HttpError(403, "Your Mac reaches its mail with its own key.");
+  const v = await viewOf(call);
+  const named = [call.params.inbox, ...[...queryValues(call.query), ...keysIn(call.json)].filter((x) => x.key === "inboxid" || x.key === "inboxids").flatMap((x) => idsIn(x.value))];
+  if (named.some((id) => !v.inboxes.has(id))) throw notForComputer("mail only in the inboxes of the bots on this computer.");
+}
+
+async function podKeyFor(call: Call): Promise<string> {
+  const key = await podKeyOf(call.user.id);
+  if (!key) throw new HttpError(409, "Your email isn't set up yet. Restart Bops on your Mac and try again.");
+  return key;
+}
+
+/** Exactly what lib/server/mail.ts does in a bot's inbox (the agentmail SDK's paths). */
+const agentmail: Spec = {
+  name: "AgentMail",
+  key: config.agentmailKey,
+  keyFor: podKeyFor,
+  upstream: config.upstream.agentmail,
+  auth: (key) => ({ authorization: `Bearer ${key}` }),
+  body: "json",
+  computers: "all",
+  check: computerInbox,
+  timeoutMs: 2 * 60_000,
+  rules: [
+    rule("GET v0/inboxes/:inbox/messages"),
+    // Before ":message", which it would otherwise be taken for.
+    rule("GET v0/inboxes/:inbox/messages/search"),
+    rule("GET v0/inboxes/:inbox/messages/:message"),
+    rule("GET v0/inboxes/:inbox/messages/:message/attachments/:attachment"),
+    rule("POST v0/inboxes/:inbox/messages/send"),
+    rule("POST v0/inboxes/:inbox/messages/:message/reply"),
+    rule("POST v0/inboxes/:inbox/messages/:message/reply-all"),
+    rule("GET v0/inboxes/:inbox/threads/:thread"),
+    rule("GET v0/inboxes/:inbox/threads/:thread/attachments/:attachment"),
+  ],
+};
+
 /* ---------------- Typesafe ---------------- */
 
 /**
@@ -1140,6 +1382,7 @@ const typesafe: Spec = {
   upstream: config.upstream.typesafe,
   auth: (key) => ({ authorization: `Bearer ${key}` }),
   body: "json",
+  computers: "all",
   timeoutMs: 60_000,
   rules: [
     rule("POST v1/systemone", {
@@ -1320,11 +1563,12 @@ const treg: Spec = {
   upstream: config.upstream.treg,
   auth: (key) => ({ "x-treg-token": key }),
   body: "json",
+  computers: "all",
   timeoutMs: 2 * 60_000,
   rules: [rule("GET call/:endpoint", TREG_CALL), rule("POST call/:endpoint", TREG_CALL)],
 };
 
-const SPECS: Record<Provider, Spec> = { openai, agentphone, honcho, composio, typesafe, treg };
+const SPECS: Record<Provider, Spec> = { openai, agentphone, honcho, composio, typesafe, treg, agentmail };
 
 /* ---------------- Sending on ---------------- */
 
@@ -1626,12 +1870,14 @@ async function handle(provider: Provider, prefix: string, req: IncomingMessage, 
 
 /** handle's work once the request is read: its checks, the credit, and sending it on and answering. */
 async function sendOn(provider: Provider, spec: Spec, key: string, r: Rule, call: Call, req: IncomingMessage, res: ServerResponse, user: CloudUser, body: IncomingMessage | null) {
+  if (user.computer) await forComputer(spec, r, call);
   await spec.check?.(call);
   for (const name of r.own ?? []) await mustOwn(provider, call, call.params[name]);
   await r.check?.(call);
   // Last before it's sent: a call that isn't allowed is refused for that, not for the credit.
   if (r.spends) await requireCredit(user.id, await r.minCost?.(call));
   await r.before?.(call);
+  if (spec.keyFor) key = await spec.keyFor(call);
   // A turn that doesn't start gives back what was set aside for it (turn-guard.ts admitTurn).
   let up: IncomingMessage;
   try {
@@ -1883,8 +2129,12 @@ function responsesBridge(client: WebSocket, { ws: upstream, early, keep }: Upstr
 
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 
+/**
+ * Every provider's routes take a computer's runner as far as the server (Route.computer): what it may
+ * call there is each provider's (Spec.computers, Rule.computer, forComputer), deny by default.
+ */
 const proxyRoutes = (provider: Provider, prefix: string, path = `${prefix}/*`): Route[] =>
-  METHODS.map((method) => ({ method, path, auth: "user", handle: (req, res, { user }) => handle(provider, prefix, req, res, user!) }));
+  METHODS.map((method) => ({ method, path, auth: "user", computer: true as const, handle: (req, res, { user }) => handle(provider, prefix, req, res, user!) }));
 
 export const routes: Route[] = [
   ...(Object.keys(SPECS) as Provider[]).flatMap((p) => proxyRoutes(p, `/proxy/${p}`)),
@@ -1895,6 +2145,7 @@ export const routes: Route[] = [
 export const upgrades: Upgrade[] = [
   {
     path: "/proxy/openai/*",
+    computer: true,
     handle: (req, socket, head, { user }) => {
       // Node takes its own error handler off an upgrading socket: without one, a Mac dropping off mid-handshake would crash the process.
       socket.on("error", () => socket.destroy());

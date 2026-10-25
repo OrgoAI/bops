@@ -1,17 +1,24 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { appsOpen } from "@/lib/apps-access";
+import { builtinLabels, builtinSkills, type BuiltinSkill } from "@/lib/builtin-skills";
+import { cleanLabel, OTHER, sameLabel, SKILL_LABEL_MAX, type SkillGroup } from "@/lib/skill-labels";
 import { workspaceOf, type AppState, type Bot, type SkillKind, type SkillRef } from "@/lib/types";
+import { Fold } from "./fold";
 import { Mascot, Spinner } from "./mascot";
+import { Chevron, readSectionOpen, writeSectionOpen } from "./side-group";
 import { CloseButton, currentWorkspace, post, teamOf } from "./ui";
 
 /*
  * Skills: a workspace's ways of doing a kind of job (skills) and the tools Bops built that bots run (apps),
  * each a folder in the Agent Skill shape on this Mac (lib/server/workspace-skills.ts). A kind in Knowledge
- * (memory-categories.tsx): its chip opens a page of cards (SkillsPage) in the Knowledge tab, opening one in place:
- * its SKILL.md and files, which bots have it, its versions (Publish, Roll back), its scripts to approve,
- * Open in Finder and Delete. Import folder takes a folder picked in Finder through the Mac app. The lists
- * are the app's state (Workspace.skills, Workspace.apps), so they're as current as everything else.
+ * (memory-categories.tsx): its chip opens a page (SkillsPage) in the Knowledge tab with the skills under
+ * their labels (lib/skill-labels.ts), Bops' own labels first, each a heading that folds; one opens in place:
+ * its SKILL.md and files, its label (a chip to move it), which bots have it, its versions (Publish, Roll
+ * back), its scripts to approve, Open in Finder and Delete. Bops' own skills open read only. Import folder
+ * takes a folder picked in Finder through the Mac app. The lists are the app's state (Workspace.skills,
+ * Workspace.apps), so they're as current as everything else.
  */
 
 type Problem = { path: string; reason: string; line?: number };
@@ -48,7 +55,77 @@ export function SkillsIcon({ size = 14 }: { size?: number }) {
 
 const PILL = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
 const CHIP = "rounded-full bg-[#F2F2F0] px-2 py-px text-[11px] leading-4 text-[#6B6B6B]";
+const DRAFT = "shrink-0 rounded-full bg-highlighter px-2 py-px text-[11px] font-medium leading-4 text-ink";
 const RISK: Record<string, string> = { read: "Reads only", write: "Changes things", destructive: "Can delete" };
+
+/* ---------------- Labels ---------------- */
+
+/** One label on the page: its skills of the workspace's, and Bops' own in it (lib/builtin-skills.ts: every bot has them, nobody edits them). */
+export type LabelGroup = SkillGroup & { refs: SkillRef[]; builtins: BuiltinSkill[] };
+
+/**
+ * Skills under their labels, as the page lists them and in the order a bot sees them (skillGroups in
+ * lib/server/workspace-skills.ts): Bops' own labels first, in their order (with any of the workspace's
+ * skills given one of their names), then the workspace's, the most skills first, then by name, Other
+ * last. Each list keeps the order it came in (newest first). `withBuiltins` false: only the workspace's
+ * labels (apps have no built-in ones). `apps`: whether apps are open to the account (lib/apps-access.ts),
+ * without which Bops' own Apps and source control skills aren't listed.
+ */
+export function labelGroups(refs: SkillRef[], withBuiltins = true, apps = true): LabelGroup[] {
+  const make = (label: string, about: string, builtin: boolean): LabelGroup => ({ label: cleanLabel(label), about, builtin, count: 0, slugs: [], refs: [], builtins: [] });
+  const ours = withBuiltins ? builtinLabels(apps).map((b) => make(b.label, b.about, true)) : [];
+  for (const s of withBuiltins ? builtinSkills(apps) : []) {
+    let g = ours.find((x) => sameLabel(x.label, s.label));
+    // One under a label BUILTIN_LABELS doesn't name is still Bops' own, listed with them.
+    if (!g) ours.push((g = make(s.label, "", true)));
+    g.builtins.push(s);
+  }
+  const theirs: LabelGroup[] = [];
+  for (const r of refs) {
+    const label = cleanLabel(r.label);
+    let g = ours.find((x) => sameLabel(x.label, label)) ?? theirs.find((x) => sameLabel(x.label, label));
+    if (!g) theirs.push((g = make(label, "", false)));
+    g.refs.push(r);
+  }
+  const other = (g: LabelGroup) => (sameLabel(g.label, OTHER) ? 1 : 0);
+  theirs.sort((a, b) => other(a) - other(b) || b.refs.length - a.refs.length || a.label.localeCompare(b.label));
+  // A label of Bops' with nothing in it isn't listed.
+  return [...ours.filter((g) => g.builtins.length || g.refs.length), ...theirs].map((g) => {
+    const all = [...g.builtins, ...g.refs];
+    return { ...g, count: all.length, slugs: all.map((x) => x.slug), about: g.about || all.map((x) => x.name).join(", ") };
+  });
+}
+
+/** The labels a skill can be moved to: every one on the page, and Other. */
+export function labelChoices(refs: SkillRef[], apps = true) {
+  const all = labelGroups(refs, true, apps).map((g) => g.label);
+  return all.some((l) => sameLabel(l, OTHER)) ? all : [...all, OTHER];
+}
+
+/** What the update route takes to move a skill to `label` (app/api/skills, action "update"). */
+export const labelEdit = (label: string) => ({ action: "update", edit: { label: cleanLabel(label) } });
+
+/** Labels open on the page before the user folds or opens one: the first two. */
+export const OPEN_LABELS = 2;
+/** This Mac's memory of what's folded (side-group.tsx keeps it), for this page. */
+const FOLDS = "skills";
+
+/**
+ * Whether a label is open, as the user left it on this Mac (`fallback` until they fold or open it), read
+ * again for another workspace or label, and how to change it (remembered, when it can be).
+ */
+function useLabelOpen(user: string, ws: string, label: string, fallback: boolean) {
+  const key = label.toLowerCase();
+  const id = `${user}:${ws}:${key}:${fallback}`;
+  const [v, setV] = useState(() => ({ id, open: readSectionOpen(FOLDS, user, ws, key, fallback) }));
+  if (v.id !== id) setV({ id, open: readSectionOpen(FOLDS, user, ws, key, fallback) });
+  const open = v.id === id ? v.open : readSectionOpen(FOLDS, user, ws, key, fallback);
+  const set = (next: boolean) => {
+    setV({ id, open: next });
+    writeSectionOpen(FOLDS, user, ws, key, next);
+  };
+  return [open, set] as const;
+}
 
 /** What the server said back, in words, with the files it turned down (path and why, never what's in them). */
 async function call<T>(body: Record<string, unknown>): Promise<{ ok: true; json: T } | { ok: false; error: string; problems?: Problem[] }> {
@@ -61,16 +138,11 @@ async function call<T>(body: Record<string, unknown>): Promise<{ ok: true; json:
   }
 }
 
-/** Which bots have it: every bot, or the ones named. */
-function botsLine(r: SkillRef, team: Bot[]) {
-  if (!r.botIds.length) return team.length > 1 ? "Every bot" : "";
-  return r.botIds.map((id) => team.find((b) => b.id === id)?.name).filter(Boolean).join(", ");
-}
-
 /**
- * Skills or Apps, in the Knowledge tab (one per workspace; `only` picks which, its own chip): cards, Import
- * folder, and one opened in place (`focus`: "skill:<slug>" or "app:<slug>"; `focusAt` is when it was asked
- * for). `nav` is Knowledge's row of chips, under the title as on Issues.
+ * Skills or Apps, in the Knowledge tab (one per workspace; `only` picks which, its own chip): one line each
+ * under its label, Import folder, and one opened in place (`focus`: "skill:<slug>", "app:<slug>", or
+ * "builtin:<slug>" for one of Bops' own; `focusAt` is when it was asked for). `nav` is Knowledge's row of
+ * chips, under the title as on Issues.
  */
 export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { state: AppState; only?: SkillKind; focus?: string; focusAt?: number; nav?: ReactNode; onClose: () => void }) {
   const ws = currentWorkspace(state);
@@ -112,11 +184,18 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
   };
 
   const ref = open ? [...skills, ...apps].find((r) => `${r.kind}:${r.slug}` === open) : undefined;
+  // Bops' own Apps and source control skills only where apps are open (lib/apps-access.ts).
+  const appsHere = appsOpen(state);
+  const ours = open?.startsWith("builtin:") ? builtinSkills(appsHere).find((s) => `builtin:${s.slug}` === open) : undefined;
   const kinds: SkillKind[] = only ? [only] : ["skill", "app"];
   const groups = [
     { kind: "skill" as const, label: "Skills", list: skills },
     { kind: "app" as const, label: "Apps", list: apps },
   ].filter((g) => kinds.includes(g.kind));
+  // Each kind's labels (Bops' own for skills), and where its first one is on the page, so only the page's first two start open.
+  const sections = groups.map((g) => ({ ...g, labels: labelGroups(g.list, g.kind === "skill", appsHere) }));
+  const starts = sections.map((_, i) => sections.slice(0, i).reduce((n, s) => n + s.labels.length, 0));
+  const user = state.account?.user.id ?? "";
   const about =
     only === "app"
       ? "Programs and tools this workspace\u2019s bots run, kept with their files exactly as they are."
@@ -144,7 +223,9 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
         {imported && <ImportNote result={imported} onDismiss={() => setImported(null)} />}
 
         {ref ? (
-          <SkillView key={open} state={state} ws={ws} skill={ref} team={team} onBack={() => setOpen(null)} />
+          <SkillView key={open} state={state} ws={ws} skill={ref} team={team} labels={labelChoices(skills, appsHere)} onBack={() => setOpen(null)} />
+        ) : ours ? (
+          <BuiltinView key={open} skill={ours} onBack={() => setOpen(null)} />
         ) : (
           <>
             {picker && (
@@ -157,26 +238,29 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
                 ))}
               </div>
             )}
-            {groups.every((g) => !g.list.length) ? (
-              <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
-                {only === "app" ? `No apps yet.${picker ? " Import a folder with the program and its files." : ""}` : `No skills yet. Save one from a chat\u2019s menu${picker ? ", or import a folder" : ""}.`}
-              </span>
-            ) : (
-              groups
-                .filter((g) => g.list.length)
-                .map((g) => (
-                  <section key={g.label} className="flex flex-col gap-2">
-                    <span className="text-[13px] font-semibold leading-4">
-                      {g.label} <span className="font-normal tabular-nums text-[#9A9A98]">{g.list.length}</span>
-                    </span>
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {g.list.map((r) => (
-                        <SkillCard key={`${r.kind}:${r.slug}`} skill={r} team={team} onOpen={() => setOpen(`${r.kind}:${r.slug}`)} />
-                      ))}
-                    </div>
-                  </section>
-                ))
-            )}
+            {sections.map((s, i) => (
+              <section key={s.kind} className="flex flex-col gap-3">
+                {/* Both kinds on one page: each under its own name. */}
+                {sections.length > 1 && s.labels.length > 0 && <span className="text-[13px] font-semibold leading-4">{s.label}</span>}
+                {s.labels.map((g, n) => (
+                  <LabelSection key={g.label} user={user} ws={ws} group={g} first={starts[i] + n < OPEN_LABELS}>
+                    {g.builtins.map((b) => (
+                      <SkillRow key={`builtin:${b.slug}`} name={b.name} description={b.description} onOpen={() => setOpen(`builtin:${b.slug}`)} />
+                    ))}
+                    {g.refs.map((r) => (
+                      <SkillRow key={`${r.kind}:${r.slug}`} name={r.name} description={r.description} draft={r.status === "draft"} onOpen={() => setOpen(`${r.kind}:${r.slug}`)} />
+                    ))}
+                  </LabelSection>
+                ))}
+                {!s.list.length && (
+                  <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
+                    {s.kind === "app"
+                      ? `No apps yet.${picker ? " Import a folder with the program and its files." : ""}`
+                      : `No skills of your own yet. Save one from a chat\u2019s menu${picker ? ", or import a folder" : ""}.`}
+                  </span>
+                )}
+              </section>
+            ))}
           </>
         )}
       </div>
@@ -184,20 +268,216 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
   );
 }
 
-/** A skill or app as a card: name, what it does, its version (or Draft), risk, where it runs, its bots. */
-function SkillCard({ skill: r, team, onOpen }: { skill: SkillRef; team: Bot[]; onOpen: () => void }) {
-  const bots = botsLine(r, team);
+/**
+ * A label: a heading with how many skills it has (Built in for Bops' own, what they're for in its tooltip)
+ * that folds its rows. Open as the user left it on this Mac; until then, open when it's one of the first two.
+ */
+function LabelSection({ user, ws, group: g, first, children }: { user: string; ws: string; group: LabelGroup; first: boolean; children: ReactNode }) {
+  const [open, setOpen] = useLabelOpen(user, ws, g.label, first);
   return (
-    <button onClick={onOpen} className="flex min-w-0 flex-col gap-1.5 rounded-2xl bg-white p-3.5 text-left shadow-[0_0_0_1px_#ECECEA] hover:shadow-[0_0_0_1px_#D9D9D6]">
-      <span className="truncate text-[14px] font-medium leading-[18px]">{r.name}</span>
-      <span className="line-clamp-2 text-[12.5px] leading-[17px] text-[#6B6B6B]">{r.description}</span>
-      <span className="flex flex-wrap items-center gap-1 pt-0.5">
-        {r.status === "draft" ? <span className="rounded-full bg-highlighter px-2 py-px text-[11px] font-medium leading-4 text-ink">Draft</span> : <span className={CHIP}>v{r.version}</span>}
-        {r.risk && <span className={CHIP}>{RISK[r.risk] ?? r.risk}</span>}
-        {r.runsOn && <span className={CHIP}>{r.runsOn === "local" ? "On its computer" : r.runsOn}</span>}
-        {bots && <span className="truncate text-[11.5px] leading-4 text-[#9A9A98]">{bots}</span>}
-      </span>
+    <div className="flex flex-col gap-1.5" data-label={g.label}>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-label={`${g.label}, ${g.count} skill${g.count === 1 ? "" : "s"}${g.builtin ? ", built in" : ""}`}
+        data-tip={g.builtin ? g.about : undefined}
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 self-start rounded-md py-0.5 pr-1 text-[13px] font-semibold leading-4 text-ink"
+      >
+        <span className="text-[#9A9A98]">
+          <Chevron open={open} />
+        </span>
+        {g.label}
+        <span className="font-normal tabular-nums text-[#9A9A98]">{g.count}</span>
+        {g.builtin && <span className={`${CHIP} font-normal`}>Built in</span>}
+      </button>
+      <Fold open={open} lazy>
+        <div className="flex flex-col overflow-hidden rounded-2xl border border-[#ECECEA] bg-white">{children}</div>
+      </Fold>
+    </div>
+  );
+}
+
+/** A skill on one line: its name, what it does (all of it in the tooltip), and Draft until it's published. */
+function SkillRow({ name, description, draft, onOpen }: { name: string; description: string; draft?: boolean; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      title={`${name}\n${description}`}
+      className="flex min-w-0 items-center gap-2.5 border-b border-black/[0.05] px-3.5 py-2 text-left last:border-b-0 hover:bg-[#FCFCFB]"
+    >
+      <span className="max-w-[45%] shrink-0 truncate text-[13px] font-medium leading-[18px]">{name}</span>
+      <span className="min-w-0 flex-1 truncate text-[12.5px] leading-[18px] text-[#6B6B6B]">{description}</span>
+      {draft && <span className={DRAFT}>Draft</span>}
     </button>
+  );
+}
+
+/** One of Bops' own skills opened: what it is, its files and its SKILL.md, to read. Every bot has it and it can't be changed. */
+function BuiltinView({ skill: s, onBack }: { skill: BuiltinSkill; onBack: () => void }) {
+  const [shown, setShown] = useState<string | null>(null);
+  const files = s.files ?? [];
+  return (
+    <div className="motion-fade-in flex flex-col gap-4">
+      <button onClick={onBack} className="self-start text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+        ‹ Back
+      </button>
+      <div className="flex flex-col gap-1">
+        <span className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[17px] font-semibold leading-[22px]">{s.name}</span>
+          <span className={CHIP}>Built in</span>
+          <span className={CHIP}>{cleanLabel(s.label)}</span>
+        </span>
+        <span className="text-[13px] leading-[19px] text-[#3A3A38]">{s.description}</span>
+        <span className="text-[12px] leading-4 text-[#9A9A98]">Every bot has it. It comes with Bops, so it can&apos;t be changed here.</span>
+      </div>
+      {files.length > 0 && (
+        <Group title="Files">
+          {files.map((f, i) => (
+            <div key={f.path} className={`flex flex-col gap-1.5 px-4 py-2 ${i === files.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px] leading-4">{f.path}</span>
+                <button onClick={() => setShown(shown === f.path ? null : f.path)} className="shrink-0 text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+                  {shown === f.path ? "Hide" : "View"}
+                </button>
+              </div>
+              {shown === f.path && (
+                <pre className="motion-fade-in max-h-[260px] overflow-auto whitespace-pre-wrap rounded-[10px] bg-[#F7F7F6] px-3 py-2 font-mono text-[11.5px] leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#ECECEA]">{f.content}</pre>
+              )}
+            </div>
+          ))}
+        </Group>
+      )}
+      <Group title="SKILL.md">
+        <div className="px-4 pb-4 pt-1">
+          <SkillMarkdown text={s.body} />
+        </div>
+      </Group>
+    </div>
+  );
+}
+
+const MENU_ITEM = "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-4 text-ink outline-none hover:bg-[#F2F2F0] focus-visible:bg-[#F2F2F0]";
+
+/** A skill's label as a chip, which opens the labels there are to move it to one, or to a new one. */
+function LabelChip({ label, labels, busy, onPick }: { label: string; labels: string[]; busy: boolean; onPick: (label: string) => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="relative flex">
+      <button
+        type="button"
+        disabled={busy}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Label: ${label}. Change it`}
+        data-label-chip={label}
+        onClick={() => setOpen(!open)}
+        className={`${CHIP} flex items-center gap-1 hover:bg-[#EAEAE7] disabled:opacity-50`}
+      >
+        {label}
+        <svg width="8" height="8" viewBox="0 0 12 12" className="shrink-0" aria-hidden>
+          <path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <LabelMenu
+          current={label}
+          labels={labels}
+          onClose={() => setOpen(false)}
+          onPick={(l) => {
+            setOpen(false);
+            if (!sameLabel(l, label)) onPick(l);
+          }}
+        />
+      )}
+    </span>
+  );
+}
+
+/**
+ * The labels a skill can go under, its own checked, and New label, which asks for a name in place (one
+ * that's already there, in any case, is that one). Esc or a click outside closes it.
+ */
+export function LabelMenu({ current, labels, onPick, onClose }: { current: string; labels: string[]; onPick: (label: string) => void; onClose: () => void }) {
+  const [naming, setNaming] = useState(false);
+  const [name, setName] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  // Focus on the skill's own label as it opens (the first, when it has none there), on the name once New label asks for one.
+  useEffect(() => {
+    const menu = ref.current;
+    (menu?.querySelector<HTMLElement>(naming ? "input" : "[aria-checked=true]") ?? menu?.querySelector<HTMLElement>("[role^=menuitem]"))?.focus();
+  }, [naming]);
+  const move = (by: number) => {
+    const all = [...(ref.current?.querySelectorAll<HTMLElement>("[role^=menuitem]") ?? [])];
+    const i = all.indexOf(document.activeElement as HTMLElement);
+    all[(i + by + all.length) % all.length]?.focus();
+  };
+  const save = () => {
+    if (!name.trim()) return;
+    const fresh = cleanLabel(name);
+    onPick(labels.find((l) => sameLabel(l, fresh)) ?? fresh);
+  };
+  return (
+    <>
+      <div className="fixed inset-0 z-30" onMouseDown={onClose} />
+      <div
+        ref={ref}
+        role="menu"
+        aria-label="Labels"
+        onKeyDown={(e) => {
+          const go = { Escape: onClose, ArrowDown: () => move(1), ArrowUp: () => move(-1) }[e.key];
+          if (!go || (naming && e.key !== "Escape")) return;
+          // Esc closes the menu and only the menu (the page under it stays open).
+          e.preventDefault();
+          e.stopPropagation();
+          go();
+        }}
+        className="motion-menu-in absolute left-0 top-[calc(100%+6px)] z-40 flex w-[220px] origin-top-left flex-col rounded-xl bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040]"
+      >
+        <div className="flex max-h-[240px] flex-col overflow-y-auto">
+          {labels.map((l) => {
+            const on = sameLabel(l, current);
+            return (
+              <button key={l} type="button" role="menuitemradio" aria-checked={on} onClick={() => onPick(l)} className={MENU_ITEM}>
+                <span className="min-w-0 flex-1 truncate">{l}</span>
+                {on && (
+                  <svg width="11" height="11" viewBox="0 0 12 12" className="shrink-0" aria-hidden>
+                    <path d="M2.5 6.5l2.5 2.5 4.5-6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        <span className="mx-1.5 my-1 h-px bg-black/[0.06]" />
+        {naming ? (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              save();
+            }}
+            className="flex items-center gap-1.5 p-1"
+          >
+            <input
+              value={name}
+              maxLength={SKILL_LABEL_MAX}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Label name"
+              aria-label="New label"
+              className="min-w-0 flex-1 rounded-lg bg-[#F7F7F6] px-2 py-1.5 text-[13px] leading-4 text-ink outline-none placeholder:text-[#9A9A98] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+            />
+            <button type="submit" disabled={!name.trim()} className="rounded-full bg-ink px-2.5 py-1 text-[12px] font-medium leading-4 text-white disabled:opacity-40">
+              Save
+            </button>
+          </form>
+        ) : (
+          <button type="button" role="menuitem" onClick={() => setNaming(true)} className={MENU_ITEM}>
+            New label
+          </button>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -228,7 +508,7 @@ function ImportNote({ result: r, onDismiss }: { result: { name?: string; skipped
 }
 
 /** One skill or app opened: what it is, who has it, its versions, its SKILL.md and files. */
-function SkillView({ state, ws, skill: r, team, onBack }: { state: AppState; ws: string; skill: SkillRef; team: Bot[]; onBack: () => void }) {
+function SkillView({ state, ws, skill: r, team, labels, onBack }: { state: AppState; ws: string; skill: SkillRef; team: Bot[]; labels: string[]; onBack: () => void }) {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [version, setVersion] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
@@ -286,7 +566,8 @@ function SkillView({ state, ws, skill: r, team, onBack }: { state: AppState; ws:
       <div className="flex flex-col gap-1">
         <span className="flex flex-wrap items-center gap-1.5">
           <span className="text-[17px] font-semibold leading-[22px]">{r.name}</span>
-          {r.status === "draft" ? <span className="rounded-full bg-highlighter px-2 py-px text-[11px] font-medium leading-4 text-ink">Draft</span> : <span className={CHIP}>v{r.version}</span>}
+          {r.status === "draft" ? <span className={DRAFT}>Draft</span> : <span className={CHIP}>v{r.version}</span>}
+          {r.kind === "skill" && <LabelChip label={labels.find((l) => sameLabel(l, cleanLabel(r.label))) ?? cleanLabel(r.label)} labels={labels} busy={!!busy} onPick={(l) => void act("label", labelEdit(l))} />}
           {r.risk && <span className={CHIP}>{RISK[r.risk] ?? r.risk}</span>}
           {r.runsOn && <span className={CHIP}>Runs {r.runsOn === "local" ? "on its computer" : `on ${r.runsOn}`}</span>}
         </span>

@@ -208,8 +208,9 @@
 
 /*
  * Boppy listening to music while Bops loads (BoppyLoading in components/app/mascot.tsx): it bops to
- * the beat, leaning one way then the other, and notes drift out of its headphones. The same scene as
- * the window's splash (desktop/splash.html), so one hands over to the other without a jump.
+ * the beat, leaning one way then the other, notes drift out of its headphones, and it sings along and
+ * blinks now and then. The same scene as the window's splash (desktop/splash.html), so one hands over
+ * to the other without a jump.
  */
 .boppy-loading-scene {
   position: relative;
@@ -224,6 +225,85 @@
   height: 88px;
   transform-origin: 50% 90%;
   animation: boppy-bop 1.1s ease-in-out infinite;
+}
+/*
+ * It sings along, a phrase over four bars: its mouth, shut between lines, opens on the beats, a held
+ * note wavering. Its eyes blink now and then, twice sometimes. The eyes and mouth are the awake face's
+ * (lib/mascot.ts), found by their shapes, since the pictures carry no classes (scripts/test-bot-moods.mjs
+ * holds them to it).
+ */
+.boppy-loading-boppy g[transform="translate(.6 -1.4)"] ellipse {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: boppy-blink 5.3s ease-in-out infinite;
+}
+.boppy-loading-boppy ellipse[cy="26.6"] {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: boppy-sing 4.4s ease-in-out infinite;
+}
+@keyframes boppy-sing {
+  0%,
+  2%,
+  47%,
+  52%,
+  96%,
+  100% {
+    transform: scale(1.2, 0.3);
+  }
+  6% {
+    transform: scale(1, 1.15);
+  }
+  12%,
+  25% {
+    transform: scale(1.1, 0.5);
+  }
+  18% {
+    transform: scale(1.05, 1.35);
+  }
+  31%,
+  39% {
+    transform: scale(0.95, 1.1);
+  }
+  35%,
+  43% {
+    transform: scale(0.95, 0.9);
+  }
+  56% {
+    transform: scale(1.05, 1.25);
+  }
+  62% {
+    transform: scale(1.1, 0.45);
+  }
+  68% {
+    transform: scale(1.1, 1.4);
+  }
+  74% {
+    transform: scale(1.1, 0.5);
+  }
+  81%,
+  91% {
+    transform: scale(1, 1.2);
+  }
+  86% {
+    transform: scale(1, 1);
+  }
+}
+@keyframes boppy-blink {
+  0%,
+  38%,
+  43%,
+  82%,
+  86.5%,
+  91.5%,
+  100% {
+    transform: scaleY(1);
+  }
+  40%,
+  84%,
+  88.5% {
+    transform: scaleY(0.1);
+  }
 }
 .boppy-loading-shadow {
   position: absolute;
@@ -324,6 +404,7 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .boppy-loading-boppy,
+  .boppy-loading-boppy ellipse,
   .boppy-loading-shadow {
     animation: none;
   }
@@ -650,6 +731,238 @@
   .motion-tick,
   .motion-dot-in,
   .motion-typing-dot {
+    animation: none;
+  }
+}
+
+/*
+ * A bot's mood while it works (lib/mascot.ts draws each pose, lib/bot-mood.ts picks it): thinking
+ * glances up, its head tilting with it, while its thought bubble's dots pulse; writing scribbles with
+ * its pencil, nodding with each stroke; speaking moves its mouth, its head with it, with sound off a
+ * cup; working bops along, leaning one way then the other, with its cups to the beat; shy sways,
+ * looking away, its cheeks glowing. Slow loops of transform and opacity only, in the mascot's own 40
+ * unit box (a px here is a unit there; each head turns about its own chin). With reduced motion each
+ * holds its pose; while the window is hidden they rest (mascot-paused).
+ */
+@keyframes mascot-glance {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  30%,
+  75% {
+    transform: translate(0.6px, -1.4px);
+  }
+}
+.mascot-glance {
+  animation: mascot-glance 2s ease-in-out infinite;
+}
+/* In time with the glance: the head tilts a little further as the eyes go up, "hmm". */
+@keyframes mascot-ponder {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  30%,
+  75% {
+    transform: rotate(-3deg);
+  }
+}
+.mascot-thinking {
+  transform-origin: 20px 30px;
+  animation: mascot-ponder 2s ease-in-out infinite;
+}
+@keyframes mascot-thought {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+  }
+  30% {
+    opacity: 1;
+  }
+}
+.mascot-thought-dot {
+  animation: mascot-thought 1.4s ease-in-out infinite;
+}
+
+/* Writing a word, a stroke at a time, then back to the start of the next; the line darkens as it goes. */
+@keyframes mascot-scribble {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  20% {
+    transform: translate(0.7px, -0.6px);
+  }
+  40% {
+    transform: translate(1.4px, 0);
+  }
+  60% {
+    transform: translate(2.1px, -0.6px);
+  }
+  80% {
+    transform: translate(2.8px, 0);
+  }
+}
+.mascot-pencil {
+  animation: mascot-scribble 1.6s ease-in-out infinite;
+}
+@keyframes mascot-ink {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  80% {
+    opacity: 1;
+  }
+}
+.mascot-scribble {
+  animation: mascot-ink 1.6s ease-in-out infinite;
+}
+/* A small nod into the page, twice a word. */
+@keyframes mascot-jot {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(0.5px) rotate(-1.5deg);
+  }
+}
+.mascot-writing {
+  transform-origin: 20px 32px;
+  animation: mascot-jot 0.8s ease-in-out infinite;
+}
+
+/* Talking: the mouth opens and closes from its top edge, and the sound arcs pulse out, inner first. */
+@keyframes mascot-talk {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  30% {
+    transform: scaleY(1);
+  }
+  55% {
+    transform: scaleY(0.5);
+  }
+  75% {
+    transform: scaleY(0.9);
+  }
+}
+.mascot-mouth {
+  transform-box: fill-box;
+  transform-origin: 50% 0;
+  animation: mascot-talk 0.9s ease-in-out infinite;
+}
+@keyframes mascot-sound {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+.mascot-sound path {
+  animation: mascot-sound 1.2s ease-out infinite;
+}
+.mascot-sound path + path {
+  animation-delay: 0.2s;
+}
+/* The head lifts a touch as the mouth opens, in time with it. */
+@keyframes mascot-nod {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-0.5px);
+  }
+}
+.mascot-speaking {
+  animation: mascot-nod 0.9s ease-in-out infinite;
+}
+
+/* At work: bopping along, leaning one way then the other with a lift between, the cups bouncing on each lift, one then the other. */
+@keyframes mascot-sway {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-3deg);
+  }
+  25%,
+  75% {
+    transform: translateY(-0.8px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(0) rotate(3deg);
+  }
+}
+.mascot-working {
+  transform-origin: 20px 34px;
+  animation: mascot-sway 1.4s ease-in-out infinite;
+}
+@keyframes mascot-cup {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(0.8px);
+  }
+}
+.mascot-cup {
+  animation: mascot-cup 0.7s ease-in-out infinite;
+}
+.mascot-cup-r {
+  animation-delay: -0.35s;
+}
+/* Shy, for a few seconds after a thanks: a small bashful sway, the cheeks glowing. */
+@keyframes mascot-bashful {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(-3deg);
+  }
+}
+.mascot-shy {
+  transform-origin: 20px 32px;
+  animation: mascot-bashful 1.6s ease-in-out infinite;
+}
+@keyframes mascot-blush {
+  0%,
+  100% {
+    opacity: 0.7;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.mascot-blush {
+  animation: mascot-blush 1.6s ease-in-out infinite;
+}
+/* As specific as the sound arcs' own rule (.mascot-sound path), whose animation shorthand would otherwise run them on. */
+.mascot-paused *,
+.mascot-paused .mascot-sound path {
+  animation-play-state: paused;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mascot-glance,
+  .mascot-thinking,
+  .mascot-thought-dot,
+  .mascot-pencil,
+  .mascot-scribble,
+  .mascot-writing,
+  .mascot-mouth,
+  .mascot-sound path,
+  .mascot-speaking,
+  .mascot-working,
+  .mascot-cup,
+  .mascot-shy,
+  .mascot-blush {
     animation: none;
   }
 }

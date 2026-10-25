@@ -1,5 +1,5 @@
 import OpenAI, { type ClientOptions } from "openai";
-import { APP_VERSION_HEADER, TELEMETRY_HEADER } from "@/cloud/protocol";
+import { APP_VERSION_HEADER, BOPS_STATE_LEVEL_HEADER, STATE_LEVEL, TELEMETRY_HEADER } from "@/cloud/protocol";
 import { appVersion, telemetryHere } from "./app-version";
 import { cloudProxy } from "./cloud";
 
@@ -14,11 +14,15 @@ import { cloudProxy } from "./cloud";
 export function openaiClient(opts: Omit<ClientOptions, "apiKey" | "defaultHeaders"> = {}) {
   const client = new OpenAI({
     ...opts,
-    // Which app is calling, said to Bops Cloud only: read at each call (and each sideband socket), and
-    // left out (null) when the app calls OpenAI directly.
+    // Which app is calling, and which state it may be given (an older app's calls are refused once a
+    // newer one wrote the user's state: cloud/state.ts behindState), said to Bops Cloud only: read at
+    // each call (and each sideband socket), and left out (null) when the app calls OpenAI directly.
     defaultHeaders: {
       get [APP_VERSION_HEADER]() {
         return cloudProxy("openai") ? (appVersion() ?? null) : null;
+      },
+      get [BOPS_STATE_LEVEL_HEADER]() {
+        return cloudProxy("openai") ? String(STATE_LEVEL) : null;
       },
       get [TELEMETRY_HEADER]() {
         return cloudProxy("openai") && !telemetryHere() ? "off" : null;

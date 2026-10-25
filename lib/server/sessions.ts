@@ -9,15 +9,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "@/cloud/protocol";
-import { BLOCKER_LABEL, botChatId, brainOf, BRAINS_ON, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, threadRunner, workBot, workspaceOf, type Bot, type Brain, type Routine, type Session, type TaskRoute, type ThreadReply } from "@/lib/types";
+import { BLOCKER_LABEL, botChatId, brainOf, BRAINS_ON, computerStaysDown, DISPLAYS, isScreenWatch, live, MAIN_WORKSPACE, MAX_SCREENS, ownerSent, pausedForOk, routineSent, threadRunner, waitsForOk, workBot, workspaceOf, type AppApproval, type Bot, type Brain, type Routine, type Session, type Takeover, type TaskRoute, type ThreadReply } from "@/lib/types";
 import { CloudError, creditsOut, executorKey, noteOutOfCredit, OUT_OF_CREDIT, outOfCreditError, shortOfCredit } from "./cloud";
-import { appsMcp, appsSocket, browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
+import { browserMcp, cdpPort, cuaDriverHere, currentUrl, ensureChrome, MAC_BROWSER_TOOLS, MAC_UI_TOOLS, macTaskPort, macUiMcp, navigate, startExecutor, stopExecutor, taskDir, taskSockets } from "./local";
 import { relayNewComputer } from "./relay";
 import { computerAsleepError, computerWakingError, madeByThisServer, madeReady, orgo, OrgoError, screenId, wakeWaitMs, type OrgoScreen } from "./orgo";
 import { forgetPlan, holdFreeAgain, limitText, makeMainComputer, makeOwnComputer, orgoPlan, PlanLimit } from "./plan";
 import { signedInUser } from "./orgo-auth";
 import { fullAccessOn } from "./full-access";
-import { onPostgres } from "./persist";
+import { loopHere, onPostgres, onRunner } from "./persist";
 import { chose, decide, yes } from "./decide";
 import { watchScreen } from "./screen-watch";
 import { forgetScreens, listedScreenId, pageAt, sameComputer, screenEndpoint, screenPages, workComputer } from "./screens";
@@ -28,23 +28,28 @@ import { ensureTailnet } from "./tailnet";
 import { applyDesktop } from "./desktop";
 import { computerBriefing } from "./briefing";
 import { ASKING, tidyAnswer, withBriefing, WRITING } from "./style";
-import { accountsOf, appsKeyFor, bopsAddress, composioOn, serveApps } from "./composio";
+import { accountsOf, APP_TOOLS, appsKeyFor, bopsAddress, composioOn, findAppActions, runAppAction } from "./composio";
+import { askFor, declined, NeedsOk, Paused, stopAsks, takeAnswer, type AskSpec } from "./permission";
 import { appsNote, placesNote } from "./skills";
-import { copySkillsToComputer, countUse, findSkill, skillsFor, skillsNote, skillText } from "./workspace-skills";
-import { dataNote, dataOn } from "./treg";
+import { copySkillsToComputer, countUse, findSkill, skillsFor, skillsIndexNote, skillsNote, skillText } from "./workspace-skills";
+import { appMcp, readyAppForTask } from "./hosted-apps";
+import { DATA_TOOL_NAMES, DATA_TOOLS, dataNote, dataOn, runDataTool } from "./treg";
 import { crmNote } from "./crm";
-import { memoryBlock, saveToMemory, wsOf } from "./memory";
+import { memoryBlock, OWNER_WHO, saveToMemory, wsOf } from "./memory";
 import { pingIfWorthIt } from "./attention";
 import { emailResult } from "./mail";
 import { textOwner, textResult } from "./phone";
 import { askTiming, needsYou } from "@/lib/asks";
 import { channelResult } from "./channels";
 import { asksForMac, chooseWhere } from "./where";
-import { addMessage, bot, getState, id, ownerLine, ownerName, patchSession, sameState, session, stateEpoch, stateReady, update } from "./store";
+import { RUNNER_SCRUB, runnerFailed, runnerUpFor } from "./runner";
+import { addMessage, bot, getState, id, leftBehind, ownerLine, ownerName, ownSession, patchSession, pullState, sameState, session, startLanded, stateDevice, stateEpoch, stateReady, update, watchArrivals } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { computerToolOn, computerTurn, PAGE_RUNNER } from "./computer-task";
 import { ASKS_AGAIN, LIGHT, logRoute, routeTask, speedFor, taskConfig } from "./routing";
-import { holdsScreen, screenLabel, screenMap, screenNo } from "@/lib/screens";
+import { HOLD_MS, holdsScreen, screenLabel, screenMap, screenNo } from "@/lib/screens";
+import { appsOpen } from "@/lib/apps-access";
+import { builtinSkills } from "@/lib/builtin-skills";
 import { watching } from "./presence";
 import { freeHoursUsed, sayInUse, START_SAY_MS, wakeForUser } from "./free-hours";
 import { brainById, signInStatus } from "./brains";
@@ -106,6 +111,11 @@ type StartOptions = {
   title?: string;
   chatId?: string;
   sentVia?: Session["sentVia"];
+  /**
+   * `sentVia` names a bot (handing it on): said wherever a bot's id goes there, as a bot from before may have
+   * the id "you" or "routine" (Session.sentViaBot). A copy of a thread passes its sentViaBot.
+   */
+  viaBot?: boolean;
   onWatch?: string;
   /** Where to run it: the user's Mac, the cloud, or (auto) let Bops decide. */
   where?: "mac" | "cloud" | "auto";
@@ -133,11 +143,15 @@ type StartOptions = {
   routineId?: string;
   /** The procedure it follows (Session.procedure). */
   procedure?: string;
+  /** The app on the web it works on (Session.app: work_on_app's task). */
+  app?: Session["app"];
   /** What it runs on, set here rather than routed (a benchmark run: app/api/sessions). */
   route?: TaskRoute;
   /** One of several parts of one request, run side by side (Session.group), and the thread that split it off. */
   group?: Session["group"];
   partOf?: string;
+  /** Started for a message the user kept between us (Session.secret): a job it adds to is kept between us from then on. */
+  secret?: boolean;
 };
 
 const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -148,10 +162,10 @@ const waiting = (s: Session) => !s.dismissed && !s.replacedBy && (!!s.blocker ||
 /** Running and not on its way out: a thread being stopped (or moved) runs until its turn ends, but no longer does its job. */
 const doing = (s: Session) => live(s) && !stopped.has(s.id);
 
-/** The bot's thread already doing this job (same title): running, or waiting on the user. */
+/** The bot's thread already doing this job (same title): running, or waiting on the user. Not one another Mac left behind (store.ts leftBehind): nothing works on that one. */
 function sameJob(botId: string, title: string, except?: string) {
   return getState()
-    .sessions.filter((s) => s.botId === botId && s.id !== except && !s.dismissed && !s.replacedBy && (doing(s) || waiting(s)) && norm(s.title) === norm(title))
+    .sessions.filter((s) => s.botId === botId && s.id !== except && !s.dismissed && !s.replacedBy && (doing(s) || waiting(s)) && !leftBehind(s) && norm(s.title) === norm(title))
     .at(-1);
 }
 
@@ -172,7 +186,7 @@ function repoint(from: string, to: string) {
 async function sameJobByMeaning(s: Session) {
   // Its siblings (parts of the same request) are other jobs by design.
   const open = getState()
-    .sessions.filter((x) => x.id !== s.id && x.botId === s.botId && !x.dismissed && !x.replacedBy && (doing(x) || waiting(x)) && x.createdAt < s.createdAt && !(s.group && x.group?.id === s.group.id) && x.id !== s.partOf)
+    .sessions.filter((x) => x.id !== s.id && x.botId === s.botId && !x.dismissed && !x.replacedBy && (doing(x) || waiting(x)) && !leftBehind(x) && x.createdAt < s.createdAt && !(s.group && x.group?.id === s.group.id) && x.id !== s.partOf)
     .slice(-5);
   if (!open.length) return undefined;
   const brief = (g: string) => (g.length > 240 ? `${g.slice(0, 240)}…` : g);
@@ -209,18 +223,30 @@ function foldInto(s: Session, goal: string, where: "mac" | "cloud" | "auto", opt
   return s;
 }
 
-export function startSession({ botId, goal, title, chatId, sentVia = "you", onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom, routineId, procedure, route: forced, group, partOf }: StartOptions): Session {
+export function startSession({ botId, goal, title, chatId, sentVia = "you", viaBot, onWatch, where: asked = "auto", thenOnMac, fresh, outside, ownerAsked, movedFrom, routineId, procedure, app, route: forced, group, partOf, secret }: StartOptions): Session {
   // Someone else's words (an email or a text from outside) never put work on the user's Mac (StartOptions.outside).
   // Parts of one request run side by side on the bot's screens, in the cloud, unless the bot said where.
   const where = outside && asked === "mac" ? "auto" : group && asked === "auto" ? "cloud" : asked;
   // One job, one thread: asking for a job that's already running (or waiting on the user) adds to it.
   const same = !fresh && !onWatch ? sameJob(botId, title?.trim() || goal.slice(0, 48)) : undefined;
-  if (same) return foldInto(same, goal, where, { outside, ownerAsked });
+  if (same) {
+    if (secret)
+      update((state) => {
+        const x = state.sessions.find((t) => t.id === same.id);
+        if (x) x.secret = true;
+      });
+    return foldInto(same, goal, where, { outside, ownerAsked });
+  }
+  const by = stateDevice();
   const s: Session = {
     id: id("ses"),
     botId,
+    // This server runs it (Session.by): another Mac or a computer's runner leaves it be.
+    ...(by ? { by } : {}),
     chatId: chatId ?? botChatId(botId),
     sentVia,
+    // A bot's id that reads as the user or a routine there (a bot from before: bots.ts namesTheUser) says it's a bot's.
+    ...(viaBot && (sentVia === "you" || sentVia === "routine") ? { sentViaBot: true as const } : {}),
     title: title?.trim() || goal.slice(0, 48),
     goal,
     host: getState().host,
@@ -236,12 +262,15 @@ export function startSession({ botId, goal, title, chatId, sentVia = "you", onWa
     ...(movedFrom ? { movedFrom } : {}),
     ...(routineId ? { routineId } : {}),
     ...(procedure ? { procedure } : {}),
+    // Never on someone else's task, or a routine's run: those don't work on a workspace's app on the web.
+    ...(app && !outside && sentVia === "you" && !viaBot && !routineId ? { app } : {}),
     ...(forced ? { route: forced, effort: forced.effort } : {}),
     ...(group ? { group } : {}),
     ...(partOf ? { partOf } : {}),
+    ...(secret ? { secret: true as const } : {}),
   };
   update((state) => state.sessions.push(s));
-  trackServerEvent("bops_task_started", { task_id: s.id, sent_via: sentVia === "you" || sentVia === "routine" ? sentVia : "bot", on_watch: !!onWatch, where_asked: where });
+  trackServerEvent("bops_task_started", { task_id: s.id, sent_via: ownerSent(s) ? "you" : routineSent(s) ? "routine" : "bot", on_watch: !!onWatch, where_asked: where });
   retireCopies(s);
   if (s.routing) void route(s.id, where, { fresh, outside, ownerAsked });
   else void pump();
@@ -265,7 +294,7 @@ function rememberTask(t: Session) {
     wsOf(t.botId),
     "task",
     t.id,
-    [{ who: "owner", text: t.goal }, ...t.replies.filter((r) => r.role === "user" && !r.from).map((r) => ({ who: "owner", text: r.text })), { who: t.botId, text: t.answer ?? "" }],
+    [{ who: OWNER_WHO, text: t.goal }, ...t.replies.filter((r) => r.role === "user" && !r.from).map((r) => ({ who: OWNER_WHO, text: r.text })), { who: t.botId, text: t.answer ?? "" }],
     { title: t.title, where: t.runsOn ?? "cloud" },
   );
 }
@@ -281,6 +310,9 @@ function routineOf(s: Session): Routine | undefined {
   return r?.last?.sessionId === s.id ? r : undefined;
 }
 
+/** A thread paused while the user took its screen over: not its end. */
+const PAUSED = /^Paused while you took over/;
+
 /**
  * A routine's thread ended without its answer (it couldn't start, it failed, it was stopped): the routine
  * records that, and says so where its results go (routines.ts onRoutineTaskEnd). Paused for a takeover
@@ -289,7 +321,7 @@ function routineOf(s: Session): Routine | undefined {
  * module. True when the routine's run before failed the same way: it was recorded, and isn't said again.
  */
 async function routineFailed(sessionId: string, error: string, chatOnly = false): Promise<boolean> {
-  if (!session(sessionId)?.routineId || /^Paused while you took over/.test(error)) return false;
+  if (!session(sessionId)?.routineId || PAUSED.test(error)) return false;
   try {
     const { onRoutineTaskEnd } = await import("./routines");
     // Read again once it's loaded: a move to the Mac hands the run to the new thread meanwhile (moveToMac).
@@ -333,6 +365,9 @@ async function quietNothing(s: Session, answer: string) {
 async function route(sessionId: string, where: "mac" | "cloud" | "auto", opts: { fresh?: boolean; outside?: boolean | string; ownerAsked?: boolean } = {}) {
   const s = session(sessionId);
   if (!s) return;
+  // On a computer's runner (a routine's run) it starts once Bops Cloud has it (store.ts startLanded): its bot may
+  // have moved off the computer meanwhile, and then the Bops that has the bot now runs that routine instead.
+  if (onRunner() && !(await startLanded((st) => Array.isArray(st.sessions) && st.sessions.some((x: { id?: unknown }) => x?.id === sessionId)))) return;
   // Same job under a different name? Jev checks against what the bot is already doing.
   const twin = opts.fresh ? undefined : await sameJobByMeaning(s).catch(() => undefined);
   if (twin) {
@@ -351,7 +386,7 @@ async function route(sessionId: string, where: "mac" | "cloud" | "auto", opts: {
       taskEnded(s, "not_started");
       // A routine's run failing as its last one did (every 15 minutes, the Mac still not set up) isn't said again.
       const again = await routineFailed(sessionId, session(sessionId)?.error ?? "Your Mac isn't set up for bots yet");
-      if (!again) addMessage({ chatId: s.chatId, role: "bot", botId: s.botId, text: `I can't work on your Mac yet: ${getState().mac?.reason ?? "it isn't set up"}`, sessionIds: [sessionId], resultOf: sessionId });
+      if (!again) addMessage({ chatId: s.chatId, role: "bot", botId: s.botId, text: `I can't work on your Mac yet: ${getState().mac?.reason ?? "it isn't set up"}`, sessionIds: [sessionId], resultOf: sessionId, bops: true });
       return;
     }
     to = "cloud";
@@ -365,9 +400,9 @@ async function route(sessionId: string, where: "mac" | "cloud" | "auto", opts: {
   const lastAsk = [...getState().messages].reverse().find((m) => m.chatId === s.chatId && m.role === "user");
   // (Not on a turn someone else started: the user picks where that runs.)
   const byText = !opts.outside && lastAsk?.via === "sms" && Date.now() - lastAsk.at < 10 * 60_000;
-  if (to === "ask" && (s.sentVia === "routine" || byText)) {
+  if (to === "ask" && (routineSent(s) || byText)) {
     to = "cloud";
-    const r = s.sentVia === "routine" && s.routineId ? getState().routines.find((x) => x.id === s.routineId) : undefined;
+    const r = routineSent(s) && s.routineId ? getState().routines.find((x) => x.id === s.routineId) : undefined;
     if (r) {
       const { setRoutineWhere } = await import("./routines");
       setRoutineWhere(r.id, "cloud");
@@ -376,7 +411,7 @@ async function route(sessionId: string, where: "mac" | "cloud" | "auto", opts: {
   }
   if (to === "ask") {
     patchSession(sessionId, { routing: false, askWhere: true });
-    addMessage({ chatId: s.chatId, role: "bot", botId: s.botId, text: `Should I do this on your Mac or in the cloud?`, sessionIds: [sessionId] });
+    addMessage({ chatId: s.chatId, role: "bot", botId: s.botId, text: `Should I do this on your Mac or in the cloud?`, sessionIds: [sessionId], bops: true });
     return;
   }
   patchSession(sessionId, { routing: false, runsOn: to });
@@ -387,7 +422,8 @@ async function route(sessionId: string, where: "mac" | "cloud" | "auto", opts: {
 export function setWhere(sessionId: string, to: "mac" | "cloud") {
   const s = session(sessionId);
   if (!s?.askWhere) return;
-  patchSession(sessionId, { askWhere: false, runsOn: to });
+  // It waited on the user, running nowhere: this server runs it now (Session.by).
+  patchSession(sessionId, { askWhere: false, runsOn: to, by: stateDevice() ?? undefined });
   void pump();
 }
 
@@ -424,7 +460,7 @@ export function moveToMac(sessionId: string, also?: string, depth = 0): Session 
   const page = pageNow(s);
   const running = live(s);
   if (running) stopSession(sessionId, "Moved to your Mac");
-  // A run under way is only told to stop (one that hadn't started stops at once).
+  // A run under way is only told to stop (one that hadn't started, or was paused for the user's OK, stops at once).
   const ending = (running && live(session(sessionId)!)) || runs.has(sessionId);
   // Already being done on the Mac: this copy steps aside for that one, which gets what came with the move.
   const there = getState().sessions.find((x) => x.id !== s.id && x.botId === s.botId && x.runsOn === "mac" && doing(x) && norm(x.title) === norm(s.title));
@@ -445,6 +481,7 @@ export function moveToMac(sessionId: string, also?: string, depth = 0): Session 
       title: s.title,
       chatId: s.chatId,
       sentVia: s.sentVia,
+      viaBot: s.sentViaBot,
       where: "mac",
       fresh: true,
       movedFrom: s.id,
@@ -453,11 +490,17 @@ export function moveToMac(sessionId: string, also?: string, depth = 0): Session 
     });
   if (!there) movePages.set(next.id, page);
   // A routine's run carries on on the Mac: the routine follows the new thread, so the cloud one's stop
-  // isn't its end, and its next run waits for this one (routines.ts taskRun).
+  // isn't its end, and its next run waits for this one (routines.ts taskRun). The run is the Mac's now, not
+  // the computer's runner's that began it (RoutineRun.by): the computer forgets it (its thread stops), and
+  // the Mac thread's end is that run's end, that time of the routine done, never due again for the move;
+  // what that runner writes of the thread it left before it hears of the move never lands on it
+  // (state-merge.ts mergeRoutine).
   if (!there && routineOf(s))
     update((state) => {
       const r = state.routines.find((x) => x.id === s.routineId);
-      if (r?.last) r.last.sessionId = next.id;
+      if (!r?.last) return;
+      r.last.sessionId = next.id;
+      delete r.last.by;
     });
   patchSession(sessionId, { replacedBy: next.id, blocker: undefined, waitingOnYou: false, offerMac: undefined });
   repoint(sessionId, next.id);
@@ -470,6 +513,8 @@ export function moveToMac(sessionId: string, also?: string, depth = 0): Session 
 
 /** Runs under way (run), until their cleanup is done: a cloud executor is only killed in its finally. */
 const runs = new Set<string>();
+/** The threads this server runs right now (live.ts: only this Mac's own are its to say are working). */
+export const runsHere = (): ReadonlySet<string> => runs;
 /** The page a moved thread's cloud screen was on when the move was asked for (moveToMac), by the Mac thread's id, for cloudRecord. */
 const movePages = new Map<string, Promise<{ url: string; title?: string } | null>>();
 
@@ -566,14 +611,45 @@ const cancelTurn = (agentSessionId: string) =>
 /** Whether the user stopped a thread (or paused it by taking over) and hasn't set it going again. */
 export const stoppedByUser = (sessionId: string) => stopped.has(sessionId);
 
-/** Stop a session: a queued one never starts; a running one ends its turn (at OpenAI too) and frees its screen. */
+/**
+ * Stop a session: a queued one never starts; a running one ends its turn (at OpenAI too) and frees its
+ * screen. Another Bops's thread (Session.by: another Mac's, a computer's runner's) is that one's to stop,
+ * as this server has no hold on its turn: it's asked to (stopAsked), and stops it when it hears
+ * (stopAskedHere). One another Mac left behind (closed, asleep or quit: store.ts leftBehind), or one a
+ * computer's runner ran that failed (runner.ts runnerFailed: a run of its paused for the user's OK and
+ * answered, which nothing there will carry on), ends here at once, as this Bops's now, its requests
+ * resolved as Stop resolves them; that Mac lets go of it when it hears (letGoOfEnded). A run paused for the
+ * user's OK (lib/types.ts pausedForOk) at a request they haven't answered ends here and now, wherever it runs
+ * (endPaused): nothing of it is held anywhere to stop.
+ */
 export function stopSession(sessionId: string, reason = "Stopped by you") {
   const s = session(sessionId);
   if (!s || !live(s)) return;
+  // Stopped for good (not paused for a takeover or its terminal) while the user has its screen: handing the screen back
+  // doesn't set it going again (returnControl).
+  if (!PAUSED.test(reason) && reason !== IN_TERMINAL && getState().takeover?.sessionId === sessionId)
+    update((state) => {
+      if (state.takeover) state.takeover = { ...state.takeover, sessionId: undefined, found: undefined };
+    });
+  // Paused at a request still waiting on the user: ended here (endPaused). One answered already is a run that goes on
+  // (or is about to, on the Bops that asked, which takes the reply as it starts): stopped as any run is, there.
+  if (pausedForOk(s, getState()) && waitsForOk(s, getState())) return endPaused(s, reason);
+  if (!ownSession(s)) {
+    if (leftBehind(s) || runnerFailed(s.by)) {
+      if (s.agentSessionId) void cancelTurn(s.agentSessionId);
+      // Stopped here, as one of this Bops's own would be: the run's end.
+      endSessionOf(s.id, s.by!, reason);
+    } else if (s.stopAsked !== reason) patchSession(sessionId, { stopAsked: reason });
+    for (const p of getState().sessions.filter((x) => x.partOf === sessionId && live(x))) stopSession(p.id, reason);
+    return;
+  }
   stopped.add(sessionId);
   siteWait.delete(sessionId);
   if (s.status === "queued") {
     patchSession(sessionId, { status: "failed", error: reason, endedAt: Date.now(), offerMac: undefined });
+    // A run paused for the user's OK they answered, which hadn't gone on yet: stopped, its request goes with it (permission.ts
+    // stopAsks), never read. Not for a pause (a takeover, its terminal): the run goes on from that answer after.
+    if (!PAUSED.test(reason) && reason !== IN_TERMINAL) stopAsks(sessionId);
     movePages.delete(sessionId);
     taskEnded(s, getState().takeover?.sessionId === sessionId ? "paused_for_takeover" : "stopped");
     void routineFailed(sessionId, reason);
@@ -582,6 +658,59 @@ export function stopSession(sessionId: string, reason = "Stopped by you") {
   interrupts.get(sessionId)?.();
   // The parts it split off (split_task) stop with it.
   for (const p of getState().sessions.filter((x) => x.partOf === sessionId && live(x))) stopSession(p.id, reason);
+}
+
+/**
+ * Stop on a run paused for the user's OK (lib/types.ts pausedForOk), from whichever Bops pressed it: its request is
+ * rejected, reason "stopped" (permission.ts stopAsks), an Agents API session waiting for that call's result gets
+ * agent.session.input.cancel from here, and the run ends where it paused, nothing resumed. Nothing is woken: the
+ * Bops that asked (a bot's computer asleep through the wait, another Mac shut) takes the request out when it next
+ * hears, and has nothing else of it to let go of. Its routine's run ends with it.
+ */
+function endPaused(s: Session, reason: string) {
+  // Read first: the Bops that asked takes its request out as soon as it reads the stop (this one, when it's that one).
+  const waiting = new Set((getState().appApprovals ?? []).flatMap((a) => (a.threadId === s.id && a.resume?.engine === "agents" ? [a.resume.sessionId] : [])));
+  stopAsks(s.id);
+  for (const agentSessionId of waiting) void cancelTurn(agentSessionId);
+  stopped.add(s.id);
+  patchSession(s.id, { status: "failed", error: reason, endedAt: Date.now(), display: undefined, stopAsked: undefined, blocker: undefined, offerMac: undefined });
+  taskEnded(s, "stopped");
+  void routineFailed(s.id, reason);
+  for (const p of getState().sessions.filter((x) => x.partOf === s.id && live(x))) stopSession(p.id, reason);
+}
+
+/**
+ * A run of this Bops's paused for the user's OK that was stopped on another Bops (at `at`), whose end hadn't reached
+ * this copy of the thread (permission.ts settleAsks): it ends here too, as that Stop said. Not one the user set going
+ * again since (Try again, a reply after the Stop).
+ */
+export function endStopped(sessionId: string, at: number) {
+  const s = session(sessionId);
+  if (!s || !live(s) || !ownSession(s) || runs.has(sessionId) || s.replies.some((r) => r.role === "user" && r.at > at)) return;
+  patchSession(sessionId, { status: "failed", error: "Stopped by you", endedAt: Date.now(), display: undefined, blocker: undefined });
+  taskEnded(s, "stopped");
+  void routineFailed(sessionId, "Stopped by you");
+}
+
+/**
+ * A run of this Bops's paused for the user's OK that won't go on: its request stopped, or its thread over some other
+ * way (permission.ts settleAsks). What it kept here to go on with goes: a Mac task's folder, kept through the pause
+ * (run). Not while it runs here again (Try again after the Stop): that run's folder is the one there now.
+ */
+export function letGoOfPause(threadId: string) {
+  const s = session(threadId);
+  if (runs.has(threadId) || (s && s.runsOn !== "mac" && s.host !== "mac")) return;
+  stopExecutor(threadId);
+}
+
+/**
+ * Runs of this Bops's paused for the user's OK that were answered (permission.ts settleAsks): the session pump picks
+ * each up again where it paused, on its own screen (handed back first when the user has it here: handBackForAnswers),
+ * and the run takes the reply as it starts (run).
+ */
+export function pickUpAnswered() {
+  handBackForAnswers();
+  void pump();
 }
 
 /* ---------------- Parts: a thread's work split across the bot's screens ---------------- */
@@ -606,7 +735,7 @@ function splitTask(sessionId: string, parts: { title: string; goal: string }[]):
     .slice(0, MOST_PARTS)
     .map((p) =>
       // A part of a task someone outside Bops started is theirs too (StartOptions.outside): no CRM, no call_api with the user's keys.
-      startSession({ botId: s.botId, goal: p.goal, title: p.title, chatId: s.chatId, sentVia: s.botId, where: "cloud", fresh: true, group, partOf: sessionId, ...(s.fromOutside ? { outside: true } : {}) }),
+      startSession({ botId: s.botId, goal: p.goal, title: p.title, chatId: s.chatId, sentVia: s.botId, viaBot: true, where: "cloud", fresh: true, group, partOf: sessionId, ...(s.fromOutside ? { outside: true } : {}) }),
     );
   if (!made.length) return "No parts to start: each needs a goal.";
   addMessage({ chatId: s.chatId, role: "system", text: `${bot(s.botId)?.name ?? "The bot"} split ${s.title} into ${made.length + 1} parts`, sessionIds: [sessionId, ...made.map((m) => m.id)] });
@@ -615,7 +744,8 @@ function splitTask(sessionId: string, parts: { title: string; goal: string }[]):
 
 /** Where a thread's parts are (check_parts): with `wait`, once none is still working (or partsTiming.waitMs went by, or it was stopped). */
 async function checkParts(sessionId: string, wait: boolean, signal: AbortSignal): Promise<string> {
-  const working = () => getState().sessions.filter((x) => x.partOf === sessionId && live(x) && !needsYou(x));
+  const onUser = (x: Session) => needsYou(x) || waitsForOk(x, getState());
+  const working = () => getState().sessions.filter((x) => x.partOf === sessionId && live(x) && !onUser(x));
   const end = Date.now() + partsTiming.waitMs;
   while (wait && !signal.aborted && Date.now() < end && working().length)
     await new Promise<void>((r) => {
@@ -627,8 +757,8 @@ async function checkParts(sessionId: string, wait: boolean, signal: AbortSignal)
   return parts
     .map((x) => {
       const said = live(x)
-        ? needsYou(x)
-          ? `waiting on ${ownerName()} (${x.blocker ?? "a question"})`
+        ? onUser(x)
+          ? `waiting on ${ownerName()} (${waitsForOk(x, getState()) ? "their OK" : (x.blocker ?? "a question")})`
           : `still working${x.activity ? `: ${x.activity}` : ""}`
         : x.status === "done"
           ? `${needsYou(x) ? "asked" : "done"}: ${x.answer ?? ""}`
@@ -638,9 +768,124 @@ async function checkParts(sessionId: string, wait: boolean, signal: AbortSignal)
     .join("\n\n");
 }
 
+/**
+ * The threads this server runs that another Bops asked to stop (stopSession there): stopped here, saying why, as soon as
+ * that's heard, and before the session pump starts or carries on any run (pump), so a stop that came with a loaded state
+ * is never passed over.
+ */
+export function stopAskedHere() {
+  for (const s of getState().sessions.filter((x) => x.stopAsked && live(x) && ownSession(x))) {
+    const why = s.stopAsked!;
+    patchSession(s.id, { stopAsked: undefined });
+    stopSession(s.id, why);
+  }
+}
+watchArrivals("stop-asked", stopAskedHere);
+
+/** Runs this server let go of (letGoOfEnded): they end without a word of their own. */
+const letGo = new Set<string>();
+
+/**
+ * The threads this server is running that another Bops ended or took since: the thread isn't this one's
+ * any more (Session.by: the Mac ended a runner's thread of a routine that runs elsewhere now, its computer
+ * asleep, runner-install.ts strays; another Mac stopped or picked up one this Mac left behind as it slept),
+ * or it's over in the state while a turn of it is still going here. Each stops at once, its turn cancelled
+ * at OpenAI too, and ends without a result, a "couldn't finish" or anything sent: the Bops that ended it
+ * said why, and may be doing its job now. A run paused for the user's OK runs nowhere, so there's nothing
+ * of it here to let go of.
+ */
+export function letGoOfEnded() {
+  for (const id of runs) {
+    if (letGo.has(id)) continue;
+    const s = session(id);
+    if (s && ownSession(s) && (live(s) || !interrupts.has(id))) continue;
+    letGo.add(id);
+    stopped.add(id);
+    if (s?.agentSessionId) void cancelTurn(s.agentSessionId);
+    interrupts.get(id)?.();
+  }
+}
+watchArrivals("let-go", letGoOfEnded);
+
+/**
+ * On a computer's runner: a thread of its own queued again from elsewhere (the user replied, signed in or
+ * pressed Try again on their Mac, to a run this computer ran: replyToSession leaves it with the computer; or
+ * answered a request its run paused at) is picked up here as soon as that's heard, and the run goes on where
+ * it is, never on the Mac.
+ */
+export function pickUpQueued() {
+  if (!onRunner()) return;
+  const queued = getState().sessions.filter((x) => x.status === "queued" && ownSession(x) && !runs.has(x.id));
+  if (!queued.length) return;
+  // Stopped here before, and set going again since (a stopped thread only ever ends failed here).
+  for (const x of queued) stopped.delete(x.id);
+  void pump();
+}
+watchArrivals("queued-here", pickUpQueued);
+
+/** How recent a reply that crossed a thread's end may be for it to pick the thread up (pickUpCrossed): an older one is from before, left as it is. */
+const CROSSED_MS = 10 * 60_000;
+
+/**
+ * Replies that crossed the end of a thread this Bops ran: the user replied (on another Mac, or here) just as
+ * its last turn ended, after it last looked for replies, so it ended done with their words unread, and where
+ * they replied it was still running, so nothing picked it up there either. Once both copies are together
+ * (changes from elsewhere merged in, or its run's end here), this Bops, whose thread it is, picks it up
+ * again with them, as a reply to a finished thread is (replyToSession).
+ */
+export function pickUpCrossed() {
+  const now = Date.now();
+  let picked = false;
+  for (const s of getState().sessions) {
+    if (s.status !== "done" || !ownSession(s) || runs.has(s.id) || s.dismissed || s.replacedBy) continue;
+    // Not one that held its replies on purpose: a step OpenAI flagged waits for the user's OK, which a reply sent
+    // before they saw the question isn't, and a brain that stopped waits on the user's pick (the run's loop).
+    if (s.owed?.some((o) => o.checks) || s.brainRun?.waits) continue;
+    if (!s.replies.some((r) => r.role === "user" && !r.delivered && now - r.at < CROSSED_MS)) continue;
+    stopped.delete(s.id);
+    patchSession(s.id, { status: "queued", error: undefined, endedAt: undefined, stopAsked: undefined, by: stateDevice() ?? undefined });
+    picked = true;
+  }
+  if (picked) void pump();
+}
+watchArrivals("crossed-replies", pickUpCrossed);
+
 /** Stop every task that's queued or running (a reset, or a hosted server about to swap in another user's state). */
 export function stopAllSessions(reason: string) {
-  for (const s of getState().sessions.filter(live)) stopSession(s.id, reason);
+  // Never a run paused for the user's OK: nothing of it runs here, and it waits on in their state for their reply or Stop.
+  for (const s of getState().sessions.filter((x) => live(x) && !pausedForOk(x, getState()))) stopSession(s.id, reason);
+}
+
+/**
+ * A computer's runner was stopped (where the bots work switched to This Mac, its computer was deleted, its
+ * bots moved off; lib/server/runner.ts): the threads it ran (Session.by `device`, its id as the user's state
+ * knows it) end, saying why, as a thread does when Bops restarts mid-run. Its routines' runs end with them.
+ * Never a run paused for the user's OK (lib/types.ts pausedForOk): nothing of it is held there, so it waits on,
+ * for their reply or Stop; only `gone` (its computer deleted, where nothing can carry it on) ends those too.
+ */
+export function endSessionsOf(device: string, reason: string, opts: { gone?: boolean } = {}) {
+  for (const s of getState().sessions.filter((x) => live(x) && x.by === device && (opts.gone || !pausedForOk(x, getState())))) endSessionOf(s.id, device, reason);
+}
+
+/**
+ * One thread `device` runs (a runner whose computer is gone or down, one another Mac left behind), over, as
+ * endSessionsOf ends each: its routine's run ends with it, failed, and says why (Run now runs it again). A
+ * thread the user had asked to stop (stopAsked) that its Bops never got to ends with their stop (a pause for
+ * a takeover isn't a stop). Its requests for the user's OK still waiting are resolved as Stop resolves them
+ * (permission.ts stopAsks: reject, reason "stopped"), so none waits on for good with nobody to read it: the Bops
+ * that asked may never be back (its computer deleted, the workspace shared), and any Bops of the user's takes such
+ * a request out (permission.ts settleAsks).
+ */
+export function endSessionOf(sessionId: string, device: string, reason: string) {
+  const s = session(sessionId);
+  if (!s || !live(s) || s.by !== device) return;
+  const asked = s.stopAsked && !PAUSED.test(s.stopAsked) ? s.stopAsked : undefined;
+  const why = asked ?? reason;
+  // Ended here, as this Bops's now: a last save from that runner never brings it back as running (state-merge.ts mergeSession).
+  patchSession(s.id, { status: "failed", error: why, endedAt: Date.now(), display: undefined, stopAsked: undefined, blocker: undefined, by: stateDevice() ?? undefined });
+  stopAsks(s.id);
+  taskEnded(s, "stopped");
+  void routineFailed(s.id, why);
 }
 
 /**
@@ -658,6 +903,8 @@ export function stopAllSessions(reason: string) {
 export function replyToSession(sessionId: string, text: string, note?: string, from?: string) {
   const s = session(sessionId);
   if (!s) return;
+  // One another Mac left behind (store.ts leftBehind) is picked up here, as one that had ended: nothing there reads the reply.
+  const behind = live(s) && leftBehind(s);
   // Open in a terminal (openInTerminal): a reply closes it, and the thread carries on headless with it.
   const held = getState().takeover;
   if (held?.terminal && held.sessionId === sessionId) {
@@ -675,20 +922,33 @@ export function replyToSession(sessionId: string, text: string, note?: string, f
     }
   });
   if (pick === "wait") return;
-  if (!live(s)) {
+  if (!live(s) || behind) {
     stopped.delete(sessionId);
+    if (behind && s.agentSessionId) void cancelTurn(s.agentSessionId);
     // It failed, or the user says it's wrong: on the router's route, the next turn thinks a tier harder (routing.ts taskConfig).
     if (s.route?.by === "router" && (s.status === "failed" || ASKS_AGAIN.test(text)))
       patchSession(sessionId, (x) => {
         if (x.route) x.route.bumps = (x.route.bumps ?? 0) + 1;
       });
-    patchSession(sessionId, { status: "queued", error: undefined, endedAt: undefined });
-    void pump();
+    // A run a bot's computer ran (a routine's task that needed a sign in, one that failed or was stopped and is
+    // tried again: Stop never makes a thread another Bops's) carries on there, on that computer's runner, while it's
+    // up and the bot still works there, whichever of the user's Macs it's picked up from: a run is never handed from
+    // a computer to the Mac in its middle. The computer is woken for it if it's asleep, and its runner picks it up
+    // when it hears (pickUpQueued).
+    const ranBy = ownSession(s) ? undefined : s.by;
+    const computer = !onRunner() && !live(s) && ranBy ? runnerUpFor(ranBy, s.botId) : null;
+    // Otherwise picked up again here, whichever Bops ran it before: it isn't running there anymore (Session.by).
+    patchSession(sessionId, { status: "queued", error: undefined, endedAt: undefined, stopAsked: undefined, by: computer ? ranBy : (stateDevice() ?? undefined) });
+    if (!computer) return void pump();
+    void wakeForUser(computer).then((why) => why && step(sessionId, "note", `Waiting for its computer to wake: ${why}`), () => {});
   } else steerers.get(sessionId)?.();
 }
 
 /** A screen the computer's ledger says is taken, though Bops thought it free. */
-class ScreenTaken extends Error {}
+class ScreenTaken extends Error {
+  /** It's the screen the user drives (drivenElsewhere): still where the thread left off, which the queue waits for a while or moves on from. */
+  userHasIt = false;
+}
 /** Threads that just found their screen taken wait a moment before trying another. */
 const notBefore = new Map<string, number>();
 
@@ -737,9 +997,17 @@ async function pump() {
   pumping = true;
   pumpAgain = false;
   try {
-    for (const s of getState().sessions.filter((x) => x.status === "queued" && !x.routing && !x.askWhere && !stopped.has(x.id) && (notBefore.get(x.id) ?? 0) <= Date.now() && !waitsForCloud(x))) {
+    // A stop another Bops asked of a thread of this one's (stopAsked) is honored before any run starts or goes on here,
+    // one this Bops heard of only with the state it loaded (a restart, a sign in) too: a run paused for the user's OK that
+    // they answered and then stopped ends then, its action never done.
+    stopAskedHere();
+    // Only this server's (Session.by): another Mac's or a runner's queued thread is started there, but one
+    // another Mac left behind (closed, asleep or quit: store.ts leftBehind) is this Mac's to run now. Never a run
+    // paused for the user's OK while they haven't answered (lib/types.ts waitsForOk): it's picked up once they do.
+    for (const s of getState().sessions.filter((x) => x.status === "queued" && (ownSession(x) || leftBehind(x)) && !x.routing && !x.askWhere && !stopped.has(x.id) && (notBefore.get(x.id) ?? 0) <= Date.now() && !waitsForCloud(x) && !waitsForOk(x, getState()))) {
       const b = bot(s.botId);
       if (!b) continue;
+      if (!ownSession(s)) patchSession(s.id, { by: stateDevice() ?? undefined });
       // On the user's Mac: a Chrome of the bot's own there, not one of its computer's screens, a few at a
       // time. A thread picked up again uses the one it used before (its browser tools point there).
       if (s.runsOn === "mac") {
@@ -852,7 +1120,8 @@ async function pump() {
       void run(s.id).finally(async () => {
         // Where it left off (the page, a last frame) before the screen is anyone else's.
         await leaveScreen(s.id, at).catch((e: Error) => console.warn(`[screens] ${s.id}: ${e.message}`));
-        patchSession(s.id, { display: undefined });
+        // Unless it's running again meanwhile (picked up afresh: letGoOfEnded, pickUpCrossed): that run holds its screen now.
+        if (!runs.has(s.id)) patchSession(s.id, { display: undefined });
         void pump();
       });
     }
@@ -912,8 +1181,70 @@ function screensInUse(botId: string) {
   const state = getState();
   const here = (id: string) => sameComputer(id, botId);
   const held = state.sessions.filter((x) => here(x.botId)).flatMap((x) => [...(x.display !== undefined ? [x.display] : []), ...(x.helperScreens ?? [])]);
-  if (state.takeover?.display !== undefined && here(state.takeover.botId)) held.push(state.takeover.display);
+  // The one the user drives: from here (its takeover), or from another Bops of theirs (what that one says: drivenElsewhere).
+  for (const d of [...(state.takeover?.display !== undefined && here(state.takeover.botId) ? [state.takeover.display] : []), ...drivenElsewhere(botId)]) if (!held.includes(d)) held.push(d);
   return { held, watched: (state.watches ?? []).filter((w) => here(w.botId) && isScreenWatch(w)) };
+}
+
+/**
+ * How often a Mac whose user drives a screen of a bot's computer says so again (keepDriving), and how long the user's
+ * other Bops believe it without hearing it again (drivenElsewhere): a Mac that quit or crashed mid takeover.
+ */
+export const drivingTiming = { everyMs: 4 * 60_000, staleMs: 10 * 60_000 };
+const gd = globalThis as unknown as { bopsDriving?: ReturnType<typeof setInterval>; bopsDrivenLook?: ReturnType<typeof setTimeout> };
+
+/**
+ * This Mac's takeover of a screen of a bot's computer, said to the user's other Bops and to that computer's runner
+ * (AppState.driving), as only this Mac has the takeover itself: so no run of theirs lands on the screen the user is
+ * driving, a run picked up there included. Set as the takeover starts, said again every few minutes while it lasts,
+ * gone as it ends (and as Bops restarts: store.ts migrate).
+ */
+function keepDriving() {
+  const t = getState().takeover;
+  const want = t?.display !== undefined ? { botId: t.botId, display: t.display } : undefined;
+  const had = getState().driving;
+  const same = !!want && !!had && had.botId === want.botId && had.display === want.display && Date.now() - had.at < drivingTiming.everyMs;
+  if (!same && (want || had)) update((state) => (state.driving = want ? { ...want, at: Date.now() } : undefined));
+  // Looked at every minute while it lasts: said again when it's due, and gone soon after a takeover ended any other way (its bot removed, its computer changed).
+  if (want && !gd.bopsDriving) {
+    gd.bopsDriving = setInterval(() => {
+      try {
+        keepDriving();
+      } catch {}
+    }, 60_000);
+    gd.bopsDriving.unref?.();
+  } else if (!want && gd.bopsDriving) {
+    clearInterval(gd.bopsDriving);
+    gd.bopsDriving = undefined;
+  }
+}
+
+/**
+ * The screens of `botId`'s computer the user drives from another Bops of theirs (its AppState.driving, under macs in the
+ * shared state), whichever bot's they are: none of them is free here. One not said again within drivingTiming.staleMs
+ * (that Mac quit or crashed mid takeover) counts no more, and the queue is looked at again as it stops counting.
+ */
+function drivenElsewhere(botId: string): number[] {
+  const me = stateDevice();
+  const now = Date.now();
+  const out: number[] = [];
+  let next = Infinity;
+  for (const [device, m] of Object.entries(getState().macs ?? {})) {
+    const d = m?.driving;
+    if (device === me || !d || typeof d.display !== "number" || !sameComputer(d.botId, botId)) continue;
+    const until = d.at + drivingTiming.staleMs;
+    if (until <= now) continue;
+    if (!out.includes(d.display)) out.push(d.display);
+    next = Math.min(next, until);
+  }
+  if (Number.isFinite(next) && !gd.bopsDrivenLook) {
+    gd.bopsDrivenLook = setTimeout(() => {
+      gd.bopsDrivenLook = undefined;
+      void pump();
+    }, next - now + 100);
+    gd.bopsDrivenLook.unref?.();
+  }
+  return out;
 }
 
 /**
@@ -1000,7 +1331,7 @@ export async function ensureComputer(botId: string): Promise<void> {
         if (c.ram) update(() => (b.computerRam = c.ram));
         break;
       }
-      if (c && BROKEN.has(c.status)) {
+      if (c && computerStaysDown(c.status)) {
         broken = c.status;
         throw new Error(`Orgo says it's ${c.status === "error" ? "broken" : c.status}`);
       }
@@ -1015,6 +1346,14 @@ export async function ensureComputer(botId: string): Promise<void> {
       }
       if (Date.now() >= setupWaitUntil(startedAt, firstWakeAt)) break;
       await new Promise((r) => setTimeout(r, setupWait.pollMs));
+    }
+    // A copy made just now brings along the main computer's Bops runner and that computer's id: taken off
+    // first, before anything else runs there, so it never runs the main computer's routines a second time
+    // (runner.ts RUNNER_SCRUB). Its Orgo key is Orgo's to change: it gives a copy its own, or none. A
+    // runner is set up on it afresh (runner-install.ts).
+    if (!b.isMain && (!had || b.computerNeverReady === clone.id)) {
+      const off = await orgo.bash(clone.id, RUNNER_SCRUB, 30).catch((e: Error) => ({ output: e.message, exit_code: 1 }));
+      if (off.exit_code !== 0) throw new Error(`the copy of the main computer couldn't be cleaned up (${off.output.trim().slice(0, 120) || "no answer"})`);
     }
     await orgo.growDisk(clone.id).catch((e: Error) => console.warn(`[disk] ${b.id}: ${e.message}`));
     // Its screen streams over UDP (Orgo's WebRTC) where Orgo can; the app falls back to VNC where it can't.
@@ -1088,8 +1427,6 @@ const COPIED_BRAINS = [
   "rm -rf /root/.bops/brains /root/.bops/agents && echo cleaned",
 ].join("; ");
 
-/** Orgo statuses a computer doesn't come back from by itself (a computer that's been deleted isn't usually listed at all). */
-const BROKEN = new Set(["error", "stopped", "frozen", "deleted"]);
 /**
  * How long a setup waits for a computer to run before going on (upMs; a computer it wakes waits up to
  * wakeWaitMs after the first ask), how often it asks Orgo again to wake one that's still asleep
@@ -1243,7 +1580,7 @@ gh.bopsComputerCheckTick = checkComputers;
  * 10 minutes. Not on a hosted server, where users' states come and go.
  */
 export function startComputerChecks() {
-  if (gh.bopsComputerCheck || onPostgres()) return;
+  if (gh.bopsComputerCheck || onPostgres() || !loopHere("computer-checks")) return;
   const tick = () => void gh.bopsComputerCheckTick?.().catch((e: Error) => console.warn(`[computer] check: ${e.message}`));
   gh.bopsComputerCheck = setInterval(tick, 10 * 60_000);
   tick();
@@ -1262,6 +1599,7 @@ const reattaching = (gh.bopsReattaching ??= new Map());
  * another account is in (signed out, someone else signed in, or a hosted server swapped states).
  */
 export function reattachFreeComputer(userId: string): Promise<void> {
+  if (!loopHere("free-computer")) return Promise.resolve();
   const running = reattaching.get(userId);
   if (running) return running;
   // Never rejects: a sign-in doesn't wait for it.
@@ -1300,7 +1638,7 @@ function computerFailed(b: Bot, e: Error, deleted = false, kept = false) {
     const x = bot(s.botId);
     return !!x && (workComputer(x).id === b.id || (b.isMain && !x.computerId && workspaceOf(x) === workspaceOf(b)));
   };
-  const waiting = getState().sessions.filter((s) => s.status === "queued" && !s.routing && !s.askWhere && s.runsOn !== "mac" && s.host === "orgo" && waits(s));
+  const waiting = getState().sessions.filter((s) => s.status === "queued" && ownSession(s) && !s.routing && !s.askWhere && s.runsOn !== "mac" && s.host === "orgo" && waits(s));
   const next = deleted ? "Bops deleted it, and the next task makes a new one." : kept ? "Bops kept it, so nothing on it is lost. The next task tries again." : "The next task tries again.";
   for (const s of waiting) {
     patchSession(s.id, { status: "failed", error: e.message, endedAt: Date.now() });
@@ -1587,10 +1925,10 @@ function instructions(botName: string, role: string, mac: boolean, display: numb
       ? []
       : vaultTool
         ? [
-            `If a page asks you to sign in or for a verification code, call sign_in_from_vault${computer ? "" : " (with the screen number when it's on a helper's screen)"}: Bops fills ${owner}'s saved login from their vault straight into the page and tells you how it went. Never type a password yourself. If it says no login fits, or the page still needs ${owner} (or it's a captcha), stop and say in one short sentence what you need. A card lets ${owner} sign you in, and you'll be told to carry on.`,
+            `If a page asks you to sign in or for a verification code, call sign_in_from_vault${computer ? "" : " (with the screen number when it's on a helper's screen)"}: Bops fills ${owner}'s saved login from Logins straight into the page and tells you how it went. Never type a password yourself. If it says no login fits, or the page still needs ${owner} (or it's a captcha), stop and say in one short sentence what you need. A card lets ${owner} sign you in, and you'll be told to carry on.`,
           ]
         : [
-            `If a sign-in or verification code page appears, wait about 15 seconds and look again first: Bops may sign you in from ${owner}'s vault. That happens by itself on the page you're working in (there's no tool for it, so don't look for one, and never type a password yourself). If the page is already open from before, click into it first so Bops sees it. If it's still there after that (or it's a captcha), stop and say in one short sentence what you need. A card lets ${owner} sign you in, and you'll be told to carry on.`,
+            `If a sign-in or verification code page appears, wait about 15 seconds and look again first: Bops may sign you in with a login ${owner} saved in Logins. That happens by itself on the page you're working in (there's no tool for it, so don't look for one, and never type a password yourself). If the page is already open from before, click into it first so Bops sees it. If it's still there after that (or it's a captcha), stop and say in one short sentence what you need. A card lets ${owner} sign you in, and you'll be told to carry on.`,
           ]),
     "Finish each turn with a short answer in plain sentences, under 80 words: no tables or headings. Lead with the answer.",
     WRITING,
@@ -1609,7 +1947,7 @@ const FIRST_STEPS = 3;
 function waitingOn(sessionId: string, calls: number): boolean {
   const s = session(sessionId);
   if (!s) return false;
-  return watching(s) || (calls < FIRST_STEPS && s.sentVia !== "routine" && !s.fromOutside);
+  return watching(s) || (calls < FIRST_STEPS && !routineSent(s) && !s.fromOutside);
 }
 
 /** A new task's route, next to what the router would have picked, for the comparison (routing.ts logRoute). */
@@ -1648,29 +1986,36 @@ const SKILLS_IN_FULL = 8000;
  * A bot's skills for an Agents API thread, which has no read_skill tool: each in full, the most recently
  * used or changed first, while they fit in SKILLS_IN_FULL, then the rest by name. (Its folders are on its
  * computer too, in its capabilities folder, as the thread starts.) The one the thread follows isn't
- * repeated (procedureBlock has it). Empty when it has none.
+ * repeated (procedureBlock has it). Empty when it has none. `notCopied`: a brain's run whose copy to its
+ * computer failed (brainTurns), so INDEX.md and the folders there are missing or old: Bops' own skills
+ * come too, after the workspace's, and it's told not to count on the folders.
  */
-function proceduresInFull(s: Session) {
+function proceduresInFull(s: Session, notCopied = false) {
   const following = s.procedure ? findSkill(s.botId, s.procedure)?.slug : undefined;
   const touched = (p: { usedAt?: number; updatedAt: number }) => Math.max(p.usedAt ?? 0, p.updatedAt);
-  const all = skillsFor(s.botId)
-    .filter((p) => p.slug !== following)
-    .sort((a, b) => touched(b) - touched(a));
+  const all = [
+    ...skillsFor(s.botId)
+      .filter((p) => p.slug !== following)
+      .sort((a, b) => touched(b) - touched(a))
+      .map((p) => ({ text: skillText(s.botId, p), line: `- ${p.name}: ${p.description}` })),
+    ...(notCopied ? builtinSkills(appsOpen(getState())).map((x) => ({ text: `Skill: ${x.name} (Bops' own)\n\n${x.body.trim()}`, line: `- ${x.name}: ${x.description}` })) : []),
+  ];
   if (!all.length) return "";
   const full: string[] = [];
   const named: string[] = [];
   let room = SKILLS_IN_FULL;
   for (const p of all) {
-    const text = skillText(s.botId, p);
-    if (text && text.length <= room) {
-      full.push(text);
-      room -= text.length;
-    } else named.push(`- ${p.name}: ${p.description}`);
+    if (p.text && p.text.length <= room) {
+      full.push(p.text);
+      room -= p.text.length;
+    } else named.push(p.line);
   }
   return [
-    `Your skills: how your workspace does jobs it was shown before. When the task fits one, do it that way, and tell ${ownerName()} if a step no longer works. Their folders (with any scripts) are in capabilities/skills and capabilities/apps.`,
+    notCopied
+      ? `Your skills couldn't be copied to your computer for this run, so INDEX.md and their folders in capabilities/skills may be missing or out of date: here they are instead, how your workspace does jobs it was shown before and Bops' own. When the task fits one, do it that way, and tell ${ownerName()} if a step no longer works.`
+      : `Your skills: how your workspace does jobs it was shown before. When the task fits one, do it that way, and tell ${ownerName()} if a step no longer works. Their folders (with any scripts) are in capabilities/skills and capabilities/apps.`,
     ...full,
-    ...(named.length ? [`More of yours, too long to give here (do these jobs as best you can):\n${named.join("\n")}`] : []),
+    ...(named.length ? [`${notCopied ? "More" : "More of yours"}, too long to give here (do these jobs as best you can):\n${named.join("\n")}`] : []),
   ].join("\n\n");
 }
 
@@ -1684,7 +2029,7 @@ function proceduresInFull(s: Session) {
 function agentBrief(
   s: Session,
   b: Bot,
-  o: { mac: boolean; display: number; sharedWith?: string; apps: boolean; appTools: boolean; dataTools: boolean; full: boolean; onMac: boolean; vaultTool: boolean; ui: boolean; outside: boolean; memory: string; count: boolean },
+  o: { mac: boolean; display: number; sharedWith?: string; apps: boolean; appTools: boolean; dataTools: boolean; full: boolean; onMac: boolean; vaultTool: boolean; ui: boolean; outside: boolean; memory: string; count: boolean; brain?: boolean },
 ) {
   return [
     instructions(b.name, b.role, o.mac, o.display, o.sharedWith, o.apps, !!b.autoApprove, o.full, false, o.onMac, o.vaultTool, o.ui),
@@ -1692,8 +2037,9 @@ function agentBrief(
     o.outside ? "" : appsNote(b, "task", { tools: o.appTools }),
     dataNote(b, "task", { tools: o.dataTools }),
     placesNote(b, "task"),
-    // No read_skill here: its skills in full, as far as they fit, and the one it follows.
-    proceduresInFull(s),
+    // No read_skill here. A brain reads its skills as folders on its computer (INDEX.md first, by label, then
+    // the skill: copySkillsToComputer); an Agents API thread gets them in full, as far as they fit. And the one it follows.
+    o.brain ? skillsIndexNote(b.id, ownerName()) : proceduresInFull(s),
     procedureBlock(s, o.count),
     o.memory,
   ]
@@ -1756,6 +2102,8 @@ function brainTools(sessionId: string, botId: string, display: number, browser: 
     mcpServers: {
       screen: { type: "stdio", command: "/opt/bops/venv/bin/python", args: ["/opt/bops/screen_mcp.py", "stdio", "--session", sessionId, "--bot", botId, ...(approve ? ["--approve"] : [])], env },
       ...(browser ? { browser: { type: "stdio", command: "/usr/bin/node", args: [BROWSER_MCP, "--cdp-endpoint", `http://127.0.0.1:${9200 + display}`, "--init-page", BROWSER_FRONT], env } } : {}),
+      // A task on one of the workspace's apps (work_on_app): Ingot's tools, for the app's repo on this computer.
+      ...appMcp(sessionId),
     },
   };
 }
@@ -1798,6 +2146,7 @@ async function brainBrief(s: Session, b: Bot, computerId: string, display: numbe
     outside: !!outside,
     memory,
     count,
+    brain: true,
   });
 }
 
@@ -1826,8 +2175,12 @@ async function brainTurns(sessionId: string, at: { computerId: string; display: 
   if (!(s.brainRun?.brainId === x.id && s.brainRun.computerId === at.computerId))
     patchSession(sessionId, { brainRun: { brainId: x.id, kind: x.kind, computerId: at.computerId, cli: randomUUID(), ...(s.brainRun?.said ? { said: s.brainRun.said } : {}) } });
   await driver.prepare(at.computerId);
-  // Its skills and apps on its computer (capabilities/skills), for the scripts they bring.
-  await copySkillsToComputer(b.id, at.computerId, orgo.bash).catch((e: Error) => console.warn(`[skills] ${sessionId}: ${e.message}`));
+  // Its skills and apps on its computer (capabilities/skills), for the scripts they bring. A copy that failed
+  // leaves INDEX.md there missing or old, so this run's briefing has them in full instead.
+  const copied = await copySkillsToComputer(b.id, at.computerId, orgo.bash).then(
+    () => true,
+    (e: Error) => (console.warn(`[skills] ${sessionId}: ${e.message}`), false),
+  );
   const browser = await ensureBrowserTool(at.computerId);
   const run = await openRun({
     sessionId,
@@ -1838,7 +2191,7 @@ async function brainTurns(sessionId: string, at: { computerId: string; display: 
     cli: session(sessionId)!.brainRun!.cli,
     resume: at.resuming,
     mcp: brainTools(sessionId, b.id, at.display, browser, driver.asks),
-    prompt: [at.brief, driver.note(ownerName())].join("\n\n"),
+    prompt: [at.brief, copied ? "" : proceduresInFull(s, true), driver.note(ownerName())].filter(Boolean).join("\n\n"),
   });
   const where = `${workComputer(b).name}'s computer`;
   // A plan brain signs in on each computer: asked once a run, as its first turn starts.
@@ -1923,7 +2276,7 @@ export function brainSignedIn(brainId: string, computerId: string) {
     stopped.delete(s.id);
     patchSession(s.id, (x) => {
       if (x.brainRun) delete x.brainRun.waits;
-      Object.assign(x, { status: "queued", waitingOnYou: false, error: undefined, endedAt: undefined });
+      Object.assign(x, { status: "queued", waitingOnYou: false, error: undefined, endedAt: undefined, stopAsked: undefined, by: stateDevice() ?? undefined });
     });
   }
   void pump();
@@ -1969,6 +2322,7 @@ export function openInTerminal(sessionId: string): { botId: string; display: num
   const paused = live(s) || (held?.sessionId === sessionId && held.display === display);
   if (held && !(held.display === display && sameComputer(held.botId, s.botId))) returnControl();
   update((state) => (state.takeover = { botId: s.botId, display, sessionId, since: Date.now(), terminal: paused ? { paused: true } : {} }));
+  keepDriving();
   if (live(s)) stopSession(sessionId, IN_TERMINAL);
   void terminalFor(sessionId, x, b.id, c.computerId, display);
   return { botId: s.botId, display };
@@ -2081,7 +2435,7 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
   ]
     .filter(Boolean)
     .join("\n\n");
-  return async (input: string) => {
+  return async (input?: string, resume?: AppApproval) => {
     const ac = new AbortController();
     interrupts.set(sessionId, () => ac.abort());
     // Stopped while this turn was on its way (Stop found no turn to interrupt yet).
@@ -2096,10 +2450,12 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
         instructions: text,
         apps,
         input,
+        resume,
         signal: ac.signal,
         timeoutMs: TURN_MAX_MS,
         idleMs: TURN_IDLE_MS,
         step: (tool, detail) => step(sessionId, tool, detail),
+        caughtUp: () => pullState(),
         speed: (calls) => now.route?.speed ?? speedFor(config.model, waitingOn(sessionId, calls)),
         pages: () => ensureBrowserTool(at.computerId),
         parts: splits ? { start: (parts) => splitTask(sessionId, parts), check: (wait, signal) => checkParts(sessionId, wait, signal) } : undefined,
@@ -2344,8 +2700,9 @@ async function run(sessionId: string) {
   // the end, even when the user has signed out meanwhile.
   let folder: string | undefined;
   let executor: ChildProcess | undefined;
+  // Paused for the user's OK (Paused): its folder stays for when it goes on, only its executor stops (letGoOfPause).
+  let paused = false;
   let unwatch: (() => void) | undefined;
-  let closeApps: (() => void) | undefined;
   // A thread its bot's brain runs (brainTurns): Claude Code on the bot's computer, on the user's own plan or
   // key. Only in the cloud: on the Mac a task runs on Bops agent. The run's end lets its process go.
   const brain = mac ? undefined : brainFor(s, b);
@@ -2373,6 +2730,12 @@ async function run(sessionId: string) {
     step(sessionId, "setup", mac ? "Getting a browser ready on your Mac" : "Getting the computer ready");
     if (mac) await ensureChrome(b.id, port);
     else {
+      // On a computer's runner, which reads the user's state now and then: they may have taken this screen over on a Mac
+      // of theirs since (AppState.driving). Read now, and another screen it is (or theirs once they hand it back).
+      if (onRunner()) {
+        await pullState().catch(() => {});
+        if (drivenElsewhere(b.id).includes(display)) throw Object.assign(new ScreenTaken(), { userHasIt: true });
+      }
       // Orgo hears the computer is in use as the task starts, not on the next beat: Free's computer,
       // asleep after 15 minutes nobody used it, may be left asleep for a read of its screens (the
       // task's first call) until then.
@@ -2387,6 +2750,15 @@ async function run(sessionId: string) {
       await ensureTailnet(c).catch(() => null);
       // The computer's screen ledger: drop stale claims, then take this thread's screen.
       await ensureScreenTools(computerId, b.id);
+      // A task on one of the workspace's apps (work_on_app): Ingot set up on the computer, and the app's working
+      // folder cloned or brought to the newest there, before its brain or Bops agent starts on it.
+      if (s.app) {
+        step(sessionId, "setup", "Getting the app ready");
+        const ready = await readyAppForTask(sessionId, computerId).catch((e: Error) => {
+          throw new Error(`I couldn't get the app ready on my computer (${e.message.replace(/[.\s]+$/, "")})`);
+        });
+        if (ready) step(sessionId, "setup", ready);
+      }
       // Not fatal: without them the task still has web search, the shell and the screen tools. A thread on
       // the computer tool doesn't wait for them: its first page_script does (computerToolTurns).
       if (!onComputerTool) await ensureBrowserTool(computerId);
@@ -2407,18 +2779,18 @@ async function run(sessionId: string) {
     // A screen of the bot's computer is watched for what only the user can get past (a Mac task's Chrome isn't one).
     const endpoint = onMac ? null : screenEndpoint(b, display);
     if (endpoint) unwatch = watchScreen(b.id, display, endpoint, sessionId);
-    // Its apps: on the Mac through the executor (vm/apps-mcp.mjs, composio.ts serveApps); from an Orgo
-    // computer over the tailnet (screen_mcp.py, when its key file went on: ensureScreenTools).
-    // Not on a task someone outside Bops started: composio.ts refuses them there, and they aren't named to it.
+    // Its apps and business data (treg.ts): function tools of its agent session that this Bops answers itself, in
+    // this process (agentTool), wherever its screen is, so a call that needs the user's OK pauses the run in
+    // requires_action until they reply (lib/server/permission.ts). Not its apps on a task someone outside Bops
+    // started: composio.ts refuses them there, and they aren't named to it.
     const outside = s.fromOutside || (!!s.partOf && !!session(s.partOf)?.fromOutside);
-    const macApps = mac && !outside && composioOn() && accountsOf(b).length > 0;
-    const appTools = !outside && (mac ? macApps : !!appsReach.get(computerId));
-    // Business data (treg.ts) the same way: through the executor on the Mac, over the tailnet from an Orgo computer.
-    const macData = mac && dataOn(b);
-    // With Full access, the user's own apps and browsers, through Cua Driver (local.ts MAC_UI_TOOLS), when it's installed:
+    const fnApps = !outside && composioOn() && accountsOf(b).length > 0;
+    const fnData = dataOn(b);
+    const appTools = fnApps;
+        // With Full access, the user's own apps and browsers, through Cua Driver (local.ts MAC_UI_TOOLS), when it's installed:
     // behind Bops' own MCP server (vm/mac-ui-mcp.mjs). A thread whose agent session had Cua's own one starts a fresh session.
     const macUi = full && cuaDriverHere();
-    const dataTools = mac ? macData : !!appsReach.get(computerId) && dataOn(b);
+    const dataTools = fnData;
 
     // A thread picks its agent session back up; a new one gets a fresh agent session. So does a Mac
     // thread whose agent session predates its task folder (and the locked-down executor).
@@ -2428,28 +2800,36 @@ async function run(sessionId: string) {
     // And one whose apps came or went (a Mac thread made before it could reach them, or the user changed its access).
     // And on a computer, one whose agent session was set up for another screen (or before Bops kept
     // which: its browser tools may drive another screen's Chrome).
+    // And one made before its apps and data were function tools Bops answers (Session.env.fn: they were MCP tools
+    // that couldn't pause for the user's OK).
     // A brain's thread picks its CLI session back up where the CLI began it, on the same computer.
     const resuming = brain
       ? brainResumes(s, brain, computerId)
       : onComputerTool
       ? !!s.responseId
-      : !!(s.agentSessionId && s.env) &&
+      : !!(s.agentSessionId && s.env?.fn) &&
         (mac
           ? s.env?.workspace === workspace &&
             !!s.env?.fullAccess === full &&
             s.env?.sockets === sockets &&
-            !!s.env?.apps === macApps &&
-            !!s.env?.data === macData &&
+            !!s.env?.apps === fnApps &&
+            !!s.env?.data === fnData &&
             // Never an agent session that had Cua's own MCP server (ui true), with or without the Mac tools now.
             s.env?.ui !== true &&
             (s.env?.ui === "bops") === macUi
-          : s.env?.display === display);
-    /** One turn: the user's message in, the bot's answer out. */
-    let turn: (input: string) => Promise<string>;
+          : s.env?.display === display && !!s.env?.apps === fnApps && !!s.env?.data === fnData);
+    /**
+     * One turn: the user's message in, the bot's answer out. `resume`: the answered request its run paused at
+     * (permission.ts takeAnswer), which this turn answers first and goes on from; then `input` may be none.
+     */
+    let turn: (input: string | undefined, resume?: AppApproval) => Promise<string>;
     if (brain) {
       // Its briefing is an Agents API thread's, made fresh each run, memory included.
       const brief = await brainBrief(s, b, computerId, display, !resuming);
-      ({ turn, close: closeBrain } = await brainTurns(sessionId, { computerId, display, brain, resuming, brief }));
+      const onBrainTurns = await brainTurns(sessionId, { computerId, display, brain, resuming, brief });
+      closeBrain = onBrainTurns.close;
+      // A brain's call that needs the OK is held, never paused (composio.ts held): it has no resume of its own.
+      turn = (input) => onBrainTurns.turn(input ?? "");
     } else if (onComputerTool) turn = await computerToolTurns(sessionId, { computerId, display, sharedWith: c.id !== b.id ? c.name : undefined, resuming });
     else {
       if (!resuming) {
@@ -2510,14 +2890,16 @@ async function run(sessionId: string) {
                   : {
                       type: "stdio",
                       command: "/opt/bops/venv/bin/python",
-                      args: ["/opt/bops/screen_mcp.py", "stdio", "--session", sessionId, "--bot", b.id],
+                      // Its apps and data are the session's function tools (below), never the screen tools' as well.
+                      args: ["/opt/bops/screen_mcp.py", "stdio", "--session", sessionId, "--bot", b.id, "--no-apps"],
                       cwd: "/workspace",
                       env_vars: ["DISPLAY"],
                     },
                 required: true,
               },
-              ...(macApps || macData ? [{ type: "mcp", server_label: "apps", transport: appsMcp(folder!, { apps: macApps, data: macData }), required: false }] : []),
               ...(macUi ? [{ type: "mcp", server_label: "mac", allowed_tools: MAC_UI_TOOLS, transport: macUiMcp(folder!), required: false }] : []),
+              // Its apps and business data, answered by this Bops (agentTool): a call that needs the user's OK pauses here.
+              ...[...(fnApps ? APP_TOOLS(b) : []), ...(fnData ? DATA_TOOLS(b) : [])].map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.parameters })),
             ],
             // Orgo threads can split into helpers (subagents), each on a screen of its own; see screen_mcp.py.
             ...(mac ? {} : { multi_agent: { enabled: true, max_concurrent_subagents: MAX_HELPERS } }),
@@ -2528,15 +2910,14 @@ async function run(sessionId: string) {
             capability_directories: [`${workspace}/capabilities/skills`],
           },
         } as never, usageTags("session", b.id))) as unknown as { id: string; environment: { id: string; remote_url: string } };
-        patchSession(sessionId, { agentSessionId: created.id, env: { id: created.environment.id, remoteUrl: created.environment.remote_url, workspace, ...(full ? { fullAccess: true } : {}), ...(sockets ? { sockets } : {}), ...(macApps ? { apps: true } : {}), ...(macData ? { data: true } : {}), ...(macUi ? { ui: "bops" as const } : {}), ...(mac ? {} : { display }) } });
+        patchSession(sessionId, { agentSessionId: created.id, env: { id: created.environment.id, remoteUrl: created.environment.remote_url, workspace, fn: true, ...(full ? { fullAccess: true } : {}), ...(sockets ? { sockets } : {}), ...(fnApps ? { apps: true } : {}), ...(fnData ? { data: true } : {}), ...(macUi ? { ui: "bops" as const } : {}), ...(mac ? {} : { display }) } });
       }
       const { agentSessionId, env } = session(sessionId)! as Required<Pick<Session, "agentSessionId" | "env">>;
 
       if (folder) {
-        // Its skills go in its skills folder as the executor makes the folders fresh.
-        executor = await startExecutor(sessionId, env.id, env.remoteUrl, port, folder, full, b.id);
-        // After the executor made the task's folders fresh; it calls on its first app tool.
-        if (env.apps || env.data) closeApps = serveApps(sessionId, appsSocket(folder));
+        // Its skills go in its skills folder as the executor makes the folders fresh; one going on in the same agent
+        // session (picked up again after a pause for the user's OK) keeps what it made there.
+        executor = await startExecutor(sessionId, env.id, env.remoteUrl, port, folder, full, b.id, resuming);
       }
       else {
         // Its skills and apps go onto its computer first (capabilities/skills), so the agent finds them there.
@@ -2547,8 +2928,8 @@ async function run(sessionId: string) {
       // How far this run has read the thread's own items, so each look reads only what's new. One picked
       // back up reads on from what its agent session did before, which is in its steps already.
       const at: ReadAt = resuming ? { root: await lastItem(agentSessionId) } : {};
-      turn = async (input) => {
-        await runTurn(sessionId, agentSessionId, input, seen, at);
+      turn = async (input, resume) => {
+        await runTurn(sessionId, agentSessionId, input, seen, at, resume);
         return finalAnswer(agentSessionId);
       };
     }
@@ -2563,14 +2944,27 @@ async function run(sessionId: string) {
     // what the brain did (brainRecord).
     const moved = !resuming && s.movedFrom ? await cloudRecord(s.movedFrom, movePages.get(sessionId)) : !resuming && !brain && s.brainRun?.started ? brainRecord(s) : "";
     movePages.delete(sessionId);
-    let input: string | undefined = resuming ? withMovedNote(sessionId, takeReplies(sessionId)) : freshStart(sessionId, moved);
-    while (input) {
+    // The user's reply to the request its run paused at (permission.ts takeAnswer), taken out as it's read: the first
+    // turn answers that call and goes on from where it paused. One its engine can't go on from (an agent session made
+    // afresh, its tools changed meanwhile) is said in its fresh start instead, and the old session's wait cancelled.
+    const answered = brain ? undefined : await takeAnswer(sessionId);
+    const engine = onComputerTool ? "responses" : "agents";
+    let resume = answered && resuming && answered.resume?.engine === engine ? answered : undefined;
+    if (answered && !resume && answered.resume?.engine === "agents") void cancelTurn(answered.resume.sessionId);
+    const lost = answered && !resume ? answeredBefore(answered) : "";
+    // A computer-tool run left paused at a call whose request is gone (taken out before this Bops read a reply) still
+    // owes that call's output: it goes on, the call answered as not run (computer-task.ts settle), never left for good.
+    let owesOnly = !resume && !answered && resuming && onComputerTool && !!session(sessionId)!.owed?.some((o) => o.type === "function" && o.output === undefined);
+    let input: string | undefined = resuming ? withMovedNote(sessionId, takeReplies(sessionId), !!resume || owesOnly) : freshStart(sessionId, [moved, lost].filter(Boolean).join("\n\n"));
+    while (input || resume || owesOnly) {
+      owesOnly = false;
       if (stopped.has(sessionId)) throw new Error("Stopped by you");
       // A new turn starts clean; the screen watch raises the blocker again if it's still there.
       patchSession(sessionId, { blocker: undefined });
-      const brief = await computerBriefing(b.id, { thread: sessionId }).catch(() => "");
+      const brief = input ? await computerBriefing(b.id, { thread: sessionId }).catch(() => "") : "";
       patchSession(sessionId, { options: undefined });
-      const { text: answer, options } = tidyAnswer(await turn(withBriefing(input, brief)));
+      const { text: answer, options } = tidyAnswer(await turn(input ? withBriefing(input, brief) : undefined, resume));
+      resume = undefined;
       patchSession(sessionId, { options });
       patchSession(sessionId, (x) => {
         x.answer = answer;
@@ -2585,6 +2979,8 @@ async function run(sessionId: string) {
       // A step OpenAI flagged waits for the user's OK (computer-task.ts): a reply sent before they saw the question isn't one.
       input = holds || session(sessionId)!.owed?.some((o) => o.checks) ? undefined : takeReplies(sessionId);
     }
+    // Ended or taken elsewhere as its last turn finished (letGoOfEnded): no result from here.
+    if (letGo.has(sessionId)) throw new Error("Ended elsewhere");
 
     const done = session(sessionId)!;
     // An offer to move it to the Mac goes with the run: tapping it later would do the whole task again there.
@@ -2613,10 +3009,19 @@ async function run(sessionId: string) {
     }
     // The part only the user's Mac can do comes next, with what the cloud found.
     if (done.thenOnMac && !done.brainRun?.waits)
-      startSession({ botId: b.id, goal: `${done.thenOnMac}\n\nWhat the first part found (in the cloud):\n${done.answer ?? ""}`, title: `${done.title} · on your Mac`, chatId: done.chatId, sentVia: done.sentVia, where: "mac" });
+      startSession({ botId: b.id, goal: `${done.thenOnMac}\n\nWhat the first part found (in the cloud):\n${done.answer ?? ""}`, title: `${done.title} · on your Mac`, chatId: done.chatId, sentVia: done.sentVia, viaBot: done.sentViaBot, where: "mac" });
   } catch (e) {
+    // Ended or taken by another Bops (letGoOfEnded): that one said why, and nothing more is written here.
+    if (letGo.has(sessionId)) return;
+    // Paused at a call that needs the user's OK (permission.ts): the thread waits, queued, holding no screen and nothing
+    // here; only their reply picks it up again (pickUpAnswered), and Stop ends it. Its status says so (lib/types.ts waitsForOk).
+    if (e instanceof Paused && !stopped.has(sessionId)) {
+      paused = true;
+      patchSession(sessionId, { status: "queued", display: undefined, activity: undefined, blocker: undefined, options: undefined, helperScreens: undefined });
+      return;
+    }
     if (e instanceof ScreenTaken && !stopped.has(sessionId)) {
-      patchSession(sessionId, { status: "queued", lastDisplay: undefined });
+      patchSession(sessionId, { status: "queued", ...(e.userHasIt ? {} : { lastDisplay: undefined }) });
       notBefore.set(sessionId, Date.now() + 5000);
       setTimeout(() => void pump(), 5000);
       return;
@@ -2656,9 +3061,9 @@ async function run(sessionId: string) {
     if (again) {
       // (Said when the run before failed.)
     } else if (credit) addMessage({ chatId: s.chatId, role: "bot", botId: b.id, text: OUT_OF_CREDIT, sessionIds: [sessionId], resultOf: sessionId });
-    else if (low) addMessage({ chatId: s.chatId, role: "bot", botId: b.id, text: `I couldn't finish ${s.title}${onMac ? " on your Mac" : ""}: ${error}`, sessionIds: [sessionId], resultOf: sessionId });
+    else if (low) addMessage({ chatId: s.chatId, role: "bot", botId: b.id, text: `I couldn't finish ${s.title}${onMac ? " on your Mac" : ""}: ${error}`, sessionIds: [sessionId], resultOf: sessionId, bops: true });
     else if (!stopped.has(sessionId)) {
-      const failed = addMessage({ chatId: s.chatId, role: "bot", botId: b.id, text: `I couldn't finish ${s.title}${onMac ? " on your Mac" : ""}: ${error}`, sessionIds: [sessionId], resultOf: sessionId });
+      const failed = addMessage({ chatId: s.chatId, role: "bot", botId: b.id, text: `I couldn't finish ${s.title}${onMac ? " on your Mac" : ""}: ${error}`, sessionIds: [sessionId], resultOf: sessionId, bops: true });
       emailResult(s, failed.id, failed.text);
       textResult(s, failed.text);
       channelResult(s, failed.text);
@@ -2666,14 +3071,16 @@ async function run(sessionId: string) {
   } finally {
     try {
       unwatch?.();
-      closeApps?.();
       interrupts.delete(sessionId);
       taken.delete(sessionId);
-      patchSession(sessionId, { helperScreens: undefined, helperTasks: undefined, helperOrder: undefined });
+      // Picked up by another Bops meanwhile (letGoOfEnded): its screen and its computer's environment are that one's now.
+      const now = session(sessionId);
+      const elsewhere = letGo.has(sessionId) && !!now && live(now) && !ownSession(now);
+      if (!elsewhere) patchSession(sessionId, { helperScreens: undefined, helperTasks: undefined, helperOrder: undefined });
       // Its brain's process ends with the run (a later turn starts it again, on the same session).
       await closeBrain?.().catch((e: Error) => console.warn(`[brains] ${sessionId}: ${e.message}`));
-      if (folder) stopExecutor(sessionId, executor, folder);
-      else {
+      if (folder) stopExecutor(sessionId, executor, folder, paused);
+      else if (!elsewhere) {
         const envId = session(sessionId)?.env?.id;
         await orgo
           .bash(
@@ -2687,9 +3094,12 @@ async function run(sessionId: string) {
       }
     } finally {
       runs.delete(sessionId);
+      letGo.delete(sessionId);
       onBrain.delete(sessionId);
       brainStops.delete(sessionId);
       letSleep();
+      // A reply that came as its last turn ended: picked up now (pickUpCrossed).
+      pickUpCrossed();
     }
   }
 }
@@ -2729,13 +3139,24 @@ const pageWords = (p: { url: string; title?: string }) => (p.title ? `"${p.title
  * A thread picked up again on another screen than it left (its own was busy past screenTiming.homeWaitMs): its turn
  * starts by saying so, with the page it was on, so it opens that again instead of starting over. Said once.
  */
-function withMovedNote(sessionId: string, input: string | undefined): string | undefined {
+function withMovedNote(sessionId: string, input: string | undefined, resumes = false): string | undefined {
   const s = session(sessionId);
   const m = s?.screenMoved;
-  if (!s || !m || !input) return input;
+  if (!s || !m || (!input && !resumes)) return input;
   patchSession(sessionId, { screenMoved: undefined });
   const where = s.lastPage ? ` You were on ${pageWords(s.lastPage)}: open it again before you go on.` : " Pick up where you left off.";
-  return `(From Bops: you're on screen ${m.to} now; screen ${m.from}, where you left off, was busy.${where})\n\n${input}`;
+  return `(From Bops: you're on screen ${m.to} now; screen ${m.from}, where you left off, was busy.${where})${input ? `\n\n${input}` : ""}`;
+}
+
+/**
+ * What a run picked up afresh is told of the request it had paused at, when its engine couldn't go on from there
+ * (run): what it asked and what the user said, so it does it again (or doesn't) itself.
+ */
+function answeredBefore(a: AppApproval): string {
+  const owner = ownerName();
+  const what = `${a.action}${a.resources.length ? ` (${a.resources.join(", ")})` : ""}`;
+  if (a.reply?.reply === "reject") return `You asked ${owner}'s OK to ${what}. ${declined(a)}`;
+  return `You asked ${owner}'s OK to ${what}, and they said yes, but it wasn't done yet. Do it now if it's still needed.`;
 }
 
 /** The replies each thread's latest turn took (takeReplies): a brain that couldn't take them in (it waits on the user: brainTurns) gives them back. */
@@ -2774,10 +3195,66 @@ const sendMessage = (agentSessionId: string, text: string) =>
     events: [{ type: "agent.session.input.message", input: [{ role: "user", content: [{ type: "input_text", text }] }] }],
   } as never);
 
-async function runTurn(sessionId: string, agentSessionId: string, input: string, seen: Set<string>, at: ReadAt) {
+/**
+ * One of Bops' own tools on an agent session (its apps and business data: function tools this Bops answers in
+ * requires_action), run here as the computer tool's are (computer-task.ts runFunction). `approved`: the user said
+ * yes to this very call. One that needs their OK and hasn't it throws NeedsOk: the run pauses there (runTurn).
+ */
+async function agentTool(sessionId: string, botId: string, name: string, args: Record<string, unknown>, opts: { approved?: boolean } = {}): Promise<string> {
+  if (name === "find_app_actions") {
+    step(sessionId, name, `looked for "${String(args.query ?? "").slice(0, 60)}" in your apps`);
+    return findAppActions(botId, String(args.query ?? ""), { sessionId });
+  }
+  if (name === "use_app") {
+    if (!opts.approved) step(sessionId, name, `used ${String(args.action ?? "an app")}`);
+    return runAppAction(botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId }, (args.account as string | null) ?? null, opts);
+  }
+  if (DATA_TOOL_NAMES.has(name)) {
+    if (!opts.approved) step(sessionId, name, name === "business_search" ? `looked up ${String(args.job ?? "business data")}` : name === "find_data" ? `looked for "${String(args.query ?? "").slice(0, 60)}" in business data` : `got ${String(args.endpoint_id ?? "data")}`);
+    return runDataTool(botId, name, args, { sessionId }, opts);
+  }
+  return `Unknown tool ${name}.`;
+}
+
+/** An agent session's function call as it asks for it (requires_action), with its arguments read. */
+type FnCall = { call_id: string; turn_id: string; name: string; arguments: unknown };
+const argsOf = (c: { arguments: unknown }): Record<string, unknown> => {
+  if (c.arguments && typeof c.arguments === "object" && !Array.isArray(c.arguments)) return c.arguments as Record<string, unknown>;
+  try {
+    const v = JSON.parse(String(c.arguments ?? "{}"));
+    return v && typeof v === "object" ? v : {};
+  } catch {
+    return {};
+  }
+};
+
+/** The result of a function call, to the agent session waiting for it in requires_action. */
+const toolResult = (agentSessionId: string, c: Pick<FnCall, "call_id" | "turn_id">, output: string) =>
+  client.beta.agents.sessions.events.create(agentSessionId, { events: [{ type: "agent.session.input.tool_result", call_id: c.call_id, turn_id: c.turn_id, success: true, output }] } as never);
+
+/**
+ * The answer to the call a run paused at (`resume`, an agent session waiting in requires_action): the action done
+ * on the user's yes, its result as that call's output; "Declined: …" on their no.
+ */
+async function answerPausedCall(sessionId: string, agentSessionId: string, a: AppApproval) {
+  if (a.resume?.engine !== "agents") return;
+  const r = a.resume;
+  const call = { call_id: r.callId, turn_id: r.turnId };
+  if (a.reply?.reply === "reject") {
+    step(sessionId, "note", declined(a).replace(/^Declined:/, "Declined by you:"));
+    return void (await toolResult(agentSessionId, call, declined(a)));
+  }
+  const output = await agentTool(sessionId, a.botId, r.call.name, argsOf(r.call), { approved: true }).catch((e: Error) => `Failed: ${e.message}`);
+  await toolResult(agentSessionId, call, output);
+}
+
+async function runTurn(sessionId: string, agentSessionId: string, input: string | undefined, seen: Set<string>, at: ReadAt, resume?: AppApproval) {
   const stream = await client.beta.agents.sessions.events.stream(agentSessionId);
   interrupts.set(sessionId, () => stream.controller.abort());
-  await sendMessage(agentSessionId, input);
+  // A run that paused for the user's OK goes on from where it waited (requires_action): that call's result first,
+  // then what the user said meanwhile, which steers it.
+  if (resume) await answerPausedCall(sessionId, agentSessionId, resume);
+  if (input) await sendMessage(agentSessionId, input);
   // Stopped while that was on its way: Stop's cancel landed before the turn existed.
   if (stopped.has(sessionId)) {
     await cancelTurn(agentSessionId);
@@ -2826,18 +3303,28 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
     looking = true;
     void syncSteps(sessionId, agentSessionId, seen, at).finally(() => (looking = false));
   }, 2500);
-  // Why the turn was given up on: stalled (no step for a while) or out of time.
+  // Why the turn was given up on: stalled (no step for a while) or out of time. A call that needs the user's OK
+  // never waits here: the turn pauses there (Paused), and the turn that carries it on has an hour of its own.
   let gaveUp: string | undefined;
   const giveUp = (why: string) => {
     gaveUp = why;
     stream.controller.abort();
   };
-  let timeout = setTimeout(() => giveUp(TOO_LONG), TURN_MAX_MS);
-  let idle = setTimeout(() => giveUp(STALLED), TURN_IDLE_MS);
+  const outOfTime = () => giveUp(TOO_LONG);
+  /** A new turn of its own: its own hour, from now. */
+  const newHour = () => {
+    clearTimeout(timeout);
+    timeout = setTimeout(outOfTime, TURN_MAX_MS);
+  };
+  let timeout = setTimeout(outOfTime, TURN_MAX_MS);
+  const quiet = () => giveUp(STALLED);
+  let idle = setTimeout(quiet, TURN_IDLE_MS);
   const progressed = () => {
     clearTimeout(idle);
-    idle = setTimeout(() => giveUp(STALLED), TURN_IDLE_MS);
+    idle = setTimeout(quiet, TURN_IDLE_MS);
   };
+  // Paused at a call that needs the user's OK (its request opened: permission.ts askFor): the turn ends here.
+  let paused: Paused | undefined;
   let failure: string | undefined = "The session ended without finishing";
   // Bops Cloud stopped it for the AI credit (cloud/turn-guard.ts): AI_CREDIT_EMPTY or AI_CREDIT_LOW.
   let creditStopped: string | undefined;
@@ -2866,15 +3353,40 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
       turn?: { subagent_id?: string | null; error?: { code?: string; message?: string }; usage?: TokenCount };
       subagent?: { id: string; name: string | null };
       usage?: TokenCount;
+      session?: { required_actions?: (FnCall & { type: string })[] };
     }>) {
+      // Bops' own tools (its apps and business data) are answered here, each in turn. One that needs the user's OK
+      // pauses the run: its request carries the session and the call, the calls after it are answered as not run,
+      // and the session waits at OpenAI for that call's result, however long the user takes.
+      if (event.type === "agent.session.requires_action") {
+        const calls = (event.session?.required_actions ?? []).filter((x) => x.type === "function_call");
+        for (const [i, c] of calls.entries()) {
+          progressed();
+          try {
+            await toolResult(agentSessionId, c, await agentTool(sessionId, session(sessionId)!.botId, c.name, argsOf(c)));
+          } catch (e) {
+            if (!(e instanceof NeedsOk)) {
+              await toolResult(agentSessionId, c, `Failed: ${(e as Error).message}`).catch(() => {});
+              continue;
+            }
+            for (const later of calls.slice(i + 1)) await toolResult(agentSessionId, later, "Not run: it came after a step that waited for the user's OK. Call it again if it's still needed.").catch(() => {});
+            const ask: AskSpec = e.ask;
+            const a = askFor(ask, { botId: session(sessionId)!.botId, threadId: sessionId }, { engine: "agents", sessionId: agentSessionId, turnId: c.turn_id, callId: c.call_id, call: { name: c.name, arguments: JSON.stringify(argsOf(c)) } });
+            step(sessionId, "note", `Waiting for your OK: ${ask.action}`);
+            paused = new Paused(a.id);
+            break;
+          }
+        }
+        if (paused) break;
+        continue;
+      }
       if (event.type === "agent.session.turn.created" && event.turn_id) turnOwner.set(event.turn_id, event.turn?.subagent_id ?? null);
       if (event.type === "agent.session.turn.created" && event.turn_id && !event.turn?.subagent_id) mainTurn ??= event.turn_id;
       // The cloud set it going again after a cancel: a new turn of the thread's own, with its own time.
       if (event.type === "agent.session.turn.created" && !event.turn?.subagent_id && afterCancel) {
         clearTimeout(afterCancel);
         afterCancel = undefined;
-        clearTimeout(timeout);
-        timeout = setTimeout(() => giveUp(TOO_LONG), TURN_MAX_MS);
+        newHour();
       }
       // Any step (the thread's or a helper's) or new turn is progress.
       if (event.type === "agent.session.turn.item.done" || event.type === "agent.session.turn.created") progressed();
@@ -2904,8 +3416,7 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
         // Replies from here on wait for the next turn: sent now, one would start a turn no one follows.
         steerers.delete(sessionId);
         if (await steeredOn()) {
-          clearTimeout(timeout);
-          timeout = setTimeout(() => giveUp(TOO_LONG), TURN_MAX_MS);
+          newHour();
           progressed();
           continue;
         }
@@ -2943,6 +3454,11 @@ async function runTurn(sessionId: string, agentSessionId: string, input: string,
     clearTimeout(idle);
     clearTimeout(afterCancel);
     stream.controller.abort();
+  }
+  // Paused for the user's OK: the session waits at OpenAI in requires_action, and nothing here is over.
+  if (paused && !stopped.has(sessionId)) {
+    await syncSteps(sessionId, agentSessionId, seen, at);
+    throw paused;
   }
   // Replies sent into a turn that then failed or was stopped: a turn one of them started after it ended
   // would run with no one following, so it's cancelled. They stay sent: they're in the session's history,
@@ -3157,8 +3673,16 @@ function describe(tool?: string, args?: Record<string, unknown>) {
 
 /* ---------------- Take over ---------------- */
 
-/** The user takes control of a screen: the session there pauses until they hand it back. */
-export async function takeOver(botId: string, display: number) {
+/**
+ * The user takes control of a screen: the session working there pauses until they hand it back. A run that waits
+ * for their OK holds no screen while it waits, so a takeover never finds it, and neither taking a screen nor handing
+ * it back touches it or its request (their answer to it hands the screen back: handBackForAnswers). With nothing
+ * running there, the thread that ended there waiting on them at the screen (a sign in, a code, a check, a payment:
+ * waitingAt) is the one they're there for: handing the screen back carries it on, on the computer that ran it
+ * (returnControl, replyToSession). `forThread`: the thread whose card they came from (its Sign in), that one; null,
+ * none (a brain's sign in on a free screen).
+ */
+export async function takeOver(botId: string, display: number, forThread?: string | null) {
   const held = getState().takeover;
   const same = held?.botId === botId && held.display === display;
   // One screen at a time: moving to another screen hands the last one back first.
@@ -3166,7 +3690,9 @@ export async function takeOver(botId: string, display: number) {
   if (!same) {
     // Whichever bot's thread is on that screen pauses: bots that share a computer share its screens.
     const s = getState().sessions.find((x) => sameComputer(x.botId, botId) && x.display === display && live(x));
-    update((state) => (state.takeover = { botId, display, sessionId: s?.id, since: Date.now() }));
+    const left = s || forThread === null ? undefined : waitingAt(botId, display, forThread);
+    update((state) => (state.takeover = { botId, display, sessionId: (s ?? left)?.id, ...(left ? { found: "left" as const } : {}), since: Date.now() }));
+    keepDriving();
     trackServerEvent("bops_takeover_started", { screen: getState().host === "mac" ? "mac" : "bot_computer", paused_task: !!s });
     if (s) stopSession(s.id, "Paused while you took over");
     if (s) addMessage({ chatId: s.chatId, role: "system", text: `You took over from ${bot(s.botId)?.name} · paused ${s.title}` });
@@ -3186,7 +3712,7 @@ export async function takeOver(botId: string, display: number) {
   if (why) {
     const t = getState().takeover;
     if (t?.botId === botId && t.display === display) returnControl();
-    addMessage({ chatId: botChatId(botId), role: "bot", botId, text: `My computer is asleep and couldn't wake up. ${why}` });
+    addMessage({ chatId: botChatId(botId), role: "bot", botId, text: `My computer is asleep and couldn't wake up. ${why}`, bops: true });
     return;
   }
   // On the Mac an idle screen has no browser yet; start one. Either way, don't hand the user a blank page.
@@ -3194,6 +3720,73 @@ export async function takeOver(botId: string, display: number) {
   const endpoint = screenEndpoint(bot(botId)!, display);
   if (endpoint && (await currentUrl(endpoint)) === "about:blank") await navigate(endpoint, "https://www.google.com");
 }
+
+/** What a thread's screen raised that the user clears at that screen themselves (Session.blocker): a sign in, a code, a check, a payment. */
+const AT_THE_SCREEN = new Set<Session["blocker"]>(["sign_in", "two_factor", "captcha", "payment"]);
+
+/** Whether thread `x` ended on screen `display` of `botId`'s computer waiting on the user there (AT_THE_SCREEN), nothing having picked it up since. */
+function waitsAtScreen(x: Session, botId: string, display: number) {
+  return x.status === "done" && !x.dismissed && !x.replacedBy && AT_THE_SCREEN.has(x.blocker) && x.lastDisplay === display && sameComputer(x.botId, botId);
+}
+
+/**
+ * The thread a takeover of screen `display` of `botId`'s computer is for, when it ended there waiting on the user at the
+ * screen (waitsAtScreen): the one whose card they came from (`forThread`), however long it's waited and whatever used
+ * the screen since; else the last thread on that screen, while it still holds it (lib/screens.ts HOLD_MS). Never one
+ * that only asked a question (Session.waitingOnYou): taking a screen over is no answer to it, and clicking into a screen
+ * and out again must not set it going past what it asked.
+ */
+function waitingAt(botId: string, display: number, forThread?: string): Session | undefined {
+  const named = forThread ? session(forThread) : undefined;
+  if (named && waitsAtScreen(named, botId, display)) return named;
+  const last = getState()
+    .sessions.filter((x) => sameComputer(x.botId, botId) && x.lastDisplay === display)
+    .sort((a, b) => (b.endedAt ?? b.startedAt ?? b.createdAt) - (a.endedAt ?? a.startedAt ?? a.createdAt))[0];
+  return last && waitsAtScreen(last, botId, display) && Date.now() - (last.endedAt ?? 0) < HOLD_MS ? last : undefined;
+}
+
+/** Whether the thread a takeover found waiting at its screen (Takeover.found "left") still waits there, not carried on or ended from elsewhere since. */
+function stillFound(t: Takeover): boolean {
+  const s = t.sessionId ? session(t.sessionId) : undefined;
+  if (!s) return false;
+  if (t.found === "left") return t.display !== undefined && waitsAtScreen(s, t.botId, t.display);
+  return true;
+}
+
+/**
+ * The thread a takeover here holds the screen for, changed on another Bops (merged in): one that waited at the screen
+ * and was picked up or ended elsewhere is nothing the screen is held for any more: the user keeps it, and handing it
+ * back sets nothing going.
+ */
+export function takeoverFollows() {
+  const t = getState().takeover;
+  if (!t?.sessionId || !t.found || stillFound(t)) return;
+  update((state) => {
+    const x = state.takeover;
+    if (x && x.sessionId === t.sessionId) state.takeover = { ...x, sessionId: undefined, found: undefined };
+  });
+}
+watchArrivals("takeover-follows", takeoverFollows);
+
+/**
+ * The user answered (here, or on another Bops of theirs) a request of a run paused on the screen they've taken over
+ * here, after they took it: the screen goes back to the run first, so it goes on where it paused, on its own screen,
+ * never on one they're driving. The Bops that runs it can't see a takeover on this Mac (Takeover isn't synced), so this
+ * Mac lets go. Their answer is what does it: a screen taken after the answer stays theirs, and a Stop leaves it to them.
+ */
+export function handBackForAnswers() {
+  const t = getState().takeover;
+  if (!t || t.terminal) return;
+  const goesOn = (getState().appApprovals ?? []).some((a) => {
+    if (!a.threadId || !a.reply || a.reply.reason === "stopped" || a.reply.at < t.since) return false;
+    const x = session(a.threadId);
+    if (!x || !live(x)) return false;
+    if (t.macScreen !== undefined) return x.runsOn === "mac" && x.botId === t.botId && x.macScreen === t.macScreen;
+    return t.display !== undefined && x.runsOn !== "mac" && sameComputer(x.botId, t.botId) && (x.lastDisplay === t.display || x.env?.display === t.display);
+  });
+  if (goesOn) returnControl();
+}
+watchArrivals("hand-back-for-answers", handBackForAnswers);
 
 /**
  * The user takes control of the Chrome a task of the bot's has of its own on their Mac (Session.macScreen):
@@ -3211,6 +3804,7 @@ export async function takeOverMacChrome(botId: string, macScreen: number) {
     const waiting = working ? undefined : onIt.filter((x) => x.waitingOnYou).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))[0];
     const s = working ?? waiting;
     update((state) => (state.takeover = { botId, macScreen, sessionId: s?.id, since: Date.now() }));
+    keepDriving();
     trackServerEvent("bops_takeover_started", { screen: "mac", paused_task: !!working });
     if (working) stopSession(working.id, "Paused while you took over");
     if (working) addMessage({ chatId: working.chatId, role: "system", text: `You took over from ${bot(working.botId)?.name} · paused ${working.title}` });
@@ -3228,6 +3822,7 @@ export function returnControl() {
   const t = getState().takeover;
   if (!t) return;
   update((state) => (state.takeover = undefined));
+  keepDriving();
   trackServerEvent("bops_takeover_ended", { duration_ms: Math.max(0, Date.now() - t.since) });
   if (t.terminal) {
     void endTerminal(t);
@@ -3237,7 +3832,13 @@ export function returnControl() {
     return;
   }
   const what = t.macScreen !== undefined ? "Chrome" : "screen";
-  if (t.sessionId) replyToSession(t.sessionId, `Your ${what} was taken over by ${ownerName()} and has been handed back. Look at the page as it is now and carry on.`, "You handed control back");
+  // A thread the takeover found (Takeover.found) is told only while it's still as it was found: one that finished or was
+  // stopped elsewhere meanwhile, or carried on from elsewhere, isn't set going again.
+  const s = t.sessionId && stillFound(t) ? session(t.sessionId) : undefined;
+  // One that ended there waiting on them (a sign in, a code): what its screen raised is taken as done, as a sign in through
+  // the card is (sign-in.ts submitSignIn), and its next turn raises it again if it's still there.
+  if (s && !live(s) && s.blocker) patchSession(s.id, { blocker: undefined });
+  if (s) replyToSession(s.id, `Your ${what} was taken over by ${ownerName()} and has been handed back. Look at the page as it is now and carry on.`, "You handed control back");
   // A thread queued while you drove (you replied in it) waited for this screen: it can start now.
   void pump();
 }

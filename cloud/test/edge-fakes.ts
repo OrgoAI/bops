@@ -130,11 +130,16 @@ const json = (res: ServerResponse, status: number, body: unknown) => res.writeHe
 /** The cloud itself, on a free port. Its auth asks BOPS_ORGO_ORIGIN, so start fakeOrgo() first. */
 export const startCloud = () => listen(makeServer());
 
-/** Orgo's GET /api/user/profile: the key "key-<userId>" is <userId>'s; anything else is turned down. */
-export async function fakeOrgo(): Promise<Listening> {
+/**
+ * Orgo's GET /api/user/profile: the key "key-<userId>" is <userId>'s; anything else is turned down. With
+ * `roles`, its GET /api/projects/<id>/bops-role too: what's there for "<userId> <projectId>", else 404.
+ */
+export async function fakeOrgo(roles?: Record<string, unknown>): Promise<Listening> {
   const orgo = await listen(
     createServer((req, res) => {
       const userId = /^Bearer key-(.+)$/.exec(req.headers.authorization ?? "")?.[1];
+      const project = /^\/api\/projects\/([^/]+)\/bops-role$/.exec(req.url ?? "")?.[1];
+      if (roles && project && userId) return void (roles[`${userId} ${project}`] ? json(res, 200, roles[`${userId} ${project}`]) : json(res, 404, { error: "Not found" }));
       if (req.url !== "/api/user/profile" || !userId) return void json(res, 401, { error: "no" });
       json(res, 200, { id: userId, email: `${userId}@example.com` });
     }),

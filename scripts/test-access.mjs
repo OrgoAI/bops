@@ -1,19 +1,23 @@
 // Tests for who may use what (lib/types.ts levelOf, lib/server/composio.ts, lib/server/access-sync.ts): every bot
 // has Read & act in every account of its workspace by default (not another workspace's), the user's own choice
 // for a bot wins (read, act, or none), and a channel app (Bops' Slack app) has no default; a bot's Composio session holds the apps it has by default, read
-// only where it was set so, and nothing it may not use; a task someone outside Bops started gets no apps; each
+// only where it was set so, and nothing it may not use; a task someone outside Bops started gets no apps; a write
+// asks the user (the run pauses for it: lib/server/permission.ts) unless the bot's rules allow it, and Always allow
+// saves such a rule; only the user replies, never a bot's computer; each
 // workspace's whole set goes to its Orgo project as the PUT orgo-web takes, a use goes to the log, and an Orgo
-// without the routes (404) is left alone. After an upgrade from v0.0.28 every bot has exactly what it had
+// without the routes (404) is left alone; a use Orgo didn't take waits in an outbox on disk (written at once
+// as Bops quits) and goes after a restart, once, with its entry's id each time (clientId). After an upgrade from v0.0.28 every bot has exactly what it had
 // there in an account from before (only where it was given it), while one connected from now on is every bot's.
 //
 // The store, Bops Cloud, the vault's keys, Orgo and Composio are fakes: nothing reaches a real service.
 // Usage: node --conditions=react-server scripts/test-access.mjs
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { fill } from "./fake-exports.mjs";
 
 for (const k of Object.keys(process.env)) if (/^(BOPS|COMPOSIO|ORGO)_/.test(k)) delete process.env[k];
 process.env.COMPOSIO_API_KEY = "test-composio";
@@ -22,7 +26,7 @@ const scratch = mkdtempSync(join(tmpdir(), "bops-test-access-"));
 
 const forward = (mod, names) => names.map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(mod)}].${n}(...a);`).join("\n");
 const FAKES = {
-  store: forward("store", ["addMessage", "bot", "getState", "id", "installId", "ownerName", "session", "update", "stateReady", "userDir", "watchChanges"]),
+  store: forward("store", ["addMessage", "bot", "getState", "id", "installId", "ownerName", "ownSession", "pullState", "session", "stateDevice", "stateEpoch", "statePulledAt", "update", "stateReady", "userDir", "watchArrivals", "watchChanges", "watchLoads"]),
   orgo: forward("orgo", ["apiKey", "callOrgo"]),
   keys: forward("keys", ["listKeys", "keysOf"]),
   cloud: forward("cloud", ["cloudOn", "cloudProxy", "cloudSession", "cloudSessionNow", "cloudUrl"]),
@@ -52,7 +56,7 @@ registerHooks({
     if (url === "fake:composio") return { format: "module", shortCircuit: true, source: COMPOSIO };
     const name = url.match(/\/lib\/server\/([a-z-]+)\.ts$/)?.[1];
     if (!name || !FAKES[name]) return next(url, context);
-    return { format: "module", shortCircuit: true, source: FAKES[name] };
+    return { format: "module", shortCircuit: true, source: fill(name, url, FAKES[name]) };
   },
 });
 
@@ -99,6 +103,8 @@ const state = {
   routines: [],
 };
 
+let asks = 0;
+const arrivals = new Map();
 const created = [];
 const executed = [];
 const calls = [];
@@ -118,12 +124,22 @@ globalThis.__fake = {
     session: (id) => state.sessions.find((s) => s.id === id),
     update: (fn) => fn(state),
     addMessage: (m) => (state.messages.push(m), m),
-    id: (p) => `${p}_1`,
+    id: (p) => (p === "apr" ? `apr_${++asks}` : `${p}_1`),
     installId: () => "test",
     ownerName: () => "Sam",
     stateReady: () => true,
     userDir: () => scratch,
     watchChanges: () => {},
+    // What runs once changes from elsewhere came in (another Bops's, merged in): arrive() stands in for that.
+    watchArrivals: (name, fn) => void arrivals.set(name, fn),
+    // No state loads whole in these tests (a sign-in, a restart): nothing to run.
+    watchLoads: () => {},
+    pullState: async () => {},
+    stateEpoch: () => 1,
+    statePulledAt: () => 0,
+    // This Bops's device: the Mac's, or a computer's runner's (as it records its routines' runs and its asks).
+    stateDevice: () => (process.env.BOPS_RUNNER === "1" ? "dev_runner" : "dev_mac"),
+    ownSession: (s) => (s.by ? s.by === globalThis.__fake.store.stateDevice() : process.env.BOPS_RUNNER !== "1"),
   },
   orgo: {
     apiKey: async () => "sk_test",
@@ -151,7 +167,10 @@ globalThis.__fake = {
 
 const T = await import(`${root}/lib/types.ts`);
 const C = await import(`${root}/lib/server/composio.ts`);
+const P = await import(`${root}/lib/server/permission.ts`);
+const R = await import(`${root}/lib/permission.ts`);
 const A = await import(`${root}/lib/server/access-sync.ts`);
+const O = await import(`${root}/lib/server/sync-outbox.ts`);
 const bot = (id) => state.bots.find((b) => b.id === id);
 const account = (id) => state.accounts.find((a) => a.id === id);
 
@@ -226,7 +245,8 @@ await check("a change goes to Orgo as one PUT of the whole set; a use goes to th
   assert.deepEqual(put.body.grants, A.accessPayload("ws_main", ["OPENAI_API_KEY"]));
   const log = calls.find((c) => c.method === "POST");
   assert.equal(log.path, `/api/projects/${PID}/access/log`);
-  assert.deepEqual({ ...log.body.entries[0], at: undefined }, { bot: "iris", kind: "app", target: "ca_gmail", targetName: "Gmail, sam@acme.com", action: "GMAIL_FETCH_EMAILS", via: "routine", viaId: "rt_1", outcome: "ok", at: undefined });
+  assert.match(log.body.entries[0].clientId, /^[0-9a-f]{16}$/, "its outbox entry's id, so orgo-web can keep one row for it");
+  assert.deepEqual({ ...log.body.entries[0], at: undefined, clientId: undefined }, { bot: "iris", kind: "app", target: "ca_gmail", targetName: "Gmail, sam@acme.com", action: "GMAIL_FETCH_EMAILS", via: "routine", viaId: "rt_1", outcome: "ok", at: undefined, clientId: undefined });
   assert.ok(!Number.isNaN(Date.parse(log.body.entries[0].at)));
   assert.deepEqual(Object.keys(A.lastUses(new Set(["iris"]))), ["ca_gmail"]);
   assert.deepEqual(A.lastUses(new Set(["boppy"])), {}, "by this workspace's bots only");
@@ -237,16 +257,21 @@ await check("a change goes to Orgo as one PUT of the whole set; a use goes to th
   assert.equal(calls.length, 0);
 });
 
-await check("a write waits for the user: logged as waiting, then as the user's yes", async () => {
+await check("a write asks the user: logged as waiting, the run told to pause (NeedsOk, with exactly what and to whom), and done on their yes, logged as the user's", async () => {
   A.accessSyncForTests.reset();
   calls.length = 0;
-  let decided;
-  const said = await C.runAppAction("boppy", "GMAIL_SEND_EMAIL", { to: "a@b.c" }, { chatId: "bot:boppy", via: "call" }, (a) => (decided = a));
-  assert.match(said, /needs Sam's approval first/);
-  const ask = state.appApprovals.at(-1);
-  assert.deepEqual(Object.keys(ask).sort(), ["action", "app", "at", "botId", "chatId", "detail", "id", "title"], "the approval keeps only its chat");
-  C.answerApp(ask.id, true);
-  assert.equal(await decided, '{"ok":true}');
+  const ran = executed.length;
+  const asked = await C.runAppAction("boppy", "GMAIL_SEND_EMAIL", { to: "a@b.c", subject: "Hi" }, { chatId: "bot:boppy", via: "call" }).then(
+    () => null,
+    (e) => e,
+  );
+  assert.ok(asked instanceof P.NeedsOk, "the engine running it pauses there");
+  assert.deepEqual(asked.ask, { action: "GMAIL_SEND_EMAIL in Gmail (sam@acme.com)", resources: ["a@b.c"], preview: "to: a@b.c\nsubject: Hi", kind: "app" });
+  assert.equal(executed.length, ran, "nothing done");
+  assert.deepEqual(state.appApprovals ?? [], [], "the tool opens no request itself: the engine does, with what resumes its run");
+  // Its run carries on from the user's yes: the same call, approved.
+  assert.equal(await C.runAppAction("boppy", "GMAIL_SEND_EMAIL", { to: "a@b.c", subject: "Hi" }, { chatId: "bot:boppy", via: "call" }, null, { approved: true }), '{"ok":true}');
+  assert.equal(executed.length, ran + 1, "done once");
   await A.accessSyncForTests.flushAll();
   const entries = calls.filter((c) => c.method === "POST").flatMap((c) => c.body.entries);
   assert.deepEqual(
@@ -256,6 +281,111 @@ await check("a write waits for the user: logged as waiting, then as the user's y
       ["GMAIL_SEND_EMAIL", "call", "ok", "user"],
     ],
   );
+});
+
+await check("Always allow is a rule for that bot and that action, whoever it's for, as the card says: that action then goes without asking to anyone (said in the chat), and the bot's other requests for it are answered; another action, or another bot, still asks; the last rule for an action wins; one saved before for one recipient covers that action for anyone", async () => {
+  const ran = executed.length;
+  const SEND = "GMAIL_SEND_EMAIL in Gmail (sam@acme.com)";
+  const needs = (botId, args, slug = "GMAIL_SEND_EMAIL") =>
+    C.runAppAction(botId, slug, args, { chatId: `bot:${botId}` }).then(
+      () => false,
+      (e) => e instanceof P.NeedsOk,
+    );
+  const asked = await C.runAppAction("boppy", "GMAIL_SEND_EMAIL", { to: "dana@acme.example" }, { chatId: "bot:boppy" }).then(
+    () => null,
+    (e) => e,
+  );
+  assert.ok(asked instanceof P.NeedsOk, "no rule: it asks");
+  // The card says what Always allow covers: this bot and this action, whoever it's for.
+  assert.equal(R.alwaysScope("Boppy", asked.ask), `Always allow Boppy to ${SEND}, whoever it's for and whatever it says.`);
+  const request = (id, botId, action, to) => ({ id, botId, chatId: `bot:${botId}`, askedBy: "dev_mac_b", action, resources: [to], preview: `to: ${to}`, at: 1, resume: { engine: "chat", responseId: "r", callId: "c", call: { name: "use_app", arguments: "{}" }, outputs: [] } });
+  // Dana's, and others waiting meanwhile: the same action to Max, another action, the same action from Iris.
+  state.appApprovals = [
+    request("apr_dana", "boppy", SEND, "dana@acme.example"),
+    request("apr_max", "boppy", SEND, "max@acme.example"),
+    request("apr_draft", "boppy", "GMAIL_CREATE_DRAFT in Gmail (sam@acme.com)", "max@acme.example"),
+    request("apr_iris", "iris", SEND, "dana@acme.example"),
+  ];
+  // The owner's Always allow on Dana's (permission.ts replyToAsk), from their Mac.
+  assert.equal(P.replyToAsk("apr_dana", "always"), undefined);
+  assert.deepEqual(state.bots.find((b) => b.id === "boppy").permissions, [{ action: SEND, resource: "*", effect: "allow" }], "one rule for that action, for anyone");
+  assert.deepEqual(
+    state.appApprovals.map((a) => [a.id, a.reply?.reply]),
+    [
+      ["apr_dana", "always"],
+      ["apr_max", "always"],
+      ["apr_draft", undefined],
+      ["apr_iris", undefined],
+    ],
+    "Boppy's other request for that action answered; another action's and Iris's still wait",
+  );
+  assert.equal(P.replyToAsk("apr_dana", "once"), "That isn't waiting on you anymore.", "never answered twice");
+  const before = state.messages.length;
+  assert.equal(await C.runAppAction("boppy", "GMAIL_SEND_EMAIL", { to: "eve@other.example", cc: ["sam.o@other.example"], subject: "Hi" }, { chatId: "bot:boppy" }), '{"ok":true}', "that action to anyone else: no ask");
+  assert.equal(executed.length, ran + 1);
+  assert.match(state.messages.slice(before).at(-1).text, /you always allow it, so didn't ask/);
+  assert.equal(await needs("boppy", { to: "dana@acme.example" }, "GMAIL_CREATE_DRAFT"), true, "another action still asks");
+  assert.equal(await needs("iris", { to: "dana@acme.example" }), true, "another bot still asks");
+  // A later rule that asks for that action wins over the allow.
+  state.bots.find((b) => b.id === "boppy").permissions.push({ action: SEND, effect: "ask" });
+  assert.equal(await needs("boppy", { to: "dana@acme.example" }), true, "the last rule for an action wins");
+  // Saved before, for one recipient: a rule for that action now. A pattern is no rule for anything but itself.
+  state.bots.find((b) => b.id === "boppy").permissions = [{ action: SEND, resource: "dana@acme.example", effect: "allow" }];
+  assert.equal(await needs("boppy", { to: "eve@other.example" }), false, "one saved for Dana covers that action for anyone");
+  state.bots.find((b) => b.id === "boppy").permissions = [{ action: "GMAIL_*", resource: "*", effect: "allow" }];
+  assert.equal(await needs("boppy", { to: "dana@acme.example" }), true, "no wildcards");
+  delete state.bots.find((b) => b.id === "boppy").permissions;
+  state.appApprovals = [];
+});
+
+await check("a request shows who and what its inputs name, as best Bops can tell, for the user to read: whatever the input is called, nested anywhere, all of them", () => {
+  assert.deepEqual(C.resourcesOf({ recipient_email: "ava@acme.example", subject: "Hi", body: "Write to max@acme.example if you need me" }), ["ava@acme.example"], "an address in the text reaches no one");
+  assert.deepEqual(C.resourcesOf({ recipient_email: "ava@acme.example", extra_recipients: ["eve@evil.example"] }), ["ava@acme.example", "eve@evil.example"], "Gmail's extra recipients");
+  assert.deepEqual(C.resourcesOf({ to_email: "ava@acme.example", cc_emails: ["eve@evil.example"], bcc_emails: ["dana@acme.example"] }), ["ava@acme.example", "eve@evil.example", "dana@acme.example"], "Outlook's cc and bcc");
+  assert.deepEqual(C.resourcesOf({ invitees: [{ email: "Max@acme.example", name: "Max" }], user_ids: ["U1", "U2"], participants: ["U3"], guests: "sam@acme.example; Dana <dana@acme.example>" }), ["max@acme.example", "u1", "u2", "u3", "sam@acme.example", "dana@acme.example"]);
+  assert.deepEqual(C.resourcesOf({ message: { toRecipients: [{ emailAddress: { address: "eve@evil.example" } }] } }), ["eve@evil.example"], "one nested anywhere");
+  assert.deepEqual(C.resourcesOf({ phone_number_id: "pn-1", to_number: "+15551230001", text: "Hi" }), ["+15551230001"], "the number someone is texted at");
+  assert.deepEqual(C.resourcesOf({ participant_id: "111", text: "Hi" }), ["111"], "a participant's id");
+  assert.equal(C.resourcesOf({ to: Array.from({ length: 12 }, (_, i) => `p${i}@acme.example`) }).length, 12, "however many");
+});
+
+await check("on a computer's runner an action goes as on the Mac: the bot's rule covers it there too, and on the user's yes it's made with the runner's own credential only, nothing of their answer sent to Bops Cloud", async () => {
+  const cloud = globalThis.__fake.cloud;
+  const was = { ...cloud };
+  const made = [];
+  const realMade = globalThis.__fake.composio.made;
+  globalThis.__fake.composio.made = (o) => made.push(o);
+  Object.assign(cloud, { cloudOn: () => true, cloudProxy: () => ({ url: "https://cloud.test/proxy/composio", key: "orgo_vm_x" }), cloudSessionNow: () => ({ composio: { userId: "bops-u1" } }) });
+  process.env.BOPS_RUNNER = "1";
+  try {
+    const ran = executed.length;
+    state.bots.find((b) => b.id === "boppy").permissions = [{ action: "GMAIL_SEND_EMAIL in Gmail (sam@acme.com)", resource: "*", effect: "allow" }];
+    assert.equal(await C.runAppAction("boppy", "GMAIL_SEND_EMAIL", { to: "dana@acme.example" }, { sessionId: "ses_mine" }), '{"ok":true}', "the rule");
+    delete state.bots.find((b) => b.id === "boppy").permissions;
+    // An empty file input in the call the user said yes to: it goes as it is (Composio drops it before sending).
+    assert.equal(await C.runAppAction("boppy", "GMAIL_SEND_EMAIL", { to: "dana@acme.example", attachment: "" }, { sessionId: "ses_mine" }, null, { approved: true }), '{"ok":true}', "their yes");
+    assert.equal(executed.length, ran + 2);
+    assert.ok(made.every((o) => !Object.keys(o.defaultHeaders ?? {}).some((h) => /^x-bops-ok$/i.test(h))), "no answer named to Bops Cloud");
+  } finally {
+    globalThis.__fake.composio.made = realMade;
+    Object.assign(cloud, was);
+    delete process.env.BOPS_RUNNER;
+    delete state.bots.find((b) => b.id === "boppy").permissions;
+  }
+});
+
+await check("only the user replies, from a Bops of their own: a bot's computer can't (it writes no reply), nor anyone for a request that isn't waiting", async () => {
+  state.appApprovals = [{ id: "apr_run", botId: "iris", threadId: "ses_routine", askedBy: "dev_runner", action: "GMAIL_SEND_EMAIL in Gmail (sam@acme.com)", resources: ["dana@acme.example"], preview: "to: dana@acme.example", at: 1, resume: { engine: "responses", responseId: "resp_1", callId: "call_1", call: { name: "use_app", arguments: "{}" } } }];
+  process.env.BOPS_RUNNER = "1";
+  try {
+    assert.equal(P.replyToAsk("apr_run", "once"), "A bot's computer can't answer for you.");
+    assert.equal(P.replyToAsk("apr_run", "always"), "A bot's computer can't answer for you.");
+    assert.equal(state.appApprovals[0].reply, undefined, "still waiting on the owner");
+  } finally {
+    delete process.env.BOPS_RUNNER;
+  }
+  assert.equal(P.replyToAsk("apr_none", "once"), "That isn't waiting on you anymore.");
+  state.appApprovals = [];
 });
 
 await check("an Orgo without the routes is left alone", async () => {
@@ -279,6 +409,55 @@ await check("the use log on this Mac keeps the last uses", async () => {
   assert.ok(kept.length >= 3);
   assert.deepEqual(Object.keys(kept.at(-1)).sort(), ["action", "at", "bot", "kind", "outcome", "target", "targetName", "via", "viaId"]);
   assert.deepEqual([kept.at(-1).via, kept.at(-1).viaId], ["thread", "ses_mine"]);
+});
+
+await check("on the way out the outbox is written at once, not half a second later (persist.ts onExit)", async () => {
+  A.accessSyncForTests.reset();
+  O.outboxForTests.restart();
+  const file = join(scratch, "outbox", "access-uses.json");
+  rmSync(file, { force: true });
+  orgoAnswer = () => null;
+  await C.runAppAction("iris", "GMAIL_FETCH_EMAILS", {}, { sessionId: "ses_exit" });
+  assert.equal(existsSync(file), false, "not written yet: it's due in half a second");
+  await globalThis.__bopsExitWork.get("outbox:access-uses")();
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).entries.map((e) => e.item.viaId), ["ses_exit"], "written as Bops goes");
+  await A.accessSyncForTests.flushAll();
+  A.accessSyncForTests.reset();
+  O.outboxForTests.restart();
+  rmSync(file, { force: true });
+});
+
+await check("a use Orgo didn't take waits in an outbox on disk: after a quit and a start it goes, once", async () => {
+  A.accessSyncForTests.reset();
+  calls.length = 0;
+  // Orgo away.
+  orgoAnswer = () => null;
+  await C.runAppAction("iris", "GMAIL_FETCH_EMAILS", {}, { sessionId: "ses_outbox" });
+  await A.accessSyncForTests.flushAll();
+  assert.ok(calls.some((c) => c.method === "POST"), "tried");
+  O.outboxForTests.writeAll();
+  const file = join(scratch, "outbox", "access-uses.json");
+  const kept = JSON.parse(readFileSync(file, "utf8")).entries;
+  assert.deepEqual(kept.map((e) => [e.wsId, e.item.viaId]), [["ws_main", "ses_outbox"]], "kept on disk with its workspace");
+  // Bops quits (what's in memory is gone) and starts again, with Orgo back.
+  A.accessSyncForTests.reset();
+  O.outboxForTests.restart();
+  orgoAnswer = (method) => ({ status: method === "PUT" ? 200 : 201, json: {} });
+  calls.length = 0;
+  A.accessSyncForTests.look();
+  await A.accessSyncForTests.flushAll();
+  const sent = calls.filter((c) => c.method === "POST" && c.path === `/api/projects/${PID}/access/log`).flatMap((c) => c.body.entries);
+  assert.deepEqual(sent.map((e) => [e.action, e.via, e.viaId]), [["GMAIL_FETCH_EMAILS", "thread", "ses_outbox"]], "the use from before went");
+  assert.ok(!("oid" in sent[0]), "the outbox's id goes only as its clientId");
+  assert.equal(sent[0].clientId, kept[0].id, "the same id as the first try: a resend is the same entry");
+  assert.equal(A.accessSyncForTests.waitingUses().length, 0, "out of the outbox once Orgo took it");
+  // Started again: not sent twice.
+  A.accessSyncForTests.reset();
+  O.outboxForTests.restart();
+  calls.length = 0;
+  A.accessSyncForTests.look();
+  await A.accessSyncForTests.flushAll();
+  assert.equal(calls.filter((c) => c.method === "POST").length, 0);
 });
 
 /* ---------------- After an upgrade from v0.0.28 ---------------- */

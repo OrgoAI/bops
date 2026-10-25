@@ -1,5 +1,6 @@
 "use client";
 
+import { appsOpen } from "@/lib/apps-access";
 import { screenMap } from "@/lib/screens";
 import { chatAsks } from "@/lib/asks";
 import { useEffect, useRef, useState } from "react";
@@ -8,6 +9,7 @@ import { Account } from "./account";
 import { AutopilotPage, type AutopilotSection } from "./autopilot";
 import { Members } from "./members";
 import { BotPanel, type Section } from "./bot-panel";
+import { BotComputers } from "./bot-computers";
 import { BrainSettings } from "./brains";
 import { CallBar } from "./call-bar";
 import { ChatView, forgetSheet, ThreadSheet, ToPicker } from "./chat-view";
@@ -16,13 +18,15 @@ import { crmOpen } from "@/lib/crm-access";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { tagsOf } from "@/lib/routine-catalog";
 import { CrmView, OpenCrm } from "./crm";
-import { BoppyLoading, BusyBots, Mascot } from "./mascot";
+import { BoppyLoading, BotMoodsFrom, CallTalking, talkingStore } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
 import { CHAT_TAB, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
+import { MadeAppsHome, MadeAppTab, OpenMadeApp } from "./made-apps";
+import { HostedAppTab, OpenHostedApp } from "./hosted-apps";
 
 /** Your Mac's tab, and the chat's bot's profile (it follows the chat, like the computer tab); both open on demand. */
 const MAC_TAB = "tab_mac";
-const PROFILE_TAB = "tab_profile";
+import { opensMacTab, PROFILE_TAB, tabsShown } from "./tabs-shown";
 import { Sidebar } from "./sidebar";
 import { footerPageOf } from "./sidebar-footer";
 import { CloudUnreachable, SignIn, useAuthStatus } from "./sign-in";
@@ -34,7 +38,11 @@ import { OPEN_MAC_KEY } from "./mac-pip";
 import { MacComputer } from "./mac-computer";
 import { NoticePopup } from "./notice-popup";
 import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
-import { chatInWorkspace, currentWorkspace, post, SideToggleIcon, teamOf, useAppState, useSelfHosted } from "./ui";
+import { RunsOnSettings } from "./runs-on";
+import { chatInWorkspace, currentWorkspace, option, post, radio, SideToggleIcon, teamOf, useAppState, useSelfHosted } from "./ui";
+import { viewOnly } from "./view-only";
+import { readOnlyLine } from "@/lib/shared";
+import { duePings } from "@/lib/pings";
 import { UsageData, useAnalytics } from "./usage-data";
 import { trackEvent } from "@/lib/analytics";
 import { OwnerEmail, useOwnerEmailInfo } from "./owner-email";
@@ -127,6 +135,8 @@ function Bops({ state }: { state: AppState | null }) {
   const [followed, setFollowed] = useState("");
   // The newest thing waiting on you in this chat that the panel last went to (lib/asks.ts chatAsks): undefined until the first look, so what was already waiting doesn't jump.
   const [shownAsk, setShownAsk] = useState<string | undefined>(undefined);
+  // The latest app build line in the chat (made-apps.tsx), so a new one opens its app's tab once.
+  const [shownBuild, setShownBuild] = useState<string | undefined>(undefined);
   // The popped-out Mac previews ask for the Your Mac tab by bumping a key in local storage.
   const openMacRef = useRef<() => void>(() => {});
   useEffect(() => {
@@ -162,6 +172,8 @@ function Bops({ state }: { state: AppState | null }) {
   const [shownScreen, setShownScreen] = useState("");
   // Screens you picked yourself stay put; otherwise the panel follows the action (see ComputerView).
   const [pinned, setPinned] = useState<Record<string, boolean>>({});
+  // The thread whose card you came to a bot's screen from (its Sign in), by bot: taking control of that screen is for it (ComputerView forThread).
+  const [cameFor, setCameFor] = useState<Record<string, { display: number; sessionId: string } | undefined>>({});
   // Settings, or Settings at Keys to add one for a bot (from its profile).
   const [settings, setSettings] = useState(false);
   const [account, setAccount] = useState(false);
@@ -188,14 +200,13 @@ function Bops({ state }: { state: AppState | null }) {
   }, [held]);
   const bringForward = useRef<() => void>(() => {});
   // A soft chime (and a notification when Bops is behind) for what's worth interrupting for: news
-  // judged "now", and finished tasks the user is waiting on. Not for what was already there when Bops opened.
+  // judged "now", and finished tasks the user is waiting on (lib/pings.ts). Not for what was already there when Bops opened.
   const pinged = useRef<Set<string> | null>(null);
   useEffect(() => {
     if (!state) return;
-    const due = [
-      ...(state.watches ?? []).filter((w) => w.alert?.level === "now").map((w) => ({ key: `w:${w.id}:${w.alert!.at}`, title: w.mac?.title ?? w.site, body: w.alert!.text })),
-      ...state.messages.filter((m) => m.ping).map((m) => ({ key: `m:${m.id}`, title: state.bots.find((b) => b.id === m.botId)?.name ?? "Bops", body: m.text.replace(/\*\*|\[|\]\([^)]*\)/g, "").slice(0, 140) })),
-    ];
+    // A workspace shared with the user is someone else's: its news is theirs to be told of. The user's own
+    // still chimes meanwhile, as the server sends it along (AppState.ownPings).
+    const due = state.shared ? (state.ownPings ?? []) : duePings(state);
     if (!pinged.current) {
       pinged.current = new Set(due.map((d) => d.key));
       return;
@@ -224,6 +235,9 @@ function Bops({ state }: { state: AppState | null }) {
   // only the hang-up button does. In the caller's chat it sits in the header slot; elsewhere it waits
   // small in the sidebar's corner.
   const [call, setCall] = useState<string | null>(null);
+  // Whether the bot's voice is coming through on that call right now (its mascot talks while it does):
+  // a store of its own (CallTalking), so a word starting or ending doesn't redraw the whole app.
+  const [callTalking] = useState(talkingStore);
   const [callSlot, setCallSlot] = useState<HTMLElement | null>(null);
   const [slotBox, setSlotBox] = useState<{ x: number; y: number } | null>(null);
   useEffect(() => {
@@ -294,7 +308,20 @@ function Bops({ state }: { state: AppState | null }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // A workspace shared with the user open: nothing in the window changes anything (view-only.ts). Set as
+  // it renders, not in an effect: what it draws runs its effects first (a chat's mark read), and the
+  // ids there are often the user's own too.
+  const sharedRole = state?.shared?.role;
+  viewOnly(sharedRole ? readOnlyLine(sharedRole) : null);
+
   if (!state) return <FirstLoad />;
+
+  // Your Mac full width is the viewer's own Mac, never a workspace shared with them: opening one from the
+  // sidebar (still there at full width) goes back to the chat rather than carry it over (MacComputer).
+  if (state.shared && macFocus) {
+    setMacFocus(false);
+    if (focus && !crmFocus) setFocus(false);
+  }
 
   // Stay inside the workspace you're in: a chat from another one falls back to this one's main bot.
   const team = teamOf(state);
@@ -304,17 +331,12 @@ function Bops({ state }: { state: AppState | null }) {
   // The first tab shows the computer of the bot you're talking to (or whose thread is open).
   const chatBotId = thread?.botId ?? chat.botIds[0];
   // A deleted bot's tabs go with it; the profile tab is always the chat's bot. A CRM file shows in its own workspace only,
-  // and only to an account the CRM is open to (lib/crm-access.ts); the same for the memory page (lib/memory-categories.ts).
+  // and only to an account the CRM is open to (lib/crm-access.ts); the same for the memory page (lib/memory-categories.ts)
+  // and for apps, the ones bots made and those on the web (lib/apps-access.ts), which a shared workspace never shows (they're its owner's).
   const crm = crmOpen(state);
   const memory = categoriesOpen(state);
-  const tabs = openTabs
-    .map((t) => (t.id === PROFILE_TAB && t.kind === "bot" ? { ...t, botId: chatBotId } : t))
-    .filter((t) => !("botId" in t) || state.bots.some((b) => b.id === t.botId))
-    .filter((t) => t.kind !== "crm" || (crm && t.ws === currentWorkspace(state)))
-    // Skills are this Mac's folders and need no account, so a Knowledge tab on Skills stays without one.
-    .filter((t) => t.kind !== "memory" || (t.ws === currentWorkspace(state) && (memory || t.category === "skills" || t.category === "apps")))
-    // Routines shows its own workspace's bots only: another workspace's tab goes on a switch.
-    .filter((t) => t.kind !== "autopilot" || t.ws === currentWorkspace(state));
+  const apps = appsOpen(state) && !state.shared;
+  const tabs = tabsShown(openTabs, state, { chatBotId, ws: currentWorkspace(state), crm, memory, apps });
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
   // The footer's pill: People while its sheet is open, else the page in sight on the right.
   const footer = footerPageOf({ people: members, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory });
@@ -337,6 +359,9 @@ function Bops({ state }: { state: AppState | null }) {
         tab.kind === "crm" ||
         tab.kind === "memory" ||
         tab.kind === "autopilot" ||
+        tab.kind === "made-app" ||
+        tab.kind === "made-apps" ||
+        tab.kind === "hosted-app" ||
         (tab.kind === "computer" && tab.botId !== chatBotId) ||
         (tab.kind === "bot" && tab.id !== PROFILE_TAB));
     if (lead && !browsing && !focus) {
@@ -344,7 +369,8 @@ function Bops({ state }: { state: AppState | null }) {
       // again (several at once show side by side), even if you'd picked a screen before.
       setPanelOpen(true);
       if (lead.runsOn !== "mac") setPinned((p) => ({ ...p, [lead.botId]: false }));
-      if (lead.runsOn === "mac") {
+      // In a workspace shared with the user, a lead on the owner's Mac is never the viewer's own Mac tab (opensMacTab).
+      if (opensMacTab(state, lead)) {
         // Your Mac's tab, however it was opened (from a new tab it keeps that tab's id): never a second one.
         const mac = openTabs.find((t) => t.kind === "mac");
         if (!mac) setTabs([...openTabs, { id: MAC_TAB, kind: "mac" }]);
@@ -373,7 +399,8 @@ function Bops({ state }: { state: AppState | null }) {
   if (showingMac && macHeldAt !== 0) setMacHeldAt(0);
   else if (!showingMac && macHeldAt === 0 && macWasShown) setMacHeldAt(1);
   if (showingMac && !macWasShown) setMacWasShown(true);
-  const macHeld = macWasShown && !showingMac && macHeldAt === 1;
+  // Not while a shared workspace is open: it would keep capturing the viewer's own screens there.
+  const macHeld = macWasShown && !showingMac && macHeldAt === 1 && !state.shared;
   const heldBot = showingComputer ? bot : held ? state.bots.find((b) => b.id === held.botId) : undefined;
   // Full screen, when asked for explicitly (taking control happens in place, in the panel).
   const clickIn = () => {
@@ -401,15 +428,20 @@ function Bops({ state }: { state: AppState | null }) {
       setFocus(false);
     } else openTab((t) => t.kind === "computer" && t.botId === id, () => ({ id: tabId(), kind: "computer", botId: id }));
   };
-  /** A screen up close: that bot's computer (its tab, or the chat's own panel), pinned to the screen. The chat stays where it is. */
-  const showScreen = (id: string, d: number) => {
+  /**
+   * A screen up close: that bot's computer (its tab, or the chat's own panel), pinned to the screen. The chat stays where it is.
+   * `sessionId`: the thread waiting there whose card this came from, so taking control of that screen is for it.
+   */
+  const showScreen = (id: string, d: number, sessionId?: string) => {
     setDisplays((x) => ({ ...x, [id]: d }));
     setPinned((p) => ({ ...p, [id]: true }));
+    setCameFor((x) => ({ ...x, [id]: sessionId ? { display: d, sessionId } : undefined }));
     openComputer(id);
   };
   // Something new waiting on you here (in the main bot's chat, from any bot): the panel shows its screen,
   // with its card, unless you're reading something (a page, the Vault) or have a computer full width.
-  const [ask] = chatAsks(state, chat.id);
+  // Never in a shared workspace: what waits there waits on its owner, not the viewer.
+  const [ask] = state.shared ? [] : chatAsks(state, chat.id);
   const askKey = ask ? `${ask.id}:${ask.endedAt ?? ""}:${ask.blocker ?? ""}` : "";
   if (shownAsk !== askKey) {
     setShownAsk(askKey);
@@ -470,9 +502,39 @@ function Bops({ state }: { state: AppState | null }) {
       (t) => ({ ...t, section, focus: item, focusAt, bot: bot === undefined && t.kind === "autopilot" ? t.bot : (bot ?? undefined) }) as PanelTab,
     );
   };
-  /** Skills or Apps (skills.tsx), kinds in Knowledge: the Knowledge tab on the one asked for ("skill:<slug>" or "app:<slug>"). */
-  const openSkills = (item?: string) => openMemory({ category: item?.startsWith("app:") ? "apps" : "skills", focus: item });
+  /** Skills (skills.tsx), in Knowledge: the Knowledge tab on the one asked for ("skill:<slug>"). */
+  const openSkills = (item?: string) => openMemory({ category: "skills", focus: item });
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
+  /** An app a bot made, in its tab (one per app), and every app as tiles (one tab per workspace). */
+  const openMadeApp = (appId: string) => {
+    if (apps) openTab((t) => t.kind === "made-app" && t.appId === appId, () => ({ id: tabId(), kind: "made-app", appId }));
+  };
+  const openApps = () => {
+    if (!apps) return;
+    const ws = currentWorkspace(state);
+    openTab((t) => t.kind === "made-apps" && t.ws === ws, () => ({ id: tabId(), kind: "made-apps", ws }));
+  };
+  /** An app on the web (hosted-apps.tsx), from the Apps page's list, by its Ingot repo's name: one tab per app. */
+  const openHostedApp = (ws: string, name: string) => {
+    if (apps) openTab((t) => t.kind === "hosted-app" && t.ws === ws && t.name === name, () => ({ id: tabId(), kind: "hosted-app", ws, name }));
+  };
+  // An app starting to build from this chat comes up beside it, built live there (unless a computer is
+  // full width). Not on the first look at the chat: only a build that starts while you're here.
+  const lastBuild = state.messages.findLast((m) => m.chatId === chat.id && m.madeApp);
+  if (shownBuild !== (lastBuild?.id ?? "")) {
+    setShownBuild(lastBuild?.id ?? "");
+    const building = lastBuild?.madeApp && state.madeApps?.find((a) => a.id === lastBuild.madeApp!.appId)?.building;
+    if (shownBuild !== undefined && lastBuild?.madeApp && building && !focus && apps) {
+      // As openMadeApp does (rendering can't make a new id: the tab is named for the app).
+      const appId = lastBuild.madeApp.appId;
+      const there = openTabs.find((t) => t.kind === "made-app" && t.appId === appId);
+      if (!there) setTabs([...openTabs, { id: `tab_app_${appId}`, kind: "made-app", appId }]);
+      setActive(there?.id ?? `tab_app_${appId}`);
+      setPanelOpen(true);
+    }
+  }
+  // The app beside the chat, which what the user says is about (made-apps.tsx LookingAt).
+  const lookingAt = panelOpen && tab?.kind === "made-app" ? state.madeApps?.find((a) => a.id === tab.appId) : undefined;
   // eslint-disable-next-line react-hooks/refs -- kept current for the storage listener above
   openMacRef.current = openMac;
   const openWeb = (url: string, title?: string) => openTab((t) => t.kind === "web" && t.url === url, () => ({ id: tabId(), kind: "web", url, title }));
@@ -543,6 +605,8 @@ function Bops({ state }: { state: AppState | null }) {
   // you're free. Alerts already there when Bops opens stay in the sidebar instead.
   // eslint-disable-next-line react-hooks/refs -- kept current for the effect that runs it
   bringForward.current = () => {
+    // A shared workspace's news is its owner's to be shown (as its chime is: never the viewer's to be interrupted by).
+    if (state.shared) return;
     const key = (w: Watch) => `${w.id}:${w.alert?.at}`;
     // Only news Jev judged worth interrupting for (older alerts have no level: they interrupt too), on a
     // screen or a Mac window: a web page has no screen to cut to (its chime and sidebar mark say it).
@@ -586,8 +650,9 @@ function Bops({ state }: { state: AppState | null }) {
     setComposing(false);
     setFocus(false);
     setThreadId(s.id);
-    // A thread on your Mac shows your Mac; one in the cloud, the bot's computer, on its screen.
-    if (s.runsOn === "mac") {
+    // A thread on your Mac shows your Mac; one in the cloud, the bot's computer, on its screen. The owner's
+    // thread on their Mac, in a workspace shared with the user, is never shown as the viewer's own Mac (opensMacTab).
+    if (opensMacTab(state, s)) {
       const mac = openTabs.find((t) => t.kind === "mac");
       if (!mac) setTabs([...openTabs, { id: MAC_TAB, kind: "mac" }]);
       setActive(mac?.id ?? MAC_TAB);
@@ -620,6 +685,7 @@ function Bops({ state }: { state: AppState | null }) {
         state={state}
         chat={chat}
         wide={!panelOpen}
+        lookingAt={lookingAt}
         onOpenThread={openThread}
         onShowBot={(id) => openProfile(id)}
         onShowMac={openMac}
@@ -675,16 +741,20 @@ function Bops({ state }: { state: AppState | null }) {
     />
   );
 
-  // Bots at work open their eyes (every mascot reads this): a running thread, typing, or on a call.
-  const busy = new Set([...state.sessions.filter((s) => live(s) && !s.askWhere).map((s) => s.botId), ...state.chats.flatMap((c) => c.typing), ...(call ? [call] : [])]);
-
+  // What the bots are doing, for every mascot's mood: a running thread (writing, or not), a reply, a call
+  // (whether the bot on it is talking, each of its mascots reads from CallTalking), a thanks, and what
+  // they're doing on the user's other devices (state.liveMoods).
   return (
-    <BusyBots.Provider value={busy}>
+    <BotMoodsFrom state={state} call={call ? { botId: call, speaking: false } : null}>
+    <CallTalking.Provider value={callTalking}>
     <OpenLink.Provider value={openWeb}>
     <OpenCrm.Provider value={openCrm}>
+    <OpenMadeApp.Provider value={openMadeApp}>
+    <OpenHostedApp.Provider value={openHostedApp}>
       <TooltipLayer />
       <NoticePopup />
-      <ViewReporter chatId={chat.id} threadId={thread?.id ?? null} />
+      {/* A shared workspace's chats aren't the user's own: nothing of them is said as what they're looking at. */}
+      <ViewReporter chatId={state.shared ? "" : chat.id} threadId={state.shared ? null : (thread?.id ?? null)} />
       <div className="flex h-screen flex-col overflow-clip bg-white font-sans text-ink antialiased">
         <TitleBar
           columns={titleColumns}
@@ -716,6 +786,7 @@ function Bops({ state }: { state: AppState | null }) {
             onAccount={() => setAccount(true)}
             onSetup={() => setSetup(true)}
             onVault={() => openVault()}
+            onApps={openApps}
             onMembers={() => setMembers(true)}
             onOpenWatch={showWatch}
             onOpenMemory={openMemory}
@@ -756,7 +827,7 @@ function Bops({ state }: { state: AppState | null }) {
                 }}
               />
             </div>
-          ) : focus && macFocus ? (
+          ) : focus && macFocus && !state.shared ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
               <MacComputer state={state} mode="focus" showThread={thread?.runsOn === "mac" ? thread.id : undefined} onBack={() => setFocus(false)} onOpenThread={openThread} />
             </div>
@@ -766,6 +837,7 @@ function Bops({ state }: { state: AppState | null }) {
                 state={state}
                 bot={bot}
                 display={display}
+                forThread={cameFor[bot.id]}
                 // Picking a screen only shows it: taking control is its own button, never a side effect of looking.
                 onDisplay={setDisplay}
                 onShowScreen={showScreen}
@@ -836,6 +908,19 @@ function Bops({ state }: { state: AppState | null }) {
                       }}
                       onProfile={(id) => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "bot", botId: id, section: "details" } : t)))}
                       onVault={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "vault" } : t)))}
+                      // The workspace's one Apps tab: this new tab gives way to it (or becomes it). None where apps aren't open.
+                      onApps={
+                        apps
+                          ? () => {
+                              const ws = currentWorkspace(state);
+                              const there = tabs.find((t) => t.kind === "made-apps" && t.ws === ws);
+                              if (there) {
+                                closeTab(tab.id);
+                                setActive(there.id);
+                              } else setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "made-apps", ws } : t)));
+                            }
+                          : undefined
+                      }
                       // The workspace's one Knowledge tab: this new tab gives way to it (or becomes it).
                       onKnowledge={
                         categoriesOpen(state)
@@ -853,6 +938,12 @@ function Bops({ state }: { state: AppState | null }) {
                     />
                   ) : tab?.kind === "vault" ? (
                     <VaultTab state={state} keysFor={tab.keysFor} onOpenWatch={showWatch} onClose={() => leaveTab(tab.id)} />
+                  ) : tab?.kind === "made-app" ? (
+                    <MadeAppTab key={tab.id} state={state} appId={tab.appId} />
+                  ) : tab?.kind === "made-apps" ? (
+                    <MadeAppsHome state={state} ws={tab.ws} />
+                  ) : tab?.kind === "hosted-app" ? (
+                    <HostedAppTab key={tab.id} state={state} ws={tab.ws} name={tab.name} onAsk={askBot} />
                   ) : tab?.kind === "crm" ? (
                     // These two pages fade in from here (the others in their own files). The key is on the
                     // wrapper, so the page remounts exactly when it did before.
@@ -927,6 +1018,7 @@ function Bops({ state }: { state: AppState | null }) {
                         state={state}
                         bot={heldBot}
                         display={defaultDisplay(state, heldBot.id, displays[heldBot.id])}
+                        forThread={cameFor[heldBot.id]}
                         onDisplay={setDisplay}
                         follow={showingComputer ? follow : undefined}
                         mode="panel"
@@ -947,7 +1039,7 @@ function Bops({ state }: { state: AppState | null }) {
             className="fixed z-40"
             style={callHere && slotBox ? { left: slotBox.x, top: slotBox.y, transform: "translateX(-50%)" } : { left: 12, bottom: 76 }}
           >
-            <CallBar bot={callBot} owner={state.owner?.name} compact={!(callHere && slotBox)} onOpen={() => openChat(botChatId(callBot.id))} onClose={() => setCall(null)} />
+            <CallBar bot={callBot} owner={state.owner?.name} compact={!(callHere && slotBox)} onOpen={() => openChat(botChatId(callBot.id))} onClose={() => setCall(null)} onSpeaking={callTalking.set} />
           </div>
         )}
         {/* Before Account, so the plans open on top of it and closing them shows it again. */}
@@ -989,11 +1081,14 @@ function Bops({ state }: { state: AppState | null }) {
         {/* The first time a workspace gets email: "Pick your Bops address" (or an offer to change one Bops picked). */}
         {!settings && !account && !setup && !members && <MailAddressStep state={state} />}
         {/* What bots are doing on the user's Mac, live, in the corner (hidden while the Your Mac tab is open). */}
-        {!(tab?.kind === "mac" && panelOpen) && <MacPreviews state={state} onOpen={openMac} />}
+        {!(tab?.kind === "mac" && panelOpen) && !state.shared && <MacPreviews state={state} onOpen={openMac} />}
       </div>
+    </OpenHostedApp.Provider>
+    </OpenMadeApp.Provider>
     </OpenCrm.Provider>
     </OpenLink.Provider>
-    </BusyBots.Provider>
+    </CallTalking.Provider>
+    </BotMoodsFrom>
   );
 }
 
@@ -1323,23 +1418,6 @@ function OwnerSettings({ owner }: { owner: AppState["owner"] }) {
   );
 }
 
-const option = (on: boolean) => (on ? "bg-[#FBFFE0] shadow-[0_0_0_1.5px_#0A0A0A]" : "shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]");
-const radio = (on: boolean) =>
-  on ? (
-    <span className="flex size-4 items-center justify-center rounded-full bg-ink">
-      <span className="size-1.5 rounded-full bg-highlighter" />
-    </span>
-  ) : (
-    <span className="size-4 rounded-full shadow-[inset_0_0_0_1.5px_#C9C9C6]" />
-  );
-
-/** A bot's computer, in plain words. A bot that shares says whose computer it works on. */
-const computerNow = (state: AppState, b: AppState["bots"][number]) => {
-  const c = workBot(b, state.bots);
-  if (state.host !== "mac" && c.id !== b.id) return `Works on ${c.name}'s computer`;
-  return state.host === "mac" ? "Uses this Mac" : b.computerStatus === "ready" ? "Ready" : b.computerStatus === "cloning" ? "Setting up" : b.computerStatus === "none" ? "Set up on its first task" : "Couldn't be set up yet";
-};
-
 /**
  * For self-hosting (BOPS_SELF_HOSTED=1): the providers behind Bops, from .env.local. How screens are
  * reached (Tailscale), the email domain, the phone service, and each computer's id.
@@ -1388,7 +1466,7 @@ function SelfHosting({ state }: { state: AppState }) {
         {state.bots.map((b) => (
           <div key={b.id} className="flex items-center border-b border-[#F0F0EE] py-2 last:border-0">
             <span className="w-[200px] text-[13px] font-medium">{b.name}</span>
-            <span className="font-mono text-[12px] text-[#3A3A38]">{state.host === "mac" ? "this Mac" : b.computerId ? `${b.computerId}${b.tailnet ? ` · ${b.tailnet.ip}` : ""}` : sharesComputer(b) ? `shares ${workBot(b, state.bots).name}'s` : "none yet"}</span>
+            <span className="font-mono text-[12px] text-[#3A3A38]">{!state.shared && state.host === "mac" ? "this Mac" : b.computerId ? `${b.computerId}${b.tailnet ? ` · ${b.tailnet.ip}` : ""}` : sharesComputer(b) ? `shares ${workBot(b, state.bots).name}'s` : "none yet"}</span>
           </div>
         ))}
       </div>
@@ -1443,25 +1521,13 @@ export function Settings({ state, onClose, onShowScreen, onOpenVault }: { state:
           </div>
         </div>
 
+        {/* Bots in browsers on this Mac have no computer to run routines on; a self-hosted Bops has no Bops Cloud for a runner to share the state through. */}
+        {!selfHosted && state.host !== "mac" && <RunsOnSettings state={state} />}
+
         {BRAINS_ON && <BrainSettings state={state} onShowScreen={onShowScreen} onOpenVault={onOpenVault} />}
 
-        <div className={`flex flex-col px-[22px] pt-4 ${selfHosted ? "" : "pb-5"}`}>
-          <span className="pb-1 text-[13px] font-semibold">Your bots&apos; computers</span>
-          {teamOf(state).map((b) => (
-            <div key={b.id} className="flex items-center border-b border-[#F0F0EE] py-2.5 last:border-0">
-              <span className="flex w-[200px] items-center gap-2">
-                <Mascot botId={b.id} color={b.color} size={20} />
-                <span className="text-[13.5px] font-medium">{b.name}</span>
-              </span>
-              <span className="flex flex-1 items-center gap-1.5 text-[12.5px] text-[#3A3A38]">
-                <span
-                  className={`size-[7px] rounded-full ${state.host === "mac" || workBot(b, state.bots).computerStatus === "ready" ? "bg-[#2BB673]" : workBot(b, state.bots).computerStatus === "cloning" ? "bg-[#E59A0B]" : "bg-[#C9C9C6]"}`}
-                />
-                {computerNow(state, b)}
-              </span>
-            </div>
-          ))}
-        </div>
+        {/* (A shared workspace's computers are its owner's: nothing asks this Mac's Orgo about their keys.) */}
+        <BotComputers state={state} padded={!selfHosted} askKeys={!selfHosted && !state.shared} />
 
         {selfHosted && <SelfHosting state={state} />}
       </div>

@@ -17,6 +17,7 @@ import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { unfaked } from "./fake-exports.mjs";
 
 // This process is in New York, like the user (Owner.timeZone).
 process.env.TZ = "America/New_York";
@@ -26,11 +27,11 @@ const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 // The modules routines.ts talks to are fakes that call into globalThis.__fake (set up below).
 const FAKES = {
-  store: ["addMessage", "bot", "getState", "id", "ownerName", "patchSession", "session", "stateReady", "update"],
+  store: ["addMessage", "bot", "getState", "id", "ownerName", "ownSession", "patchSession", "pullState", "session", "stateEpoch", "statePulledAt", "stateReady", "stateTooNew", "update"],
   sessions: ["startSession"],
   analytics: ["trackServerEvent"],
   attention: ["pingIfWorthIt"],
-  persist: ["onPostgres"],
+  persist: ["onExit", "onPostgres", "onRunner"],
   phone: ["isOwner", "ownerPhone", "sendText", "textingLine"],
   mail: ["ownerAddresses", "sendEmail"],
   channels: ["postTo"],
@@ -57,7 +58,7 @@ registerHooks({
   load(url, context, next) {
     const name = url.match(/\/lib\/server\/([a-z-]+)\.ts$/)?.[1];
     if (!name || !FAKES[name]) return next(url, context);
-    return { format: "module", shortCircuit: true, source: FAKES[name].map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(name)}].${n}(...a);`).join("\n") };
+    return { format: "module", shortCircuit: true, source: FAKES[name].map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(name)}].${n}(...a);`).join("\n") + unfaked(name, url, FAKES[name]) };
   },
 });
 
@@ -488,6 +489,7 @@ globalThis.__fake = {
     },
     bot: (id) => state.bots.find((b) => b.id === id),
     id: (p) => `${p}_${++seq}`,
+    stateEpoch: () => 1,
     ownerName: () => state.owner?.name || "the user",
     patchSession: (id, patch) => {
       const s = state.sessions.find((x) => x.id === id);
@@ -496,6 +498,11 @@ globalThis.__fake = {
     },
     session: (id) => state.sessions.find((x) => x.id === id),
     stateReady: () => ready,
+    stateTooNew: () => false,
+    // Every thread here is this Mac's own (store.ts ownSession).
+    ownSession: () => true,
+    pullState: async () => {},
+    statePulledAt: () => 0,
   },
   sessions: {
     startSession: (o) => {
@@ -507,7 +514,7 @@ globalThis.__fake = {
   },
   analytics: { trackServerEvent: () => {} },
   attention: { pingIfWorthIt: (...a) => fake.pings.push(a) },
-  persist: { onPostgres: () => false },
+  persist: { onExit: () => {}, onPostgres: () => false, onRunner: () => false },
   phone: {
     isOwner: (n) => n === fake.ownerPhone,
     ownerPhone: () => fake.ownerPhone,

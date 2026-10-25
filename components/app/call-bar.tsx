@@ -85,10 +85,33 @@ function hangUpTone() {
 const RING_AT_LEAST_MS = 1300;
 
 /**
- * `compact`: you're in another chat (or the computer), so the call waits small in the sidebar's
- * corner: who, the time, mute and hang up. Click the bot to go back to its chat.
+ * Whether the bot is talking, from how loud its voice is coming through now (0 to 1, as the waveform
+ * meters it) and when it was last loud: it stays talking through the short gaps between words, so its
+ * mascot's mouth doesn't snap shut mid-sentence.
  */
-export function CallBar({ bot: b, owner, onClose, compact, onOpen }: { bot: Bot; owner?: string; onClose: () => void; compact?: boolean; onOpen?: () => void }) {
+export const BOT_TALKING = { level: 0.08, holdMs: 400 };
+export const botTalking = (level: number, loudAt: number, now: number) => level > BOT_TALKING.level || now - loudAt < BOT_TALKING.holdMs;
+
+/**
+ * `compact`: you're in another chat (or the computer), so the call waits small in the sidebar's
+ * corner: who, the time, mute and hang up. Click the bot to go back to its chat. `onSpeaking` hears
+ * when the bot starts and stops talking (its mascots talk while it does).
+ */
+export function CallBar({
+  bot: b,
+  owner,
+  onClose,
+  compact,
+  onOpen,
+  onSpeaking,
+}: {
+  bot: Bot;
+  owner?: string;
+  onClose: () => void;
+  compact?: boolean;
+  onOpen?: () => void;
+  onSpeaking?: (speaking: boolean) => void;
+}) {
   // The name the bot greets you by, read when the call connects (a later change shouldn't restart the call).
   const ownerRef = useRef(owner);
   useEffect(() => {
@@ -284,8 +307,11 @@ export function CallBar({ bot: b, owner, onClose, compact, onOpen }: { bot: Bot;
   }, [b.id]);
 
   // The waveform: every ~90ms, how loud the call is right now (whoever is talking) becomes the newest dot.
+  // The bot's own loudness also says whether it's talking (botTalking), told on each change.
   useEffect(() => {
     if (phase !== "live") return;
+    let loudAt = 0;
+    let talking = false;
     const buf = new Uint8Array(512);
     const loudness = (node: AnalyserNode | undefined, gain: number) => {
       if (!node) return 0;
@@ -296,11 +322,18 @@ export function CallBar({ bot: b, owner, onClose, compact, onOpen }: { bot: Bot;
     };
     const t = setInterval(() => {
       // The bot's audio arrives quieter than a mic, so it gets a little more gain.
-      const level = Math.max(loudness(meters.current.bot, 7), muted ? 0 : loudness(meters.current.you, 3.5));
+      const bot = loudness(meters.current.bot, 7);
+      const level = Math.max(bot, muted ? 0 : loudness(meters.current.you, 3.5));
       setLevels((l) => [...l.slice(1), level]);
+      const now = Date.now();
+      if (bot > BOT_TALKING.level) loudAt = now;
+      if (botTalking(bot, loudAt, now) !== talking) onSpeaking?.((talking = !talking));
     }, 90);
-    return () => clearInterval(t);
-  }, [phase, muted]);
+    return () => {
+      clearInterval(t);
+      if (talking) onSpeaking?.(false);
+    };
+  }, [phase, muted, onSpeaking]);
 
   // The call timer.
   useEffect(() => {
@@ -347,7 +380,7 @@ export function CallBar({ bot: b, owner, onClose, compact, onOpen }: { bot: Bot;
           className="flex size-10 shrink-0 items-center justify-center rounded-full enabled:hover:brightness-95"
           style={{ background: `color-mix(in oklab, ${b.color} 18%, white)` }}
         >
-          <Mascot botId={b.id} color={b.color} size={28} />
+          <Mascot botId={b.id} color={b.color} size={28} live />
         </button>
         <div className="flex w-[74px] shrink-0 flex-col pl-1">
           <span className="truncate text-[14px] font-semibold leading-[18px]">{b.name}</span>

@@ -10,7 +10,7 @@ import { MAIN_WORKSPACE } from "@/lib/types";
 import { bankOf, bankOwner, bindingOf, cardOf, dream as askToDream, existingFacts, factSource, factsByIds, memoryOn, privateLines, purgeMemory, saidSince, scanFacts, sessionWorkspace, type FactRow } from "./memory";
 import { openaiClient } from "./openai-client";
 import { orbitChanged, orbitOpened, orbitPreview } from "./orbit-sync";
-import { onPostgres } from "./persist";
+import { loopHere, onPostgres } from "./persist";
 import { getState, ownerName, sameState, stateEpoch, update, userDir } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { currentWorkspaceId } from "./workspaces";
@@ -185,9 +185,11 @@ type Space = {
   /** Changes with anything a snapshot shows, so the window's polls can be answered "unchanged". */
   rev: number;
 };
-type Live = { spaces: Map<string, Space>; timer?: ReturnType<typeof setInterval> };
+/** `dropped`: workspaces deleted here (dropWorkspaceCategories): their index is never written again. */
+type Live = { spaces: Map<string, Space>; timer?: ReturnType<typeof setInterval>; dropped?: Set<string> };
 const g = globalThis as unknown as { bopsCategories?: Live };
 const live: Live = (g.bopsCategories ??= { spaces: new Map() });
+live.dropped ??= new Set();
 
 const openai = openaiClient();
 
@@ -445,7 +447,7 @@ async function drainStashes(ws: string) {
 function save(ws: string, index: Index, opts: { quiet?: boolean } = {}) {
   const b = space(ws);
   const file = fileOf(ws);
-  if (!file || b.index !== index || b.file !== file) return;
+  if (!file || b.index !== index || b.file !== file || live.dropped!.has(ws)) return;
   b.rev++;
   // What changed goes to the workspace's Orbit in Orgo soon (orbit-sync.ts; only what it hasn't got).
   if (!opts.quiet) orbitChanged(ws);
@@ -618,7 +620,9 @@ function rebuild(index: Index, item: Item) {
 /**
  * Facts gone from memory (deleted, or dropped as out of date): their items lose them, and an item no
  * sorted fact backs any more goes, unless the user changed or hid it (a fact that comes back reworded
- * merges into it by its key). Says whether anything changed.
+ * merges into it by its key). An item that goes is deleted from the workspace's Orbit in Orgo too (its
+ * delete waits in Index.out until Orgo took it), so the next read of Orgo doesn't bring it back. Says
+ * whether anything changed.
  */
 function dropMany(index: Index, facts: string[]) {
   const gone = new Set(facts.filter((f) => Object.hasOwn(index.facts, f)));
@@ -637,6 +641,7 @@ function dropMany(index: Index, facts: string[]) {
     if (!backed.has(id)) {
       if (!item.edited && !item.marked && !item.hidden) {
         delete index.items[id];
+        sendLater(index, { del: [id] });
         continue;
       }
       // Kept for the user's sake (hidden, marked, renamed): what the facts said goes with them.
@@ -1063,6 +1068,7 @@ async function run(ws: string, bank: string, index: Index, opts: SyncOpts, ours:
 
 /** A look later, once per reason: a newer ask replaces it, or (`keep`) leaves one already set. Never for an account that signed in since. */
 function later(ws: string, why: string, ms: number, opts: SyncOpts, keep = false) {
+  if (!loopHere("categories")) return;
   const b = space(ws);
   if (keep && b.timers.has(why)) return;
   clearTimeout(b.timers.get(why));
@@ -1077,7 +1083,8 @@ function later(ws: string, why: string, ms: number, opts: SyncOpts, keep = false
 
 /** While Bops is open: every 15 minutes, a look at the workspace in use, unless one ran meanwhile. */
 function ensureTimer() {
-  if (live.timer) return;
+  // Memory is sorted on the Mac: a computer's runner leaves it for when the Mac is open.
+  if (live.timer || !loopHere("categories")) return;
   live.timer = setInterval(() => {
     if (!categoriesOn()) return;
     const ws = currentWorkspaceId();
@@ -1777,4 +1784,43 @@ export function orbitApply(
   if (r.full) for (const id of Object.keys(index.pushed ?? {})) if (!seen.has(id)) dropRemote(index, id);
   space(ws).rows = undefined;
   save(ws, index);
+}
+
+/* ---------------- A deleted workspace ---------------- */
+
+/**
+ * A deleted workspace's Orbit goes from this Mac (remove.ts deleteWorkspace): its index
+ * (memory-categories/ws-<id>.json) and the ones it kept for banks it used before (ws-<id>@<bank>.json),
+ * its looks and retries, and nothing writes them again. What was still to delete from memory in a bank
+ * that stays (one it shares, or used before) is deleted there once now; in `goneBank` (its own, deleted
+ * whole) nothing needs to be.
+ */
+export function dropWorkspaceCategories(ws: string, goneBank: string | null): Promise<void> {
+  live.dropped!.add(ws);
+  const b = live.spaces.get(ws);
+  if (b) for (const t of b.timers.values()) clearTimeout(t);
+  live.spaces.delete(ws);
+  const dir = dirOf();
+  if (!dir || !existsSync(/*turbopackIgnore: true*/ dir)) return Promise.resolve();
+  const mine = readdirSync(/*turbopackIgnore: true*/ dir).filter((n) => n === `ws-${safe(ws)}.json` || (n.startsWith(`ws-${safe(ws)}@`) && n.endsWith(".json")));
+  const left: Index[] = [];
+  for (const name of mine) {
+    const file = join(/*turbopackIgnore: true*/ dir, name);
+    const kept = readIndex(file, ws);
+    const p = kept?.purge;
+    if (kept && p && kept.peer && kept.bank !== goneBank && (p.facts.length || p.cards.length || p.sessions.length)) left.push(kept);
+    rmSync(/*turbopackIgnore: true*/ file, { force: true });
+  }
+  return Promise.all(
+    left.map((kept) => {
+      const p = kept.purge!;
+      const cards = new Set(p.cards);
+      return purgeMemory(ws, { facts: p.facts, cardLine: cards.size ? (l) => cards.has(wordsHash(l)) : undefined, sessions: p.sessions }, { bank: kept.bank, peer: kept.peer! }).then(
+        (r) => {
+          if (r.facts.length || r.sessions.length || r.card) console.warn(`[categories] ${ws}: memory still has some of what was forgotten in ${kept.bank}`);
+        },
+        (e: Error) => console.warn(`[categories] ${ws}: deleting what was forgotten in ${kept.bank}: ${e.message}`),
+      );
+    }),
+  ).then(() => {});
 }

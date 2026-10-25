@@ -7,6 +7,7 @@ import { botChatId, pairCodeLive, PAIR_CODE_MS, turnsOwn, type Bot, type Channel
 import { cloudJson, cloudOn, cloudSession, cloudSessionNow } from "./cloud";
 import { deleteUserSecret, getUserSecret, setUserSecret } from "./keychain";
 import { composio, composioUser, publicUrl, runAs } from "./composio";
+import { loopHere, onRunner } from "./persist";
 import { addMessage, bot, getState, id, ownerName, patchSession, stateReady, update, watchChanges } from "./store";
 import { saveUpload } from "./uploads";
 import { plainLinks } from "./style";
@@ -114,7 +115,7 @@ export function stopChannels() {
 
 /** Start every channel's listener. Safe to call again: running ones are left alone. */
 export function startChannels() {
-  if (!stateReady()) return;
+  if (!stateReady() || !loopHere("channels")) return;
   for (const l of linksOf("telegram")) if (!live.telegram.has(l.id)) void pollTelegram(l.id);
   for (const l of linksOf("discord")) if (!live.discord.has(l.id)) void connectDiscord(l.id);
   // Signed in with Orgo, Slack's events come through Bops Cloud (which never passes Composio's live
@@ -473,6 +474,8 @@ function typing(l: ChannelLink, chat: string) {
 }
 
 async function tokenOf(l: ChannelLink) {
+  // Its token is in the Mac's Keychain, which a computer's runner hasn't.
+  if (onRunner()) throw new Error(`${KIND_NAME[l.kind]} works from the Bops app on your Mac, not from a bot's computer`);
   const t = await getUserSecret(secretOf(l.id));
   if (!t) throw new Error(`${KIND_NAME[l.kind]} token is missing from the Keychain`);
   return t;
@@ -1003,7 +1006,7 @@ async function pushSlackLinks() {
 // Any change might be one the cloud should hear (a link, a pairing, a channel): checked a moment later,
 // once for a burst of changes, and sent only if what it would be told changed.
 watchChanges("slack-links", () => {
-  if (!cloudOn()) return;
+  if (!cloudOn() || !loopHere("channels")) return;
   const sync = slackSync();
   if (sync.soon) return;
   sync.soon = setTimeout(() => {

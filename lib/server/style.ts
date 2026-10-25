@@ -7,7 +7,7 @@ import { ownerName } from "./store";
  * Cloud imports too: it answers the main bot's chat from the iPhone, so a bot says the same things on
  * the Mac and in the cloud.
  */
-export { ABOUT_BOPS, ASKING, plainLinks, SPEAKING, tidyAnswer, WRITING } from "@/cloud/style";
+export { ABOUT_BOPS, aboutBops, ASKING, plainLinks, SPEAKING, tidyAnswer, WRITING } from "@/cloud/style";
 
 /** The computer briefing, wrapped so a bot reads it as background, not something to report. */
 export const withBriefing = (input: string, brief: string) =>

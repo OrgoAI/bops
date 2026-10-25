@@ -1,0 +1,254 @@
+import assert from "node:assert/strict";
+import { after, before, test } from "node:test";
+import { closeDb, query } from "../db.ts";
+import { closeAll } from "../live.ts";
+import { resetMembers } from "../members.ts";
+import type { SharedWsState, SharedWsUnchanged } from "../protocol.ts";
+import { dropUsers, fakeOrgo, keyOf, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
+
+/**
+ * A shared workspace's state, read by a member (members.ts GET /v1/ws/:projectId/state): the owner's
+ * workspace as the allow list shows it, with the bots the owner gave them (found by the email Orgo's
+ * profile gives them; someone given none, no bot) and everything of each, its chats' newest messages
+ * (the owner's own and one kept "between us" too) and none of another workspace's or of a bot they
+ * weren't given, a copy that's still current answered in a line, and the stream's "state" events carrying
+ * the same fingerprint the read does. orgo-web is a fake on localhost.
+ */
+
+let orgo: Listening;
+let cloud: Listening;
+const owner = newUserId("owner");
+const member = newUserId("member");
+const outsider = newUserId("outsider");
+const both = newUserId("both");
+const PROJECT = "11111111-2222-3333-4444-555555555555";
+const roles: Record<string, unknown> = {};
+
+before(async () => {
+  await prepareDb();
+  roles[`${member} ${PROJECT}`] = { role: "member", ownerUserId: owner, bopsWsId: "ws_acme", name: "Acme" };
+  orgo = await fakeOrgo(roles);
+  cloud = await startCloud();
+  resetMembers();
+});
+
+after(async () => {
+  closeAll();
+  await cloud.close();
+  await orgo.close();
+  await query("DELETE FROM bops.chat_messages WHERE user_id = ANY($1::text[])", [[owner, member]]);
+  await dropUsers([owner, member, outsider, both]);
+  await closeDb();
+});
+
+const headers = (userId: string) => ({ Authorization: `Bearer ${keyOf(userId)}`, "x-bops-user": userId, "x-bops-protocol": "2", "x-bops-device": "mac-o", "content-type": "application/json" });
+const blob = (acmeStatus: string) => ({
+  workspaces: [
+    { id: "ws_main", name: "Main", orbitKey: "main-orbit" },
+    { id: "ws_acme", name: "Acme", createdAt: 1, orbitKey: "acme-orbit", memberAccess: { [`${member}@example.com`]: { others: "none", bots: { max: "read" } } } },
+  ],
+  bots: [
+    { id: "boppy", name: "Boppy", isMain: true },
+    { id: "max", name: "Max", isMain: true, workspaceId: "ws_acme", appsKey: "apps-key-max", keys: ["STRIPE_SECRET_KEY"] },
+    { id: "dana", name: "Dana", workspaceId: "ws_acme" },
+  ],
+  chats: [
+    { id: "bot:boppy", kind: "bot", botIds: ["boppy"] },
+    { id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_acme", readAt: 7 },
+    { id: "bot:dana", kind: "bot", botIds: ["dana"], workspaceId: "ws_acme" },
+    { id: "pair", kind: "group", botIds: ["max", "dana"], workspaceId: "ws_acme", title: "Hiring" },
+  ],
+  sessions: [
+    { id: "s1", botId: "max", title: "Leads", status: acmeStatus, env: { remoteUrl: "https://secret" } },
+    { id: "s2", botId: "max", chatId: "bot:max", title: "Pricing", status: "done", answer: "Raise it 10%", secret: true },
+    { id: "s3", botId: "dana", chatId: "bot:dana", title: "Shortlist", status: "running" },
+  ],
+  routines: [{ id: "r1", botId: "dana", title: "Dana's daily" }],
+  vault: [{ id: "v1", username: "owner@example.com" }],
+  usage: { events: [1, 2] },
+});
+const read = async (userId: string, qs = "") => {
+  const res = await fetch(`${cloud.url}/v1/ws/${PROJECT}/state${qs}`, { headers: { Authorization: `Bearer ${keyOf(userId)}` } });
+  return { status: res.status, body: (await res.json()) as SharedWsState & Partial<SharedWsUnchanged> };
+};
+
+test("a member reads all of the bot they were given as it's shown, the owner's own messages too, and nothing of another bot", async () => {
+  assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: headers(owner), body: JSON.stringify({ base: 0, state: blob("running") }) })).status, 200);
+  const msgs = [
+    { id: "m1", chatId: "bot:max", role: "user", text: "find leads", at: 10 },
+    { id: "m2", chatId: "bot:max", role: "bot", botId: "max", text: "on it", at: 11, channel: { linkId: "slack-1", chat: "C1" } },
+    { id: "m3", chatId: "bot:max", role: "user", text: "between us", at: 12, secret: true },
+    { id: "m3b", chatId: "bot:max", role: "bot", botId: "max", text: "I won't mention it", at: 13 },
+    { id: "m4", chatId: "bot:boppy", role: "user", text: "main workspace only", at: 13 },
+    { id: "d1", chatId: "bot:dana", role: "user", text: "only for the shortlist", at: 14 },
+    { id: "g1", chatId: "pair", role: "user", text: "the hiring plan", at: 15 },
+  ];
+  assert.equal((await fetch(`${cloud.url}/v1/messages`, { method: "POST", headers: headers(owner), body: JSON.stringify({ upsert: msgs, remove: [] }) })).status, 200);
+
+  const { status, body } = await read(member);
+  assert.equal(status, 200);
+  assert.equal(body.wsId, "ws_acme");
+  assert.equal(body.role, "member");
+  assert.deepEqual(body.state.workspace, { id: "ws_acme", name: "Acme", createdAt: 1 });
+  assert.deepEqual(body.state.bots, [{ id: "max", name: "Max", isMain: true, workspaceId: "ws_acme" }]);
+  assert.deepEqual(body.state.chats, [{ id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_acme" }]);
+  assert.deepEqual(body.state.sessions, [
+    { id: "s1", botId: "max", title: "Leads", status: "running" },
+    { id: "s2", botId: "max", chatId: "bot:max", title: "Pricing", status: "done", answer: "Raise it 10%" },
+  ]);
+  assert.deepEqual(body.state.routines, [], "Dana's routine isn't theirs");
+  assert.deepEqual(
+    body.messages.map((m) => m.id),
+    ["m1", "m2", "m3", "m3b"],
+    "all of Max's chat, the owner's own messages and the one kept between us with its answer; nothing of another workspace or of Dana",
+  );
+  assert.deepEqual(body.messages[1], { id: "m2", chatId: "bot:max", role: "bot", botId: "max", text: "on it", at: 11 });
+  assert.deepEqual(body.messages[2], { id: "m3", chatId: "bot:max", role: "user", text: "between us", at: 12 });
+  assert.deepEqual(body.more, []);
+  const text = JSON.stringify(body);
+  for (const secret of ["orbit", "apps-key", "STRIPE", "https://secret", "owner@example.com", "Boppy", "main workspace only", "slack-1", "usage", "memberAccess", `${member}@example.com`, "Dana", "dana", "shortlist", "Shortlist", "pair", "hiring", "Hiring"])
+    assert.ok(!text.includes(secret), `"${secret}" isn't shown`);
+
+  // Still current: answered in a line. One chat's older page: only a chat of the workspace.
+  const again = await read(member, `?have=${body.hash}.${body.seq}`);
+  assert.deepEqual(again.body, { hash: body.hash, seq: body.seq, unchanged: true });
+  assert.equal((await read(member, "?chat=bot:max&before=11")).body.messages.length, 1);
+  assert.equal((await read(member, "?chat=bot:boppy&before=99")).status, 404);
+  assert.equal((await read(member, "?chat=bot:dana&before=99")).status, 404, "nor a page of Dana's chat");
+  // The owner reading their own project's state: every bot and chat of it; anyone else gets 404.
+  roles[`${owner} ${PROJECT}`] = { role: "owner", ownerUserId: owner, bopsWsId: "ws_acme", name: "Acme" };
+  const own = await read(owner);
+  assert.equal(own.status, 200);
+  assert.deepEqual(own.body.messages.map((m) => m.id), ["m1", "m2", "m3", "m3b", "d1", "g1"]);
+  assert.equal((await read(newUserId("stranger"))).status, 404);
+  // Someone orgo-web says is in it whom the owner gave no bots: the workspace, and nothing of it.
+  roles[`${outsider} ${PROJECT}`] = { role: "member", ownerUserId: owner, bopsWsId: "ws_acme", name: "Acme" };
+  const none = await read(outsider);
+  assert.equal(none.status, 200);
+  assert.deepEqual(none.body.state.workspace, { id: "ws_acme", name: "Acme", createdAt: 1 });
+  assert.deepEqual([none.body.state.bots, none.body.state.chats, none.body.state.sessions, none.body.state.routines, none.body.messages], [[], [], [], [], []]);
+  assert.ok(!/@example\.com\b/.test(JSON.stringify(none.body)), "nobody's email, theirs or the member's");
+});
+
+test("an owner whose state the cloud hasn't got, or that has no such workspace, gives a member nothing to open", async () => {
+  const P2 = "22222222-2222-3333-4444-555555555555";
+  const absent = newUserId("absent");
+  roles[`${member} ${P2}`] = { role: "member", ownerUserId: absent, bopsWsId: "ws_acme", name: "Acme" };
+  const get = () => fetch(`${cloud.url}/v1/ws/${P2}/state`, { headers: { Authorization: `Bearer ${keyOf(member)}` } });
+  assert.equal((await get()).status, 404, "no state of the owner's");
+  roles[`${member} ${P2}`] = { role: "member", ownerUserId: owner, bopsWsId: "ws_deleted", name: "Gone" };
+  resetMembers();
+  assert.equal((await get()).status, 404, "no such workspace in it");
+  delete roles[`${member} ${P2}`];
+  resetMembers();
+});
+
+test("the member's stream hears the owner's write with the fingerprint a read gives", async () => {
+  const ctl = new AbortController();
+  const res = await fetch(`${cloud.url}/v1/live?project=${PROJECT}`, { headers: { Authorization: `Bearer ${keyOf(member)}` }, signal: ctl.signal });
+  assert.equal(res.status, 200);
+  const got: { type: string; data: Record<string, unknown> }[] = [];
+  void (async () => {
+    let text = "";
+    const dec = new TextDecoder();
+    try {
+      for await (const chunk of res.body!) {
+        text += dec.decode(chunk as Uint8Array, { stream: true });
+        for (let i = text.indexOf("\n\n"); i >= 0; i = text.indexOf("\n\n")) {
+          const block = text.slice(0, i);
+          text = text.slice(i + 2);
+          const field = (name: string) => block.split("\n").find((l) => l.startsWith(`${name}: `))?.slice(name.length + 2);
+          if (field("event")) got.push({ type: field("event")!, data: JSON.parse(field("data") ?? "{}") });
+        }
+      }
+    } catch {}
+  })();
+  await until(() => got.some((g) => g.type === "reset"), "the stream to start");
+  const version = (await (await fetch(`${cloud.url}/v1/state/head`, { headers: headers(owner) })).json()) as { version: number };
+  assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: headers(owner), body: JSON.stringify({ base: version.version, state: blob("done") }) })).status, 200);
+  const ev = await until(() => got.find((g) => g.type === "state"), "the state event");
+  const { body } = await read(member);
+  assert.equal(ev.data.hash, body.hash);
+  assert.equal(body.state.sessions[0].status, "done");
+  // A message in the main workspace's chat (known now), or in a chat of a bot they weren't given, doesn't
+  // wake the member; one the owner keeps between us in Max's chat does.
+  const before = got.filter((g) => g.type === "state").length;
+  await fetch(`${cloud.url}/v1/messages`, { method: "POST", headers: headers(owner), body: JSON.stringify({ upsert: [{ id: "m5", chatId: "bot:boppy", role: "user", text: "x", at: 20 }], remove: [] }) });
+  await fetch(`${cloud.url}/v1/messages`, { method: "POST", headers: headers(owner), body: JSON.stringify({ upsert: [{ id: "d2", chatId: "bot:dana", role: "user", text: "z", at: 20 }], remove: [] }) });
+  await fetch(`${cloud.url}/v1/messages`, { method: "POST", headers: headers(owner), body: JSON.stringify({ upsert: [{ id: "m6", chatId: "bot:max", role: "user", text: "y", at: 21, secret: true }], remove: [] }) });
+  await until(() => got.filter((g) => g.type === "state").length === before + 1, "Acme's message");
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(got.filter((g) => g.type === "state").length, before + 1);
+  ctl.abort();
+});
+
+test("a page of a long chat shows every message of it, the ones after a message kept between us too", async () => {
+  // bot:max so far: m1, m2, m3 (between us), m3b (the answer to it), m6 (the owner's next, kept between us too). 198 more after m6.
+  const more = Array.from({ length: 198 }, (_, i) => ({ id: `n${i}`, chatId: "bot:max", role: "bot", botId: "max", text: `note ${i}`, at: 30 + i }));
+  assert.equal((await fetch(`${cloud.url}/v1/messages`, { method: "POST", headers: headers(owner), body: JSON.stringify({ upsert: more, remove: [] }) })).status, 200);
+  // The newest 200 start at m3b, after m3.
+  const { body } = await read(member);
+  const ids = body.messages.map((m) => m.id);
+  assert.deepEqual(body.more, ["bot:max"]);
+  assert.deepEqual(ids.slice(0, 3), ["m3b", "m6", "n0"]);
+  assert.equal(ids.length, 200);
+  // A page picked so the answer is its oldest row: the same.
+  const page = await read(member, "?chat=bot:max&before=228");
+  assert.deepEqual(page.body.more, ["bot:max"]);
+  assert.equal(page.body.messages[0]?.id, "m3b");
+  // The page before it has the whole start of the chat.
+  assert.deepEqual((await read(member, "?chat=bot:max&before=14")).body.messages.map((m) => m.id), ["m1", "m2", "m3", "m3b"]);
+});
+
+test("a member given two bots reads their conversation with each other (Max asked Dana) and its older pages; one given only one of them doesn't", async () => {
+  roles[`${both} ${PROJECT}`] = { role: "member", ownerUserId: owner, bopsWsId: "ws_acme", name: "Acme" };
+  const state = blob("done");
+  (state.workspaces[1].memberAccess as Record<string, unknown>)[`${both}@example.com`] = { others: "none", bots: { max: "read", dana: "read" } };
+  const version = (await (await fetch(`${cloud.url}/v1/state/head`, { headers: headers(owner) })).json()) as { version: number };
+  assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: headers(owner), body: JSON.stringify({ base: version.version, state }) })).status, 200);
+  const talk = [
+    { id: "p1", chatId: "pair:dana:max", role: "bot", botId: "max", text: "Is the deck ready?", at: 500 },
+    { id: "p2", chatId: "pair:dana:max", role: "bot", botId: "dana", text: "Yes, sent it this morning.", at: 501 },
+    { id: "m9", chatId: "bot:max", role: "bot", botId: "max", text: "Dana says the deck is ready.", at: 502, asked: [{ botId: "dana", question: "Is the deck ready?", answer: "Yes, sent it this morning.", questionId: "p1" }] },
+  ];
+  assert.equal((await fetch(`${cloud.url}/v1/messages`, { method: "POST", headers: headers(owner), body: JSON.stringify({ upsert: talk, remove: [] }) })).status, 200);
+
+  const { status, body } = await read(both);
+  assert.equal(status, 200);
+  assert.deepEqual(body.messages.filter((m) => m.chatId === "pair:dana:max").map((m) => m.id), ["p1", "p2"], "the conversation Asked ● Dana opens");
+  assert.deepEqual(body.messages.find((m) => m.id === "m9")?.asked, [{ botId: "dana", question: "Is the deck ready?", answer: "Yes, sent it this morning.", questionId: "p1" }], "where in it Max asked");
+  assert.deepEqual((await read(both, "?chat=pair:dana:max&before=501")).body.messages.map((m) => m.id), ["p1"], "a page of it");
+  // Given Max only: none of it, nor a page.
+  const one = await read(member);
+  assert.ok(!one.body.messages.some((m) => String(m.chatId).startsWith("pair:")));
+  assert.deepEqual(one.body.messages.find((m) => m.id === "m9")?.asked, undefined, "what Dana said isn't theirs");
+  assert.equal((await read(member, "?chat=pair:dana:max&before=999")).status, 404);
+  // Orgo says they joined after what's kept for them was set (removed and back since): none of it is theirs now.
+  roles[`${both} ${PROJECT}`] = { role: "member", ownerUserId: owner, bopsWsId: "ws_acme", name: "Acme", joinedAt: new Date().toISOString() };
+  resetMembers();
+  const back = await read(both);
+  assert.equal(back.status, 200);
+  assert.deepEqual([back.body.state.bots, back.body.state.chats, back.body.messages], [[], [], []]);
+  delete roles[`${both} ${PROJECT}`];
+  resetMembers();
+});
+
+test("a page boundary between two messages of the same millisecond (a bot's answer and its note) loses neither: the next page comes before the oldest the member has, by its id too", async () => {
+  // Max answers and notes what he read in one tick, then 199 more: the newest 200 start at the note.
+  const tick = [
+    { id: "t-answer", chatId: "bot:max", role: "bot", botId: "max", text: "Here's what I found", at: 5000 },
+    { id: "t-note", chatId: "bot:max", role: "system", text: "Read example.com", at: 5000 },
+  ];
+  const after = Array.from({ length: 199 }, (_, i) => ({ id: `t${i}`, chatId: "bot:max", role: "bot", botId: "max", text: `later ${i}`, at: 5001 + i }));
+  for (const upsert of [tick, after]) assert.equal((await fetch(`${cloud.url}/v1/messages`, { method: "POST", headers: headers(owner), body: JSON.stringify({ upsert, remove: [] }) })).status, 200);
+  const { body } = await read(member);
+  assert.equal(body.messages[0]?.id, "t-note");
+  assert.deepEqual(body.more, ["bot:max"]);
+  const page = await read(member, "?chat=bot:max&before=5000&beforeId=t-note");
+  assert.equal(page.status, 200);
+  assert.equal(page.body.messages.at(-1)?.id, "t-answer", "the answer the note is under is in the page before it");
+  assert.ok(!page.body.messages.some((m) => m.id === "t-note"), "and the note isn't again");
+  // An id of none of that chat's messages at that time (or none): the ones before that millisecond, as before.
+  for (const qs of ["?chat=bot:max&before=5000", "?chat=bot:max&before=5000&beforeId=t0", "?chat=bot:max&before=5000&beforeId=d1"])
+    assert.ok(!(await read(member, qs)).body.messages.some((m) => String(m.id).startsWith("t-")), qs);
+});

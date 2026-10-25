@@ -77,7 +77,7 @@ export async function POST(request: Request) {
       }
       case "update": {
         const e = (b.edit ?? {}) as Record<string, unknown>;
-        return Response.json({ ref: updateSkill(wsId, kind, slug, { name: str(e.name), description: str(e.description), body: str(e.body) }) });
+        return Response.json({ ref: updateSkill(wsId, kind, slug, { name: str(e.name), description: str(e.description), body: str(e.body), label: str(e.label) }) });
       }
       case "publish":
         return Response.json({ ref: publishSkill(wsId, kind, slug, { version: str(b.version) }) });

@@ -13,7 +13,16 @@ import { BrandTile, post } from "./ui";
 
 type Kind = "slack" | "telegram" | "discord";
 
-export function WhereToFind({ state, bot: b }: { state: AppState; bot: Bot }) {
+/**
+ * Never in a workspace shared with the user: the channels here are the viewer's own (state.channels), and
+ * a link of theirs for a bot of the same id ("boppy" is every workspace's first bot) would read as where
+ * the owner's bot can be reached. Setting one up there would change the owner's bot too.
+ */
+export function WhereToFind(props: { state: AppState; bot: Bot }) {
+  return props.state.shared ? null : <WhereToFindCard {...props} />;
+}
+
+function WhereToFindCard({ state, bot: b }: { state: AppState; bot: Bot }) {
   const [open, setOpen] = useState<Kind | null>(null);
   const links = (state.channels ?? []).filter((l) => l.botId === b.id);
   const line = state.workspaces?.find((w) => w.id === workspaceOf(b))?.line;

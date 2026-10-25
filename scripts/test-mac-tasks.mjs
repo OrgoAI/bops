@@ -4,7 +4,10 @@
 // through Bops Cloud on the user's Orgo key (so it's counted and priced), with `codex exec-server` on
 // Bops' executor key, in a Codex home of Bops' own, and its browser tools on a Chrome of the bot's own
 // on the Mac. A reply while a task works goes to its turn at once (steering), and one OpenAI turns away
-// is its next turn. A thread picked back up reads its items on from where it got to, so nothing it did
+// is its next turn. A call that needs the owner's OK pauses the run in requires_action (its apps and data are function
+// tools Bops answers, never an MCP server in its sandbox): Allow once sends that call's tool_result and the same session
+// goes on; Stop cancels the session's wait. A thread another Mac runs that's paused for the OK there is never taken for
+// one that Mac left behind, and a routine run Bops ended as it started is recorded failed. A thread picked back up reads its items on from where it got to, so nothing it did
 // before comes back as a new step. Out of AI credit, it doesn't start. The old sign-in routes answer 410, and no source file
 // can call Codex's sign-in. The executor runs in a macOS sandbox (lib/server/executor-sandbox.ts) that
 // leaves the agent its browser tools and nothing else: the stand-in Codex checks from inside the real
@@ -603,6 +606,78 @@ assert.equal(replyOf(turnedAway, "window seat").delivered, true);
 live(turnDone("turn_s1"));
 await until(() => ["done", "failed"].includes(S.session(turnedAway).status), "the task to end", 30_000);
 assert.equal(S.session(turnedAway).status, "done", S.session(turnedAway).error);
+
+// A Mac task's call that needs the owner's OK (business data dearer than a bot spends by itself) pauses its run where the
+// Agents API holds it: its apps and data are function tools Bops answers itself (no MCP server in its sandbox), so the
+// session waits in requires_action, and the request carries the session, the turn and the call. The run ends here,
+// holding nothing. Allow once: the lookup done now and its answer sent as that call's tool_result, the same session going
+// on to its end. Stop on another such run: its request rejected, the session's wait cancelled (agent.session.input.cancel).
+{
+  process.env.TREG_TOKEN = "treg_test";
+  const P = await import(`${root}/lib/server/permission.ts`);
+  const T = await import(`${root}/lib/types.ts`);
+  const lookup = { endpoint: { id: "acme.company_lookup", name: "Company lookup", summary: "Look up a company's numbers", kind: "data", method: "POST", cost: { usd: 0.5 } }, usd_per_call: 0.5 };
+  const tregCalls = [];
+  web.answer = (c) => {
+    if (c.host === "treg.to" && c.path === "/catalog/endpoints/acme.company_lookup") return lookup;
+    if (c.host === "treg.to" && c.path === "/call/acme.company_lookup") return (tregCalls.push(c.body), { revenue: "$12M" });
+    return undefined;
+  };
+  const posted = () => web.calls.filter((c) => c.method === "POST" && c.path === "/proxy/openai/v1/agents/sessions/as_1/events").map((c) => JSON.parse(c.body).events[0]);
+  const agentSessionsMade = () => web.calls.filter((c) => c.method === "POST" && c.path === "/proxy/openai/v1/agents/sessions").length;
+  const DEAR = { endpoint_id: "acme.company_lookup", input: { domain: "acme.example" } };
+  const needsOk = (callId) => ({ type: "agent.session.requires_action", session: { status: "requires_action", required_actions: [{ type: "function_call", call_id: callId, turn_id: "turn_s1", name: "get_data", arguments: DEAR }] } });
+  live = undefined;
+  const made = agentSessionsMade();
+  const t = await working("Look up Acme's numbers", "Acme numbers");
+  const tools = JSON.parse(web.calls.filter((c) => c.method === "POST" && c.path === "/proxy/openai/v1/agents/sessions").at(-1).body).agent.tools;
+  assert.ok(tools.some((x) => x.type === "function" && x.name === "get_data"), "its business data: a function tool Bops answers");
+  assert.ok(!tools.some((x) => x.server_label === "apps"), "no MCP server for it in its sandbox");
+  assert.equal(S.session(t).env.fn, true);
+  // What the task made in its folder before it got to the call (a CSV it means to send) is there when it goes on.
+  const csv = join(L.taskDir(t), "workspace", "invoices.csv");
+  writeFileSync(csv, "invoice,total\nINV-1,120\n");
+  live(needsOk("fc_a1"));
+  const ask = await until(() => S.getState().appApprovals?.find((a) => a.threadId === t), "the request for the OK");
+  await until(() => S.session(t).status === "queued" && !X.runsHere().has(t), "the run paused: queued, nothing running here");
+  assert.equal(readFileSync(csv, "utf8"), "invoice,total\nINV-1,120\n", "the task's folder kept while it waits: only its executor stopped");
+  assert.deepEqual(ask.resume, { engine: "agents", sessionId: "as_1", turnId: "turn_s1", callId: "fc_a1", call: { name: "get_data", arguments: JSON.stringify(DEAR) } }, "what resumes it: the session, the turn and the call");
+  assert.deepEqual([ask.action, ask.resources, ask.askedBy], ["Use a paid lookup", ["acme.company_lookup"], S.stateDevice() ?? undefined]);
+  assert.equal(T.waitsForOk(S.session(t), S.getState()), true, "Waiting for your OK");
+  assert.ok(!posted().some((e) => e.type === "agent.session.input.tool_result" && e.call_id === "fc_a1"), "that call's result not sent: the session waits at OpenAI");
+  assert.ok(!posted().some((e) => e.type === "agent.session.input.cancel"), "and isn't cancelled");
+  assert.equal(tregCalls.length, 0, "nothing looked up");
+  live = undefined;
+  assert.equal(P.replyToAsk(ask.id, "once"), undefined);
+  const result = await until(() => posted().find((e) => e.type === "agent.session.input.tool_result" && e.call_id === "fc_a1"), "the call's result, sent", 30_000);
+  assert.deepEqual([result.turn_id, result.success], ["turn_s1", true]);
+  assert.match(result.output, /12M/, "the lookup's answer");
+  assert.equal(tregCalls.length, 1, "done once");
+  await until(() => live, "the same session followed again", 30_000);
+  assert.equal(readFileSync(csv, "utf8"), "invoice,total\nINV-1,120\n", "and still there as it goes on, the same session in the same folder");
+  live(turnDone("turn_s1"));
+  await until(() => S.session(t).status === "done", "the run to go on to its end", 30_000);
+  await until(() => !existsSync(L.taskDir(t)), "its folder to go once the thread is over");
+  assert.equal(agentSessionsMade(), made + 1, "the same agent session: none made afresh for it");
+  assert.equal(S.getState().appApprovals.find((a) => a.id === ask.id), undefined, "taken out as it was read");
+
+  // Stop on one that waits: the session's wait cancelled from here, the request rejected (stopped), the run ended where it paused.
+  live = undefined;
+  const t2 = await working("Look up Acme's staff", "Acme staff");
+  live(needsOk("fc_a2"));
+  const ask2 = await until(() => S.getState().appApprovals?.find((a) => a.threadId === t2), "the second request");
+  await until(() => S.session(t2).status === "queued" && !X.runsHere().has(t2), "paused");
+  assert.ok(existsSync(L.taskDir(t2)), "its folder kept while it waits");
+  X.stopSession(t2);
+  assert.deepEqual([S.session(t2).status, S.session(t2).error], ["failed", "Stopped by you"]);
+  await until(() => !existsSync(L.taskDir(t2)), "its folder to go with the Stop");
+  await until(() => posted().some((e) => e.type === "agent.session.input.cancel"), "the session's wait cancelled");
+  assert.equal(S.getState().appApprovals.find((a) => a.id === ask2.id), undefined, "its request read (stopped) and taken out here, where it was asked");
+  assert.ok(!posted().some((e) => e.type === "agent.session.input.tool_result" && e.call_id === "fc_a2"), "nothing sent for it");
+  assert.equal(tregCalls.length, 1, "nothing looked up for it");
+  web.answer = undefined;
+  delete process.env.TREG_TOKEN;
+}
 web.stream = web.postEvent = web.sessionStatus = undefined;
 
 // And Codex only ever ran as the executor, in the sandbox: never its app server, never a sign-in.
@@ -700,10 +775,10 @@ assert.equal(codexRuns().at(-1).probes.shell, "EPERM");
 
 /* ---------------- The user's apps in a Mac task ---------------- */
 
-// A bot the user gave an app in the Vault (Notion, read & act) uses it from a Mac task too: the executor
-// starts vm/apps-mcp.mjs, which the sandbox may read, and it reaches Bops on a socket in the task's
-// sockets folder (the only way out to this Mac), served only while the thread runs. Its earlier Mac
-// threads, made without them, pick up in a fresh agent session that has them.
+// A bot the user gave an app in the Vault (Notion, read & act) uses it from a Mac task too: its apps are function tools of
+// its agent session that Bops answers itself, in this process (sessions.ts agentTool), so nothing of them is in the
+// executor's sandbox and a call that needs the user's OK can pause the run there. Its earlier Mac threads, made without
+// them, pick up in a fresh agent session that has them.
 Cl.cloudSessionNow().composio = { on: true };
 S.update((s) => {
   (s.accounts ??= []).push({ id: "acc_notion", app: "notion", appName: "Notion MCP", name: "Sam's workspace", status: "active", at: Date.now() });
@@ -714,19 +789,14 @@ await until(() => S.session(next.id).status === "done" && S.session(next.id).rep
 assert.equal(S.session(next.id).env.apps, true, "kept, so a change of access gets a fresh agent session");
 const appsBody = JSON.parse(web.calls.filter((c) => c.method === "POST" && c.path === "/proxy/openai/v1/agents/sessions").at(-1).body);
 assert.deepEqual(
-  appsBody.agent.tools.map((t) => (t.type === "mcp" ? t.server_label : t.type)),
-  ["web_search", "browser", "apps"],
+  appsBody.agent.tools.map((t) => (t.type === "mcp" ? t.server_label : t.type === "function" ? t.name : t.type)),
+  ["web_search", "browser", "find_app_actions", "use_app"],
 );
-const apps = appsBody.agent.tools.find((t) => t.server_label === "apps").transport;
-const appsScript = join(process.cwd(), "vm/apps-mcp.mjs");
-// Its apps only (--apps): business data (--data) comes only with treg on Bops Cloud (lib/server/treg.ts).
-assert.deepEqual(apps.args.slice(-4), [appsScript, "--socket", join(L.taskSockets(L.taskDir(next.id)), "apps.sock"), "--apps"]);
-assert.equal(apps.cwd, L.taskWorkspace(next.id));
-assert.ok(!JSON.stringify(apps).includes(S.getState().bots.find((b) => b.id === main.id).appsKey ?? "no key"), "no secret in the task");
+assert.ok(!JSON.stringify(appsBody).includes(S.getState().bots.find((b) => b.id === main.id).appsKey ?? "no key"), "no secret in the task");
 assert.match(appsBody.agent.instructions, /find_app_actions, then use_app/);
 assert.match(appsBody.agent.instructions, /Use only the browser tools, your apps/);
 assert.doesNotMatch(appsBody.agent.instructions, /can't be reached from this computer/);
-assert.ok(Object.values(sandboxParams(executors.at(-1).args)).includes(appsScript), "the sandbox may read the apps script");
+assert.ok(!existsSync(join(root, "vm/apps-mcp.mjs")), "no apps server to put in a sandbox any more");
 // Its apps go with the access: taken away (no access, not the default), the thread picks up without them.
 S.update((s) => (s.bots.find((b) => b.id === main.id).access = { acc_notion: "none" }));
 X.replyToSession(next.id, "Never mind");
@@ -1172,6 +1242,159 @@ assert.equal(S.session("ses_queued").offerMac, true);
 X.stopSession("ses_queued");
 assert.equal(S.session("ses_queued").offerMac, undefined);
 
+// Stop on another Bops's thread (a computer's runner's, Session.by): asked for, not done here; the Bops that runs it
+// stops it when it hears (stopAskedHere, on changes from elsewhere), and the ask goes.
+S.update((s) => s.sessions.push({ ...cloudThread("ses_runner", "Inbox sweep", "Sort my inbox"), status: "queued", by: "dev_runner_c1" }));
+X.stopSession("ses_runner", "Stopped by you");
+assert.deepEqual([S.session("ses_runner").status, S.session("ses_runner").stopAsked], ["queued", "Stopped by you"], "asked for, not done here");
+X.stopAskedHere();
+assert.equal(S.session("ses_runner").status, "queued", "another Bops's: still not this one's to stop");
+S.patchSession("ses_runner", { by: undefined });
+X.stopAskedHere();
+assert.deepEqual([S.session("ses_runner").status, S.session("ses_runner").error, S.session("ses_runner").stopAsked], ["failed", "Stopped by you", undefined], "stopped where it runs");
+// Moved to the Mac while that computer's run is paused for the user's OK there (its computer asleep meanwhile): the move
+// stops the paused run where it paused, its request rejected (stopped), and the Mac thread waits for nothing: there's nothing
+// going there to wait for.
+const pausedResume = { engine: "responses", responseId: "resp_p", callId: "call_p", call: { name: "use_app", arguments: "{}" } };
+S.update((s) => {
+  s.sessions.push({ ...cloudThread("ses_runner_ok", "Invoice to Dana", "Email Dana the invoice"), status: "queued", by: "dev_runner_c1" });
+  (s.appApprovals ??= []).push({ id: "apr_runner_ok", botId: main.id, chatId, threadId: "ses_runner_ok", askedBy: "dev_runner_c1", action: "Send an email", resources: ["dana@example.com"], preview: "", at: Date.now(), resume: pausedResume });
+});
+const movedOk = X.moveToMac("ses_runner_ok");
+assert.deepEqual(
+  [S.session("ses_runner_ok").status, S.session("ses_runner_ok").error, S.session("ses_runner_ok").replacedBy, S.getState().appApprovals.find((a) => a.id === "apr_runner_ok").reply?.reason],
+  ["failed", "Moved to your Mac", movedOk.id, "stopped"],
+  "the computer's paused run ended here, its request rejected as stopped",
+);
+assert.ok(!S.session(movedOk.id).steps.some((x) => x.detail === "Waiting for the cloud part to stop first"), "the Mac thread waits for nothing there");
+X.stopSession(movedOk.id);
+S.update((s) => (s.appApprovals = s.appApprovals.filter((a) => a.id !== "apr_runner_ok")));
+
+// Another of the user's Macs left a thread behind (closed, asleep or quit: store.ts leftBehind): no sign of work from that
+// Mac on any of its threads for ten minutes. Nothing there will end it, so this Mac does: Stop ends it here at once, a reply
+// picks it up here, and asking for the same job again starts a new thread instead of adding to it. One of a Mac still at
+// work, queued there behind that work however long, or a quiet one of a computer's runner's (its Mac takes those back:
+// runner-install.ts), is still only asked to stop.
+const MAC_B = "dev_mac_b";
+const MAC_C = "dev_mac_c";
+const quietFor = Date.now() - 11 * 60_000;
+const onB = (id, title, o = {}) => ({ ...cloudThread(id, title, title), by: MAC_B, createdAt: quietFor, startedAt: quietFor, steps: [{ at: quietFor, tool: "note", detail: "Opened the page" }], ...o });
+const onC = (id, title, o = {}) => onB(id, title, { by: MAC_C, ...o });
+S.update((s) => {
+  s.macs = { ...s.macs, [MAC_B]: { mac: { ready: true, rules: [] } }, [MAC_C]: { mac: { ready: true, rules: [] } } };
+  s.sessions.push(
+    onB("ses_b_busy", "Busy on B", { steps: [{ at: Date.now() - 30_000, tool: "note", detail: "Typing the reply" }] }),
+    onB("ses_b_waits", "Queued behind B's work", { status: "queued", startedAt: undefined, steps: [] }),
+    onB("ses_b_runner", "Quiet on a runner", { by: "dev_runner_c1" }),
+    onC("ses_c_queued", "Queued on C", { status: "queued" }),
+    onC("ses_c_reply", "Supplier email"),
+    onC("ses_c_same", "Weekly numbers"),
+  );
+});
+assert.equal(S.leftBehind(S.session("ses_b_busy")), false, "at work there");
+assert.equal(S.leftBehind(S.session("ses_b_waits")), false, "queued there eleven minutes behind that work: still B's");
+assert.equal(S.leftBehind(S.session("ses_b_runner")), false, "a runner's");
+X.stopSession("ses_b_busy");
+X.stopSession("ses_b_waits");
+X.stopSession("ses_b_runner");
+assert.deepEqual(
+  ["ses_b_busy", "ses_b_waits", "ses_b_runner"].map((id) => [S.session(id).status, S.session(id).stopAsked, S.session(id).by]),
+  [
+    ["running", "Stopped by you", MAC_B],
+    ["queued", "Stopped by you", MAC_B],
+    ["running", "Stopped by you", "dev_runner_c1"],
+  ],
+  "asked, not done here",
+);
+X.stopSession("ses_c_queued");
+assert.deepEqual(
+  [S.session("ses_c_queued").status, S.session("ses_c_queued").error, S.session("ses_c_queued").stopAsked, S.ownSession(S.session("ses_c_queued"))],
+  ["failed", "Stopped by you", undefined, true],
+  "left behind: ended here, as this Mac's",
+);
+X.replyToSession("ses_c_reply", "also cc Dana");
+assert.deepEqual([S.session("ses_c_reply").status, S.ownSession(S.session("ses_c_reply")), repliesOf("ses_c_reply")], ["queued", true, ["also cc Dana"]], "a reply picks it up here");
+X.stopSession("ses_c_reply");
+assert.equal(S.session("ses_c_reply").status, "failed");
+const again = X.startSession({ botId: main.id, goal: "Weekly numbers", title: "Weekly numbers", where: "cloud" });
+assert.notEqual(again.id, "ses_c_same", "the same job again: a new thread, not one nobody works on");
+await until(() => !S.session(again.id).routing, "the new thread to be placed");
+X.stopSession(again.id);
+
+// A one-off's run is over when the user stops it, whichever Bops ran it: Stop on Mac C's thread it left behind, or a stop
+// a computer's runner never got to (its computer went down, so the Mac ended that thread), is that run's end, "Stopped
+// by you": the one-off stays Done (it went off as it fired), and nothing runs it again.
+{
+  const at = Date.now() - 20 * 60_000;
+  const oneOff = (id, sessionId, title) => ({ id, botId: main.id, title, goal: title, schedule: { kind: "once", at }, enabled: false, lastRunAt: at + 1000, last: { at: at + 1000, status: "running", sessionId } });
+  S.update((s) => {
+    s.sessions.push(onC("ses_c_once", "Buy 2 tickets", { routineId: "r_c_once" }), onB("ses_r_once", "Book the table", { by: "dev_runner_c1", routineId: "r_r_once", stopAsked: "Stopped by you" }));
+    s.routines.push(oneOff("r_c_once", "ses_c_once", "Buy 2 tickets"), oneOff("r_r_once", "ses_r_once", "Book the table"));
+  });
+  X.stopSession("ses_c_once");
+  X.endSessionOf("ses_r_once", "dev_runner_c1", "Stopped: its computer was stopped.");
+  const rOf = (id) => S.getState().routines.find((r) => r.id === id);
+  await until(() => ["r_c_once", "r_r_once"].every((id) => rOf(id).last.status === "failed"), "the runs' ends");
+  for (const id of ["r_c_once", "r_r_once"]) assert.deepEqual([rOf(id).enabled, rOf(id).nextRunAt, rOf(id).last.error], [false, undefined, "Stopped by you"], `${id}: Done, not due again`);
+  assert.equal(S.session("ses_r_once").error, "Stopped by you", "the user's stop, not the computer's");
+  globalThis.__bopsRoutineTick();
+  await sleep(100);
+  assert.deepEqual(S.getState().sessions.filter((x) => ["r_c_once", "r_r_once"].includes(x.routineId)).map((x) => x.id).sort(), ["ses_c_once", "ses_r_once"], "never run again");
+  S.update((s) => (s.routines = s.routines.filter((r) => !["r_c_once", "r_r_once"].includes(r.id))));
+}
+
+// Paused for the owner's OK is never a Mac gone (lib/types.ts pausedForOk): Mac C's thread quiet for eleven minutes because
+// it's paused at what Mac C asked isn't left behind. A reply waits for it there (it goes with the run when the OK comes),
+// nothing takes it over here, and its routine's next run waits for it, so the email is never sent twice. One quiet on Mac C
+// with a request another Mac made is left behind as any is, and its request is never touched by that.
+{
+  const R = await import(`${root}/lib/server/routines.ts`);
+  const later = Date.now() + 60 * 60_000;
+  S.update((s) => {
+    s.sessions.push(onC("ses_c_ok", "Summary to Dana", { routineId: "r_c_ok", status: "queued" }), onC("ses_c_left", "Invoice to Ava"));
+    (s.appApprovals ??= []).push(
+      { id: "apr_c_ok", botId: main.id, chatId, threadId: "ses_c_ok", askedBy: MAC_C, action: "Send an email", resources: ["dana@example.com"], preview: "", at: quietFor, resume: pausedResume },
+      // A request made on another Mac before Mac C ran the thread: nothing of Mac C's waits on it, so the thread is left behind.
+      { id: "apr_c_left", botId: main.id, chatId, threadId: "ses_c_left", askedBy: MAC_B, action: "Send an email", resources: ["ava@example.com"], preview: "", at: quietFor, resume: pausedResume },
+    );
+    s.routines.push({ id: "r_c_ok", botId: main.id, title: "Summary to Dana", goal: "Email Dana the summary", schedule: { kind: "once", at: later }, enabled: true, nextRunAt: later, last: { at: quietFor, status: "running", sessionId: "ses_c_ok" } });
+  });
+  const ask = (id) => S.getState().appApprovals.find((a) => a.id === id);
+  assert.equal(S.leftBehind(S.session("ses_c_ok")), false, "paused for the owner's OK there: not left behind");
+  assert.equal(S.leftBehind(S.session("ses_c_left")), true);
+  X.replyToSession("ses_c_left", "send it now");
+  assert.deepEqual([S.session("ses_c_left").status, S.ownSession(S.session("ses_c_left")), ask("apr_c_left").reply], ["queued", true, undefined], "this Mac's run now; the request untouched (hidden: its run isn't the one that asked)");
+  X.stopSession("ses_c_left");
+  X.replyToSession("ses_c_ok", "keep it short");
+  assert.deepEqual([S.session("ses_c_ok").status, S.session("ses_c_ok").by, ask("apr_c_ok").reply], ["queued", MAC_C, undefined], "the reply waits for it there; not taken over here, still waiting for the OK");
+  const ran = await R.runRoutine("r_c_ok", { manual: true });
+  assert.deepEqual([ran.status, ran.error, ran.sessionId], ["skipped", "The last run was still going.", "ses_c_ok"], "its routine waits for it: no second run, no second email");
+  S.update((s) => {
+    s.routines = s.routines.filter((r) => r.id !== "r_c_ok");
+    s.appApprovals = s.appApprovals.filter((a) => !["apr_c_ok", "apr_c_left"].includes(a.id));
+  });
+}
+
+// A routine's run Bops ended as it started (store.ts migrate: restarted mid-run, so the thread failed without a word to the
+// routine) is recorded failed on the next tick, so it shows failed with Run again rather than Done or "still running".
+{
+  const at = Date.now() - 30 * 60_000;
+  S.update((s) => {
+    s.sessions.push({ ...cloudThread("ses_restarted", "Send the proposal", "Send the proposal to Ava"), status: "failed", error: "Bops restarted while this was running", by: S.stateDevice(), routineId: "r_restarted" });
+    s.routines.push({ id: "r_restarted", botId: main.id, title: "Send the proposal", goal: "Send the proposal to Ava", schedule: { kind: "once", at }, enabled: false, lastRunAt: at, last: { at, status: "running", sessionId: "ses_restarted" } });
+  });
+  globalThis.__bopsRoutineTick();
+  const r = () => S.getState().routines.find((x) => x.id === "r_restarted");
+  await until(() => r().last.status !== "running", "the run recorded");
+  assert.deepEqual([r().last.status, r().last.error, r().last.sessionId, r().enabled], ["failed", "Bops restarted while this was running", "ses_restarted", false], "failed, with Run again; the one-off doesn't run again by itself");
+  S.update((s) => (s.routines = s.routines.filter((x) => x.id !== "r_restarted")));
+}
+S.update((s) => {
+  s.sessions = s.sessions.filter((x) => !x.id.startsWith("ses_b_") && !x.id.startsWith("ses_c_") && x.id !== "ses_r_once");
+  delete s.macs[MAC_B];
+  delete s.macs[MAC_C];
+});
+
 // In the chat, words about the Mac for a cloud thread go to the bot, even as a reply to the thread's message: the bot
 // moves it (tell_task on_mac) when the user's words name the Mac, and otherwise passes them on with the move offered.
 S.update((s) => s.sessions.push(cloudThread("ses_flight", "Flight search", "Find flights to Lisbon in May")));
@@ -1285,7 +1508,7 @@ Cl.cloudSessionNow().typesafe = false;
   assert.deepEqual(readdirSync(skills), ["weekly-invoice-summary"]);
   assert.deepEqual(readdirSync(join(L.taskWorkspace(id), "capabilities", "apps")), ["invoice-checker"]);
   const skill = readFileSync(join(skills, "weekly-invoice-summary", "SKILL.md"), "utf8");
-  assert.match(skill, /^---\nname: weekly-invoice-summary\ndescription: "When asked for the week's invoices"\nversion: "0\.1\.0"\n---\n/);
+  assert.match(skill, /^---\nname: weekly-invoice-summary\ndescription: "When asked for the week's invoices"\nversion: "0\.1\.0"\nmetadata: \{label: Finance\}\n---\n/, "published with its label");
   assert.match(skill, /Open the Invoices folder/);
   // A script nobody approved yet isn't executable in the task.
   assert.equal(statSync(join(skills, "weekly-invoice-summary", "scripts", "sum.sh")).mode & 0o111, 0);

@@ -2,8 +2,9 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { USAGE_BOT_HEADER } from "@/cloud/protocol";
 import type { Bot } from "@/lib/types";
+import { appHeaders } from "./app-version";
 import { cloudOn, cloudProxy, cloudSessionNow } from "./cloud";
-import { askOwner } from "./composio";
+import { allows, NeedsOk, type AskSpec } from "./permission";
 import { bot, installId, ownerName } from "./store";
 
 /**
@@ -76,7 +77,7 @@ async function call(botId: string, endpoint: string, method: "GET" | "POST", inp
     "idempotency-key": randomUUID(),
     ...(body !== undefined ? { "content-type": "application/json" } : {}),
     ...(via
-      ? { authorization: `Bearer ${via.key}`, [USAGE_BOT_HEADER]: botId }
+      ? { authorization: `Bearer ${via.key}`, [USAGE_BOT_HEADER]: botId, ...appHeaders() }
       : { "x-treg-token": ownToken(), "x-treg-meta": `customer=${tag(installId())}, bot=${tag(botId)}` }),
   };
   const send = () => fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(110_000) });
@@ -433,8 +434,11 @@ export async function findData(botId: string, query: string): Promise<string> {
   );
 }
 
-/** get_data: one endpoint by id. Up to CAP runs at once; a dearer one waits for the user's OK (and `onAsk` lets a chat turn go on meanwhile). */
-export async function getData(botId: string, endpointId: string, input: unknown, where: { chatId?: string; sessionId?: string }, onAsk?: (ask: Promise<string>) => void): Promise<string> {
+/**
+ * get_data: one endpoint by id. Up to CAP runs at once; a dearer one asks the user (NeedsOk: the run pauses for
+ * their reply, lib/server/permission.ts), unless the bot's rules allow it, and runs on their yes (`approved`).
+ */
+export async function getData(botId: string, endpointId: string, input: unknown, opts: { approved?: boolean } = {}): Promise<string> {
   const b = bot(botId);
   if (!b || !dataOn(b)) return "You don't have business data.";
   const e = await endpointOf(endpointId.trim());
@@ -446,28 +450,26 @@ export async function getData(botId: string, endpointId: string, input: unknown,
   const run = (max: number) => call(botId, e.id, method, input ?? {}, max, queryKeys).then((a) => readable(a, e.id));
   if (usd <= CAP) return run(CAP);
   if (usd > MOST) return `${e.id} costs ${price(e)} a call, more than Bops allows. Use find_data for another.`;
-  const owner = ownerName();
-  const ask = askOwner({
-    botId,
-    app: "data",
-    action: e.id,
-    // The card reads "<bot> wants to: <title>".
-    title: `${(e.summary ?? e.name ?? `Use ${e.id}`).replace(/[.\s]+$/, "")} (about ${price(e)})`,
-    detail: `${e.id} on treg, about ${price(e)} from your AI credit.\n\n${clip(JSON.stringify(input ?? {}, null, 1), 1200)}`,
-    ...where,
-  }).then((yes) => (yes ? run(Math.min(MOST, usd * 1.5 + 0.01)) : `Not approved: ${owner} said no. Don't do it.`));
-  if (onAsk) {
-    onAsk(ask);
-    return `This one costs about ${price(e)}, so ${owner} has to OK it first. Bops is showing them the details. Tell them in one short line, and don't call it again.`;
-  }
-  return ask;
+  const dear = () => run(Math.min(MOST, usd * 1.5 + 0.01));
+  if (opts.approved) return dear();
+  // The card reads "<bot> wants to use a paid lookup", with which one, what it does, its price and what goes in.
+  const what = (e.summary ?? e.name ?? "").replace(/[.\s]+$/, "");
+  const ask: AskSpec = {
+    action: "Use a paid lookup",
+    resources: [e.id],
+    preview: `${what ? `${what}\n` : ""}${e.id} on treg, about ${price(e)} from your AI credit.\n\n${clip(JSON.stringify(input ?? {}, null, 1), 1200)}`,
+    kind: "data",
+  };
+  // Money from the user's AI credit: Just do it doesn't cover it, an Always allow they saved for this lookup does.
+  if (allows(b, ask, { justDoIt: false })) return dear();
+  throw new NeedsOk(ask);
 }
 
-/** A data tool call by name, for the places that pass tool calls on. */
-export function runDataTool(botId: string, name: string, args: Record<string, unknown>, where: { chatId?: string; sessionId?: string }, onAsk?: (ask: Promise<string>) => void): Promise<string> {
+/** A data tool call by name, for the places that pass tool calls on. `approved`: the user said yes to this very call. */
+export function runDataTool(botId: string, name: string, args: Record<string, unknown>, _where: { chatId?: string; sessionId?: string }, opts: { approved?: boolean } = {}): Promise<string> {
   if (name === "business_search") return businessSearch(botId, String(args.job ?? ""), args as Input);
   if (name === "find_data") return findData(botId, String(args.query ?? ""));
-  return getData(botId, String(args.endpoint_id ?? ""), args.input, where, onAsk);
+  return getData(botId, String(args.endpoint_id ?? ""), args.input, opts);
 }
 
 /** What a bot is told about its business data, for its chat, tasks and calls (skills.ts style). */

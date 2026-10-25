@@ -415,8 +415,9 @@ export async function startSignIn(brainId: string, botId: string): Promise<{ bot
   watching.set(brainId, ctl);
   signingIn(brainId, { botId, computerId, display, at: Date.now() });
   // The user has the screen from now (takeOver marks it theirs before it waits on anything), so no task starts on it.
+  // It's for the sign in alone: handing it back carries on no thread that last waited there.
   const S = await import("./sessions");
-  const taken = S.takeOver(botId, display);
+  const taken = S.takeOver(botId, display, null);
   taken.catch(() => {});
   void signIn(brainId, botId, computerId, display, taken, ctl.signal);
   return { botId, display };

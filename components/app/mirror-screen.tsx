@@ -4,6 +4,7 @@ import "@rrweb/replay/dist/style.css";
 import { Replayer } from "@rrweb/replay";
 import { useEffect, useRef, useState } from "react";
 import { useTyping, type ScreenInput } from "./live-screen";
+import { readAllowed } from "./view-only";
 import { useWindowVisible } from "./window-visible";
 
 export type MirrorTab = { id: string; title: string; url: string; active: boolean };
@@ -68,7 +69,10 @@ export function MirrorScreen({
     const root = stage.current!;
     let replayer: Replayer | undefined;
     let seen = false;
-    const es = new EventSource(`/api/mirror?bot=${botId}&display=${display}`);
+    const url = `/api/mirror?bot=${botId}&display=${display}`;
+    // A shared workspace open: the bot of that id here is the user's own, never the owner's (view-only.ts).
+    if (!readAllowed(url)) return void failed.current?.();
+    const es = new EventSource(url);
     const fail = () => {
       es.close();
       failed.current?.();

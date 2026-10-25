@@ -155,10 +155,11 @@ async function prepareLedger() {
 
 before(async () => {
   await prepareDb();
-  await prepareLedger();
+  // Held from before the ledger is made again: its grants would otherwise give back the access core-credit's test takes away for a moment.
   ledger = new pg.Client({ connectionString: TEST_DATABASE_URL });
   await ledger.connect();
   await ledger.query("SELECT pg_advisory_lock_shared(hashtext($1))", [LEDGER_IN_USE]);
+  await prepareLedger();
   process.env.BOPS_AI_CREDITS = "1";
   // Sweeps by hand; a stopped turn's use waited on for 3 seconds; a waiting turn read at every sweep.
   Object.assign(guardTiming, { everyMs: 40, settleMs: 3_000, waitingMs: 0 });

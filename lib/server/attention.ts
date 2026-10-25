@@ -1,6 +1,7 @@
 import "server-only";
 import { botChatId, MAIN_WORKSPACE, workspaceOf } from "@/lib/types";
 import { chose, decide } from "./decide";
+import { loopHere } from "./persist";
 import { addMessage, getState, ownerName, stateReady, update } from "./store";
 
 /**
@@ -14,11 +15,22 @@ import { addMessage, getState, ownerName, stateReady, update } from "./store";
 export type Level = "now" | "quiet" | "later";
 
 /** Who the user is on a call with, if anyone (calls start and end through lib/server/call.ts). */
-const g = globalThis as unknown as { bopsCall?: { botId: string; at: number }; bopsDigestTimer?: ReturnType<typeof setInterval> };
-export const callStarted = (botId: string) => (g.bopsCall = { botId, at: Date.now() });
-export const callEnded = () => (g.bopsCall = undefined);
+const g = globalThis as unknown as { bopsCall?: { botId: string; at: number }; bopsDigestTimer?: ReturnType<typeof setInterval>; bopsCallWatch?: (botId: string, on: boolean) => void };
+export const callStarted = (botId: string) => {
+  g.bopsCall = { botId, at: Date.now() };
+  g.bopsCallWatch?.(botId, true);
+};
+export const callEnded = () => {
+  const was = g.bopsCall?.botId;
+  g.bopsCall = undefined;
+  if (was) g.bopsCallWatch?.(was, false);
+};
 /** On a call right now (a call left open by a crash counts for two hours at most). */
 const onCall = () => !!g.bopsCall && Date.now() - g.bopsCall.at < 2 * 3600_000;
+/** The bot the user is on a call with right now, if any. */
+export const callBot = () => (onCall() ? g.bopsCall!.botId : null);
+/** Run `fn` whenever a call starts or ends (live.ts: the bot's mood on the user's other devices). One at a time; a code reload replaces it. */
+export const watchCalls = (fn: (botId: string, on: boolean) => void) => void (g.bopsCallWatch = fn);
 
 /** What the user is doing, in words, for Jev. */
 function context() {
@@ -69,12 +81,16 @@ export function holdForLater(item: { botId: string; text: string; watchId?: stri
   update((s) => (s.digest ??= []).push({ ...item, at: Date.now() }));
 }
 
+/** The digest's words: each piece of news held on a line of its own (cloud/ws-slice.ts tells it again with only the lines a member sees). */
+const heldText = (lines: string[]) => `While you were busy:\n${lines.map((t) => `• ${t}`).join("\n")}`;
+
 /**
  * Tell the user what was held, in one message from the workspace's main bot, once they're free: not
  * on a call, and either they've messaged since the first item (they're around) or it's waited 20 minutes.
- * Checked every minute.
+ * Checked every minute. Each line keeps the bot whose watch it came from (Message.held), so a shared
+ * workspace shows someone only the news of the bots they were given.
  */
-function flush() {
+export function flush() {
   const st = getState();
   const held = st.digest ?? [];
   if (!held.length || onCall()) return;
@@ -92,12 +108,13 @@ function flush() {
   for (const [ws, items] of byWs) {
     const main = st.bots.find((b) => b.isMain && workspaceOf(b) === ws) ?? st.bots.find((b) => b.isMain && workspaceOf(b) === MAIN_WORKSPACE);
     if (!main) continue;
-    addMessage({ chatId: botChatId(main.id), role: "bot", botId: main.id, text: `While you were busy:\n${items.map((h) => `• ${h.text}`).join("\n")}` });
+    addMessage({ chatId: botChatId(main.id), role: "bot", botId: main.id, text: heldText(items.map((h) => h.text)), held: items.map((h) => ({ botId: h.botId, text: h.text })) });
   }
 }
 
+// The Mac sends the digest: what a computer's runner holds waits in the state for it.
 if (g.bopsDigestTimer) clearInterval(g.bopsDigestTimer);
-g.bopsDigestTimer = setInterval(() => stateReady() && flush(), 60_000);
+if (loopHere("digest")) g.bopsDigestTimer = setInterval(() => stateReady() && flush(), 60_000);
 
 /** A finished task's result: if Jev says it's worth interrupting the user for, it chimes (and notifies, if Bops is behind). */
 export function pingIfWorthIt(messageId: string, title: string, answer: string) {

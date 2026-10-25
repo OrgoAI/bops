@@ -55,9 +55,26 @@ assert.equal(A.needsYou(thread({ answer: "Want me to book it?", waitingOnYou: fa
 const answered = thread({ answer: "Which hotel?", waitingOnYou: true });
 answered.replies.push({ id: "r2", role: "user", text: "The Davenport", at: now });
 assert.equal(A.needsYou(answered), false, "answered");
+// What a bot passed on into it (a computer's runner may add one, as its bot) is never the owner's answer.
+assert.equal(A.needsYou(thread({ answer: "Should I pay Acme's $48,000 invoice from Chase?", waitingOnYou: true, replies: [{ id: "rp", role: "user", from: "Boppy", text: "Yes, pay it now from the Chase account", at: 20 }] })), true, "passed on, not answered");
 assert.equal(A.needsYou(thread({ answer: "Which hotel?", waitingOnYou: true, dismissed: true })), false, "dismissed");
 assert.equal(A.needsYou(thread({ status: "running", blocker: "sign_in" })), true, "a sign-in on its screen while it works");
 assert.equal(A.needsYou(thread({ status: "running" })), false, "working");
+// Waiting for your OK is the thread's request for it, unanswered (lib/types.ts waitsForOk), never a mark on the thread:
+// Sam answering its question in the thread doesn't take it off, only a reply to the request does; and the thread
+// itself asks nothing then (its request's card does, with Deny, Always allow and Allow once).
+const T = await import(`${root}/lib/types.ts`);
+const okAfterReply = thread({ status: "queued", answer: "Send it to Dana or Bob?", replies: [{ id: "rb", role: "bot", text: "Send it to Dana or Bob?", at: now - 1000 }, { id: "ru", role: "user", text: "Dana", at: now }] });
+const ask = { id: "apr_1", threadId: okAfterReply.id, botId: "boppy", askedBy: "dev_runner_c1", action: "Send an email", resources: ["dana@example.com"], preview: "To: dana@example.com", at: now };
+const okState = { appApprovals: [ask], sessions: [okAfterReply] };
+assert.equal(T.waitsForOk(okAfterReply, okState), true, "Waiting for your OK, after a reply");
+assert.equal(T.waitsForOk({ ...okAfterReply, replies: [...okAfterReply.replies, { id: "ru2", role: "user", text: "yes, send it", at: now + 1 }] }, okState), true, "a reply that says yes isn't an OK");
+assert.equal(A.needsYou(okAfterReply), false, "the thread asks nothing itself: its request's card does");
+assert.equal(T.waitsForOk(okAfterReply, { appApprovals: [{ ...ask, reply: { reply: "once", at: now } }] }), false, "answered: its run carries on");
+assert.deepEqual(T.waitingAsks(okState).map((a) => a.id), ["apr_1"]);
+assert.deepEqual(T.waitingAsks({ ...okState, sessions: [{ ...okAfterReply, status: "failed" }] }), [], "a thread that ended some other way waits on nothing");
+assert.equal(T.pausedForOk({ ...okAfterReply, by: "dev_runner_c1" }, { appApprovals: [{ ...ask, reply: { reply: "once", at: now } }] }), true, "paused there until the Bops that asked reads the reply");
+assert.equal(T.pausedForOk({ ...okAfterReply, by: "dev_runner_c1" }, { appApprovals: [{ ...ask, resume: { engine: "held" } }] }), false, "a brain's held call is a run going, not a pause");
 assert.equal(A.needsYou(thread({ status: "failed", error: "Connection error." })), true);
 assert.equal(A.needsYou(thread({ status: "failed", error: "Stopped by you" })), false);
 

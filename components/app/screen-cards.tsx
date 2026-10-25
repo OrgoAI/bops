@@ -87,7 +87,7 @@ export function SignInCard({
               <KeyIcon />
               <span className="flex min-w-0 flex-1 flex-col">
                 <span className="text-[13.5px] font-semibold leading-[18px]">{busy ? "Signing in…" : `Sign in as ${l.username}`}</span>
-                <span className="text-[11.5px] leading-4 text-white/60">Saved in your vault{l.hasTotp ? " · makes the 2FA code too" : ""}</span>
+                <span className="text-[11.5px] leading-4 text-white/60">Saved in Logins{l.hasTotp ? " · makes the 2FA code too" : ""}</span>
               </span>
             </button>
           ))}
@@ -115,7 +115,7 @@ export function SignInCard({
         {!code && (
           <label className="flex items-center gap-2 text-[12.5px] leading-4 text-[#3A3A38]">
             <input type="checkbox" checked={save} onChange={(e) => setSave(e.target.checked)} className="size-3.5 accent-[#0A0A0A]" />
-            Save to your vault, so {b.name} can sign in next time
+            Save to Logins, so {b.name} can sign in next time
           </label>
         )}
         {error && <span className="text-[12px] leading-4 text-[#B42318]">{error}</span>}

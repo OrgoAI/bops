@@ -89,7 +89,7 @@ const CHAT_NEVER = (app: string) => [`Post or reply in ${app}`, "React to or edi
 const SORT = "Sort with the tags listed with your routines (the workspace's own tags too).";
 /** How a support starter keeps track: one issue in Orbit per thread or ticket, opened or updated by its id there. */
 const ISSUE = (app: string, what: string, id: string) =>
-  `Keep each one as an issue in Orbit: orbit_issue_open with source_app "${app}" and external_id ${id}, with the title, a short summary, the tags, the customer, a link and last_message_at (when its newest message came in), for ${what}. It updates the issue already open for that ${id.startsWith("the ticket") ? "ticket" : "thread"} instead of making another, so call it when there's a new message on it, not again while it only waits; when one is answered or fixed, orbit_issue_update its status.`;
+  `Keep each one as an issue in Knowledge: orbit_issue_open with source_app "${app}" and external_id ${id}, with the title, a short summary, the tags, the customer, a link and last_message_at (when its newest message came in), for ${what}. It updates the issue already open for that ${id.startsWith("the ticket") ? "ticket" : "thread"} instead of making another, so call it when there's a new message on it, not again while it only waits; when one is answered or fixed, orbit_issue_update its status.`;
 
 /* Suggested times, by what kind of job it is. */
 const WEEKDAYS = [1, 2, 3, 4, 5];
@@ -124,7 +124,7 @@ const chatApp = (app: "slack" | "discord", name: string): RoutineTemplate[] => [
     id: `${app}-support-watch`,
     app,
     title: `${name} support watch`,
-    summary: "Tags new threads, drafts answers, keeps an issue in Orbit for each, and tells you at once about an outage.",
+    summary: "Tags new threads, drafts answers, keeps an issue in Knowledge for each, and tells you at once about an outage.",
     when: "Every 15 minutes",
     kind: "monitor",
     defaultOn: true,
@@ -187,7 +187,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     goal: [
       "Check my Gmail for mail since the last run, or the last 24 hours (find_app_actions, then use_app).",
       `${SORT} Give each email one tag.`,
-      "Look people up in Orbit (orbit_read) and memory (recall) when it helps to know who they are.",
+      "Look people up in Knowledge (orbit_read) and memory (recall) when it helps to know who they are.",
       "For each email that needs an answer from me, write a short draft reply in my voice in your answer.",
       ISSUE("gmail", "each email from a customer that needs me, an outage or a bug report", "the email's thread id"),
       "Answer with one short summary: what needs me first, then a line per tag that has mail, then the drafts.",
@@ -200,7 +200,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     id: "gmail-alerts",
     app: "gmail",
     title: "Outage and customer alerts",
-    summary: "Checks your mail every half hour, keeps an issue in Orbit for an outage or a customer who needs you, and speaks up only then.",
+    summary: "Checks your mail every half hour, keeps an issue in Knowledge for an outage or a customer who needs you, and speaks up only then.",
     when: "Every 30 minutes",
     kind: "schedule",
     defaultOn: true,
@@ -233,7 +233,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     ],
     goal: [
       "Check my Gmail for new mail since the last run that needs a reply from me (find_app_actions, then use_app).",
-      "Skip newsletters, receipts and notifications. Look the sender up in Orbit (orbit_read) and memory (recall).",
+      "Skip newsletters, receipts and notifications. Look the sender up in Knowledge (orbit_read) and memory (recall).",
       "For each one, give who it's from, the subject, and a short draft reply in my voice.",
       `Don't send it or save it in Gmail: I'll send what I like. ${READS_ONLY}`,
       "If nothing new needs a reply, answer NOTHING.",
@@ -252,7 +252,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     schedule: { kind: "weekly", day: 1, time: "09:00" },
     suggested: [...WEEKLY_TIMES, { label: "Monday and Thursday 9 AM", schedule: { kind: "weekly", day: 1, days: [1, 4], time: "09:00" } }],
     goal: [
-      "Look through the mail I sent in the last 14 days that got no reply yet (find_app_actions, then use_app), and the open promises in Orbit (orbit_read).",
+      "Look through the mail I sent in the last 14 days that got no reply yet (find_app_actions, then use_app), and the open promises in Knowledge (orbit_read).",
       "List who I'm waiting on and since when, most important first.",
       "For each one worth chasing, write a short, friendly follow up in my voice.",
       `Don't send anything. ${READS_ONLY}`,
@@ -277,7 +277,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     ],
     goal: [
       "List today's events on my Google Calendar (find_app_actions, then use_app).",
-      "For each meeting with other people, look the attendees up in Orbit (orbit_read) and memory (recall): who they are, when we last talked, anything still open with them.",
+      "For each meeting with other people, look the attendees up in Knowledge (orbit_read) and memory (recall): who they are, when we last talked, anything still open with them.",
       "Answer with the day in order, one short block per meeting. If there are no meetings today, say so in one line.",
       `Read only: don't accept, decline, move or create events. ${READS_ONLY}`,
     ].join(" "),
@@ -299,7 +299,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     ],
     goal: [
       "Check my Google Calendar for meetings with other people that start in this run's window, given below (find_app_actions, then use_app).",
-      "For each one, write a short prep: who's coming (Orbit, orbit_read, and memory, recall), what it's about, the last emails with them, and what I should ask or bring.",
+      "For each one, write a short prep: who's coming (Knowledge, orbit_read, and memory, recall), what it's about, the last emails with them, and what I should ask or bring.",
       `Read only: don't change the event or write to anyone. ${READS_ONLY}`,
       "If there's no such meeting, answer NOTHING.",
     ].join(" "),
@@ -341,7 +341,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     id: "plain-support-queue",
     app: "PLAIN_API_KEY",
     title: "Support queue watch",
-    summary: "Watches your Plain queue, keeps an issue in Orbit for each thread, and tells you about new or waiting ones.",
+    summary: "Watches your Plain queue, keeps an issue in Knowledge for each thread, and tells you about new or waiting ones.",
     when: "Every 15 minutes",
     kind: "monitor",
     defaultOn: true,

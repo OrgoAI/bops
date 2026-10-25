@@ -6,8 +6,9 @@ import { onTab, openPages } from "./local";
 import { readScreen } from "./screen-watch";
 import { screenEndpoint } from "./screens";
 import { submitSignIn, type SignInValues } from "./sign-in";
+import { onRunner } from "./persist";
 import { addStep } from "./sessions";
-import { bot, getState, id, ownerName, session, stateUser, update } from "./store";
+import { bot, getState, id, ownerName, patchSession, session, stateUser, update } from "./store";
 
 /**
  * The vault: logins bots can sign in with. Bops keeps the site, the username and who may use it;
@@ -39,8 +40,16 @@ const patchLogin = (loginId: string, patch: Partial<VaultLogin>) =>
     if (l) Object.assign(l, patch);
   });
 
-/** The logins a bot may use on a page, best match first. */
+/** The logins a bot may use on a page, best match first. None on a computer's runner: their passwords are in the Mac's Keychain. */
 export function loginsFor(botId: string, url: string) {
+  return onRunner() ? [] : fitting(botId, url);
+}
+
+/** Whether the bot may use the login, whichever site. */
+const mayUse = (l: VaultLogin, botId: string) => l.bots === "all" || l.bots.includes(botId);
+
+/** The logins a bot may use on a page, best match first, as the state lists them (their passwords may be elsewhere: loginsFor). */
+function fitting(botId: string, url: string) {
   let host = "";
   try {
     host = new URL(url).hostname.replace(/^www\./, "");
@@ -48,7 +57,7 @@ export function loginsFor(botId: string, url: string) {
     return [];
   }
   return logins()
-    .filter((l) => (l.bots === "all" || l.bots.includes(botId)) && (host === l.site || host.endsWith(`.${l.site}`)))
+    .filter((l) => mayUse(l, botId) && (host === l.site || host.endsWith(`.${l.site}`)))
     .sort((a, b) => (b.usedAt ?? 0) - (a.usedAt ?? 0));
 }
 
@@ -123,6 +132,7 @@ export async function signInWith(botId: string, display: number, loginId: string
   const b = bot(botId);
   const l = logins().find((x) => x.id === loginId);
   if (!b || !l) throw new Error("no such login");
+  if (onRunner()) throw new Error("saved logins work only from the Bops app on your Mac");
   if (l.bots !== "all" && !l.bots.includes(botId)) throw new Error(`${b.name} isn't allowed to use this login`);
   const lock = `${botId}:${display}`;
   if (signingIn.has(lock)) return { signedIn: false, busy: true, read: getState().screens?.[lock] };
@@ -194,6 +204,13 @@ export async function vaultSignIn(botId: string, display: number, sessionId: str
   const owner = ownerName();
   if (!b || !(DISPLAYS as readonly number[]).includes(display)) return "There's no such screen.";
   const s = session(sessionId);
+  // A computer's runner has no Keychain: a saved login's password is on the Mac alone. The thread waits for the
+  // user to sign in on its screen (Needs you to sign in, with the way to that screen), and goes on from there;
+  // it's never handed to the Mac.
+  if (onRunner()) {
+    if (s && live(s) && !s.blocker) patchSession(sessionId, { blocker: "sign_in" });
+    return `${owner}'s saved logins sign in only from Bops on their Mac, not here. Say in one short line that you need ${owner} to sign in on your screen, and stop there: once they have, you carry on.`;
+  }
   if (!s || !live(s)) return "This task isn't running anymore.";
   const ep = screenEndpoint(b, display);
   if (!ep) return "Bops can't reach that screen right now.";
@@ -207,7 +224,7 @@ export async function vaultSignIn(botId: string, display: number, sessionId: str
     const asks = pages.filter((p) => loginsFor(botId, p.url).length).map((p) => siteOfUrl(p.url));
     if (asks.length)
       return `${owner}'s saved ${[...new Set(asks)].join(", ")} login is set to ask first. Stop and say in one sentence that you need to sign in: a card lets ${owner} sign you in with one tap.`;
-    return `No login in ${owner}'s vault fits a page open on that screen (${[...new Set(pages.map((p) => siteOfUrl(p.url)))].join(", ") || "none"}). Stop and say so in one sentence: ${owner} can add one in the Vault, or sign you in with the card.`;
+    return `No login saved in ${owner}'s Logins fits a page open on that screen (${[...new Set(pages.map((p) => siteOfUrl(p.url)))].join(", ") || "none"}). Stop and say so in one sentence: ${owner} can add one in Logins, or sign you in with the card.`;
   }
   const task = s.goal ?? "";
   for (const p of fits) {

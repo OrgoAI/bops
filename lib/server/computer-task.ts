@@ -6,13 +6,14 @@ import { openaiClient } from "./openai-client";
 import { sleptSince } from "./awake";
 import { computerAsleepError, computerWakingError, orgo, OrgoTimeout, screenId } from "./orgo";
 import { APP_TOOLS, findAppActions, runAppAction } from "./composio";
+import { askFor, declined, NeedsOk, Paused, type AskSpec } from "./permission";
 import { DATA_TOOL_NAMES, DATA_TOOLS, runDataTool } from "./treg";
 import { CRM_TOOL_NAMES, CRM_TOOLS, crmStep, runCrmTool } from "./crm";
 import { callApi, callApiTool, usableKeys } from "./keys";
-import { readSkill, READ_SKILL_TOOL, skillsFor } from "./workspace-skills";
+import { readSkill, READ_SKILL_TOOL } from "./workspace-skills";
 import { bot, patchSession, session, stateEpoch } from "./store";
 import { recordTokens, usageTags } from "./usage";
-import type { Session } from "@/lib/types";
+import type { AppApproval, Session } from "@/lib/types";
 
 /**
  * A thread on a bot's Orgo computer, run on the Responses API's own `computer` tool: the model sees
@@ -67,6 +68,8 @@ type OutputItem = {
   status?: string;
 };
 type Owed = NonNullable<Session["owed"]>[number];
+/** A tool call's output, as the Responses API takes it: text, or text with the screen. */
+type FunctionOutput = { type: "function_call_output"; call_id?: string; output: string | { type: string; text?: string; image_url?: string; detail?: string }[] };
 
 export type ComputerTurn = {
   sessionId: string;
@@ -77,7 +80,14 @@ export type ComputerTurn = {
   instructions: string;
   /** The user's apps as tools (find_app_actions, use_app). */
   apps: boolean;
-  input: string;
+  /** What the user said, as this turn's message: none on a turn that only carries a paused run on (`resume`). */
+  input?: string;
+  /**
+   * The answered request this run paused at (lib/server/permission.ts), taken out as it was read: this turn first
+   * answers that call (the action done on a yes, its result as the call's output; "Declined: …" on a no) and goes
+   * on from the response it paused in.
+   */
+  resume?: AppApproval;
   signal: AbortSignal;
   /** How long the turn may run at all, and how long one step (the model's answer) may take before it counts as stuck. */
   timeoutMs: number;
@@ -91,6 +101,12 @@ export type ComputerTurn = {
   parts?: { start: (parts: { title: string; goal: string }[]) => string; check: (wait: boolean, signal: AbortSignal) => Promise<string> };
   /** How fast its `calls`th model call of this turn runs (routing.ts speedFor): fast while someone's waiting on it. */
   speed?: (calls: number) => Speed;
+  /**
+   * Read what changed elsewhere meanwhile (sessions.ts: the state, from Bops Cloud), before a step that
+   * went over a nap is made again: the Mac may have ended the thread while its computer slept, and then
+   * the turn is stopped (its signal) rather than carrying on.
+   */
+  caughtUp?: () => Promise<void>;
 };
 
 /** One turn: from the user's message to the bot's answer. Returns the answer. Its WebSocket, if it opened one, closes with it. */
@@ -109,9 +125,11 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   const b = bot(s.botId)!;
   const epoch = stateEpoch();
   const started = Date.now();
+  // A run paused for the user's OK ended its turn there; the turn that carries it on has an hour of its own.
+  const ranFor = () => Date.now() - started;
   // Business data and the user's CRM run in this process (treg.ts, crm.ts), so the task has them wherever its computer is.
   // Not the CRM for a task someone outside Bops started (Session.fromOutside), as for a chat turn of theirs.
-  // read_skill only when the bot has skills to read (sessions.ts lists them in its instructions).
+  // read_skill always: every bot has Bops' own skills, under their labels (sessions.ts lists them in its instructions).
   // call_api with the user's keys (keys.ts) reads only (GET): anything that changes something is asked for in the chat.
   // Not for a task someone outside Bops started, like the CRM. Not bank, payroll or compliance keys (chatOnly):
   // the task's browser and shell can reach any site, so a page could have it type what they answer anywhere.
@@ -124,20 +142,22 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
     PAGE_TOOL,
     VAULT_TOOL,
     ...(t.parts ? PART_TOOLS : []),
-    ...(skillsFor(b.id).length ? [READ_SKILL_TOOL] : []),
+    READ_SKILL_TOOL,
     ...(t.apps ? APP_TOOLS(b) : []),
     ...DATA_TOOLS(b),
     ...(outside ? [] : CRM_TOOLS(b)),
     ...(keyed.length ? [callApiTool(keyed, { getOnly: true })] : []),
   ];
-  // A turn that was stopped mid-step owes OpenAI the outputs of the calls it was answering.
-  let input: unknown[] = [...(await settle(t, s.owed ?? [])), { role: "user", content: [{ type: "input_text", text: t.input }] }];
-  let prev = s.responseId;
   const guard = newPageGuard();
+  // A turn that was stopped mid-step, or paused at a call that needed the user's OK, owes OpenAI the outputs of the
+  // calls it was answering: the paused call's is what the user's reply made of it.
+  const paused = t.resume?.resume?.engine === "responses" ? t.resume.resume : undefined;
+  let input: unknown[] = [...(await settle(t, s.owed ?? [], guard)), ...(t.input ? [{ role: "user", content: [{ type: "input_text", text: t.input }] }] : [])];
+  let prev = paused?.responseId ?? s.responseId;
 
   for (let calls = 0; ; calls++) {
     if (t.signal.aborted) throw new Error("Stopped");
-    if (Date.now() - started > t.timeoutMs) throw new Error(`Ran for ${Math.round(t.timeoutMs / 60_000)} minutes without finishing`);
+    if (ranFor() > t.timeoutMs) throw new Error(`Ran for ${Math.round(t.timeoutMs / 60_000)} minutes without finishing`);
     if (calls >= MAX_CALLS) return "I took too many steps without finishing, so I stopped here. Tell me how you'd like me to go on.";
     // The user's replies since the last step go in with this one, so they can redirect it mid-task (steering)
     // rather than wait for the turn to end. Marked sent once the model has them; a failed call leaves them for the next turn.
@@ -151,19 +171,29 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
     const overSocket = async (tier: Speed, last: boolean) => {
       if (ws.socket === undefined) ws.socket = await ResponsesSocket.open(b.id).catch(() => null);
       if (!ws.socket?.open) return overHttp(tier, last);
-      return ws.socket.create({ ...body, ...tierParam(tier) }, { signal: t.signal, timeoutMs: t.idleMs }).catch((e: unknown) => {
+      return ws.socket.create({ ...body, ...tierParam(tier) }, { signal: t.signal, timeoutMs: t.idleMs }).catch(async (e: unknown) => {
         if (!(e instanceof TransportError)) throw e;
         ws.socket?.close();
         ws.socket = null;
+        if (sleptSince(asked)) await stillOn();
         return overHttp(tier, last);
       });
+    };
+    /** After a nap: what changed meanwhile read first, and the turn stopped if the thread ended elsewhere. */
+    const stillOn = async () => {
+      await t.caughtUp?.().catch(() => {});
+      if (t.signal.aborted) throw new Error("Stopped");
     };
     // Fast while someone's waiting on it, falling back a tier when OpenAI's busy (routing.ts withSpeed).
     const ask = () => withSpeed(t.speed?.(calls) ?? "default", (tier, last) => (tier !== "default" && responsesSocketOn() ? overSocket(tier, last) : overHttp(tier, last)));
     const asked = Date.now();
     const r = (await ask()
       // The Mac slept while it waited (awake.ts): that's not the task stalling, so it's asked again now the Mac's back.
-      .catch((e: unknown) => (e instanceof APIConnectionTimeoutError && sleptSince(asked) && !t.signal.aborted ? ask() : Promise.reject(e)))
+      .catch(async (e: unknown) => {
+        if (!(e instanceof APIConnectionTimeoutError && sleptSince(asked) && !t.signal.aborted)) throw e;
+        await stillOn();
+        return ask();
+      })
       .catch((e: Error) => {
         throw e instanceof APIConnectionTimeoutError ? new Error(`Stuck: nothing happened for ${Math.round(t.idleMs / 60_000)} minutes`) : e;
       })) as unknown as { id: string; model: string; usage: Usage; output: OutputItem[] };
@@ -190,7 +220,7 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
     input = [];
     // What a screenshot can't say (an action that failed), after the calls' outputs.
     const notes: string[] = [];
-    for (const o of asks) {
+    for (const [i, o] of asks.entries()) {
       if (t.signal.aborted) throw new Error("Stopped");
       if (o.type === "computer_call") {
         const done = await act(t, o);
@@ -199,6 +229,8 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
         guard.since = 0;
       } else {
         const answered = await runFunction(t, o, guard);
+        // A call that needs the user's OK: the run pauses here (pauseAt), and this turn ends.
+        if ("pause" in answered) pauseAt(t, b.id, r.id, o, answered.pause, asks.slice(i + 1));
         input.push(answered);
         // Kept with the call, so a turn stopped before sending it answers with what really happened (settle); its words, not the screen it came with.
         const kept = typeof answered.output === "string" ? answered.output : (answered.output.find((c) => c.type === "input_text")?.text ?? "");
@@ -215,17 +247,64 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
 /**
  * What a turn that ended mid-step still owes OpenAI: the screen as it is now for each computer call
  * (its safety checks acknowledged: the user has answered since), and for each tool call what it
- * answered, or that it didn't run.
+ * answered, or that it didn't run. The call a run paused at for the user's OK (`t.resume`) is answered by
+ * their reply: on a yes the action is done now and its result is the output, on a no "Declined: …".
  */
-async function settle(t: ComputerTurn, owed: Owed[]) {
+async function settle(t: ComputerTurn, owed: Owed[], guard: PageGuard) {
+  const paused = t.resume?.resume?.engine === "responses" ? t.resume.resume : undefined;
   const out: unknown[] = [];
-  for (const o of owed)
+  for (const o of owed) {
+    if (paused && o.id === paused.callId) {
+      out.push(await answerPaused(t, t.resume!, paused.call, o.id, guard));
+      continue;
+    }
     out.push(
       o.type === "computer"
         ? { type: "computer_call_output", call_id: o.id, acknowledged_safety_checks: o.checks ?? [], output: await screen(t) }
         : { type: "function_call_output", call_id: o.id, output: o.output ?? "Not run: the task was stopped first." },
     );
+  }
+  if (paused && !owed.some((o) => o.id === paused.callId)) out.push(await answerPaused(t, t.resume!, paused.call, paused.callId, guard));
   return out;
+}
+
+/** What a later call in a response is answered with when the run paused at an earlier one: not run, to call again. */
+const AFTER_PAUSE = "Not run: it came after a step that waited for the user's OK. Call it again if it's still needed.";
+
+/**
+ * The paused call's output, from the user's reply: the action done (runFunction, approved) or declined. Kept with
+ * the call before and after it's done, so a turn stopped meanwhile answers with what really happened (settle).
+ */
+async function answerPaused(t: ComputerTurn, a: AppApproval, call: { name: string; arguments: string }, callId: string, guard: PageGuard) {
+  const keep = (output: string) =>
+    patchSession(t.sessionId, (x) => {
+      const owed = x.owed?.find((w) => w.id === callId);
+      if (owed) owed.output = output;
+    });
+  if (a.reply?.reply === "reject") {
+    t.step("note", declined(a).replace(/^Declined:/, "Declined by you:"));
+    keep(declined(a));
+    return { type: "function_call_output", call_id: callId, output: declined(a) };
+  }
+  keep("Not known: Bops stopped while doing it, so it may or may not have happened. Check before doing it again.");
+  const answered = await runFunction(t, { type: "function_call", call_id: callId, name: call.name, arguments: call.arguments }, guard, { approved: true });
+  const output = "pause" in answered ? "Failed: it still needs the user's OK." : answered.output;
+  keep(typeof output === "string" ? output : (output.find((c) => c.type === "input_text")?.text ?? ""));
+  return { type: "function_call_output", call_id: callId, output };
+}
+
+/**
+ * Pause the run at call `o`, which needs the user's OK: the request goes into the state with what resumes the
+ * run (this response, this call and its arguments), the later calls of this response are answered as not run
+ * (kept with them, settle), and the turn ends (Paused) without that call's output: OpenAI holds the rest.
+ */
+function pauseAt(t: ComputerTurn, botId: string, responseId: string, o: OutputItem, ask: AskSpec, later: OutputItem[]): never {
+  patchSession(t.sessionId, (x) => {
+    for (const w of x.owed ?? []) if (later.some((l) => l.call_id === w.id) && w.type === "function") w.output = AFTER_PAUSE;
+  });
+  const a = askFor(ask, { botId, threadId: t.sessionId }, { engine: "responses", responseId, callId: o.call_id!, call: { name: o.name ?? "", arguments: o.arguments ?? "{}" } });
+  t.step("note", `Waiting for your OK: ${ask.action}`);
+  throw new Paused(a.id);
 }
 
 /** The bot's answer in a response: its final answer, without what it said on the way there (as the Agents API thread's, sessions.ts finalAnswer). */
@@ -491,7 +570,7 @@ const VAULT_TOOL = {
   type: "function",
   name: "sign_in_from_vault",
   description:
-    "Sign in on a sign-in or verification code page from the user's vault: Bops finds the page on your screen, fills the saved username, password or 2FA code straight into it and submits; you never see them. Call it whenever a page asks you to sign in, and never type a password yourself. It says whether that worked.",
+    "Sign in on a sign-in or verification code page with a login the user saved in Logins: Bops finds the page on your screen, fills the saved username, password or 2FA code straight into it and submits; you never see them. Call it whenever a page asks you to sign in, and never type a password yourself. It says whether that worked.",
   parameters: { type: "object", additionalProperties: false, required: [], properties: {} },
   strict: true,
 };
@@ -585,7 +664,25 @@ function outsideTask(id: string) {
   return !!s?.fromOutside || (!!s?.partOf && !!session(s.partOf)?.fromOutside);
 }
 
-async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard()) {
+/**
+ * A tool call that may take a while (an app, a lookup, a sign-in), raced against the turn's Stop: a stopped
+ * task ends at once rather than waiting on it. Commands, page scripts and its parts take the turn's signal
+ * themselves. One that needs the user's OK never waits here: it pauses the run (NeedsOk).
+ */
+function orStop<T>(t: ComputerTurn, work: Promise<T>): Promise<T> {
+  if (t.signal.aborted) return Promise.reject(new Error("Stopped"));
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(new Error("Stopped"));
+    t.signal.addEventListener("abort", stop, { once: true });
+    work.then(resolve, reject).finally(() => t.signal.removeEventListener("abort", stop));
+  });
+}
+
+/**
+ * One tool call, answered. `approved`: the user said yes to this very call (its run paused for it). A call that
+ * needs their OK and hasn't it answers `pause`, with what to ask: the run pauses there (pauseAt).
+ */
+async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard(), opts: { approved?: boolean } = {}): Promise<FunctionOutput | { pause: AskSpec }> {
   const s = session(t.sessionId)!;
   const outside = outsideTask(t.sessionId);
   let args: Record<string, unknown> = {};
@@ -621,31 +718,33 @@ async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = ne
       t.step("parts", args.wait ? "waiting for its parts" : "checked on its parts");
       output = await t.parts.check(args.wait === true, t.signal);
     } else if (o.name === "sign_in_from_vault") {
-      t.step("vault", "signing in from your vault");
-      output = await (await import("./vault")).vaultSignIn(s.botId, t.display, t.sessionId);
+      t.step("vault", "signing in with a saved login");
+      output = await orStop(t, import("./vault").then((v) => v.vaultSignIn(s.botId, t.display, t.sessionId)));
     } else if (o.name === "read_skill") {
       const name = String(args.name ?? "").trim();
       const file = typeof args.file === "string" && args.file.trim() ? args.file.trim() : null;
-      t.step("skill", file ? `read ${file.slice(0, 60)} of the skill "${name.slice(0, 60)}"` : `read the skill "${name.slice(0, 60)}"`);
-      output = readSkill(s.botId, name, file);
+      const label = typeof args.label === "string" && args.label.trim() ? args.label.trim() : null;
+      t.step("skill", file ? `read ${file.slice(0, 60)} of the skill "${name.slice(0, 60)}"` : name ? `read the skill "${name.slice(0, 60)}"` : label ? `opened the label "${label.slice(0, 60)}"` : "looked at its skills");
+      output = readSkill(s.botId, name, file, label);
     } else if (o.name === "find_app_actions") {
       t.step("find_app_actions", `looked for "${String(args.query ?? "").slice(0, 60)}" in your apps`);
-      output = await findAppActions(s.botId, String(args.query ?? ""), { sessionId: t.sessionId });
+      output = await orStop(t, findAppActions(s.botId, String(args.query ?? ""), { sessionId: t.sessionId }));
     } else if (o.name === "use_app") {
       t.step("use_app", `used ${String(args.action ?? "an app")}`);
-      output = await runAppAction(s.botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId: t.sessionId }, undefined, (args.account as string | null) ?? null);
+      output = await orStop(t, runAppAction(s.botId, String(args.action ?? ""), (args.arguments as Record<string, unknown>) ?? {}, { sessionId: t.sessionId }, (args.account as string | null) ?? null, { approved: opts.approved }));
     } else if (o.name === "call_api" && !outside) {
-      const r = await callApi(s.botId, args, { sessionId: t.sessionId });
+      const r = await orStop(t, callApi(s.botId, args, { sessionId: t.sessionId }));
       t.step("call_api", r.did ?? `tried to call ${String(args.key ?? "an API")}`);
       output = r.text;
     } else if (o.name && DATA_TOOL_NAMES.has(o.name)) {
       t.step(o.name, o.name === "business_search" ? `looked up ${String(args.job ?? "business data")}` : o.name === "find_data" ? `looked for "${String(args.query ?? "").slice(0, 60)}" in business data` : `got ${String(args.endpoint_id ?? "data")}`);
-      output = await runDataTool(s.botId, o.name, args, { sessionId: t.sessionId });
+      output = await orStop(t, runDataTool(s.botId, o.name, args, { sessionId: t.sessionId }, { approved: opts.approved }));
     } else if (o.name && CRM_TOOL_NAMES.has(o.name) && !outside) {
       t.step(o.name, crmStep(o.name, args));
-      output = await runCrmTool(s.botId, o.name, args, { sessionId: t.sessionId });
+      output = await orStop(t, runCrmTool(s.botId, o.name, args, { sessionId: t.sessionId }));
     } else output = `Unknown tool ${o.name}.`;
   } catch (e) {
+    if (e instanceof NeedsOk) return { pause: e.ask };
     // Stopped, or Orgo not answering, mid-command: it may have run on the computer all the same, and the
     // model's told so (kept with the call when it was stopped, for when the task picks up: settle).
     const unsure = o.name === "run_command" || o.name === "page_script";

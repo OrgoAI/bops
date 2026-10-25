@@ -1,9 +1,9 @@
 import "server-only";
 import { sameApp } from "@/lib/routine-catalog";
 import { MAIN_WORKSPACE, workspaceOf, type AccessUse, type Bot } from "@/lib/types";
-import { accessChanged, logUse, placeOf, viaOf, type UseWhere } from "./access-sync";
+import { accessChanged, logUse, viaOf, type UseWhere } from "./access-sync";
+import { allows, NeedsOk, type AskSpec } from "./permission";
 import { orgoHeaders } from "./app-version";
-import { askOwner } from "./composio";
 import { apiKey } from "./orgo";
 import { orgoOrigin } from "./orgo-auth";
 import { bot, getState, ownerName, update } from "./store";
@@ -346,17 +346,13 @@ const SHOW_CAP = 4000;
 
 /**
  * call_api. The key must be one the bot may use (Bot.keys) and set in the vault; a read-only service takes
- * GET only. GET runs at once (for Slack, only a GET of a read method: its others can post and delete). Anything else waits for the user's yes every time (askOwner, the app approval
- * card), whatever "Just do it" says: an email or a text from outside can ask for a refund, and the bot can't
- * tell who's really asking. `onAsk` lets a chat turn go on while the user decides; without it (`getOnly`,
- * a task) only GET is allowed.
+ * GET only. GET runs at once (for Slack, only a GET of a read method: its others can post and delete). Anything
+ * else asks the user (NeedsOk: the run pauses for their reply, lib/server/permission.ts), whatever "Just do it"
+ * says: an email or a text from outside can ask for a refund, and the bot can't tell who's really asking. Only an
+ * Always allow the user saved for that very call goes without asking. `chat`: a chat turn's (a task gets GET only,
+ * and never a key that's for the chat only); `approved`: the user said yes to this very call.
  */
-export async function callApi(
-  botId: string,
-  a: CallApiArgs,
-  where: UseWhere,
-  onAsk?: (ask: Promise<CallApiDone>, did: string) => void,
-): Promise<CallApiDone> {
+export async function callApi(botId: string, a: CallApiArgs, where: UseWhere, opts: { chat?: boolean; approved?: boolean } = {}): Promise<CallApiDone> {
   const b = bot(botId);
   if (!b) return { text: "Unknown bot." };
   const owner = ownerName();
@@ -381,10 +377,10 @@ export async function callApi(
   const refused = (text: string) => (used(action, "refused"), { text });
   if (p.readOnly && method !== "GET") return refused(`${p.label} is read only in Bops: only GET.`);
   if (p.denied?.test(path)) return refused(`Bops doesn't call ${path} in ${p.label}: it makes a new key, and keys never reach you.`);
-  if (!onAsk && p.chatOnly) return refused(`${p.label} is for the chat only, not a task.`);
+  if (!opts.chat && p.chatOnly) return refused(`${p.label} is for the chat only, not a task.`);
   // Slack's GETs can post and delete: only its read methods count as a GET here.
   const asks = method !== "GET" || (!!p.getReads && !p.getReads.test(path));
-  if (!onAsk && asks) return refused("Only GET here, and only reads. Ask in the chat for anything that changes something.");
+  if (!opts.chat && asks) return refused("Only GET here, and only reads. Ask in the chat for anything that changes something.");
   const parse = (v: unknown, what: string): { ok: true; v: unknown } | { ok: false; why: string } => {
     if (v === null || v === undefined || v === "") return { ok: true, v: null };
     if (typeof v !== "string") return { ok: true, v };
@@ -417,12 +413,11 @@ export async function callApi(
     }
   };
   if (!asks) return run();
+  if (opts.approved) return run("user");
   const detail = [q.v ? `query: ${JSON.stringify(q.v)}` : "", body.v !== null ? `body: ${typeof body.v === "string" ? body.v : JSON.stringify(body.v, null, 1)}` : ""].filter(Boolean).join("\n");
   if (detail.length > SHOW_CAP) return { text: `That's too long to show ${owner} for a yes (${detail.length} characters, at most ${SHOW_CAP}). Send a shorter query and body.` };
+  const ask: AskSpec = { action: `Call ${p.label}`, resources: [`${method} ${path}`], preview: detail, kind: "api", api: { key: name, label: p.label, method, path } };
+  if (allows(b, ask, { justDoIt: false })) return run("auto");
   used(action, "waiting");
-  const ask = askOwner({ botId, app: "api", action: `${name} ${method} ${path}`, title: `${method} ${shown} in ${p.label}`, detail, ...placeOf(where) }).then((yes) =>
-    yes ? run("user") : refused(`Not approved: ${owner} said no. Don't do it.`),
-  );
-  onAsk!(ask, did);
-  return { text: `This needs ${owner}'s approval first: ${method} ${shown} in ${p.label}. Bops is showing them the details. Tell them in one short line, and don't call it again.` };
+  throw new NeedsOk(ask);
 }

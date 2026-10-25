@@ -413,6 +413,29 @@ export function renderSkillMd(frontmatter: Record<string, unknown>, body: string
   return `---\n${keys.map((k) => `${k}: ${yamlValue(frontmatter[k])}\n`).join("")}---\n${body.startsWith("\n") ? body : `\n${body}`}`;
 }
 
+/**
+ * A skill's label as its SKILL.md keeps it: `metadata.label`, in the Agent Skills metadata map, which
+ * orgo-web keeps as it is (an unknown key passes its checks), so the label syncs with Orgo unchanged. A
+ * top level `label` someone wrote by hand is read too. Undefined when it has none.
+ */
+export function labelOf(fm: Record<string, unknown> | null | undefined): string | undefined {
+  const meta = fm?.metadata;
+  const said = meta && typeof meta === "object" && !Array.isArray(meta) ? (meta as Record<string, unknown>).label : undefined;
+  const v = typeof said === "string" ? said : typeof fm?.label === "string" ? fm.label : undefined;
+  const s = v?.replace(/\s+/g, " ").trim();
+  return s ? s : undefined;
+}
+
+/** Frontmatter with its label kept in `metadata.label` (the rest of metadata as it was); unchanged when there's no label to keep. */
+export function withLabel(fm: Record<string, unknown>, label: string | undefined): Record<string, unknown> {
+  if (!label) return fm;
+  const meta = fm.metadata && typeof fm.metadata === "object" && !Array.isArray(fm.metadata) ? (fm.metadata as Record<string, unknown>) : {};
+  const out: Record<string, unknown> = { ...fm, metadata: { ...meta, label } };
+  // The one place it's kept: a hand written top level label would say something else after a move.
+  delete out.label;
+  return out;
+}
+
 /** Checks the keys Orgo knows when they're there. */
 export function validateFrontmatter(fm: Record<string, unknown>): Problem[] {
   const errors: Problem[] = [];

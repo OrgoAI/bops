@@ -11,6 +11,7 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { pathToFileURL } from "node:url";
+import { unfaked } from "./fake-exports.mjs";
 
 process.env.TZ = "America/New_York";
 delete process.env.BOPS_UI_TOKEN;
@@ -18,11 +19,11 @@ delete process.env.BOPS_DATABASE_URL;
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 const FAKES = {
-  store: ["addMessage", "bot", "getState", "id", "ownerName", "patchSession", "session", "stateReady", "update"],
+  store: ["addMessage", "bot", "getState", "id", "ownerName", "ownSession", "patchSession", "pullState", "session", "stateEpoch", "statePulledAt", "stateReady", "stateTooNew", "update"],
   sessions: ["startSession"],
   analytics: ["trackServerEvent"],
   attention: ["pingIfWorthIt"],
-  persist: ["onPostgres"],
+  persist: ["onExit", "onPostgres", "onRunner"],
   phone: ["isOwner", "ownerPhone", "sendText", "textingLine"],
   mail: ["ownerAddresses", "sendEmail"],
   channels: ["postTo"],
@@ -46,7 +47,7 @@ registerHooks({
   load(url, context, next) {
     const name = url.match(/\/lib\/server\/([a-z-]+)\.ts$/)?.[1];
     if (!name || !FAKES[name]) return next(url, context);
-    return { format: "module", shortCircuit: true, source: FAKES[name].map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(name)}].${n}(...a);`).join("\n") };
+    return { format: "module", shortCircuit: true, source: FAKES[name].map((n) => `export const ${n} = (...a) => globalThis.__fake[${JSON.stringify(name)}].${n}(...a);`).join("\n") + unfaked(name, url, FAKES[name]) };
   },
 });
 
@@ -95,15 +96,21 @@ globalThis.__fake = {
     },
     bot: (id) => state.bots.find((b) => b.id === id),
     id: (p) => `${p}_${++seq}`,
+    stateEpoch: () => 1,
     ownerName: () => state.owner?.name || "the user",
     patchSession: () => {},
     session: (id) => state.sessions.find((x) => x.id === id),
     stateReady: () => ready,
+    stateTooNew: () => false,
+    // Every thread here is this Mac's own (store.ts ownSession).
+    ownSession: () => true,
+    pullState: async () => {},
+    statePulledAt: () => 0,
   },
   sessions: { startSession: () => ({ id: `ses_${++seq}` }) },
   analytics: { trackServerEvent: () => {} },
   attention: { pingIfWorthIt: () => {} },
-  persist: { onPostgres: () => false },
+  persist: { onExit: () => {}, onPostgres: () => false, onRunner: () => false },
   phone: { isOwner: () => false, ownerPhone: () => undefined, sendText: async () => {}, textingLine: () => undefined },
   mail: { ownerAddresses: () => [], sendEmail: async () => "" },
   channels: { postTo: async () => {} },
@@ -524,16 +531,16 @@ await check("a check whose account went, is signed out or its bot can't use now 
     assert.equal(fake.jobs.length, jobs + 1);
     work.status = "expired";
     let run = await R.runRoutine(r.id);
-    assert.deepEqual([run.status, run.error], ["failed", "Gmail (Work · sam@acme.com) is signed out. Sign in again in the Vault."]);
+    assert.deepEqual([run.status, run.error], ["failed", "Gmail (Work · sam@acme.com) is signed out. Sign in again in Logins."]);
     await R.runRoutine(r.id);
     assert.equal(said().length, 1, "said once, not every hour");
     work.status = "active";
     state.bots.find((b) => b.id === "bot_main").access.ca_work = "none";
     run = await R.runRoutine(r.id);
-    assert.equal(run.error, "Jev can't use Gmail (Work · sam@acme.com) now. Give it access in the Vault, or delete this routine.");
+    assert.equal(run.error, "Jev can't use Gmail (Work · sam@acme.com) now. Give it access in Logins, or delete this routine.");
     state.accounts = state.accounts.filter((a) => a.id !== "ca_work");
     run = await R.runRoutine(r.id);
-    assert.equal(run.error, "That Gmail account isn't connected anymore. Delete this routine, or connect it again in the Vault.");
+    assert.equal(run.error, "That Gmail account isn't connected anymore. Delete this routine, or connect it again in Logins.");
     assert.equal(fake.jobs.length, jobs + 1, "never run on Personal instead");
     for (const t of said()) noDashes(t, "a check that can't run");
   } finally {

@@ -33,21 +33,24 @@ export async function GET(request: Request) {
   return answer(new URL(request.url).searchParams.get("count") === "1" ? await membersCount() : await readMembers());
 }
 
-/** Invite someone, or send their invite again: {email, role: "viewer" | "admin"}. Answers {email, role, emailSent, link?}. */
+/**
+ * Invite someone, or send their invite again: {email, role: "viewer" | "admin", access?}, `access` being
+ * what they may do with this workspace's bots (lib/member-access.ts). Answers {email, role, emailSent, link?}.
+ */
 export async function POST(request: Request) {
   const stop = notReady() ?? notFromWindow(request);
   if (stop) return stop;
   return answer(await invite(await bodyOf(request)));
 }
 
-/** Change what someone can do: {memberId, role: "viewer" | "admin"}. */
+/** Change what someone can do: {memberId, role?: "viewer" | "admin", access?}, one or both. */
 export async function PATCH(request: Request) {
   const stop = notReady() ?? notFromWindow(request);
   if (stop) return stop;
   return answer(await changeAccess(await bodyOf(request)));
 }
 
-/** Take someone's access away ({memberId}), or cancel an invite ({email}). */
+/** Take someone's access away ({memberId}), or cancel an invite ({email}): their bot access goes too. */
 export async function DELETE(request: Request) {
   const stop = notReady() ?? notFromWindow(request);
   if (stop) return stop;

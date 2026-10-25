@@ -5,7 +5,8 @@ import { CLOUD_TUNNEL_HEADER, type CloudToMac, type MacToCloud } from "@/cloud/p
 import { appHeaders } from "./app-version";
 import { cloudOn, cloudSession, cloudUrl, forgetCloudSession } from "./cloud";
 import { orgoKey } from "./orgo-auth";
-import { onExit } from "./persist";
+import { ensureLive, livePulled, stopLive } from "./live";
+import { loopHere, onExit } from "./persist";
 import { pullState, stateReady, stateUser } from "./store";
 
 /**
@@ -37,6 +38,11 @@ type Tunnel = {
   want: boolean;
   /** A newer connection of the same user's took over: closed until the next sign-in or start. */
   replaced?: boolean;
+  /**
+   * The key a sign-out (or a restart) closed Bops Cloud on: nothing opens on it again until the next
+   * sign-in, however long the sign-out takes to let the key go (the state's poll would bring it all back).
+   */
+  stoppedKey?: string | null;
   failures: number;
   openedAt?: number;
   retry?: ReturnType<typeof setTimeout>;
@@ -150,8 +156,11 @@ tunnel.onFrame = (socket, frame) => {
     else void replay(frame).then((res) => send(socket, res));
   }
   else if (frame.t === "event") tunnel.events = tunnel.events.then(() => deliver(socket, frame)).catch(() => {});
-  // Another Mac of the user's changed the state: read what changed.
-  else if (frame.t === "state" && current(socket)) void pullState();
+  // Another Mac of the user's changed the state: read what changed (and the live stream needn't, for the same write).
+  else if (frame.t === "state" && current(socket)) {
+    livePulled();
+    void pullState();
+  }
 };
 
 /** Try again after 1 second, then 2, 4… up to a minute; a connection that held a while starts that over. */
@@ -243,9 +252,13 @@ function closeTunnel() {
  * has loaded: what comes down the tunnel lands in the user's state.
  */
 export async function startCloud({ signedIn = false } = {}) {
-  if (!cloudOn() || !stateReady()) return;
-  if (signedIn) tunnel.replaced = false;
+  // One tunnel per user: a computer's runner opening one would take the Mac's webhooks from it.
+  if (!cloudOn() || !stateReady() || !loopHere("tunnel")) return;
+  if (signedIn) tunnel.replaced = tunnel.stoppedKey = undefined;
+  else if (stopped()) return;
   if (signedIn || (!tunnel.want && !tunnel.replaced)) openTunnel();
+  // Live runs whether or not this Mac holds the tunnel (live.ts).
+  ensureLive();
   try {
     await cloudSession(signedIn);
   } catch (e) {
@@ -255,12 +268,22 @@ export async function startCloud({ signedIn = false } = {}) {
 
 /** Bops Cloud running whenever it should be, even with a key the Keychain only gave later. The state route calls it on every poll, so it's cheap when it already is. */
 export function ensureCloud() {
-  if (cloudOn() && stateReady() && !tunnel.want && !tunnel.replaced) void startCloud();
+  if (stopped()) return;
+  if (cloudOn() && stateReady() && loopHere("tunnel") && !tunnel.want && !tunnel.replaced) void startCloud();
+  ensureLive();
 }
 
-/** At a sign-out, while the key is still here: the tunnel closes, and the session is forgotten. (The state was saved first: app/api/auth/signout.) */
+/** Whether Bops Cloud was stopped on the key signed in now (stopCloud), so it stays closed until a sign-in. */
+const stopped = () => !!tunnel.stoppedKey && tunnel.stoppedKey === orgoKey();
+
+/**
+ * At a sign-out, while the key is still here: the tunnel and the live stream close, and the session is
+ * forgotten. Nothing reopens them on this key meanwhile (stoppedKey). (The state was saved first: app/api/auth/signout.)
+ */
 export async function stopCloud() {
+  tunnel.stoppedKey = orgoKey();
   closeTunnel();
+  await stopLive();
   forgetCloudSession();
 }
 

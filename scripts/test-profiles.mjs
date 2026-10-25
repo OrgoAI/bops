@@ -158,7 +158,7 @@ async function asUser(id, path, init = {}) {
       "x-bops-protocol": "2",
       "x-bops-device": init.device ?? "other-mac",
       "content-type": "application/json",
-      ...(init.old ? { "x-bops-version": "0.0.28" } : { "x-bops-state-level": "3" }),
+      ...(init.old ? { "x-bops-version": "0.0.28" } : { "x-bops-state-level": "4" }),
     },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
   });
@@ -310,7 +310,7 @@ try {
   await until(() => !existsSync(waiting), "the file from before to be removed once it's all up");
   assert.ok((await cloudMessages(A)).some((m) => m.text === LEGACY_TEXT), "in A's cloud");
   const a0 = await cloudState(A);
-  assert.equal(a0.protocol, 3, "written at this app's state level");
+  assert.equal(a0.protocol, 4, "written at this app's state level");
   assert.ok(a0.state.bots.some((b) => b.name === "Lex"));
   assert.equal(a0.state.messages, undefined, "messages are rows, never in the blob");
   assert.equal(a0.state.account, undefined, "who's signed in stays on the Mac");
@@ -706,7 +706,7 @@ try {
   // nothing it sends lands. This Mac goes on as before.
   S.update((s) => (s.owner = { ...s.owner, about: "Written here" }));
   assert.equal(await S.flushState(10_000), true);
-  assert.equal((await db.query("SELECT protocol FROM bops.app_state WHERE user_id = $1", [A])).rows[0].protocol, 3, "the level this Mac wrote at");
+  assert.equal((await db.query("SELECT protocol FROM bops.app_state WHERE user_id = $1", [A])).rows[0].protocol, 4, "the level this Mac wrote at");
   const oldMac = { device: "old-mac", old: true };
   const oldRead = await asUser(A, "/v1/state", oldMac);
   assert.deepEqual([oldRead.status, oldRead.body.code, oldRead.body.state], [426, "state_too_new", undefined]);

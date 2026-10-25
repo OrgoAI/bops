@@ -285,6 +285,10 @@ await check("opening an issue: a session in the workspace's bank, the issue its 
   assert.equal(x.messages[0].content, "Opened: Acme can't sign in, SSO broken. Their SSO fails since 9 AM, about 40 people.");
   assert.deepEqual(x.messages[0].metadata, { app: "bops", kind: "issue", event: "opened", by: "Tiger" }, "saying who");
   assert.deepEqual(x.messages[0].configuration, { reasoning: { enabled: false } });
+  // Said as the owner (the bank's own peer), never as a bot whose id is "owner".
+  assert.equal(x.messages[0].peer_id, "user", "the owner's line is the owner's");
+  assert.deepEqual(Object.keys(x.peers), ["user"], "no other peer in it");
+  assert.ok(!hbank(BANK).peers.has("bops-owner"), "no bot peer made for the owner");
   assert.ok(!honcho.calls.slice(h).some((c) => c.path.endsWith("/conclusions")), "no fact saved");
   const bad = await open(MAIN, { title: "   " });
   assert.deepEqual([bad.status, bad.body.error], [400, "Give the issue a title."]);

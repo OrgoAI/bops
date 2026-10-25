@@ -152,10 +152,11 @@ async function prepareLedger() {
 
 before(async () => {
   await prepareDb();
-  await prepareLedger();
+  // Held from before the ledger is made again: its grants would otherwise give back the access core-credit's test takes away for a moment.
   ledger = new pg.Client({ connectionString: TEST_DATABASE_URL });
   await ledger.connect();
   await ledger.query("SELECT pg_advisory_lock_shared(hashtext($1))", [LEDGER_IN_USE]);
+  await prepareLedger();
   orgo = await fakeProvider((g) => {
     const id = /^Bearer key-(.+)$/.exec(String(g.headers.authorization ?? ""))?.[1];
     if (g.path !== "/api/user/profile" || !id) return { status: 401, json: { error: "no" } };

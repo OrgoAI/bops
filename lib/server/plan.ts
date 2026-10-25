@@ -554,6 +554,7 @@ function shareFree(main: Bot, holder: Bot, why: PlanLimit, epoch: number) {
     role: "bot",
     botId: main.id,
     text: `I'll work on your free Bops computer, which ${holder.name} has, instead of one of my own. ${limitText(why)} Once your ${why.link ? "Orgo plan" : "plan"} has room, you can switch me to Its own under Computer in my Details.`,
+    bops: true,
   });
   return null;
 }
@@ -570,7 +571,12 @@ export async function noMainComputer(main: Bot) {
  * A computer of its own for `b`, copied from its main bot's (a fork, else a clone), when the plan has
  * room for it: one more computer, as big as the main bot's. When it hasn't, or Orgo turns the copy down
  * for the plan, `b` works on the main bot's computer instead and its chat says why: null then. Its task
- * still runs, and no copy is tried again.
+ * still runs, and no copy is tried again. A copy comes with the main computer's Bops runner, if it has
+ * one: the first command on it, once it's up, takes that off (sessions.ts ensureComputer, RUNNER_SCRUB).
+ * A main computer with a runner is cloned, never forked: a fork carries on from the running computer's
+ * memory, so its runner would go on as the main computer's (its threads driving that computer) until
+ * that command; a clone starts its runner afresh, which finds it's a copy before it reads anything
+ * (runner-start.ts).
  */
 export async function makeOwnComputer(b: Bot, main: Bot, name: string, epoch = stateEpoch()) {
   const from = main.computerId;
@@ -588,13 +594,16 @@ export async function makeOwnComputer(b: Bot, main: Bot, name: string, epoch = s
     if (short) return shareInstead(b, main, limitOf(short, plan, main), epoch);
     try {
       sameUser(epoch);
+      const clone = (forkErr?: Error) =>
+        orgo.clone(from, name, workspaceOf(b)).catch((cloneErr: Error) => {
+          if (planRefusal(cloneErr) || !forkErr) throw cloneErr;
+          throw new Error(/insufficient memory/i.test(forkErr.message) ? "the cloud server it has to share with the main bot's computer is full right now" : `${forkErr.message}; ${cloneErr.message}`);
+        });
+      if (getState().runners?.[from] || getState().runners?.[from.toLowerCase()]) return await clone();
       return await orgo.fork(from, workspaceOf(b)).catch((forkErr: Error) => {
         // Turned down for the plan: a clone would be too.
         if (planRefusal(forkErr)) throw forkErr;
-        return orgo.clone(from, name, workspaceOf(b)).catch((cloneErr: Error) => {
-          if (planRefusal(cloneErr)) throw cloneErr;
-          throw new Error(/insufficient memory/i.test(forkErr.message) ? "the cloud server it has to share with the main bot's computer is full right now" : `${forkErr.message}; ${cloneErr.message}`);
-        });
+        return clone(forkErr);
       });
     } catch (e) {
       const refused = await refusedFor(e, main);
@@ -620,6 +629,7 @@ function shareInstead(b: Bot, main: Bot, why: PlanLimit, epoch: number) {
     role: "bot",
     botId: b.id,
     text: `I'll work on ${main.name}'s computer instead of one of my own. ${limitText(why)} Once your ${why.link ? "Orgo plan" : "plan"} has room, you can switch me to Its own under Computer in my Details.`,
+    bops: true,
   });
   return null;
 }

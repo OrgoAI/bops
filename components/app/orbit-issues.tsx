@@ -292,10 +292,13 @@ export const issueStore = { watch, update, remove, loadHistory, list: (user: str
 
 export type IssueActs = { update: (id: string, patch: IssuePatch) => Promise<string | null>; remove: (id: string) => Promise<string | null>; history: (id: string) => void };
 
-/** A workspace's issues as the signed-in account sees them (null until they're in), and how to change them. */
-export function useIssues(ws: string, user = "") {
-  const subscribe = useCallback((changed: () => void) => watch(user, ws, changed), [user, ws]);
-  const list = useSyncExternalStore(subscribe, () => shared.get(keyOf(user, ws))?.list ?? null, () => null);
+/**
+ * A workspace's issues as the signed-in account sees them (null until they're in), and how to change
+ * them. `on` false: nothing read (null), for a caller that's there whether Knowledge is or not.
+ */
+export function useIssues(ws: string, user = "", on = true) {
+  const subscribe = useCallback((changed: () => void) => (on ? watch(user, ws, changed) : () => {}), [user, ws, on]);
+  const list = useSyncExternalStore(subscribe, () => (on ? (shared.get(keyOf(user, ws))?.list ?? null) : null), () => null);
   const updateOne = useCallback((id: string, patch: IssuePatch) => update(user, ws, id, patch), [user, ws]);
   const removeOne = useCallback((id: string) => remove(user, ws, id), [user, ws]);
   const historyOf = useCallback((id: string) => void loadHistory(user, ws, id), [user, ws]);

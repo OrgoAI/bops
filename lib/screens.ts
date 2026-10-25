@@ -23,13 +23,17 @@ export const LEFT_FOR_MS = 30 * 60_000;
 /** How long a thread that stopped to ask the user keeps its screen, so their answer picks it up there. */
 export const HOLD_MS = 15 * 60_000;
 
-/** The bot whose computer `b` works on (lib/server/screens.ts workComputer, from the state alone): on this Mac every bot has its own browsers. */
-export function computerOf(state: Pick<AppState, "host" | "bots">, b: Bot): Bot {
-  return state.host === "mac" ? b : workBot(b, state.bots);
+/**
+ * The bot whose computer `b` works on (lib/server/screens.ts workComputer, from the state alone): on this Mac
+ * every bot has its own browsers. Not in a workspace shared with the user (state.shared): `host` is the
+ * viewer's own app's, and the owner's bots work on their own computers wherever the viewer's work.
+ */
+export function computerOf(state: Pick<AppState, "host" | "bots" | "shared">, b: Bot): Bot {
+  return state.host === "mac" && !state.shared ? b : workBot(b, state.bots);
 }
 
 /** Whether two bots work on the same computer, so share its screens. */
-export function onSameComputer(state: Pick<AppState, "host" | "bots">, a: string, b: string): boolean {
+export function onSameComputer(state: Pick<AppState, "host" | "bots" | "shared">, a: string, b: string): boolean {
   if (a === b) return true;
   const x = state.bots.find((y) => y.id === a);
   const y = state.bots.find((z) => z.id === b);
