@@ -1,0 +1,5 @@
+- A new sidebar: Needs your attention, Favorites, and threads under each bot.
+- Bots show what they're doing: thinking, writing, talking or working.
+- Task routines keep running on the bot's computer with your Mac closed.
+- A new icon, and Boppy sings on the opening screen.
+- Skills are grouped by label, so bots find the right one.
