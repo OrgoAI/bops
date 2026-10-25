@@ -65,7 +65,72 @@ and `BOPS_PHONE_AREA` (the area code a plan's number is bought in, 415 unless se
 
 Every request from a Mac carries `Authorization: Bearer <the user's Orgo API key>`, the key the app
 got from "Sign in with Orgo". The cloud asks Orgo whose it is (`GET /api/user/profile`) and keeps
-the answer for 5 minutes by the key's SHA-256 (`cloud/auth.ts`). It never stores the key.
+the answer for 5 minutes by the key's SHA-256 (`cloud/auth.ts`). It never stores the key. A key Orgo
+turns down is a 401, with Orgo's `code` when it gave one (an identity token's says why).
+
+### A computer's runner
+
+A runner on one of the bots' computers (`docs/cloud-runner.md`) signs in as that computer, not as its
+user: with the computer's Orgo identity (an `orgo_vm_` token; its profile has `principal: { kind:
+"vm_identity", desktop_id, expires_at }`) or the computer's own key (`api_key.scope: "computer"`, with
+`computer_id`). Either is a computer (`CloudUser.computer`), kept 30 seconds at most and never past the
+token's end, so a computer deleted, moved, joined or paused reaches the cloud within that. An `orgo_vm_`
+token is a computer whatever Orgo says: one whose profile names no computer is refused everywhere, and so
+is a computer key Orgo never bound to its computer (`computer_key: true` without the computer scope).
+
+A computer calls only the routes marked `computer: true` (`cloud/http.ts`): `GET`/`PUT /v1/state`,
+`GET /v1/state/head`, `GET`/`POST /v1/messages`, `POST /v1/session`, and the providers' routes. Everything
+else is 403 `computer_not_allowed` ("A computer's identity can't do this."): numbers and lines, mail
+handles, Slack links, codes, backups, notices, usage, the iPhone's agent, and the tunnel (`/v1/connect`:
+one per user, so a computer there would drop the user's Mac).
+
+And it reaches only what its own bots use (`cloud/computer-scope.ts`, from the user's state, which it
+can't rewrite where it matters). The Mac mirrors each bot's keys, app access and computer to orgo-web on
+the user's own key, and orgo-web pins a runner's own calls (routines, Orbit, the access log, Logins) to
+the bots those rows put on its computer, so a computer that could rewrite them could reach any bot's:
+
+- **Its state:** a write over the version it read may change only its own threads (`Session.by`), its
+  bots' routines' runs (the clock, a passed skip going, a pause), how its bots are doing on it
+  (`computerStatus`, `computerRam`, `computerNeverReady`, `wakeFailed`, `tailnet`, `composio`), an
+  account's `usedAt`, a brain's sign-in on this computer, news held about its bots (added), its screens'
+  last threads, `usage` and `credits`, and its own requests for the user's OK (`appApprovals` with
+  `askedBy` its device, of its bots or a thread of its own): added unanswered, and taken out (cancelled, or
+  read once answered). Never a reply (`reply`: once, always or reject is the owner's, from a Bops of their
+  own), so a computer never says yes to itself (`appApprovals.<id>`), nor a change to one once made, nor a
+  bot's rules (`bots.<id>.permissions`). Anything else is 403 `computer_not_allowed` with `paths` (the first
+  20: `bots.<id>.keys`, `routines.<id>.goal`, `workspaces`). It never starts a user's state (403
+  `["state"]`), never uploads a whole one (the old builds' `PUT` without `base`), and never reads one with
+  the messages in it.
+- **Its messages:** written, changed and taken out only in its bots' chats (`bot:<id>`, and a chat one of
+  them is in), and only those read (`GET /v1/messages` skips the rest, its cursor past them). Only its
+  bots' own words (role `bot`, one of its bots) and Bops' notes (role `system`, naming none of the
+  others): never the user's, nor another bot's (`computer-scope.ts` computersMessage).
+- **Its session:** `agentmail.apiKey` is empty and `proxied` true: the pod key reaches every inbox of the
+  user's and lives on past the computer. Its mail goes through `/proxy/agentmail/*` (computers only),
+  sent on with the user's pod key, in its bots' own inboxes only (`messages`, `search`, a message, its
+  attachments, `send`, `reply`, `reply-all`, a thread).
+- **The providers** (`Spec.computers`, `Rule.computer` in `proxy.ts`, deny by default): OpenAI, Typesafe
+  and treg as the Mac; Honcho in its bots' workspaces' banks only (`<prefix>-bops`,
+  `<prefix>-bops-<workspace>`, or the bank a workspace shares), the list filtered to them; Composio's
+  catalog, a session only for one of its bots (`x-bops-bot`) with that bot's apps and accounts, a read-only
+  app read-only (`readOnlyHint`), connecting accounts and the sandbox off, and actions only in an account
+  the bot was given (a reading one where it may only read), never connecting, deleting or linking an
+  account, a sign-in setup, a raw API call or a trigger; AgentPhone only `POST /v1/messages`, from a line
+  its bots text the user from to one of the user's verified numbers.
+- **The user's OK** is the runner's to ask, as Claude Code's harness asks it (`lib/server/permission.ts`):
+  a bot's computer is trusted for its bots (it reads and writes their things and uses their accounts), so
+  Bops Cloud doesn't check its calls against the user's answers. What it holds to is who answers: a
+  computer never writes a reply (above), and someone the user shared a workspace with sees a request, read
+  only, and never answers it.
+
+Its device is the cloud's to set (`cloud/device.ts`: the same as the runner's own, from its computer
+id), and a state write saying another device is 403. Its open sockets and streamed answers are looked at
+again every 30 seconds (`server.ts watchComputer`): Orgo turning its credential down, or naming another
+computer for it, ends them; a socket also ends at its token's end; a streamed answer (an agent's events)
+outlives its token only while that computer keeps signing in afresh (`computerSeenAt`, under 2 minutes).
+It still reads the user's whole state and spends their AI credit (the identity spec's Q4). orgo-web
+answers a profile for an identity token only once `VM_IDENTITY_BOPS_CLOUD_READY=1`, which is set right
+after this is deployed and before `VM_IDENTITY=admins`.
 
 ### Which app
 
@@ -121,6 +186,9 @@ Webhooks are public and proven by the provider's signature instead.
 | 1 | `GET /v1/usage?from=&to=&tz=` | Mac | the user's metered use in a range, by kind, day and bot (`CloudUsage`; see "What's counted") |
 | 3 | `PUT /v1/slack/links` | Mac | where the user's bots are in Slack, for routing the Slack app's events |
 | 3 | `GET /v1/connect` (WebSocket) | Mac | the tunnel |
+| 1 | `GET /v1/live?ws=` (Server-Sent Events), `POST /v1/live` | Mac, iPhone | what each bot of a workspace is doing right now, to every device of the user's (see "Live") |
+| 1 | `GET /v1/live?project=`, `GET /v1/ws/<project>/state` | Mac | a workspace shared with the user, read only (see "Shared workspaces") |
+| 1 | `POST /v1/internal/members-changed` | orgo-web | someone's access to a project changed (signed; see "Shared workspaces") |
 | 3,4 | `POST /hooks/agentphone` | AgentPhone | texts and call turns for any user's number |
 | 3,4 | `POST /hooks/openai` | OpenAI | incoming GPT-Live calls over a SIP trunk (dormant) |
 | 3 | `POST /hooks/slack` | Slack | events from Bops' Slack app, for any user's bots |
@@ -138,7 +206,8 @@ Idempotent, safe to call at every app start; two at once for one user must not m
   so it's sealed (`crypto.ts`) in `bops.cloud_accounts` and the same one is handed back every time.
   The Mac uses AgentMail directly with it (REST and the WebSocket mail comes in on). AgentMail itself
   keeps that key inside the pod, and it has mail permissions only (inboxes, messages, drafts,
-  labels): no keys, pods, domains, webhooks, apps or account changes.
+  labels): no keys, pods, domains, webhooks, apps or account changes. A computer's runner never gets it
+  (`apiKey` empty, `proxied` true): its mail goes through `/proxy/agentmail` (above).
 - **AgentPhone:** a sub-account named `bops-<userId>` (found by name first, else
   `POST /v1/sub-accounts`). The Mac points each number's calls at its agent
   (`PATCH /v1/numbers/{id}/voice-routing {method: "agent"}` through the proxy, agent in voice mode
@@ -178,7 +247,8 @@ object is held only until its owner is recorded. Two SDK details: the Honcho SDK
 its baseURL, so the cloud also answers Honcho at `/v3/*`; and the Composio SDK sends its key as
 `x-api-key`, so the Mac adds `Authorization: Bearer <Orgo key>` to it (`defaultHeaders`).
 
-What keeps users apart, per service:
+What keeps users apart, per service (a computer's runner is held to less, its own bots' use: "A computer's
+runner" above):
 
 - **AgentPhone:** every request gets `X-Sub-Account-Id: <the user's sub-account>`, whatever the Mac
   sent. A sub-account only sees its own numbers, agents and messages, so that is the whole wall.
@@ -614,6 +684,73 @@ What Bops' front door (`edge/server.mjs`) served, now here, with nothing of any 
   `edge/public`), names of letters, digits and `-` only, `image/png` or `image/jpeg`. Slack shows
   them as each bot's `icon_url`.
 
+### Live
+
+What each bot of a workspace is doing right now (thinking, writing, speaking, working, idle), and a
+nudge when the workspace changed, streamed to every signed-in device that watches it (`live.ts`,
+`LiveEventIn` and `LiveEventOut` in `protocol.ts`). Nothing of it is saved: it's one hub in this
+process's memory, keyed by account and workspace, and a restart starts it over.
+
+- `GET /v1/live?ws=<workspace id>` (Orgo key as Bearer): Server-Sent Events, each one's `event:` its
+  type and `data:` JSON. First a `snapshot` of the bots that aren't idle, then what the device missed
+  since its `Last-Event-ID` when that's in the last 2 minutes and from this start (ids are
+  `<boot>-<seq>`), else `reset` (it reads the state afresh). Events are kept for that only in a
+  workspace watched now or within those 2 minutes, and 64 MB of them in all. A comment every 15
+  seconds keeps it open through Caddy (`flush_interval -1`). 20 streams per account and 5000 in all;
+  past that, 429, and the device goes on polling. A client that stops reading (256 KB behind) is cut
+  off and comes back with its `Last-Event-ID`.
+- `POST /v1/live { ws, events }`: up to 16 events in 4 KB, each checked to its exact shape:
+  `mood { botId, chatId?, mood, ttl? }`, `session { id, botId, status, activity? }`,
+  `routine { id, change }`, `call { botId, on }`. 120 events every 10 seconds per account, then
+  429 `live_busy`. Only into the caller's own account; `X-Bops-Device`
+  names the publisher (`by`), so a device can leave out its own. A mood lasts its ttl (15 seconds, at
+  most 60) unless said again: one that runs out leaves the snapshot and an `idle` goes out.
+- `state { hash | seq, by }` comes from the cloud itself: after a write of the user's state, to each
+  workspace watched now or within 2 minutes whose part of it (the workspace, its bots, chats, threads, routines and watched
+  screens) changed, `hash` the fingerprint of what its members are shown of it (see "Shared
+  workspaces"); after messages are written, to their chats' workspaces,
+  `seq` the newest. The usage ledger and each Mac's own settings are no workspace's, so they wake
+  nobody.
+
+Who may watch or publish goes through `canWatch` and `canPublish` alone: the account's own user, or
+(watching only) a member of the workspace's Orgo project (see "Shared workspaces"). Live is for the
+user's devices: a Cloud mode computer's runner never opens or publishes to it (`/v1/live` isn't a
+computer route, so `server.ts` refuses its token first, and `lib/server/persist.ts` keeps "live" among
+the Mac's loops); what its routines do reaches the devices through the "state" event its state writes
+send. Streams are counted by who opened them, so members can't use up the owner's 20.
+
+### Shared workspaces
+
+Someone the owner added to a Bops workspace's Orgo project watches it from their own Bops, read only
+(`members.ts`, `ws-slice.ts`; `WsAccess` and `SharedWsState` in `protocol.ts`). The owner picks, per
+person and per bot, None, Read or Write (`member-access.ts`, kept on the workspace as `memberAccess`;
+Write reads as Read until people can act in a shared workspace). For each bot they were given they see
+everything of it: all its chats, the owner's own messages there included, its threads with their notes
+and results, its routines, its watched screens, what Needs you and its moods as they happen. A group
+chat only when they were given every bot in it. Of a bot set to None, nothing. A message the owner
+kept "between us" is no different here: that mark only keeps things out of the shared memory, so what
+the owner wants kept from someone stays with a bot that person wasn't given. Never the owner's vault or
+logins, keys or key names, Macs, usage, channels, connected accounts or settings, who else is in it or
+what they may see, or anything of another workspace. Nobody but the owner changes anything: a member's
+publish only goes into their own account, and nothing here writes.
+
+- Who may is orgo-web's to say, with the caller's own Orgo key: `GET /api/projects/<id>/bops-role`
+  answers `{ role: owner | admin | member, ownerUserId, bopsWsId, name }`, else 404. Kept a minute per
+  caller and project (a no 15 seconds). A project whose `bopsWsId` is null (an Orgo without per
+  workspace projects, one "bops" project for all of them) is refused, 409 `not_shareable`.
+- `GET /v1/live?project=<id>`: the owner's stream of that workspace (see "Live"). While it's open it
+  asks orgo-web again every minute; once the answer is no, a `revoked` event goes out and it ends.
+- `GET /v1/ws/<id>/state`: `SharedWsState`, what the member is shown (the bots they were given, an
+  allow list of fields per kind) and the newest 200 messages of each of its chats, `hash` the same fingerprint the stream's
+  `state` events carry, `seq` the newest message write in its chats. `?have=<hash>.<seq>`: only
+  `{ unchanged: true }` when nothing changed; `?chat=<id>&before=<ms>&beforeId=<message id>`: one chat's
+  older page, the messages before the oldest the reader has (its time and id: one in the same millisecond
+  that comes before it is in the page; without `beforeId`, the ones before that millisecond).
+- `POST /v1/internal/members-changed { projectId, userId }`, from orgo-web after a member is removed,
+  leaves, has their role changed, or the project changes hands: signed as the plan notices are
+  (`BOPS_CLOUD_PLAN_SECRET`, see "Plans"; 404 unset, 401 signed wrong). What was kept for them goes and
+  their streams of it end (reconnecting asks orgo-web afresh); 204.
+
 ## The app's state
 
 The Mac app keeps no state of its own: signed in, its state is the user's here, and signing in on
@@ -633,21 +770,28 @@ user's other Macs hear of it, then swept hourly), and the rest is one blob in `a
 
 Every call names its user (`X-Bops-User`, which must be the key's: else 409 `wrong_user`), the
 protocol (`X-Bops-Protocol: 2`) and the Mac (`X-Bops-Device`). After a write the user's connected Mac
-gets a `state` frame and reads what changed; the others look at the head every 30 seconds. Builds
+gets a `state` frame and reads what changed, a device watching a workspace whose part changed gets a
+live `state` event (see "Live"), and the others look at the head every 30 seconds. Builds
 from before still `PUT /v1/state { version, state }` their whole state as a backup (its messages
 become rows) and `GET` it back with the messages in, until a newer build writes for the user
 (`protocol` 2): then the old upload is refused (426).
 
-Each app also says which state it may be given, `X-Bops-State-Level: 3` from 0.0.29 on (with every
-call and the tunnel, `lib/server/app-version.ts`; none counts as 2), and a write keeps the highest in
+Each app also says which state it may be given, `X-Bops-State-Level: 3` or more from 0.0.29 on (4 once
+routines may run on a cloud runner, a Bops on one of the bots' computers; with every call and the tunnel,
+`lib/server/app-version.ts`; none counts as 2), and a write keeps the highest in
 `protocol`. Once that's above an app's, every one of the calls above from it but the copy before
 "Start over" is refused (426 `state_too_new`), reads, merges and writes alike, and so is its tunnel
 (one it's on then is closed as replaced); its notices say to update. The copy is made from what's
 here and none of it goes back, and that Mac's Start over goes up once it's updated.
 0.0.28 runs a routine that runs every so often or before meetings over and over (its `nextRun` throws
 after the task started), a monthly one daily, and lists a bot with an app it has no access to as able
-to use it. What such a Mac changes meanwhile waits on it (`unsent-state.json`) and goes up merged once
-it's updated. A user whose Macs are all older is never marked: nothing changes for them.
+to use it, and one before level 4 runs every routine itself, a runner's too. What such a Mac changes
+meanwhile waits on it (`unsent-state.json`) and goes up merged once it's updated; a newer app that's
+still open when it's refused stops its routines until then (`lib/server/persist-cloud.ts` tooNew). One
+before level 4 doesn't stop them, so once one at level 4 wrote the user's state it's refused `/proxy/…`
+too (426 `state_too_new`, the state's level read again at most every minute: `state.ts` behindState),
+and the runs it would make a second time fail. A call says its level, or only its version (0.0.29's
+OpenAI and treg calls: below 0.0.30 is before level 4). A user whose Macs are all older is never marked: nothing changes for them.
 
 ## The main bot's chat from the phone
 
@@ -801,12 +945,14 @@ bot's chat from the phone").
 |---|---|
 | `server.ts` | puts the routes together, HTTP + upgrades, start and stop |
 | `config.ts`, `http.ts`, `auth.ts`, `crypto.ts`, `db.ts` | shared pieces |
+| `computer-scope.ts` | what a computer's runner may touch of its user's Bops: its bots, their chats, accounts, inboxes, lines and banks, and what of the state it may write (the app imports it too) |
 | `protocol.ts` | what the cloud and the app say to each other (both import it) |
 | `session.ts`, `proxy.ts`, `verify.ts`, `usage.ts`, `reconcile.ts` | 1 and 2: setup, the proxies, codes, metering, agent turns read back |
 | `pricing.ts`, `credit.ts` | what each use costs, and the AI credit it's paid from (the gate) |
 | `plans.ts`, `provision.ts`, `handles.ts` | each user's plan and what it brings the main bot (a number, an inbox), and each workspace's mail handle |
 | `ops.ts` | each user's bot number and email for Orgo's staff page (signed, read only) |
 | `tunnel.ts`, `hooks.ts`, `slack.ts`, `state.ts` | 3: the tunnel, webhooks, Slack, state |
+| `live.ts` | what each bot is doing right now, streamed to the user's devices (in memory only) |
 | `lines.ts`, `voice.ts`, `calls.ts` | 4: who owns each line, a call's turns answered here, GPT-Live calls (dormant) |
 | `agent.ts`, `agent-prompt.ts`, `honcho.ts` | 5: the main bot's chat from the phone, what the bot is told there, and its memory |
 | `style.ts` | how every bot writes and asks, and what Bops is: the words the Mac's bots and the cloud's share (the app imports it too) |
@@ -827,6 +973,15 @@ one of them or carries the right pairing code, never a stranger's. It matches a 
 links by the envelope's `team_id` or any `authorizations[].team_id`, as the cloud does (`teamsOf`
 in `slack.ts`), so a message in a channel shared with another workspace isn't dropped. Telegram and
 Discord stay on the Mac (their tokens are in its Keychain).
+
+Live on the Mac (`lib/server/live.ts`, `live-core.ts`; see "Live"): while signed in it publishes what
+its own bots are doing (typing or asking in a chat is thinking, a thread this Mac runs is working, the
+user's call is speaking) when that changes and every 5 seconds while it holds, idle when it ends, and
+its threads, routines and calls; and it keeps one stream open for the workspace the user is in. A
+`state` from another device or a `reset` reads the state at once; the other devices' moods go to the
+window (`liveMoods` in what `/api/state` answers, never saved). Dropped, the stream comes back after 1,
+2, 4… seconds up to a minute with jitter, a cloud without Live is asked every 15 minutes, and the
+30 second look at the head goes on as before. A sign-out, another account's sign-in, or quitting closes it.
 
 For calls, the app answers each turn the cloud replays (`lib/server/phone-voice.ts`, as JSON: the
 cloud speaks the filler) and follows `x-bops-caller` for who's calling or texting, never its own

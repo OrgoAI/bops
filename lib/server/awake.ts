@@ -49,3 +49,13 @@ setInterval(() => {
 
 /** Whether the Mac slept at any point after `since`. */
 export const sleptSince = (since: number) => naps.some((n) => n.to > since);
+
+/** When this server started: it wasn't running before (Bops was quit, or not yet open). */
+const started = Date.now();
+
+/**
+ * Whether this server ran, awake, from `at` until now: it had started by then and the Mac (or a runner's
+ * computer) never slept since. A routine due then that's late wasn't missed while it was off or asleep
+ * (routines.ts tick).
+ */
+export const awakeSince = (at: number) => started <= at && !sleptSince(at);

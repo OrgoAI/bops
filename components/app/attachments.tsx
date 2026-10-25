@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Message } from "@/lib/types";
+import { readAllowed } from "./view-only";
 
 /**
  * Images in chat: attaching them (the + button, pasting, dropping), the tray of what's about to be
@@ -129,6 +130,13 @@ export function MessageImages({ images, previews, align = "end" }: { images?: Pi
   const [open, setOpen] = useState<string | null>(null);
   const srcs = previews ?? (images ?? []).map((i) => `/api/uploads/${i.id}`);
   if (!srcs.length) return null;
+  // A workspace shared with the user: its images are the owner's, kept where they were sent from, not here.
+  if (!previews && !readAllowed(srcs[0]))
+    return (
+      <div className={`rounded-[14px] px-3 py-2 text-[12.5px] leading-4 text-[#6B6B6B] shadow-[0_0_0_1px_#E6E6E3] ${align === "end" ? "self-end" : "self-start"}`}>
+        {srcs.length === 1 ? "An image" : `${srcs.length} images`}. Images in a shared workspace aren&apos;t shown yet.
+      </div>
+    );
   const one = srcs.length === 1;
   const ratio = (i: number) => (images?.[i]?.w && images[i].h ? images[i].w! / images[i].h! : undefined);
   return (

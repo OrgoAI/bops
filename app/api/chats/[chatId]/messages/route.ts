@@ -10,11 +10,17 @@ export async function POST(request: Request, ctx: RouteContext<"/api/chats/[chat
   const unready = notReady();
   if (unready) return unready;
   const { chatId } = await ctx.params;
-  const { text, replyTo, images } = (await request.json()) as { text?: string; replyTo?: string; images?: { id: string; type: string; w?: number; h?: number }[] };
+  const { text, replyTo, images, lookingAt } = (await request.json()) as {
+    text?: string;
+    replyTo?: string;
+    images?: { id: string; type: string; w?: number; h?: number }[];
+    /** The app open beside the chat (lib/server/made-apps.ts), which a change the user asks for is about. */
+    lookingAt?: string;
+  };
   if (!chat(chatId)) return Response.json({ error: "no such chat" }, { status: 404 });
   const pics = (images ?? []).filter((i) => uploadPath(i.id)).slice(0, 10);
   if (!text?.trim() && !pics.length) return Response.json({ error: "empty message" }, { status: 400 });
-  void handleMessage(chatId, text?.trim() ?? "", replyTo, pics);
+  void handleMessage(chatId, text?.trim() ?? "", replyTo, pics, undefined, undefined, undefined, undefined, typeof lookingAt === "string" ? lookingAt : undefined);
   return Response.json({ ok: true });
 }
 

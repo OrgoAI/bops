@@ -242,11 +242,12 @@ The packaged app's server listens on 127.0.0.1 only. To let webhooks reach it ov
 scripts/release.sh          # or: npm run app:release
 ```
 
-It fetches the relay agent, builds the server (Next.js standalone), packs it into Bops.app with its own Node, and makes `dist-desktop/Bops-<version>-arm64.dmg` and `.zip`. Before it finishes, it starts the bundled server as a fresh install would and checks that it answers. The installed app keeps its local files (and, self-hosted, its state) in `~/Library/Application Support/Bops/server/.data`, and its log in `~/Library/Logs/Bops/server.log`.
+It fetches the relay agent and the ingot command, builds the server (Next.js standalone), packs it into Bops.app with its own Node, and makes `dist-desktop/Bops-<version>-arm64.dmg` and `.zip`. Before it finishes, it starts the bundled server as a fresh install would and checks that it answers. The installed app keeps its local files (and, self-hosted, its state) in `~/Library/Application Support/Bops/server/.data`, and its log in `~/Library/Logs/Bops/server.log`.
 
 A release needs:
 
 - **The relay agent** that routes the bots' Chrome through your Mac (Route through this Mac). `scripts/fetch-relay.sh` downloads it from a private Orgo repository, so a release build needs that access. Without it, `release.sh` stops.
+- **The ingot command** for the bots' computers (Linux, amd64 and arm64), which they work on an app's Ingot repo with. `scripts/fetch-ingot.sh` downloads it from a private Orgo repository too, checked against the release's SHA256SUMS. Without it, `release.sh` stops.
 - **A Developer ID Application certificate**, in the keychain or as `CSC_LINK` plus `CSC_KEY_PASSWORD` (`CSC_NAME` picks one when there are several). An Apple Development certificate is not enough. Without one, the script builds an unsigned app for testing on your own Mac.
 - **Notarization credentials:** an App Store Connect API key (`APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`), or an Apple ID (`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`).
 

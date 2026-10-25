@@ -44,9 +44,10 @@ BRAINS="${BOPS_BRAINS:-/root/.bops/brains}"
 WORK="${BOPS_WORKSPACE:-/workspace}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # What Claude Code may do without asking: what a Bops agent does on its own computer (the shell, files,
-# search and reading pages, a to-do list, helpers) and Bops' screen and browser tools. Anything else asks
-# the user in Bops first (the screen MCP's approve tool).
-ALLOWED="Bash,BashOutput,KillShell,Read,Edit,MultiEdit,Write,Glob,Grep,LS,WebFetch,WebSearch,TodoWrite,Task,Agent,mcp__screen,mcp__browser"
+# search and reading pages, a to-do list, helpers), Bops' screen and browser tools, and Ingot's tools for
+# an app's repo on this computer (a task on one has them). Anything else asks the user in Bops first (the
+# screen MCP's approve tool).
+ALLOWED="Bash,BashOutput,KillShell,Read,Edit,MultiEdit,Write,Glob,Grep,LS,WebFetch,WebSearch,TodoWrite,Task,Agent,mcp__screen,mcp__browser,mcp__ingot"
 usage() { echo "usage: bops-agent put|start|send|read|stop|close|terminal|unterm <thread> ..." >&2; exit 2; }
 CMD="${1:-}"; T="${2:-}"
 [[ "$T" =~ ^[A-Za-z0-9_-]+$ ]] || usage

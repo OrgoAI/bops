@@ -8,6 +8,7 @@ import { delimiter, join } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
+import { loopHere } from "./persist";
 
 /**
  * The Codex CLI that runs bots' tools on the user's Mac: `codex exec-server`, the Agents API's executor,
@@ -52,7 +53,8 @@ export const installStatus = () => install.status;
 
 /** Install the CLI into binDir(), unless an install is already running; `then` runs once this one ends, however it ended. */
 export function installCodex(then?: () => void) {
-  if (install.running) return;
+  // Codex here is for tasks on the Mac: a computer's runner has its own, from the Bops template.
+  if (install.running || !loopHere("codex")) return;
   install.status = { state: "installing" };
   install.running = download(binDir())
     .then((version) => void (install.status = { state: "installed", version }))

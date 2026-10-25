@@ -1,6 +1,7 @@
 import "server-only";
 import { computerBriefing, teamBriefing } from "./briefing";
-import { ABOUT_BOPS, SPEAKING } from "./style";
+import { appsOpen } from "@/lib/apps-access";
+import { aboutBops, SPEAKING } from "./style";
 import { howIWork } from "@/cloud/style";
 import { appsNote, placesNote } from "./skills";
 import { dataNote } from "./treg";
@@ -10,7 +11,7 @@ import { handleMessage } from "./chat";
 import { callEnded, callStarted } from "./attention";
 import { noteOutOfCredit, OUT_OF_CREDIT } from "./cloud";
 import { chose, decide } from "./decide";
-import { memoryBlock, saveToMemory, wsOf } from "./memory";
+import { memoryBlock, OWNER_WHO, saveToMemory, wsOf } from "./memory";
 import { addMessage, bot, getState, ownerLine, ownerName, update } from "./store";
 import { recordCallMinutes, usageTags } from "./usage";
 import { contactLine } from "./bots";
@@ -86,7 +87,8 @@ export async function voicePrompt(b: Bot, how: "live" | "turns" = "live") {
     howIWork(owner, b.persona?.slice(0, MAX_PERSONA_CHARS), true),
     "Talk like a capable teammate on a call: short, warm, natural. One or two sentences at a time. No lists.",
     SPEAKING,
-    ABOUT_BOPS,
+    // With Apps for an account they're open to (lib/apps-access.ts).
+    aboutBops(appsOpen(getState())),
     contactLine(b, true),
     // What it can use (through its delegate) and where else the user reaches it.
     appsNote(b, "call"),
@@ -157,7 +159,7 @@ export function endCall(botId: string, seconds: number, transcript?: { who: stri
   if (!phone) recordCallMinutes(botId, seconds);
   // The call goes into long-term memory like a chat, so what the user said out loud is remembered too.
   if (transcript?.length)
-    saveToMemory(wsOf(botId), "chat", botChatId(botId), transcript.slice(-200).map((t) => ({ who: t.who === "owner" ? "owner" : botId, text: t.text.slice(0, 2000) })), { chat: "call" });
+    saveToMemory(wsOf(botId), "chat", botChatId(botId), transcript.slice(-200).map((t) => ({ who: t.who === "owner" ? OWNER_WHO : botId, text: t.text.slice(0, 2000) })), { chat: "call" });
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);
   addMessage({ chatId: botChatId(botId), role: "system", text: `${phone ? "Phone call" : "Call"} ended · ${m ? `${m}m ` : ""}${s}s`, call: { seconds: Math.round(seconds), phone } });

@@ -1,9 +1,9 @@
 import "server-only";
 import { BRAIN_NAMES, BRAINS_ON, live, planName, type Brain, type BrainKind } from "@/lib/types";
 import { brainById, ensureBrainTools, ensureClaudeCode, ensureCodex, revealBrainKey } from "./brains";
-import { answerApp, askOwner } from "./composio";
+import { heldAsk } from "./permission";
 import { orgo } from "./orgo";
-import { id, ownerName, session } from "./store";
+import { ownerName, session } from "./store";
 
 /**
  * A bot's threads on its brain (lib/server/brains.ts Brain) instead of Bops agent: Claude Code or Codex on
@@ -143,7 +143,7 @@ export const claudeDriver: CliDriver = {
     await ensureBrainTools(computerId);
   },
   note: (owner) =>
-    `You run as Claude Code on this computer, for Bops. Your tools are Claude Code's own (Bash for the shell, Read, Edit and Write for files, WebSearch and WebFetch to look things up and read pages, TodoWrite, and Task for helpers) and Bops' (mcp__screen__* for the screen, ${owner}'s apps, signing in from their vault and screens for helpers; mcp__browser__* for the Chrome on your screen). Where the instructions above name a tool, use the one of yours that does that: web_search is WebSearch, the shell is Bash. Any other tool asks ${owner} in Bops first and waits for their answer; if they say no, don't do it another way.`,
+    `You run as Claude Code on this computer, for Bops. Your tools are Claude Code's own (Bash for the shell, Read, Edit and Write for files, WebSearch and WebFetch to look things up and read pages, TodoWrite, and Task for helpers) and Bops' (mcp__screen__* for the screen, ${owner}'s apps, signing in with their saved logins and screens for helpers; mcp__browser__* for the Chrome on your screen). Where the instructions above name a tool, use the one of yours that does that: web_search is WebSearch, the shell is Bash. Any other tool asks ${owner} in Bops first and waits for their answer; if they say no, don't do it another way.`,
   line: (text) => `${JSON.stringify({ type: "user", message: { role: "user", content: text } })}\n`,
   parse: (e) => {
     const parent = str(e.parent_tool_use_id);
@@ -217,7 +217,7 @@ export const codexDriver: CliDriver = {
     await ensureBrainTools(computerId);
   },
   note: (owner) =>
-    `You run as Codex on this computer, for Bops. Your tools are Codex's own (the shell, editing files, web search and your plan) and Bops' (the screen server's tools for the screen, ${owner}'s apps and signing in from their vault; the browser server's for the Chrome on your screen). Where the instructions above name a tool, use the one of yours that does that: web_search is your web search, the shell is your shell. You have no helpers here, so do every part yourself. What would change ${owner}'s apps (sending, posting, paying) asks them in Bops first and waits for their answer; if they say no, don't do it another way.`,
+    `You run as Codex on this computer, for Bops. Your tools are Codex's own (the shell, editing files, web search and your plan) and Bops' (the screen server's tools for the screen, ${owner}'s apps and signing in with their saved logins; the browser server's for the Chrome on your screen). Where the instructions above name a tool, use the one of yours that does that: web_search is your web search, the shell is your shell. You have no helpers here, so do every part yourself. What would change ${owner}'s apps (sending, posting, paying) asks them in Bops first and waits for their answer; if they say no, don't do it another way.`,
   line: (text) => `${JSON.stringify({ text })}\n`,
   parse: (e) => {
     if (e.type === "thread.started") return [{ type: "started", session: str(e.thread_id), failed: [] }];
@@ -486,7 +486,7 @@ export async function cliTurn(run: CliRun, t: CliTurn): Promise<string> {
       poke = done;
       t.signal.addEventListener("abort", done, { once: true });
     });
-  const startedAt = Date.now();
+  let startedAt = Date.now();
   let lastAt = Date.now();
   const giveUp = async (why: string): Promise<never> => {
     await stopCli(run).catch(() => {});
@@ -500,9 +500,13 @@ export async function cliTurn(run: CliRun, t: CliTurn): Promise<string> {
     else if (!(await sendCli(run, t.input))) await begin(true);
     for (;;) {
       if (t.signal.aborted) await giveUp("Stopped by you");
+      // Time a tool waited on the user's OK (approveTool) isn't the turn running long, nor stalling.
+      if (asking.get(run.sessionId)) {
+        startedAt += Date.now() - lastAt;
+        lastAt = Date.now();
+      }
       if (Date.now() - startedAt > t.timeoutMs) await giveUp(t.tooLong);
-      if (!asking.get(run.sessionId) && Date.now() - lastAt > t.idleMs) await giveUp(t.stalled);
-      if (asking.get(run.sessionId)) lastAt = Date.now();
+      if (Date.now() - lastAt > t.idleMs) await giveUp(t.stalled);
       // The user's words since: in now, and Claude Code takes them after what it's doing. Codex doesn't
       // steer: they stay unsent, and the session runner gives them to it as the next turn (sessions.ts run).
       const st = run.driver.steers ? t.steer() : undefined;
@@ -594,9 +598,10 @@ const callDetail = (input: Record<string, unknown>) =>
 /**
  * Claude Code asks whether a thread may use a tool it may not use by itself (the screen MCP's approve tool, its
  * --permission-prompt-tool; composio.ts appCall checks it's the thread's own bot and the thread is running).
- * The user sees the app approval card ("Sam wants to run: …") and says yes or no. No answer within
- * cliTiming.approveMs, or the thread stopped meanwhile, is a no, and the card goes. Answers what the approve
- * tool hands Claude Code: allow, or deny with why.
+ * The user sees the request's card ("Sam wants to use Bash") and answers. Claude Code holds the call meanwhile,
+ * so it can't pause the way Bops' own engines do: the request is held (permission.ts heldAsk). No answer within
+ * cliTiming.approveMs, or the thread stopped meanwhile, is a no, and the request is taken out. Answers what the
+ * approve tool hands Claude Code: allow, or deny with why (the user's own words, when they said what to do instead).
  */
 export async function approveTool(botId: string, sessionId: string, args: Record<string, unknown>): Promise<string> {
   const tool = cut(str(args.tool) ?? "a tool", 80);
@@ -608,31 +613,32 @@ export async function approveTool(botId: string, sessionId: string, args: Record
   // one the model can call too), so the user is never shown a card for something made up.
   if (!/^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(tool) || /^mcp__(screen|browser)__/.test(tool))
     return JSON.stringify({ behavior: "deny", message: "That isn't a tool Claude Code asks about. Don't call approve yourself." });
-  const approvalId = id("apr");
   asking.set(sessionId, (asking.get(sessionId) ?? 0) + 1);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let check: ReturnType<typeof setInterval> | undefined;
   try {
-    const answer = await new Promise<"yes" | "no" | "late" | "gone">((resolve) => {
-      void askOwner({ botId, sessionId, app: "brain", action: tool, title: shortCall(tool, input), detail: callDetail(input) }, approvalId).then((yes) => resolve(yes ? "yes" : "no"));
-      timer = setTimeout(() => resolve("late"), cliTiming.approveMs);
-      check = setInterval(() => {
-        const s = session(sessionId);
-        if (!s || !live(s)) resolve("gone");
-      }, 1000);
-    });
-    if (answer === "late" || answer === "gone") answerApp(approvalId, false);
-    if (answer === "yes") return JSON.stringify({ behavior: "allow" });
+    const name = /^mcp__.+?__(.+)$/.exec(tool)?.[1] ?? tool;
+    const call = shortCall(tool, input);
+    const answer = await heldAsk(
+      { action: `Use ${name}`, resources: [call], preview: callDetail(input), kind: "brain" },
+      { botId, threadId: sessionId },
+      {
+        ms: cliTiming.approveMs,
+        alive: () => {
+          const s = session(sessionId);
+          return !!s && live(s);
+        },
+      },
+    );
+    if (typeof answer !== "string" && answer.reply !== "reject") return JSON.stringify({ behavior: "allow" });
     const why =
-      answer === "no"
-        ? `${owner} said no. Don't do it, and don't do it another way.`
+      typeof answer !== "string"
+        ? answer.message
+          ? `${owner} said no: ${answer.message}`
+          : `${owner} said no. Don't do it, and don't do it another way.`
         : answer === "late"
           ? `${owner} didn't answer in time, so it wasn't done. Don't do it another way: say in your answer what you needed.`
           : "This task was stopped.";
     return JSON.stringify({ behavior: "deny", message: why });
   } finally {
-    clearTimeout(timer);
-    clearInterval(check);
     const n = (asking.get(sessionId) ?? 1) - 1;
     if (n > 0) asking.set(sessionId, n);
     else asking.delete(sessionId);

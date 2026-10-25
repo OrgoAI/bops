@@ -109,7 +109,8 @@ if (process.argv[2] === "--render") {
   assert.match(limit, /Boppy is waiting on you Finish on Bops agent Wait Never mind Something else/, limit);
   console.log("ok render: at its limit, the card has Finish on Bops agent and Wait");
   const chat = text(renderToStaticMarkup(h(ChatView, { state: state(v.asking, { appApprovals: [v.approval] }), chat: v.chat, wide: false, onOpenThread: noop, onShowBot: noop, onShowMac: noop, onShowScreen: noop, call: null, onCall: noop, callSlot: noop })));
-  assert.match(chat, /Boppy wants to run: NotebookEdit \/workspace\/report\.ipynb For “Asks” notebook path: \/workspace\/report\.ipynb new source: print\(1\) Do it Don’t/, chat);
+  assert.match(chat, /Boppy wants to use NotebookEdit For “Asks” NotebookEdit \/workspace\/report\.ipynb notebook path: \/workspace\/report\.ipynb new source: print\(1\) Deny Always allow Allow once Tell the bot what to do instead/, chat);
+  assert.equal((chat.match(/Boppy wants to use/g) ?? []).length, 1, "one card for the request: the thread waiting on it shows as that card, not a second one");
   console.log("ok render: a brain's approval says what it wants to run");
   // Open in the terminal (the takeover the server made): it says where, and a reply closes it; done, it offers to open; a Codex thread has its badge and no terminal.
   const term = text(renderToStaticMarkup(h(ThreadSheet, { state: state(v.terminal, { takeover: v.takeover }), session: v.terminal, onClose: noop, onShowComputer: noop, onShowScreen: noop })));
@@ -123,7 +124,7 @@ if (process.argv[2] === "--render") {
   assert.match(codex, /^Totals Codex Boppy · /, codex);
   assert.ok(!/Open in terminal/.test(codex));
   console.log("ok render: a thread says which brain ran it, and one Claude Code ran opens in a terminal");
-  for (const t of [signIn.match(/Boppy needs.*Dismiss/)[0], limit.match(/Boppy is waiting.*Wait/)[0], chat.match(/Boppy wants to run.*Don’t/)[0], term]) assert.ok(!/[–—]/.test(t), t);
+  for (const t of [signIn.match(/Boppy needs.*Dismiss/)[0], limit.match(/Boppy is waiting.*Wait/)[0], chat.match(/Boppy wants to use.*Allow once/)[0], term]) assert.ok(!/[–—]/.test(t), t);
   process.exit(0);
 }
 
@@ -332,7 +333,8 @@ const flagOff = (f) => rmSync(join(FLAGS, f), { force: true });
 process.env.BOPS_CLOUD_URL = "https://cloud.test";
 process.env.BOPS_ORGO_ORIGIN = "https://orgo.test";
 globalThis.bopsOrgoKey = "sk_orgo_test";
-const USER = { id: "u_1", email: "me@acme.test", name: "Maya" };
+// An @orgo.ai account, so Bops' own skills for apps are its bots' (lib/apps-access.ts); a test signs in as someone else.
+const USER = { id: "u_1", email: "me@orgo.ai", name: "Maya" };
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
 const cloudState = { version: 0, seq: 0, blob: null };
@@ -390,9 +392,12 @@ const runHere = (c, command) =>
       (err, stdout, stderr) => resolve({ output: `${stdout}${stderr}`, exit_code: err ? (typeof err.code === "number" ? err.code : 1) : 0 }),
     ),
   );
+/** Set: copying a bot's skills to its computer fails (a full disk), as copySkillsToComputer's one bash call per piece sees it. */
+let skillCopyFails = false;
 async function bash(id, command) {
   const c = pc(id);
   c.commands.push(command);
+  if (skillCopyFails && command.startsWith("set -e\nrm -rf /workspace/capabilities/skills")) return { output: "No space left on device", exit_code: 1 };
   if (command.startsWith("md5sum ")) return { output: "", exit_code: 0 };
   const write = /^(?:mkdir -p \S+ && )?echo ([A-Za-z0-9+/=]+) \| base64 -d > (\S+) && chmod (\d+) \2 && echo ok$/.exec(command);
   if (write) {
@@ -474,6 +479,8 @@ const X = await import(`${root}/lib/server/sessions.ts`);
 const C = await import(`${root}/lib/server/cli-agents.ts`);
 const A = await import(`${root}/lib/asks.ts`);
 const Cx = await import(`${root}/lib/server/composio.ts`);
+const P = await import(`${root}/lib/server/permission.ts`);
+P.askTimingHeld.pollMs = 20;
 C.cliTiming.pollMs = 25;
 
 await S.bindSignIn(USER.id, "sk_orgo_test");
@@ -511,7 +518,8 @@ const details = (id) => thread(id).steps.map((x) => x.detail);
 /** Threads as the server left them, for the --render pass. */
 const views = {};
 const { screenMap } = await import(`${root}/lib/screens.ts`);
-const { DISPLAYS } = await import(`${root}/lib/types.ts`);
+const T = await import(`${root}/lib/types.ts`);
+const { DISPLAYS } = T;
 const screenMapOf = () => screenMap(S.getState(), main.id);
 
 /* ---------------- Not signed in, then signed in ---------------- */
@@ -561,7 +569,7 @@ await test("signed in there, the thread carries on: Claude Code on its screen, f
   assert.equal(arg("--session-id"), sid1, "a new session, under the id Bops keeps");
   assert.ok(!r.args.includes("--resume"));
   assert.equal(arg("--permission-prompt-tool"), "mcp__screen__approve");
-  assert.deepEqual(arg("--allowedTools").split(","), ["Bash", "BashOutput", "KillShell", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "TodoWrite", "Task", "Agent", "mcp__screen", "mcp__browser"]);
+  assert.deepEqual(arg("--allowedTools").split(","), ["Bash", "BashOutput", "KillShell", "Read", "Edit", "MultiEdit", "Write", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "TodoWrite", "Task", "Agent", "mcp__screen", "mcp__browser", "mcp__ingot"]);
   for (const a of ["--dangerously-skip-permissions", "--bare", "--permission-mode"]) assert.ok(!r.args.includes(a), `never ${a}`);
   const dir = agentDir(t1);
   assert.equal(arg("--mcp-config"), join(dir, "mcp.json"));
@@ -678,19 +686,23 @@ await test("a tool it may not use by itself asks the user with the approval card
   await until(() => runs().some((r) => heardBy(r.pid).some((h) => h.got?.startsWith("HANG while"))), "it to start");
   const key = Cx.appsKeyFor(main.id);
   const yes = Cx.appCall(s.id, key, "approve", { tool: "NotebookEdit", input: { notebook_path: "/workspace/report.ipynb", new_source: "print(1)" } });
-  const card = await until(() => S.getState().appApprovals?.find((a) => a.sessionId === s.id), "the card");
-  assert.equal(card.app, "brain");
-  assert.equal(card.title, "NotebookEdit /workspace/report.ipynb");
-  assert.equal(card.action, "NotebookEdit");
-  assert.match(card.detail, /notebook path: \/workspace\/report\.ipynb\nnew source: print\(1\)/);
+  const card = await until(() => S.getState().appApprovals?.find((a) => a.threadId === s.id), "the card");
+  assert.equal(card.kind, "brain");
+  assert.equal(card.action, "Use NotebookEdit");
+  assert.deepEqual(card.resources, ["NotebookEdit /workspace/report.ipynb"]);
+  assert.match(card.preview, /notebook path: \/workspace\/report\.ipynb\nnew source: print\(1\)/);
   views.approval = structuredClone(card);
   views.asking = structuredClone(thread(s.id));
-  Cx.answerApp(card.id, true);
+  // Shared, unanswered, this Bops's own (held by its run: Claude Code holds the call), and its thread Waiting for your OK, from the request alone.
+  assert.deepEqual([card.reply, card.askedBy, card.resume], [undefined, S.stateDevice() ?? undefined, { engine: "held" }]);
+  assert.equal(T.waitsForOk(thread(s.id), S.getState()), true);
+  assert.equal(P.replyToAsk(card.id, "once"), undefined);
   assert.deepEqual(JSON.parse((await yes).text), { behavior: "allow" });
+  assert.ok(!S.getState().appApprovals?.some((a) => a.id === card.id), "read and taken out");
   const no = Cx.appCall(s.id, key, "approve", { tool: "mcp__github__create_issue", input: { title: "Bug" } });
-  const card2 = await until(() => S.getState().appApprovals?.find((a) => a.sessionId === s.id), "the second card");
-  assert.equal(card2.title, "create_issue Bug");
-  Cx.answerApp(card2.id, false);
+  const card2 = await until(() => S.getState().appApprovals?.find((a) => a.threadId === s.id), "the second card");
+  assert.deepEqual([card2.action, card2.resources], ["Use create_issue", ["create_issue Bug"]]);
+  P.replyToAsk(card2.id, "reject");
   const denied = JSON.parse((await no).text);
   assert.equal(denied.behavior, "deny");
   assert.match(denied.message, /^Maya said no\. Don't do it, and don't do it another way\.$/);
@@ -699,7 +711,7 @@ await test("a tool it may not use by itself asks the user with the approval card
   C.cliTiming.approveMs = 19 * 60_000;
   assert.equal(late.behavior, "deny");
   assert.match(late.message, /didn't answer in time/);
-  assert.ok(!S.getState().appApprovals?.some((a) => a.sessionId === s.id), "its card went");
+  assert.ok(!S.getState().appApprovals?.some((a) => a.threadId === s.id), "its card went");
   // Only a running thread of its own bot, by its secret; and only a thread a brain runs asks this way.
   assert.equal((await Cx.appCall(s.id, "wrong-key", "approve", { tool: "Bash", input: {} })).status, 403);
   X.stopSession(s.id);
@@ -1090,6 +1102,40 @@ await test("the brain folder's settings never send its sign-in or key anywhere, 
   rmSync(join(pc(PC).dir, "workspace", ".claude"), { recursive: true, force: true });
 });
 
+await test("its skills couldn't be copied to its computer: that run's briefing has them in full, Bops' own too, not only a pointer to INDEX.md", async () => {
+  const before = readFileSync(join(agentDir(t1), "prompt.md"), "utf8");
+  assert.match(before, /read \/workspace\/capabilities\/skills\/INDEX\.md first, open the label that fits the job there/, "copied: it reads them there");
+  assert.doesNotMatch(before, /couldn't be copied/);
+  skillCopyFails = true;
+  // Copied there before, unchanged since, would send nothing: as if this server had never copied them.
+  globalThis.bopsSkillsCopied?.delete(PC);
+  try {
+    const s = X.startSession({ botId: main.id, goal: "Change the landing page", title: "Landing page", where: "cloud", fresh: true });
+    const t = await ended(s.id);
+    assert.equal(t.status, "done", t.error);
+    const prompt = readFileSync(join(agentDir(s.id), "prompt.md"), "utf8");
+    assert.match(prompt, /\n\nYour skills couldn't be copied to your computer for this run, so INDEX\.md and their folders in capabilities\/skills may be missing or out of date: here they are instead, how your workspace does jobs it was shown before and Bops' own\./);
+    assert.match(prompt, /\n\nSkill: Work on an app with Ingot \(Bops' own\)\n\n# Work on an app with Ingot\n/, "Bops' own in full");
+    assert.ok(prompt.indexOf("couldn't be copied") < prompt.indexOf("You run as Claude Code on this computer"), "before what it's told about itself");
+    assert.ok(!/[–—]/.test(prompt.slice(prompt.indexOf("couldn't be copied"), prompt.indexOf("You run as Claude Code"))), "no long dashes in it");
+    assert.ok(warned.some((w) => w.startsWith(`[skills] ${s.id}: copying skills: No space left on device`)), warned.join(" | "));
+    // Signed in as someone apps aren't open to: none of Bops' own skills for apps in full either.
+    const was = S.getState().account;
+    S.update((st) => (st.account = { user: { ...USER, email: "me@acme.test" }, signedInAt: Date.now() }));
+    globalThis.bopsSkillsCopied?.delete(PC);
+    try {
+      const o = X.startSession({ botId: main.id, goal: "Change the pricing page", title: "Pricing page", where: "cloud", fresh: true });
+      const ot = await ended(o.id);
+      assert.equal(ot.status, "done", ot.error);
+      assert.doesNotMatch(readFileSync(join(agentDir(o.id), "prompt.md"), "utf8"), /Skill: [^\n]+ \(Bops' own\)/);
+    } finally {
+      S.update((st) => (st.account = was));
+    }
+  } finally {
+    skillCopyFails = false;
+  }
+});
+
 await test("a thread Bops agent took over stays on Bops agent when its bot goes back to the brain", async () => {
   const s = X.startSession({ botId: main.id, goal: "Plan the launch", title: "Launch", where: "cloud", fresh: true });
   let t = await ended(s.id);
@@ -1245,6 +1291,8 @@ if (REAL_CLAUDE) {
     fake("real-claude", `env | LC_ALL=C sort > ${JSON.stringify(envFile)}\nunset CLAUDE_CONFIG_DIR\nexport USER="$(/usr/bin/id -un)"\nexec ${JSON.stringify(real)} "$@"`);
     c.home = REAL_HOME;
     const brain = { id: "brain_real", kind: "claude", name: "Claude Code", auth: "plan", bots: [], workspaceId: "ws_main", createdAt: 3 };
+    // The user's brain, as every start of its process reads it again (cli-agents.ts brainNow).
+    S.update((st) => st.brains.push(structuredClone(brain)));
     const sid = "ses_real_" + Date.now().toString(36);
     const cli = (await import("node:crypto")).randomUUID();
     const run = await C.openRun({ sessionId: sid, computerId: c.id, display: 100, brain, driver: C.claudeDriver, cli, resume: false, mcp: { mcpServers: {} }, prompt: "Keep every answer to one word.", args: ["--max-turns", "1"] });
@@ -1269,6 +1317,7 @@ if (REAL_CLAUDE) {
       assert.match(answer, /\bok\b/i, `its answer: ${answer}`);
     } finally {
       await C.closeCli(run).catch(() => {});
+      S.update((st) => (st.brains = st.brains.filter((x) => x.id !== brain.id)));
     }
     assert.equal(startedAs, cli, "it began the session under Bops' id, as its init said");
     const env = readFileSync(envFile, "utf8");

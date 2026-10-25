@@ -74,7 +74,7 @@ export function needsSignIn(state: AppState, x: Brain): Bot | undefined {
  * key brain's key isn't there.
  */
 export function brainLine(state: AppState, x: Brain, keys?: string[]): string {
-  if (x.auth === "key") return `Key: ${x.keyName ?? BRAIN_KEYS[x.kind]}${keys && !keys.includes(x.keyName ?? BRAIN_KEYS[x.kind]) ? " · not in your Vault" : ""}`;
+  if (x.auth === "key") return `Key: ${x.keyName ?? BRAIN_KEYS[x.kind]}${keys && !keys.includes(x.keyName ?? BRAIN_KEYS[x.kind]) ? " · not in Logins" : ""}`;
   const going = x.signingIn;
   // Whose computer it is: the bot that has it (a computer that's gone isn't anyone's any more).
   const owner = (computerId: string) => state.bots.find((b) => b.computerId === computerId)?.name;
@@ -346,9 +346,9 @@ const choice = (on: boolean) => `flex flex-1 flex-col gap-0.5 rounded-[12px] px-
 const SIGN_INS: Record<BrainKind, { id: BrainAuth; name: string; hint: string }[]> = {
   claude: [
     { id: "plan", name: "Claude account with subscription", hint: "Pro, Max, Team, or Enterprise. You sign in with Claude Code's own sign-in on the bot's computer." },
-    { id: "key", name: "Anthropic API key", hint: "Your key from the Vault. Usage is billed to your Anthropic account." },
+    { id: "key", name: "Anthropic API key", hint: "Your key from Logins. Usage is billed to your Anthropic account." },
   ],
-  codex: [{ id: "key", name: "OpenAI API key", hint: "Your key from the Vault. Usage is billed to your OpenAI account." }],
+  codex: [{ id: "key", name: "OpenAI API key", hint: "Your key from Logins. Usage is billed to your OpenAI account." }],
 };
 
 /**
@@ -455,14 +455,14 @@ export function AddBrain({
           {auth === "key" &&
             (saved ? (
               <span className="text-[12px] leading-4 text-[#6B6B6B]">
-                Uses <span className="font-mono text-[11.5px] text-ink">{saved.name}</span> from your Vault{saved.scope === "workspace" ? ", this workspace's" : ""}.
+                Uses <span className="font-mono text-[11.5px] text-ink">{saved.name}</span> from Logins{saved.scope === "workspace" ? ", this workspace's" : ""}.
               </span>
             ) : (
               <span className="flex flex-wrap items-center gap-2 text-[12px] leading-4 text-[#6B6B6B]">
-                {keys === null ? "Checking your Vault" : `Add your ${vendor} key in the Vault first. Only ${BRAIN_NAMES[kind ?? "claude"]} on the bot's computer gets it.`}
+                {keys === null ? "Checking Logins" : `Add your ${vendor} key in Logins first. Only ${BRAIN_NAMES[kind ?? "claude"]} on the bot's computer gets it.`}
                 {keys !== null && (
                   <button type="button" onClick={onOpenVault} className="font-medium text-ink underline-offset-2 hover:underline">
-                    Open the Vault
+                    Open Logins
                   </button>
                 )}
               </span>

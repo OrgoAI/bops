@@ -1,12 +1,13 @@
 import "server-only";
 import { chose, decide } from "./decide";
 import { fullAccessOn } from "./full-access";
+import { onRunner } from "./persist";
+import { MAC_WORDS } from "./runner";
 import { bot, getState, ownerName } from "./store";
 
 export type Where = "mac" | "cloud" | "ask";
 
-/** Where a new task runs, from its words (chooseWhere). Moving work already under way takes more: asksForMac. */
-const MAC_WORDS = /\b(on|from|using|use|with) my (mac|macbook|laptop|computer)\b|\blocally\b|\bon this mac\b/i;
+/** Where a new task runs, from its words (chooseWhere; MAC_WORDS, which a routine goes by too: runner.ts pinnedToMac). Moving work already under way takes more: asksForMac. */
 const CLOUD_WORDS = /\b(in the cloud|on your (own )?computer|on your (cloud )?machine)\b/i;
 
 /** The user's Mac by name: "on my Mac", "use my MacBook Pro", "to this laptop", "on the Mac" (not the Mac App Store). */
@@ -61,6 +62,25 @@ const BUT_ANYWHERE = /\b(?:anywhere|anything|everywhere|everything|nowhere|all|n
  * there may have their files, apps and a shell, and its goal was written from someone else's words.
  */
 export async function chooseWhere(botId: string, goal: string, asked: "mac" | "cloud" | "auto" = "auto", opts: { outside?: boolean } = {}): Promise<Where> {
+  return (await whereFor(botId, goal, asked, opts)) ?? "cloud";
+}
+
+/**
+ * Where the Mac would send a run of a routine left to Bops (where auto), worked out ahead of its runs
+ * (routines.ts pickWhere): chooseWhere's way, and "ask" is the cloud, as a routine's run never stops to
+ * ask (sessions.ts route). Null when it can't say for good now: this Mac can't take bots yet (picked once
+ * it can), or Jev didn't answer.
+ */
+export async function routinePick(botId: string, goal: string): Promise<"mac" | "cloud" | null> {
+  if (onRunner()) return null;
+  const to = await whereFor(botId, goal, "auto", {});
+  return to === null ? null : to === "mac" ? "mac" : "cloud";
+}
+
+/** chooseWhere, and null where it would take the cloud for want of an answer: no Mac Bops can use, or none from Jev. */
+async function whereFor(botId: string, goal: string, asked: "mac" | "cloud" | "auto", opts: { outside?: boolean }): Promise<Where | null> {
+  // A computer's runner is on the bot's computer, with no Mac and nobody to ask: it runs only what needs no Mac (runner.ts pinnedToMac).
+  if (onRunner()) return "cloud";
   const state = getState();
   const mac = state.mac;
   // Full access is kept on this Mac, not in the state (full-access.ts).
@@ -72,7 +92,7 @@ export async function chooseWhere(botId: string, goal: string, asked: "mac" | "c
   const b = bot(botId);
   if (b?.runsOn === "mac" || b?.runsOn === "cloud") return b.runsOn;
   // Without a Mac Bops can use, there's only the cloud.
-  if (!mac?.ready) return "cloud";
+  if (!mac?.ready) return null;
   const rule = mac.rules.find((r) => new RegExp(`\\b${r.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(goal));
   if (rule) return "mac";
   const owner = ownerName();
@@ -97,7 +117,7 @@ export async function chooseWhere(botId: string, goal: string, asked: "mac" | "c
     { botId },
   );
   const pick = chose(a?.where);
-  if (!pick) return "cloud";
+  if (!pick) return null;
   if (pick.choice === "mac" && pick.confidence >= 0.65) return "mac";
   if (pick.choice === "cloud" && pick.confidence >= 0.6) return "cloud";
   return "ask";

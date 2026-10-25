@@ -617,6 +617,520 @@ assert.deepEqual(
 globalThis.bopsOrgoWorkspace = undefined;
 console.log("ok - a kept workspace id that's gone is looked up again");
 
+/* ---------------- 10b. Access to the workspace's bots ---------------- */
+
+// Kept on the Bops workspace whose sheet it is (the one findBopsWorkspace is asked for: here the default), by email or
+// a guest's "user:<id>", once Orgo has the invite or the change; never a key the window sent; gone with the person.
+const S = await import(`${root}/lib/server/store.ts`);
+const W = await import(`${root}/lib/server/workspaces.ts`);
+const sheetWs = () => S.getState().workspace ?? "ws_main";
+/** Each entry's levels (when it was set, MemberAccess.at and invite, is checked on its own below). */
+const levels = (map) => map && Object.fromEntries(Object.entries(map).map(([k, a]) => [k, { others: a.others, bots: a.bots }]));
+const rawKept = () => S.getState().workspaces?.find((w) => w.id === sheetWs())?.memberAccess;
+const kept = () => levels(rawKept());
+const NONE = { others: "none", bots: {} };
+const accessOf = (body) => Object.fromEntries([...body.people.map((p) => [p.id, p.access]), ...body.invites.map((i) => [i.email, i.access])]);
+replies = usual();
+list = { members: MEMBERS, invites: INVITES, seats: seatsOf() };
+assert.equal(kept(), undefined, "nothing kept yet");
+r = await get();
+assert.deepEqual(accessOf(r.body), { "u-guest": NONE, "u-jamie": NONE, "u-sam": NONE, "pat@example.com": NONE, "old@example.com": NONE }, "nobody kept: no bot for anyone");
+// Inviting with access: kept once Orgo has the invite, cleaned (a level that isn't one is none, a bot at `others`' level
+// isn't named, ids that couldn't be a bot's are dropped).
+n = calls.length;
+r = await route("POST", {
+  email: " Lee@Example.COM ",
+  role: "viewer",
+  access: { others: "read", bots: { boppy: "write", otto: "none", rook: "read", iris: "admin", ["x".repeat(81)]: "write", "": "write" } },
+});
+assert.equal(r.status, 200);
+assert.deepEqual(r.body, { email: "lee@example.com", role: "viewer", emailSent: true }, "the answer is as before");
+assert.deepEqual(kept(), { "lee@example.com": { others: "read", bots: { boppy: "write", otto: "none", iris: "none" } } }, "kept by email, cleaned");
+assert.ok(
+  calls.slice(n).every((c) => !JSON.stringify(c.body ?? {}).includes("boppy")),
+  "bot access never goes to Orgo",
+);
+// The sheet reads it back on the invite.
+list = { ...list, invites: [...INVITES, pending("lee@example.com")] };
+r = await get();
+assert.deepEqual(accessOf(r.body)["lee@example.com"], { others: "read", bots: { boppy: "write", otto: "none", iris: "none" } });
+assert.deepEqual(accessOf(r.body)["pat@example.com"], NONE);
+// Sent again without access: what was kept stays. Sent again with it: replaced.
+r = await route("POST", { email: "lee@example.com", role: "viewer" });
+assert.equal(r.status, 200);
+assert.deepEqual(kept()["lee@example.com"], { others: "read", bots: { boppy: "write", otto: "none", iris: "none" } }, "a resend keeps it");
+r = await route("POST", { email: "lee@example.com", role: "viewer", access: { others: "none", bots: { boppy: "read" } } });
+assert.deepEqual(kept()["lee@example.com"], { others: "none", bots: { boppy: "read" } }, "a resend with access replaces it");
+// A new invite without access keeps nothing (an entry from before, from someone removed while Orgo didn't list, goes).
+W.setMemberAccess(sheetWs(), "kim@example.com", { others: "write", bots: {} });
+r = await route("POST", { email: "kim@example.com", role: "viewer" });
+assert.equal(r.status, 200);
+assert.equal(kept()["kim@example.com"], undefined, "a new invite without access: they see no bot");
+// Access that shows no bot is no entry.
+r = await route("POST", { email: "kim@example.com", role: "viewer", access: { others: "none", bots: { boppy: "none" } } });
+assert.equal(r.status, 200);
+assert.ok(!Object.hasOwn(kept(), "kim@example.com"), "no empty entries");
+// Orgo turned the invite down: nothing kept.
+replies[`POST /api/workspaces/${WS}/invite`] = () => json(429, { error: "x", code: "INVITE_RATE_LIMITED" });
+r = await route("POST", { email: "ray@example.com", role: "viewer", access: { others: "read", bots: {} } });
+assert.equal(r.status, 429);
+assert.equal(kept()["ray@example.com"], undefined, "kept only once Orgo has the invite");
+replies = usual();
+// Access that isn't access: turned down before Orgo is asked.
+n = calls.length;
+for (const access of ["write", ["read"], null, 7]) {
+  r = await route("POST", { email: "ray@example.com", role: "viewer", access });
+  assert.deepEqual([r.status, r.body.code], [400, "BAD_ACCESS"], JSON.stringify(access));
+}
+assert.equal(calls.length, n, "nothing asked of Orgo");
+console.log("ok - bot access: invite, send again, cleaned");
+
+// Changing: access only, by the member as Orgo lists them; never a key the window sent.
+n = calls.length;
+r = await route("PATCH", { memberId: "u-jamie", email: "sam@example.com", key: "sam@example.com", access: { others: "none", bots: { boppy: "read" } } });
+assert.deepEqual(r, { status: 200, body: { ok: true } });
+assert.deepEqual(
+  calls.slice(n).map((c) => `${c.method} ${c.path}`),
+  ["GET /api/workspaces", `GET /api/workspaces/${WS}/members`],
+  "access only: Orgo's list read, no role sent",
+);
+assert.deepEqual(kept()["jamie@example.com"], { others: "none", bots: { boppy: "read" } }, "kept under the member's own email");
+assert.equal(kept()["sam@example.com"], undefined, "never the window's key");
+// A guest has no email: kept by their user id.
+r = await route("PATCH", { memberId: "u-guest", access: { others: "read", bots: {} } });
+assert.equal(r.status, 200);
+assert.deepEqual(kept()["user:u-guest"], { others: "read", bots: {} });
+r = await get();
+assert.deepEqual(accessOf(r.body)["u-guest"], { others: "read", bots: {} }, "a guest's, read back by id");
+assert.deepEqual(accessOf(r.body)["u-jamie"], { others: "none", bots: { boppy: "read" } }, "a member's, read back by email");
+assert.deepEqual(accessOf(r.body)["u-sam"], NONE);
+// Orgo's email in another case reads the same entry.
+list = { ...list, members: MEMBERS.map((m) => (m.id === "u-jamie" ? { ...m, email: "Jamie@Example.com" } : m)) };
+assert.deepEqual(accessOf((await get()).body)["u-jamie"], { others: "none", bots: { boppy: "read" } }, "by email, any case");
+list = { ...list, members: MEMBERS };
+// Role and access together: the role goes to Orgo first, and access is kept only once Orgo took it.
+r = await route("PATCH", { memberId: "u-sam", role: "viewer", access: { others: "write", bots: {} } });
+assert.equal(r.status, 200);
+assert.deepEqual([calls.at(-1).method, calls.at(-1).body], ["PATCH", { memberId: "u-sam", role: "member" }]);
+assert.deepEqual(kept()["sam@example.com"], { others: "write", bots: {} });
+replies[`PATCH /api/workspaces/${WS}/members`] = () => json(403, { error: "Only project owners can change roles" });
+r = await route("PATCH", { memberId: "u-sam", role: "viewer", access: { others: "none", bots: { otto: "read" } } });
+assert.deepEqual([r.status, r.body.code], [403, "NOT_OWNER"]);
+assert.deepEqual(kept()["sam@example.com"], { others: "write", bots: {} }, "Orgo turned the role down: access unchanged");
+replies = usual();
+// Someone Orgo doesn't list, the user, or access that isn't access.
+n = calls.length;
+r = await route("PATCH", { memberId: "u-nobody", access: { others: "read", bots: {} } });
+assert.deepEqual([r.status, r.body.code, r.body.error], [404, "GONE", M.WORDS.gone]);
+r = await route("PATCH", { memberId: "u-nobody", role: "viewer", access: { others: "read", bots: {} } });
+assert.deepEqual([r.status, r.body.code], [404, "GONE"]);
+assert.ok(!calls.slice(n).some((c) => c.method === "PATCH"), "no role sent for someone not there");
+assert.ok(!Object.keys(kept()).some((k) => k.includes("nobody")), "nothing kept for them");
+r = await route("PATCH", { memberId: "u-owner", access: { others: "read", bots: {} } });
+assert.deepEqual([r.status, r.body.code], [400, "SELF"], "the user always has every bot");
+n = calls.length;
+for (const [body, code] of [
+  [{ memberId: "u-jamie", access: "write" }, "BAD_ACCESS"],
+  [{ memberId: "u-jamie", access: null }, "BAD_ACCESS"],
+  [{ memberId: "u-jamie", role: "owner", access: { others: "read", bots: {} } }, "BAD_REQUEST"],
+  [{ memberId: "u-jamie", role: null }, "BAD_REQUEST"],
+  [{ access: { others: "read", bots: {} } }, "BAD_REQUEST"],
+]) {
+  r = await route("PATCH", body);
+  assert.deepEqual([r.status, r.body.code], [400, code], JSON.stringify(body));
+}
+assert.equal(calls.length, n, "nothing asked of Orgo");
+// Access that shows no bot: their entry goes.
+r = await route("PATCH", { memberId: "u-guest", access: { others: "none", bots: { boppy: "none" } } });
+assert.equal(r.status, 200);
+assert.ok(!Object.hasOwn(kept(), "user:u-guest"), "no empty entries");
+// An entry kept by their id from before Orgo listed their email never shows through once it's kept by email.
+W.setMemberAccess(sheetWs(), "user:u-jamie", { others: "write", bots: {} });
+r = await route("PATCH", { memberId: "u-jamie", access: { others: "none", bots: {} } });
+assert.equal(r.status, 200);
+assert.ok(!Object.hasOwn(kept(), "user:u-jamie") && !Object.hasOwn(kept(), "jamie@example.com"));
+assert.deepEqual(accessOf((await get()).body)["u-jamie"], NONE, "no bot");
+console.log("ok - bot access: changed by the member Orgo lists, alone or with the role");
+
+// Removing and cancelling: their entries go once Orgo did it.
+W.setMemberAccess(sheetWs(), "jamie@example.com", { others: "read", bots: {} });
+W.setMemberAccess(sheetWs(), "user:u-guest", { others: "read", bots: {} });
+W.setMemberAccess(sheetWs(), "user:u-sam", { others: "read", bots: {} });
+replies[`DELETE /api/workspaces/${WS}/members`] = () => json(400, { error: "Cannot remove the project owner" });
+r = await route("DELETE", { memberId: "u-jamie" });
+assert.equal(r.status, 502);
+assert.ok(Object.hasOwn(kept(), "jamie@example.com"), "Orgo didn't remove them: kept");
+replies = usual();
+n = calls.length;
+r = await route("DELETE", { memberId: "u-jamie" });
+assert.equal(r.status, 200);
+assert.deepEqual(
+  calls.slice(n).map((c) => `${c.method} ${c.path}`),
+  ["GET /api/workspaces", `GET /api/workspaces/${WS}/members`, `DELETE /api/workspaces/${WS}/members`],
+  "who they are read before they go",
+);
+assert.ok(!Object.hasOwn(kept(), "jamie@example.com"), "a member's goes");
+r = await route("DELETE", { memberId: "u-guest" });
+assert.ok(!Object.hasOwn(kept(), "user:u-guest"), "a guest's goes");
+r = await route("DELETE", { memberId: "u-sam" });
+assert.ok(!Object.hasOwn(kept(), "sam@example.com") && !Object.hasOwn(kept(), "user:u-sam"), "by email and by id");
+// Orgo doesn't give the list: the removal still goes, and what's kept by their id with it.
+W.setMemberAccess(sheetWs(), "jamie@example.com", { others: "read", bots: {} });
+W.setMemberAccess(sheetWs(), "user:u-jamie", { others: "read", bots: {} });
+replies[`GET /api/workspaces/${WS}/members`] = () => json(500, { error: "boom" });
+r = await route("DELETE", { memberId: "u-jamie" });
+assert.equal(r.status, 200, "never held back");
+assert.ok(!Object.hasOwn(kept(), "user:u-jamie"));
+replies = usual();
+W.setMemberAccess(sheetWs(), "jamie@example.com", null);
+// Cancelling an invite.
+r = await route("DELETE", { email: " Lee@Example.com " });
+assert.equal(r.status, 200);
+assert.deepEqual(kept(), {}, "nobody left: the map stays, empty, so two Macs' changes to it still go together");
+// Nothing kept: removing someone asks Orgo no more than before.
+n = calls.length;
+r = await route("DELETE", { memberId: "u-jamie" });
+assert.equal(r.status, 200);
+assert.deepEqual(
+  calls.slice(n).map((c) => `${c.method} ${c.path}`),
+  ["GET /api/workspaces", `DELETE /api/workspaces/${WS}/members`],
+);
+// Forgetting what isn't kept changes nothing (no version, nothing to sync).
+const version = S.getVersion();
+W.setMemberAccess(sheetWs(), "nobody@example.com", null);
+W.setMemberAccess(sheetWs(), "kim@example.com", { others: "none", bots: {} });
+assert.equal(S.getVersion(), version);
+W.setMemberAccess(sheetWs(), "kim@example.com", { others: "read", bots: {} });
+const after = S.getVersion();
+W.setMemberAccess(sheetWs(), "kim@example.com", { others: "read", bots: {} });
+assert.equal(S.getVersion(), after, "the same again: nothing changes");
+W.setMemberAccess(sheetWs(), "kim@example.com", null);
+assert.deepEqual(kept(), {});
+assert.throws(() => W.setMemberAccess("ws_not_there", "kim@example.com", { others: "read", bots: {} }), /no such workspace/);
+console.log("ok - bot access: gone when they're removed or their invite is cancelled");
+
+/* ---------------- 10c. Bot access kept where it's read, and only for who's there ---------------- */
+
+replies = usual();
+const on = (wsId) => levels(S.getState().workspaces.find((w) => w.id === wsId)?.memberAccess);
+// Someone Orgo no longer lists (removed or gone on orgo.ai, left on their own, an invite cancelled there) is forgotten
+// when the sheet reads who's there, so coming back any way never brings their old bots; everyone listed keeps theirs.
+for (const k of ["jamie@example.com", "user:u-guest", "pat@example.com", "old@example.com", "gone@example.com", "user:u-left"]) W.setMemberAccess("ws_main", k, { others: "read", bots: {} });
+r = await get();
+assert.deepEqual(Object.keys(on("ws_main")).sort(), ["jamie@example.com", "old@example.com", "pat@example.com", "user:u-guest"], "an invite that ran out is still listed");
+assert.deepEqual(accessOf(r.body)["u-jamie"], { others: "read", bots: {} });
+// One kept while Orgo was being asked is newer than its list: it stays until a read that doesn't list them.
+replies[`GET /api/workspaces/${WS}/members`] = () => (W.setMemberAccess("ws_main", "new@example.com", { others: "read", bots: {} }), json(200, list));
+await get();
+assert.ok(Object.hasOwn(on("ws_main"), "new@example.com"), "kept while the list was on its way");
+replies = usual();
+await get();
+assert.ok(!Object.hasOwn(on("ws_main"), "new@example.com"));
+// A list that doesn't say who's invited forgets nobody.
+W.setMemberAccess("ws_main", "gone@example.com", { others: "read", bots: {} });
+replies[`GET /api/workspaces/${WS}/members`] = () => json(200, { members: MEMBERS, seats: seatsOf() });
+await get();
+assert.ok(Object.hasOwn(on("ws_main"), "gone@example.com"));
+replies = usual();
+await get();
+assert.ok(!Object.hasOwn(on("ws_main"), "gone@example.com"));
+console.log("ok - bot access: forgotten once Orgo no longer lists them");
+
+// Cancelling an invite whose email is a member's now (they joined by a link, or the row was stale): theirs stays.
+list = { ...list, members: [...MEMBERS, { id: "u-pat", alt: "Pat Doe", role: "member", email: "Pat@Example.com" }] };
+r = await route("DELETE", { email: "pat@example.com" });
+assert.equal(r.status, 200);
+assert.deepEqual(on("ws_main")["pat@example.com"], { others: "read", bots: {} }, "a member's, though the invite had the email too");
+list = { ...list, members: MEMBERS };
+r = await route("DELETE", { email: "pat@example.com" });
+assert.ok(!Object.hasOwn(on("ws_main"), "pat@example.com"), "an invite's alone goes");
+// Orgo doesn't give the list: an invite's goes, never held back by what Orgo can't say.
+W.setMemberAccess("ws_main", "pat@example.com", { others: "read", bots: {} });
+replies[`GET /api/workspaces/${WS}/members`] = () => json(500, { error: "boom" });
+r = await route("DELETE", { email: "pat@example.com" });
+assert.equal(r.status, 200);
+assert.ok(!Object.hasOwn(on("ws_main"), "pat@example.com"));
+replies = usual();
+console.log("ok - bot access: a cancelled invite's goes, never a member's with the same email");
+
+// A bot it can't name (an id too long) set below `others`: turned down, never kept as shown.
+r = await route("PATCH", { memberId: "u-jamie", access: { others: "read", bots: { ["x".repeat(81)]: "none" } } });
+assert.deepEqual([r.status, r.body.code], [400, "BAD_ACCESS"]);
+assert.deepEqual(on("ws_main")["jamie@example.com"], { others: "read", bots: {} }, "unchanged");
+
+// A bot deleted goes from everyone's access: one made later with its name gets its id, and starts hidden.
+const Bt = await import(`${root}/lib/server/bots.ts`);
+const Rm = await import(`${root}/lib/server/remove.ts`);
+const Ac = await import(`${root}/lib/member-access.ts`);
+assert.equal((await Bt.createBot("Otto", "Ops", "ws_main")).botId, "otto");
+W.setMemberAccess("ws_main", "jamie@example.com", { others: "none", bots: { boppy: "read", otto: "read" } });
+W.setMemberAccess("ws_main", "user:u-guest", { others: "none", bots: { otto: "write" } });
+await Rm.deleteBot("otto");
+assert.deepEqual(on("ws_main")["jamie@example.com"], { others: "none", bots: { boppy: "read" } });
+assert.ok(!Object.hasOwn(on("ws_main"), "user:u-guest"), "an entry left showing no bot goes");
+assert.equal((await Bt.createBot("Otto", "Ops", "ws_main")).botId, "otto", "the same id again");
+// A bot never gets an id that names the user (a tapback's "owner", how a chat says them).
+// Nor one that names a routine (who started a thread: Session.sentVia "routine").
+for (const [name, id] of [["Owner", "owner-2"], ["You", "you-2"], ["User", "user-2"], ["Routine", "routine-2"]]) {
+  const named = await Bt.createBot(name, "Ops", "ws_main");
+  assert.equal(named.botId, id);
+  await Rm.deleteBot(named.botId);
+}
+assert.equal(Ac.levelOf(on("ws_main")["jamie@example.com"], "otto"), "none", "the new Otto is hidden from them");
+await Rm.deleteBot("otto");
+// A long name is cut as a rename cuts it, so its id is one access can name.
+const long = await Bt.createBot("L".repeat(90), "Ops", "ws_main");
+assert.equal(S.getState().bots.find((b) => b.id === long.botId).name.length, 40);
+await Rm.deleteBot(long.botId);
+console.log("ok - bot access: a deleted bot's goes with it");
+
+// A bot deleted from a group that stays: its lines there stay its own. One made later with its name gets another id,
+// so what the old one said, which someone it was hidden from never saw, never shows to them as the new one's.
+{
+  const { botsOf, handedByOthers, sharedMessages, sharedSlice } = await import(`${root}/cloud/ws-slice.ts`);
+  const sam = await Bt.createBot("Sam", "Ops", "ws_main");
+  const vera = await Bt.createBot("Vera", "Money", "ws_main");
+  S.update((st) => {
+    st.chats.push({ id: "grp_money", kind: "group", botIds: ["boppy", sam.botId, vera.botId], title: "Money", createdAt: 1, typing: [], workspaceId: "ws_main" });
+    st.messages.push(
+      { id: "gm1", chatId: "grp_money", role: "user", text: "@Vera what's on my card statement?", at: 1 },
+      { id: "gm2", chatId: "grp_money", role: "bot", botId: vera.botId, text: "Card ending 4242: $3,120", at: 2, reactions: [{ by: vera.botId, type: "like", at: 3 }] },
+      { id: "gm3", chatId: "grp_money", role: "bot", botId: "boppy", text: "Noted", at: 4, asked: [{ botId: vera.botId, question: "Balance?", answer: "$212" }] },
+    );
+  });
+  W.setMemberAccess("ws_main", "ava@example.com", { others: "read", bots: { [vera.botId]: "none" } });
+  await Rm.deleteBot(vera.botId);
+  assert.deepEqual(S.getState().chats.find((c) => c.id === "grp_money").botIds, ["boppy", sam.botId], "the group stays");
+  assert.equal(S.getState().messages.find((m) => m.id === "gm2")?.botId, vera.botId, "and its history, the old Vera's line still hers");
+  const again = await Bt.createBot("Vera", "Money", "ws_main");
+  assert.equal(again.botId, `${vera.botId}-2`, "another id while what she said is kept");
+  const ava = sharedSlice(S.getState(), "ws_main", { role: "member", id: "u-ava", email: "ava@example.com" });
+  const bots = botsOf(ava);
+  assert.ok(bots.has(again.botId), "the new Vera is shown to Ava (every bot, new ones too)");
+  const read = sharedMessages(S.getState().messages, bots, handedByOthers(S.getState(), bots));
+  assert.ok(!read.some((m) => m.id === "gm2"), "the old Vera's answer never shows as the new one's");
+  assert.equal(read.find((m) => m.id === "gm3")?.asked, undefined, "nor what she answered when asked");
+  for (const id of [again.botId, sam.botId]) await Rm.deleteBot(id);
+  W.setMemberAccess("ws_main", "ava@example.com", null);
+  S.update((st) => {
+    st.chats = st.chats.filter((c) => c.id !== "grp_money");
+    st.messages = st.messages.filter((m) => m.chatId !== "grp_money");
+  });
+}
+console.log("ok - a deleted bot's lines in a group that stays never read as a new bot's with its name");
+
+// News held for later (attention.ts): the main bot's "While you were busy" says whose watch each line came from, so a
+// member given Boppy alone reads its own line and nothing of what another bot's watch found (cloud/ws-slice.ts).
+{
+  const At = await import(`${root}/lib/server/attention.ts`);
+  const { botsOf, handedByOthers, sharedMessages, sharedSlice } = await import(`${root}/cloud/ws-slice.ts`);
+  const vera = await Bt.createBot("Vera", "Money", "ws_main");
+  At.holdForLater({ botId: vera.botId, text: "Bank: “Withdrawal of $4,800, balance $212”" });
+  At.holdForLater({ botId: "boppy", text: "Inbox: “Dana wrote back”" });
+  S.update((st) => {
+    for (const h of st.digest) h.at -= 21 * 60_000;
+  });
+  At.flush();
+  const posted = S.getState().messages.at(-1);
+  assert.deepEqual([posted.chatId, posted.botId], ["bot:boppy", "boppy"], "one message, from the main bot, as before");
+  assert.equal(posted.text, "While you were busy:\n• Bank: “Withdrawal of $4,800, balance $212”\n• Inbox: “Dana wrote back”", "the owner reads all of it");
+  assert.deepEqual(posted.held.map((h) => h.botId), [vera.botId, "boppy"]);
+  assert.deepEqual(S.getState().digest, []);
+  W.setMemberAccess("ws_main", "ava@example.com", { others: "none", bots: { boppy: "read" } });
+  const bots = botsOf(sharedSlice(S.getState(), "ws_main", { role: "member", id: "u-ava", email: "ava@example.com" }));
+  const read = sharedMessages(S.getState().messages, bots, handedByOthers(S.getState(), bots)).find((m) => m.id === posted.id);
+  assert.equal(read?.text, "While you were busy:\n• Inbox: “Dana wrote back”", "Ava reads Boppy's line alone");
+  W.setMemberAccess("ws_main", "ava@example.com", null);
+  await Rm.deleteBot(vera.botId);
+  S.update((st) => void (st.messages = st.messages.filter((m) => m.id !== posted.id)));
+}
+console.log("ok - the digest of news held for later shows a member only the lines of bots they were given");
+
+// What a bot waits on the owner's OK for (lib/server/permission.ts), shared in the owner's state: someone given that bot
+// sees it read only (never which device asked, the reply, nor what resumes its run), one of a bot not given them
+// nothing, and one answered already nothing; and they never reply: their own Bops has none of the owner's requests to
+// answer (replyToAsk says so, the approvals route 409), and the window shows the card inert (chat-view.tsx).
+{
+  const { sharedSlice } = await import(`${root}/cloud/ws-slice.ts`);
+  const P = await import(`${root}/lib/server/permission.ts`);
+  const Ap = await import(`${root}/app/api/apps/approvals/route.ts`);
+  const vera = await Bt.createBot("Vera", "Money", "ws_main");
+  const resume = { engine: "responses", responseId: "resp_books", callId: "call_books", call: { name: "use_app", arguments: "{}" } };
+  const ask = (id, botId, reply) => ({ id, botId, chatId: `bot:${botId}`, threadId: "ses_books", askedBy: "dev_runner_c1", action: "Send an email", resources: ["books@acme.example"], preview: "to: books@acme.example", at: 5, resume, ...(reply ? { reply } : {}) });
+  const owner = { ...S.getState(), appApprovals: [ask("apr_boppy", "boppy"), ask("apr_vera", vera.botId), ask("apr_done", "boppy", { reply: "once", by: "dev_mac", at: 6 })] };
+  W.setMemberAccess("ws_main", "ava@example.com", { others: "none", bots: { boppy: "read" } });
+  const slice = sharedSlice(owner, "ws_main", { role: "member", id: "u-ava", email: "ava@example.com" });
+  assert.deepEqual(
+    slice.approvals,
+    [{ id: "apr_boppy", botId: "boppy", chatId: "bot:boppy", threadId: "ses_books", action: "Send an email", resources: ["books@acme.example"], preview: "to: books@acme.example", at: 5 }],
+    "Boppy's, unanswered, read only: Vera's isn't hers, the answered one is done",
+  );
+  assert.equal(sharedSlice({ ...owner, appApprovals: [] }, "ws_main", { role: "member", id: "u-ava", email: "ava@example.com" }).approvals, undefined, "none waiting: nothing added");
+  const before = JSON.stringify(S.getState().appApprovals ?? []);
+  assert.equal(P.replyToAsk("apr_boppy", "once"), "That isn't waiting on you anymore.", "her own Bops has no such request to answer");
+  const res = await Ap.POST(new Request("http://localhost:3210/api/apps/approvals", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "apr_boppy", reply: "always" }) }));
+  assert.equal(res.status, 409, "the route turns it down");
+  assert.equal(JSON.stringify(S.getState().appApprovals ?? []), before, "nothing written");
+  assert.equal(owner.appApprovals[0].reply, undefined, "the owner's request still waits on the owner");
+  W.setMemberAccess("ws_main", "ava@example.com", null);
+  await Rm.deleteBot(vera.botId);
+}
+console.log("ok - a member sees what a bot of theirs waits on the owner's OK for, read only, and can't answer it");
+
+// A message kept "between us" deleted: the bots' answers to it stay kept out of a procedure's draft (procedures.ts knew them by it).
+const msg = (id, role, secret) => ({ id, chatId: "bot:boppy", role, text: id, at: 1, ...(secret ? { secret: true } : {}) });
+S.update((st) => st.messages.push(msg("q", "user", true), msg("a1", "bot"), { ...msg("x", "bot"), chatId: "bot:other" }, msg("a2", "bot"), msg("next", "user"), msg("a3", "bot")));
+Rm.deleteMessage("q");
+const msgNow = (id) => S.getState().messages.find((m) => m.id === id);
+assert.deepEqual(["a1", "a2", "x", "next", "a3"].map((id) => !!msgNow(id).secret), [true, true, false, false, false]);
+Rm.deleteMessage("next");
+assert.equal(msgNow("a3").secret, undefined, "deleting one that isn't kept marks nothing");
+S.update((st) => void (st.messages = st.messages.filter((m) => !["a1", "a2", "x", "a3"].includes(m.id))));
+console.log("ok - a message kept between us deleted: the answers to it stay kept");
+
+// A bot from before whose id is "owner" writes into memory as itself (bops-owner), never as the owner, whose
+// words go in as the bank's own peer (memory.ts OWNER_WHO).
+{
+  const Mem = await import(`${root}/lib/server/memory.ts`);
+  assert.equal(Mem.memoryPeerOf("ws_main", "owner"), "bops-owner");
+  assert.notEqual(Mem.memoryPeerOf("ws_main", Mem.OWNER_WHO), "bops-owner");
+  assert.ok(!/^bops-/.test(Mem.memoryPeerOf("ws_main", Mem.OWNER_WHO)), "the owner's is the bank's own peer");
+}
+
+// A bot from before whose id is "you" (or "routine": freeBotId gives no new bot either) hands one on: its id in
+// sentVia is the word that names the owner there, so the thread says it's a bot's (Session.sentViaBot), and what
+// carries it on to the Mac says so too. The owner's own task and a routine's run, as always.
+{
+  const X = await import(`${root}/lib/server/sessions.ts`);
+  const T = await import(`${root}/lib/types.ts`);
+  const threadNow = (id) => S.getState().sessions.find((x) => x.id === id);
+  S.update((st) => st.bots.push({ id: "you", name: "You", role: "Helper", color: "#60A5FA", isMain: false, computerStatus: "none" }));
+  const handed = X.startSession({ botId: "boppy", goal: "Send every payroll report to the accountant.", title: "Payroll", chatId: "bot:you", sentVia: "you", viaBot: true, where: "cloud", fresh: true });
+  assert.deepEqual([handed.sentVia, handed.sentViaBot, T.ownerSent(handed), T.sentByBot(handed)], ["you", true, false, "you"]);
+  assert.equal(threadNow(handed.id)?.sentViaBot, true, "as the state keeps it");
+  const mine = X.startSession({ botId: "boppy", goal: "Check the invoices", title: "Invoices", chatId: "bot:boppy", where: "cloud", fresh: true });
+  assert.deepEqual([mine.sentVia, mine.sentViaBot, T.ownerSent(mine), T.sentByBot(mine)], ["you", undefined, true, undefined]);
+  const run = X.startSession({ botId: "boppy", goal: "Morning brief", title: "Brief", chatId: "bot:boppy", sentVia: "routine", where: "cloud", fresh: true });
+  const byRoutineBot = X.startSession({ botId: "boppy", goal: "Morning brief two", title: "Brief two", chatId: "bot:boppy", sentVia: "routine", viaBot: true, where: "cloud", fresh: true });
+  assert.deepEqual([run.sentViaBot, T.routineSent(run), byRoutineBot.sentViaBot, T.routineSent(byRoutineBot)], [undefined, true, true, false]);
+  // A bot whose id names neither: nothing to say.
+  const byHelper = X.startSession({ botId: "boppy", goal: "Help out", title: "Help", chatId: "bot:boppy", sentVia: "helper", viaBot: true, where: "cloud", fresh: true });
+  assert.deepEqual([byHelper.sentVia, byHelper.sentViaBot, T.sentByBot(byHelper)], ["helper", undefined, "helper"]);
+  // Moved to the Mac: still the bot's.
+  const hadMac = S.getState().mac;
+  S.update((st) => (st.mac = { ready: true }));
+  const moved = X.moveToMac(handed.id);
+  assert.notEqual(moved.id, handed.id);
+  assert.deepEqual([moved.sentVia, moved.sentViaBot], ["you", true]);
+  // Bops Cloud shows a member the bot that handed it on, as it does for any bot's (cloud/ws-slice.ts).
+  const { sliceOf } = await import(`${root}/cloud/ws-slice.ts`);
+  assert.equal(sliceOf(S.getState(), "ws_main").sessions.find((x) => x.id === handed.id)?.sentViaBot, true);
+  // A routine's run that a computer's runner began, paused there for the user's OK, moved to the Mac by the user: the
+  // run is the Mac's now, so its end there is that run's end (that time of the routine done, never due again for the
+  // move), and the move stops the paused run (its request rejected as stopped; the Mac thread asks again for what it needs).
+  const routineRun = X.startSession({ botId: "boppy", goal: "Book a table for 4 tonight", title: "Book a table", chatId: "bot:boppy", sentVia: "routine", where: "cloud", fresh: true, routineId: "rtn_moved" });
+  S.update((st) => {
+    Object.assign(st.sessions.find((x) => x.id === routineRun.id), { by: "dev_runner_c1", status: "queued" });
+    st.routines.push({ id: "rtn_moved", botId: "boppy", title: "Book a table", goal: "Book a table for 4 tonight", schedule: { kind: "once", at: 1 }, enabled: false, lastRunAt: 2, last: { at: 2, status: "running", sessionId: routineRun.id, by: "dev_runner_c1" } });
+    (st.appApprovals ??= []).push({ id: "apr_moved", botId: "boppy", threadId: routineRun.id, routineId: "rtn_moved", askedBy: "dev_runner_c1", action: "Send an email", resources: ["table@bistro.example"], preview: "to: table@bistro.example", at: 3, resume: { engine: "responses", responseId: "resp_t", callId: "call_t", call: { name: "use_app", arguments: "{}" } } });
+  });
+  const movedRun = X.moveToMac(routineRun.id);
+  const r = S.getState().routines.find((x) => x.id === "rtn_moved");
+  assert.deepEqual([r.last.sessionId, r.last.by, r.enabled, r.nextRunAt], [movedRun.id, undefined, false, undefined], "the Mac's run now, and never due again for the move");
+  assert.deepEqual([S.getState().appApprovals.find((a) => a.id === "apr_moved")?.reply?.reply, S.getState().appApprovals.find((a) => a.id === "apr_moved")?.reply?.reason], ["reject", "stopped"], "its paused run on the computer stopped");
+  S.update((st) => void (st.appApprovals = st.appApprovals.filter((a) => a.id !== "apr_moved")));
+  for (const id of [handed.id, mine.id, run.id, byRoutineBot.id, byHelper.id, moved.id, routineRun.id, movedRun.id]) X.stopSession(id, "test over");
+  S.update((st) => {
+    st.mac = hadMac;
+    st.sessions = st.sessions.filter((x) => ![handed.id, mine.id, run.id, byRoutineBot.id, byHelper.id, moved.id, routineRun.id, movedRun.id].includes(x.id));
+    st.routines = st.routines.filter((x) => x.id !== "rtn_moved");
+    st.bots = st.bots.filter((b) => b.id !== "you");
+  });
+}
+
+// A thread a bot started for a message kept between us (marked once Jev's check is back, after the answer
+// started it) is kept between us too, and so is what's said about it later, its result after the owner's
+// next message included. That keeps them out of the shared memory and a procedure's draft only: Bops Cloud
+// shows all of it to someone the owner gave the bot (cloud/ws-slice.ts), and nothing of it to anyone else.
+{
+  const Mem = await import(`${root}/lib/server/memory.ts`);
+  const { botsOf, handedByOthers, sharedMessages, sharedSlice } = await import(`${root}/cloud/ws-slice.ts`);
+  const ask = "Between us, find what senior engineers earn in Austin";
+  S.update((st) => {
+    st.sessions.push({ id: "s_pay", botId: "boppy", chatId: "bot:boppy", sentVia: "you", title: "Austin pay", goal: ask, host: "orgo", status: "running", steps: [], replies: [], createdAt: 1 });
+    st.sessions.push({ id: "s_lunch", botId: "boppy", chatId: "bot:boppy", sentVia: "you", title: "Lunch", goal: "Book lunch", host: "orgo", status: "running", steps: [], replies: [], createdAt: 1 });
+    st.messages.push(msg("ask", "user"), { ...msg("on it", "bot"), botId: "boppy", sessionIds: ["s_pay"] });
+  });
+  Mem.rememberMessage("ws_main", "bot:boppy", "ask", ask);
+  const threadNow = (id) => S.getState().sessions.find((x) => x.id === id);
+  assert.deepEqual([msgNow("ask").secret, msgNow("on it").secret, threadNow("s_pay").secret, threadNow("s_lunch").secret], [true, true, true, undefined]);
+  S.addMessage({ chatId: "bot:boppy", role: "user", text: "Also book lunch Friday" });
+  const result = S.addMessage({ chatId: "bot:boppy", role: "bot", botId: "boppy", text: "About $180k", resultOf: "s_pay", sessionIds: ["s_pay"] });
+  const lunch = S.addMessage({ chatId: "bot:boppy", role: "bot", botId: "boppy", text: "Booked", resultOf: "s_lunch", sessionIds: ["s_lunch"] });
+  assert.deepEqual([msgNow(result.id).secret, msgNow(lunch.id).secret], [true, undefined], "its result, after the owner's next message");
+  assert.deepEqual(S.getState().sessions.filter((x) => x.secret).map((x) => x.id), ["s_pay"]);
+  const given = sharedSlice(S.getState(), "ws_main", { role: "member", id: "u-jamie", email: "jamie@example.com" });
+  assert.deepEqual(given.sessions.filter((x) => ["s_pay", "s_lunch"].includes(x.id)).map((x) => x.id), ["s_pay", "s_lunch"], "a member given Boppy sees the thread kept between us");
+  const bots = botsOf(given);
+  const read = sharedMessages(S.getState().messages, bots, handedByOthers(S.getState(), bots)).map((m) => m.id);
+  for (const id of ["ask", "on it", result.id, lunch.id]) assert.ok(read.includes(id), `${id}: the owner's request, the answer and both results`);
+  const other = sharedSlice(S.getState(), "ws_main", { role: "member", id: "u-guest" });
+  assert.ok(!other.sessions.some((x) => x.id === "s_pay"), "someone not given Boppy sees none of it");
+  S.update((st) => {
+    st.sessions = st.sessions.filter((x) => !["s_pay", "s_lunch"].includes(x.id));
+    st.messages = st.messages.filter((m) => m.chatId !== "bot:boppy" || (!["ask", "on it", result.id, lunch.id].includes(m.id) && m.text !== "Also book lunch Friday"));
+  });
+}
+console.log("ok - a thread started for a message kept between us is kept between us, and its result too, and a member given the bot sees it all");
+
+// Two Macs: one takes the last person away while the other adds someone. The map stays (empty), so the two go
+// together entry by entry, whichever merges last.
+const G = await import(`${root}/lib/server/state-merge.ts`);
+S.update((st) => void st.workspaces.push({ id: "ws_merge", name: "Merge", createdAt: 1 }));
+const mergeWs = (blob) => blob.workspaces.find((w) => w.id === "ws_merge").memberAccess;
+W.setMemberAccess("ws_merge", "kim@example.com", { others: "read", bots: {} });
+const was = structuredClone({ workspaces: S.getState().workspaces });
+W.setMemberAccess("ws_merge", "kim@example.com", null);
+const mine = structuredClone({ workspaces: S.getState().workspaces });
+assert.deepEqual(mergeWs(mine), {});
+const theirs = structuredClone(was);
+mergeWs(theirs)["bob@example.com"] = { others: "none", bots: { boppy: "read" } };
+assert.deepEqual(mergeWs(G.merge3(was, mine, theirs)), { "bob@example.com": { others: "none", bots: { boppy: "read" } } });
+assert.deepEqual(mergeWs(G.merge3(was, theirs, mine)), { "bob@example.com": { others: "none", bots: { boppy: "read" } } });
+S.update((st) => void (st.workspaces = st.workspaces.filter((w) => w.id !== "ws_merge")));
+console.log("ok - bot access: two Macs' changes go together");
+
+// The open workspace has no Orgo workspace of its own (an Orgo without them, or the move to them undone): the sheet
+// lists the default's "bops" people, so their access is kept on the default, where Bops Cloud reads it.
+S.update((st) => {
+  st.workspaces.push({ id: "ws_two", name: "Two", createdAt: 1 });
+  st.workspace = "ws_two";
+  st.orgoMigrationRevertedAt = Date.now();
+});
+r = await get();
+assert.equal(r.body.wsId, "ws_main", "the sheet says whose bots it offers");
+assert.deepEqual(accessOf(r.body)["u-jamie"], { others: "none", bots: { boppy: "read" } }, "read from the default");
+r = await route("PATCH", { memberId: "u-guest", access: { others: "read", bots: {} } });
+assert.equal(r.status, 200);
+assert.deepEqual(on("ws_main")["user:u-guest"], { others: "read", bots: {} });
+assert.equal(on("ws_two"), undefined, "never the open one");
+r = await route("DELETE", { memberId: "u-guest" });
+assert.equal(r.status, 200);
+assert.ok(!Object.hasOwn(on("ws_main"), "user:u-guest"), "and forgotten there when they're removed");
+// Tied to the Orgo workspace the sheet lists: kept on it.
+S.update((st) => void (st.workspaces.find((w) => w.id === "ws_two").orgoProjectId = WS));
+r = await get();
+assert.equal(r.body.wsId, "ws_two");
+r = await route("PATCH", { memberId: "u-guest", access: { others: "write", bots: {} } });
+assert.deepEqual(on("ws_two")["user:u-guest"], { others: "write", bots: {} });
+assert.ok(!Object.hasOwn(on("ws_main"), "user:u-guest"));
+S.update((st) => {
+  st.workspaces = st.workspaces.filter((w) => w.id !== "ws_two");
+  st.workspace = undefined;
+  delete st.orgoMigrationRevertedAt;
+});
+console.log("ok - bot access: kept on the workspace whose people the sheet lists");
+
 /* ---------------- 11. The words ---------------- */
 
 const caps = { pro_bops: 2, max_bops: 5 };
@@ -689,6 +1203,128 @@ assert.deepEqual(
 for (const t of tracked) assert.ok(!/email|name|memberId|people\b/i.test(t), `no email, name or id in ${t}`);
 assert.ok(!/console\.(log|info|warn|error)\([^)]*email/i.test(server), "no email logged");
 console.log("ok - no emails in usage events");
+
+/* ---------------- Someone else can use the workspace (no Bops runner there: runner-install.ts) ---------------- */
+
+{
+  const S = await import(`${root}/lib/server/members.ts`);
+  replies = usual();
+  const others = (members, invites = []) => {
+    list = { members, invites, seats: seatsOf() };
+    return S.othersCanUse(KEY, WS);
+  };
+  const [owner, sam, jamie, guest] = MEMBERS;
+  assert.equal(await others([owner]), false, "the owner alone");
+  assert.equal(await others([owner, sam]), true, "Full access");
+  assert.equal(await others([owner, jamie]), true, "View only counts too");
+  assert.equal(await others([owner, guest]), true, "and a guest");
+  assert.equal(await others([owner], [INVITES[1]]), true, "an invite still open");
+  assert.equal(await others([owner], [INVITES[0]]), false, "an expired one doesn't");
+  replies = { ...usual(), [`GET /api/workspaces/${WS}/members`]: () => json(500, { error: "down" }) };
+  assert.equal(await S.othersCanUse(KEY, WS), null, "Orgo didn't say");
+  list = { members: MEMBERS, invites: INVITES, seats: seatsOf() };
+  replies = usual();
+}
+console.log("ok - someone else can use the workspace: any other member, or an invite still open");
+
+/* ---------------- Bot access forgotten without the sheet (runner-install.ts's look) ---------------- */
+
+{
+  const S = await import(`${root}/lib/server/members.ts`);
+  const St = await import(`${root}/lib/server/store.ts`);
+  replies = usual();
+  list = { members: MEMBERS, invites: INVITES, seats: seatsOf() };
+  const had = St.getState().workspaces.find((w) => w.id === "ws_main").orgoProjectId;
+  St.update((st) => void (st.workspaces.find((w) => w.id === "ws_main").orgoProjectId = WS));
+  const on = () => levels(St.getState().workspaces.find((w) => w.id === "ws_main").memberAccess ?? {});
+  const read = { others: "read", bots: {} };
+  // Dana was removed on orgo.ai (or from a Mac still on v0.0.29, or left): the People sheet is never opened.
+  W.setMemberAccess("ws_main", "dana@example.com", read);
+  W.setMemberAccess("ws_main", "jamie@example.com", read);
+  await S.forgetGoneMembers(KEY);
+  assert.ok(!Object.hasOwn(on(), "dana@example.com"), "forgotten at the Mac's look, so coming back never brings her bots");
+  assert.deepEqual(on()["jamie@example.com"], read, "someone Orgo lists keeps theirs");
+  // The look's members check reads the same list: it forgets too.
+  W.setMemberAccess("ws_main", "dana@example.com", read);
+  assert.equal(await S.othersCanUse(KEY, WS), true);
+  assert.ok(!Object.hasOwn(on(), "dana@example.com"), "forgotten by the members check");
+  // A list Orgo didn't give forgets nobody.
+  W.setMemberAccess("ws_main", "dana@example.com", read);
+  replies = { ...usual(), [`GET /api/workspaces/${WS}/members`]: () => json(500, { error: "down" }) };
+  await S.forgetGoneMembers(KEY);
+  assert.deepEqual(on()["dana@example.com"], read, "kept while Orgo can't say");
+  replies = usual();
+  W.setMemberAccess("ws_main", "dana@example.com", null);
+  W.setMemberAccess("ws_main", "jamie@example.com", null);
+  St.update((st) => {
+    const w = st.workspaces.find((x) => x.id === "ws_main");
+    if (had === undefined) delete w.orgoProjectId;
+    else w.orgoProjectId = had;
+  });
+}
+console.log("ok - bot access: forgotten at the Mac's look too, whether or not the sheet is opened");
+
+/* ---------------- Bot access is for the membership it was set in ---------------- */
+
+{
+  const St = await import(`${root}/lib/server/store.ts`);
+  replies = usual();
+  const raw = () => St.getState().workspaces.find((w) => w.id === sheetWs()).memberAccess ?? {};
+  const read = { others: "read", bots: {} };
+  const dana = (joined) => ({ id: "u-dana", alt: "Dana Lee", role: "member", email: "dana@example.com", ...(joined ? { joined_at: iso(joined) } : {}) });
+  // Set with an invite: said so, and when.
+  const t0 = Date.now();
+  r = await route("POST", { email: "dana@example.com", role: "viewer", access: read });
+  assert.equal(r.status, 200);
+  assert.equal(raw()["dana@example.com"].invite, true, "set with an invite");
+  assert.ok(raw()["dana@example.com"].at >= t0 && raw()["dana@example.com"].at <= Date.now(), "and when");
+  // Sent again without access a few days on: what was kept is the new invite's, its 7 days from now.
+  St.update((st) => void (st.workspaces.find((w) => w.id === sheetWs()).memberAccess["dana@example.com"].at = t0 - 5 * DAY));
+  list = { members: MEMBERS, invites: [...INVITES, pending("dana@example.com")], seats: seatsOf() };
+  r = await route("POST", { email: "dana@example.com", role: "viewer" });
+  assert.equal(r.status, 200);
+  assert.ok(raw()["dana@example.com"].at >= t0, "renewed with the invite sent again");
+  // Say that was 6 days ago, and she took it a day later: the sheet's read ties what was set with it to that membership.
+  const sent = t0 - 6 * DAY;
+  St.update((st) => void (st.workspaces.find((w) => w.id === sheetWs()).memberAccess["dana@example.com"].at = sent));
+  const joined = sent + DAY;
+  list = { members: [...MEMBERS, dana(joined)], invites: INVITES, seats: seatsOf() };
+  r = await get();
+  assert.deepEqual(accessOf(r.body)["u-dana"], read, "hers; the sheet never shows when it was set");
+  assert.deepEqual(raw()["dana@example.com"], { ...read, at: joined }, "tied to the membership her invite began");
+  // Removed on orgo.ai, invited back there days later and in again, with no Mac on this Bops looking in between:
+  // Orgo lists her as joined after it was set, so it's forgotten, at the sheet's read and at the Mac's look alike.
+  list = { members: [...MEMBERS, dana(joined + 3 * DAY)], invites: INVITES, seats: seatsOf() };
+  r = await get();
+  assert.equal(raw()["dana@example.com"], undefined, "coming back never brings her old bots");
+  assert.deepEqual(accessOf(r.body)["u-dana"], NONE);
+  const Sv = await import(`${root}/lib/server/members.ts`);
+  const had = St.getState().workspaces.find((w) => w.id === sheetWs()).orgoProjectId;
+  St.update((st) => void (st.workspaces.find((w) => w.id === sheetWs()).orgoProjectId = WS));
+  W.setMemberAccess(sheetWs(), "dana@example.com", read, { at: joined });
+  await Sv.forgetGoneMembers(KEY);
+  assert.equal(raw()["dana@example.com"], undefined, "the Mac's look forgets it too");
+  St.update((st) => {
+    const w = st.workspaces.find((x) => x.id === sheetWs());
+    if (had === undefined) delete w.orgoProjectId;
+    else w.orgoProjectId = had;
+  });
+  // Set in the sheet since she came back: hers.
+  W.setMemberAccess(sheetWs(), "dana@example.com", null);
+  r = await route("PATCH", { memberId: "u-dana", access: read });
+  assert.equal(r.status, 200);
+  assert.equal(raw()["dana@example.com"].invite, undefined, "set for a member");
+  await get();
+  assert.deepEqual(levels(raw())["dana@example.com"], read, "kept");
+  // An orgo-web that doesn't say when anyone joined: kept while listed, as before.
+  W.setMemberAccess(sheetWs(), "dana@example.com", read, { at: 1 });
+  list = { members: [...MEMBERS, dana()], invites: INVITES, seats: seatsOf() };
+  await get();
+  assert.deepEqual(levels(raw())["dana@example.com"], read);
+  W.setMemberAccess(sheetWs(), "dana@example.com", null);
+  list = { members: MEMBERS, invites: INVITES, seats: seatsOf() };
+}
+console.log("ok - bot access: only for the membership it was set in, so someone removed and back never finds their old bots");
 
 process.chdir(tmpdir());
 rmSync(scratch, { recursive: true, force: true });

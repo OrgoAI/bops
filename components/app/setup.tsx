@@ -46,7 +46,8 @@ const bridge = () => (window as unknown as { bopsMac?: Bridge }).bopsMac;
 export type RelayInfo = { available: boolean; on: boolean; reason?: string; device?: { id: string; name: string }; running: boolean; online?: boolean; routedComputers: string[] };
 
 /** The items on the setup screen, which it can record as skipped (app/api/setup keeps the same list). */
-type Item = "screen" | "microphone" | "notifications" | "relay";
+export type SetupItem = "screen" | "microphone" | "notifications" | "relay";
+type Item = SetupItem;
 const ITEMS: Item[] = ["screen", "microphone", "notifications", "relay"];
 
 /** The OS permissions setup asks for. Accessibility isn't one: Bops itself never drives other apps. */
@@ -428,14 +429,28 @@ export function Setup({ state, onClose }: { state: AppState; onClose: () => void
 }
 
 /**
- * Whether something on the setup screen still needs the user and they haven't skipped it there: the
- * account menu's badge (sidebar.tsx). The same items and the same "done" as the screen's own.
+ * What on the setup screen still needs the user and they haven't skipped there, in the screen's order:
+ * the sidebar's Needs you (one row each) and the account menu's badge (sidebar.tsx). The same items and
+ * the same "done" as the screen's own.
  */
-export function useSetupNeedsYou(state: AppState) {
+export function useSetupWaiting(state: AppState): SetupItem[] {
   const items = useSetupItems(state, "badge");
   const skipped = new Set(state.setup?.skipped ?? []);
-  return items.waiting.some((i) => !skipped.has(i));
+  return items.waiting.filter((i) => !skipped.has(i));
 }
+
+/** Whether something on the setup screen still needs the user (useSetupWaiting has anything). */
+export function useSetupNeedsYou(state: AppState) {
+  return useSetupWaiting(state).length > 0;
+}
+
+/** What a setup item that still needs the user is called in the sidebar's Needs you. */
+export const SETUP_NEEDS: Record<SetupItem, string> = {
+  screen: "Screen recording is off",
+  microphone: "Microphone is off",
+  notifications: "Notifications are off",
+  relay: "Routing through this Mac is off",
+};
 
 /* ---------------- In Settings ---------------- */
 

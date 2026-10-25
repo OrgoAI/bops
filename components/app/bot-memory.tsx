@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AppState, Bot, Session } from "@/lib/types";
+import { waitsForOk, type AppState, type Bot, type Session } from "@/lib/types";
 import { MemorySheet } from "./memory-sheet";
 import { ago, post, quietNothing, StatusIcon } from "./ui";
+import { you } from "@/lib/shared";
 
 type Fact = { id: string; text: string; private: boolean; at?: number; source?: string };
 type Data = { workspace: string; ws: string; card: Fact[]; facts: Fact[]; error?: string };
@@ -113,7 +114,7 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
             setAnswer(null);
             setResults(null);
           }}
-          placeholder={`Ask ${b.name} what it knows about you`}
+          placeholder={`Ask ${b.name} what it knows about ${you(state)}`}
           className="h-8 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-[#9A9A98]"
         />
         {searching && (
@@ -197,7 +198,7 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
                   {(allWork ? done : done.slice(0, 3)).map((s) => (
                     <button key={s.id} onClick={() => onOpenThread(s)} className="-mx-2.5 flex items-start gap-2.5 rounded-[12px] px-2.5 py-2 text-left hover:bg-[#F7F7F6]">
                       <span className="mt-0.5">
-                        <StatusIcon session={s} />
+                        <StatusIcon session={s} owner={!!state.shared} okWait={waitsForOk(s, state)} />
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-baseline gap-2">

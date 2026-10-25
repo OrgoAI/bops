@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Waking } from "./live-desktop";
+import { readAllowed } from "./view-only";
 import { useWindowVisible } from "./window-visible";
 
 /**
@@ -58,6 +59,13 @@ export function LiveScreen({
     let failing = false;
     const tick = () => {
       const url = `/api/screen?bot=${botId}&${mac !== undefined ? `mac=${mac}` : `display=${display}`}&scale=${scale}&t=${Date.now()}`;
+      // A shared workspace open: the bot of that id here is the user's own, never the owner's (view-only.ts). Nothing goes.
+      if (!readAllowed(url)) {
+        setError(true);
+        if (!failing) failed.current?.();
+        failing = true;
+        return;
+      }
       const next = new Image();
       next.onload = () => {
         if (!on) return;

@@ -4,15 +4,29 @@ import { dropGuestKey, resetComputer, stopSession } from "./sessions";
 import { bot, getState, session, update } from "./store";
 import { stopWatch } from "./watches";
 import { deleteInboxes } from "./mail";
-import { dropBotFromSkills } from "./workspace-skills";
-import { DEFAULT_UNDELETABLE, deleteOrgoWorkspace, WorkspaceError } from "./workspaces";
-import { orgo as orgoApi, OrgoError, perWorkspaceProjects } from "./orgo";
+import { dropBotFromSkills, dropWorkspaceSkills } from "./workspace-skills";
+import { DEFAULT_UNDELETABLE, deleteOrgoWorkspace, forgetBotAccess, WorkspaceError } from "./workspaces";
+import { apiKey, orgo as orgoApi, OrgoError, perWorkspaceProjects } from "./orgo";
 import { routinesRemovedInWorkspace } from "./routine-sync";
 import { brainsOf, removeBrain } from "./brains";
 
-/** Delete one message from a chat. */
+/**
+ * Delete one message from a chat. One the user kept "between us" (Message.secret) leaves the bots' answers
+ * to it there (until the user's next message) kept the same, so a procedure's draft still leaves them out
+ * (procedures.ts notSecret knew them by the message before them).
+ */
 export function deleteMessage(messageId: string) {
-  update((state) => (state.messages = state.messages.filter((m) => m.id !== messageId)));
+  update((state) => {
+    const at = state.messages.findIndex((m) => m.id === messageId);
+    const gone = state.messages[at];
+    if (gone?.secret && gone.role === "user")
+      for (const m of state.messages.slice(at + 1)) {
+        if (m.chatId !== gone.chatId) continue;
+        if (m.role === "user") break;
+        if (m.role === "bot") m.secret = true;
+      }
+    state.messages = state.messages.filter((m) => m.id !== messageId);
+  });
 }
 
 /** Delete a finished thread, its result in the chat, and its chips. A running one has to be stopped first. */
@@ -35,7 +49,12 @@ export function deleteThread(sessionId: string) {
  * Delete a bot: stop its work, stop watching its screens, delete its own computer if it has one
  * (only ever one in the Bops workspace; a bot that shares the main bot's leaves that one alone), then remove it with its chat, threads, routines and
  * the skills only it had (a skill other bots have too stays theirs). Group chats keep their
- * history without it, unless only one bot is left in them. The main bot can't be deleted.
+ * history without it, unless only one bot is left in them: its lines there stay its own, as no bot made
+ * later gets its id while they're kept (bots.ts freeBotId). Its channels go too (channels.ts removeLink:
+ * its Telegram or Discord bot stops listening and its token leaves the Keychain; a Slack link leaves Bops
+ * Cloud), as they go from Orgo's map with it. The apps it made stay, under its workspace's main bot (their
+ * record in Orgo too: made-apps-sync.ts appsToMainBot), as the delete's question says. The main bot can't
+ * be deleted.
  */
 export async function deleteBot(botId: string, withWorkspace = false) {
   const b = bot(botId);
@@ -49,9 +68,20 @@ export async function deleteBot(botId: string, withWorkspace = false) {
   if (b.computerId) await resetComputer(botId);
   // Its email inboxes go too (they count against the AgentMail plan).
   await deleteInboxes(b);
+  // Its channels: no listener or token is left for a bot that's gone.
+  const links = (getState().channels ?? []).filter((c) => c.botId === botId);
+  if (links.length) {
+    const { removeLink } = await import("./channels");
+    for (const l of links) await removeLink(l.id).catch((e: Error) => console.warn(`[remove] ${b.name}'s ${l.kind} channel: ${e.message}`));
+  }
   const chatId = botChatId(botId);
   const wsId = workspaceOf(b);
   const hadRoutines = getState().routines.some((r) => r.botId === botId);
+  // Its apps go to the main bot while it's still here (a workspace's delete takes them all instead).
+  if (!withWorkspace) {
+    const { appsToMainBot } = await import("./made-apps-sync");
+    appsToMainBot(botId, wsId);
+  }
   dropBotFromSkills(botId, workspaceOf(b));
   update((state) => {
     state.bots = state.bots.filter((x) => x.id !== botId);
@@ -65,6 +95,7 @@ export async function deleteBot(botId: string, withWorkspace = false) {
     state.sessions = state.sessions.filter((s) => s.botId !== botId);
     state.routines = state.routines.filter((r) => r.botId !== botId);
     state.procedures = state.procedures?.filter((p) => p.botId !== botId);
+    forgetBotAccess(state, botId);
     for (const key of Object.keys(state.screens ?? {})) if (key.startsWith(`${botId}:`)) delete state.screens![key];
     if (state.takeover?.botId === botId) state.takeover = undefined;
   });
@@ -81,7 +112,12 @@ export async function deleteBot(botId: string, withWorkspace = false) {
  * moved; one that went with the project is already gone, and a failure here leaves the project gone, which
  * Delete again takes as done and goes on). The free Bops computer stays when another workspace's main bot
  * works on it or has it (freeComputerOnDelete): it passes to that one instead. Only then is it taken off
- * this Mac.
+ * this Mac. A workspace with an Orgo project is never deleted on this Mac alone: when Orgo can't be asked
+ * (it doesn't answer, or no one is signed in) nothing is deleted and the user is told to try again. Its
+ * brains go once Orgo's workspace has (a refusal leaves them as they were). Its memory goes from Honcho
+ * too (orgo-web's delete doesn't reach it): its own bank whole, or, in a bank another workspace uses, its
+ * issues' sessions (memory-deletes.ts, through an outbox while memory doesn't answer). And nothing of it
+ * stays on this Mac: its skills' folder, its issues' cache and its Orbit index go with it.
  */
 export async function deleteWorkspace(workspaceId: string) {
   const gone = (getState().workspaces ?? []).find((w) => w.id === workspaceId);
@@ -90,15 +126,31 @@ export async function deleteWorkspace(workspaceId: string) {
   const left = (getState().workspaces ?? []).filter((w) => w.id !== workspaceId);
   if (left.length === 0) throw new Error("You need at least one workspace");
   const team = getState().bots.filter((b) => workspaceOf(b) === workspaceId);
-  // Its brains first, while its bots' computers are still there: each signs out and its folder goes on them.
-  for (const x of brainsOf(workspaceId)) removeBrain(x.id);
   // The main bot last: the others' computers were cloned from its computer.
   const order = [...team.filter((x) => !x.isMain), ...team.filter((x) => x.isMain)];
-  const orgo = !!gone.orgoProjectId && (await perWorkspaceProjects().catch(() => null)) === true;
+  const orgo = !!gone.orgoProjectId && (await orgoWorkspaceGoes(gone.name)) === true;
   if (orgo) await deleteOrgoWorkspace(gone);
+  // Its brains, while its bots' computers are still there: each signs out and its folder goes on them.
+  for (const x of brainsOf(workspaceId)) removeBrain(x.id);
   await passFreeComputer(workspaceId);
   for (const b of order) if (bot(b.id)?.computerId) await resetComputer(b.id);
   for (const b of order) await deleteBot(b.id, true);
+  // Its made apps and CRM files: off this Mac too (Orgo's went with its project).
+  const { dropWorkspaceApps } = await import("./made-apps-sync");
+  dropWorkspaceApps(workspaceId);
+  const { dropWorkspaceCrm } = await import("./crm-sync");
+  dropWorkspaceCrm(workspaceId);
+  // Its memory: its own bank, or its issues' sessions in the bank it shares, said while it's still listed.
+  const { memoryDeleteFor, deleteWorkspaceMemory } = await import("./memory-deletes");
+  const { memoryGoesWith } = await import("./memory");
+  const { issueSessionsOf, dropWorkspaceIssues } = await import("./orbit-issues");
+  const goes = memoryGoesWith(workspaceId);
+  const memory = memoryDeleteFor(workspaceId, goes && !goes.whole ? await issueSessionsOf(workspaceId) : []);
+  // What else it kept on this Mac: its skills' folder, its issues' cache and its Orbit index.
+  const { dropWorkspaceCategories } = await import("./memory-categories");
+  const forgotten = dropWorkspaceCategories(workspaceId, goes?.whole ? goes.binding.bank : null);
+  dropWorkspaceIssues(workspaceId);
+  dropWorkspaceSkills(workspaceId);
   update((state) => {
     state.workspaces = left;
     state.chats = state.chats.filter((c) => c.workspaceId !== workspaceId);
@@ -106,6 +158,24 @@ export async function deleteWorkspace(workspaceId: string) {
     state.messages = state.messages.filter((m) => chats.has(m.chatId));
     if (state.workspace === workspaceId) state.workspace = left[0].id;
   });
+  // Memory isn't waited on: what it doesn't take now waits in an outbox (memory-deletes.ts).
+  void forgotten.catch(() => {});
+  void deleteWorkspaceMemory(workspaceId, memory).catch((e: Error) => console.warn(`[memory] deleting ${gone.name}'s memory: ${e.message}`));
+}
+
+/**
+ * Whether a workspace's Orgo project goes with it (per workspace projects: deletePreview said so too).
+ * Throws, so nothing is deleted, when Orgo can't be asked: no one is signed in, or it didn't answer. Null
+ * (Orgo lists no project tied to a Bops workspace, so this one's is gone there) and false (an Orgo without
+ * per workspace projects) delete it on this Mac only.
+ */
+async function orgoWorkspaceGoes(name: string): Promise<boolean | null> {
+  if (!(await apiKey().catch(() => ""))) throw new WorkspaceError(`Sign in to Orgo to delete ${name}: its Orgo workspace goes with it.`, 401);
+  try {
+    return await perWorkspaceProjects();
+  } catch {
+    throw new WorkspaceError(`Couldn't reach Orgo to delete ${name}, so it's still here. Try again.`, 502);
+  }
 }
 
 /**

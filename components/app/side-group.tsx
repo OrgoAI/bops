@@ -4,7 +4,8 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type A
 import { ago } from "./ui";
 
 /*
- * What the sidebar's pinned groups share: Routines (autopilot.tsx) and Orbit (memory-categories.tsx).
+ * What the sidebar's pinned groups share: Routines (autopilot.tsx), Orbit (memory-categories.tsx) and the
+ * sidebar's own sections, Needs you, Favorites and each bot's threads (sidebar-sections.tsx).
  * Counts that tick when they go up, the chevron that folds, the arrow that opens a group's page, where
  * this Mac keeps what the user folded, the small × that deletes from a row, one remove question at a time
  * in a list and where focus goes once a row is deleted, and the marks that make only what arrives after

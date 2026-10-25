@@ -168,6 +168,9 @@ assert.equal(T.computerUp("running"), true);
 for (const s of ["suspended", "stopped", "frozen", "starting", "error"]) assert.equal(T.computerUp(s), false, s);
 assert.equal(T.computerAsleep("suspended"), true);
 for (const s of [undefined, "running", "starting", "stopped", "frozen"]) assert.equal(T.computerAsleep(s), false, `${s}`);
+// Down and not coming back by itself (a setup there ends, a runner's routines go back to the Mac): never one asleep or on its way up.
+for (const s of ["error", "stopped", "frozen", "deleted"]) assert.equal(T.computerStaysDown(s), true, s);
+for (const s of [undefined, "running", "suspended", "starting", "resuming"]) assert.equal(T.computerStaysDown(s), false, `${s}`);
 const on = (id) => id === "boppy" || id === "otto";
 const ses = (over) => ({ id: "s", botId: "boppy", chatId: "c", title: "t", goal: "g", status: "running", runsOn: "cloud", steps: [], replies: [], createdAt: 1, ...over });
 assert.equal(T.computerInUse({ sessions: [] }, on), false);

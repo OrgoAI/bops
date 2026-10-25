@@ -8,7 +8,7 @@
 // from a stub (or not at all), and `security`, `codex` and `orgo-relay` are stand-ins.
 // Usage: node --conditions=react-server scripts/test-cloud.mjs
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire, registerHooks } from "node:module";
@@ -203,7 +203,7 @@ function stateAnswer(r) {
   if (!user) return { status: 400, json: { error: "Name the user" } };
   const st = stateOf(user);
   if (url.pathname === "/v1/state" && r.method === "GET")
-    return st.blob ? { json: { version: st.version, seq: lastSeq(st), protocol: 2, writer: st.writer, state: st.blob } } : { status: 404, json: { error: "No state saved yet", version: st.version, seq: lastSeq(st) } };
+    return st.blob ? { json: { version: st.version, seq: lastSeq(st), protocol: st.protocol ?? 2, writer: st.writer, state: st.blob } } : { status: 404, json: { error: "No state saved yet", version: st.version, seq: lastSeq(st) } };
   if (url.pathname === "/v1/state/head") return { json: { version: st.version, seq: lastSeq(st), writer: st.writer } };
   if (url.pathname === "/v1/state" && r.method === "PUT") {
     const b = sentJson(r);
@@ -708,6 +708,26 @@ await selfHosted({}, () => assert.deepEqual(U.usageTags("chat", "sam"), {}, "not
 cloud.handle = null;
 console.log("usage: quick checks counted here at Typesafe's tokens, and every call tells the cloud its bot and kind of work");
 
+// A task's steps over a socket (responses-ws.ts) and business data (treg.ts) go through the cloud on the
+// Orgo key too, and say which app is calling as every other call does (checked with the rest at the end).
+{
+  const RW = await import(`${root}/lib/server/responses-ws.ts`);
+  const TR = await import(`${root}/lib/server/treg.ts`);
+  const u = cloud.upgrades.length;
+  await assert.rejects(RW.ResponsesSocket.open("boppy", 4000), RW.TransportError, "the fake cloud takes no step sockets");
+  assert.deepEqual(cloud.upgrades.slice(u).map((x) => [x.path, x.auth]), [["/proxy/openai/v1/responses", `Bearer ${KEY}`]]);
+  await withSession({ ...SESSION, treg: true });
+  cloud.handle = (r) => (r.path.startsWith("/proxy/treg/") ? { json: { output: { name: "Acme" } } } : cloudDefault(r));
+  n = cloud.requests.length;
+  await TR.businessSearch("boppy", "company", { domain: "acme.com" });
+  assert.deepEqual(
+    since(n).map((r) => [r.method, r.path.split("?")[0], r.headers.authorization, r.headers["x-bops-bot"]]),
+    [["POST", "/proxy/treg/call/treg.companies.enrich", `Bearer ${KEY}`, "boppy"]],
+  );
+  cloud.handle = null;
+  await withSession(SESSION);
+}
+
 // The account page: model use, calls and AI credit spent are the cloud's own count (what AI credit
 // paid for), and each way of cutting it adds up; computers made are this Mac's. A row older builds kept
 // for Codex on the user's own account is never counted, and there's no line for it.
@@ -1211,6 +1231,33 @@ assert.equal(said().length - before, 2, "said once, however often it's handed ov
 // "Keep test": the offer goes.
 r = await HANDLE.POST(new Request("http://127.0.0.1:3210/api/mail/handle", { method: "POST", body: JSON.stringify({ workspaceId: MAIN_WORKSPACE, keep: true }) }));
 assert.equal(mainWs().mailPick, undefined);
+// One recipient that names two people is refused before it's sent or asked about (mail.ts valid): it would read as
+// its first, the user's own address, and reach the second too.
+for (const two of ["Sam <sam@example.com>, Eve <eve@evil.example>", "sam@example.com; eve@evil.example", "Sam <sam@example.com> <eve@evil.example>"])
+  assert.equal(await M.sendEmail(main().id, { to: [two], subject: "Hi", text: "Hello" }, {}), `Check the addresses: ${two}. Nothing was sent.`, two);
+// Always allow on one email is a rule for that bot's emails, whoever they're to (lib/permission.ts), as its card says:
+// a later email to anyone else goes with no card.
+{
+  const PM = await import(`${root}/lib/server/permission.ts`);
+  const R = await import(`${root}/lib/permission.ts`);
+  const toDana = await M.sendEmail(main().id, { to: ["Dana <dana@example.com>"], subject: "Hi", text: "Hello" }, {}).then(
+    () => null,
+    (e) => e,
+  );
+  assert.ok(toDana instanceof PM.NeedsOk, `to someone else, it asks: ${toDana}`);
+  assert.deepEqual([toDana.ask.action, toDana.ask.resources, toDana.ask.kind], ["Send an email", ["dana@example.com"], "email"]);
+  assert.equal(R.alwaysScope(main().name, toDana.ask), `Always allow ${main().name} to send an email, whoever it's to and whatever it says.`);
+  S.update((s) => (s.appApprovals = [{ id: "apr_mail", botId: main().id, chatId: `bot:${main().id}`, askedBy: "dev_other_mac", ...toDana.ask, at: Date.now(), resume: { engine: "chat", responseId: "r", callId: "c", call: { name: "send_email", arguments: "{}" }, outputs: [] } }]));
+  assert.equal(PM.replyToAsk("apr_mail", "always"), undefined);
+  assert.deepEqual(main().permissions, [{ action: "Send an email", resource: "*", effect: "allow" }]);
+  const w = web.calls.length;
+  assert.equal(await M.sendEmail(main().id, { to: ["max@example.org"], cc: ["ava@example.net"], subject: "Next", text: "Again" }, {}), "Sent to max@example.org.", "anyone else: no card");
+  assert.ok(web.calls.slice(w).some((c) => c.host === "api.agentmail.to" && c.method === "POST" && c.path.endsWith("/messages/send")), "sent through AgentMail");
+  S.update((s) => {
+    delete s.bots.find((b) => b.id === main().id).permissions;
+    s.appApprovals = [];
+  });
+}
 // The plan ended: paused (unanswered, unread, nothing sent), then given back.
 assert.equal((await planEvent("p2", { tier: "free_bops", botId: main().id, workspaceId: MAIN_WORKSPACE, phone: { ...phone, status: "paused" }, email: { ...inbox, status: "paused" } })).status, 200);
 assert.deepEqual([main().phoneLine.paused, main().mail.paused], [true, true]);
@@ -1409,15 +1456,14 @@ assert.match(K.appsNote(mainBot(), "task", { tools: false }), /can't be reached 
 assert.ok(!/find_app_actions with the job/.test(K.appsNote(mainBot(), "task", { tools: false })));
 assert.match(C.APP_TOOLS(mainBot())[0].description, /app gateway .*Google Sheets \(Work · me@example\.com: read only\)/);
 const executed = () => cloud.requests.filter((x) => x.path.startsWith("/proxy/composio/api/v3.1/tools/execute/")).map((x) => x.path.split("/").pop());
-let decision = null;
-const draft = await C.runAppAction("boppy", "GMAIL_SEND_DRAFT", { draft_id: "d1" }, { chatId: "bot:boppy" }, (a) => (decision = a));
-assert.match(draft, /^This needs .+'s approval first: Send Draft in Gmail/);
-const approval = S.getState().appApprovals.find((a) => a.action === "GMAIL_SEND_DRAFT");
-assert.ok(approval && decision, "waits for the user");
+// A send asks the user: the run pauses there (NeedsOk: lib/server/permission.ts) and nothing is sent until their yes.
+const draft = await C.runAppAction("boppy", "GMAIL_SEND_DRAFT", { draft_id: "d1" }, { chatId: "bot:boppy" }).then(
+  () => null,
+  (e) => e,
+);
+assert.equal(draft?.name, "NeedsOk", "it asks the user first");
+assert.match(draft.ask.action, /^Send Draft in Gmail/);
 assert.ok(!executed().includes("GMAIL_SEND_DRAFT"), "nothing sent yet");
-C.answerApp(approval.id, false);
-assert.match(await decision, /^Not approved/);
-assert.ok(!executed().includes("GMAIL_SEND_DRAFT"), "and nothing sent after a no");
 assert.equal(await C.runAppAction("boppy", "GMAIL_FETCH_EMAILS", {}, { chatId: "bot:boppy" }), '{"messages":[]}');
 assert.ok(executed().includes("GMAIL_FETCH_EMAILS"), "reading runs at once");
 // The run tells the cloud whose and which app it is, for counting it (the cloud's Composio rows).
@@ -1444,7 +1490,7 @@ const lastCall = cloud.stateRequests.at(-1);
 assert.equal(lastCall.headers.authorization, `Bearer ${KEY}`);
 assert.equal(lastCall.headers["x-bops-user"], "u1");
 assert.equal(lastCall.headers["x-bops-protocol"], "2");
-assert.deepEqual(cloud.stateRequests.filter((r) => r.headers["x-bops-protocol"] !== "2" || r.headers["x-bops-state-level"] !== "3").map((r) => `${r.method} ${r.path}`), []);
+assert.deepEqual(cloud.stateRequests.filter((r) => r.headers["x-bops-protocol"] !== "2" || r.headers["x-bops-state-level"] !== "4").map((r) => `${r.method} ${r.path}`), []);
 assert.match(lastCall.headers["x-bops-device"], /^[0-9a-f]{16}$/);
 const device = lastCall.headers["x-bops-device"];
 
@@ -1866,8 +1912,16 @@ await signIn("orgo_key_2");
 S.update((s) => (s.owner.about = "last words"));
 assert.equal(await S.flushState(5000), true);
 assert.equal(blobPuts().at(-1).headers.authorization, "Bearer orgo_key_2");
-await T.stopCloud();
+// The state's poll (ensureCloud) comes while the sign-out is under way, its key still here (the live
+// stream saying this Mac's bots are idle can take 2 seconds): nothing reopens on that key.
+const stopping = T.stopCloud();
+T.ensureCloud();
+await stopping;
 await until(() => c4.closed === 1000, "the tunnel closed");
+T.ensureCloud();
+await sleep(1500);
+assert.equal(cloud.connections.length, 4, "nothing reopens on the key being signed out");
+assert.equal(globalThis.bopsLive ?? null, null, "nor the live stream");
 signOut();
 T.ensureCloud();
 await sleep(1500);
@@ -1920,6 +1974,7 @@ await globalThis.__bopsExitWork.get("state")();
 const keptOnMac = join(scratch, ".data", "users", USER.id, "unsent-state.json");
 assert.equal(existsSync(keptOnMac), true, "kept on this Mac on the way out");
 assert.equal(JSON.parse(readFileSync(keptOnMac, "utf8")).blob.owner.about, "while the cloud is down");
+assert.equal(JSON.parse(readFileSync(keptOnMac, "utf8")).level, 4, "with the state level of the app that kept it");
 cloud.stateHandle = null;
 assert.equal(await S.flushState(5000), true, "up once the cloud is back");
 assert.equal(stateOf(USER.id).blob.owner.about, "while the cloud is down");
@@ -1931,6 +1986,106 @@ assert.equal(since(n).filter((r) => r.path === "/v1/session").length, 1, "the se
 await T.stopCloud();
 signOut();
 console.log("restart: the state saved to the user's Bops Cloud first, the cloud session and plan dropped, still signed in");
+
+// A Mac still on v0.0.29 went on in memory while Bops Cloud refused it (426: a v0.0.30 Mac wrote the
+// state since) and kept what it did on quitting, to update: its copy never undoes the newer work. Where
+// both changed something the cloud's stands; of its messages only the ones it added go in. A copy kept
+// by an app at the cloud's level still merges as a save would.
+{
+  const fpOf = (m) => createHash("sha1").update(JSON.stringify(m)).digest("base64");
+  const sam = { id: "sam", name: "Sam", role: "Ops", color: "#5B8CFF", isMain: true, computer: "shared", computerStatus: "ready", access: {} };
+  const base = { workspaces: [{ id: MAIN_WORKSPACE, name: "Main", createdAt: 1 }], workspace: MAIN_WORKSPACE, bots: [sam], accounts: [], sessions: [], routines: [], owner: { name: "Ava" } };
+  const msg = (id, text, at) => ({ id, chatId: "bot:sam", role: id === "m3" ? "user" : "bot", text, at });
+  const m1 = msg("m1", "Plan the week", 1_000);
+  const m2 = msg("m2", "Working on it", 2_000);
+  const m3 = msg("m3", "Sam, add Dana to the list", 3_000);
+  // The newer Mac renamed Sam, gave it its own computer and Gmail, and Sam finished m2.
+  const newer = { ...base, bots: [{ ...sam, name: "Samantha", computer: "own", computerId: "c2", access: { ca_gmail: "act" } }] };
+  const m2done = { ...m2, text: "Done: 3 items" };
+  // The older Mac only saw Sam's computer go to sleep, failed m2 at the cloud, cleared m1 and wrote m3.
+  const kept = (user, level) => ({
+    user,
+    version: 3,
+    base,
+    msgHashes: [[m1.id, fpOf(m1)], [m2.id, fpOf(m2)]],
+    blob: { ...base, bots: [{ ...sam, computerStatus: "asleep" }] },
+    messages: [{ ...m2, text: "Failed: Bops Cloud answered 426 (state_too_new)" }, m3],
+    at: 1,
+    ...(level ? { level } : {}),
+  });
+  const seed = (user, level) => {
+    states.set(user, { version: 5, protocol: 4, writer: "dev_newer", blob: structuredClone(newer), rows: new Map([[m1.id, { id: m1.id, seq: ++seqs, json: m1 }], [m2.id, { id: m2.id, seq: ++seqs, json: m2done }]]) });
+    const file = join(scratch, ".data", "users", user, "unsent-state.json");
+    mkdirSync(join(scratch, ".data", "users", user), { recursive: true });
+    writeFileSync(file, JSON.stringify(kept(user, level)));
+    return file;
+  };
+  const texts = () => Object.fromEntries(S.getState().messages.filter((m) => m.chatId === "bot:sam").map((m) => [m.id, m.text]));
+  const file5 = seed("u5");
+  await signIn("orgo_key_5", { id: "u5" });
+  const got = S.getState().bots.find((b) => b.id === "sam");
+  assert.deepEqual([got.name, got.computer, got.computerId, got.access, got.computerStatus], ["Samantha", "own", "c2", { ca_gmail: "act" }, "asleep"], "the newer work stands, the older Mac's own change too");
+  assert.deepEqual(texts(), { m1: "Plan the week", m2: "Done: 3 items", m3: "Sam, add Dana to the list" }, "only the message it added goes in");
+  assert.equal(await S.flushState(5000), true);
+  assert.equal(stateOf("u5").blob.bots.find((b) => b.id === "sam").name, "Samantha", "and that's what goes up");
+  assert.equal(stateOf("u5").rows.get("m3").json.text, "Sam, add Dana to the list");
+  assert.equal(existsSync(file5), false, "the kept copy goes once it's up");
+  // Kept by an app at the cloud's level (offline, not refused): this Mac's changes stand, as a save's would.
+  seed("u6", 4);
+  await signIn("orgo_key_6", { id: "u6" });
+  assert.equal(S.getState().bots.find((b) => b.id === "sam").name, "Sam", "this Mac's copy of a bot changed on both");
+  assert.deepEqual(texts(), { m2: "Failed: Bops Cloud answered 426 (state_too_new)", m3: "Sam, add Dana to the list" }, "its changes and removals stand");
+  assert.equal(await S.flushState(5000), true);
+  signOut();
+
+  // Refused, the older Mac went on running every routine from memory while the newer Bops ran them too: two
+  // "Stretch" reminders (Bops Cloud has the newer Bops's two), a run's chip, its failed thread and the note
+  // of it, and a note that one didn't run. None of that comes back with it; the user's own message and
+  // thread do.
+  const TOO_NEW = "Another of your Macs is on a newer Bops. Update Bops on this Mac to keep your chats in sync.";
+  const stretch = (id, at) => ({ id, chatId: "bot:sam", role: "bot", botId: "sam", text: "Stretch", at, routine: { id: "r_stretch" } });
+  states.set("u7", {
+    version: 5,
+    protocol: 4,
+    writer: "dev_newer",
+    blob: structuredClone(newer),
+    rows: new Map([m1, m2done, stretch("r1", 4_000), stretch("r2", 5_000)].map((m) => [m.id, { id: m.id, seq: ++seqs, json: m }])),
+  });
+  const thread = (id, extra) => ({ id, botId: "sam", chatId: "bot:sam", title: id, goal: id, createdAt: 3_500, ...extra });
+  const old = {
+    ...kept("u7"),
+    blob: {
+      ...base,
+      sessions: [
+        thread("ses_old_1", { sentVia: "routine", routineId: "r_digest", status: "failed", error: `426 ${TOO_NEW}` }),
+        thread("ses_user", { sentVia: "you", status: "done", answer: "Booked for 7" }),
+        thread("ses_refused", { sentVia: "you", status: "failed", error: TOO_NEW }),
+      ],
+    },
+    messages: [
+      m3,
+      stretch("s1", 4_001),
+      stretch("s2", 5_001),
+      { id: "chip", chatId: "bot:sam", role: "system", text: "Routine · Every day at 9 AM", at: 6_000, sessionIds: ["ses_old_1"] },
+      { id: "late", chatId: "bot:sam", role: "system", text: "Routine · Every day at 9 AM · late, it was due at 9 AM", at: 6_001 },
+      { id: "fail", chatId: "bot:sam", role: "bot", botId: "sam", text: `Couldn't finish: ${TOO_NEW}`, at: 6_002, resultOf: "ses_old_1" },
+      { id: "nope", chatId: "bot:sam", role: "system", text: `"Digest" didn't run: ${TOO_NEW}`, at: 6_003, routine: { id: "r_digest" } },
+      { id: "book", chatId: "bot:sam", role: "user", text: "Book a table for 7", at: 6_100 },
+      { id: "booked", chatId: "bot:sam", role: "bot", botId: "sam", text: "Booked for 7", at: 6_200, resultOf: "ses_user" },
+    ],
+  };
+  mkdirSync(join(scratch, ".data", "users", "u7"), { recursive: true });
+  writeFileSync(join(scratch, ".data", "users", "u7", "unsent-state.json"), JSON.stringify(old));
+  await signIn("orgo_key_7", { id: "u7" });
+  assert.deepEqual(
+    Object.keys(texts()).sort(),
+    ["booked", "book", "m1", "m2", "m3", "r1", "r2"].sort(),
+    "the newer Bops's two reminders, and the user's own; none of what its routines made while refused",
+  );
+  assert.deepEqual(S.getState().sessions.map((x) => x.id), ["ses_user"], "the user's own thread; not the routine's failed one, nor one that failed for the refusal");
+  signOut();
+}
+console.log("kept on a Mac: a copy an older Bops kept never undoes newer work, nor brings back what its routines did while refused; one at the cloud's level merges as a save");
 
 // An action's inputs get the fields its schema pins to one value (a const) where the bot left them out:
 // NOTION_APPEND_TEXT_BLOCKS lists each block's `type` as optional, then refuses a block without it.
@@ -1997,10 +2152,16 @@ assert.ok(cloud.upgrades.length > 0 && cloud.upgrades.every((u) => u.version ===
 // What the cloud keeps a Mac older than the user's state out of says which state this one may be given:
 // the tunnel and the notices, as the state's calls above.
 const tunnels = cloud.upgrades.filter((u) => u.path === "/v1/connect");
-assert.ok(tunnels.length > 0 && tunnels.every((u) => u.level === "3"), `every tunnel says its state level: ${JSON.stringify(tunnels.map((u) => u.level))}`);
+assert.ok(tunnels.length > 0 && tunnels.every((u) => u.level === "4"), `every tunnel says its state level: ${JSON.stringify(tunnels.map((u) => u.level))}`);
 const noticeCalls = cloud.requests.filter((r) => r.path.startsWith("/v1/notices"));
-assert.ok(noticeCalls.length > 0 && noticeCalls.every((r) => r.headers["x-bops-state-level"] === "3"), "and every call for notices");
+assert.ok(noticeCalls.length > 0 && noticeCalls.every((r) => r.headers["x-bops-state-level"] === "4"), "and every call for notices");
 assert.ok(cloud.requests.some((r) => r.path.startsWith("/proxy/openai/")) && cloud.requests.some((r) => r.path.startsWith("/proxy/composio")), "through the providers' proxies too");
+// And every proxy's call and socket, OpenAI's SDK's included: Bops Cloud refuses them to an app below
+// level 4 once one at 4 wrote the user's state (cloud/state.ts behindState), so one that didn't say would refuse this app itself.
+const unleveled = cloud.requests.filter((r) => r.path.startsWith("/proxy/") && r.headers["x-bops-state-level"] !== "4").map((r) => `${r.method} ${r.path}`);
+assert.deepEqual(unleveled, [], "every proxy call says its state level");
+const proxySockets = cloud.upgrades.filter((u) => u.path.startsWith("/proxy/"));
+assert.ok(proxySockets.length > 0 && proxySockets.every((u) => u.level === "4"), `every proxy socket says it: ${JSON.stringify(proxySockets.map((u) => [u.path, u.level]))}`);
 const toOrgo = web.calls.filter((c) => c.host === "www.orgo.ai");
 assert.ok(toOrgo.length > 0 && toOrgo.every((c) => c.headers["x-bops-version"] === "9.9.9"), "every call to Orgo says the app's version");
 assert.deepEqual(web.calls.filter((c) => c.headers["x-bops-version"] && c.host !== "www.orgo.ai").map((c) => c.host), [], "never to anyone else");

@@ -2,12 +2,16 @@ import "server-only";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { orgoHeaders } from "./app-version";
-import { loadOrgoKey, orgoOrigin } from "./orgo-auth";
+import { loadOrgoKey, orgoKeyRejected, orgoOrigin } from "./orgo-auth";
+import { onRunner } from "./persist";
 import { RTC_SHRUNK_MS } from "@/lib/rtc";
 import { recordUsage } from "./usage";
 import { getState, stateEpoch, update } from "./store";
 import { MAIN_WORKSPACE, WORKSPACE_APPS_SINCE, type Workspace } from "@/lib/types";
+import type { DeployState } from "@/lib/hosted-apps";
+import type { SharedRole, SharedWorkspace } from "@/lib/shared";
 import { folderKey, moveWorkspaceFolder } from "./workspace-skills";
+import { isIdentityToken } from "./vm-identity";
 
 /** Thin Orgo REST client (the published SDKs predate screens and clone). */
 
@@ -15,11 +19,15 @@ const base = () => `${orgoOrigin()}/api`;
 
 /**
  * The key Orgo calls run on: the signed-in user's (Sign in with Orgo, kept in the Keychain), else
- * ORGO_API_KEY (self-hosting), else the Orgo CLI's login in ~/.orgo/credentials.json.
+ * ORGO_API_KEY (self-hosting), else the Orgo CLI's login in ~/.orgo/credentials.json. A computer's runner
+ * uses only its computer's own credential: its Orgo identity, else its key read from the files Orgo
+ * writes it in (orgo-auth.ts runnerKey): never one from its environment or a CLI login on that computer,
+ * which may be anyone's.
  */
 export async function apiKey(): Promise<string> {
   const signedIn = await loadOrgoKey();
   if (signedIn) return signedIn;
+  if (onRunner()) throw new Error("No ORGO_API_KEY on this computer");
   if (process.env.ORGO_API_KEY) return process.env.ORGO_API_KEY;
   try {
     const creds = JSON.parse(readFileSync(`${homedir()}/.orgo/credentials.json`, "utf8"));
@@ -92,21 +100,35 @@ const MAKE_MS = 180_000;
 /** Orgo didn't answer in time (the connection dropped, or it hung): the call may or may not have been done. */
 export class OrgoTimeout extends Error {}
 
+/** Orgo's code in an answer (a 401's says why an identity token was turned down), read from a copy so the answer itself is still unread. */
+async function codeOf(res: Response): Promise<string | undefined> {
+  try {
+    const j = (await res.clone().json()) as { code?: unknown } | null;
+    return typeof j?.code === "string" ? j.code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * One request to Orgo with the signed-in key, read with `read`, within `timeoutMs` (OrgoTimeout after) or
  * until `signal` (a task stopped), which ends it as the signal says. A network error comes as Node gave it.
+ * Says which key went, so a caller can tell a runner's identity token was turned down.
  */
 async function answered<R>(url: string, init: RequestInit, timeoutMs: number, signal: AbortSignal | undefined, read: (res: Response) => Promise<R>) {
   if (signal?.aborted) throw signal.reason ?? new Error("Stopped");
   const timer = AbortSignal.timeout(timeoutMs);
   try {
+    const key = await apiKey();
     const res = await fetch(url, {
       ...init,
-      headers: { ...orgoHeaders(), ...(init.headers as Record<string, string>), Authorization: `Bearer ${await apiKey()}` },
+      headers: { ...orgoHeaders(), ...(init.headers as Record<string, string>), Authorization: `Bearer ${key}` },
       cache: "no-store",
       signal: signal ? AbortSignal.any([timer, signal]) : timer,
     });
-    return { res, text: await read(res) };
+    // A runner's credential turned down: its computer may have a new key, or a fresh token (orgo-auth.ts).
+    if (res.status === 401) orgoKeyRejected(key, await codeOf(res));
+    return { res, text: await read(res), key };
   } catch (e) {
     if (signal?.aborted) throw signal.reason ?? new Error("Stopped");
     if (timer.aborted) throw new OrgoTimeout(`Orgo didn't answer within ${Math.round(timeoutMs / 1000)} seconds`);
@@ -128,14 +150,21 @@ async function call<T>(
   { wait = method === "POST" || method === "PATCH", timeoutMs = CALL_MS, signal }: { wait?: boolean; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<T> {
   const until = Date.now() + wakeWaitMs();
+  let reauthed = false;
   for (let attempt = 0; ; attempt++) {
-    let res: Response, text: string;
+    let res: Response, text: string, key: string;
     try {
-      ({ res, text } = await answered(`${base()}${path}`, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs, signal, async (r) => r.text()));
+      ({ res, text, key } = await answered(`${base()}${path}`, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) }, timeoutMs, signal, async (r) => r.text()));
     } catch (e) {
       // A read that didn't get through is safe to make again, once; an action may have happened, so it says so instead.
       if (method === "GET" && attempt === 0 && !signal?.aborted) continue;
       throw e;
+    }
+    // A runner's identity token turned down (its computer woke on another VM, say): once more on the
+    // credential it takes next, at once (orgo-auth.ts). A 401 is answered before anything is done.
+    if (res.status === 401 && !reauthed && isIdentityToken(key)) {
+      reauthed = true;
+      continue;
     }
     let json: { error?: string; code?: unknown; retry_after?: unknown } = {};
     try {
@@ -171,22 +200,33 @@ async function call<T>(
 /**
  * One call to Orgo with `key`, the key passed in and only that (never apiKey's fallbacks): its status and
  * JSON (an empty object when it had none), or null when it didn't answer within `timeoutMs`. `headers` go
- * along (an Idempotency-Key), never in place of the key. `path` starts with /api.
+ * along (an Idempotency-Key, an If-Match), never in place of the key. `raw`: a body sent as it is with its
+ * own type (an app's data as the Mac wrote it, a CRM file's CSV) instead of `body` as JSON. `path` starts
+ * with /api.
  */
 export async function callOrgo<T>(
   key: string,
   path: string,
-  { method = "GET", body, headers, timeoutMs = 15_000 }: { method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; body?: unknown; headers?: Record<string, string>; timeoutMs?: number } = {},
+  {
+    method = "GET",
+    body,
+    raw,
+    headers,
+    timeoutMs = 15_000,
+  }: { method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; body?: unknown; raw?: { data: string | Uint8Array; type: string }; headers?: Record<string, string>; timeoutMs?: number } = {},
 ): Promise<{ status: number; json: T } | null> {
   try {
+    const type: Record<string, string> = raw ? { "Content-Type": raw.type } : body === undefined ? {} : { "Content-Type": "application/json" };
     const res = await fetch(`${orgoOrigin()}${path}`, {
       method,
-      headers: { ...orgoHeaders(), ...headers, Authorization: `Bearer ${key}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      headers: { ...orgoHeaders(), ...headers, Authorization: `Bearer ${key}`, ...type },
+      ...(raw ? { body: raw.data as BodyInit } : body === undefined ? {} : { body: JSON.stringify(body) }),
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return { status: res.status, json: (await res.json().catch(() => ({}))) as T };
+    const json = (await res.json().catch(() => ({}))) as T;
+    if (res.status === 401) orgoKeyRejected(key, typeof (json as { code?: unknown })?.code === "string" ? (json as { code: string }).code : undefined);
+    return { status: res.status, json };
   } catch {
     return null;
   }
@@ -244,8 +284,22 @@ export type OrgoComputer = { id: string; name: string; status: string; cpu: numb
  * the next user never lands in the last one's workspace.
  */
 const WORKSPACE = "bops";
-/** A workspace as GET /api/workspaces lists it. `product` and `bops_ws_id` only from an orgo-web with per workspace projects. */
-export type OrgoWorkspace = { id: string; name: string; role?: string; product?: string | null; bops_ws_id?: string | null; created_at?: string; updated_at?: string | null; desktops?: { id: string; name?: string }[]; member_count?: number };
+/**
+ * A workspace as GET /api/workspaces lists it. `product` and `bops_ws_id` only from an orgo-web with per
+ * workspace projects; `owner_email` is its owner's (one shared with the user names who shared it).
+ */
+export type OrgoWorkspace = {
+  id: string;
+  name: string;
+  role?: string;
+  product?: string | null;
+  bops_ws_id?: string | null;
+  owner_email?: string | null;
+  created_at?: string;
+  updated_at?: string | null;
+  desktops?: { id: string; name?: string }[];
+  member_count?: number;
+};
 const g = globalThis as unknown as {
   bopsOrgoWorkspace?: Promise<string>;
   bopsComputerChanges?: number;
@@ -285,6 +339,18 @@ export const ownedWorkspaces = async () => {
   notePerWorkspace(list, await apiKey().catch(() => ""));
   return list;
 };
+
+/**
+ * The Bops workspaces others shared with the user (lib/shared.ts): ones they're an admin or a member of,
+ * each its own Bops workspace (bops_ws_id), so being in it shows that workspace alone. An Orgo without
+ * per workspace projects has none: its one "bops" project holds every workspace of its owner's.
+ */
+export async function sharedWorkspaces(): Promise<SharedWorkspace[]> {
+  const list = (await call<{ workspaces?: OrgoWorkspace[] }>("GET", "/workspaces")).workspaces ?? [];
+  return list
+    .filter((w) => (w.role === "admin" || w.role === "member") && w.product === "bops" && typeof w.bops_ws_id === "string" && !!w.bops_ws_id)
+    .map((w) => ({ projectId: w.id, name: w.name, owner: typeof w.owner_email === "string" ? w.owner_email : "", role: w.role as SharedRole }));
+}
 
 /**
  * What a list says about this Orgo. `product` on a project shows only the column (GET answers every column,
@@ -447,7 +513,7 @@ export const collisionNames = (name: string) => [name, `${name} (Bops)`, ...Arra
  * already has is said back (OrgoError, nameTaken) for them to pick another; otherwise the next free one
  * of collisionNames is used and noted.
  */
-export async function ensureProject(wsId: string, opts: { interactive?: boolean; name?: string } = {}): Promise<{ id: string; name: string; renamed?: boolean; created?: boolean }> {
+export async function ensureProject(wsId: string, opts: { interactive?: boolean; name?: string } = {}): Promise<{ id: string; name: string; updatedAt?: string; renamed?: boolean; created?: boolean }> {
   const w = workspaceOfId(wsId);
   const local = (opts.name ?? w?.name ?? "Workspace").trim().slice(0, 80) || "Workspace";
   const owned = await ownedWorkspaces();
@@ -456,7 +522,7 @@ export async function ensureProject(wsId: string, opts: { interactive?: boolean;
     // Tied here only once Orgo tied it too (a refusal, a 409 taken by another, or an orgo-web without the code: nothing).
     if (tied.bops_ws_id !== wsId && !(await tieProject(tied.id, wsId))) throw new Error(`Orgo didn't tie ${tied.id.slice(0, 8)} to this workspace`);
     bindProject(wsId, tied.id, tied.name, tied.updated_at);
-    return { id: tied.id, name: tied.name };
+    return { id: tied.id, name: tied.name, ...(tied.updated_at ? { updatedAt: tied.updated_at } : {}) };
   }
   const name = wsId === MAIN_WORKSPACE && /^main$/i.test(local) ? WORKSPACE : local;
   const tries = opts.interactive ? [name] : collisionNames(name);
@@ -467,7 +533,7 @@ export async function ensureProject(wsId: string, opts: { interactive?: boolean;
   for (const n of tries) {
     if (!opts.interactive && taken.has(n.toLowerCase())) continue;
     try {
-      const made = await call<{ id: string; name?: string; product?: unknown; bops_ws_id?: unknown; updated_at?: string | null }>("POST", "/workspaces", { name: n, product: "bops", bops_ws_id: wsId }, { wait: false });
+      const made = await call<{ id: string; name?: string; product?: unknown; bops_ws_id?: unknown; created_at?: string | null; updated_at?: string | null }>("POST", "/workspaces", { name: n, product: "bops", bops_ws_id: wsId }, { wait: false });
       if (!saidBack(made, wsId)) {
         // An orgo-web without the code made a plain Orgo project: it goes again, and this workspace stays on the "bops" project.
         if (g.bopsOrgoPerWorkspace) g.bopsOrgoPerWorkspace.on = null;
@@ -475,15 +541,17 @@ export async function ensureProject(wsId: string, opts: { interactive?: boolean;
         throw new Error("Orgo didn't make it a Bops workspace");
       }
       await confirmPerWorkspace();
-      bindProject(wsId, made.id, made.name ?? n, made.updated_at);
-      return { id: made.id, name: made.name ?? n, created: true, ...(n !== name ? { renamed: true } : {}) };
+      // orgo-web's create answers created_at, not updated_at: a project just made was last changed then.
+      const at = made.updated_at ?? made.created_at ?? undefined;
+      bindProject(wsId, made.id, made.name ?? n, at);
+      return { id: made.id, name: made.name ?? n, created: true, ...(at ? { updatedAt: at } : {}), ...(n !== name ? { renamed: true } : {}) };
     } catch (e) {
       if (!nameTaken(e) || opts.interactive) throw e;
       // Made meanwhile (another Mac): that's it, if it's tied to this workspace.
       const again = (await ownedWorkspaces()).find((x) => x.bops_ws_id === wsId);
       if (again) {
         bindProject(wsId, again.id, again.name, again.updated_at);
-        return { id: again.id, name: again.name };
+        return { id: again.id, name: again.name, ...(again.updated_at ? { updatedAt: again.updated_at } : {}) };
       }
     }
   }
@@ -525,8 +593,8 @@ export async function bopsProjects(): Promise<string[]> {
 /**
  * A workspace the user owns, to read their plan's numbers by (Orgo counts computers against the owner,
  * across every workspace they own): the "bops" one when there is one, else any. Unlike bopsWorkspace it
- * never makes one, so reading the plan leaves nothing behind in an account that never used the cloud.
- * Null when they own none.
+ * never makes one, so reading the plan makes nothing (the "bops" one is made by bindMissingProjects at
+ * sign-in or start, in workspaces.ts, or with the first computer). Null when they own none.
  */
 export async function ownedWorkspace(): Promise<string | null> {
   const bops = await g.bopsOrgoWorkspace?.catch(() => undefined);
@@ -550,7 +618,8 @@ export type BopsWorkspaceFound =
  * The user's own "bops" workspace, found and never made, with `key` (theirs, signed in): the id
  * bopsWorkspace() already has for them (unless `fresh`), else the one they own named "bops" (any case,
  * spaces trimmed). Never one shared with them, never another of theirs (unlike ownedWorkspace), and
- * nothing is made (unlike bopsWorkspace): "none" until a bot of theirs has had a computer. The people
+ * nothing is made (unlike bopsWorkspace): "none" until Bops made it (workspaces.ts bindMissingProjects at
+ * sign-in or start, every account signed in to Bops, or a bot's first computer). The people
  * the user adds are this workspace's members (lib/server/members.ts).
  */
 export async function findBopsWorkspace(key: string, { fresh = false, wsId }: { fresh?: boolean; wsId?: string } = {}): Promise<BopsWorkspaceFound> {
@@ -574,7 +643,8 @@ export async function findBopsWorkspace(key: string, { fresh = false, wsId }: { 
 }
 
 /** A member of a workspace as orgo-web lists it: the owner first, then everyone else (guests have no email). */
-export type OrgoMember = { id?: unknown; alt?: unknown; role?: unknown; email?: unknown };
+/** A member as orgo-web lists them (`joined_at`: when their membership began, from an orgo-web that sends it). */
+export type OrgoMember = { id?: unknown; alt?: unknown; role?: unknown; email?: unknown; joined_at?: unknown };
 /** An invite as orgo-web lists it (the token only for the owner; the times from an orgo-web that sends them). */
 export type OrgoInvite = { email?: unknown; role?: unknown; status?: unknown; token?: unknown; created_at?: unknown; expires_at?: unknown; expired?: unknown };
 
@@ -902,6 +972,12 @@ export type OrgoDeletePreview = {
   keys: string[];
   skills: string[];
   apps: string[];
+  /** The apps its bots made and its CRM files, by name (an orgo-web that keeps them: madeApps [{ title }], crmFiles [{ name }]). */
+  madeApps: string[];
+  crmFiles: string[];
+  /** Its routines and Orbit issues, by title, from an orgo-web that lists them (routines [{ title }], orbitIssues [{ title }]); none from one that doesn't (Bops lists its own). */
+  routines: string[];
+  issues: string[];
   /** An orgo-web that counted skills and apps (563ed1cf6) instead of naming them: how many it has, names unknown. */
   skillCount?: number;
   appCount?: number;
@@ -926,6 +1002,10 @@ export async function deletePreview(projectId: string): Promise<OrgoDeletePrevie
     keys: names(j.keys ?? j.secrets),
     skills: names(j.skills),
     apps: names(j.apps),
+    madeApps: names(j.madeApps),
+    crmFiles: names(j.crmFiles),
+    routines: names(j.routines),
+    issues: names(j.orbitIssues ?? j.issues),
     ...(count(j.skills) !== undefined && { skillCount: count(j.skills) }),
     ...(count(j.apps) !== undefined && { appCount: count(j.apps) }),
   };
@@ -1011,6 +1091,93 @@ export const egress = {
 
 /** Orgo said a feature isn't available for this account (403). */
 export const orgoUnavailable = (e: unknown) => / → 403:/.test((e as Error)?.message ?? "");
+
+/**
+ * One deploy as orgo-web's deploy runner has it (DeploymentView). An app's names the Ingot changeset it
+ * builds (`at`; `source_version` or `commit_sha` where orgo-web says it so).
+ */
+export type OrgoDeployment = {
+  id: string;
+  project_id: string;
+  state: DeployState;
+  phase?: string | null;
+  error?: string | null;
+  at?: string | null;
+  source_version?: string | null;
+  commit_sha?: string | null;
+  created_at: string;
+  finished_at?: string | null;
+};
+
+/** A deploy project on one computer (ProjectView): an app's has Ingot as its source (its repo there), and its public URL once it was live. */
+export type OrgoDeployProject = {
+  id: string;
+  name: string;
+  source?: string;
+  /** Its GitHub repository (owner/name): null for an app's. */
+  repo?: string | null;
+  /** The Ingot repo it builds (source "ingot"), as "<project>/<name>". */
+  ingot_repo?: string | null;
+  /** The changeset every deploy that names none builds, when one is kept (Bops keeps none: those build the newest on main). */
+  ingot_at?: string | null;
+  url: string | null;
+  /** The port its app listens on there (each project on a computer has its own). */
+  port?: number;
+  current?: OrgoDeployment | null;
+  deployments?: OrgoDeployment[];
+};
+
+/** A deploy's build log after `after` (GET …/deployments/{id}/logs): `next` reads on from there, `more` when there's more already. */
+export type OrgoDeployLog = { state: DeployState; phase?: string | null; error?: string | null; log: string; next: number; more: boolean };
+
+/** The Ingot changeset a deploy builds, however orgo-web names it (null: it doesn't say). */
+export const deployedAt = (d: Pick<OrgoDeployment, "at" | "source_version" | "commit_sha"> | null | undefined) => d?.at ?? d?.source_version ?? d?.commit_sha ?? null;
+
+/**
+ * What a deploy route answers: its answer, or `enabled` false with why, when orgo-web says hosting isn't
+ * open to this account (404 DEPLOYS_DISABLED or SERVICES_DISABLED: HOSTING_ACCESS keeps it to admins, or
+ * deploys are off there). Anything else Orgo turns down throws its OrgoError.
+ */
+export type Hosting<T> = { enabled: true; value: T } | { enabled: false; why: string };
+
+export const HOSTING_CLOSED = "Hosting apps on the web isn't open to your Orgo account yet.";
+
+async function hostingCall<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<Hosting<T>> {
+  try {
+    return { enabled: true, value: await call<T>(method, path, body, { wait: false }) };
+  } catch (e) {
+    if (e instanceof OrgoError && e.status === 404 && (e.code === "DEPLOYS_DISABLED" || e.code === "SERVICES_DISABLED")) return { enabled: false, why: HOSTING_CLOSED };
+    throw e;
+  }
+}
+
+/**
+ * orgo-web's deploy runner (lib/deploys), with the user's key: apps a workspace runs on the web. A project
+ * is one app on one computer, built from one changeset of its Ingot repo on that computer (source "ingot":
+ * the runner there exports it with `ingot export`), and reached at its public URL (<name>.orgo.dev) once
+ * its first deploy is live. Nothing here calls the computer: Orgo queues a deploy and builds it once the
+ * computer runs.
+ */
+export const deploys = {
+  /** The computer's deploy projects, each with its newest deploys. */
+  projects: (computerId: string) => hostingCall<{ projects?: OrgoDeployProject[] }>("GET", `/computers/${encodeURIComponent(computerId)}/deploy-projects`),
+  /** One project, with its newest deploys. */
+  project: (computerId: string, projectId: string) => hostingCall<OrgoDeployProject>("GET", `/computers/${encodeURIComponent(computerId)}/deploy-projects/${encodeURIComponent(projectId)}`),
+  /**
+   * A new project for an app (its Ingot repo, "<project>/<name>", on that computer), named for its public URL, its app listening
+   * on `port` (one no other project or app on that computer has). It names no changeset: one named here
+   * would be kept (ingot_at) and built by every deploy that names none after it. Nothing is deployed yet:
+   * deploy queues that.
+   */
+  create: (computerId: string, app: { repo: string; name: string; port: number }) =>
+    hostingCall<OrgoDeployProject>("POST", `/computers/${encodeURIComponent(computerId)}/deploy-projects`, { source: "ingot", repo: app.repo, name: app.name, port: app.port, deploy: false }),
+  /** Queue a deploy of one changeset (none: the newest on main). A newer deploy replaces one still queued. */
+  deploy: (computerId: string, projectId: string, at?: string) =>
+    hostingCall<OrgoDeployment>("POST", `/computers/${encodeURIComponent(computerId)}/deploy-projects/${encodeURIComponent(projectId)}/deployments`, at ? { at } : {}),
+  /** A deploy's build log after the line `after` (0: from the start). */
+  logs: (computerId: string, deploymentId: string, after = 0) =>
+    hostingCall<OrgoDeployLog>("GET", `/computers/${encodeURIComponent(computerId)}/deployments/${encodeURIComponent(deploymentId)}/logs?after=${Math.max(0, Math.floor(after))}`),
+};
 
 /** Screen id for an X display number: 99 is the boot screen, 100-102 are created screens. */
 export const screenId = (display: number) => (display === 99 ? "default" : `screen-${display}`);

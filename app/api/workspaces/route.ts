@@ -1,6 +1,7 @@
 import { deleteWorkspace } from "@/lib/server/remove";
-import { createWorkspace, deletePreview, dismissRenamedNotice, ensureMain, renameWorkspace, revertWorkspaceMigration, switchWorkspace, syncWorkspaceNames, WorkspaceError } from "@/lib/server/workspaces";
+import { createWorkspace, deletePreview, dismissRenamedNotice, ensureMain, renameWorkspace, revertWorkspaceMigration, setFavorites, switchWorkspace, syncWorkspaceNames, WorkspaceError } from "@/lib/server/workspaces";
 import { notReady } from "@/lib/server/ready";
+import { closeShared } from "@/lib/server/shared";
 
 /**
  * `?preview=<id>`: what deleting that workspace takes with it, for the confirm (its computers, keys, skills
@@ -31,6 +32,8 @@ export async function POST(request: Request) {
   ensureMain();
   const made = await createWorkspace(typeof name === "string" ? name : "");
   if ("error" in made) return Response.json(made, { status: made.code === "name_taken" ? 409 : made.status });
+  // The new one is open now, in place of a shared one that was.
+  closeShared();
   return Response.json(made);
 }
 
@@ -38,12 +41,21 @@ export async function POST(request: Request) {
  * Switch to a workspace, or rename one (its Orgo workspace too, when it has one; the default's waits for every
  * app on the account to be new, and says so in `waiting`). `noticeSeen`: the switcher's note about names Orgo
  * already had was seen. `syncNames`: take renames made on orgo.ai (the sidebar asks every 10 minutes). `revertOrgoMove`: undo the move onto Orgo workspaces
- * (revertWorkspaceMigration, DESIGN.md section 8), for a rollback.
+ * (revertWorkspaceMigration, DESIGN.md section 8), for a rollback. `favorites` (with `id`): the kinds pinned to
+ * the sidebar, the whole list in order (setFavorites).
  */
 export async function PATCH(request: Request) {
   const unready = notReady();
   if (unready) return unready;
-  const { id, name, current, noticeSeen, revertOrgoMove, syncNames } = (await request.json().catch(() => ({}))) as { id?: string; name?: string; current?: string; noticeSeen?: boolean; revertOrgoMove?: boolean; syncNames?: boolean };
+  const { id, name, current, noticeSeen, revertOrgoMove, syncNames, favorites } = (await request.json().catch(() => ({}))) as {
+    id?: string;
+    name?: string;
+    current?: string;
+    noticeSeen?: boolean;
+    revertOrgoMove?: boolean;
+    syncNames?: boolean;
+    favorites?: unknown;
+  };
   ensureMain();
   if (noticeSeen === true) dismissRenamedNotice();
   if (syncNames === true) {
@@ -58,7 +70,15 @@ export async function PATCH(request: Request) {
     }
   }
   try {
-    if (current) switchWorkspace(current);
+    if (current) {
+      switchWorkspace(current);
+      // One of the user's own, in place of a shared one that was open (lib/server/shared.ts).
+      closeShared();
+    }
+    if (id && favorites !== undefined) {
+      setFavorites(id, favorites);
+      return Response.json({ ok: true });
+    }
     if (id && typeof name === "string") {
       const r = await renameWorkspace(id, name);
       if ("error" in r) return Response.json(r, { status: r.code === "name_taken" ? 409 : 502 });

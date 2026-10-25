@@ -8,7 +8,10 @@ free screens for helpers (subagents), who pass their screen number to every tool
 ledger (bops-screens) makes sure no two agents ever drive the same screen.
 
 Usage (stdio, started by the executor, or by Claude Code for a thread a brain runs, with --approve):
-    DISPLAY=:100 python3 screen_mcp.py stdio --session <bops session id> [--bot <bops bot id>] [--approve]
+    DISPLAY=:100 python3 screen_mcp.py stdio --session <bops session id> [--bot <bops bot id>] [--approve] [--no-apps]
+
+--no-apps: an Agents API session has the user's apps and business data as function tools Bops answers itself
+(so a call that needs the user's OK pauses the run there), so these tools don't offer them again.
 """
 
 import json
@@ -279,7 +282,8 @@ def _apps(tool: str, args: dict) -> str:
 
 
 # Which tools the key file says this bot has: its apps (a file from before business data says nothing: apps), business data.
-_HAS = _read(APPS) if os.path.exists(APPS) else {}
+# None with --no-apps: the session that runs these tools has them as its own function tools.
+_HAS = _read(APPS) if os.path.exists(APPS) and "--no-apps" not in sys.argv else {"apps": False}
 
 if os.path.exists(APPS) and _HAS.get("apps", True):
 

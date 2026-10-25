@@ -25,8 +25,8 @@ const shot = async (markup, bg, size, scale, out, jpg) => {
   if (jpg) await page.screenshot({ path: out.replace(/\.png$/, ".jpg"), type: "jpeg", quality: 92, clip: { x: 0, y: 0, width: size, height: size } });
 };
 for (const j of jobs) await shot(j.markup, j.bg, 512, 0.8, `edge/public/mascot/${j.name}.png`, true);
-// The logo: Boppy, vibing, ink headphones on the highlighter.
-const logo = mascotMarkup("boppy", "#0A0A0A", { accent: false });
+// The logo: Boppy on the highlighter, awake, going "ooh" as on the app icon.
+const logo = mascotMarkup("boppy", "#0A0A0A", { mood: "awake" });
 await shot(logo, "#E9FF3B", 512, 0.74, "edge/public/brand/bops-512.png");
 await shot(logo, "#E9FF3B", 1024, 0.74, "edge/public/brand/bops-1024.png");
 await browser.close();

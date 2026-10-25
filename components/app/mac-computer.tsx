@@ -49,15 +49,7 @@ type Item = {
   macScreen?: number;
 };
 
-export function MacComputer({
-  state,
-  mode,
-  onFocus,
-  onBack,
-  onOpenThread,
-  showThread,
-  hidden = false,
-}: {
+type MacComputerProps = {
   state: AppState;
   mode: "panel" | "focus";
   /** The thread open in the chat: its Chrome (or window) is shown, once it has one, until you pick another. */
@@ -67,7 +59,18 @@ export function MacComputer({
   onOpenThread: (s: Session) => void;
   /** Kept capturing behind another tab: the view stays live, the director rests. */
   hidden?: boolean;
-}) {
+};
+
+/**
+ * Your Mac: the viewer's own, never a workspace shared with them's (state.shared). Nothing of it shows there,
+ * full width or kept capturing hidden: the owner's work on their Mac and their Mac watches would be matched
+ * against the viewer's own windows and screens, and shown as the owner's under Your Mac.
+ */
+export function MacComputer(props: MacComputerProps) {
+  return props.state.shared ? null : <MacComputerView {...props} />;
+}
+
+function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThread, hidden = false }: MacComputerProps) {
   const inApp = useMacApp();
   const screens = useMacScreens();
   // A tile you picked, and when: it stays until a new task starts on the Mac (then the view follows that).

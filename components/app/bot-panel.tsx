@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { botChatId, BRAIN_NAMES, BRAINS_ON, brainOf, brainRuns, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
+import { appsStayLine, botChatId, BRAIN_NAMES, BRAINS_ON, brainOf, brainRuns, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
 import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
@@ -20,6 +20,7 @@ import { botWash, CloseButton, post } from "./ui";
 import { accountTitle, AppLogo, botApps } from "./apps";
 import { WhereToFind } from "./channels";
 import { undash } from "./side-group";
+import { readOnly, you, your, Your, yourMac } from "@/lib/shared";
 import { BOOK_A_CALL } from "@/lib/links";
 
 /** The parts of a bot's profile. Its computer has a tab of its own (see panel-tabs.tsx). */
@@ -130,7 +131,7 @@ export function BotPanel({
         <BotRoutines state={state} bot={b} app={app} onApp={(a) => setOnly({ bot: b.id, app: a })} onOpenAutopilot={onOpenAutopilot} onAsk={onAsk} />
       )}
       {tab === "memory" && <BotMemory state={state} bot={b} onOpenThread={onOpenThread} />}
-      {tab === "phone" && <Phone bot={b} />}
+      {tab === "phone" && <Phone state={state} bot={b} />}
     </section>
   );
 }
@@ -237,7 +238,7 @@ function Details({
       <div className={`flex w-full flex-col rounded-2xl ${glass}`}>
         <Field
           label={
-            line && b.isMain ? `mobile · ${line.type === "imessage" ? "iMessage" : "texts"} · the team's number` : b.phoneLine?.paused ? "mobile · paused until you upgrade again" : "mobile · texts and calls"
+            line && b.isMain ? `mobile · ${line.type === "imessage" ? "iMessage" : "texts"} · the team's number` : b.phoneLine?.paused ? `mobile · paused until ${you(state)} upgrade${state.shared ? "s" : ""} again` : "mobile · texts and calls"
           }
           value={reach ? prettyPhone(reach) : undefined}
           empty={line && main ? `Text ${main.name} at ${prettyPhone(line.phone)}: ${main.name} passes work to ${b.name}.` : "No number yet."}
@@ -246,14 +247,15 @@ function Details({
         {/* Whose phone the number is linked to: the first to call or text it, then calls and texts from it count as the user. */}
         {reach && <LineLink key={reach} phone={reach} className="px-4 pb-[11px]" />}
         <div className="h-px bg-black/[0.05]" />
-        <Field label={b.mail?.paused ? "email · paused until you upgrade again" : "email"} value={b.email} empty="No inbox yet." />
+        <Field label={b.mail?.paused ? `email · paused until ${you(state)} upgrade${state.shared ? "s" : ""} again` : "email"} value={b.email} empty="No inbox yet." />
         {!b.email && emailRoom && <PlanRoom short={emailRoom} onUpgrade={onUpgrade} />}
         {!b.email && !emailRoom && !plan.room && plan.planNeeded && <PlanNeeded what="An email address" bot={b} onUpgrade={onUpgrade} />}
         {emailOnAsk && <GetEmail bot={b} />}
       </div>
 
       <ComputerSummary state={state} bot={b} className={`w-full ${glass}`} onOpen={() => onOpenComputer(b.id)} />
-      <Uses state={state} bot={b} onOpenVault={onOpenVault} onOpenRoutines={onOpenRoutines} className={glass} />
+      {/* The apps and logins Uses lists are the viewer's own (their vault, their Connected Apps), never the owner's bot's: not in a shared workspace (nor are Keys: BotKeys). */}
+      {!state.shared && <Uses state={state} bot={b} onOpenVault={onOpenVault} onOpenRoutines={onOpenRoutines} className={glass} />}
       <BotKeys state={state} bot={b} onAdd={() => onOpenKeys(b.id)} className={glass} />
 
       {BRAINS_ON && <BotBrain state={state} bot={b} onShowScreen={onShowScreen} className={glass} />}
@@ -280,11 +282,11 @@ function Details({
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="text-[13px] font-semibold leading-4">Works on</span>
           <span className="text-[12px] leading-4 text-[#6B6B6B]">
-            {(b.runsOn ?? "auto") === "auto" ? "Its cloud computer, or your Mac when a task needs it" : b.runsOn === "mac" ? "Your Mac, always" : "Its cloud computer, always"}
+            {(b.runsOn ?? "auto") === "auto" ? `Its cloud computer, or ${yourMac(state)} when a task needs it` : b.runsOn === "mac" ? `${Your(state)} Mac, always` : "Its cloud computer, always"}
           </span>
         </div>
         <div className="flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px]">
-          {([["auto", "Auto"], ["cloud", "Cloud"], ["mac", "Your Mac"]] as const).map(([v, label]) => (
+          {([["auto", "Auto"], ["cloud", "Cloud"], ["mac", `${Your(state)} Mac`]] as const).map(([v, label]) => (
             <button
               key={v}
               onClick={() => void post("/api/bots", { botId: b.id, runsOn: v }, "PATCH")}
@@ -300,7 +302,7 @@ function Details({
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="text-[13px] font-semibold leading-4">Approvals</span>
           <span className="text-[12px] leading-4 text-[#6B6B6B]">
-            {b.autoApprove ? "Sends, posts and changes things without asking. Still asks before paying" : "Asks you before it sends, posts, deletes or pays"}
+            {b.autoApprove ? "Sends, posts and changes things without asking. Still asks before paying" : `Asks ${you(state)} before it sends, posts, deletes or pays`}
           </span>
         </div>
         <div className="flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px]">
@@ -341,7 +343,8 @@ function Details({
       {/* Keyed by bot: another bot's profile in this tab starts from that bot's own words. */}
       <HowIWork key={b.id} bot={b} className={glass} />
 
-      {(!b.isMain || sharesComputer(b)) && state.host !== "mac" && <ComputerChoice state={state} bot={b} className={glass} onUpgrade={onUpgrade} />}
+      {/* Never in a workspace shared with the user: it changes the owner's bot, and the viewer's own host and plan aren't the owner's. */}
+      {(!b.isMain || sharesComputer(b)) && state.host !== "mac" && !readOnly(state) && <ComputerChoice state={state} bot={b} className={glass} onUpgrade={onUpgrade} />}
 
       <WhereToFind state={state} bot={b} />
 
@@ -358,7 +361,7 @@ function Details({
         </button>
       </div>
 
-      {!b.isMain && <DeleteBot bot={b} />}
+      {!b.isMain && <DeleteBot bot={b} apps={appsStayLine(state, b)} />}
     </section>
   );
 }
@@ -398,7 +401,7 @@ function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppSta
           <span className="text-[13px] font-semibold leading-4">Computer</span>
           <span className="text-[12px] leading-4 text-[#6B6B6B]">
             {b.isMain
-              ? `Works on your free Bops computer, which ${main.name} has, with ${b.name}'s team`
+              ? `Works on ${your(state)} free Bops computer, which ${main.name} has, with ${b.name}'s team`
               : shared
                 ? `Works on ${main.name}'s computer, on screens no one else is using`
                 : plan?.plan?.bops
@@ -447,8 +450,8 @@ function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppSta
   );
 }
 
-/** Deleting a bot takes its computer with it, so it asks once more, saying exactly that. */
-function DeleteBot({ bot: b }: { bot: Bot }) {
+/** Deleting a bot takes its computer with it, so it asks once more, saying exactly that (and that the apps it made stay, `apps`). */
+function DeleteBot({ bot: b, apps }: { bot: Bot; apps: string | null }) {
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -470,8 +473,8 @@ function DeleteBot({ bot: b }: { bot: Bot }) {
     <div className="motion-rise-in flex w-full flex-col gap-2.5 rounded-2xl bg-[#FEF3F2] px-4 py-3 shadow-[0_0_0_1px_#FECDCA]">
       <span className="text-[13px] leading-[18px] text-[#3A3A38]">
         {sharesComputer(b)
-          ? `Delete ${b.name}? Its chat, threads and routines go with it; the computer it works on stays. This can't be undone.`
-          : `Delete ${b.name}? Its computer, chat, threads and routines go with it. This can't be undone.`}
+          ? `Delete ${b.name}? Its chat, threads and routines go with it; the computer it works on stays.${apps ? ` ${apps}` : ""} This can't be undone.`
+          : `Delete ${b.name}? Its computer, chat, threads and routines go with it.${apps ? ` ${apps}` : ""} This can't be undone.`}
       </span>
       {error && <span className="text-[12px] text-[#B42318]">{error}</span>}
       <div className="flex gap-2">
@@ -962,7 +965,7 @@ function Uses({ state, bot: b, onOpenVault, onOpenRoutines, className }: { state
         )}
       </div>
       <button onClick={onOpenVault} className="shrink-0 text-[12px] font-medium leading-4 text-ink">
-        Manage in Vault ›
+        Manage in Logins ›
       </button>
       {popover && (
         <RoutineSuggest
@@ -988,7 +991,7 @@ function ComingSoon() {
 
 /* ---------------- Phone ---------------- */
 
-function Phone({ bot: b }: { bot: Bot }) {
+function Phone({ state, bot: b }: { state: AppState; bot: Bot }) {
   return (
     <div className="flex gap-4">
       <div className="flex w-[260px] shrink-0 items-center justify-center rounded-[20px] py-6" style={{ backgroundImage: botWash(b) }}>
@@ -1019,7 +1022,9 @@ function Phone({ bot: b }: { bot: Bot }) {
           ))}
         </div>
         <span className="text-[12px] leading-[17px] text-[#9A9A98]">
-          Not available yet. Until then, you can text and call {b.isMain ? b.name : "your main bot"} on its number (Settings, How your bots reach you).
+          {state.shared
+            ? `Not available yet. Until then, the owner can text and call ${b.isMain ? b.name : "their main bot"} on its number.`
+            : `Not available yet. Until then, you can text and call ${b.isMain ? b.name : "your main bot"} on its number (Settings, How your bots reach you).`}
         </span>
       </div>
     </div>

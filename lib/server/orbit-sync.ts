@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { orbitApply, orbitForgetFacts, orbitItemsOf, orbitMerged, orbitOutbox, orbitPushed, orbitRefused, orbitRemote, orbitRemoteAt, orbitSent, type OrbitEntry, type OrbitRemoteItem } from "./memory-categories";
 import { orbitIssuesApply, orbitIssuesFlush } from "./orbit-issues";
 import { cleanText } from "./routine-sync";
+import { loopHere } from "./persist";
 import { getState } from "./store";
 
 /**
@@ -347,6 +348,7 @@ function start(ws: string): Promise<void> {
 }
 
 function schedule(ws: string, wait: number) {
+  if (!loopHere("orbit")) return;
   const sp = space(ws);
   if (sp.timer) clearTimeout(sp.timer);
   sp.timer = setTimeout(() => {
@@ -394,7 +396,8 @@ export function pullSoon(ws: string) {
 }
 
 function ensureTimer() {
-  if (g.__bopsOrbitSyncTimer) return;
+  // Orbit is kept in step from the Mac, never from a computer's runner.
+  if (g.__bopsOrbitSyncTimer || !loopHere("orbit")) return;
   g.__bopsOrbitSyncTimer = setInterval(() => {
     for (const [ws, sp] of spaces) if (sp.opened && Date.now() - (sp.pulledAt ?? 0) >= PULL_EVERY_MS - 30_000) pullSoon(ws);
   }, PULL_EVERY_MS);

@@ -4,6 +4,7 @@ import { requestInbox } from "@/lib/server/mail";
 import { MAX_PERSONA_CHARS, type AppAccess, type Effort } from "@/lib/types";
 import { bot, update } from "@/lib/server/store";
 import { notReady } from "@/lib/server/ready";
+import { routineChanged } from "@/lib/server/routine-sync";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 
 /**
@@ -68,6 +69,7 @@ export async function PATCH(request: Request) {
     const r = renameBot(b.id, body.name);
     if ("error" in r) return Response.json(r, { status: 400 });
   }
+  const runsOnBefore = b.runsOn;
   update(() => {
     if (body.access && typeof body.access.account === "string") {
       const level = body.access.level;
@@ -80,6 +82,8 @@ export async function PATCH(request: Request) {
     if (typeof body.dataOff === "boolean") b.dataOff = body.dataOff || undefined;
     if (typeof body.persona === "string") b.persona = body.persona.trim().slice(0, MAX_PERSONA_CHARS).trim() || undefined;
   });
+  // Its routines that need the Mac follow where it works (runner.ts pinnedToMac): Orgo hears.
+  if (body.runsOn && runsOnBefore !== b.runsOn) routineChanged(b.id);
   return Response.json({ ok: true });
 }
 

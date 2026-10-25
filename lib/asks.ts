@@ -6,21 +6,34 @@ import { BRAINS_ON, live, workspaceOf, type AppState, type Session } from "@/lib
  * answers (sessions.ts textIfUnanswered).
  */
 
-/** A thread needs the user when its screen hit something only they can get past, its bot is waiting on their answer (Jev decides), or it hit a problem they haven't answered. */
+/**
+ * A thread needs the user when its screen hit something only they can get past, its bot is waiting on their answer
+ * (Jev decides), or it hit a problem they haven't answered. A run waiting for their OK is its request's to show
+ * (lib/types.ts AppApproval, waitingAsks): the card, with Deny, Always allow and Allow once.
+ */
 export function needsYou(s: Session) {
   // Dismissed, or a newer thread has the job: it never asks again.
   if (s.dismissed || s.replacedBy) return false;
   // It can't start until the user says where (their Mac or the cloud), whatever they've said since.
   if (s.askWhere && live(s)) return true;
-  const lastUser = [...s.replies].reverse().find((r) => r.role === "user");
-  const lastBot = [...s.replies].reverse().find((r) => r.role === "bot");
-  if (lastUser && (!lastBot || lastUser.at > lastBot.at)) return false;
+  if (repliedSince(s)) return false;
   // Its brain waits on them (Session.brainRun), in a build without brains (BRAINS_ON): there's nothing to do
   // about it here, and a reply carries it on with Bops agent.
   if (!BRAINS_ON && s.brainRun?.waits && !live(s)) return false;
   if (live(s)) return !!s.blocker;
   if (s.status === "done") return !!s.blocker || (s.waitingOnYou ?? (s.answer ?? "").trim().endsWith("?"));
-  return s.status === "failed" && !!s.error && !/stopped by you|paused/i.test(s.error);
+  // Stopped by them (said as the owner's in a shared workspace: lib/shared.ts ownerVoice), or paused: nothing to ask.
+  return s.status === "failed" && !!s.error && !/stopped by (you|the owner)|paused/i.test(s.error);
+}
+
+/**
+ * The owner replied in the thread after the bot last said something there: what it asked them is answered. Their own
+ * reply only, never what a bot passed on from someone else (`from`: a computer's runner may add one).
+ */
+export function repliedSince(s: Session) {
+  const lastUser = [...s.replies].reverse().find((r) => r.role === "user" && !r.from);
+  const lastBot = [...s.replies].reverse().find((r) => r.role === "bot");
+  return !!lastUser && (!lastBot || lastUser.at > lastBot.at);
 }
 
 /** What a thread waits on, for its card's buttons. "brain": its brain signed in on its bot's computer (Session.brainRun). */

@@ -2,15 +2,18 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import * as agent from "./agent.ts";
 import { appVersionOf, fromIphone, noteAppVersion, noteIphoneVersion, requireAppVersion, requireIphoneVersion, startAppPolicy } from "./app-version.ts";
-import { requireUser, type CloudUser } from "./auth.ts";
+import { bearer, computerSeenAt, requireUser, userForKey, type CloudUser } from "./auth.ts";
 import { captureCloudException, inTelemetryScope, shutdownTelemetry } from "./analytics.ts";
 import { config } from "./config.ts";
 import { checkCreditAccess } from "./credit.ts";
 import { migrate, query } from "./db.ts";
 import { HttpError, matches, refuseUpgrade, sendJson, type Route, type Upgrade } from "./http.ts";
+import { BOPS_DEVICE_HEADER, COMPUTER_NOT_ALLOWED } from "./protocol.ts";
 import * as handles from "./handles.ts";
 import * as hooks from "./hooks.ts";
 import * as lines from "./lines.ts";
+import * as live from "./live.ts";
+import * as members from "./members.ts";
 import * as notices from "./notices.ts";
 import * as ops from "./ops.ts";
 import * as pages from "./pages.ts";
@@ -28,7 +31,7 @@ import * as verify from "./verify.ts";
 /**
  * Bops Cloud. One process serves every user: each module owns its routes (session.ts, proxy.ts,
  * verify.ts, lines.ts, handles.ts, plans.ts, ops.ts, tunnel.ts, hooks.ts, slack.ts, state.ts, pages.ts,
- * usage.ts, agent.ts) and this file only puts them together. See README.md.
+ * usage.ts, agent.ts, live.ts, members.ts) and this file only puts them together. See README.md.
  */
 
 const health: Route = {
@@ -62,6 +65,8 @@ export const routes = (): Route[] => [
   ...usage.routes,
   ...notices.routes,
   ...agent.routes,
+  ...live.routes,
+  ...members.routes,
 ];
 export const upgrades = (): Upgrade[] => [...tunnel.upgrades, ...proxy.upgrades];
 
@@ -77,15 +82,76 @@ function requestUrl(req: IncomingMessage): URL | null {
 /**
  * Which app a signed-in call came from: kept with the user's account, and an app too old for the cloud
  * is told to update (app-version.ts). Bops for iPhone's version is its own: it never stands in for the Mac's.
+ * A Mac's app that a newer one locked out of the user's state, and that runs its routines all the same,
+ * is refused the proxies (state.ts behindState). A computer's runner stops its own on that.
  */
-function appCheck(req: IncomingMessage, userId: string, path: string) {
+async function appCheck(req: IncomingMessage, user: CloudUser, path: string) {
   const version = appVersionOf(req);
   if (fromIphone(req)) {
-    noteIphoneVersion(userId, version);
+    noteIphoneVersion(user.id, version);
     return requireIphoneVersion(version);
   }
-  noteAppVersion(userId, version);
+  noteAppVersion(user.id, version);
   requireAppVersion(path, version);
+  if (!user.computer && path.startsWith("/proxy/") && (await state.behindState(req, user.id))) throw state.behindRefusal(path);
+}
+
+/**
+ * A computer signed in as itself (its runner: auth.ts CloudUser.computer) calls only the routes marked
+ * for it (`allowed`), and only as its own device: Bops Cloud sets that from the computer's id, and a
+ * device header that says another is refused. That's which device wrote, and a guard against a runner
+ * set up wrong; it bounds nothing, as anyone with the token can work the same device out. An identity
+ * token Orgo named no computer for is refused everywhere.
+ */
+function computerCheck(req: IncomingMessage, user: CloudUser, allowed: boolean) {
+  const c = user.computer;
+  if (!c) return;
+  if (!c.desktopId || !allowed) throw new HttpError(403, "A computer's identity can't do this.", { code: COMPUTER_NOT_ALLOWED });
+  const said = req.headers[BOPS_DEVICE_HEADER];
+  const device = (Array.isArray(said) ? said[0] : said)?.trim();
+  if (device && device !== c.device) throw new HttpError(403, "That device isn't this computer's.", { code: COMPUTER_NOT_ALLOWED });
+}
+
+/** How often a computer's open socket or long answer is looked at again (its sign-in kept 30 seconds at most: auth.ts). */
+export const computerWatch = { everyMs: 30_000, seenMs: 2 * 60_000 };
+
+/**
+ * A computer's socket or answer still open is looked at again every 30 seconds: Orgo turning its
+ * credential down, or naming another computer for it (deleted, moved, joined, copied or paused), ends
+ * it (`lost`). A socket (`stream` false) also ends when its token does: its runner opens another on its
+ * next token. A long answer still coming (an agent's events) outlives its token only while that computer
+ * keeps signing in afresh (computerSeenAt, under 2 minutes ago), so a task's turn isn't cut at the hour.
+ * Returns what stops the looking (when it closes).
+ */
+export function watchComputer(key: string, user: CloudUser, lost: () => void, stream: boolean): () => void {
+  const c = user.computer!;
+  let over = false;
+  const stop = () => {
+    over = true;
+    clearInterval(every);
+    if (cut) clearTimeout(cut);
+  };
+  const end = () => {
+    if (over) return;
+    stop();
+    lost();
+  };
+  const look = async () => {
+    if (over) return;
+    if (Date.now() < c.expiresAt) {
+      // Orgo out of reach says nothing either way: looked at again next time.
+      const now = await userForKey(key).catch(() => undefined);
+      if (now === null || (now && now.computer?.desktopId !== c.desktopId)) end();
+      return;
+    }
+    if (!stream || Date.now() - computerSeenAt(user.id, c.desktopId) > computerWatch.seenMs) end();
+  };
+  const every = setInterval(() => void look(), computerWatch.everyMs);
+  every.unref?.();
+  const left = c.expiresAt - Date.now();
+  const cut = Number.isFinite(left) ? setTimeout(() => void look(), Math.min(Math.max(0, left), 2 ** 31 - 1)) : undefined;
+  cut?.unref?.();
+  return stop;
 }
 
 export function makeServer(): Server {
@@ -99,7 +165,10 @@ export function makeServer(): Server {
     try {
       if (!route) throw new HttpError(404, "Not found");
       user = route.auth === "user" ? await requireUser(req) : null;
-      if (user) appCheck(req, user.id, url.pathname);
+      if (user) computerCheck(req, user, !!route.computer);
+      if (user) await appCheck(req, user, url.pathname);
+      // A computer's answer that's still coming (a stream) is held to its computer while it lasts.
+      if (user?.computer) res.on("close", watchComputer(bearer(req), user, () => res.destroy(), true));
       const as = user;
       // What the call says about usage events goes with everything its handler does (analytics.ts).
       await inTelemetryScope(req, () => route.handle(req, res, { user: as, url }));
@@ -124,8 +193,12 @@ export function makeServer(): Server {
     if (fromIphone(req)) return refuseUpgrade(socket, 403, "Forbidden");
     try {
       const user = await requireUser(req);
-      appCheck(req, user.id, url.pathname);
+      // The tunnel is one per user: a computer there would drop the user's Mac.
+      computerCheck(req, user, !!up.computer);
+      await appCheck(req, user, url.pathname);
       up.handle(req, socket, head, { user, url });
+      // A computer's socket is held to its computer, and to its token's end, while it's open.
+      if (user.computer) socket.on("close", watchComputer(bearer(req), user, () => socket.destroy(), false));
     } catch (e) {
       refuseUpgrade(socket, e instanceof HttpError ? e.status : 500, e instanceof HttpError ? e.message.replace(/[^\x20-\x7e]/g, "") : "Error");
     }
@@ -168,6 +241,8 @@ async function main() {
     stopStateSweeps();
     stopAppPolicy();
     tunnel.closeAll();
+    // Every live stream ends: each device reconnects to the next start, and is reset (live.ts).
+    live.closeAll();
     // Usage events still queued go out first (up to 2 seconds).
     void shutdownTelemetry().finally(() => server.close(() => process.exit(0)));
     setTimeout(() => process.exit(0), 5_000).unref();

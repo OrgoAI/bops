@@ -1,7 +1,10 @@
 import "server-only";
-import { botChatId, freeComputerOnDelete, MAIN_WORKSPACE, sharesComputer, workspaceOf, type Bot, type OrgoMigration, type Workspace } from "@/lib/types";
+import { cleanAccess, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
+import { botChatId, freeComputerOnDelete, MAIN_WORKSPACE, sharesComputer, workspaceOf, type AppState, type Bot, type OrgoMigration, type Workspace } from "@/lib/types";
+import { cleanFavorites } from "@/lib/favorites";
 import { freeBotId } from "./bots";
-import { getState, id, stateEpoch, stateReady, update } from "./store";
+import { getState, id, stateEpoch, stateReady, stateTooNew, update } from "./store";
+import { onRunner } from "./persist";
 import { ensureInbox } from "./mail";
 import {
   bindProject,
@@ -12,6 +15,7 @@ import {
   ensureProject,
   nameTaken,
   OrgoError,
+  orgoProjectFor,
   ownedWorkspaces,
   perWorkspaceProjects,
   perWorkspaceUnconfirmed,
@@ -22,7 +26,7 @@ import {
   type AppsGateReason,
   type OrgoWorkspace,
 } from "./orgo";
-import { folderKey, moveWorkspaceFolder, refsOf, syncSkills } from "./workspace-skills";
+import { folderKey, moveWorkspaceFolder, refsOf, skillDeletesOnStart, syncSkills } from "./workspace-skills";
 
 /**
  * Workspaces: separate teams. Each has its own main bot (Boppy by default, who runs it and whose computer the
@@ -57,12 +61,12 @@ export type CreateResult = { id: string; chatId: string; orgoProjectId?: string 
  * orgo-web with per workspace projects its Orgo workspace is made first, under the same name: when the
  * user's Orgo already has a workspace by that name, nothing is made and they're asked for another
  * (`name_taken`, with "<name> (Bops)" to start from). Orgo not answering doesn't stop it: the project is
- * made with its first computer then.
+ * made later (bindMissingProjects: tried again after a backoff, and at each start and sign-in).
  */
 export async function createWorkspace(name: string): Promise<CreateResult> {
   const clean = freeLocalName(name.trim().slice(0, NAME_MAX) || "New workspace");
   const ws = id("ws");
-  let made: { id: string; name: string } | undefined;
+  let made: { id: string; name: string; updatedAt?: string } | undefined;
   if ((await perWorkspaceProjects().catch(() => null)) === true) {
     try {
       made = await ensureProject(ws, { interactive: true, name: clean });
@@ -73,6 +77,7 @@ export async function createWorkspace(name: string): Promise<CreateResult> {
       }
       if (e instanceof OrgoError && e.status >= 400 && e.status < 500) return { error: e.said || "Orgo didn't make the workspace.", code: "orgo", status: e.status };
       console.warn(`[workspaces] Orgo didn't make ${ws}'s workspace yet: ${(e as Error).message}`);
+      bindLater();
     }
   }
   const mainId = freeBotId("Boppy");
@@ -86,7 +91,12 @@ export async function createWorkspace(name: string): Promise<CreateResult> {
     workspaceId: ws,
   };
   update((s) => {
-    (s.workspaces ??= [{ id: MAIN_WORKSPACE, name: "Main", createdAt: Date.now() }]).push({ id: ws, name: clean, createdAt: Date.now(), ...(made ? { orgoProjectId: made.id, orgoName: made.name } : {}) });
+    (s.workspaces ??= [{ id: MAIN_WORKSPACE, name: "Main", createdAt: Date.now() }]).push({
+      id: ws,
+      name: clean,
+      createdAt: Date.now(),
+      ...(made ? { orgoProjectId: made.id, orgoName: made.name, ...(made.updatedAt ? { orgoUpdatedAt: made.updatedAt } : {}) } : {}),
+    });
     s.bots.push(main);
     s.chats.push({ id: botChatId(mainId), kind: "bot", botIds: [mainId], createdAt: Date.now(), typing: [], workspaceId: ws });
     s.workspace = ws;
@@ -115,6 +125,10 @@ const g = globalThis as unknown as {
   bopsWsMigration?: Promise<MigrationResult>;
   bopsWsRenamedAt?: Map<string, number>;
   bopsWsSync?: Promise<SyncResult | null>;
+  bopsWsBind?: Promise<string[]>;
+  bopsWsBindTimer?: ReturnType<typeof setTimeout>;
+  bopsWsBindTries?: number;
+  bopsWsBindStarted?: boolean;
   bopsWsHeldRetry?: Promise<DefaultName | null>;
   bopsWsHeldStarted?: boolean;
 };
@@ -252,20 +266,23 @@ export async function renameWorkspace(workspaceId: string, name: string): Promis
   const per = (await perWorkspaceProjects().catch(() => null)) === true;
   let waiting: AppsGateReason | undefined;
   if (per && !w.orgoProjectId && workspaceId !== MAIN_WORKSPACE) {
-    // No project of its own yet (made with its first computer): a name the user's Orgo has is asked about now, not changed then.
+    // No project of its own yet (made at the next start or sign-in, bindMissingProjects, or with its first computer): a name the user's Orgo has is asked about now, not changed then.
     const owned = await ownedWorkspaces().catch(() => null);
     if (owned?.some((p) => sameName(p.name, clean))) return { error: `You already have an Orgo workspace named ${clean}. Pick another name.`, code: "name_taken" };
   }
   // The default's project, with Orgo not saying now whether it has per workspace projects: held, to go when it does.
   if (!per && w.orgoProjectId && workspaceId === MAIN_WORKSPACE && !sameName(w.orgoName ?? "bops", clean)) waiting = "unreachable";
   if (per && w.orgoProjectId) {
-    renamedAt.set(workspaceId, Date.now());
     // The default's project still named "bops", to a name that isn't: only when no older app looks for "bops".
     const gated = workspaceId === MAIN_WORKSPACE && isBopsName(w.orgoName ?? "bops") && !isBopsName(clean);
     const gate = gated ? await bopsAppsGate() : null;
     if (gate && !gate.ok) waiting = gate.reason;
     else
       try {
+        // Only a rename that goes to Orgo makes a list Orgo started on before it old: a held one is
+        // weighed against a rename on orgo.ai by when it was given (orgoNewer), so a sync right after it
+        // still takes a newer name from there.
+        renamedAt.set(workspaceId, Date.now());
         const r = await renameProject(w.orgoProjectId, clean);
         noteOrgoName(workspaceId, typeof r?.name === "string" ? r.name : clean, r?.updated_at);
       } catch (e) {
@@ -290,8 +307,79 @@ export function switchWorkspace(workspaceId: string) {
   update((s) => (s.workspace = workspaceId));
 }
 
+/**
+ * A workspace's Favorites in the sidebar (Workspace.favorites, lib/favorites.ts): the user's whole list,
+ * as they left it, which from then on is used in place of the defaults (an empty one too). Kept on this
+ * Mac only, never sent to Orgo; the state's sync takes it to their other Macs, and an edit made on two
+ * Macs at once keeps the list of the one that saves last (state-merge.ts), never a mix of the two.
+ */
+export function setFavorites(workspaceId: string, list: unknown) {
+  const clean = cleanFavorites(list);
+  if (!clean) throw new Error("favorites must be a list");
+  if (!getState().workspaces?.some((w) => w.id === workspaceId)) throw new Error("no such workspace");
+  update((s) => {
+    const x = s.workspaces?.find((y) => y.id === workspaceId);
+    if (x) x.favorites = clean;
+  });
+}
+
 /** The workspace the user is looking at. */
 export const currentWorkspaceId = () => getState().workspace ?? MAIN_WORKSPACE;
+
+const sameAccess = (a: MemberAccess, b: MemberAccess) =>
+  a.others === b.others && Object.keys(a.bots).length === Object.keys(b.bots).length && Object.entries(a.bots).every(([id, level]) => b.bots[id] === level);
+
+/** `map` without `key`'s entry. */
+const without = (map: MemberAccessMap, key: string): MemberAccessMap => Object.fromEntries(Object.entries(map).filter(([k]) => k !== key));
+/** Access that shows a bot, now or later: anything else is kept as no entry, which reads the same (accessOf). */
+const showsAny = (a: MemberAccess) => a.others !== "none" || Object.keys(a.bots).length > 0;
+
+/**
+ * One person's access to a workspace's bots (Workspace.memberAccess, lib/member-access.ts), kept under
+ * their accessKey: `access` from now on, or null to forget it (they were removed, or their invite was
+ * cancelled). Access that shows them no bot is kept as no entry. A map, once there, stays when its last
+ * entry goes (empty): two Macs' changes to it then always go together entry by entry (state-merge.ts),
+ * where one with no map at all would take the whole of the other's or none of it. It rides in the synced
+ * state, so Bops Cloud reads it from the owner's blob when it builds a member's view; it's never sent to
+ * them. Nothing changes (or syncs) when it's already so. The People sheet's server (lib/server/members.ts)
+ * is the only writer, besides a bot's deletion (forgetBotAccess).
+ *
+ * Each entry says when it was set (MemberAccess.at: now, else `how.at`), and `how.invite` that it was set
+ * with an invite not yet taken: Bops Cloud shows it only for the membership begun then (member-access.ts
+ * currentFor), so someone removed without this Mac seeing it never comes back to their old bots.
+ */
+export function setMemberAccess(workspaceId: string, key: string, access: MemberAccess | null, how: { invite?: boolean; at?: number } = {}) {
+  const clean = access && cleanAccess(access);
+  const keep: MemberAccess | null = clean && showsAny(clean) ? { ...clean, at: how.at ?? Date.now(), ...(how.invite ? { invite: true as const } : {}) } : null;
+  const map = getState().workspaces?.find((w) => w.id === workspaceId)?.memberAccess;
+  const kept = map && Object.hasOwn(map, key) ? map[key] : undefined;
+  if (keep ? kept && sameAccess(keep, kept) && !!kept.invite === !!keep.invite && (how.at === undefined || kept.at === how.at) : !kept) return;
+  if (keep) ensureMain();
+  if (!getState().workspaces?.some((w) => w.id === workspaceId)) throw new Error("no such workspace");
+  update((s) => {
+    const x = s.workspaces?.find((y) => y.id === workspaceId);
+    if (!x) return;
+    if (keep) x.memberAccess = { ...x.memberAccess, [key]: keep };
+    else if (x.memberAccess) x.memberAccess = without(x.memberAccess, key);
+  });
+}
+
+/**
+ * A deleted bot's id out of everyone's access, in `state` (inside the deletion's update): a bot made
+ * later with its name may get the same id (bots.ts freeBotId: once nothing kept names the old one), and
+ * starts hidden unless `others` shows it, as every new bot does, never at the level the old one had. An
+ * entry left showing no bot goes.
+ */
+export function forgetBotAccess(state: AppState, botId: string) {
+  for (const w of state.workspaces ?? []) {
+    if (!w.memberAccess) continue;
+    for (const [key, a] of Object.entries(w.memberAccess)) {
+      if (!Object.hasOwn(a.bots, botId)) continue;
+      const next: MemberAccess = { ...a, bots: Object.fromEntries(Object.entries(a.bots).filter(([id]) => id !== botId)) };
+      w.memberAccess = showsAny(next) ? { ...w.memberAccess, [key]: next } : without(w.memberAccess, key);
+    }
+  }
+}
 
 /* ---------------- Names from orgo.ai ---------------- */
 
@@ -365,11 +453,27 @@ async function runSync(): Promise<SyncResult | null> {
 
 /**
  * What deleting a workspace takes with it, for the confirm: the computers (its team's here, and what's in
- * its Orgo workspace), its keys (the ones for This workspace), its skills and its apps, Bops' and Orgo's
- * together, each once. `orgo`: its Orgo workspace goes too. Throws for the default workspace, and when Orgo
- * doesn't say what's in it (nothing is deleted without the user seeing the list).
+ * its Orgo workspace), its keys (the ones for This workspace), its skills and its apps, the apps its bots
+ * made and its CRM files, its routines and its Orbit issues, Bops' and Orgo's together, each once. `orgo`:
+ * its Orgo workspace goes too. `memory`: its memory bank goes too (its own, used by no other workspace:
+ * memory.ts memoryGoesWith). Throws for the default workspace, and when Orgo doesn't say what's in it
+ * (nothing is deleted without the user seeing the list).
  */
-export type DeletePreview = { id: string; name: string; orgo: boolean; bots: string[]; computers: { id: string; name: string }[]; keys: string[]; skills: string[]; apps: string[] };
+export type DeletePreview = {
+  id: string;
+  name: string;
+  orgo: boolean;
+  memory: boolean;
+  bots: string[];
+  computers: { id: string; name: string }[];
+  keys: string[];
+  skills: string[];
+  apps: string[];
+  madeApps: string[];
+  crmFiles: string[];
+  routines: string[];
+  issues: string[];
+};
 
 export class WorkspaceError extends Error {
   status: number;
@@ -395,7 +499,23 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
   const keys: string[] = [];
   const skills = refsOf(workspaceId, "skill").map((r) => r.name);
   const apps = refsOf(workspaceId, "app").map((r) => r.name);
-  const orgo = !!w.orgoProjectId && (await perWorkspaceProjects().catch(() => null)) === true;
+  const madeApps = (getState().madeApps ?? []).filter((a) => a.ws === workspaceId).map((a) => a.title);
+  const { crmNames } = await import("./crm-sync");
+  const crmFiles = await crmNames(workspaceId);
+  // Its routines and its Orbit issues: Orgo's delete takes its copy of them too.
+  const ids = new Set(team.map((b) => b.id));
+  const routines = getState()
+    .routines.filter((r) => ids.has(r.botId))
+    .map((r) => r.title.trim() || r.goal.trim().slice(0, 60) || "Routine");
+  const issues = await issueTitles(workspaceId);
+  const { memoryGoesWith } = await import("./memory");
+  const memory = memoryGoesWith(workspaceId)?.whole === true;
+  // Orgo not answering is said, never taken for "nothing there": Delete would refuse then too (remove.ts).
+  const orgo =
+    !!w.orgoProjectId &&
+    (await perWorkspaceProjects().catch(() => {
+      throw new WorkspaceError(`Couldn't reach Orgo to say what's in ${w.name}, so nothing was deleted. Try again.`, 502);
+    })) === true;
   if (orgo) {
     let there;
     try {
@@ -409,6 +529,10 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
     keys.push(...there.keys);
     skills.push(...there.skills);
     apps.push(...there.apps);
+    madeApps.push(...there.madeApps);
+    crmFiles.push(...there.crmFiles);
+    routines.push(...there.routines);
+    issues.push(...there.issues);
     // An orgo-web that only counts them: more there than are named here are still said, never left off.
     const more = (n: number | undefined, named: string[], one: string, many: string) => {
       if (n && n > named.length) named.push(`${n} ${n === 1 ? one : many} on Orgo`);
@@ -420,7 +544,27 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
     for (const k of await listKeys().catch(() => [])) if (k.workspaceId === w.orgoProjectId) keys.push(k.name);
   }
   const once = (xs: string[]) => xs.filter((x, i) => xs.findIndex((y) => sameName(x, y)) === i);
-  return { id: w.id, name: w.name, orgo, bots: team.map((b) => b.name), computers, keys: once(keys), skills: once(skills), apps: once(apps) };
+  return {
+    id: w.id,
+    name: w.name,
+    orgo,
+    memory,
+    bots: team.map((b) => b.name),
+    computers,
+    keys: once(keys),
+    skills: once(skills),
+    apps: once(apps),
+    madeApps: once(madeApps),
+    crmFiles: once(crmFiles),
+    routines: once(routines),
+    issues: once(issues),
+  };
+}
+
+/** The titles of a workspace's Orbit issues (orbit-issues.ts issueTitlesOf); none with memory off. */
+async function issueTitles(workspaceId: string): Promise<string[]> {
+  const { issueTitlesOf } = await import("./orbit-issues");
+  return issueTitlesOf(workspaceId);
 }
 
 /* ---------------- Moving onto Orgo workspaces ---------------- */
@@ -468,8 +612,162 @@ export function migrateWorkspacesToOrgo(): Promise<MigrationResult> {
       console.warn(`[workspaces] moving onto Orgo workspaces (goes on at the next sign-in): ${(e as Error).message}`);
       return { status: "unreachable" };
     })
-    .finally(() => (g.bopsWsMigration = undefined)));
+    .finally(() => {
+      g.bopsWsMigration = undefined;
+      // Then every workspace the move left without a project gets one (the default's too).
+      void bindMissingProjects();
+    }));
 }
+
+/* ---------------- Workspaces with no Orgo project yet ---------------- */
+
+const BIND_RETRY_MS = 60_000;
+const BIND_RETRY_MAX_MS = 30 * 60_000;
+
+/**
+ * Every workspace with no Orgo project yet gets one, so what's made and deleted in it reaches orgo-web
+ * (routines, the map, the access set, skills and Orbit all go only for a workspace with one): the default
+ * workspace its "bops" project (found, or made as {name: 'bops', product: 'bops', bops_ws_id: 'ws_main'}
+ * as its first computer would), every other one a project of its own under its name (orgo.ts
+ * orgoProjectFor; a name Orgo already has gets " (Bops)", said in the switcher). Run after the move onto
+ * Orgo workspaces at each sign-in (migrateWorkspacesToOrgo), once a start (startProjectBinding), and when
+ * a new workspace couldn't get one; tried again after a backoff (1 minute, doubling to 30) while Orgo
+ * doesn't answer. A per workspace Orgo whose move isn't done yet runs the move first (it chooses the
+ * default's project with care). Once bound, what the workspace has goes at once (afterBind). Never on a
+ * computer's runner, on an Orgo without per workspace projects, signed out, or after the move was undone
+ * here. Answers the workspaces it bound.
+ */
+export function bindMissingProjects(): Promise<string[]> {
+  return (g.bopsWsBind ??= runBind()
+    .catch((e: Error) => {
+      console.warn(`[workspaces] Orgo projects for workspaces without one (tried again later): ${e.message}`);
+      bindLater();
+      return [] as string[];
+    })
+    .finally(() => (g.bopsWsBind = undefined)));
+}
+
+const unbound = () => (getState().workspaces ?? []).filter((w) => !w.orgoProjectId);
+
+async function runBind(): Promise<string[]> {
+  if (onRunner() || !stateReady() || stateTooNew() || getState().orgoMigrationRevertedAt) return [];
+  // A state from before workspaces lists none: the default is listed first, to be bound.
+  ensureMain();
+  const before = unbound().map((w) => w.id);
+  if (!before.length) return [];
+  const epoch = stateEpoch();
+  // Bound by the move or here: what they have goes now (afterBind).
+  const bound = () => before.filter((id) => getState().workspaces?.find((x) => x.id === id)?.orgoProjectId);
+  const settle = () => {
+    const now = bound();
+    for (const wsId of now) void afterBind(wsId);
+    return now;
+  };
+  const on = await perWorkspaceProjects();
+  if (on === false) return [];
+  if (on === true && getState().orgoMigration?.step !== "done") {
+    await migrateWorkspacesToOrgo();
+    if (stateEpoch() !== epoch) return [];
+    if (getState().orgoMigration?.step !== "done") {
+      bindLater();
+      return settle();
+    }
+  }
+  const order = [...unbound()].sort((a, b) => Number(b.id === MAIN_WORKSPACE) - Number(a.id === MAIN_WORKSPACE) || a.createdAt - b.createdAt);
+  let failed = false;
+  for (const w of order) {
+    if (stateEpoch() !== epoch) break;
+    // The default's "bops" project tells whether this Orgo has per workspace projects (orgo.ts bopsWorkspace); every other needs them.
+    if (w.id !== MAIN_WORKSPACE && (await perWorkspaceProjects()) !== true) continue;
+    try {
+      await orgoProjectFor(w.id);
+    } catch (e) {
+      failed = true;
+      console.warn(`[workspaces] no Orgo project for ${w.id} yet (tried again later): ${(e as Error).message}`);
+    }
+  }
+  if (failed) bindLater();
+  else g.bopsWsBindTries = 0;
+  return stateEpoch() === epoch ? settle() : [];
+}
+
+/**
+ * A workspace just got its Orgo project: its routines go in full (deleteMissing), its skills, Orbit, the
+ * apps its bots made and its CRM files now. The map and the access set go by themselves: their next look
+ * sees the new project.
+ */
+async function afterBind(wsId: string) {
+  try {
+    const { routinesBound } = await import("./routine-sync");
+    routinesBound(wsId);
+    const { orbitChanged, pullSoon } = await import("./orbit-sync");
+    orbitChanged(wsId);
+    pullSoon(wsId);
+    const { appsBound } = await import("./made-apps-sync");
+    appsBound(wsId);
+    const { crmBound } = await import("./crm-sync");
+    crmBound(wsId);
+  } catch (e) {
+    console.warn(`[workspaces] ${wsId}'s copy to its new Orgo project: ${(e as Error).message}`);
+  }
+  void syncSkills(wsId).catch((e: Error) => console.warn(`[skills] sync after ${wsId} got its project: ${e.message}`));
+}
+
+/** Tried again after a backoff, once at a time. */
+function bindLater() {
+  if (g.bopsWsBindTimer) return;
+  const n = (g.bopsWsBindTries = (g.bopsWsBindTries ?? 0) + 1);
+  g.bopsWsBindTimer = setTimeout(
+    () => {
+      g.bopsWsBindTimer = undefined;
+      void bindMissingProjects();
+    },
+    Math.min(BIND_RETRY_MS * 2 ** (n - 1), BIND_RETRY_MAX_MS),
+  );
+  g.bopsWsBindTimer.unref?.();
+}
+
+/**
+ * Once a start (the state route, on the Mac): workspaces with no project get one, skill deletes and a
+ * deleted workspace's memory left from before go, and what a bound workspace changed here that Orgo
+ * hadn't taken when Bops last quit goes now, as its retries lived in memory only: each one's skills are
+ * synced (a create, an edit or a bot dropped since its last sync, SkillRef.updatedAt past syncedAt, and
+ * what Orgo has), and its Orbit is sent where its index still holds what Orgo hasn't taken (deletes,
+ * items or facts: orbitOutbox).
+ */
+export function startProjectBinding() {
+  if (g.bopsWsBindStarted || onRunner() || !stateReady() || stateTooNew()) return;
+  g.bopsWsBindStarted = true;
+  void bindMissingProjects();
+  skillDeletesOnStart();
+  // A deleted workspace's memory that memory didn't take before Bops last quit.
+  void import("./memory-deletes").then((m) => m.memoryDeletesOnStart()).catch((e: Error) => console.warn(`[memory] deletes from before: ${e.message}`));
+  void pushBoundOnStart().catch((e: Error) => console.warn(`[workspaces] sending what waited from before: ${e.message}`));
+}
+
+async function pushBoundOnStart() {
+  const bound = (getState().workspaces ?? []).filter((w) => w.orgoProjectId).map((w) => w.id);
+  if (!bound.length) return;
+  const { queueSync } = await import("./workspace-skills");
+  const { orbitChanged } = await import("./orbit-sync");
+  const { orbitOutbox } = await import("./memory-categories");
+  for (const wsId of bound) {
+    queueSync(wsId);
+    const out = orbitOutbox(wsId);
+    if (out && (out.del.length || out.items.length || out.facts.length)) orbitChanged(wsId);
+  }
+}
+
+/** Tests: forget the start and the backoff. */
+export const projectBindingForTests = {
+  reset: () => {
+    if (g.bopsWsBindTimer) clearTimeout(g.bopsWsBindTimer);
+    g.bopsWsBindTimer = undefined;
+    g.bopsWsBindTries = 0;
+    g.bopsWsBindStarted = false;
+  },
+  retrying: () => !!g.bopsWsBindTimer,
+};
 
 const doneResult = (m: OrgoMigration, defaultName: DefaultName): MigrationResult => ({ status: "done", created: m.created.length, renamed: m.renamed ?? [], defaultName });
 
@@ -513,7 +811,8 @@ async function runMigration(): Promise<MigrationResult> {
   save(() => {});
 
   // 1. The default workspace: its stored project, the one tied to it, the Bops one (rule in DESIGN.md 9), or later
-  // (no "bops" project yet: it's made with the first computer, as {name:'bops', product:'bops', bops_ws_id:'ws_main'}).
+  // (no "bops" project yet: bindMissingProjects makes it right after the move, at sign-in or start, or the first
+  // computer does, as {name:'bops', product:'bops', bops_ws_id:'ws_main'}).
   if (!after(m(), "bind-main")) {
     const owned = await ownedWorkspaces();
     same();
@@ -609,7 +908,7 @@ async function renameDefault(same: () => void): Promise<DefaultName> {
   if (main.orgoProjectId) p = (await ownedWorkspaces()).find((x) => x.id === main.orgoProjectId);
   same();
   if (!p) {
-    // No "bops" project yet: made under that name with the first computer, and named then at a later sign-in.
+    // No "bops" project yet: made under that name at the next start or sign-in (bindMissingProjects) or with the first computer, and named then at a later sign-in.
     if (isBopsName(local)) settled();
     else wait("no_project");
     return { local, project: null, renamed: false, reason: "no_project" };

@@ -41,6 +41,7 @@ export async function submitSignIn(b: Bot, display: number, values: SignInValues
 
   const s = read.sessionId ? session(read.sessionId) : undefined;
   if (next && !next.blocker && s) {
+    // What its screen raised is cleared (a request for the user's OK is its own record, untouched: lib/server/permission.ts).
     patchSession(s.id, { blocker: undefined });
     // A thread that ended waiting on the sign-in picks up; one the user stopped (or paused to take over) stays as they left it.
     if (!live(s) && !stoppedByUser(s.id)) replyToSession(s.id, "You've been signed in on the screen. Look at the screen as it is now and carry on with the task.", `${b.name} was signed in`);

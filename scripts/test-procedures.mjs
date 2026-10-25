@@ -151,6 +151,8 @@ const msg = (chatId, m) => ({ id: `m_${++seq}`, chatId, at: 1_000 + seq, ...m })
 // The state: Tiger, with Boppy (main), Max and Penny; Max's chat, a group with both, and a chat Max isn't in.
 S.update((s) => {
   s.owner = { name: "Tiger" };
+  // Signed in with an @orgo.ai email: Bops' own skills for apps are its bots' too (lib/apps-access.ts).
+  s.account = { user: { id: "u_tiger", email: "ava@orgo.ai" }, signedInAt: 0 };
   s.bots.push({ id: "max", name: "Max", role: "Sales", color: "#5B8CFF", isMain: false, computerStatus: "none" });
   s.bots.push({ id: "penny", name: "Penny", role: "Finance", color: "#FF6FB5", isMain: false, computerStatus: "none" });
   for (const id of ["max", "penny"]) s.chats.push({ id: botChatId(id), kind: "bot", botIds: [id], createdAt: 0, typing: [] });
@@ -219,14 +221,24 @@ await part("Each bot's procedures move into its workspace's skills: published fo
 await part("Its bot's prompts list it by name; read_skill reads it in full (a use), or says what it has", async () => {
   const note = W.skillsNote("max");
   hear(note);
-  assert.match(note, /^Your skills: how your workspace does jobs it was shown before\. [^\n]*read_skill[^\n]*\n- Weekly invoice summary: When Tiger asks for the weekly summary$/);
-  assert.equal(W.skillsNote("boppy"), "", "nothing for a bot that has none");
+  assert.match(note, /^Your skills: how your workspace does jobs it was shown before, and Bops' own, under labels\. [^\n]*read_skill[^\n]*\nApps and source control \(5\): [^\n]+\nFinance \(1\):\n- Weekly invoice summary: When Tiger asks for the weekly summary$/);
+  assert.match(W.skillsNote("boppy"), /^Your skills: [^\n]+\nApps and source control \(5\): [^\n]+$/, "only Bops' own for a bot with none of its workspace's");
   const read = W.readSkill("max", "weekly invoice summary");
   hear(read);
   assert.equal(read, "Skill: Weekly invoice summary (version 0.1.0)\n\n# Weekly invoice summary\n\n## When to use\n\nWhen Tiger asks for the weekly summary\n\n## Steps\n\n1. Open Drive\n2. Sum it\n3. Send it");
   assert.equal(W.findRef("ws_main", "skill", weekly.slug).uses, 4);
-  assert.equal(W.readSkill("max", "Payroll"), 'No skill called "Payroll". Yours are: "Weekly invoice summary".');
-  assert.equal(W.readSkill("boppy", "Payroll"), 'No skill called "Payroll". You have none yet.');
+  assert.equal(W.readSkill("max", "Payroll"), 'No skill called "Payroll". Your labels: Apps and source control (5), Finance (1). Open one with read_skill and label to see its skills.');
+  assert.equal(W.readSkill("boppy", "Payroll"), 'No skill called "Payroll". Your labels: Apps and source control (5). Open one with read_skill and label to see its skills.');
+  // Someone apps aren't open to: the workspace's own only.
+  const was = S.getState().account;
+  S.update((s) => (s.account = { user: { id: "u_2", email: "tiger@example.com" }, signedInAt: 0 }));
+  try {
+    assert.match(W.skillsNote("max"), /^Your skills: [^\n]+\nFinance \(1\):\n- Weekly invoice summary: When Tiger asks for the weekly summary$/);
+    assert.equal(W.skillsNote("boppy"), "", "a bot with none of its workspace's has none");
+    assert.equal(W.readSkill("max", "Payroll"), 'No skill called "Payroll". Your labels: Finance (1). Open one with read_skill and label to see its skills.');
+  } finally {
+    S.update((s) => (s.account = was));
+  }
 });
 
 await part("On another Mac (the state from Bops Cloud, not the folder): a skill that was a procedure is written again from it", async () => {
@@ -572,6 +584,25 @@ await part("Draft: the bot's answer to a secret stays out too, and the mark outl
   const { input } = openai.calls.at(-1);
   assert.equal(input.chat.includes("123,456"), false, input.chat);
   assert.ok(input.chat.includes("Sending it to HR."), "the rest of the chat is read");
+});
+
+await part("Draft: a failed call no one was asked about never reads as the user's approval; an approved one does", async () => {
+  const C = "c_unasked";
+  S.update((s) => {
+    s.chats.push({ id: C, kind: "bot", botIds: ["max"], createdAt: 0, typing: [] });
+    s.messages.push(
+      msg(C, { role: "user", text: "Who is cus_gone, and refund ch_1" }),
+      msg(C, { role: "system", text: "Max couldn't call it: Stripe answered 404", appResult: { action: "Stripe GET /v1/customers/cus_gone", ok: false, output: "What Stripe answered (status 404)", unasked: true } }),
+      msg(C, { role: "system", text: "Max: Called Stripe POST /v1/refunds", appResult: { action: "Stripe POST /v1/refunds", ok: true, output: "What Stripe answered (status 200)" } }),
+      msg(C, { role: "bot", botId: "max", text: "Refunded; no such customer." }),
+    );
+  });
+  openai.answer = () => ANSWER;
+  await P.draftSkill("max", C);
+  const { input } = openai.calls.at(-1);
+  assert.ok(input.chat.includes("Bops note: Stripe GET /v1/customers/cus_gone was called without asking the user, and it failed."), input.chat);
+  assert.ok(!input.chat.includes("the user approved Stripe GET"), input.chat);
+  assert.ok(input.chat.includes("Bops note: the user approved Stripe POST /v1/refunds, and it ran."), input.chat);
 });
 
 await part("Two Macs: a thing changed on one side is that side's; changed on both, this Mac's whole copy", async () => {

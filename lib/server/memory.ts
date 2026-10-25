@@ -149,17 +149,26 @@ function bankFor(b: Binding) {
   return x;
 }
 
-/** The user is "owner" in Bops; in a bank they're the binding's peer. Bots are bops-<id>. */
-const peerId = (b: Binding, who: string) => (who === "owner" ? b.peer : `bops-${clean(who)}`);
+/**
+ * Who said something, as a save into memory names the user (`who`): never a bot's id (those are letters, digits
+ * and dashes: bots.ts freeBotId), so a bot from before whose id is "owner" is that bot, never the user.
+ */
+export const OWNER_WHO = "the owner";
 
-function peer(b: Binding, who = "owner") {
+/** The user is OWNER_WHO here; in a bank they're the binding's peer. Bots are bops-<id>. */
+const peerId = (b: Binding, who: string) => (who === OWNER_WHO ? b.peer : `bops-${clean(who)}`);
+
+/** The Honcho peer a save into `ws`'s bank writes `who` as (the owner's: the bank's own peer). */
+export const memoryPeerOf = (ws: string, who: string) => peerId(bindingOf(ws), who);
+
+function peer(b: Binding, who = OWNER_WHO) {
   const x = bankFor(b);
   const id = peerId(b, who);
   let p = x.peers.get(id);
   if (!p) {
-    const bt = who === "owner" ? undefined : bot(who);
+    const bt = who === OWNER_WHO ? undefined : bot(who);
     // Bots aren't worth modelling; the user is the one Honcho learns about.
-    p = x.client.peer(id, who === "owner" ? undefined : { metadata: { app: "bops", name: bt?.name ?? who, role: bt?.role ?? "" }, configuration: { observeMe: false } });
+    p = x.client.peer(id, who === OWNER_WHO ? undefined : { metadata: { app: "bops", name: bt?.name ?? who, role: bt?.role ?? "" }, configuration: { observeMe: false } });
     p.catch(() => x.peers.delete(id));
     x.peers.set(id, p);
   }
@@ -172,7 +181,7 @@ function session(b: Binding, id: string, who: string[], metadata: Record<string,
   if (!s) {
     s = (async () => {
       const sess = await x.client.session(id, { metadata: { app: "bops", ...metadata } });
-      await sess.addPeers(who.map((w) => [peerId(b, w), { observeMe: w === "owner" }] as [string, { observeMe: boolean }]));
+      await sess.addPeers(who.map((w) => [peerId(b, w), { observeMe: w === OWNER_WHO }] as [string, { observeMe: boolean }]));
       return sess;
     })();
     s.catch(() => x.sessions.delete(id));
@@ -274,7 +283,7 @@ export function saveToMemory(ws: string, kind: "chat" | "task", id: string, mess
   const b = bindingOf(ws);
   const sid = `bops-${kind}-${clean(id)}`;
   void (async () => {
-    const who = [...new Set(["owner", ...msgs.map((m) => m.who)])];
+    const who = [...new Set([OWNER_WHO, ...msgs.map((m) => m.who)])];
     // The workspace it's from, so a bank two workspaces share knows whose it is.
     const s = await session(b, sid, who, { kind, ws, ...metadata });
     const peers = await Promise.all(msgs.map((m) => peer(b, m.who)));
@@ -398,8 +407,21 @@ export function isSecret(messageId: string | undefined) {
 function markSecret(messageId: string) {
   secrets.add(messageId);
   update((s) => {
-    const m = s.messages.find((x) => x.id === messageId);
-    if (m) m.secret = true;
+    const at = s.messages.findIndex((x) => x.id === messageId);
+    const m = s.messages[at];
+    if (!m) return;
+    m.secret = true;
+    // The threads the bots' answers to it started (marked later than they were: Jev's check takes a
+    // moment), and what's said about them, are kept between us too (Session.secret).
+    const threads = new Set<string>();
+    for (const x of s.messages.slice(at + 1)) {
+      if (x.chatId !== m.chatId) continue;
+      if (x.role === "user") break;
+      for (const t of x.sessionIds ?? []) threads.add(t);
+    }
+    if (!threads.size) return;
+    for (const t of s.sessions) if (threads.has(t.id)) t.secret = true;
+    for (const x of s.messages) if ((x.resultOf && threads.has(x.resultOf)) || x.sessionIds?.some((t) => threads.has(t))) x.secret = true;
   });
 }
 
@@ -439,7 +461,7 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
       return;
     }
     if (!ours()) return;
-    saveToMemory(ws, "chat", chatId, [{ who: "owner", text: said }], metadata);
+    saveToMemory(ws, "chat", chatId, [{ who: OWNER_WHO, text: said }], metadata);
     if (said.trim().length < 8 || (yes(a?.worth) ?? 0) < 0.6) return;
     const res = await openai.responses.create({
       model: MODEL(),
@@ -1036,14 +1058,17 @@ export async function cardOf(ws: string) {
 }
 
 /**
- * A workspace's bank as Orbit's issues use it (orbit-issues.ts): the Honcho client, the user's peer id,
- * and a bot's peer (made once, never modelled). Null with memory off.
+ * A workspace's bank as Knowledge's issues use it (orbit-issues.ts): the Honcho client, the user's peer id,
+ * and a bot's peer (made once, never modelled). Null with memory off. Who's speaking is a bot's id, or
+ * undefined for the owner (the bank's own peer): never a word that stands for them ("owner"), which a bot
+ * from before may have as its id.
  */
 export function bankClient(ws: string) {
   if (!on()) return null;
   const b = bindingOf(ws);
   const x = bankFor(b);
-  return { client: x.client, bank: b.bank, owner: b.peer, peerId: (who: string) => peerId(b, who), peer: (who: string) => peer(b, who), forget: (id: string) => x.sessions.delete(id) };
+  const who = (botId: string | undefined) => botId ?? OWNER_WHO;
+  return { client: x.client, bank: b.bank, owner: b.peer, peerId: (botId: string | undefined) => peerId(b, who(botId)), peer: (botId: string | undefined) => peer(b, who(botId)), forget: (id: string) => x.sessions.delete(id) };
 }
 
 /** Which bank (Honcho workspace) a workspace's memory is in: workspaces can share one. */
@@ -1070,4 +1095,75 @@ export async function dream(ws: string) {
   await peer(b);
   await x.client.scheduleDream({ observer: b.peer, observed: b.peer });
   x.card = undefined;
+}
+
+/* ---------------- A deleted workspace's memory ---------------- */
+
+/**
+ * What of a workspace's memory goes when it's deleted (remove.ts deleteWorkspace, and the confirm's list):
+ * the bank it uses whole (every session, message and fact in it) when no other workspace uses that bank
+ * (its own, or one it shared from a workspace deleted since); otherwise (`whole` false) only its Orbit
+ * issues' sessions there. Never the user's own bank (the default's, maybe their other agents' too), nor
+ * one Bops didn't name (bops-<workspace>). Null with memory off, and for the default workspace. Asked
+ * while the workspace is still listed: its binding is read from it.
+ */
+export function memoryGoesWith(ws: string): { binding: Binding; whole: boolean } | null {
+  if (!on() || ws === MAIN_WORKSPACE) return null;
+  const binding = bindingOf(ws);
+  const others = [MAIN_WORKSPACE, ...(getState().workspaces ?? []).map((w) => w.id)].filter((x) => x !== ws);
+  const shared = others.some((x) => bindingOf(x).bank === binding.bank);
+  const bops = binding.bank.startsWith("bops-") && binding.bank !== ownBank(MAIN_WORKSPACE).bank;
+  return { binding, whole: bops && !shared };
+}
+
+/** Whether a workspace listed now uses this bank, or it's the user's own (the default's, never deleted whole). */
+export const bankInUse = (bank: string) => bank === ownBank(MAIN_WORKSPACE).bank || [MAIN_WORKSPACE, ...(getState().workspaces ?? []).map((w) => w.id)].some((x) => bindingOf(x).bank === bank);
+
+/** At most this many sessions are deleted one by one when memory won't delete a bank that still has them. */
+const BANK_SESSIONS_MAX = 5000;
+
+/**
+ * Delete a bank from memory for good (a deleted workspace's own: memory-deletes.ts): every session,
+ * message and fact in it. Memory refusing it while it still has sessions (409) has them deleted first, by
+ * id, and is asked again. Gone already is fine. Its review on this Mac goes too, and its client here, so
+ * nothing uses (or makes again) the bank. Throws what memory answered otherwise, to be tried again.
+ */
+export async function deleteBank(b: Binding): Promise<void> {
+  const x = bankFor(b);
+  const id = x.client.workspaceId;
+  const gone = async () => {
+    try {
+      await x.client.deleteWorkspace(id);
+    } catch (e) {
+      if (!notFound(e)) throw e;
+    }
+  };
+  try {
+    await gone();
+  } catch (e) {
+    if ((e as { status?: number }).status !== 409) throw e;
+    // Listed first, then deleted: deleting while paging would skip some.
+    const ids: string[] = [];
+    for await (const s of await x.client.sessions({ size: 100 })) {
+      ids.push(s.id);
+      if (ids.length >= BANK_SESSIONS_MAX) break;
+    }
+    for (const sid of ids)
+      try {
+        await sessionRef(x.client, sid).delete();
+      } catch (err) {
+        if (!notFound(err)) throw err;
+      }
+    await gone();
+  }
+  live.banks.delete(id);
+  const all = reviews();
+  if (all[b.bank]) {
+    delete all[b.bank];
+    const file = reviewsFile();
+    if (file) {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, JSON.stringify(all));
+    }
+  }
 }

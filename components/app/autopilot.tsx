@@ -4,7 +4,8 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
 import { appNameFor, canonicalApp, CHECK_TEMPLATE, CHECK_TIMES, sameApp, templateById } from "@/lib/routine-catalog";
-import { botChatId, DISPLAYS, isScreenWatch, onceDone, runningNow, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type RoutineSource, type Session, type Watch } from "@/lib/types";
+import { botChatId, computerWait, DISPLAYS, isScreenWatch, onceDone, runningNow, waitingAsks, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type RoutineSource, type Watch } from "@/lib/types";
+import { you, your, yourMac } from "@/lib/shared";
 import { Fold } from "./fold";
 import { Mascot } from "./mascot";
 import {
@@ -24,7 +25,7 @@ import {
 import { watchName } from "./watch-overlay";
 import { AppLogo, BotChip, botApps, rowTrashBtn, TrashIcon } from "./apps";
 import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, type Cadence } from "./cadence-picker";
-import { CloseButton, currentWorkspace, needsYou, post, teamOf } from "./ui";
+import { CloseButton, currentWorkspace, needsYou, post, ReadOnlyLine, teamOf } from "./ui";
 import { FooterButton } from "./sidebar-footer";
 import { deleteQuestion, RoutineWeek, useClock, weekPlan, WeekLegend, WeekLetters } from "./routine-week";
 
@@ -80,11 +81,17 @@ const matchMonitor = (w: Watch, q: string) => has(q, watchName(w), w.site, w.loo
 
 /* ---------------- Words ---------------- */
 
-/** When a schedule runs next ("Tomorrow 9 AM"), or that it's running now (really: runningNow), paused, or done. */
-export function nextWords(r: Routine, sessions: Session[], tz?: string) {
-  if (runningNow(r, sessions)) return "Running now";
+/**
+ * When a schedule runs next ("Tomorrow 9 AM"), or that it's running now (really: runningNow), paused, or done;
+ * or, while its bot's computer is down or asleep with it overdue, that it waits and why ("Waiting: Max's
+ * computer is stopped", computerWait): it runs there once the computer is up.
+ */
+export function nextWords(r: Routine, state: Pick<AppState, "sessions" | "bots" | "runners" | "workspaces">, tz?: string) {
+  if (runningNow(r, state.sessions)) return "Running now";
   if (done(r)) return "Done";
   if (!r.enabled) return "Paused";
+  const wait = computerWait(state, r);
+  if (wait) return `Waiting: ${wait}`;
   return r.nextRunAt ? whenText(r.nextRunAt, Date.now(), tz) : describeSchedule(r.schedule, tz);
 }
 
@@ -104,19 +111,23 @@ export function trouble(r: Routine) {
 
 /**
  * A schedule needs the user: its last run or delivery failed, or the run it started is waiting on them
- * (an app action to approve, a sign-in, a question).
+ * (an app action to approve, a sign-in, a question). Never in a shared workspace: what's wrong there
+ * waits on its owner, never the viewer (no Needs you filter, count or row note).
  */
 export function scheduleNeedsYou(r: Routine, state: AppState) {
+  if (state.shared) return false;
   if (trouble(r)) return true;
+  // A chat run of it paused for the user's OK (its request names the routine and no thread).
+  if (waitingAsks(state).some((a) => a.routineId === r.id && !a.threadId)) return true;
   const sid = r.last?.sessionId;
   if (!sid) return false;
-  if (state.appApprovals?.some((a) => a.sessionId === sid)) return true;
+  if (waitingAsks(state, sid).length) return true;
   const s = state.sessions.find((x) => x.id === sid);
   return !!s && needsYou(s);
 }
 
-/** A monitor needs the user when its page couldn't be read (news is its own mark, New). */
-export const monitorNeedsYou = (w: Watch) => !!w.page?.error && !w.paused;
+/** A monitor needs the user when its page couldn't be read (news is its own mark, New). Never in a shared workspace (scheduleNeedsYou). */
+export const monitorNeedsYou = (w: Watch, state?: Pick<AppState, "shared">) => !state?.shared && !!w.page?.error && !w.paused;
 
 /** A Connected App's or a key's name as the user knows it: from their accounts or the catalog ("Stripe"), else its slug, capitalized. */
 export function appNameOf(state: AppState, app: string) {
@@ -189,6 +200,8 @@ export const RAN: Record<RoutineRun["status"], string> = {
   failed: "Failed",
   skipped: "Skipped",
 };
+/** How a run went, as a viewer reads it: a quiet run had nothing for the owner in a workspace shared with them (lib/shared.ts you). */
+const ranWords = (status: RoutineRun["status"], state: AppState) => (status === "quiet" ? `Ran, nothing for ${you(state)}` : RAN[status]);
 
 /** How often a page is read: "Every 30 minutes", "Every hour", "Every 2 hours". */
 function everyWords(min: number) {
@@ -203,7 +216,7 @@ const shortUrl = (url: string) => url.replace(/^https?:\/\//i, "").replace(/^www
 /** What a watch looks at, in words: a page, a window on the user's Mac, or one of a bot's screens. */
 function whereWords(w: Watch, state: AppState) {
   if (w.page) return shortUrl(w.page.url);
-  if (w.mac) return `${w.mac.app} on your Mac`;
+  if (w.mac) return `${w.mac.app} on ${yourMac(state)}`;
   return `${state.bots.find((b) => b.id === w.botId)?.name ?? "Bot"}'s screen ${DISPLAYS.indexOf(w.display) + 1}`;
 }
 
@@ -301,7 +314,7 @@ export function AutopilotButton({ state, expanded = false, pressed = expanded, o
       expanded={expanded}
       pressed={pressed}
       label={GROUP_NAME}
-      tip={news ? `${GROUP_NAME}: ${news === 1 ? "a monitor has" : `${news} monitors have`} news` : `${GROUP_NAME}: what your bots do on their own`}
+      tip={news ? `${GROUP_NAME}: ${news === 1 ? "a monitor has" : `${news} monitors have`} news` : `${GROUP_NAME}: what ${your(state)} bots do on their own`}
       ariaLabel={news ? `${GROUP_NAME}, ${news} with news` : GROUP_NAME}
       onClick={() => onOpen({ section, focus: fresh?.id })}
       icon={<AutopilotIcon size={16} />}
@@ -349,9 +362,9 @@ function SidebarGroup({
   // One row, and what comes next under it: monitors with news, then the soonest
   // schedules, then the other monitors. Nothing under it while there are none (the page says how).
   const next = [
-    ...monitors.filter((w) => w.alert).map((w) => <MonitorLine key={w.id} watch={w} onClick={() => onOpenWatch(w)} />),
-    ...schedules.map((r) => <ScheduleLine key={r.id} routine={r} sessions={state.sessions} tz={tz} onClick={() => onOpen({ section: "schedules", focus: r.id })} />),
-    ...monitors.filter((w) => !w.alert).map((w) => <MonitorLine key={w.id} watch={w} onClick={() => onOpenWatch(w)} />),
+    ...monitors.filter((w) => w.alert).map((w) => <MonitorLine key={w.id} watch={w} onClick={() => onOpenWatch(w)} readOnly={!!state.shared} />),
+    ...schedules.map((r) => <ScheduleLine key={r.id} routine={r} state={state} tz={tz} onClick={() => onOpen({ section: "schedules", focus: r.id })} />),
+    ...monitors.filter((w) => !w.alert).map((w) => <MonitorLine key={w.id} watch={w} onClick={() => onOpenWatch(w)} readOnly={!!state.shared} />),
   ];
   const max = q ? FIRST : 3;
   const first = SECTIONS.find((s) => lists[s.id].length)?.id ?? "schedules";
@@ -383,10 +396,10 @@ const SIDE_ROW =
   "flex h-[30px] shrink-0 items-center gap-2 rounded-[10px] pl-8 pr-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]";
 
 /** A schedule in the sidebar: its name, then when it runs next (or Paused, Done) and "quiet" in grey; a red dot when its last run or delivery failed. */
-function ScheduleLine({ routine: r, sessions, tz, onClick }: { routine: Routine; sessions: Session[]; tz?: string; onClick: () => void }) {
+function ScheduleLine({ routine: r, state, tz, onClick }: { routine: Routine; state: AppState; tz?: string; onClick: () => void }) {
   const fresh = useFresh(r.id);
   const bad = trouble(r);
-  const line = [nextWords(r, sessions, tz), r.quiet ? "quiet" : ""].filter(Boolean).join(" · ");
+  const line = [nextWords(r, state, tz), r.quiet ? "quiet" : ""].filter(Boolean).join(" · ");
   return (
     <button onClick={onClick} onAnimationEnd={fresh.done} className={`${SIDE_ROW} ${fresh.on ? "motion-new-item" : ""}`}>
       <span className="min-w-0 flex-1 truncate text-[13.5px] leading-[18px]">
@@ -406,7 +419,7 @@ function ScheduleLine({ routine: r, sessions, tz, onClick }: { routine: Routine;
  * has news, Paused while the user paused it or the screen shows something else, a red dot when a page
  * couldn't be read; × stops it.
  */
-function MonitorLine({ watch: w, onClick }: { watch: Watch; onClick: () => void }) {
+function MonitorLine({ watch: w, onClick, readOnly }: { watch: Watch; onClick: () => void; readOnly?: boolean }) {
   const fresh = useFresh(w.id);
   // Its New mark pops when news comes in while it's shown.
   const pop = usePop(!!w.alert);
@@ -433,11 +446,13 @@ function MonitorLine({ watch: w, onClick }: { watch: Watch; onClick: () => void 
       ) : (
         off && <span className="shrink-0 text-[12px] text-[#9A9A98] group-hover/watch:hidden group-has-[:focus-visible]/watch:hidden group-focus-visible/watch:hidden">Paused</span>
       )}
-      <DeleteX
-        label={`Stop watching ${watchName(w)}`}
-        onDelete={() => void post(`/api/watches?id=${encodeURIComponent(w.id)}`, {}, "DELETE")}
-        className="group-hover/watch:opacity-100 group-focus-visible/watch:opacity-100"
-      />
+      {!readOnly && (
+        <DeleteX
+          label={`Stop watching ${watchName(w)}`}
+          onDelete={() => void post(`/api/watches?id=${encodeURIComponent(w.id)}`, {}, "DELETE")}
+          className="group-hover/watch:opacity-100 group-focus-visible/watch:opacity-100"
+        />
+      )}
     </button>
   );
 }
@@ -451,7 +466,7 @@ export type RoutineFilter = { bot?: string; app?: string; needsYou?: boolean };
 export function filterRoutines(state: AppState, lists: { schedules: Routine[]; monitors: Watch[] }, f: RoutineFilter) {
   return {
     schedules: lists.schedules.filter((r) => (!f.bot || r.botId === f.bot) && (!f.app || (!!r.source && sameApp(r.source.app, f.app))) && (!f.needsYou || scheduleNeedsYou(r, state))),
-    monitors: lists.monitors.filter((w) => (!f.bot || w.botId === f.bot) && (!f.app || (!!w.source && sameApp(w.source.app, f.app))) && (!f.needsYou || monitorNeedsYou(w))),
+    monitors: lists.monitors.filter((w) => (!f.bot || w.botId === f.bot) && (!f.app || (!!w.source && sameApp(w.source.app, f.app))) && (!f.needsYou || monitorNeedsYou(w, state))),
   };
 }
 
@@ -686,6 +701,8 @@ export function AutopilotPage({
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
       <div className="flex w-full max-w-[560px] flex-col gap-5">
+        {/* A shared workspace's routines are the owner's: shown, never changed here (view-only.ts holds every change). */}
+        <ReadOnlyLine state={state} />
         <div className="flex items-start gap-3.5">
           <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-ink text-highlighter">
             <AutopilotIcon size={20} />
@@ -696,7 +713,7 @@ export function AutopilotPage({
               {GROUP_NAME}
             </span>
             <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
-              What your bots do on their own. How they do each job is in{" "}
+              {state.shared ? "What the owner's bots do on their own" : "What your bots do on their own"}. How they do each job is in{" "}
               {/* The link and its period together, so the period never starts a line on its own. */}
               <span className="whitespace-nowrap">
                 <button onClick={onOpenSkills} className="font-medium text-ink underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink">
@@ -714,7 +731,7 @@ export function AutopilotPage({
             {/* Every bot, with how many each runs: whose each color in the week is, and which bot's to show. */}
             {team.length > 1 && <WeekLegend bots={team} on={botOn} counts={counts} all={total} onPick={(bot) => setFilter({ ...filter, bot })} />}
             {appFilters && (
-              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Connected App and Needs you">
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label={state.shared ? "Connected App" : "Connected App and Needs you"}>
                 {(needsN > 0 || filter.needsYou) && (
                   <FilterPill on={!!filter.needsYou} onClick={() => setFilter({ ...filter, needsYou: !filter.needsYou })}>
                     Needs you
@@ -746,6 +763,7 @@ export function AutopilotPage({
               needsYou={(r) => scheduleNeedsYou(r, state)}
               checked={(x) => checkedOf(state, x)}
               onOpen={(id) => setPicked({ id, at: Date.now() })}
+              viewOnly={!!state.shared}
             />
           )}
 
@@ -1207,7 +1225,7 @@ export function ScheduleRow({
       id={r.id}
       lead={chip ? undefined : <BotMark bot={bot} />}
       title={undash(r.title)}
-      line={`${describeSchedule(r.schedule, zone)} · ${nextWords(r, state.sessions, tz)}${r.quiet ? " · quiet" : ""}`}
+      line={`${describeSchedule(r.schedule, zone)} · ${nextWords(r, state, tz)}${r.quiet ? " · quiet" : ""}`}
       dim={!r.enabled}
       end={
         <>
@@ -1237,7 +1255,7 @@ export function ScheduleRow({
       open={open}
       onToggle={onToggle}
       rowRef={row}
-      remove={{ label: `Delete ${undash(r.title)}`, tip: "Delete", busy: !!busy, onAsk: ask }}
+      remove={state.shared ? undefined : { label: `Delete ${undash(r.title)}`, tip: "Delete", busy: !!busy, onAsk: ask }}
       confirm={
         sure && (
           <>
@@ -1254,11 +1272,11 @@ export function ScheduleRow({
         )
       }
     >
-      {/* What can be done to it first, above what it does (often long). The question takes their place. */}
-      {!sure && (
+      {/* What can be done to it first, above what it does (often long). The question takes their place. A shared workspace's are the owner's to do. */}
+      {!sure && !state.shared && (
         <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
           <button onClick={() => void run("run", "/api/routines", { id: r.id, action: "run" }, "PATCH")} disabled={!!busy || runningNow(r, state.sessions)} className={small("plain")}>
-            {busy === "run" ? "Running…" : "Run now"}
+            {busy === "run" ? "Running…" : r.last?.status === "failed" ? "Run again" : "Run now"}
           </button>
           {canSkip && (
             <button
@@ -1311,7 +1329,7 @@ export function ScheduleRow({
               <span key="when">
                 {`${describeSchedule(r.schedule, zone)}${next ? `. Next: ${next}` : ""}`}
                 {zone && zone !== tz ? <span className="text-[#9A9A98]">{` (${zone.split("/").pop()?.replace(/_/g, " ")} time)`}</span> : null}
-                {!done(r) && (
+                {!done(r) && !state.shared && (
                   <button onClick={() => setChangingWhen(true)} disabled={!!busy} className="ml-1.5 text-[12px] font-medium leading-4 text-ink underline-offset-2 outline-none hover:underline focus-visible:underline disabled:opacity-40">
                     Change
                   </button>
@@ -1326,6 +1344,7 @@ export function ScheduleRow({
                 {skips.map((x) => (
                   <span key={x} className="inline-flex items-center gap-1 rounded-full bg-[#F2F2F0] py-0.5 pl-2 pr-0.5 text-[12px] leading-4">
                     <span className="line-through decoration-[#9A9A98]">{whenText(x, now, tz)}</span>
+                    {!state.shared && (
                     <button
                       onClick={() => void run("unskip", "/api/routines", { id: r.id, action: "unskip", at: x }, "PATCH")}
                       disabled={!!busy}
@@ -1334,13 +1353,14 @@ export function ScheduleRow({
                     >
                       Undo
                     </button>
+                    )}
                   </span>
                 ))}
               </span>
             ),
           ],
           ["Runs", howWords(r)],
-          ["Quiet", r.quiet ? "Yes: it posts only when there's something for you" : ""],
+          ["Quiet", r.quiet ? `Yes: it posts only when there's something for ${you(state)}` : ""],
           ["Results go to", destinations(r, state)],
           // Set up on someone else's say (an email or a text from outside): who, so the user can tell.
           ["Set up by", r.fromOutside ? undash(r.fromOutside) : ""],
@@ -1349,7 +1369,7 @@ export function ScheduleRow({
             ran && (
               <span className="flex flex-col gap-0.5">
                 <span>
-                  {RAN[ran.status]} · {since(ran.at)}
+                  {ranWords(ran.status, state)} · {since(ran.at)}
                 </span>
                 {ran.error && <span className="text-[#B42318]">{undash(ran.error)}</span>}
               </span>
@@ -1430,7 +1450,7 @@ export function MonitorRow({
       open={open}
       onToggle={onToggle}
       rowRef={row}
-      remove={{ label: `Stop watching ${watchName(w)}`, tip: "Stop", busy: !!busy, onAsk: ask }}
+      remove={state.shared ? undefined : { label: `Stop watching ${watchName(w)}`, tip: "Stop", busy: !!busy, onAsk: ask }}
       confirm={
         sure && (
           <>
@@ -1447,7 +1467,7 @@ export function MonitorRow({
         )
       }
     >
-      {!sure && (
+      {!sure && !state.shared && (
         <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
           {(isScreenWatch(w) || !!w.mac) && (
             <button onClick={onShow} disabled={!!busy} className={small("plain")}>
@@ -1491,7 +1511,7 @@ export function MonitorRow({
           ["Checked", checked ? since(checked) : page ? "Not yet" : ""],
           ["Changed", page?.changedAt ? since(page.changedAt) : ""],
           ["Read", page?.via === "browser" ? "In a browser, since the page needs one" : ""],
-          ["Paused", w.paused ? "Yes, until you resume it" : w.away ? "It isn't showing right now" : ""],
+          ["Paused", w.paused ? (state.shared ? "Yes, until the owner resumes it" : "Yes, until you resume it") : w.away ? "It isn't showing right now" : ""],
           [
             "News",
             w.alert && (

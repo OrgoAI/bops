@@ -414,11 +414,12 @@ function baseOf(document: Document, url: string) {
  * A page as read: fetched (`got`), or rendered in the browser (`rendered`) when the fetch showed it needs
  * one (web-render.ts needsBrowser), or its site did lately (siteNeedsBrowser, straight to the browser).
  * An address checkUrl refuses throws before anything, so it never reaches the browser; a browser that
- * isn't there, is busy, fails or never gets past a wall leaves the fetched page as it was. A site is
- * remembered only when a fetch showed it needed the browser and the browser read it (with text, and not
- * an error), so after 7 days without that, a fetch tries it again.
+ * isn't there, is busy, fails or never gets past a wall leaves the fetched page as it was, and one that
+ * isn't there says so (`noBrowser`: a computer's runner, whose routine the Mac then runs: chat.ts
+ * web_fetch). A site is remembered only when a fetch showed it needed the browser and the browser read it
+ * (with text, and not an error), so after 7 days without that, a fetch tries it again.
  */
-async function fetchPage(url: string): Promise<{ got: Fetched; rendered?: undefined } | { rendered: Rendered; got?: undefined }> {
+async function fetchPage(url: string): Promise<{ got: Fetched; rendered?: undefined; noBrowser?: true } | { rendered: Rendered; got?: undefined; noBrowser?: undefined }> {
   const u = checkUrl(url);
   const host = u.hostname;
   const usable = (r: Rendered) => (!r.type || /html/.test(r.type)) && (r.status === 0 || (r.status >= 200 && r.status < 300)) && !!r.text.trim();
@@ -429,7 +430,8 @@ async function fetchPage(url: string): Promise<{ got: Fetched; rendered?: undefi
     if (r && usable(r)) return { rendered: r };
   }
   const got = await safeFetch(url);
-  if (tried || !browserAvailable() || !needsBrowser(got)) return { got };
+  if (tried || !needsBrowser(got)) return { got };
+  if (!browserAvailable()) return { got, noBrowser: true };
   const r = await renderPage(u.href).catch(() => null);
   if (!r || !usable(r)) return { got };
   rememberSite(host);
@@ -448,16 +450,19 @@ const renderedLines = (r: Rendered) =>
  * when there was more, or the page was over 2 MB), and its links, at most 100, the ones to read first
  * (absoluteLinks: an article's own, then the page's own, then its menus and the rest; none for JSON,
  * plain text or a feed, whose addresses are in the text). A page read in the browser (fetchPage) gives
- * its visible text as lines and its links the same way, with `via: "browser"`. Throws FetchRefused for an
+ * its visible text as lines and its links the same way, with `via: "browser"`. One that needs the browser
+ * where there's none (a computer's runner) comes with no text and `noBrowser` when `sayNoBrowser` asks
+ * (chat.ts web_fetch: the Mac runs the routine), else read plain as it is. Throws FetchRefused for an
  * address Bops won't open, and a plain Error when the page couldn't be read or answered with an error.
  */
-export async function readPage(url: string): Promise<{ url: string; title: string; text: string; truncated: boolean; links: PageLink[]; via?: "browser" }> {
+export async function readPage(url: string, opts: { sayNoBrowser?: boolean } = {}): Promise<{ url: string; title: string; text: string; truncated: boolean; links: PageLink[]; via?: "browser"; noBrowser?: true }> {
   const read = await fetchPage(url);
   if (read.rendered) {
     const r = read.rendered;
     const out = cap(renderedLines(r).join("\n"), READ_PAGE_MAX_CHARS);
     return { url: r.url, title: squash(r.title).slice(0, MAX_LINE) || label(r.url), text: out.text, truncated: out.cut, links: absoluteLinks([], r.links, r.url, r.url), via: "browser" };
   }
+  if (read.noBrowser && opts.sayNoBrowser) return { url: read.got.url, title: label(read.got.url), text: "", truncated: false, links: [], noBrowser: true };
   const got = answered(read.got);
   const kind = kindOf(got.contentType);
   let title = "";

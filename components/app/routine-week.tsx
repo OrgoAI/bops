@@ -207,6 +207,7 @@ export function RoutineWeek({
   needsYou,
   checked,
   onOpen,
+  viewOnly = false,
 }: {
   routines: Routine[];
   bots: Bot[];
@@ -217,6 +218,8 @@ export function RoutineWeek({
   needsYou: (r: Routine) => boolean;
   checked?: (source: RoutineSource) => string;
   onOpen: (id: string) => void;
+  /** A workspace shared with the user: its routines are the owner's, said so, with nothing to run, skip, pause or delete. */
+  viewOnly?: boolean;
 }) {
   // Worked out again only when a routine's times change, or the minute does (not on every render).
   const minute = Math.floor(now / 60_000);
@@ -380,6 +383,7 @@ export function RoutineWeek({
                     onUnskip={(at) => void act(key, "unskip", { id: it.routine.id, action: "unskip", at })}
                     onPause={() => void act(key, "pause", { id: it.routine.id, enabled: false })}
                     onDelete={(from) => ask(key, it.routine, from)}
+                    viewOnly={viewOnly}
                   />
                   {sureLine === key && (
                     <div className="pb-1.5 pl-[62px] pr-1">
@@ -432,7 +436,9 @@ function Item({
   onUnskip,
   onPause,
   onDelete,
+  viewOnly = false,
 }: {
+  viewOnly?: boolean;
   item: DayItem;
   bot?: Bot;
   named: boolean;
@@ -456,7 +462,7 @@ function Item({
     it.kind === "meetings" ? "All day" : it.kind === "many" ? clockOf(it.first, tz) : clockOf(it.at, tz);
   const line =
     it.kind === "ran"
-      ? `${RAN_WORDS[running ? "running" : it.run.status]}${it.run.status === "failed" && it.run.error ? `: ${undash(it.run.error)}` : ""}`
+      ? `${!running && it.run.status === "quiet" && viewOnly ? "Ran, nothing for the owner" : RAN_WORDS[running ? "running" : it.run.status]}${it.run.status === "failed" && it.run.error ? `: ${undash(it.run.error)}` : ""}`
       : it.kind === "many"
         ? `${s.kind === "every" ? everyWords(s.minutes) : "Many times"}, ${clockOf(it.first, tz)} to ${clockOf(it.last, tz)} · ${it.count} runs`
         : it.kind === "meetings"
@@ -501,7 +507,7 @@ function Item({
           </span>
         )}
       </div>
-      <span className="flex shrink-0 items-center gap-0.5 pt-px">
+      {!viewOnly && <span className="flex shrink-0 items-center gap-0.5 pt-px">
         {off ? (
           <button onClick={() => onUnskip(it.at)} disabled={any} className={`${btn} bg-[#F2F2F0] px-2.5 text-[#3A3A38] hover:bg-[#EAEAE7]`}>
             {busy === "unskip" ? <Spinner size={11} /> : "Undo skip"}
@@ -534,7 +540,7 @@ function Item({
         >
           {busy === "remove" ? <Spinner size={11} /> : <TrashIcon size={12} />}
         </button>
-      </span>
+      </span>}
     </div>
   );
 }

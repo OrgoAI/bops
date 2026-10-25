@@ -1,8 +1,7 @@
 import "server-only";
 import { APIConnectionTimeoutError } from "openai";
 import WebSocket from "ws";
-import { APP_VERSION_HEADER, TELEMETRY_HEADER } from "@/cloud/protocol";
-import { appVersion, telemetryHere } from "./app-version";
+import { appHeaders } from "./app-version";
 import { CloudError, cloudProxy } from "./cloud";
 import { usageTags } from "./usage";
 
@@ -63,12 +62,11 @@ export class ResponsesSocket {
     if (!key) return Promise.reject(new TransportError("No OpenAI key."));
     // Self-hosting: where the SDK would send it (OPENAI_BASE_URL, else OpenAI's).
     const url = `${(via ? `${via.url}/v1` : process.env.OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1").replace(/\/+$/, "").replace(/^http/, "ws")}/responses`;
-    const version = via ? appVersion() : null;
+    // Through Bops Cloud, which app is calling (its version and state level: an older one is refused once a newer one wrote the user's state).
     const headers: Record<string, string> = {
       authorization: `Bearer ${key}`,
       ...(usageTags("session", botId).headers ?? {}),
-      ...(version ? { [APP_VERSION_HEADER]: version } : {}),
-      ...(via && !telemetryHere() ? { [TELEMETRY_HEADER]: "off" } : {}),
+      ...(via ? appHeaders() : {}),
     };
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url, { headers, handshakeTimeout: timeoutMs, maxPayload: 64 * 1024 * 1024 });

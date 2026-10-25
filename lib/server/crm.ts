@@ -1,7 +1,7 @@
 import "server-only";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import {
   applyOps,
   cleanCell,
@@ -27,13 +27,16 @@ import { workspaceOf, type Bot, type Message } from "@/lib/types";
 import { onPostgres } from "./persist";
 import { addMessage, bot, getState, ownerName, session, update, userDir } from "./store";
 import { markFound } from "./treg";
+import { crmChanged, crmBeforeList, crmMaySeed } from "./crm-sync";
 
 /**
  * The user's CRM: CSV files on this Mac, one folder per workspace, listed on the left of the app and
  * opened as a chart over a table (components/app/crm.tsx), and read and added to by the bots (the
  * crm_* tools below). The files live in the signed-in user's own folder, so another Orgo account on
  * this Mac never sees them, and they stay through Restart, Start over, signing out and new versions
- * of the app. They don't go to Bops Cloud: the user's other Macs and the iPhone app don't have them.
+ * of the app. They don't go to Bops Cloud. Orgo is their record (crm-sync.ts: orgo-web's bops_crm_files,
+ * each file's CSV in the user-apps bucket), so the user's other Macs list and open them too: every create,
+ * change, rename and delete here goes there, and what changed there comes here.
  *
  *   <userDir>/crm/<workspace id>/Leads.csv   folders 0700, files 0600
  *                               .seeded      the sample was written once (deleting it is for good)
@@ -353,23 +356,116 @@ function metas(dir: string): CrmFileMeta[] {
     .sort((a, b) => a.name.localeCompare(b.name, "en", { numeric: true, sensitivity: "base" }));
 }
 
-/** The sample pipeline, the first time a workspace's CRM is opened (never again once it's deleted). */
+/** The workspace a folder is the CRM of (its name). */
+const wsOfDir = (dir: string) => basename(dir);
+
+/**
+ * The sample pipeline, the first time a workspace's CRM is opened (never again once it's deleted, nor where
+ * another Mac set it up: for a workspace in Orgo, only once a read of Orgo's copy found nothing there,
+ * crm-sync.ts crmMaySeed).
+ */
 function seedOnce(dir: string) {
   const marker = join(/*turbopackIgnore: true*/ dir, ".seeded");
   if (existsSync(/*turbopackIgnore: true*/ marker)) return;
   if (!entries(dir).some((e) => same(e.name, SAMPLE_NAME))) {
     const { columns, rows } = parseCsv(SAMPLE_PIPELINE);
     save(dir, join(/*turbopackIgnore: true*/ dir, `${SAMPLE_NAME}.csv`), columns, rows);
+    crmChanged(wsOfDir(dir), { put: SAMPLE_NAME, sample: true });
   }
   writeFileSync(/*turbopackIgnore: true*/ marker, "", { mode: 0o600 });
 }
+
+/* ---------------- For Orgo's copy (crm-sync.ts) ---------------- */
+
+/**
+ * What crm-sync.ts reads and writes when Orgo's copy comes here: a workspace's folder, its files as they
+ * are, and writes, renames and moves to .trash in the folder's lane (one at a time with the app's and the
+ * bots' own), none of them sent back to Orgo.
+ */
+export const crmFolder = {
+  /** The folder of a workspace that's here (made if need be), or null (no CRM here, or no such workspace). */
+  dirOf(ws: string): string | null {
+    try {
+      return crmOn() ? wsDir(ws) : null;
+    } catch {
+      return null;
+    }
+  },
+  /** The folder if it's there already, or null: nothing made. */
+  dirIfAny: (ws: string) => {
+    try {
+      return wsDirIfAny(ws);
+    } catch {
+      return null;
+    }
+  },
+  /** Its files (names Bops makes, plain files) with their size and last change. */
+  files(dir: string) {
+    return listed(dir).flatMap((e) => {
+      try {
+        const st = statSync(/*turbopackIgnore: true*/ e.file);
+        return [{ name: e.name, size: st.size, mtimeMs: st.mtimeMs }];
+      } catch {
+        return [];
+      }
+    });
+  },
+  /** One file's bytes (case ignored), or null. */
+  read(dir: string, name: string) {
+    const e = listed(dir).find((x) => same(x.name, name));
+    if (!e) return null;
+    try {
+      const { st, buf } = readBytes(e.file);
+      return buf ? { name: e.name, bytes: buf, size: st.size, mtimeMs: st.mtimeMs } : null;
+    } catch {
+      return null;
+    }
+  },
+  lane: <T>(dir: string, fn: () => T | Promise<T>) => inLane(dir, fn) as Promise<T>,
+  /** Orgo's bytes as the file of that name (the one there, case ignored, or a new one): its size and time now. Only in the lane. */
+  write(dir: string, name: string, bytes: Buffer) {
+    const there = listed(dir).find((x) => same(x.name, name));
+    const clean = cleanFileName(name);
+    if (!there && !clean) throw new CrmError(400, CRM_SAY.fileName);
+    const file = there?.file ?? join(/*turbopackIgnore: true*/ dir, `${clean}.csv`);
+    if (!resolve(file).startsWith(resolve(dir) + sep)) throw new CrmError(400, CRM_SAY.cantOpen);
+    writeAtomic(dir, file, bytes);
+    cache.delete(file);
+    const st = statSync(/*turbopackIgnore: true*/ file);
+    return { size: st.size, mtimeMs: st.mtimeMs };
+  },
+  /** A file renamed as it was on another Mac. False when there's no `from`, or another file has `to`. Only in the lane. */
+  rename(dir: string, from: string, to: string) {
+    const a = listed(dir).find((x) => same(x.name, from));
+    const name = cleanFileName(to);
+    if (!a || !name || listed(dir).some((x) => same(x.name, name) && !same(x.name, from))) return false;
+    const target = join(/*turbopackIgnore: true*/ dir, `${name}.csv`);
+    const tmp = join(/*turbopackIgnore: true*/ dir, `.${randomBytes(6).toString("hex")}.rename`);
+    renameSync(/*turbopackIgnore: true*/ a.file, tmp);
+    renameSync(/*turbopackIgnore: true*/ tmp, target);
+    cache.delete(a.file);
+    return true;
+  },
+  /** A file into the workspace's .trash (deleted on another Mac, or the copy that lost to a later change there). Only in the lane. */
+  trash(dir: string, name: string) {
+    const e = listed(dir).find((x) => same(x.name, name));
+    if (e) toTrash({ dir, name: e.name, file: e.file, exists: true });
+  },
+  /** The sample isn't written here: this workspace's CRM was set up on another Mac. */
+  seeded(dir: string) {
+    const marker = join(/*turbopackIgnore: true*/ dir, ".seeded");
+    if (!existsSync(/*turbopackIgnore: true*/ marker)) writeFileSync(/*turbopackIgnore: true*/ marker, "", { mode: 0o600 });
+  },
+};
 
 /* ---------------- What the app asks for ---------------- */
 
 /** A workspace's files for the sidebar. `seed`: the sample goes in the first time (the app's list only, never a bot's turn). */
 export async function listFiles(ws: unknown, opts: { seed?: boolean } = {}): Promise<CrmFileMeta[]> {
   const dir = wsDir(ws);
-  if (opts.seed && !existsSync(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ dir, ".seeded"))) await inLane(dir, () => seedOnce(dir));
+  // The app's list: what changed in Orgo first (made, changed or deleted on another Mac), now and then.
+  if (opts.seed) await crmBeforeList(wsOfDir(dir));
+  if (opts.seed && !existsSync(/*turbopackIgnore: true*/ join(/*turbopackIgnore: true*/ dir, ".seeded")) && crmMaySeed(wsOfDir(dir), dir)) await inLane(dir, () => seedOnce(dir));
   return metas(dir);
 }
 
@@ -408,7 +504,9 @@ export async function createFile(ws: unknown, name: unknown, from: CrmSource): P
     } else if ("columns" in from) columns = from.columns;
     else if (from.template === "sample") ({ columns, rows } = parseCsv(SAMPLE_PIPELINE));
     else columns = [...PIPELINE_COLUMNS];
-    return { file: metaOf(f.name, save(dir, f.file, columns, rows)), ...(note ? { note } : {}) };
+    const made = metaOf(f.name, save(dir, f.file, columns, rows));
+    crmChanged(wsOfDir(dir), { put: f.name });
+    return { file: made, ...(note ? { note } : {}) };
   });
 }
 
@@ -430,6 +528,7 @@ export async function renameFile(ws: unknown, from: unknown, to: unknown): Promi
       renameSync(/*turbopackIgnore: true*/ tmp, target);
     } else renameSync(/*turbopackIgnore: true*/ a.file, target);
     cache.delete(a.file);
+    crmChanged(wsOfDir(dir), { rename: [a.name, name] });
     return { file: metaOf(name, readParsed(target)) };
   });
 }
@@ -441,6 +540,7 @@ export async function deleteFile(ws: unknown, name: unknown) {
     const f = fileOf(ws, name, dir);
     if (!f.exists) throw new CrmError(404, CRM_SAY.gone);
     toTrash(f);
+    crmChanged(wsOfDir(dir), { del: f.name });
     return { ok: true };
   });
 }
@@ -457,7 +557,9 @@ export async function applyFileOps(ws: unknown, name: unknown, ops: unknown): Pr
     const next = applyOps(now.columns, now.rows, ops as CrmOp[]);
     if ("conflict" in next) throw new CrmError(409, CRM_SAY.changed, { file: dataOf(f.name, now) });
     if ("error" in next) throw new CrmError(400, next.error);
-    return dataOf(f.name, save(dir, f.file, next.columns, next.rows));
+    const saved = dataOf(f.name, save(dir, f.file, next.columns, next.rows));
+    crmChanged(wsOfDir(dir), { put: f.name });
+    return saved;
   });
 }
 
@@ -476,13 +578,16 @@ export async function undoNote(messageId: unknown) {
     const f = fileOf(c.ws, c.file, dir);
     if (!f.exists) throw new CrmError(404, "That file was renamed or deleted, so this can't be undone here.");
     if (readParsed(f.file).version !== c.after) throw new CrmError(409, "That file changed after this, so it can't be undone here. Open it to fix it by hand.");
-    if (c.created) toTrash(f);
-    else {
+    if (c.created) {
+      toTrash(f);
+      crmChanged(wsOfDir(dir), { del: f.name });
+    } else {
       const copy = c.snapshot && /^v_[a-z0-9]+$/.test(c.snapshot) ? join(/*turbopackIgnore: true*/ dir, ".versions", `${c.snapshot}.csv`) : null;
       const before = copy && existsSync(/*turbopackIgnore: true*/ copy) ? readBytes(copy).buf : null;
       if (!before) throw new CrmError(404, "That change is too old to undo here.");
       writeAtomic(dir, f.file, before);
       cache.delete(f.file);
+      crmChanged(wsOfDir(dir), { put: f.name });
     }
     update((s) => {
       const x = s.messages.find((y) => y.id === m.id);
@@ -762,6 +867,7 @@ async function saveFor(b: Bot, args: Record<string, unknown>, where: { chatId?: 
     if (over) return over;
     const copy = snapshot(f);
     const after = save(dir, f.file, cols, out, f.name);
+    crmChanged(ws, { put: f.name });
     const rowsWord = (n: number) => (n === 1 ? "row" : "rows");
     const what =
       added && changed.length
@@ -799,6 +905,7 @@ async function createFor(b: Bot, args: Record<string, unknown>, where: { chatId?
     if (f.exists) return `There's already a file called ${f.name}. Add to it with crm_save_rows.`;
     if (listed(dir).length >= CRM_LIMITS.files) return CRM_SAY.files;
     const after = save(dir, f.file, columns, []);
+    crmChanged(ws, { put: f.name });
     noteFor(b, where, `made a new CRM file: ${f.name}`, { ws, file: f.name, added: 0, changed: 0, created: true, after: after.version });
     return `Made ${f.name} with columns ${columns.join(", ")}. It has no rows yet: add them with crm_save_rows.`;
   });

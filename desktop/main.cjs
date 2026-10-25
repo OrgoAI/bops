@@ -13,6 +13,8 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { startRenderService } = require("./render.cjs");
 const { createUpdates } = require("./updates.cjs");
+const { installAppFrames } = require("./app-frames.cjs");
+const { ownCall } = require("./own-call.cjs");
 
 const PORT = 3210;
 const URL = `http://localhost:${PORT}`;
@@ -316,6 +318,8 @@ function packagedServer() {
     env = require("node:util").parseEnv(fs.readFileSync(path.join(app.getPath("userData"), ".env.local"), "utf8"));
   } catch {}
   const relay = path.join(process.resourcesPath, "bin", "orgo-relay");
+  // The ingot command for the bots' computers, which the server copies onto one that works on an app (lib/server/ingot.ts).
+  const ingot = path.join(process.resourcesPath, "bin", "ingot");
   // What the server prints, for support: ~/Library/Logs/Bops/server.log. Each start adds to it (an
   // earlier start's error is often the one that matters); it starts over once it passes 5 MB.
   fs.mkdirSync(app.getPath("logs"), { recursive: true });
@@ -327,7 +331,7 @@ function packagedServer() {
   // at its real size (ORGO_RTC_HEIGHT=960; otherwise it shrinks the bot's screen, lib/server/orgo.ts
   // webrtcWanted). Then this default goes. A Mac's .env.local can still say BOPS_WEBRTC=1.
   const shipped = { BOPS_WEBRTC: "0" };
-  return { dir, home, log, env: { ...shipped, ...env, ...(fs.existsSync(relay) ? { BOPS_RELAY_BIN: relay } : {}) } };
+  return { dir, home, log, env: { ...shipped, ...env, ...(fs.existsSync(relay) ? { BOPS_RELAY_BIN: relay } : {}), ...(fs.existsSync(ingot) ? { BOPS_INGOT_DIR: ingot } : {}) } };
 }
 
 /** The Helper app's binary (Frameworks/<App> Helper.app), which runs in the background with no Dock icon; else the app's own. */
@@ -733,9 +737,14 @@ function fenceTabSession(s) {
   s.setDevicePermissionHandler(() => false);
 }
 
+/** The apps the bots make, on a session of their own and fenced in (desktop/app-frames.cjs); set up when the app is ready. */
+let appFrames;
+
 // A page in a tab that opens a new window opens it in your browser instead.
 app.on("web-contents-created", (_, contents) => {
   if (contents.getType() !== "webview") return;
+  // An app a bot made: app-frames.cjs fences it in, far tighter than a tab.
+  if (appFrames?.isApps(contents.session)) return;
   fenceTabSession(contents.session);
   contents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
@@ -1096,7 +1105,7 @@ async function stopForRestart(why = "Restart Bops") {
   const who = await whoAnswers();
   if (who.up && who.mine)
     try {
-      const res = await fetch(`${LOCAL}/api/restart`, { method: "POST", headers: { "x-bops-window": windowToken() }, signal: AbortSignal.timeout(20_000) });
+      const res = await fetch(...ownCall(LOCAL, windowToken(), "/api/restart", { method: "POST", timeoutMs: 20_000 }));
       pid = (await res.json()).pid;
     } catch (e) {
       mainLog(`restart: the server didn't let go cleanly: ${e?.message ?? e}`);
@@ -1351,6 +1360,8 @@ app.whenReady().then(() => {
     void checkForUpdate();
     setInterval(() => void checkForUpdate(), 60 * 60_000);
   }
+  // The apps the bots make: their own session, where nothing but their pages loads (before any window can show one).
+  appFrames = installAppFrames({ app, session, server: URL, preload: path.join(__dirname, "app-frame-preload.cjs"), log: mainLog });
   // Pages the server can't read with a plain fetch (one that draws itself, one that checks for a human), read in a hidden window.
   try {
     renderService = startRenderService({ socketPath: renderSocket(), token: windowToken(), log: mainLog });

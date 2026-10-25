@@ -7,6 +7,8 @@ import { Mascot, Spinner } from "./mascot";
 import { IssuesIcon, IssuesPage, isOpen, issuesSoon, useIssues } from "./orbit-issues";
 import { SkillsPage, skillsIn } from "./skills";
 import type { AppState } from "@/lib/types";
+import { isFavoriteKind, type FavoriteKind } from "@/lib/favorites";
+import { menuPoint, PinIcon, SideMenu, useFavorites, type Favorites } from "./favorites";
 import { Fold } from "./fold";
 import { Chevron, since, small, undash } from "./side-group";
 import { clockTime, CloseButton, useNow } from "./ui";
@@ -31,7 +33,7 @@ import { clockTime, CloseButton, useNow } from "./ui";
  */
 
 /** What the Knowledge page shows: All, one kind, Issues or Skills. */
-export type OrbitSection = KnowledgeFilter | "issues" | "skills" | "apps";
+export type OrbitSection = KnowledgeFilter | "issues" | "skills";
 
 /** Open Knowledge on the right (bops-app.tsx): on a kind, at one of its items, or with a search filled in (from the sidebar's search). */
 export type MemoryOpen = { category?: OrbitSection; focus?: string; query?: string };
@@ -681,7 +683,7 @@ export function MemoryView(props: Parameters<typeof KnowledgeView>[0]) {
   // No account (self-hosted, or signed out): no memory or issues, but Skills are this Mac's folders, so
   // Skills still opens here, without the kinds it would sit among.
   const { state, user, category, focus, focusAt, onClose } = props;
-  if (!user && (category === "skills" || category === "apps") && state) return <SkillsPage state={state} only={category === "apps" ? "app" : "skill"} focus={focus} focusAt={focusAt} onClose={onClose} />;
+  if (!user && category === "skills" && state) return <SkillsPage state={state} only="skill" focus={focus} focusAt={focusAt} onClose={onClose} />;
   return <KnowledgeView {...props} />;
 }
 
@@ -718,6 +720,8 @@ function KnowledgeView({
   const { snap, act } = useMemoryCategories(ws, user);
   const { list } = useIssues(ws, user);
   const forgetting = useForget(ws, user);
+  // Pinned to the sidebar's Favorites from the chips (with the app's state only: it keeps them).
+  const favorites = useFavorites(state, ws);
   const openIssues = list ? list.issues.filter(isOpen).length : undefined;
   // Open, however it was opened: what it has is seen, and what comes while it's open too (the footer's dot goes).
   useEffect(() => {
@@ -733,11 +737,9 @@ function KnowledgeView({
   }, [last, user, ws]);
   const lists = state ? skillsIn(state, ws) : undefined;
   const skills = lists?.skills.length;
-  const apps = lists?.apps.length;
   // Saved by a bot and waiting to be published: said on the chip, as the sidebar's Skills row did.
   const drafts = lists?.skills.filter((r) => r.status === "draft").length;
-  const appDrafts = lists?.apps.filter((r) => r.status === "draft").length;
-  const chips = (on: OrbitSection) => <KnowledgeChips on={on} snap={snap} issues={openIssues} skills={skills} apps={apps} drafts={drafts} appDrafts={appDrafts} count={count} onPick={onCategory} />;
+  const chips = (on: OrbitSection) => <KnowledgeChips on={on} snap={snap} issues={openIssues} skills={skills} drafts={drafts} count={count} favorites={favorites.can ? favorites : undefined} onPick={onCategory} />;
   const count = (id: KnowledgeFilter) => (snap?.items ?? []).filter((i) => id === "all" || i.category === id).length;
   const ask = useCallback(async (question: string): Promise<Answer | string> => {
     const r = await fetch("/api/memory", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "ask", ws, question }) })
@@ -757,8 +759,8 @@ function KnowledgeView({
         onClose={onClose}
       />
     );
-  if ((category === "skills" || category === "apps") && state)
-    return <SkillsPage state={state} only={category === "apps" ? "app" : "skill"} focus={focus} focusAt={focusAt} nav={chips(category)} onClose={onClose} />;
+  if (category === "skills" && state)
+    return <SkillsPage state={state} only="skill" focus={focus} focusAt={focusAt} nav={chips(category)} onClose={onClose} />;
   return (
     <MemoryPage
       snap={snap}
@@ -767,10 +769,10 @@ function KnowledgeView({
       forgetting={forgetting}
       issues={openIssues}
       skills={skills}
-      apps={apps}
+     
       drafts={drafts}
-      appDrafts={appDrafts}
-      category={category === "skills" || category === "apps" ? "all" : category}
+      favorites={favorites.can ? favorites : undefined}
+      category={category === "skills" ? "all" : category}
       focus={focus}
       focusAt={focusAt}
       query={query}
@@ -798,49 +800,58 @@ const EXAMPLE: Record<KnowledgeFilter, string> = {
 
 /**
  * Knowledge's kinds as a row of chips at the top of its page: All, Issues (`issues`: how many are open,
- * once known), Skills (`skills`: how many skills and apps, and `drafts` of them waiting to be published;
+ * once known), Skills (`skills`: how many skills, and `drafts` of them waiting to be published;
  * none given, no chip), then each kind with its
- * count (`count`). Only once memory is on are the counts there.
+ * count (`count`). Only once memory is on are the counts there. With `favorites`, every chip but All
+ * pins to the sidebar's Favorites: a small pin on its corner while it's pointed at or tabbed to, and a
+ * right-click menu, Add to Favorites or Remove from Favorites.
  */
 function KnowledgeChips({
   on,
   snap,
   issues,
   skills,
-  apps,
   drafts,
-  appDrafts,
   count,
+  favorites,
   onPick,
 }: {
   on: OrbitSection;
   snap: MemorySnapshot | null;
   issues?: number;
   skills?: number;
-  apps?: number;
   /** How many of those are drafts waiting to be published: said after the count. */
   drafts?: number;
-  appDrafts?: number;
   count: (id: KnowledgeFilter) => number;
+  favorites?: Favorites;
   onPick: (s: OrbitSection) => void;
 }) {
+  const [menu, setMenu] = useState<{ id: FavoriteKind; label: string; x: number; y: number } | null>(null);
   const draftWords = (n?: number) => (n ? `${n} draft${n === 1 ? "" : "s"}` : undefined);
   const chips: { id: OrbitSection; label: string; n?: number; more?: string }[] = [
     { id: "all", label: "All", n: snap?.on ? count("all") : undefined },
     { id: "issues", label: "Issues", n: issues },
     ...(skills !== undefined ? [{ id: "skills" as const, label: "Skills", n: skills, more: draftWords(drafts) }] : []),
-    // Apps hidden in the prod build for now.
-    // ...(apps !== undefined ? [{ id: "apps" as const, label: "Apps", n: apps, more: draftWords(appDrafts) }] : []),
     ...CATEGORIES.map((x) => ({ id: x.id as OrbitSection, label: x.label, n: snap?.on ? count(x.id) : undefined })),
   ];
   return (
     <div className="flex flex-wrap gap-1.5">
       {chips.map((x) => {
         const here = x.id === on;
-        return (
+        const kind = favorites && isFavoriteKind(x.id) ? x.id : null;
+        const pinned = !!kind && favorites!.pinned(kind);
+        const chip = (
           <button
             key={x.id}
             onClick={() => !here && onPick(x.id)}
+            onContextMenu={
+              kind
+                ? (e) => {
+                    e.preventDefault();
+                    setMenu({ id: kind, label: x.label, ...menuPoint(e) });
+                  }
+                : undefined
+            }
             aria-pressed={here}
             className={`flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 ${here ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}
           >
@@ -849,7 +860,32 @@ function KnowledgeChips({
             {x.more && <span className={here ? "text-white/60" : "text-[#9A9A98]"}>· {x.more}</span>}
           </button>
         );
+        if (!kind) return chip;
+        const words = pinned ? `Remove ${x.label} from Favorites` : `Add ${x.label} to Favorites`;
+        return (
+          <span key={x.id} data-chip={x.id} className="group/chip relative flex">
+            {chip}
+            <button
+              onClick={() => favorites!.toggle(kind)}
+              aria-label={words}
+              aria-pressed={pinned}
+              title={words}
+              className={`absolute -right-1 -top-1 flex size-[18px] items-center justify-center rounded-full bg-white opacity-0 shadow-[0_0_0_1px_#E6E6E3,0_1px_2px_rgba(0,0,0,0.08)] outline-none transition-opacity duration-150 ease-out hover:text-ink focus-visible:opacity-100 focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] group-hover/chip:opacity-100 group-has-[:focus-visible]/chip:opacity-100 motion-reduce:transition-none ${pinned ? "text-ink" : "text-[#9A9A98]"}`}
+            >
+              <PinIcon on={pinned} size={10} />
+            </button>
+          </span>
+        );
       })}
+      {menu && favorites && (
+        <SideMenu
+          x={menu.x}
+          y={menu.y}
+          label={menu.label}
+          items={[{ label: favorites.pinned(menu.id) ? "Remove from Favorites" : "Add to Favorites", onPick: () => favorites.toggle(menu.id) }]}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -880,9 +916,8 @@ export function MemoryPage({
   forgetting,
   issues,
   skills,
-  apps,
   drafts,
-  appDrafts,
+  favorites,
   category,
   focus,
   focusAt,
@@ -898,12 +933,12 @@ export function MemoryPage({
   forgetting: ForgetCalls;
   /** How many issues are open (the Issues chip), once known. */
   issues?: number;
-  /** How many skills, and apps, the workspace has (the Skills and Apps chips; none: no chips). */
+  /** How many skills the workspace has (the Skills chip; none: no chip). */
   skills?: number;
-  apps?: number;
   /** How many of those are drafts (said on each chip). */
   drafts?: number;
-  appDrafts?: number;
+  /** The sidebar's Favorites, pinned from the chips (none: no pins). */
+  favorites?: Favorites;
   category: KnowledgeFilter;
   focus?: string;
   focusAt?: number;
@@ -1184,7 +1219,7 @@ export function MemoryPage({
           </div>
         )}
 
-        <KnowledgeChips on={category} snap={snap} issues={issues} skills={skills} apps={apps} drafts={drafts} appDrafts={appDrafts} count={count} onPick={onCategory} />
+        <KnowledgeChips on={category} snap={snap} issues={issues} skills={skills} drafts={drafts} count={count} favorites={favorites} onPick={onCategory} />
 
         {snap?.on && (
           <div className="flex flex-col gap-2.5">
@@ -1708,7 +1743,7 @@ function DeleteEverywhere({ sessions, busy, onConfirm, onCancel }: { sessions: D
       <span className="text-[12.5px] font-medium leading-[17px] text-[#3A3A38]">
         {sessions.length
           ? `Delete everywhere? Bops forgets this and deletes ${sessions.length === 1 ? "this chat" : `these ${sessions.length} chats`} from memory:`
-          : "Delete everywhere? No Bops chat in memory taught Orbit this, so Bops only forgets it."}
+          : "Delete everywhere? No Bops chat in memory taught Knowledge this, so Bops only forgets it."}
       </span>
       {sessions.length > 0 && (
         <ul className="flex flex-col gap-1">
@@ -1719,7 +1754,7 @@ function DeleteEverywhere({ sessions, busy, onConfirm, onCancel }: { sessions: D
                 {x.at ? <span className="text-[#9A9A98]">{` · ${since(x.at)}`}</span> : null}
               </span>
               {x.alsoFor.length > 0 && (
-                <span className="text-[11.5px] leading-4 text-[#9A5B00] [overflow-wrap:anywhere]">Orbit also learned {x.alsoFor.map(undash).join(", ")} from it</span>
+                <span className="text-[11.5px] leading-4 text-[#9A5B00] [overflow-wrap:anywhere]">Knowledge also learned {x.alsoFor.map(undash).join(", ")} from it</span>
               )}
             </li>
           ))}

@@ -3,7 +3,7 @@ import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_pro
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { DISPLAYS } from "@/lib/types";
 import { executorKey } from "./cloud";
 import { codexPath, findCodex } from "./codex-cli";
@@ -117,6 +117,8 @@ export async function quitBotChromes({ switching = true } = {}) {
 
 /** Start the screen's Chrome if it isn't already running (for this user: one left running for another account closes first). */
 export async function ensureChrome(botId: string, port: number) {
+  // The bot's id names a folder below: only a plain id (letters, digits, _ and -) ever does.
+  if (!/^[\w-]{1,80}$/.test(botId)) throw new Error("That isn't one of your bots.");
   const dir = userChrome();
   if (!dir) throw new Error("Sign in to Bops first.");
   const closes = quits();
@@ -259,18 +261,6 @@ export const macUiMcp = (dir: string) => ({
   cwd: join(dir, "workspace"),
 });
 
-/** The script that serves a Mac task the user's apps (find_app_actions, use_app), and the socket it reaches Bops by (composio.ts serveApps). */
-const appsScript = () => real(join(process.cwd(), "vm/apps-mcp.mjs"));
-export const appsSocket = (dir: string) => join(taskSockets(dir), "apps.sock");
-
-/** The agent's app tools for a Mac task, run by the executor on this Mac like its browser tools: the user's apps, business data (treg.ts), or both. */
-export const appsMcp = (dir: string, has: { apps: boolean; data: boolean }) => ({
-  type: "stdio",
-  command: "/usr/bin/env",
-  args: [...(asNode ? ["ELECTRON_RUN_AS_NODE=1"] : []), process.execPath, appsScript(), "--socket", appsSocket(dir), ...(has.apps ? ["--apps"] : []), ...(has.data ? ["--data"] : [])],
-  cwd: join(dir, "workspace"),
-});
-
 /** What the executor's environment keeps of the server's: nothing secret, nothing that only makes the server run. */
 const KEPT_ENV = ["USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE"];
 
@@ -300,7 +290,7 @@ export function executorCommand(sessionId: string, codex: string, args: string[]
     taskDir: dir,
     sockets: taskSockets(dir),
     programs: [...run.programs, process.execPath, "/usr/bin/env"],
-    readable: [...run.readable, installDir(process.execPath), nodeModules(), appsScript()],
+    readable: [...run.readable, installDir(process.execPath), nodeModules()],
     remotePort: opts.remotePort,
     cdpPort: opts.cdpPort,
   };
@@ -312,9 +302,13 @@ export function executorCommand(sessionId: string, codex: string, args: string[]
 /** Where a Mac task's skills are, in its folder: its agent session's capability directory (sessions.ts). */
 const SKILLS_DIR = "workspace/capabilities/skills";
 
-/** A fresh folder for a Mac task (whatever an earlier run of it left is gone). */
-export function prepareTaskDir(sessionId: string, dir = taskDir(sessionId)) {
-  rmSync(dir, { recursive: true, force: true });
+/**
+ * A fresh folder for a Mac task (whatever an earlier run of it left is gone). `keep`: the same task going on in the
+ * same agent session (a run that paused for the user's OK, picked up again): what it made in its folder stays, as
+ * its agent goes on knowing it's there, and only its skills and apps (written fresh) and its sockets go.
+ */
+export function prepareTaskDir(sessionId: string, dir = taskDir(sessionId), keep = false) {
+  rmSync(keep ? join(/*turbopackIgnore: true*/ dir, dirname(SKILLS_DIR)) : dir, { recursive: true, force: true });
   rmSync(taskSockets(dir), { recursive: true, force: true });
   for (const sub of [SKILLS_DIR, "codex", "tmp"]) mkdirSync(join(/*turbopackIgnore: true*/ dir, sub), { recursive: true, mode: 0o700 });
   mkdirSync(taskSockets(dir), { recursive: true, mode: 0o700 });
@@ -327,11 +321,11 @@ export function prepareTaskDir(sessionId: string, dir = taskDir(sessionId)) {
  * `botId`: the bot whose skills go in the task's skills folder as their folders (workspace-skills.ts
  * writeSkillFiles), fresh each run, so Codex finds them as skills. A folder it can't write costs the task nothing.
  */
-export async function startExecutor(sessionId: string, envId: string, remoteUrl: string, port: number, dir = taskDir(sessionId), fullAccess = false, botId?: string): Promise<ChildProcess> {
+export async function startExecutor(sessionId: string, envId: string, remoteUrl: string, port: number, dir = taskDir(sessionId), fullAccess = false, botId?: string, keep = false): Promise<ChildProcess> {
   if (!fullAccess && !existsSync(SANDBOX_EXEC)) throw new Error("this Mac has no sandbox for bots (/usr/bin/sandbox-exec)");
   const codex = findCodex();
   if (!codex) throw new Error("the Codex CLI isn't on this Mac yet");
-  prepareTaskDir(sessionId, dir);
+  prepareTaskDir(sessionId, dir, keep);
   if (botId)
     try {
       writeSkillFiles(botId, join(/*turbopackIgnore: true*/ dir, SKILLS_DIR));
@@ -371,9 +365,10 @@ export async function startExecutor(sessionId: string, envId: string, remoteUrl:
 /**
  * Stop a Mac task's executor, if it's running (killed outright if it's still there 5 seconds on), and
  * remove the task's folder. At once, not when it has exited: by then the thread may be running again
- * in a fresh folder at the same place.
+ * in a fresh folder at the same place. `keep`: its run paused for the user's OK, and goes on in the same
+ * folder once they answer (prepareTaskDir): only its sockets go.
  */
-export function stopExecutor(sessionId: string, child?: ChildProcess, dir?: string) {
+export function stopExecutor(sessionId: string, child?: ChildProcess, dir?: string, keep = false) {
   if (child && child.exitCode === null && child.signalCode === null) {
     const kill = setTimeout(() => child.kill("SIGKILL"), 5000).unref();
     child.once("exit", () => clearTimeout(kill));
@@ -386,7 +381,7 @@ export function stopExecutor(sessionId: string, child?: ChildProcess, dir?: stri
   } catch {
     return;
   }
-  rmSync(folder, { recursive: true, force: true });
+  if (!keep) rmSync(folder, { recursive: true, force: true });
   rmSync(taskSockets(folder), { recursive: true, force: true });
 }
 

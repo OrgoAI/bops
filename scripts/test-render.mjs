@@ -389,6 +389,15 @@ await part("No browser: pages read as they always did", async () => {
     assert.equal(p.via, undefined);
     assert.doesNotMatch(p.text, /Prices loaded/);
   });
+  await check("asked to say so (a computer's runner: chat.ts web_fetch), a page that needs the browser comes with no text and noBrowser, a wall's 403 too; a plain page reads as always", async () => {
+    const p = await readPage(at("/app"), { sayNoBrowser: true });
+    assert.deepEqual([p.noBrowser, p.text, p.url], [true, "", at("/app")]);
+    const w = await readPage(at("/wall-forever"), { sayNoBrowser: true });
+    assert.deepEqual([w.noBrowser, w.text], [true, ""]);
+    const plain = await readPage(at("/about"), { sayNoBrowser: true });
+    assert.equal(plain.noBrowser, undefined);
+    assert.match(plain.text, /About us/);
+  });
   await check("renderPage says there's no browser", async () => {
     const e = await failure(() => renderPage(at("/app")));
     assert.match(e.message, /browser isn't available/);

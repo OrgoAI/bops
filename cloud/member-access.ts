@@ -1,0 +1,138 @@
+/*
+ * What each person the owner added to a workspace may do with its bots, kept on the workspace
+ * (Workspace.memberAccess) in the synced state, so Bops Cloud has it when it builds a member's view
+ * (cloud/ws-slice.ts sharedSlice) and their live stream. The owner always has every bot.
+ *
+ * Per bot: none (they don't see it at all), read (everything of it: its chats with the owner's own
+ * messages there, a message kept "between us" too, its threads with their notes and results, routines,
+ * watches, moods and screen), or write (chat with it and run it too, once people can act in a shared
+ * workspace; until then it reads as read). The same levels as orgo-web's API key permissions
+ * (lib/api-keys/permission-groups.ts KeyLevel): write takes in read.
+ *
+ * A person's `bots` says their level for each bot named; `others` covers every bot not named, the ones
+ * made later included. So a bot made after they joined stays hidden unless `others` lets them see it.
+ * Someone with no entry at all sees nothing.
+ *
+ * Kept by the person's email, lowercased: an invite has only the email, and they sign in with it. A
+ * guest (joined with a link, no email) is kept as "user:<their Orgo user id>". Imported by Bops Cloud
+ * and, through lib/member-access.ts, the window and the Mac server, so it imports nothing.
+ *
+ * Each entry says when the owner's Mac set it (`at`), and whether it was set with an invite not yet taken
+ * (`invite`): it's for the membership that began then (currentFor). Someone removed or gone without the
+ * Mac seeing it (on orgo.ai, from a Mac on v0.0.29, leaving on their own) who comes back later, by any
+ * way in, never finds the bots they had before: their membership now began after it was set.
+ */
+
+export type AccessLevel = "none" | "read" | "write";
+export const ACCESS_LEVELS: readonly AccessLevel[] = ["none", "read", "write"];
+export const ACCESS_LABELS: Record<AccessLevel, string> = { none: "None", read: "Read", write: "Write" };
+
+/** One person's access to a workspace's bots, and when it was set (`at`, `invite`: currentFor). */
+export type MemberAccess = { others: AccessLevel; bots: Record<string, AccessLevel>; at?: number; invite?: true };
+/** Everyone's, by accessKey. */
+export type MemberAccessMap = Record<string, MemberAccess>;
+
+export const NO_ACCESS: MemberAccess = { others: "none", bots: {} };
+/** The most bots one person's entry names (a workspace has far fewer). */
+export const MAX_ACCESS_BOTS = 200;
+
+const RANK: Record<AccessLevel, number> = { none: 0, read: 1, write: 2 };
+/** Whether `have` allows `need` (write takes in read). */
+export const permits = (have: AccessLevel, need: AccessLevel) => RANK[have] >= RANK[need];
+export const isAccessLevel = (v: unknown): v is AccessLevel => v === "none" || v === "read" || v === "write";
+
+/** How long an Orgo invite can be taken: a membership begun later than this after access set with one isn't that invite's. */
+export const INVITE_MS = 7 * 24 * 3_600_000;
+
+/**
+ * Whether access kept for someone is for their membership now, begun at `joinedAt` as Orgo says it (when
+ * it doesn't say, it is, as before): set since it began (`at`), or set with the invite it began from
+ * (`invite`, taken within INVITE_MS). Access set before they were removed or left and came back is not,
+ * nor one set before entries said when (no `at`).
+ */
+export function currentFor(access: { at?: unknown; invite?: unknown }, joinedAt: number | undefined): boolean {
+  if (joinedAt === undefined) return true;
+  const at = typeof access.at === "number" && Number.isFinite(access.at) ? access.at : 0;
+  return at >= joinedAt || (access.invite === true && at > 0 && joinedAt - at <= INVITE_MS);
+}
+
+/** A time Orgo sent (ms, seconds, or an ISO date), or undefined. */
+export function timeOf(v: unknown): number | undefined {
+  if (typeof v === "number" && Number.isFinite(v) && v > 0) return v < 1e12 ? v * 1000 : v;
+  if (typeof v === "string" && v.trim() && !Number.isNaN(Date.parse(v))) return Date.parse(v);
+  return undefined;
+}
+
+/** Where a person's access is kept: their email, lowercased, or "user:<id>" for a guest with none. */
+export function accessKey(who: { email?: string | null; id?: string | null }): string | null {
+  const email = who.email?.trim().toLowerCase();
+  if (email) return email;
+  return who.id ? `user:${who.id}` : null;
+}
+
+/** A person's access as kept: their email's entry, else their user id's, else none. */
+export function accessOf(map: MemberAccessMap | undefined, who: { email?: string | null; id?: string | null }): MemberAccess {
+  if (!map) return NO_ACCESS;
+  const email = who.email?.trim().toLowerCase();
+  return (email && map[email]) || (who.id && map[`user:${who.id}`]) || NO_ACCESS;
+}
+
+/**
+ * One person's level for one bot: the level kept for it (anything else kept for it is none), else
+ * `others`. Only what's kept for it: a bot whose id every object has a field for ("constructor", a bot
+ * named Constructor) is never read off the object itself.
+ */
+export const levelOf = (access: MemberAccess, botId: string): AccessLevel =>
+  Object.hasOwn(access.bots, botId) ? (isAccessLevel(access.bots[botId]) ? access.bots[botId] : "none") : access.others;
+
+/**
+ * What a client sent, made safe to keep: anything that isn't a level is none, bot ids are short
+ * strings, at most MAX_ACCESS_BOTS of them, and a bot at the same level as `others` isn't named. A bot
+ * it can't name (an id too long, or past the most) is left out only when that gives them less (it then
+ * reads as `others`); one kept below `others` never is, so null then, as when it isn't an access object at all.
+ */
+export function cleanAccess(v: unknown): MemberAccess | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const o = v as { others?: unknown; bots?: unknown };
+  const others: AccessLevel = isAccessLevel(o.others) ? o.others : "none";
+  const bots: Record<string, AccessLevel> = {};
+  if (o.bots && typeof o.bots === "object" && !Array.isArray(o.bots)) {
+    for (const [id, level] of Object.entries(o.bots as Record<string, unknown>)) {
+      const l: AccessLevel = isAccessLevel(level) ? level : "none";
+      if (l === others) continue;
+      if (!id || id.length > 80 || id === "__proto__" || Object.keys(bots).length >= MAX_ACCESS_BOTS) {
+        // Left out, it would read as `others`: more than the owner gave them.
+        if (!permits(l, others)) return null;
+        continue;
+      }
+      bots[id] = l;
+    }
+  }
+  return { others, bots };
+}
+
+/** A new invite's access before the owner changes it: every bot there now to read; bots made later hidden. */
+export function inviteDefault(botIds: string[]): MemberAccess {
+  return { others: "none", bots: Object.fromEntries(botIds.map((id) => [id, "read" as AccessLevel])) };
+}
+
+/** The bots, of `botIds`, a person sees (read or write). */
+export const visibleBots = (access: MemberAccess, botIds: string[]) => botIds.filter((id) => levelOf(access, id) !== "none");
+
+/**
+ * Whether a person sees a chat: every bot in it at read or more (a group chat with a bot hidden from
+ * them stays hidden, as its messages would show that bot's side).
+ */
+export const seesChat = (access: MemberAccess, botIds: string[]) => botIds.length > 0 && botIds.every((id) => levelOf(access, id) !== "none");
+
+/** A short line for a person's access: "Every bot, read", "2 bots, 1 to write", "No bots". */
+export function accessSummary(access: MemberAccess, botIds: string[]): string {
+  const seen = visibleBots(access, botIds);
+  const writes = seen.filter((id) => levelOf(access, id) === "write").length;
+  const later = access.others !== "none" ? `, new bots ${access.others === "write" ? "to write" : "to read"}` : "";
+  if (!seen.length) return access.others === "none" ? "No bots" : `No bots yet${later}`;
+  const all = seen.length === botIds.length;
+  const head = all ? "Every bot" : `${seen.length} ${seen.length === 1 ? "bot" : "bots"}`;
+  const how = writes === 0 ? "read" : writes === seen.length ? "write" : `${writes} to write`;
+  return `${head}, ${how}${later}`;
+}

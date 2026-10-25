@@ -12,10 +12,10 @@ import { delegate, endCall, rememberVoices, voiceFor, voicePrompt } from "./call
 import { appHeaders } from "./app-version";
 import { CloudError, cloudOn, cloudProxy, cloudSession, cloudSessionNow, noteOutOfCredit } from "./cloud";
 import { installId } from "./mail";
-import { onPostgres } from "./persist";
+import { loopHere, onPostgres } from "./persist";
 import { ownerPhoneTable } from "./persist-pg";
 import { forgetOwnerNumber, syncCloudLines, tellCloudLine } from "./phone-lines";
-import { saveToMemory, wsOf } from "./memory";
+import { OWNER_WHO, saveToMemory, wsOf } from "./memory";
 import { saveUpload } from "./uploads";
 import { plainLinks } from "./style";
 import { addMessage, bot, getState, ofThisUser, ownerName, patchSession, react, sameState, stateEpoch, stateReady, stateUser, update, userDir } from "./store";
@@ -760,7 +760,7 @@ gp.bopsPhoneTick = () => (stateReady() ? Promise.all([phoneCatchUp(), cloudOn() 
  * or another account signing in on this Mac) a look right away and their numbers' upkeep (lineUpkeep).
  */
 export function startPhone() {
-  if (!phoneOn() || !stateReady()) return;
+  if (!phoneOn() || !stateReady() || !loopHere("phone")) return;
   gp.bopsPhoneCatchUp ??= setInterval(() => void gp.bopsPhoneTick?.().catch(() => {}), 2 * 60_000);
   const who = stateUser() ?? "";
   if (gp.bopsPhoneUpkeepFor === who) return;
@@ -974,7 +974,7 @@ export function cloudCall(p: CloudCallPayload, eventId: string) {
     call: { seconds, phone: p.from },
   });
   const turns = callTurns(p.transcript);
-  if (turns.length) saveToMemory(wsOf(b.id), "chat", botChatId(b.id), turns.slice(-200).map((t) => ({ who: t.caller ? "owner" : b.id, text: t.text.slice(0, 2000) })), { chat: "call" });
+  if (turns.length) saveToMemory(wsOf(b.id), "chat", botChatId(b.id), turns.slice(-200).map((t) => ({ who: t.caller ? OWNER_WHO : b.id, text: t.text.slice(0, 2000) })), { chat: "call" });
 }
 
 /** The cloud's transcript of a call ("Caller: …" and "Bot: …" lines) as turns; a line with no speaker goes with the turn before it. */
