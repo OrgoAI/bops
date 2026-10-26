@@ -1,2 +1,0 @@
-- Boppy's eyes move with the song while Bops starts.
-- Keys on a bot's profile say if they're for all workspaces.
