@@ -8,7 +8,7 @@ import type { IngotToken } from "@/lib/hosted-apps";
 import { workspaceOf } from "@/lib/types";
 import { apiKey, orgo } from "./orgo";
 import { onRunner } from "./persist";
-import { bot, getState, update, watchChanges } from "./store";
+import { bot, getState, sameState, update, watchChanges } from "./store";
 
 /**
  * Ingot (ingot/docs/hosted-api.md): Orgo's own source control, where a workspace's apps on the web live
@@ -83,6 +83,17 @@ export class IngotError extends Error {
 
 /** Why a workspace can't have apps yet: Ingot keeps a workspace's repos under its Orgo project, and it has none. */
 export const NO_PROJECT = "This workspace isn't on Orgo yet, so it can't have apps on the web.";
+
+/**
+ * Work on apps that waits on Orgo or Ingot (a computer's set-up, a deploy, a DNS change) is the account's that
+ * began it (`ours`: store.ts sameState). Once another account's state came in meanwhile (a sign-in on this
+ * Mac), it stops before its next call or write: none of it is made with that account's key or kept in its
+ * state, whoever they are.
+ */
+export const SWAPPED = "Another account signed in meanwhile, so that stopped.";
+export function stillOurs(ours: () => boolean) {
+  if (!ours()) throw new IngotError(SWAPPED);
+}
 
 /** An Orgo project's id as it goes in Ingot's paths (a lowercase uuid; Ingot's own rule, at most 64 characters). */
 const PROJECT = /^[a-z0-9]+(-[a-z0-9]+)*$/;
@@ -165,7 +176,7 @@ const PIECE = 64 * 1024;
  * (as copySkillsToComputer sends files), then checked by sha256 before and after unpacking and moved
  * into place in one step, so a binary half copied never runs.
  */
-async function sendBinary(computerId: string, bin: { path: string; sha256: string }, signal?: AbortSignal) {
+async function sendBinary(computerId: string, bin: { path: string; sha256: string }, ours: () => boolean, signal?: AbortSignal) {
   const gz = gzipSync(readFileSync(/*turbopackIgnore: true*/ bin.path), { level: 9 });
   const part = "/opt/bops/bin/.ingot.gz.part";
   const n = Math.max(1, Math.ceil(gz.length / PIECE));
@@ -174,6 +185,7 @@ async function sendBinary(computerId: string, bin: { path: string; sha256: strin
     const lines = [`# bops-ingot binary ${i + 1}/${n}`, "set -e", ...(i === 0 ? [`install -d -m 755 /opt/bops/bin`, `: > ${part}`] : []), `printf %s ${q(b64)} | base64 -d >> ${part}`];
     const r = await orgo.bash(computerId, lines.join("\n"), 60, { signal });
     if (r.exit_code !== 0) throw new IngotError(`Couldn't copy Ingot to the computer: ${tail(r.output)}`);
+    stillOurs(ours);
   }
   const done = await orgo.bash(
     computerId,
@@ -378,20 +390,26 @@ async function tokenName(computerId: string, wsId: string, botId?: string): Prom
  * new one is in, best effort): its key made there first (sealScript), the token minted here with the
  * user's key, sealed to it and written (tokenScript). A token that couldn't be written is revoked at once.
  */
-async function newToken(computerId: string, wsId: string, workspace: string, old: IngotToken | undefined, o: { botId?: string; signal?: AbortSignal }): Promise<IngotToken> {
+async function newToken(computerId: string, wsId: string, workspace: string, old: IngotToken | undefined, o: { botId?: string; signal?: AbortSignal; ours: () => boolean }): Promise<IngotToken> {
   const n = randomBytes(8).toString("hex");
   const seal = await orgo.bash(computerId, sealScript(n), 60, { signal: o.signal });
   if (seal.exit_code !== 0 || !/INGOT_SEAL=ok/.test(seal.output)) throw new IngotError(`Couldn't send Ingot's token to the computer: ${tail(seal.output)}`);
+  stillOurs(o.ours);
   const key = sealKeyOf(seal.output);
-  const made = await ingot.mintToken(wsId, await tokenName(computerId, wsId, o.botId), o.signal);
+  const name = await tokenName(computerId, wsId, o.botId);
+  stillOurs(o.ours);
+  const made = await ingot.mintToken(wsId, name, o.signal);
   let t: IngotToken;
   try {
+    stillOurs(o.ours);
     const sum = sha256(tokenText(made.token));
     const r = await orgo.bash(computerId, tokenScript(n, workspace, sealTo(key, made.token), sum), 30, { signal: o.signal });
     if (r.exit_code !== 0 || !/INGOT_TOKEN_FILE=ok/.test(r.output)) throw new IngotError(`Couldn't put Ingot's token on the computer: ${tail(r.output)}`);
+    stillOurs(o.ours);
     t = { id: made.id, sum, at: Date.now() };
   } catch (e) {
-    await ingot.revokeToken(wsId, made.id).catch((x: Error) => console.warn(`[ingot] ${computerId}: the token ${made.id} it never got wasn't revoked: ${x.message}`));
+    // Revoked only by the account that made it: never with another's key, in that account's workspace.
+    if (o.ours()) await ingot.revokeToken(wsId, made.id).catch((x: Error) => console.warn(`[ingot] ${computerId}: the token ${made.id} it never got wasn't revoked: ${x.message}`));
     throw e;
   }
   keepToken(wsId, computerId, t);
@@ -457,8 +475,10 @@ if (!onRunner())
  * in. `botId`: the task's bot, for the token's name when the computer is no bot's of the workspace.
  */
 export async function ensureIngotCli(computerId: string, wsId: string, opts: { signal?: AbortSignal; botId?: string; renew?: boolean } = {}): Promise<void> {
+  const ours = sameState();
   const workspace = ingotWorkspace(wsId);
   const key = await apiKey().catch(() => null);
+  stillOurs(ours);
   if (!key) throw new IngotError("Sign in with Orgo to work on apps on the web.");
   // The token turned away, as it was when it was: one another set-up replaced meanwhile is new.
   const refused = opts.renew ? (tokenOf(wsId, computerId)?.id ?? "") : undefined;
@@ -472,8 +492,9 @@ export async function ensureIngotCli(computerId: string, wsId: string, opts: { s
     const running = setup.get(computerId);
     if (!running) break;
     await running.catch(() => undefined);
+    stillOurs(ours);
   }
-  const work = setUp(computerId, wsId, workspace, { ...opts, refused });
+  const work = setUp(computerId, wsId, workspace, { ...opts, refused, ours });
   setup.set(computerId, work);
   try {
     const t = await work;
@@ -486,26 +507,32 @@ export async function ensureIngotCli(computerId: string, wsId: string, opts: { s
   }
 }
 
-async function setUp(computerId: string, wsId: string, workspace: string, o: { signal?: AbortSignal; botId?: string; refused?: string }): Promise<IngotToken> {
+async function setUp(computerId: string, wsId: string, workspace: string, o: { signal?: AbortSignal; botId?: string; refused?: string; ours: () => boolean }): Promise<IngotToken> {
   const kept = tokenOf(wsId, computerId);
   const mine = kept && kept.id !== o.refused ? kept : undefined;
   // Whether Ingot still lists the token, asked of it from here while the computer is probed (null: it didn't say).
   const [probe, listed] = await Promise.all([orgo.bash(computerId, probeScript(workspace), 30, { signal: o.signal }), mine ? ingot.tokenIds(wsId, o.signal).catch(() => null) : null]);
+  stillOurs(o.ours);
   const m = marks(probe.output);
   const arch = m.get("INGOT_ARCH");
   if (arch !== "amd64" && arch !== "arm64") throw new IngotError(`Ingot runs on Linux on amd64 or arm64, and this computer is ${arch || "something else"}.`);
   const has = m.get("INGOT_BIN") ?? "none";
   const bin = vendored(arch);
   if (!bin && has === "none") throw new IngotError(`This Bops has no Ingot for the computer to run (${binaryPath(arch)} is missing), so its apps can't be set up there.`);
-  if (bin && has !== bin.sha256) await sendBinary(computerId, bin, o.signal);
+  if (bin && has !== bin.sha256) {
+    await sendBinary(computerId, bin, o.ours, o.signal);
+    stillOurs(o.ours);
+  }
   const config = configText();
   const newConfig = m.get("INGOT_CONFIG") !== sha256(config);
   if (newConfig) {
     const r = await orgo.bash(computerId, configScript(config), 30, { signal: o.signal });
     if (r.exit_code !== 0 || !/INGOT_CONFIG=ok/.test(r.output)) throw new IngotError(`Couldn't write Ingot's config on the computer: ${tail(r.output)}`);
+    stillOurs(o.ours);
   }
   const good = mine && m.get("INGOT_TOKEN_FILE") === mine.sum && listed?.has(mine.id) !== false ? mine : undefined;
   const t = good ?? (await newToken(computerId, wsId, workspace, kept, o));
+  stillOurs(o.ours);
   await gitReady(computerId, bin?.sha256 ?? has, newConfig, o.signal);
   return t;
 }
@@ -548,8 +575,11 @@ const utf8 = (s: string) => Buffer.from(s, "utf8").toString("latin1");
  * can't be reached; any other HTTP answer comes back as it is, but a key Ingot didn't take.
  */
 async function api<T>(wsId: string, method: "GET" | "POST" | "DELETE", path: string, opts: { body?: unknown; author?: string; signal?: AbortSignal } = {}): Promise<Answer<T>> {
+  const ours = sameState();
   const project = ingotWorkspace(wsId);
   const key = await apiKey().catch(() => null);
+  // The key of the account whose workspace this is, never one signed in since.
+  stillOurs(ours);
   if (!key) throw new IngotError("Sign in with Orgo to use apps on the web.");
   const headers: Record<string, string> = { Authorization: `Bearer ${key}`, Accept: "application/json" };
   if (opts.author) headers["X-Ingot-Author"] = utf8(opts.author);

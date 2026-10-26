@@ -7,7 +7,7 @@ import { canWatch, hub, LiveHub, liveScope, messagesWritten, scoped, stateWritte
 import { accessSummary, cleanAccess, levelOf, MAX_ACCESS_BOTS, type MemberAccess, type MemberAccessMap } from "../member-access.ts";
 import { accessFor, memberStreams, membersChanged, NO_MS, resetMembers, ROLE_MS, UNSURE_LOOKS, watchable } from "../members.ts";
 import type { WsAccess } from "../protocol.ts";
-import { botsOf, chatIdsOf, handedByOthers, OWNER_VIEW, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, type SliceViewer } from "../ws-slice.ts";
+import { appThreadsOf, botsOf, chatIdsOf, handedByOthers, OWNER_VIEW, pairChatsOf, sharedHash, sharedMessage, sharedMessages, sharedSlice, type SliceViewer } from "../ws-slice.ts";
 
 /**
  * Shared workspaces, read only (members.ts, ws-slice.ts): who may watch is what orgo-web's bops-role
@@ -429,6 +429,52 @@ test("a thread a hidden bot handed over reads as its own bot's, in its chat, and
   assert.deepEqual(sharedMessages(rows, bots, handed).map((m) => m.id), ["n3", "n4"]);
   assert.deepEqual(sharedMessages(rows).map((m) => m.id), ["n1", "n2", "n3", "n4", "n5"], "the owner sees every note");
   assert.equal(sharedMessages(rows)[0].from, undefined, "who it came from is never shown, even to the owner's copy");
+});
+
+test("the owner's apps stay the owner's: anyone else given the bot sees no app thread, nor any line, note or result of one", () => {
+  // An @orgo.ai owner's bot a worked on an app (chat.ts work_on_app, hosted-apps.ts appWork) and made one (made-apps.ts).
+  const goal = "Work on Tess's app recipe-box. It's the Ingot repo p1/recipe-box (Ingot is Orgo's source control). Tess puts it live from the Apps page.";
+  const blob = {
+    ...team({ "kim@example.com": { others: "none", bots: { a: "read" } }, "tom@orgo.ai": { others: "none", bots: { a: "read" } } }),
+    sessions: [
+      { id: "s-a", botId: "a", chatId: "bot:a", title: "A's thread", goal: "Plan the week" },
+      { id: "s-app", botId: "a", chatId: "bot:a", sentVia: "you", title: "Work on recipe-box", goal, app: { wsId: "ws_acme", name: "recipe-box" }, steps: [{ at: 1, tool: "setup", detail: "Pulled the newest recipe-box into /workspace/apps/recipe-box" }] },
+      { id: "s-mac", botId: "a", chatId: "bot:a", title: "Work on recipe-box", goal: `${goal}\n\nDo it on the Mac this time.`, movedFrom: "s-app" },
+      { id: "s-split", botId: "a", chatId: "bot:a", title: "Its tests", goal: "Write its tests", partOf: "s-mac" },
+    ],
+    appApprovals: [
+      { id: "ap-1", botId: "a", chatId: "bot:a", threadId: "s-app", action: "Push to Ingot" },
+      { id: "ap-2", botId: "a", chatId: "bot:a", threadId: "s-a", action: "Send the email" },
+    ],
+  };
+  const rows = [
+    { id: "m1", chatId: "bot:a", role: "user", text: "Plan the week and fix the recipe box", at: 1 },
+    { id: "m2", chatId: "bot:a", role: "bot", botId: "a", text: "On it.", sessionIds: ["s-app"], at: 2 },
+    { id: "m3", chatId: "bot:a", role: "system", text: "Building Recipe Box", madeApp: { appId: "app_1", version: 1 }, at: 3 },
+    { id: "m4", chatId: "bot:a", role: "system", text: "Couldn't work on the app: There's no app called \"blog\" in this workspace.", appNote: true, at: 4 },
+    { id: "m5", chatId: "bot:a", role: "bot", botId: "a", text: "Committed it with ingot commit.", resultOf: "s-app", sessionIds: ["s-app"], at: 5 },
+    { id: "m6", chatId: "bot:a", role: "bot", botId: "a", text: "Both started.", sessionIds: ["s-a", "s-mac"], at: 6 },
+    { id: "m7", chatId: "bot:a", role: "bot", botId: "a", text: "Its tests pass.", resultOf: "s-split", sessionIds: ["s-split"], at: 7 },
+    { id: "m8", chatId: "bot:a", role: "bot", botId: "a", text: "Here's the week.", resultOf: "s-a", sessionIds: ["s-a"], at: 8 },
+  ];
+  assert.deepEqual([...appThreadsOf(blob)], ["s-app", "s-mac", "s-split"], "work_on_app's task, its move to the Mac and what was split off it");
+  // Whatever their email: an @orgo.ai member of someone else's workspace sees none of it either.
+  for (const viewer of [member({ id: "u-kim", email: "kim@example.com" }), member({ id: "u-tom", email: "tom@orgo.ai" }), member({ id: "u-kim", email: "kim@example.com", role: "admin" })]) {
+    const slice = sharedSlice(blob, "ws_acme", viewer);
+    assert.deepEqual(ids(slice.sessions), ["s-a"], `${viewer.email} ${viewer.role}: no app thread`);
+    assert.deepEqual(ids(slice.approvals ?? []), ["ap-2"], "nor what one waits on");
+    const bots = botsOf(slice);
+    const read = sharedMessages(rows, bots, handedByOthers(blob, bots), appThreadsOf(blob));
+    assert.deepEqual(ids(read), ["m1", "m6", "m8"], "no app line, note, start or result");
+    assert.deepEqual(read[1].sessionIds, ["s-a"], "a message of an app thread and another keeps only the other's chip");
+    const text = JSON.stringify({ slice, read });
+    for (const word of ["recipe-box", "Recipe Box", "Ingot", "ingot", "Apps page", "/workspace/apps", "app_1", "Couldn't work on the app"]) assert.ok(!text.includes(word), `nothing says ${word}`);
+  }
+  // The owner's own devices: all of it, as before.
+  assert.deepEqual(ids(sharedSlice(blob, "ws_acme", OWNER_VIEW).sessions), ["s-a", "s-app", "s-mac", "s-split"]);
+  assert.deepEqual(ids(sharedSlice(blob, "ws_acme", OWNER_VIEW).approvals ?? []), ["ap-1", "ap-2"]);
+  assert.deepEqual(ids(sharedMessages(rows)), ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"]);
+  assert.equal(sharedSlice(blob, "ws_acme", OWNER_VIEW).sessions[1].goal, goal);
 });
 
 test("the main bot's digest of what every bot's watches found tells someone only the lines of bots they have", () => {

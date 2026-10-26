@@ -1,19 +1,40 @@
 "use client";
 
 import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { AppCommit, AppCommitsAnswer, AppHosting, DeployState, HostedApp, HostedAppAction, HostedAppsAnswer } from "@/lib/hosted-apps";
+import { flushSync } from "react-dom";
+import { DNS_TYPES, dnsNeeds } from "@/lib/hosted-apps";
+import type {
+  AppCommit,
+  AppCommitsAnswer,
+  AppDnsInput,
+  AppDnsRecord,
+  AppDnsWritten,
+  AppDnsZone,
+  AppDomain,
+  AppDomainsAnswer,
+  AppDomainStatus,
+  AppHosting,
+  DeployState,
+  HostedApp,
+  HostedAppAction,
+  HostedAppsAnswer,
+} from "@/lib/hosted-apps";
 import { botChatId, workspaceOf, type AppState } from "@/lib/types";
+import { PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon } from "./apps";
+import { InlineConfirm, undash } from "./side-group";
 import { ago, post } from "./ui";
 
 /*
  * Apps the workspace runs on the web (lib/hosted-apps.ts), in Bops' right panel. Each one is an Ingot repo,
  * worked on on a bot's Bops computer. The Apps page's "On the web" list has one line per app: its state, its public
  * address, the short id of the changeset its site serves, and Deploy. An app's tab has its address (open,
- * copy), "Work on it" (its bot's chat, with words typed in) and Deploy; its history from Ingot, newest
- * first, where any changeset can be deployed; and the newest deploy's log, folded. The
+ * copy), "Work on it" (its bot's chat, with words typed in) and Deploy; its domains, and the DNS records
+ * of the ones bought through Orgo, to add to, change and remove (Orgo's own locked); its history from
+ * Ingot, newest first, where any changeset can be deployed; and the newest deploy's log, folded. The
  * list is read again every few seconds while a deploy waits or runs, whenever this Mac queues a deploy
  * (appsStamp), and otherwise when the window comes back into focus. The history is read again when the
- * app's newest changeset or deploy changes, and when the window comes back into focus, never on a timer.
+ * app's newest changeset or deploy changes, and its domains when its project or address does; both
+ * when the window comes back into focus, never on a timer.
  */
 
 /** Open an app on the web in its tab (bops-app.tsx), by its Ingot repo's name; null where there's no panel. */
@@ -149,6 +170,36 @@ export async function act(name: string, body: HostedAppAction): Promise<{ app?: 
   const r = await post(at(name), body).catch(() => null);
   const answer = ((await r?.json().catch(() => null)) ?? {}) as { app?: HostedApp; error?: string };
   return r?.ok ? { app: answer.app } : { error: answer.error || "Couldn't deploy it. Try again." };
+}
+
+/** Its domains and their DNS, or why they couldn't be read (null: the server didn't say). */
+export async function readDomains(ws: string, name: string): Promise<{ answer?: AppDomainsAnswer; error?: string | null }> {
+  const r = await fetch(`${at(name)}/dns?ws=${encodeURIComponent(ws)}`, { cache: "no-store" }).catch(() => null);
+  const j = (await r?.json().catch(() => null)) as (Partial<AppDomainsAnswer> & { error?: unknown }) | null;
+  if (r?.ok && j && Array.isArray(j.domains) && Array.isArray(j.zones)) return { answer: { url: j.url ?? null, domains: j.domains, zones: j.zones } };
+  return { error: typeof j?.error === "string" ? j.error : null };
+}
+
+/** A change to one of its zones (`zone`: its id): a record added, one changed (all of it, as it becomes), or one removed. */
+export type DnsChange = { ws: string; zone: string } & ({ action: "add"; record: AppDnsInput } | { action: "change"; id: string; record: AppDnsInput } | { action: "remove"; id: string });
+
+/**
+ * What a change answered: the zone's records as written, or why not (`field`: the one to fix), with the
+ * records as they are now (`now`) when they changed since they were read.
+ */
+export type DnsChanged = { written?: AppDnsWritten; error?: string; field?: string; now?: AppDnsWritten };
+
+export async function changeDns(name: string, c: DnsChange): Promise<DnsChanged> {
+  const url = `${at(name)}/dns/records${c.action === "add" ? "" : `/${encodeURIComponent(c.id)}`}`;
+  const r = await post(url, { ...(c.action === "remove" ? {} : c.record), ws: c.ws, zone: c.zone }, c.action === "add" ? "POST" : c.action === "change" ? "PATCH" : "DELETE").catch(() => null);
+  const j = ((await r?.json().catch(() => null)) ?? {}) as Partial<AppDnsWritten> & { error?: unknown; field?: unknown; stale?: unknown };
+  const records = typeof j.zone === "string" && Array.isArray(j.records) ? { zone: j.zone, records: j.records } : null;
+  if (r?.ok && records) return { written: records };
+  return {
+    error: undash(typeof j.error === "string" && j.error ? j.error : "Couldn't change the DNS. Try again."),
+    ...(typeof j.field === "string" ? { field: j.field } : {}),
+    ...(j.stale && records ? { now: records } : {}),
+  };
 }
 
 /** Calls `f` whenever the window comes back into focus, until what it answers is called. */
@@ -381,6 +432,8 @@ export function HostedAppTab({
   const app = answer?.apps.find((a) => a.name === name);
   // Read again when a commit or a deploy moves it on.
   const { history, older } = useHistory(ws, name, `${app?.head ?? ""}:${app?.live?.id ?? ""}:${app?.live?.state ?? ""}:${app?.serving ?? ""}`);
+  // Its domains, again when its first deploy makes its project or gives it its address.
+  const dns = useDomains(ws, name, `${app?.hosting?.projectId ?? ""}:${app ? (urlOf(app) ?? "") : ""}`);
   if (!answer || !app)
     return (
       <div className="flex flex-1 items-center justify-center px-8 text-center text-[13px] text-[#6B6B6B]">
@@ -397,8 +450,50 @@ export function HostedAppTab({
       older={older}
       work={ask ? { name: ask.name, go: () => onAsk(ask.botId, ask.text) } : null}
       onChanged={put}
+      domains={dns.domains}
+      domainsFailed={dns.failed}
+      onDns={dns.put}
     />
   );
+}
+
+/** The last read of each app's domains, so its tab opened again shows them at once (and reads them again). */
+const domainsRead = new Map<string, AppDomainsAnswer>();
+
+/**
+ * An app's domains (null: being read), read again when `stamp` changes and when the window comes back into
+ * focus. One read that fails keeps what was there; `failed` is why, while there's nothing. `put`: a zone's
+ * records as a change wrote them.
+ */
+function useDomains(ws: string, name: string, stamp: string) {
+  const key = `${ws}\n${name}`;
+  const [got, setGot] = useState<{ key: string; answer: AppDomainsAnswer | null; error: string | null } | null>(null);
+  const domains = (got?.key === key ? got.answer : null) ?? domainsRead.get(key) ?? null;
+  const failed = !domains && got?.key === key ? got.error : null;
+  useEffect(() => {
+    let stop = false;
+    const read = () =>
+      void readDomains(ws, name).then((r) => {
+        if (stop) return;
+        if (r.answer) domainsRead.set(key, r.answer);
+        setGot((g) => ({ key, answer: r.answer ?? (g?.key === key ? g.answer : null), error: r.answer ? null : (r.error ?? "Couldn't read its domains just now.") }));
+      });
+    read();
+    const off = whenFocused(read);
+    return () => {
+      stop = true;
+      off();
+    };
+  }, [key, ws, name, stamp]);
+  const put = (w: AppDnsWritten) =>
+    setGot((g) => {
+      const base = (g?.key === key ? g.answer : null) ?? domainsRead.get(key);
+      if (!base) return g;
+      const next = { ...base, zones: base.zones.map((z) => (z.id === w.zone ? { ...z, records: w.records } : z)) };
+      domainsRead.set(key, next);
+      return { key, answer: next, error: null };
+    });
+  return { domains, failed, put };
 }
 
 /**
@@ -463,7 +558,7 @@ const firstLine = (message: string) => message.split("\n", 1)[0].trim();
  * changeset (short id, message, author, when, files added, changed and deleted), the one its site serves
  * marked Live and any other deployable from its line ("Deploy this one", shown as the line is pointed at),
  * older ones a page at a time; while Ingot can't be reached, one quiet line instead;
- * and its newest deploy's log, folded.
+ * and its newest deploy's log, folded. Above the history, its domains (Domains).
  */
 export function HostedAppView({
   ws,
@@ -473,6 +568,9 @@ export function HostedAppView({
   older,
   work,
   onChanged,
+  domains = null,
+  domainsFailed = null,
+  onDns = () => {},
 }: {
   ws: string;
   answer: Pick<HostedAppsAnswer, "enabled" | "why">;
@@ -482,6 +580,11 @@ export function HostedAppView({
   older?: Older;
   work?: { name: string; go: () => void } | null;
   onChanged: (app: HostedApp) => void;
+  /** Its domains and their DNS (null: being read), and why they couldn't be read while there are none. */
+  domains?: AppDomainsAnswer | null;
+  domainsFailed?: string | null;
+  /** A zone's records as a change wrote them. */
+  onDns?: (w: AppDnsWritten) => void;
 }) {
   const { busy, error, run } = useDeploy(onChanged);
   const url = urlOf(app);
@@ -555,6 +658,7 @@ export function HostedAppView({
             )}
           </div>
         )}
+        <Domains ws={ws} app={app} answer={domains} failed={domainsFailed} onDns={onDns} />
         <div data-history className="flex flex-col">
           <span className="pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]">History</span>
           {history === null ? (
@@ -704,5 +808,461 @@ function DeployLog({ ws, name, live }: { ws: string; name: string; live: NonNull
       )}
       {open && log?.text && log.failed && <span className={QUIET}>Couldn&apos;t read more of the log.</span>}
     </div>
+  );
+}
+
+/* ---------------- Its domains and their DNS ---------------- */
+
+const DOMAIN_STATES: Record<AppDomainStatus, { word: string; dot: string }> = {
+  pending: { word: "Waiting for its DNS", dot: PULSE },
+  verifying: { word: "Checking its DNS", dot: PULSE },
+  active: { word: "Live", dot: "bg-[#2BB673]" },
+  failed: { word: "Couldn't be verified", dot: "bg-[#B42318]" },
+  disabled: { word: "Turned off by Orgo", dot: "bg-[#9A9A98]" },
+};
+
+/** A domain's state in a word, and in full for its dot's tooltip (its HTTPS certificate, once it's live). */
+function domainState(d: AppDomain) {
+  // (A state this build doesn't know reads as waiting.)
+  const s = DOMAIN_STATES[d.status] ?? DOMAIN_STATES.pending;
+  const cert = d.status !== "active" ? null : d.cert === "issued" ? "its HTTPS certificate is issued" : "its HTTPS certificate comes with its first visit";
+  return { ...s, tip: cert ? `${s.word} · ${cert}` : s.word };
+}
+
+/** What Orgo found of a record to set, when it looked. */
+const FOUND = { ok: { word: "Found", look: "text-[#1E7A4C]" }, missing: { word: "Not there yet", look: "text-[#9A9A98]" }, wrong: { word: "Says something else", look: "text-[#B42318]" } };
+
+/** A record's name as it's shown: @ for the domain itself. */
+const atName = (name: string) => name || "@";
+
+const PILL = "rounded-full px-3 py-1 text-[12px] font-medium leading-4 disabled:opacity-50";
+/** Shown as its line is pointed at or reached with the keyboard, so the records read as a list. */
+const ON_HOVER = "flex shrink-0 items-center opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none";
+
+/**
+ * Its domains: its public address on orgo.dev, then each domain that points at it (its computer serves it
+ * on the app's port) with how it's doing; one bought elsewhere that isn't live yet has the records to set
+ * where its DNS is kept under it. Then the DNS records of each one bought through Orgo (DnsZone). Its
+ * address shows at once and each line is one 32px line, so what's read comes in under it a line at a time.
+ */
+function Domains({ ws, app, answer, failed, onDns }: { ws: string; app: HostedApp; answer: AppDomainsAnswer | null; failed: string | null; onDns: (w: AppDnsWritten) => void }) {
+  const url = answer?.url ?? urlOf(app);
+  // Never deployed: no project, so no port for a domain to serve. Nothing to read.
+  const none = !app.hosting?.projectId || (answer && !answer.domains.length);
+  return (
+    <div data-domains className="flex flex-col">
+      <span className="pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]">Domains</span>
+      <div className="-mx-2 flex flex-col">
+        {url && (
+          <div data-address className="flex h-8 items-center gap-2 rounded-lg px-2">
+            <span className="size-2 shrink-0" />
+            <UrlLink url={url} />
+            <span className="flex-1" />
+            <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">Its address on Orgo</span>
+          </div>
+        )}
+        {!none && answer?.domains.map((d) => <DomainLine key={d.id} d={d} />)}
+      </div>
+      {none ? (
+        <span data-no-domains className={`flex h-8 items-center ${QUIET}`}>
+          It has no domain of its own yet.
+        </span>
+      ) : (
+        !answer && <span className={`flex h-8 items-center ${QUIET}`}>{failed ?? "Reading them…"}</span>
+      )}
+      {!none && answer?.zones.map((z) => <DnsZone key={z.id} ws={ws} name={app.name} zone={z} onDns={onDns} />)}
+    </div>
+  );
+}
+
+/** One domain: its state, its name (a link once it's live), and whether Orgo keeps its DNS; the records to set, while one bought elsewhere waits for them. */
+function DomainLine({ d }: { d: AppDomain }) {
+  const s = domainState(d);
+  return (
+    <>
+      <div data-domain={d.domain} data-status={d.status} className="flex h-8 items-center gap-2 rounded-lg px-2">
+        <span data-tip={s.tip} className={`size-2 shrink-0 rounded-full ${s.dot}`} />
+        {d.status === "active" ? (
+          <UrlLink url={`https://${d.domain}`} />
+        ) : (
+          <span title={d.domain} className="min-w-0 shrink truncate font-mono text-[11.5px] leading-4 text-ink">
+            {d.domain}
+          </span>
+        )}
+        <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">{s.word}</span>
+        <span className="flex-1" />
+        {d.managed && <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">Bought through Orgo</span>}
+      </div>
+      {/* Bought through Orgo, but Orgo didn't say which of the workspace's bought domains it's in (DNS isn't
+          open to the account, its list couldn't be read, the computer moved workspace): no zone to show, so why. */}
+      {d.managed && !d.zone && (
+        <span data-no-zone={d.domain} className="mb-1 ml-6 text-[12px] leading-[18px] text-[#9A9A98]">
+          Couldn&apos;t read its DNS records.
+        </span>
+      )}
+      {!!d.publish.length && (
+        <div data-publish={d.domain} className="mb-1 ml-6 flex flex-col">
+          <span className="text-[12px] leading-[18px] text-[#6B6B6B]">Set these {d.where ? `at ${d.where}` : `where ${d.domain}'s DNS is kept`}:</span>
+          {d.publish.map((r, i) => (
+            <div key={i} className="flex h-7 items-center gap-2">
+              <span className="w-[46px] shrink-0 font-mono text-[11.5px] leading-4 text-[#6B6B6B]">{r.type}</span>
+              <span title={r.name} className="w-[112px] shrink-0 truncate font-mono text-[11.5px] leading-4 text-ink">
+                {r.name}
+              </span>
+              <span title={r.value} className="min-w-0 flex-1 truncate font-mono text-[11.5px] leading-4 text-ink">
+                {r.value}
+              </span>
+              {r.found && FOUND[r.found] && <span className={`shrink-0 text-[12px] leading-4 ${FOUND[r.found].look}`}>{FOUND[r.found].word}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function LockIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
+      <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** A record's value as its line shows it: an MX's priority before it, an SRV's priority, weight and port too. */
+const valueOf = (r: AppDnsRecord) => [r.priority, r.weight, r.port, r.value].filter((x) => x !== undefined).join(" ");
+const numbersOf = (r: AppDnsRecord) =>
+  [r.priority !== undefined ? `priority ${r.priority}` : null, r.weight !== undefined ? `weight ${r.weight}` : null, r.port !== undefined ? `port ${r.port}` : null].filter(Boolean).join(", ");
+
+/** The record a change wrote: the one in the zone as written that wasn't in it before (a record's id is what it says). */
+const changedIn = (w: AppDnsWritten, before: AppDnsRecord[]) => w.records.find((x) => !before.some((b) => b.id === x.id))?.id ?? null;
+/** The user's record after the one removed, else the one before it, as the records were when it was asked. */
+const nextTo = (before: AppDnsRecord[], id: string) => {
+  const mine = before.filter((x) => !x.locked);
+  const i = mine.findIndex((x) => x.id === id);
+  return i < 0 ? null : ((mine[i + 1] ?? mine[i - 1])?.id ?? null);
+};
+
+/**
+ * A bought domain's DNS records, one 32px line each (type, name, value): Orgo's locked, with why in the
+ * lock's tooltip; the user's changed in place or removed (asked once more first) from their line. Add
+ * record under them. A change's answer is the zone as written, which replaces what's shown (every
+ * record's id is what it says, so ids change with it); one that changed since it was read comes back as
+ * it is now, with why. While its nameservers aren't Orgo's, the records are kept but don't answer, and it
+ * says so. As a form or a question closes, focus goes back where it was asked (a record's Change or
+ * Remove, or Add record); a record removed, to the next one.
+ */
+function DnsZone({ ws, name, zone, onDns }: { ws: string; name: string; zone: AppDnsZone; onDns: (w: AppDnsWritten) => void }) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<{ text: string; field?: string } | null>(null);
+  const box = useRef<HTMLDivElement>(null);
+  // The record's Change or Remove, by its id, else Add record (it's gone, or it was asked there). Called
+  // once what closed is off the page, so focus never falls to the page (where the next Esc is the app's).
+  const focusOn = (id: string | null, which: "Change" | "Remove" = "Change") => {
+    const line = id ? [...(box.current?.querySelectorAll("[data-record]") ?? [])].find((el) => el.getAttribute("data-record") === id) : null;
+    (line?.querySelector<HTMLElement>(`button[aria-label^="${which} "]`) ?? box.current?.querySelector<HTMLElement>("[data-add-record]"))?.focus();
+  };
+  const send = async (c: DnsChange) => {
+    const before = zone.records;
+    setBusy(true);
+    setError(null);
+    const r = await changeDns(name, c);
+    const why = { text: r.error ?? "Couldn't change the DNS. Try again.", ...(r.field ? { field: r.field } : {}) };
+    // Focus moves on only from the form or the question (or the page): put somewhere else meanwhile, it stays there.
+    const at = document.activeElement;
+    const here = !at || at === document.body || !!box.current?.contains(at);
+    const closed = r.written ?? r.now;
+    if (!closed) {
+      // Refused: the form or the question stays, with why.
+      setBusy(false);
+      setError(why);
+      return;
+    }
+    flushSync(() => {
+      setBusy(false);
+      onDns(closed);
+      setEditing(null);
+      setRemoving(null);
+      if (!r.written) setError(why);
+    });
+    if (!here) return;
+    // Written: the record changed, the next one after a remove, Add record after an add. Changed since it
+    // was read: Add record, with why just under it.
+    focusOn(!r.written ? null : c.action === "change" ? (changedIn(r.written, before) ?? c.id) : c.action === "remove" ? nextTo(before, c.id) : null);
+  };
+  const open = (id: string | null) => {
+    setEditing(id);
+    setRemoving(null);
+    setError(null);
+  };
+  const form = (start?: AppDnsRecord) => (
+    <DnsRecordForm
+      start={start}
+      domain={zone.domain}
+      busy={busy}
+      error={error}
+      onTyped={() => setError(null)}
+      onCancel={() => {
+        flushSync(() => open(null));
+        focusOn(start?.id ?? null);
+      }}
+      onSave={(record) => void send(start ? { ws, zone: zone.id, action: "change", id: start.id, record } : { ws, zone: zone.id, action: "add", record })}
+    />
+  );
+  // The question is open under a record still there (else why goes under the zone).
+  const asking = !!removing && zone.records.some((r) => r.id === removing);
+  return (
+    <div ref={box} data-zone={zone.domain} className="mt-3 flex flex-col">
+      <div className="flex h-6 items-center gap-2">
+        <span className="min-w-0 truncate text-[12px] leading-4 text-[#6B6B6B]">
+          DNS records for <span className="font-medium text-ink">{zone.domain}</span>
+        </span>
+        {!zone.serving && !zone.error && (
+          <span data-not-serving data-tip="Its nameservers aren't Orgo's, so these records are kept but don't answer on the internet." className="shrink-0 text-[12px] leading-4 text-[#B54708]">
+            Not answering
+          </span>
+        )}
+        {zone.ttl !== null && <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">TTL {zone.ttl}s</span>}
+      </div>
+      {zone.error ? (
+        <span className={`flex h-8 items-center ${QUIET}`}>{zone.error}</span>
+      ) : (
+        <>
+          <div className="-mx-2 flex flex-col">
+            {zone.records.map((r) =>
+              editing === r.id && !r.locked ? (
+                <div key={r.id} className="px-2 py-1">
+                  {form(r)}
+                </div>
+              ) : (
+                <div key={r.id} className="flex flex-col">
+                  <RecordLine
+                    r={r}
+                    busy={busy}
+                    onEdit={() => open(r.id)}
+                    onRemove={() => {
+                      open(null);
+                      setRemoving(r.id);
+                    }}
+                  />
+                  {removing === r.id && (
+                    <div
+                      className="flex flex-col gap-1 px-2 pb-1"
+                      // Esc closes the question and only that (the app's Esc would close what's beside the tab).
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape") e.stopPropagation();
+                      }}
+                    >
+                      <InlineConfirm
+                        // While its nameservers aren't Orgo's, the record isn't answering to stop.
+                        text={`Remove the ${r.type} record at ${atName(r.name)}?${zone.serving ? " It stops answering in a minute or two." : ""}`}
+                        action="Remove"
+                        doing="Removing…"
+                        busy={busy}
+                        onConfirm={() => void send({ ws, zone: zone.id, action: "remove", id: r.id })}
+                        onCancel={() => {
+                          // Why it was refused goes with it.
+                          flushSync(() => {
+                            setRemoving(null);
+                            setError(null);
+                          });
+                          focusOn(r.id, "Remove");
+                        }}
+                      />
+                      {error && (
+                        <span role="alert" className="px-1 text-[12px] leading-4 text-[#B42318]">
+                          {error.text}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ),
+            )}
+          </div>
+          {editing === "new" ? (
+            <div className="mt-1">{form()}</div>
+          ) : (
+            <button
+              data-add-record
+              onClick={() => open("new")}
+              disabled={busy}
+              className="-mx-2 mt-0.5 flex h-7 items-center gap-1.5 self-start rounded-lg px-2 text-[12px] leading-4 text-[#6B6B6B] hover:bg-[#F6F6F4] hover:text-ink disabled:text-[#9A9A98]"
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+                <path d="M5 1.5v7M1.5 5h7" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+              </svg>
+              Add record
+            </button>
+          )}
+          {error && !editing && !asking && (
+            <span role="alert" className="pt-1 text-[12px] leading-4 text-[#B42318]">
+              {error.text}
+            </span>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** One record: its type, name (@ for the domain itself) and value; at its end, Orgo's lock (why in its tooltip), or Change and Remove. */
+function RecordLine({ r, busy, onEdit, onRemove }: { r: AppDnsRecord; busy: boolean; onEdit: () => void; onRemove: () => void }) {
+  const numbers = numbersOf(r);
+  return (
+    <div data-record={r.id} data-locked={r.locked ? "true" : undefined} className="group flex h-8 items-center gap-2 rounded-lg px-2 hover:bg-[#F6F6F4]">
+      <span className="w-[46px] shrink-0 font-mono text-[11.5px] leading-4 text-[#6B6B6B]">{r.type}</span>
+      <span title={r.fqdn} className="w-[112px] shrink-0 truncate font-mono text-[11.5px] leading-4 text-ink">
+        {atName(r.name)}
+      </span>
+      <span title={numbers ? `${r.value} (${numbers})` : r.value} className="min-w-0 flex-1 truncate font-mono text-[11.5px] leading-4 text-ink">
+        {valueOf(r)}
+      </span>
+      {r.locked ? (
+        <span role="img" data-tip={r.locked} aria-label={r.locked} className="flex size-7 shrink-0 items-center justify-center text-[#9A9A98]">
+          <LockIcon />
+        </span>
+      ) : (
+        <span className={ON_HOVER}>
+          <button aria-label={`Change the ${r.type} record at ${atName(r.name)}`} data-tip="Change" disabled={busy} onClick={onEdit} className={rowIconBtn}>
+            <PencilIcon />
+          </button>
+          <button aria-label={`Remove the ${r.type} record at ${atName(r.name)}`} data-tip="Remove" disabled={busy} onClick={onRemove} className={rowTrashBtn}>
+            <TrashIcon />
+          </button>
+        </span>
+      )}
+    </div>
+  );
+}
+
+const VALUE_HINT: Record<string, string> = { A: "203.0.113.10", AAAA: "2001:db8::1", CNAME: "app.example.com", MX: "mail.example.com", TXT: "Text", SRV: "sip.example.com" };
+
+/**
+ * A record to add, or one to change (`start`, all of it sent as it becomes): its type, name and value, and
+ * the numbers its type takes (an MX's priority; an SRV's priority, weight and port, each named in its
+ * tooltip, as a filled field has no placeholder). The field Orgo said is wrong is ringed in red, with why
+ * under the form. Esc cancels, except while it saves.
+ */
+export function DnsRecordForm({
+  start,
+  domain,
+  busy,
+  error,
+  onTyped,
+  onSave,
+  onCancel,
+}: {
+  start?: AppDnsRecord;
+  domain: string;
+  busy: boolean;
+  error: { text: string; field?: string } | null;
+  onTyped: () => void;
+  onSave: (r: AppDnsInput) => void;
+  onCancel: () => void;
+}) {
+  const [type, setType] = useState<string>(start?.type ?? "A");
+  const [name, setName] = useState(start ? atName(start.name) : "");
+  const [value, setValue] = useState(start?.value ?? "");
+  const [priority, setPriority] = useState(start?.priority !== undefined ? String(start.priority) : "");
+  const [weight, setWeight] = useState(start?.weight !== undefined ? String(start.weight) : "");
+  const [port, setPort] = useState(start?.port !== undefined ? String(start.port) : "");
+  const needs = dnsNeeds(type);
+  const field = (f: string, extra = "") =>
+    `h-8 rounded-full bg-[#F7F7F6] px-3 font-mono text-[12px] outline-none ${error?.field === f ? "shadow-[0_0_0_1.5px_#B42318]" : "shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]"} ${extra}`;
+  const typed = (set: (v: string) => void) => (e: { target: { value: string } }) => {
+    set(e.target.value);
+    if (error) onTyped();
+  };
+  return (
+    <form
+      data-record-form={start?.id ?? "new"}
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (busy) return;
+        onSave({
+          type,
+          name: name.trim(),
+          value,
+          ...(needs.priority ? { priority: priority.trim() } : {}),
+          ...(needs.weight ? { weight: weight.trim() } : {}),
+          ...(needs.port ? { port: port.trim() } : {}),
+        });
+      }}
+      onKeyDown={(e) => {
+        // Closes the form, and keeps the tab as it is (the app's Esc would close the panel). Not while it
+        // saves: the change can't be called back, so the form stays to say how it went.
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!busy) onCancel();
+        }
+      }}
+      className="flex flex-col gap-2 rounded-[12px] bg-[#FCFCFB] p-2.5 shadow-[0_0_0_1px_#ECECEA]"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="relative flex">
+          <select
+            aria-label="Type"
+            aria-invalid={error?.field === "type" || undefined}
+            value={type}
+            onChange={typed(setType)}
+            className={`h-8 cursor-pointer appearance-none rounded-full bg-white pl-3 pr-7 font-mono text-[12px] text-ink outline-none hover:bg-[#FCFCFB] ${error?.field === "type" ? "shadow-[0_0_0_1.5px_#B42318]" : "shadow-[0_0_0_1px_#E6E6E3] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"}`}
+          >
+            {DNS_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <svg width="10" height="10" viewBox="0 0 12 12" className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2" aria-hidden>
+            <path d="M3 4.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
+        <input
+          aria-label="Name"
+          aria-invalid={error?.field === "name" || undefined}
+          data-tip={`Its name under ${domain}: @ for ${domain} itself, www for www.${domain}`}
+          value={name}
+          onChange={typed(setName)}
+          placeholder="@ or www"
+          autoComplete="off"
+          spellCheck={false}
+          autoFocus
+          className={field("name", "w-[112px]")}
+        />
+        <input
+          aria-label="Value"
+          aria-invalid={error?.field === "value" || undefined}
+          value={value}
+          onChange={typed(setValue)}
+          placeholder={VALUE_HINT[type] ?? ""}
+          autoComplete="off"
+          spellCheck={false}
+          className={field("value", "min-w-[140px] flex-1")}
+        />
+        {needs.priority && (
+          <input aria-label="Priority" aria-invalid={error?.field === "priority" || undefined} data-tip="Priority" value={priority} onChange={typed(setPriority)} placeholder="Priority" inputMode="numeric" className={field("priority", "w-[76px]")} />
+        )}
+        {needs.weight && <input aria-label="Weight" aria-invalid={error?.field === "weight" || undefined} data-tip="Weight" value={weight} onChange={typed(setWeight)} placeholder="Weight" inputMode="numeric" className={field("weight", "w-[76px]")} />}
+        {needs.port && <input aria-label="Port" aria-invalid={error?.field === "port" || undefined} data-tip="Port" value={port} onChange={typed(setPort)} placeholder="Port" inputMode="numeric" className={field("port", "w-[76px]")} />}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="submit" disabled={busy || !value.trim()} className={`${PILL} bg-ink text-white disabled:opacity-40`}>
+          {busy ? "Saving…" : start ? "Save" : "Add"}
+        </button>
+        <button type="button" disabled={busy} onClick={onCancel} className={`${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          Cancel
+        </button>
+        {error && (
+          <span role="alert" className="min-w-0 text-[12px] leading-4 text-[#B42318]">
+            {error.text}
+          </span>
+        )}
+      </div>
+    </form>
   );
 }

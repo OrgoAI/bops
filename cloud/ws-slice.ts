@@ -24,7 +24,9 @@ import type { SharedWsSlice, WsRole } from "./protocol.ts";
  * owner gave nothing (no entry by their email, or by their user id for a guest) is shown no bot at all.
  * A thread a hidden bot handed over reads as its own bot's, and the note the hand-off left isn't shown
  * (keepSession, sharedMessage), so neither names that bot. The main bot's "While you were busy" digest
- * tells them only what the watches of bots they have found (sharedMessage).
+ * tells them only what the watches of bots they have found (sharedMessage). The owner's apps are the
+ * owner's alone: anyone else is shown none of their app threads, nor a line, note or result of them in a
+ * chat (appThreadsOf, sharedMessage).
  */
 
 /** The workspace every older bot and chat belongs to (lib/types.ts MAIN_WORKSPACE). */
@@ -213,6 +215,26 @@ function accessIn(workspace: Record<string, unknown> | null, viewer: SliceViewer
 const botsOfChat = (c: Record<string, unknown>): string[] => (Array.isArray(c.botIds) && c.botIds.every((id) => typeof id === "string") ? c.botIds : []);
 
 /**
+ * The owner's threads on their apps, by id: work_on_app's tasks (Session.app) and every thread that carries
+ * one on (moved to the Mac, Session.movedFrom) or was split off it (Session.partOf). Apps are only ever the
+ * owner's own (lib/apps-access.ts), so anyone else is shown none of them, nor anything of them in a chat
+ * (sharedMessage), whatever their email.
+ */
+export function appThreadsOf(blob: Record<string, unknown>): Set<string> {
+  const all = list(blob.sessions).filter((s) => typeof s.id === "string");
+  const out = new Set(all.filter((s) => isObject(s.app)).map((s) => s.id as string));
+  for (let more = out.size > 0; more; ) {
+    more = false;
+    for (const s of all)
+      if (!out.has(s.id as string) && [s.movedFrom, s.partOf].some((x) => typeof x === "string" && out.has(x))) {
+        out.add(s.id as string);
+        more = true;
+      }
+  }
+  return out;
+}
+
+/**
  * One workspace's part of a state blob, every item whole: what live.ts compares to tell its devices it
  * changed. With a `viewer` other than the owner, only what they're shown of it: the bots they have at
  * read or more, the chats whose every bot is one of those (a group chat with a bot hidden from them, or
@@ -223,6 +245,7 @@ export function sliceOf(blob: Record<string, unknown>, ws: string, viewer?: Slic
   const chatWs = chatWsOf(new Map(list(blob.bots).map((b) => [b.id, b])));
   let bots = list(blob.bots).filter((b) => wsOfBot(b) === ws);
   let chats = list(blob.chats).filter((c) => chatWs(c) === ws);
+  let apps: ReadonlySet<unknown> = new Set();
   if (viewer && viewer.role !== "owner") {
     const access = accessIn(workspace, viewer);
     bots = bots.filter((b) => typeof b.id === "string" && levelOf(access, b.id) !== "none");
@@ -231,15 +254,17 @@ export function sliceOf(blob: Record<string, unknown>, ws: string, viewer?: Slic
       const ids = botsOfChat(c);
       return seesChat(access, ids) && ids.every((id) => seen.has(id));
     });
+    // The owner's app work stays the owner's (appThreadsOf).
+    apps = appThreadsOf(blob);
   }
   const ids = new Set(bots.map((b) => b.id));
   // What those bots ask the owner's OK for, while it waits: only there when there's any (an older Bops Cloud sent none).
-  const approvals = list(blob.appApprovals).filter((a) => ids.has(a.botId) && a.reply === undefined);
+  const approvals = list(blob.appApprovals).filter((a) => ids.has(a.botId) && a.reply === undefined && !apps.has(a.threadId));
   return {
     workspace,
     bots,
     chats,
-    sessions: list(blob.sessions).filter((s) => ids.has(s.botId)),
+    sessions: list(blob.sessions).filter((s) => ids.has(s.botId) && !apps.has(s.id)),
     routines: list(blob.routines).filter((r) => ids.has(r.botId)),
     watches: list(blob.watches).filter((w) => ids.has(w.botId)),
     ...(approvals.length ? { approvals } : {}),
@@ -326,13 +351,18 @@ const heldText = (lines: string[]) => `${HELD_HEAD}${lines.map((t) => `• ${t}`
  * about handing work on: by the bot it came from (Message.from), or for a note from before that was
  * kept, by its threads all being ones such a bot handed over (`handed`: handedByOthers). The main bot's
  * digest of what every bot's watches found (Message.held) tells them only the lines of bots they see,
- * and isn't shown when none is theirs; one from before its lines said whose they were, never.
+ * and isn't shown when none is theirs; one from before its lines said whose they were, never. Nor, with
+ * `bots`, anything of the owner's apps: a made app's line (Message.madeApp), Bops' note about one
+ * (Message.appNote), or a message of their app threads only (`apps`: appThreadsOf), whose chips go from
+ * any other.
  */
-export function sharedMessage(json: Record<string, unknown>, bots?: ReadonlySet<string>, handed?: ReadonlySet<string>): Record<string, unknown> | null {
+export function sharedMessage(json: Record<string, unknown>, bots?: ReadonlySet<string>, handed?: ReadonlySet<string>, apps?: ReadonlySet<string>): Record<string, unknown> | null {
   if (bots && typeof json.botId === "string" && !bots.has(json.botId)) return null;
   if (bots && typeof json.from === "string" && !bots.has(json.from)) return null;
   const threads = Array.isArray(json.sessionIds) ? json.sessionIds : [];
   if (bots && handed && json.role === "system" && threads.length > 0 && threads.every((id) => handed.has(id))) return null;
+  const ofApp = (id: unknown) => !!apps && typeof id === "string" && apps.has(id);
+  if (bots && (json.madeApp !== undefined || json.appNote !== undefined || ofApp(json.resultOf) || (threads.length > 0 && threads.every(ofApp)))) return null;
   const lines = Array.isArray(json.held) ? json.held.filter(isObject) : undefined;
   const theirs = bots && lines?.filter((h) => typeof h.botId === "string" && bots.has(h.botId) && typeof h.text === "string");
   if (bots && !lines && json.role === "bot" && typeof json.text === "string" && json.text.startsWith(HELD_HEAD)) return null;
@@ -343,13 +373,14 @@ export function sharedMessage(json: Record<string, unknown>, bots?: ReadonlySet<
     out.asked = (out.asked as Record<string, unknown>[]).filter((a) => typeof a.botId === "string" && bots.has(a.botId));
     if (!(out.asked as unknown[]).length) delete out.asked;
   }
+  if (bots && Array.isArray(out.sessionIds) && out.sessionIds.some(ofApp)) out.sessionIds = (out.sessionIds as unknown[]).filter((id) => !ofApp(id));
   return out;
 }
 
-/** Messages as a member reads them, in the order given (sharedMessage each; `bots`, `handed`: as it takes them). */
-export const sharedMessages = (all: Record<string, unknown>[], bots?: ReadonlySet<string>, handed?: ReadonlySet<string>): Record<string, unknown>[] =>
+/** Messages as a member reads them, in the order given (sharedMessage each; `bots`, `handed`, `apps`: as it takes them). */
+export const sharedMessages = (all: Record<string, unknown>[], bots?: ReadonlySet<string>, handed?: ReadonlySet<string>, apps?: ReadonlySet<string>): Record<string, unknown>[] =>
   all.flatMap((json) => {
-    const m = sharedMessage(json, bots, handed);
+    const m = sharedMessage(json, bots, handed, apps);
     return m ? [m] : [];
   });
 

@@ -590,6 +590,11 @@ export type Message = {
    */
   madeApp?: { appId: string; version: number };
   /**
+   * Set on Bops' note about an app a bot couldn't make, change or work on (chat.ts: "Couldn't work on the
+   * app: …"), so a shared workspace never shows it to anyone but its owner (cloud/ws-slice.ts sharedMessage).
+   */
+  appNote?: true;
+  /**
    * Bops' own words in the bot's voice (a line it fills in: why a thread stopped, where to run one, a plan's
    * limit), never the model's: a shared workspace reads it in the owner's voice (lib/server/shared-core.ts viewState).
    */

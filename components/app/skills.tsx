@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { appsOpen } from "@/lib/apps-access";
+import { appsShown } from "@/lib/apps-access";
 import { builtinLabels, builtinSkills, type BuiltinSkill } from "@/lib/builtin-skills";
 import { cleanLabel, OTHER, sameLabel, SKILL_LABEL_MAX, type SkillGroup } from "@/lib/skill-labels";
 import { workspaceOf, type AppState, type Bot, type SkillKind, type SkillRef } from "@/lib/types";
@@ -184,8 +184,8 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
   };
 
   const ref = open ? [...skills, ...apps].find((r) => `${r.kind}:${r.slug}` === open) : undefined;
-  // Bops' own Apps and source control skills only where apps are open (lib/apps-access.ts).
-  const appsHere = appsOpen(state);
+  // Bops' own Apps and source control skills only where apps are shown (lib/apps-access.ts): never in a shared workspace.
+  const appsHere = appsShown(state);
   const ours = open?.startsWith("builtin:") ? builtinSkills(appsHere).find((s) => `builtin:${s.slug}` === open) : undefined;
   const kinds: SkillKind[] = only ? [only] : ["skill", "app"];
   const groups = [

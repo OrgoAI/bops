@@ -682,6 +682,17 @@ type BotKeysProps = { state: AppState; bot: Bot; onAdd: () => void; className: s
  * Never in a workspace shared with the user: GET /api/keys answers with the viewer's own Orgo vault, and
  * the owner's keys are never shown to them, so it would list the viewer's keys as the owner's bot's.
  */
+/**
+ * A bot's rows: one per name, since this workspace's key and the account's by the same name are one to a bot,
+ * and that one is the workspace's (Orgo's broker picks it), whichever the vault listed first.
+ */
+export function botKeyRows<K extends { name: string; scope: Scope }>(keys: K[]): K[] {
+  return keys.filter((k, i, all) => {
+    const own = all.findIndex((x) => x.name === k.name && x.scope === "workspace");
+    return own === -1 ? all.findIndex((x) => x.name === k.name) === i : own === i;
+  });
+}
+
 export function BotKeys(props: BotKeysProps) {
   return props.state.shared ? null : <BotKeysCard {...props} />;
 }
@@ -690,8 +701,7 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
   const { info, failed, retry } = useKeys(workspaceOf(b));
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // One row per name: this workspace's key and the account's by the same name are one to a bot (its workspace's wins).
-  const keys = (info?.keys ?? []).filter((k, i, all) => all.findIndex((x) => x.name === k.name) === i);
+  const keys = botKeyRows(info?.keys ?? []);
   // A key this bot uses with starter routines (Stripe, Plain) offers them on its row, and by itself right after it's saved for this bot.
   const routinesOn = (name: string) => hasTemplates(name) && !!b.keys?.includes(name);
   const anchors = useRef(new Map<string, HTMLElement>());
@@ -733,6 +743,10 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
           return (
             <div key={k.name} className={`flex items-center gap-2.5 px-4 py-[9px] ${i === keys.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
               <span className="min-w-0 flex-1 truncate font-mono text-[13px] leading-[18px]">{k.name}</span>
+              {/* Whose key it is, as the Vault says: an account one shows on every workspace's bots, off until switched on. */}
+              <span data-tip={scopeLabel(k.scope).tip} className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">
+                {scopeLabel(k.scope).label}
+              </span>
               {routinesOn(k.name) && (
                 <span ref={(el) => void (el ? anchors.current.set(k.name, el) : anchors.current.delete(k.name))} className="flex shrink-0">
                   <button

@@ -1,4 +1,5 @@
 import "server-only";
+import { appsOpen } from "@/lib/apps-access";
 import { cleanAccess, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
 import { botChatId, freeComputerOnDelete, MAIN_WORKSPACE, sharesComputer, workspaceOf, type AppState, type Bot, type OrgoMigration, type Workspace } from "@/lib/types";
 import { cleanFavorites } from "@/lib/favorites";
@@ -499,7 +500,9 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
   const keys: string[] = [];
   const skills = refsOf(workspaceId, "skill").map((r) => r.name);
   const apps = refsOf(workspaceId, "app").map((r) => r.name);
-  const madeApps = (getState().madeApps ?? []).filter((a) => a.ws === workspaceId).map((a) => a.title);
+  // The apps its bots made only for an account apps are open to (lib/apps-access.ts): anyone else's left from before aren't named.
+  const appsHere = appsOpen(getState());
+  const madeApps = appsHere ? (getState().madeApps ?? []).filter((a) => a.ws === workspaceId).map((a) => a.title) : [];
   const { crmNames } = await import("./crm-sync");
   const crmFiles = await crmNames(workspaceId);
   // Its routines and its Orbit issues: Orgo's delete takes its copy of them too.
@@ -529,7 +532,7 @@ export async function deletePreview(workspaceId: string): Promise<DeletePreview>
     keys.push(...there.keys);
     skills.push(...there.skills);
     apps.push(...there.apps);
-    madeApps.push(...there.madeApps);
+    if (appsHere) madeApps.push(...there.madeApps);
     crmFiles.push(...there.crmFiles);
     routines.push(...there.routines);
     issues.push(...there.issues);

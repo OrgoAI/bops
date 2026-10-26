@@ -3,6 +3,7 @@ import { watchesForApp } from "@/lib/server/watches";
 import "@/lib/server/mac";
 import { getState, getVersion } from "@/lib/server/store";
 import type { AppState } from "@/lib/types";
+import { appsForWindow } from "@/lib/apps-access";
 import { ensureCloud } from "@/lib/server/cloud-tunnel";
 import { liveMoodsForApp } from "@/lib/server/live";
 import { sharedForApp } from "@/lib/server/shared";
@@ -66,8 +67,10 @@ export async function GET(request: Request) {
  * watchesForApp), and each workspace's Orbit secret (memory-categories.ts). It also says whether the other
  * screens stream through Orgo, and what the user's bots are doing on their other devices right now
  * (live.ts liveMoodsForApp), which is never saved; a shared workspace's bots' come from its own stream.
+ * Nothing of apps goes where the window doesn't show them (lib/apps-access.ts appsForWindow).
  */
-function forApp(state: AppState): AppState {
+function forApp(all: AppState): AppState {
+  const state = appsForWindow(all);
   // Full access is kept on this Mac, not in the state (full-access.ts): shown as part of it.
   const mac = state.mac ? { ...state.mac, fullAccess: fullAccessOn() || undefined } : state.mac;
   const watches = watchesForApp(state.watches);

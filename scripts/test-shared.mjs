@@ -1440,6 +1440,20 @@ await check("the owner's Boppy's profile never shows the viewer's own logins, ke
   assert.notEqual(BotKeys({ state: mine, bot: mine.bots[0], onAdd: noop, className: "" }), null);
 });
 
+await check("a bot's Keys card has one row per key, the workspace's where it has one by that name too, and each row says whose it is, as the Vault does", async () => {
+  const { botKeyRows } = await import(pathToFileURL(`${root}/components/app/keys.tsx`).href);
+  const rows = botKeyRows([
+    { name: "STRIPE_SECRET_KEY", scope: "all" },
+    { name: "OPENAI_API_KEY", scope: "all" },
+    { name: "STRIPE_SECRET_KEY", scope: "workspace" },
+  ]);
+  assert.deepEqual(rows.map((k) => `${k.name}:${k.scope}`), ["OPENAI_API_KEY:all", "STRIPE_SECRET_KEY:workspace"]);
+  assert.deepEqual(botKeyRows([{ name: "A", scope: "all" }, { name: "B", scope: "all" }]).map((k) => k.name), ["A", "B"]);
+  // The row's label and tip are the Vault's own ("All workspaces", "This workspace").
+  const card = readFileSync(`${root}/components/app/keys.tsx`, "utf8").split("function BotKeysCard")[1].split("/* ---------------- In the chat")[0];
+  assert.match(card, /data-tip=\{scopeLabel\(k\.scope\)\.tip\}[^>]*>\s*\{scopeLabel\(k\.scope\)\.label\}/);
+});
+
 await check("a thread of the user's own that ended waiting for a sign in on its bot's computer: its card has I signed in, a reply that carries the same run on where it ran, next to Sign in; not while it's still at work; in a workspace shared with them, the same card can't be answered", async () => {
   const waits = { id: "ses_sign", botId: "boppy", chatId: "bot:boppy", title: "Store orders", goal: "Check the store's orders", status: "done", blocker: "sign_in", answer: "I need Sam to sign in to the store.", lastDisplay: 101, createdAt: 2, startedAt: 2, endedAt: 3, steps: [], replies: [{ id: "r1", role: "bot", text: "I need Sam to sign in to the store.", at: 3 }] };
   const sheet = (state, s) => renderToStaticMarkup(h(ThreadSheet, { state, session: s, onClose: noop, onShowComputer: noop, onShowScreen: noop }));
@@ -1458,6 +1472,66 @@ await check("a thread of the user's own that ended waiting for a sign in on its 
   const st = viewState(own(), { ...listed, role: "member", wsId: WS }, c, {});
   const html = sheet(st, st.sessions[0]);
   assert.match(html, /inert=""[^]*I signed in/, "can't be answered there");
+});
+
+await check("an @orgo.ai owner's app work never reaches the window of anyone they share the workspace with, whatever their email; an app line shows only where apps are shown", async () => {
+  const { appThreadsOf, botsOf, handedByOthers, sharedMessages, sharedSlice } = await import(`${root}/cloud/ws-slice.ts`);
+  const goal = "Work on Dana's app recipe-box. It's the Ingot repo p1/recipe-box (Ingot is Orgo's source control). Dana puts it live from the Apps page.";
+  // The owner's state as Bops Cloud keeps it: Boppy worked on an app (chat.ts work_on_app) and made one (made-apps.ts).
+  const blob = {
+    workspaces: [{ id: "ws_main", name: "Acme", createdAt: 1, memberAccess: { "sam@x.test": { others: "read", bots: {} }, "tom@orgo.ai": { others: "read", bots: {} } } }],
+    bots: cloudState().state.bots,
+    chats: cloudState().state.chats,
+    sessions: [
+      cloudState().state.sessions[0],
+      { id: "s-app", botId: "boppy", chatId: "bot:boppy", title: "Work on recipe-box", goal, app: { wsId: "ws_main", name: "recipe-box" }, status: "running", replies: [], steps: [{ at: 1, tool: "setup", detail: "Pulled the newest recipe-box into /workspace/apps/recipe-box" }], createdAt: 3, host: "orgo", sentVia: "you" },
+    ],
+    routines: [],
+    watches: [],
+  };
+  const rows = [
+    { id: "m1", chatId: "bot:boppy", role: "user", text: "Dana asked for leads", at: 3 },
+    { id: "m2", chatId: "bot:boppy", role: "bot", botId: "boppy", text: "Starting on that now.", sessionIds: ["s-app"], at: 4 },
+    { id: "m3", chatId: "bot:boppy", role: "system", text: "Building Recipe Box", madeApp: { appId: "app_1", version: 1 }, at: 5 },
+    { id: "m4", chatId: "bot:boppy", role: "system", text: "Couldn't work on the app: There's no app called \"blog\" in this workspace.", appNote: true, at: 6 },
+  ];
+  for (const email of ["sam@x.test", "tom@orgo.ai"]) {
+    const viewer = { role: "member", id: `u-${email}`, email };
+    const slice = sharedSlice(blob, "ws_main", viewer);
+    const bots = botsOf(slice);
+    const body = { ...cloudState(), state: slice, messages: sharedMessages(rows, bots, handedByOthers(blob, bots), appThreadsOf(blob)) };
+    const mine = { ...own(), account: { user: { id: viewer.id, email }, signedInAt: 1 } };
+    const v = viewState(mine, { ...listed, role: "member", wsId: WS }, body, {});
+    assert.deepEqual(v.sessions.map((s) => s.title), ["Find leads"], `${email}: no app thread`);
+    const html = text(renderToStaticMarkup(h(ChatView, chatProps(v, "bot:boppy"))));
+    assert.match(html, /Dana asked for leads/);
+    for (const word of ["Work on recipe-box", "Building Recipe Box", "Couldn't work on the app", "Starting on that now", "Ingot", "Apps page"]) assert.ok(!html.includes(word) && !JSON.stringify(v).includes(word), `${email}: nothing says ${word}`);
+  }
+  // On the user's own: an app line shows for an @orgo.ai account, and not at all for anyone else (one kept from before).
+  const line = { id: "a1", chatId: "bot:boppy", role: "system", text: "Building Tip calculator", madeApp: { appId: "app_tip", version: 1 }, at: 2 };
+  const ownWith = (email) => ({ ...own(), account: { user: { id: "u1", email }, signedInAt: 1 }, messages: [...own().messages, line] });
+  assert.match(text(renderToStaticMarkup(h(ChatView, chatProps(ownWith("tess@orgo.ai"), "bot:boppy")))), /Building Tip calculator/);
+  assert.doesNotMatch(text(renderToStaticMarkup(h(ChatView, chatProps(ownWith("sam@x.test"), "bot:boppy")))), /Tip calculator/);
+  // What the state route gives the window (lib/apps-access.ts appsForWindow): the apps an account has, only where they're shown.
+  const { appsForWindow } = await import(`${root}/lib/apps-access.ts`);
+  const kept = (email) => ({
+    ...ownWith(email),
+    madeApps: [{ id: "app_tip", title: "Tip calculator", botId: "boppy", ws: "ws_main", versions: [] }],
+    workspaces: [{ id: "ws_main", name: "Mine", createdAt: 0, hostedApps: { shop: { botId: "boppy", computerId: "c1" } }, ingotTokens: { c1: { id: "t1", sum: "s", at: 1 } } }],
+    sessions: [{ id: "s-shop", botId: "boppy", chatId: "bot:boppy", title: "Work on shop", goal: "g", app: { wsId: "ws_main", name: "shop" } }],
+  });
+  const tess = kept("tess@orgo.ai");
+  assert.equal(appsForWindow(tess), tess, "an @orgo.ai account's own: as it is");
+  const viewed = viewState(kept("tom@orgo.ai"), { ...listed, role: "member", wsId: WS }, cloudState(), {});
+  for (const [who, st] of [["sam@x.test", kept("sam@x.test")], ["tom@orgo.ai, in a shared workspace", viewed]]) {
+    const w = appsForWindow(st);
+    assert.equal(w.madeApps, undefined, `${who}: no made apps`);
+    assert.ok(w.workspaces.every((x) => x.hostedApps === undefined && x.ingotTokens === undefined), `${who}: no apps on the web, no Ingot tokens`);
+    assert.ok(w.sessions.every((s) => s.app === undefined), `${who}: no thread's app`);
+    assert.ok(w.messages.every((m) => !m.madeApp), `${who}: no app's line`);
+    assert.ok(!/Tip calculator|"shop"|ingotTokens/.test(JSON.stringify(w)), who);
+  }
+  assert.match(readFileSync(`${root}/app/api/state/route.ts`, "utf8"), /const state = appsForWindow\(all\);/, "the state route gives the window that");
 });
 
 await check("the People sheet says what members see: the bots the owner picks, never the saved logins or keys", () => {

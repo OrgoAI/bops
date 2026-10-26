@@ -611,6 +611,33 @@ await check("An account apps aren't open to (lib/apps-access.ts): nothing of app
   }
 });
 
+await check("An account apps aren't open to, signed in where the list on this Mac has apps from before: they stay there, unread, and nothing of them is in its state", async () => {
+  // As Alex: the list on this Mac has the apps, and a restart forgets them in memory.
+  T.restart();
+  const file = join(S.userDir(), "made-apps", "apps.json");
+  const before = readFileSync(file, "utf8");
+  const left = JSON.parse(before).apps;
+  assert.ok(left.some((a) => a.botId === "max" && a.ws === "ws_main"), "Max's apps are on this Mac");
+  S.update((s) => (s.account = { user: { id: "u_sam", email: "sam@example.com", name: "Sam" }, signedInAt: 1 }));
+  try {
+    orgo.calls = [];
+    // What reads the list in: an app looked at (chat.ts madeApp), a bot's delete (remove.ts), a workspace's delete.
+    for (const a of left) assert.equal(A.madeApp(a.id), undefined, `${a.id} isn't read in`);
+    assert.equal(F.appsToMainBot("max", "ws_main"), 0, "nothing moved");
+    F.dropWorkspaceApps("ws_two");
+    assert.deepEqual(S.getState().madeApps ?? [], [], "none in its state");
+    assert.equal(appsStayLine(S.getState(), S.getState().bots.find((b) => b.id === "max")), null, "Max's delete says nothing of apps");
+    T.saveNow();
+    await settle();
+    assert.equal(readFileSync(file, "utf8"), before, "the list on this Mac is as it was, never written over");
+    assert.deepEqual(orgo.calls, [], "Orgo never asked");
+  } finally {
+    S.update((s) => (s.account = TEAM));
+  }
+  // Alex again: all of it read in, as before, Max's still Max's.
+  for (const a of left) assert.equal(A.madeApp(a.id)?.botId, a.botId, `${a.id} back`);
+});
+
 await check("Plain words: nothing said has a long dash", () => {
   const words = [...S.getState().messages.map((m) => m.text), ...(S.getState().madeApps ?? []).map((a) => a.error ?? ""), ...logged];
   for (const w of words) assert.ok(!/[–—]/.test(w), w);

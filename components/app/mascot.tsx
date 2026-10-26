@@ -133,9 +133,8 @@ const NOTES = [
 ];
 
 /**
- * Boppy listening to music, bopping to the beat while notes drift out of its headphones, singing along
- * and blinking now and then: the app's
- * first load, the same scene as the window's splash (desktop/splash.html). CSS only (globals.css).
+ * Boppy listening to music, bopping to the beat while notes drift out of its headphones, singing along,
+ * its eyes glancing about and blinking now and then: the app's first load, the same scene as the window's splash (desktop/splash.html). CSS only (globals.css).
  */
 export function BoppyLoading({ label, children }: { label: string; children?: React.ReactNode }) {
   return (
