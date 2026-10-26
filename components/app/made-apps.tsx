@@ -1,6 +1,6 @@
 "use client";
 
-import { appsOpen } from "@/lib/apps-access";
+import { appsShown } from "@/lib/apps-access";
 import { createContext, createElement, useContext, useEffect, useRef, useState } from "react";
 import type { AppState, MadeApp, Message } from "@/lib/types";
 import { HostedApps } from "./hosted-apps";
@@ -466,7 +466,7 @@ export function MadeAppsHome({ state, ws }: { state: AppState; ws: string }) {
           {apps.length ? `${apps.length} made by your bots · they keep what you put in them` : "Tools your bots make for you. Ask any bot: “make me an app that…”"}
         </span>
       </div>
-      {appsOpen(state) && <HostedApps state={state} ws={ws} />}
+      {appsShown(state) && <HostedApps state={state} ws={ws} />}
       <div className="grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] gap-4">
         {apps.map((a) => {
           const maker = state.bots.find((b) => b.id === a.botId);

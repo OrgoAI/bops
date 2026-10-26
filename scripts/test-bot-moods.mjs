@@ -325,7 +325,7 @@ await test("the call bar says the bot is talking while its voice comes through, 
   assert.equal(botTalking(BOT_TALKING.level, 0, 10_000), false, "the waveform's own quiet");
 });
 
-await test("the loading scene sings and blinks, the window's splash and the app's first load alike, on the awake face's own shapes", () => {
+await test("the loading scene sings, looks about and blinks, the window's splash and the app's first load alike, on the awake face's own shapes", () => {
   const splash = readFileSync(`${root}/desktop/splash.html`, "utf8");
   const css = readFileSync(`${root}/app/globals.css`, "utf8");
   const awake = mascotMarkup("boppy", "#0A0A0A", { mood: "awake" });
@@ -335,16 +335,25 @@ await test("the loading scene sings and blinks, the window's splash and the app'
   assert.equal(awake.match(/<ellipse [^>]*cy="26\.6"/g)?.length, 1, "its one mouth");
   // The same motion in both, so one hands over to the other without a jump: transform only.
   const frames = (src, name, close) => src.match(new RegExp(`@keyframes ${name} \\{([\\s\\S]*?)\\n${close}\\}`))?.[1].replace(/\s+/g, "");
-  for (const [mine, theirs, secs] of [["sing", "boppy-sing", "4.4"], ["blink", "boppy-blink", "5.3"]]) {
+  for (const [mine, theirs, secs] of [["sing", "boppy-sing", "4.4"], ["look", "boppy-look", "4.4"], ["blink", "boppy-blink", "5.3"]]) {
     const a = frames(splash, mine, "  "), b = frames(css, theirs, "");
     assert.ok(a && a === b, `${mine}: the same keyframes`);
     assert.deepEqual([...new Set([...a.matchAll(/([a-z-]+):/g)].map((m) => m[1]))], ["transform"], `${mine}: transform only`);
     assert.ok(splash.includes(`animation: ${mine} ${secs}s ease-in-out infinite;`) && css.includes(`animation: ${theirs} ${secs}s ease-in-out infinite;`), `${mine}: the same timing`);
   }
+  // The eyes look about as a pair, so a look moves their group, keeping its own translate(.6 -1.4) (a CSS
+  // transform replaces the attribute's) at rest and wherever it isn't looking away.
+  const look = frames(splash, "look", "  ");
+  assert.match(look, /^0%,[^{]*100%\{transform:translate\(0\.6px,-1\.4px\);\}/, "a look starts and ends on the eyes' own place");
   for (const [src, sel] of [[splash, ".boppy"], [css, ".boppy-loading-boppy"]]) {
+    assert.ok(src.includes(`${sel} g[transform="translate(.6 -1.4)"] {`), `${sel}: on the eyes' group`);
     assert.ok(src.includes(`${sel} g[transform="translate(.6 -1.4)"] ellipse {`) && src.includes(`${sel} ellipse[cy="26.6"] {`), `${sel}: on the eyes and the mouth`);
     const reduced = src.match(/@media \(prefers-reduced-motion: reduce\) \{[^@]*/g)?.find((m) => m.includes(sel)) ?? "";
-    assert.match(reduced, new RegExp(`${sel.replace(".", "\\.")} ellipse[ ,{]`), `${sel}: still with reduced motion`);
+    // Each face rule by its own selector: a plainer one (".boppy ellipse") is less specific, so it loses.
+    for (const part of ['g[transform="translate(.6 -1.4)"]', 'g[transform="translate(.6 -1.4)"] ellipse', 'ellipse[cy="26.6"]']) {
+      assert.ok(src.includes(`${sel} ${part} {`), `${sel} ${part}: animated`);
+      assert.ok([",", " {"].some((end) => reduced.includes(`${sel} ${part}${end}`)), `${sel} ${part}: still with reduced motion`);
+    }
   }
 });
 

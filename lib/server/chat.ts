@@ -1814,6 +1814,13 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     const offered = new Set(tools.map((t) => ("name" in t ? t.name : t.type)));
     // Lines for the chat after the reply ("Remembered: …", "Scheduled …", "Didn't start …").
     const notes: string[] = [];
+    // The ones about an app (Message.appNote: a shared workspace never shows them to anyone but the owner).
+    const appNotes = new Set<string>();
+    const appNote = (text: string) => {
+      appNotes.add(text);
+      notes.push(text);
+    };
+    const noteLine = (text: string) => ({ chatId, role: "system" as const, text, ...(appNotes.has(text) ? { appNote: true as const } : {}) });
     // The bot only opens web addresses it has seen written down. It's checked for web_fetch, a page watch and a
     // routine's goal, always; for the tasks it starts on a routine's run; and, on the user's own turn once it
     // read something from outside (below), for the tasks it starts, hands off or passes a message on to, a new
@@ -2234,7 +2241,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           { engine: "chat", responseId: response.id, callId: paused.call.call_id, call: { name: paused.call.name, arguments: paused.call.arguments }, outputs: answers.filter((x) => x.call_id !== paused.call.call_id).map((x) => ({ callId: x.call_id, output: x.output })), later: earlier, turn: asItIs },
         );
         // What it read and did so far is said now (on a routine's run, with its result once it goes on).
-        if (!bg) for (const n of notes.splice(0)) addMessage({ chatId, role: "system", text: n });
+        if (!bg) for (const n of notes.splice(0)) addMessage(noteLine(n));
         return { text: null, paused: true };
       }
       response = await create(
@@ -2286,19 +2293,19 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         const a = JSON.parse(item.arguments) as { title?: string; what?: string; app_id?: string; change?: string; say?: string };
         const app = item.name === "change_app" ? madeApp(a.app_id ?? "") : undefined;
         if (item.name === "change_app" && (!app || app.ws !== workspaceOf(b))) {
-          notes.push("Couldn't find that app");
+          appNote("Couldn't find that app");
           continue;
         }
         // Not on a turn that read something from outside Bops, unless the user asked for it themselves (create_skill's rule, made apps' way).
         if (outsideRead && !(await ownerAskedForApp(chatId, botId))) {
-          notes.push(`Didn't ${app ? `change ${app.title}` : "make the app"}: this turn read something from outside Bops, so apps are made or changed only when ${ownerName()} asks for it`);
+          appNote(`Didn't ${app ? `change ${app.title}` : "make the app"}: this turn read something from outside Bops, so apps are made or changed only when ${ownerName()} asks for it`);
           continue;
         }
         try {
           built.push(buildApp(botId, chatId, { appId: app?.id, title: a.title, change: (app ? a.change : a.what) ?? "" }).id);
           if (a.say?.trim()) says.push(a.say.trim());
         } catch (e) {
-          notes.push(`Couldn't ${app ? "change" : "make"} the app: ${(e as Error).message}`);
+          appNote(`Couldn't ${app ? "change" : "make"} the app: ${(e as Error).message}`);
         }
         continue;
       }
@@ -2306,7 +2313,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
         const a = JSON.parse(item.arguments) as { app?: string | null; name?: string | null; change?: string; say?: string };
         // Not on a turn that read something from outside Bops, unless the user's own words asked for the site to be built or changed.
         if (outsideRead && !(await ownerAskedForSite(chatId, botId, "change"))) {
-          notes.push(`Didn't work on ${a.app ? `the app ${a.app}` : "a new app"}: this turn read something from outside Bops, so apps are made or changed only when ${ownerName()} asks for it`);
+          appNote(`Didn't work on ${a.app ? `the app ${a.app}` : "a new app"}: this turn read something from outside Bops, so apps are made or changed only when ${ownerName()} asks for it`);
           continue;
         }
         try {
@@ -2316,7 +2323,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
           sessionIds.push(startSession({ botId, goal: withImages(w.goal), title: w.title, chatId, sentVia: "you", where: "cloud", app: { wsId: workspaceOf(b), name: w.name } }).id);
           if (a.say?.trim()) says.push(a.say.trim());
         } catch (e) {
-          notes.push(`Couldn't work on the app: ${(e as Error).message}`);
+          appNote(`Couldn't work on the app: ${(e as Error).message}`);
         }
         continue;
       }
@@ -2431,7 +2438,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
       const out = isNothing(text) ? null : text || (sessionIds.length && !bg.quiet ? says.join(" ") || "Started on it." : null);
       // What the run read or left out ("Read …") is said only with a result it posts (a quiet run's words
       // that only start a thread aren't posted: routines.ts chatRun). A quiet run with nothing posts nothing.
-      if (out && !bg.sample && !(bg.quiet && sessionIds.length)) for (const n of notes) addMessage({ chatId, role: "system", text: n, routine: tag });
+      if (out && !bg.sample && !(bg.quiet && sessionIds.length)) for (const n of notes) addMessage({ ...noteLine(n), routine: tag });
       if (!out) return { text: null, ...started };
       // Sent on by text or to Slack, Telegram or Discord, where markdown shows as typed: links read as words and an address.
       const r = getState().routines.find((x) => x.id === bg.routineId);
@@ -2458,7 +2465,7 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     if (reply) addMessage({ chatId, role: "bot", botId, text: reply, sessionIds: sessionIds.length ? sessionIds : undefined, replyTo: opts.replyTo, options: tidy.options, asked: asked.length ? asked : undefined, called: called.length ? called : undefined });
     // Not the reply to something the user wants kept from someone: it would carry the secret into the shared memory.
     if (reply && !isSecret(opts.answering)) saveToMemory(workspaceOf(b), "chat", chatId, [{ who: botId, text: reply }], { chat: chatName(chatId) });
-    for (const n of notes) addMessage({ chatId, role: "system", text: n });
+    for (const n of notes) addMessage(noteLine(n));
     for (const p of pictures) void drawFor(chatId, botId, p, ours);
     return { text: reply };
   } catch (e) {

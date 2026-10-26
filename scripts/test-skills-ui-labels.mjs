@@ -313,4 +313,20 @@ await test("Someone apps aren't open to (lib/apps-access.ts): none of Bops' own 
   stored.clear();
 });
 
+await test("In a workspace someone else shared, even an @orgo.ai account sees none of Bops' own skills for apps (they're its owner's); in its own, still all of them", () => {
+  stored.clear();
+  // As lib/server/shared-core.ts viewState makes it: the viewer's own account, the shared workspace in place of theirs.
+  const shared = { ...world(), workspace: "shared:p1", workspaces: [{ id: "shared:p1", name: "Acme", createdAt: 1 }], shared: { projectId: "p1", name: "Acme", owner: "Dana", role: "member", wsId: "ws_acme" } };
+  const html = render(shared);
+  assert.ok(!labelsIn(html).includes(L.APPS_LABEL), "no Apps and source control label");
+  for (const s of BUILT) assert.ok(!html.includes(esc(s.name)), `no ${s.slug}`);
+  assert.ok(!/Ingot|deploy/i.test(html), "nothing of Ingot or deploying");
+  for (const s of BUILT) assert.ok(!render(shared, { focus: `builtin:${s.slug}` }).includes(esc(s.name)), `${s.slug} doesn't open by name`);
+  // Their own workspace: Bops' own skills for apps, as before.
+  const own = render(world());
+  assert.ok(labelsIn(own).includes(L.APPS_LABEL));
+  for (const s of builtIn(L.APPS_LABEL)) assert.ok(own.includes(esc(s.name)), `${s.slug} listed`);
+  stored.clear();
+});
+
 console.log(`\nskills ui labels: ${passed} passed`);

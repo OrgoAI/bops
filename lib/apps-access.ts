@@ -21,3 +21,26 @@ export function appsOpenTo(email: string | null | undefined): boolean {
 
 /** Are apps open to the account signed in to this state? */
 export const appsOpen = (state: Pick<AppState, "account"> | null | undefined): boolean => appsOpenTo(state?.account?.user.email);
+
+/**
+ * Does the window show apps here: open to the account, and not in a workspace someone else shared with
+ * them (its apps, and Bops' skills for them, are its owner's, whoever the viewer is). Every part of the
+ * window that shows anything of apps asks this.
+ */
+export const appsShown = (state: Pick<AppState, "account" | "shared"> | null | undefined): boolean => appsOpen(state) && !state?.shared;
+
+/**
+ * The state as the window gets it (app/api/state): where it doesn't show apps (appsShown), nothing of them,
+ * even what an account kept from before: no apps the bots made or their lines in a chat (Message.madeApp,
+ * Message.appNote), no apps on the web or Ingot tokens on a workspace, no app a thread works on.
+ */
+export function appsForWindow(state: AppState): AppState {
+  if (appsShown(state)) return state;
+  return {
+    ...state,
+    madeApps: undefined,
+    workspaces: state.workspaces?.map((w) => (w.hostedApps || w.ingotTokens ? { ...w, hostedApps: undefined, ingotTokens: undefined } : w)),
+    sessions: state.sessions.map((s) => (s.app ? { ...s, app: undefined } : s)),
+    messages: state.messages.filter((m) => !m.madeApp && !m.appNote),
+  };
+}

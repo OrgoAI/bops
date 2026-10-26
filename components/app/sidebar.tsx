@@ -21,7 +21,7 @@ import { UpdateNotice } from "./update-notice";
 import { forgetWorkspaceHere } from "@/lib/workspace-local";
 import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, NeedsYouDot, post, RoundButton, SideToggleIcon, useNow } from "./ui";
 import { ownerWho, roleLabel, sharedBy, type SharedWorkspace } from "@/lib/shared";
-import { appsOpen } from "@/lib/apps-access";
+import { appsShown } from "@/lib/apps-access";
 
 /**
  * The sidebar for one workspace (switch at the top). On top, Favorites: Needs your attention while
@@ -313,7 +313,7 @@ export function SidebarFooter({
 }) {
   const knowledge = categoriesOpen(state);
   // Apps only for an @orgo.ai account for now (lib/apps-access.ts), and never in a shared workspace (they're its owner's).
-  const apps = appsOpen(state) && !state.shared;
+  const apps = appsShown(state);
   const page = (open === "knowledge" && !knowledge) || (open === "apps" && !apps) ? "vault" : open;
   const { hover, row } = useFooterHover(initialHover);
   const pill = footerPillOf({ rest: page, hover: (hover === "knowledge" && !knowledge) || (hover === "apps" && !apps) ? null : hover });

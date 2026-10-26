@@ -1,12 +1,24 @@
 import "server-only";
 import { appsOpen } from "@/lib/apps-access";
 import { routineSent, workBot, workspaceOf, type Session, type Workspace } from "@/lib/types";
-import type { AppCommit, AppCommitsAnswer, AppHosting, DeployState, HostedApp, HostedAppsAnswer } from "@/lib/hosted-apps";
-import { deployedAt, deploys, OrgoError, type OrgoDeployment, type OrgoDeployProject } from "./orgo";
+import { DNS_TYPES, dnsNeeds } from "@/lib/hosted-apps";
+import type { AppCommit, AppCommitsAnswer, AppDnsInput, AppDnsRecord, AppDnsWritten, AppDnsZone, AppDomain, AppDomainsAnswer, AppHosting, DeployState, HostedApp, HostedAppsAnswer } from "@/lib/hosted-apps";
+import {
+  deployedAt,
+  deploys,
+  domains,
+  OrgoError,
+  type OrgoCustomDomain,
+  type OrgoDeployment,
+  type OrgoDeployProject,
+  type OrgoDnsRecord,
+  type OrgoRecordInput,
+  type OrgoZone,
+} from "./orgo";
 import { loadOrgoKey } from "./orgo-auth";
 import { selfHosted } from "./persist";
-import { appFolder, authorOf, dropToken, ensureIngotCli, hasToken, ingot, INGOT_MCP, IngotError, ingotWorkspace, isRepoName, msOf, NO_PROJECT, readyFolder, repoNameFor, type IngotRepo } from "./ingot";
-import { bot, getState, ownerName, session, update } from "./store";
+import { appFolder, authorOf, dropToken, ensureIngotCli, hasToken, ingot, INGOT_MCP, IngotError, ingotWorkspace, isRepoName, msOf, NO_PROJECT, readyFolder, repoNameFor, stillOurs, SWAPPED, type IngotRepo } from "./ingot";
+import { bot, getState, ownerName, sameState, session, update } from "./store";
 
 /**
  * Apps a workspace builds and runs on the web (lib/hosted-apps.ts). Each one is an Ingot repo in the
@@ -30,13 +42,27 @@ import { bot, getState, ownerName, session, update } from "./store";
  * back to it). The site is public at its URL.
  */
 
-/** A request about the workspace's apps turned down, in plain words, with the HTTP status the routes answer. */
+/**
+ * A request about the workspace's apps turned down, in plain words, with the HTTP status the routes answer.
+ * `extra` goes along in the answer for the window: the field a DNS record got wrong, or the records as
+ * they are now when they changed since the window read them.
+ */
 export class HostedAppError extends Error {
   status: number;
-  constructor(message: string, status = 400) {
+  extra?: Record<string, unknown>;
+  constructor(message: string, status = 400, extra?: Record<string, unknown>) {
     super(message);
     this.status = status;
+    this.extra = extra;
   }
+}
+
+/**
+ * Work on an app is the account's that began it (`ours`: store.ts sameState): once another account's state came
+ * in meanwhile, it stops before its next Orgo or Ingot call or write (ingot.ts stillOurs), with a 409.
+ */
+function held(ours: () => boolean) {
+  if (!ours()) throw new HostedAppError(SWAPPED, 409);
 }
 
 const g = globalThis as unknown as {
@@ -147,11 +173,14 @@ const servingOf = (p: OrgoDeployProject) => deployedAt(p.current);
  * orgo-web says. `enabled` false with why when deploying can't work here; the apps are listed all the same.
  */
 export async function listApps(wsId: string): Promise<HostedAppsAnswer> {
+  const ours = sameState();
   const ws = workspace(wsId);
   if (!ws) throw new HostedAppError("That workspace is gone.", 404);
   const kept = Object.entries(ws.hostedApps ?? {}).filter(([name]) => isRepoName(name));
   const why = await closedHere();
+  held(ours);
   const on = kept.length ? await reposOf(wsId) : [];
+  held(ours);
   let closed: string | undefined;
   const apps = await Promise.all(
     kept.map(async ([name, h]): Promise<HostedApp> => {
@@ -159,6 +188,7 @@ export async function listApps(wsId: string): Promise<HostedAppsAnswer> {
       const base: HostedApp = { name, head: repo?.head ?? null, updatedAt: msOf(repo?.updated_at), hosting: h, serving: null, live: null, ...(on ? {} : { offline: true as const }) };
       if (why || !h.projectId) return base;
       const got = await deploys.project(h.computerId, h.projectId).catch(() => null);
+      held(ours);
       if (!got?.enabled) {
         if (got) closed = got.why;
         return base;
@@ -171,6 +201,7 @@ export async function listApps(wsId: string): Promise<HostedAppsAnswer> {
   );
   apps.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || a.name.localeCompare(b.name));
   if (why) return { enabled: false, why, apps };
+  held(ours);
   if (!closed && !kept.some(([, h]) => h.projectId)) closed = await probe(wsId);
   return closed ? { enabled: false, why: closed, apps } : { enabled: true, apps };
 }
@@ -184,6 +215,7 @@ const count = (v: unknown) => (Array.isArray(v) ? v.length : typeof v === "numbe
  * is asked, so one asleep changes nothing.
  */
 export async function appCommits(wsId: string, name: string, before: string | null): Promise<AppCommitsAnswer> {
+  const ours = sameState();
   if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
   const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
   if (!h) throw new HostedAppError("There's no app by that name in this workspace.", 404);
@@ -200,6 +232,7 @@ export async function appCommits(wsId: string, name: string, before: string | nu
   }
   // No such repo yet (its first task hasn't started): nothing committed.
   if (!log) return { commits: [], head: null, next: null };
+  held(ours);
   const p = h.projectId ? await deploys.project(h.computerId, h.projectId).catch(() => null) : null;
   const serving = p?.enabled ? servingOf(p.value) : null;
   const commits = log.changesets.map(
@@ -249,7 +282,7 @@ function ingotRepo(wsId: string, name: string): string {
  * sent twice, or one this Mac lost track of) is the one. A new one gets a name and a port no other project
  * there has; one Orgo still finds taken (an app on the computer itself has it) moves on to the next.
  */
-async function makeProject(wsId: string, name: string, h: AppHosting): Promise<AppHosting> {
+async function makeProject(wsId: string, name: string, h: AppHosting, ours: () => boolean): Promise<AppHosting> {
   const keep = (p: OrgoDeployProject) => {
     const next: AppHosting = { botId: h.botId, computerId: h.computerId, projectId: p.id, ...(p.url ? { url: p.url } : {}) };
     keepHosting(wsId, name, () => next);
@@ -257,6 +290,7 @@ async function makeProject(wsId: string, name: string, h: AppHosting): Promise<A
   };
   const repo = ingotRepo(wsId, name);
   const there = await deploys.projects(h.computerId).catch((e: unknown) => Promise.reject(refused(e)));
+  held(ours);
   if (!there.enabled) throw new HostedAppError(there.why, 403);
   const projects = there.value.projects ?? [];
   const mine = projects.find((p) => p.source === "ingot" && p.ingot_repo?.toLowerCase() === repo);
@@ -270,6 +304,7 @@ async function makeProject(wsId: string, name: string, h: AppHosting): Promise<A
     while (ports.has(port)) port++;
     const project = deployName(name, n);
     const made = await deploys.create(h.computerId, { repo, name: project, port }).catch((e: unknown) => e as Error);
+    held(ours);
     if (made instanceof OrgoError && tries < 5 && made.code === "NAME_TAKEN") names.add(project);
     else if (made instanceof OrgoError && tries < 5 && made.code === "PORT_TAKEN") ports.add(port);
     else if (made instanceof OrgoError && (made.code === "PROJECT_LIMIT" || made.code === "SERVICE_LIMIT"))
@@ -290,11 +325,14 @@ const gone = (e: unknown) => e instanceof OrgoError && e.status === 404 && (!e.c
  * token of the workspace's yet gets one first (ensureIngotCli), as the deploy runner exports the repo
  * there with it. Answers the app as it is now, with the deploy Orgo queued.
  */
-export async function deployApp(wsId: string, name: string, opts: { at?: string; botId?: string } = {}): Promise<{ app: HostedApp; deployment: OrgoDeployment }> {
+export async function deployApp(wsId: string, name: string, opts: { at?: string; botId?: string; ours?: () => boolean } = {}): Promise<{ app: HostedApp; deployment: OrgoDeployment }> {
+  const ours = opts.ours ?? sameState();
+  held(ours);
   if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
   if (!isRepoName(name)) throw new HostedAppError("There's no app by that name in this workspace.", 404);
   if (opts.at !== undefined && !CHANGESET.test(opts.at)) throw new HostedAppError("That isn't a changeset of it.", 400);
   const why = await closedHere();
+  held(ours);
   if (why) throw new HostedAppError(why, 403);
   let h = hostingOf(wsId, name);
   if (!h) {
@@ -309,13 +347,16 @@ export async function deployApp(wsId: string, name: string, opts: { at?: string;
     await ensureIngotCli(h.computerId, wsId, { botId: h.botId }).catch((e: unknown) =>
       Promise.reject(e instanceof IngotError ? new HostedAppError(`Couldn't set Ingot up on the app's computer: ${e.message}`, e.offline ? 503 : 502) : e),
     );
-  if (!h.projectId) h = await makeProject(wsId, name, h);
+  held(ours);
+  if (!h.projectId) h = await makeProject(wsId, name, h, ours);
   const queue = (x: AppHosting) => deploys.deploy(x.computerId, x.projectId!, opts.at).catch((e: unknown) => e as Error);
   let got = await queue(h);
+  held(ours);
   if (gone(got)) {
     // The project is gone on Orgo: made again on the same computer.
-    h = await makeProject(wsId, name, { botId: h.botId, computerId: h.computerId });
+    h = await makeProject(wsId, name, { botId: h.botId, computerId: h.computerId }, ours);
     got = await queue(h);
+    held(ours);
   }
   if (got instanceof Error) throw refused(got);
   if (!got.enabled) throw new HostedAppError(got.why, 403);
@@ -347,12 +388,14 @@ function cursorOf(after: string | null): { id?: string; n: number } {
  * never wakes the computer). A cursor from an older deploy reads the newest one from its start.
  */
 export async function appLog(wsId: string, name: string, after: string | null): Promise<{ state: DeployState | null; log: string; next: string | null; more: boolean }> {
+  const ours = sameState();
   if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
   const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
   if (!h) throw new HostedAppError("There's no app by that name in this workspace.", 404);
   const none = { state: null, log: "", next: null, more: false };
   if (!h.projectId) return none;
   const p = await deploys.project(h.computerId, h.projectId).catch((e: unknown) => Promise.reject(refused(e)));
+  held(ours);
   if (!p.enabled) throw new HostedAppError(p.why, 403);
   const d = newest(p.value);
   if (!d) return none;
@@ -361,6 +404,251 @@ export async function appLog(wsId: string, name: string, after: string | null): 
   const l = await deploys.logs(h.computerId, d.id, from).catch((e: unknown) => Promise.reject(refused(e)));
   if (!l.enabled) throw new HostedAppError(l.why, 403);
   return { state: l.value.state ?? d.state, log: l.value.log ?? "", next: `${d.id}:${Number(l.value.next) || from}`, more: !!l.value.more };
+}
+
+/* ---------------- Its domains and their DNS ---------------- */
+
+/** A bought domain's id at Orgo, as a change names the zone it goes to. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** A record's id at Orgo: 16 characters of base64url, made from what the record says. */
+const RECORD_ID = /^[A-Za-z0-9_-]{16}$/;
+
+const NOT_HERE = "That domain doesn't point at this app, so its DNS isn't changed here.";
+const STALE = "That record changed since it was read. Here are the records as they are now, so try again.";
+
+/** Orgo's DNS refusals by code, in Bops' words (Orgo's own are kept where they name the field or the name that's wrong). */
+const DNS_WORDS: Record<string, string> = {
+  RECORD_EXISTS: "That record is there already.",
+  RECORD_CONFLICT: "A CNAME needs its name to itself. Use another name.",
+  ZONE_BUSY: "Another change to this domain is still saving. Try again in a moment.",
+  RATE_LIMITED: "That's as many DNS changes as Orgo takes in an hour. Try again later.",
+  DOMAIN_PENDING: "This domain is still being registered. Try again in a few minutes.",
+  DOMAINS_NOT_ENABLED: "DNS for domains bought through Orgo isn't open to your Orgo account yet.",
+  DOMAIN_NOT_FOUND: "Orgo doesn't have that domain in this workspace any more.",
+  REGISTRAR_UNAVAILABLE: "Orgo couldn't reach its DNS just now. Try again.",
+  DNS_WRITE_FAILED: "Orgo couldn't save the records just now. Try again.",
+  DOMAINS_UNAVAILABLE: "Domains aren't working on Orgo just now. Try again later.",
+  workspace_read_only: "Your access to this workspace is view only. Ask its owner for full access to change its domains.",
+};
+
+/** Orgo turned a domains call down: in plain words, with Orgo's status (a 5xx is a 502 here), and the field to fix when it said. */
+function dnsRefused(e: unknown) {
+  if (!(e instanceof OrgoError)) return e;
+  const a = e.answer ?? {};
+  const who = typeof a.computer_name === "string" && a.computer_name ? a.computer_name : "a computer";
+  const status = e.status >= 400 && e.status < 500 ? e.status : 502;
+  // Orgo's words for a record it can't take say what to type ("Enter an IPv4 address, like 203.0.113.10.").
+  if (e.code === "INVALID_RECORD") return new HostedAppError(e.said ?? "Orgo can't take that record as it is.", 400, typeof a.field === "string" ? { field: a.field } : undefined);
+  if (e.code === "RECORD_CONFLICT" && e.said) return new HostedAppError(e.said, status, { field: "name" });
+  if (e.code === "NAME_MANAGED") return new HostedAppError(`Orgo points that name at ${who}, so it can't have this record too. Use another name.`, status, { field: "name" });
+  if (e.code === "RECORD_MANAGED") return new HostedAppError(`Orgo keeps that record so a domain reaches ${who}, so it isn't changed here.`, status);
+  const words = e.code ? DNS_WORDS[e.code] : undefined;
+  return words ? new HostedAppError(words, status) : refused(e);
+}
+
+/**
+ * The app as far as its domains go, from Orgo: the computer's custom domains (every one, and `mine`, the
+ * ones on its deploy project's port), its public URL, and the bought domains (zones) that one of `mine`
+ * is or is under, by id, each with its name; `zoneOf` says which zone each of `mine` is in. Null when the
+ * app was never deployed (no project, so no port for a domain to serve).
+ */
+type Target = {
+  h: AppHosting;
+  /** The workspace's Orgo project, which a bought domain's DNS is reached under. */
+  project: string | undefined;
+  url: string | null;
+  all: OrgoCustomDomain[];
+  mine: OrgoCustomDomain[];
+  zones: Map<string, string>;
+  zoneOf: Map<string, string>;
+};
+
+async function appTarget(wsId: string, name: string, ours: () => boolean): Promise<Target | null> {
+  if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
+  const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
+  if (!h) throw new HostedAppError("There's no app by that name in this workspace.", 404);
+  if (!h.projectId) return null;
+  const why = await closedHere();
+  held(ours);
+  if (why) throw new HostedAppError(why, 403);
+  const [p, list] = await Promise.all([
+    deploys.project(h.computerId, h.projectId).catch((e: unknown) => Promise.reject(refused(e))),
+    domains.ofComputer(h.computerId).catch((e: unknown) => Promise.reject(dnsRefused(e))),
+  ]);
+  held(ours);
+  if (!p.enabled) throw new HostedAppError(p.why, 403);
+  const port = typeof p.value.port === "number" ? p.value.port : null;
+  const all = list.domains ?? [];
+  // A custom domain serves one port of its computer, and each deploy project there listens on its own
+  // (orgo-web keeps both unique per computer), so the app's domains are the ones on its port. Nothing at
+  // Orgo ties a domain to a project otherwise. A project that doesn't say its port has none of them.
+  const mine = port === null ? [] : all.filter((d) => d.target_port === port);
+  // A bought domain is connected only to a computer in its own Orgo workspace, and a computer two Bops
+  // workspaces share is in one of them only: so its zone is under the computer's workspace, asked when
+  // there's a bought one to read (else, or when Orgo doesn't say, this workspace's).
+  const here = workspace(wsId)?.orgoProjectId;
+  const project = mine.some((d) => d.managed) ? ((await domains.workspaceOf(h.computerId).catch(() => null)) ?? here) : here;
+  held(ours);
+  // Orgo doesn't say which bought domain a custom domain is in: it's the workspace's bought domain whose
+  // name it is, or ends with (the longest one, as orgo-web matches it). The computer's list has them
+  // when custom domains are open to this account; else the workspace's own list does.
+  let owned = list.owned_domains;
+  if (!owned && project && mine.some((d) => d.managed)) {
+    owned = (await domains.bought(project).catch(() => null))?.domains?.filter((d) => d.status === "active").map(({ id, domain }) => ({ id, domain }));
+    held(ours);
+  }
+  const zones = new Map<string, string>();
+  const zoneOf = new Map<string, string>();
+  for (const d of mine) {
+    const fqdn = d.domain.toLowerCase();
+    const z = d.managed
+      ? (owned ?? []).filter((o) => fqdn === o.domain.toLowerCase() || fqdn.endsWith(`.${o.domain.toLowerCase()}`)).sort((a, b) => b.domain.length - a.domain.length)[0]
+      : undefined;
+    if (!z) continue;
+    zones.set(z.id.toLowerCase(), z.domain);
+    zoneOf.set(d.id, z.id.toLowerCase());
+  }
+  return { h, project, url: p.value.url ?? h.url ?? null, all, mine, zones, zoneOf };
+}
+
+/**
+ * Why a record Orgo keeps is Orgo's: it wrote it so one of the computer's domains reaches its computer
+ * (the A at that name, or the TXT that proves it, _orgo-verify before it). Changing it is changing that
+ * domain, never its records.
+ */
+function lockedWhy(t: Target, r: OrgoDnsRecord): string | null {
+  const m = r.managed;
+  if (!m) return null;
+  const named = t.all.find((d) => d.id === m.custom_domain_id)?.domain ?? (r.type === "TXT" ? r.fqdn.replace(/^_orgo-verify\./, "") : r.fqdn);
+  const to = t.mine.some((d) => d.id === m.custom_domain_id) ? "this app" : m.computer_id === t.h.computerId ? "another app on this computer" : (m.computer_name ?? "another computer");
+  return `Orgo set this so ${named} reaches ${to}.`;
+}
+
+const recordsOf = (t: Target, records: OrgoDnsRecord[] | undefined): AppDnsRecord[] =>
+  (records ?? [])
+    .filter((r) => (DNS_TYPES as readonly string[]).includes(r.type))
+    .map((r) => ({
+      id: r.id,
+      type: r.type as AppDnsRecord["type"],
+      name: r.name,
+      fqdn: r.fqdn,
+      value: r.value,
+      ...(typeof r.priority === "number" ? { priority: r.priority } : {}),
+      ...(typeof r.weight === "number" ? { weight: r.weight } : {}),
+      ...(typeof r.port === "number" ? { port: r.port } : {}),
+      locked: lockedWhy(t, r),
+    }));
+
+const zoneView = (t: Target, id: string, domain: string, z: OrgoZone): AppDnsZone => ({
+  id,
+  domain: z.domain || domain,
+  serving: z.serving ?? z.nameservers?.mode === "orgo",
+  ttl: typeof z.ttl_seconds === "number" ? z.ttl_seconds : null,
+  records: recordsOf(t, z.records),
+});
+
+/** A zone's records as Orgo has them; one that can't be read says why, and the rest of the app's domains still show. */
+async function readZone(t: Target, id: string, domain: string): Promise<AppDnsZone> {
+  const none: AppDnsZone = { id, domain, serving: false, ttl: null, records: [] };
+  if (!t.project) return { ...none, error: NO_PROJECT };
+  try {
+    return zoneView(t, id, domain, await domains.zone(t.project, id));
+  } catch (e) {
+    const r = dnsRefused(e);
+    return { ...none, error: r instanceof HostedAppError ? r.message : "Couldn't read its DNS records just now." };
+  }
+}
+
+/**
+ * One of the app's domains. One bought elsewhere that isn't live yet has the records to set where its DNS
+ * is kept, with what Orgo found when it looked (one look each time it's read, while it waits: Orgo allows
+ * 30 a minute); a look that fails leaves them as Orgo says to set them.
+ */
+async function domainOf(t: Target, d: OrgoCustomDomain): Promise<AppDomain> {
+  const base: AppDomain = { id: d.id, domain: d.domain, status: d.status, cert: d.cert_status === "issued" ? "issued" : "pending", managed: !!d.managed, zone: t.zoneOf.get(d.id) ?? null, publish: [] };
+  if (d.managed || d.status === "active" || d.status === "disabled") return base;
+  const check = await domains.check(t.h.computerId, d.id).catch(() => null);
+  const publish = check?.records?.length
+    ? check.records.map((r) => ({ type: r.type, name: r.host || r.name, value: r.value, found: r.status }))
+    : (d.dns_records ?? []).map((r) => ({ type: r.type, name: r.host || r.name, value: r.value }));
+  return { ...base, publish, where: check?.provider?.name ?? null };
+}
+
+/**
+ * GET /api/hosted-apps/[name]/dns: its public URL, the domains that point at it (its computer's custom
+ * domains on its port), and for the ones bought through Orgo, their zones (read once each), every record
+ * marked the user's or Orgo's (with why). From orgo-web alone: the computer is never asked.
+ */
+export async function appDomains(wsId: string, name: string): Promise<AppDomainsAnswer> {
+  const ours = sameState();
+  const t = await appTarget(wsId, name, ours);
+  held(ours);
+  if (!t) return { url: hostingOf(wsId, name)?.url ?? null, domains: [], zones: [] };
+  const [zones, list] = await Promise.all([Promise.all([...t.zones].map(([id, domain]) => readZone(t, id, domain))), Promise.all(t.mine.map((d) => domainOf(t, d)))]);
+  return { url: t.url, domains: list, zones };
+}
+
+/** A record as a request has it, any field of any type (inputOf checks them). */
+type Typed = { [K in keyof AppDnsInput]?: unknown };
+
+/** A record as the window typed it, as orgo-web takes it: its type checked here, the rest by Orgo (which says what's wrong with it). */
+function inputOf(r: Typed): OrgoRecordInput {
+  const type = typeof r?.type === "string" ? r.type.trim().toUpperCase() : "";
+  if (!(DNS_TYPES as readonly string[]).includes(type)) throw new HostedAppError("Pick a type: A, AAAA, CNAME, MX, TXT or SRV.", 400, { field: "type" });
+  const text = (v: unknown, most: number) => (typeof v === "string" ? v.slice(0, most) : "");
+  const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" && v.trim() ? v.trim().slice(0, 12) : undefined);
+  const needs = dnsNeeds(type);
+  return {
+    type,
+    name: text(r.name, 300).trim(),
+    value: text(r.value, 1024),
+    ...(needs.priority ? { priority: num(r.priority) } : {}),
+    ...(needs.weight ? { weight: num(r.weight) } : {}),
+    ...(needs.port ? { port: num(r.port) } : {}),
+  };
+}
+
+/**
+ * A change to the zone `zone`, sent only when it's the zone of a domain that points at this app (read
+ * from Orgo again for each change: never a bought domain the window merely names). A record that changed
+ * since it was read (Orgo's ids are what a record says) is refused with the records as they are now.
+ */
+async function changeZone(wsId: string, name: string, zone: unknown, recordId: string | null, send: (project: string, id: string) => Promise<{ records: OrgoDnsRecord[] }>): Promise<AppDnsWritten> {
+  if (recordId !== null && !RECORD_ID.test(recordId)) throw new HostedAppError("That isn't a record of this domain.", 400);
+  const asked = typeof zone === "string" && UUID.test(zone) ? zone.toLowerCase() : null;
+  if (!asked) throw new HostedAppError(NOT_HERE, 404);
+  const ours = sameState();
+  const t = await appTarget(wsId, name, ours);
+  held(ours);
+  const domain = t?.zones.get(asked);
+  if (!t || !domain) throw new HostedAppError(NOT_HERE, 404);
+  if (!t.project) throw new HostedAppError(NO_PROJECT, 409);
+  const project = t.project;
+  try {
+    return { zone: asked, records: recordsOf(t, (await send(project, asked)).records) };
+  } catch (e) {
+    if (!(e instanceof OrgoError && e.code === "RECORD_NOT_FOUND")) throw dnsRefused(e);
+    held(ours);
+    const now = await domains.zone(project, asked).catch(() => null);
+    throw new HostedAppError(STALE, 404, { stale: true, ...(now ? { zone: asked, records: zoneView(t, asked, domain, now).records } : {}) });
+  }
+}
+
+/** POST /api/hosted-apps/[name]/dns/records: a record added to the zone of a domain that points at the app. */
+export async function addRecord(wsId: string, name: string, zone: unknown, r: Typed): Promise<AppDnsWritten> {
+  const input = inputOf(r);
+  return changeZone(wsId, name, zone, null, (project, id) => domains.addRecord(project, id, input));
+}
+
+/** PATCH /api/hosted-apps/[name]/dns/records/[recordId]: one of its records changed (`r` is all of it, as it becomes). */
+export async function changeRecord(wsId: string, name: string, zone: unknown, recordId: string, r: Typed): Promise<AppDnsWritten> {
+  const input = inputOf(r);
+  return changeZone(wsId, name, zone, recordId, (project, id) => domains.changeRecord(project, id, recordId, input));
+}
+
+/** DELETE /api/hosted-apps/[name]/dns/records/[recordId]: one of its records removed. */
+export async function removeRecord(wsId: string, name: string, zone: unknown, recordId: string): Promise<AppDnsWritten> {
+  return changeZone(wsId, name, zone, recordId, (project, id) => domains.removeRecord(project, id, recordId));
 }
 
 /* ---------------- What a bot does with them ---------------- */
@@ -476,20 +764,25 @@ export async function readyAppForTask(sessionId: string, computerId: string, sig
   const s = session(sessionId);
   const a = taskApp(s);
   if (!s || !a) return undefined;
+  const ours = sameState();
   await ensureIngotCli(computerId, a.wsId, { signal, botId: s.botId });
+  stillOurs(ours);
   const h = hostingOf(a.wsId, a.name);
   if (!h || h.computerId !== computerId) {
     if (h) console.warn(`[hosted-apps] ${a.name} moves from ${h.computerId} to ${computerId}: its bot's computer is another one now`);
     keepHosting(a.wsId, a.name, () => ({ botId: s.botId, computerId }));
   }
   await ingot.createRepo(a.wsId, a.name, authorOf(s.botId), signal);
+  stillOurs(ours);
   listed.delete(a.wsId);
   try {
     return await readyFolder(computerId, a.wsId, a.name, signal);
   } catch (e) {
     if (!(e instanceof IngotError && e.refused)) throw e;
+    stillOurs(ours);
     console.warn(`[hosted-apps] ${computerId}: Ingot turned its token away, so it gets a new one`);
     await ensureIngotCli(computerId, a.wsId, { signal, botId: s.botId, renew: true });
+    stillOurs(ours);
     return readyFolder(computerId, a.wsId, a.name, signal);
   }
 }
@@ -502,7 +795,7 @@ const LOOK_PAGES = 10;
  * `ingot commit` and `ingot log` print it), looked up on main in Ingot. Refused when it's no changeset of
  * the app's, or the start of more than one, or Ingot can't be reached to look.
  */
-async function wholeId(wsId: string, name: string, at: string): Promise<string> {
+async function wholeId(wsId: string, name: string, at: string, ours: () => boolean): Promise<string> {
   if (CHANGESET.test(at)) return at;
   if (!/^[0-9a-f]{4,63}$/.test(at) || !hostingOf(wsId, name)) throw new HostedAppError("That isn't a changeset of it.", 400);
   const failed = (e: unknown) =>
@@ -513,6 +806,7 @@ async function wholeId(wsId: string, name: string, at: string): Promise<string> 
   let before: string | undefined;
   for (let page = 0; page < LOOK_PAGES; page++) {
     const log = await ingot.log(wsId, name, { limit: 200, ...(before ? { before } : {}) }).catch(failed);
+    held(ours);
     for (const c of log?.changesets ?? []) {
       if (!c.id.startsWith(at) || c.id === found) continue;
       if (found) throw new HostedAppError(`${at} is the start of more than one changeset of it. Use more of its id.`, 400);
@@ -535,9 +829,10 @@ export async function deployForBot(botId: string, app: string, at: string | null
   const wsId = workspaceOf(b);
   const name = appNamed(wsId, app);
   if (!name) return `There's no app called "${app.slice(0, 80)}" in this workspace.`;
+  const ours = sameState();
   try {
-    const id = at ? await wholeId(wsId, name, at) : undefined;
-    const { app: now } = await deployApp(wsId, name, { ...(id ? { at: id } : {}), botId });
+    const id = at ? await wholeId(wsId, name, at, ours) : undefined;
+    const { app: now } = await deployApp(wsId, name, { ...(id ? { at: id } : {}), botId, ours });
     const where = now.hosting ? bot(now.hosting.botId)?.name : undefined;
     const url = now.hosting?.url;
     const what = id ? `${name} at ${short(id)}` : `the newest commit of ${name}`;

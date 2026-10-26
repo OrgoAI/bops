@@ -6,7 +6,11 @@
 // where none can go on the web; an app's tab with its address (open, copy), "Work on it" and Deploy, its
 // history one line per changeset (short id, message, author, when, files added, changed and deleted) with
 // the one its site serves marked Live and "Deploy this one" on the others, older ones a page at a time,
-// one quiet line while Ingot can't be reached, and its newest deploy's log folded; what the window asks the
+// one quiet line while Ingot can't be reached, and its newest deploy's log folded; its domains, each with how it's
+// doing, a bought domain's DNS records with Orgo's locked and the user's to change, the records to set for one bought
+// elsewhere, one plain line when it has none, and the record form; changing a zone's records, rendered into
+// a DOM (linkedom) and clicked: Esc while a change saves, why a remove was refused under its question,
+// where focus goes as a form or a question closes, and the app's own Esc kept out; what the window asks the
 // server for (lib/hosted-apps.ts routes, answered here by a stubbed fetch); and the wiring: the tab is one
 // you read, named as its repo is, it lights the Apps footer button, the list sits above the made apps on
 // the Apps page, and "Work on it" asks the app's bot.
@@ -61,7 +65,7 @@ globalThis.fetch = async (url, init = {}) => {
   const path = String(url).split("?")[0];
   const answer = routes[path];
   if (!answer) return { ok: false, status: 404, json: async () => ({}) };
-  const { status = 200, body } = typeof answer === "function" ? answer(String(url), init) : answer;
+  const { status = 200, body } = await (typeof answer === "function" ? answer(String(url), init) : answer);
   return { ok: status < 400, status, json: async () => body };
 };
 
@@ -319,6 +323,146 @@ await test("the tab after a deploy failed, and where hosting isn't open", () => 
   assert.ok(!never.includes("data-deploy-log"), "and no log");
 });
 
+/* ---------------- An app's domains and their DNS ---------------- */
+
+const ZONE = "5d0c3a9e-4a2b-4c3d-8e5f-6a7b8c9d0e1f";
+const rec = (id, type, name, value, extra = {}) => ({ id: id.padEnd(16, "0"), type, name, fqdn: name ? `${name}.acme.example` : "acme.example", value, locked: null, ...extra });
+const ORGOS = "Orgo set this so acme.example reaches this app.";
+const RECORDS = [
+  rec("txtverify", "TXT", "_orgo-verify", "tok-apex", { locked: ORGOS }),
+  rec("aapex", "A", "", "203.0.113.10", { locked: ORGOS }),
+  rec("mxapex", "MX", "", "mail.acme.example", { priority: 10 }),
+  rec("srvsip", "SRV", "_sip._tcp", "sip.acme.example", { priority: 10, weight: 5, port: 5060 }),
+];
+const DOMAINS = {
+  url: "https://calm-fox-1a2b.orgo.dev",
+  domains: [
+    { id: "cd_apex", domain: "acme.example", status: "active", cert: "issued", managed: true, zone: ZONE, publish: [] },
+    {
+      id: "cd_mine",
+      domain: "recipes.example.com",
+      status: "pending",
+      cert: "pending",
+      managed: false,
+      zone: null,
+      publish: [
+        { type: "TXT", name: "_orgo-verify.recipes", value: "tok-mine", found: "ok" },
+        { type: "CNAME", name: "recipes", value: "edge.orgo.dev", found: "missing" },
+      ],
+      where: "Cloudflare",
+    },
+  ],
+  zones: [{ id: ZONE, domain: "acme.example", serving: true, ttl: null, records: RECORDS }],
+};
+const withDomains = (domains, extra = {}) => renderToStaticMarkup(h(H.HostedAppView, { ws: "ws_main", answer: { enabled: true }, app: shopApp(), history: HISTORY, onChanged: noop, domains, ...extra }));
+/** The HTML of one part of the page, from where `mark` is to where `end` (or the history) starts. */
+const between = (html, mark, end = ">History<") => {
+  const start = html.indexOf(mark);
+  if (start < 0) return null;
+  const stop = html.indexOf(end, start + mark.length);
+  return html.slice(start, stop < 0 ? undefined : stop);
+};
+const recordOf = (html, id) => between(html, `data-record="${id.padEnd(16, "0")}"`, "data-record=") ?? "";
+
+await test("the tab's domains: its address, each domain with how it's doing, a bought one's records with Orgo's locked and the rest to change, Add record", () => {
+  const html = withDomains(DOMAINS);
+  const part = between(html, "data-domains");
+  assert.ok(part && html.indexOf("data-domains") < html.indexOf(">History<"), "above the history");
+  assert.ok(part.includes(">Domains<"), "titled");
+  assert.match(between(part, "data-address", "data-domain="), /href="https:\/\/calm-fox-1a2b\.orgo\.dev"[^>]*>calm-fox-1a2b\.orgo\.dev<\/a>.*>Its address on Orgo</, "its address on orgo.dev first");
+
+  const apex = between(part, 'data-domain="acme.example"', "data-domain=");
+  assert.match(apex, /data-status="active"/);
+  assert.match(apex, /data-tip="Live · its HTTPS certificate is issued"[^>]*bg-\[#2BB673\]/, "a green dot, its certificate in the tooltip");
+  assert.match(apex, /<a href="https:\/\/acme\.example" target="_blank"[^>]*>acme\.example<\/a>/, "a live one opens in the browser");
+  assert.ok(apex.includes(">Live<") && apex.includes(">Bought through Orgo<"));
+  assert.ok(!part.includes("data-no-zone"), "its zone is read, so nothing said about it");
+  const mine = between(part, 'data-domain="recipes.example.com"', "data-zone=");
+  assert.match(mine, /data-status="pending"[^>]*>.*animate-pulse/, "one that waits pulses");
+  assert.ok(mine.includes(">Waiting for its DNS<") && !mine.includes("<a "), "and isn't a link yet");
+  assert.ok(text(mine).includes("Set these at Cloudflare:"), "the records to set, where its DNS is kept");
+  assert.ok(mine.includes(">_orgo-verify.recipes<") && mine.includes(">tok-mine<") && mine.includes(">Found<"));
+  assert.ok(mine.includes(">edge.orgo.dev<") && mine.includes(">Not there yet<"));
+
+  const zone = between(part, 'data-zone="acme.example"');
+  assert.ok(text(zone).includes("DNS records for  acme.example"), "its zone's records, named");
+  assert.ok(!zone.includes("data-not-serving"), "answering on the internet, so nothing said about it");
+  assert.deepEqual([...zone.matchAll(/data-record="([^"]+)"/g)].map((m) => m[1]), RECORDS.map((r) => r.id), "every record, in Orgo's order");
+  for (const r of RECORDS) assert.match(recordOf(zone, r.id), /class="group flex h-8 /, `${r.type} ${r.name} is one 32px line`);
+  for (const id of ["txtverify", "aapex"]) {
+    const line = recordOf(zone, id);
+    assert.match(line, /data-locked="true"/);
+    assert.match(line, new RegExp(`role="img" data-tip="${ORGOS}" aria-label="${ORGOS}"`), "Orgo's, locked, with why");
+    assert.ok(!line.includes("Change the") && !line.includes("Remove the"), "and nothing to change it with");
+  }
+  assert.match(recordOf(zone, "aapex"), /title="acme\.example"[^>]*>@</, "the domain itself is @, its full name in the tooltip");
+  const mx = recordOf(zone, "mxapex");
+  assert.ok(!mx.includes("data-locked"));
+  assert.match(mx, />10 mail\.acme\.example</, "an MX's priority before its host");
+  assert.match(mx, /opacity-0[^"]*group-hover:opacity-100[^>]*><button aria-label="Change the MX record at @"[^>]*>.*<button aria-label="Remove the MX record at @"/, "Change and Remove, shown as its line is pointed at");
+  assert.match(recordOf(zone, "srvsip"), /title="sip\.acme\.example \(priority 10, weight 5, port 5060\)"[^>]*>10 5 5060 sip\.acme\.example</, "an SRV's numbers, in words in the tooltip");
+  assert.match(zone, /data-add-record="true"[^>]*>.*Add record<\/button>/, "Add record under them");
+  assert.ok(!zone.includes("data-record-form") && !zone.includes('role="alert"'), "no form until one is opened, no error");
+  assert.ok(!NO_DASHES.test(text(part)), "no dashes in what it says");
+  assert.ok(!part.includes("data-live"), "nothing in it reads as the history's Live");
+});
+
+await test("the tab's domains with none, while they're read, when they couldn't be, and a zone that doesn't answer or couldn't be read", () => {
+  const none = between(withDomains({ url: DOMAINS.url, domains: [], zones: [] }), "data-domains");
+  assert.match(none, /data-no-domains="true" class="flex h-8 items-center [^"]*">It has no domain of its own yet\.</, "one plain line");
+  assert.ok(none.includes("calm-fox-1a2b.orgo.dev") && !none.includes("data-zone"), "under its address, and nothing else");
+
+  const never = between(renderToStaticMarkup(h(H.HostedAppView, { ws: "ws_main", answer: { enabled: true }, app: app("draft", { head: null, hosting: null }), history: HISTORY, onChanged: noop })), "data-domains");
+  assert.ok(never.includes("It has no domain of its own yet.") && !never.includes("Reading them") && !never.includes("data-address"), "never deployed: no address, nothing to read");
+
+  const reading = between(withDomains(null), "data-domains");
+  assert.match(reading, /class="flex h-8 items-center [^"]*">Reading them…</, "one line the height of a domain's while they're read");
+  assert.ok(reading.includes("data-address") && reading.includes("shop.orgo.dev"), "its address at once, from the list");
+  assert.ok(!reading.includes("It has no domain"));
+  assert.ok(between(withDomains(null, { domainsFailed: "Sign in with Orgo to put apps on the web." }), "data-domains").includes(">Sign in with Orgo to put apps on the web.<"), "why they couldn't be read");
+
+  const away = between(withDomains({ ...DOMAINS, zones: [{ ...DOMAINS.zones[0], serving: false }] }), 'data-zone="acme.example"');
+  assert.match(away, /data-not-serving="true" data-tip="Its nameservers aren&#x27;t Orgo&#x27;s, so these records are kept but don&#x27;t answer on the internet\."[^>]*>Not answering</, "kept but not answering, said");
+  assert.ok(away.includes("data-record="), "and still there to change");
+  const unread = between(withDomains({ ...DOMAINS, zones: [{ ...DOMAINS.zones[0], records: [], error: "Orgo couldn't reach its DNS just now. Try again." }] }), 'data-zone="acme.example"');
+  assert.ok(unread.includes("Orgo couldn&#x27;t reach its DNS just now. Try again.") && !unread.includes("data-record=") && !unread.includes("data-add-record"), "why, and nothing to change");
+  // Bought through Orgo, but Orgo didn't say which bought domain it's in (DNS closed to the account, the
+  // list unread, the computer moved workspace): no zone comes, and that's said under each one.
+  const www = { ...DOMAINS.domains[0], id: "cd_www", domain: "www.acme.example" };
+  const lost = between(withDomains({ url: DOMAINS.url, domains: [{ ...DOMAINS.domains[0], zone: null }, { ...www, zone: null }], zones: [] }), "data-domains");
+  for (const d of ["acme.example", "www.acme.example"])
+    assert.match(between(lost, `data-domain="${d}"`, "data-domain=") ?? "", new RegExp(`data-no-zone="${d.replaceAll(".", "\\.")}"[^>]*>Couldn&#x27;t read its DNS records\\.<`), `${d}: its records couldn't be read, said`);
+  assert.ok(!lost.includes("data-zone") && !lost.includes("It has no domain"), "and nothing else");
+  assert.ok(!NO_DASHES.test(text(none + never + reading + away + unread + lost)), "no dashes");
+});
+
+await test("the record form: the fields its type takes, filled from the record it changes, and the one Orgo said is wrong ringed in red with why", () => {
+  const form = (props) => renderToStaticMarkup(h(H.DnsRecordForm, { domain: "acme.example", busy: false, error: null, onTyped: noop, onSave: noop, onCancel: noop, ...props }));
+  const inputs = (html) => [...html.matchAll(/<(?:input|select) aria-label="([^"]+)"/g)].map((m) => m[1]);
+  const fresh = form({});
+  assert.deepEqual(inputs(fresh), ["Type", "Name", "Value"], "an A to start: its name and value");
+  assert.match(fresh, /<option value="A" selected="">A<\/option>/);
+  assert.deepEqual([...fresh.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]), ["A", "AAAA", "CNAME", "MX", "TXT", "SRV"], "the types orgo-web takes");
+  assert.match(fresh, /<button type="submit" disabled=""[^>]*>Add</, "Add, once there's a value");
+  assert.match(fresh, /placeholder="@ or www"/);
+  const mx = form({ start: RECORDS[2] });
+  assert.deepEqual(inputs(mx), ["Type", "Name", "Value", "Priority"], "an MX takes a priority");
+  assert.match(mx, /aria-label="Name"[^>]*value="@"/, "the domain itself as @");
+  assert.match(mx, /aria-label="Priority"[^>]*value="10"/);
+  assert.match(mx, /<button type="submit"[^>]*>Save</);
+  const srv = form({ start: RECORDS[3] });
+  assert.deepEqual(inputs(srv), ["Type", "Name", "Value", "Priority", "Weight", "Port"], "an SRV, a weight and a port too");
+  // Filled, a field has no placeholder: each number is named in its tooltip, so 10 and 5 aren't swapped.
+  for (const [f, v] of [["Priority", 10], ["Weight", 5], ["Port", 5060]]) assert.match(srv, new RegExp(`aria-label="${f}"[^>]*data-tip="${f}"[^>]*value="${v}"`), `${f}, named`);
+  assert.match(mx, /aria-label="Priority"[^>]*data-tip="Priority"/, "an MX's too");
+  const wrong = form({ start: RECORDS[2], error: { text: "Enter a full hostname, like mail.example.com.", field: "value" } });
+  assert.match(wrong, /aria-label="Value" aria-invalid="true"[^>]*shadow-\[0_0_0_1\.5px_#B42318\]/, "the field to fix, ringed in red");
+  assert.ok(!/aria-label="Name" aria-invalid/.test(wrong), "and only that one");
+  assert.match(wrong, /role="alert"[^>]*>Enter a full hostname, like mail\.example\.com\.</, "why, under it");
+  assert.match(form({ start: RECORDS[2], busy: true }), /<button type="submit" disabled=""[^>]*>Saving…</);
+  assert.ok(!NO_DASHES.test(text(fresh + mx + wrong)), "no dashes");
+});
+
 /* ---------------- What it asks the server ---------------- */
 
 await test("what the window asks the server, with the stubbed fetch", async () => {
@@ -359,6 +503,33 @@ await test("what the window asks the server, with the stubbed fetch", async () =
   routes = { "/api/hosted-apps": { body: { error: "nope" } }, "/api/hosted-apps/shop/commits": { body: { error: "nope" } } };
   assert.equal(await H.readApps("ws_main"), null, "and an answer without apps too");
   assert.equal(await H.readCommits("ws_main", "shop"), null, "or without commits");
+
+  // Its domains, and changes to a zone's records: the zone it's in, and all of a record that changes.
+  const written = [RECORDS[0], RECORDS[1]];
+  const REC = `/api/hosted-apps/shop/dns/records/${RECORDS[2].id}`;
+  routes = {
+    "/api/hosted-apps/shop/dns": { body: DOMAINS },
+    "/api/hosted-apps/shop/dns/records": (url, init) => (JSON.parse(init.body).type === "A" ? { status: 400, body: { error: "Enter an IPv4 address, like 203.0.113.10.", field: "value" } } : { body: { zone: ZONE, records: written } }),
+    [REC]: (url, init) => (init.method === "PATCH" ? { body: { zone: ZONE, records: written } } : { status: 404, body: { error: "That record changed since it was read. Here are the records as they are now, so try again.", stale: true, zone: ZONE, records: RECORDS } }),
+  };
+  calls.length = 0;
+  assert.deepEqual(await H.readDomains("ws main", "shop"), { answer: DOMAINS });
+  assert.equal(calls.at(-1).url, "/api/hosted-apps/shop/dns?ws=ws%20main");
+  const added = await H.changeDns("shop", { ws: "ws_main", zone: ZONE, action: "add", record: { type: "TXT", name: "_dmarc", value: "v=DMARC1; p=none" } });
+  assert.deepEqual(added, { written: { zone: ZONE, records: written } });
+  assert.deepEqual(calls.at(-1), { url: "/api/hosted-apps/shop/dns/records", method: "POST", body: { type: "TXT", name: "_dmarc", value: "v=DMARC1; p=none", ws: "ws_main", zone: ZONE } });
+  assert.deepEqual(await H.changeDns("shop", { ws: "ws_main", zone: ZONE, action: "add", record: { type: "A", name: "api", value: "nope" } }), { error: "Enter an IPv4 address, like 203.0.113.10.", field: "value" }, "Orgo's words, and the field to fix");
+  const changed = await H.changeDns("shop", { ws: "ws_main", zone: ZONE, action: "change", id: RECORDS[2].id, record: { type: "MX", name: "@", value: "mx.example.net", priority: "20" } });
+  assert.deepEqual(changed.written, { zone: ZONE, records: written });
+  assert.deepEqual(calls.at(-1), { url: REC, method: "PATCH", body: { type: "MX", name: "@", value: "mx.example.net", priority: "20", ws: "ws_main", zone: ZONE } }, "all of it, as it becomes");
+  const removed = await H.changeDns("shop", { ws: "ws_main", zone: ZONE, action: "remove", id: RECORDS[2].id });
+  assert.deepEqual(calls.at(-1), { url: REC, method: "DELETE", body: { ws: "ws_main", zone: ZONE } });
+  assert.deepEqual(removed, { error: "That record changed since it was read. Here are the records as they are now, so try again.", now: { zone: ZONE, records: RECORDS } }, "changed since: why, and the records as they are now");
+  routes = { "/api/hosted-apps/shop/dns": { status: 403, body: { error: "Sign in with Orgo to put apps on the web." } } };
+  assert.deepEqual(await H.readDomains("ws_main", "shop"), { error: "Sign in with Orgo to put apps on the web." });
+  routes = {};
+  assert.deepEqual(await H.readDomains("ws_main", "shop"), { error: null }, "a server without the route says nothing");
+  assert.deepEqual(await H.changeDns("shop", { ws: "ws_main", zone: ZONE, action: "remove", id: RECORDS[2].id }), { error: "Couldn't change the DNS. Try again." });
 
   assert.equal(H.deploying(app("a", { live: live("queued", null) })), true, "queued counts as deploying");
   for (const s of ["succeeded", "failed", "cancelled", "superseded"]) assert.equal(H.deploying(app("a", { live: live(s, id("a1")) })), false, s);
@@ -424,6 +595,232 @@ await test("Work on it asks the bot whose computer holds the app's working folde
   assert.equal(H.workOn(state(["other"]), "ws_main", app("x", { hosting: { botId: "other", computerId: "c9" } })), null, "even one the app names");
   assert.equal(H.workOn(null, "ws_main", shop), null);
   assert.ok(!NO_DASHES.test(H.workOn(state(["nova"]), "ws_main", shop).text), "no dashes");
+});
+
+/* ---------------- Changing a zone's records, clicked ---------------- */
+
+// A DOM to render into and click (linkedom), with what these need of a browser: focus that moves (never
+// to a control that's off, as a browser won't), the element that has it, and the app's own Esc
+// (bops-app.tsx's, on the window): a listener above the tab's React root hears every Esc nothing stopped.
+const { parseHTML } = await import("linkedom");
+const { window: win } = parseHTML("<!doctype html><html><body></body></html>");
+const doc = win.document;
+const focused = { on: null };
+win.HTMLElement.prototype.focus = function () {
+  if (!this.hasAttribute("disabled")) focused.on = this;
+};
+Object.defineProperty(doc, "activeElement", { configurable: true, get: () => (focused.on?.isConnected ? focused.on : doc.body) });
+// Typing as React hears it: by the input event, when the document says it has one (linkedom's doesn't).
+doc.oninput = null;
+Object.defineProperty(win.HTMLInputElement.prototype, "type", {
+  configurable: true,
+  get() {
+    return this.getAttribute("type") || "text";
+  },
+  set(v) {
+    this.setAttribute("type", v);
+  },
+});
+let appEsc = 0;
+doc.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") appEsc++;
+});
+globalThis.document = doc;
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const { createRoot } = await import("react-dom/client");
+const { act } = await import("react");
+
+const settle = () => new Promise((r) => setTimeout(r, 5));
+async function mount(el) {
+  const box = doc.createElement("div");
+  doc.body.appendChild(box);
+  const root = createRoot(box);
+  await act(async () => {
+    root.render(el);
+    await settle();
+  });
+  return { box, done: async () => (await act(async () => root.unmount()), box.remove()) };
+}
+const click = (el) =>
+  act(async () => {
+    el.dispatchEvent(new win.Event("click", { bubbles: true }));
+    await settle();
+  });
+/** A key pressed where focus is: whether the app's own Esc heard it. */
+const press = async (key, el = doc.activeElement) => {
+  const was = appEsc;
+  const e = new win.Event("keydown", { bubbles: true, cancelable: true });
+  Object.defineProperty(e, "key", { value: key });
+  await act(async () => {
+    el.dispatchEvent(e);
+    await settle();
+  });
+  return { heard: appEsc > was };
+};
+const type = (el, value) =>
+  act(async () => {
+    el.focus();
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value").set.call(el, value);
+    el.dispatchEvent(new win.Event("input", { bubbles: true }));
+    await settle();
+  });
+const submit = (form) =>
+  act(async () => {
+    form.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+  });
+/** A button by its aria-label, or by its words. */
+const button = (el, label) => [...el.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === label || b.textContent.trim() === label);
+/** A change Orgo answers once `release` is called (it's still saving until then). */
+const later = (answer) => {
+  const held = {};
+  held.route = () => new Promise((r) => (held.release = () => r(answer)));
+  return held;
+};
+
+let tabs = 0;
+/** An app's tab on its own workspace (so nothing read for another shows), the zone as `zone` says, Orgo answering changes as `change` does. */
+async function dnsTab(zone = {}, change = {}) {
+  routes = {
+    "/api/hosted-apps": { body: { enabled: true, apps: [shopApp()] } },
+    "/api/hosted-apps/shop/commits": { body: HISTORY },
+    "/api/hosted-apps/shop/dns": { body: { ...DOMAINS, zones: [{ ...DOMAINS.zones[0], ...zone }] } },
+    ...change,
+  };
+  const m = await mount(h(H.HostedAppTab, { ws: `ws_dns${++tabs}`, name: "shop" }));
+  await act(settle);
+  const z = m.box.querySelector('[data-zone="acme.example"]');
+  assert.ok(z, "its zone, read");
+  return { ...m, zone: () => m.box.querySelector('[data-zone="acme.example"]'), line: (r) => m.box.querySelector(`[data-record="${r.id}"]`) };
+}
+const [, , MX, SRV] = RECORDS;
+const MX2 = rec("mxnew", "MX", "", "mx2.acme.example", { priority: 10 });
+const WWW = rec("awww", "A", "www", "203.0.113.10");
+const RECORD = (r) => `/api/hosted-apps/shop/dns/records/${r.id}`;
+
+await test("Esc while a change saves: the form stays, saying so, and closes once it's written, focus on the record as it is now", async () => {
+  const saved = later({ body: { zone: ZONE, records: [RECORDS[0], RECORDS[1], MX2, SRV] } });
+  const t = await dnsTab({}, { [RECORD(MX)]: saved.route });
+  try {
+    await click(button(t.zone(), "Change the MX record at @"));
+    const form = t.zone().querySelector(`[data-record-form="${MX.id}"]`);
+    assert.ok(form, "the form, in its line's place");
+    assert.equal(doc.activeElement.getAttribute("aria-label"), "Name", "its name, to start");
+    await type(form.querySelector('input[aria-label="Value"]'), "mx2.acme.example");
+    await submit(form);
+    assert.equal(button(form, "Saving…")?.disabled, true, "saving, and Cancel can't be pressed");
+    const esc = await press("Escape");
+    assert.ok(form.isConnected && button(form, "Saving…"), "nor can Esc call it back: the form stays");
+    assert.equal(esc.heard, false, "and the app's Esc doesn't hear it");
+    await act(async () => {
+      saved.release();
+      await settle();
+    });
+    assert.ok(!t.zone().querySelector("[data-record-form]"), "closed once it's written");
+    assert.ok(t.line(MX2) && !t.line(MX), "the record as it is now");
+    assert.ok(doc.activeElement === button(t.line(MX2), "Change the MX record at @"), "focus on it, where it was asked");
+  } finally {
+    await t.done();
+  }
+});
+
+await test("Esc while a change saves that Orgo refuses: the form is still there with what was typed, the field ringed and why", async () => {
+  const refused = later({ status: 400, body: { error: "Enter a full hostname, like mail.example.com.", field: "value" } });
+  const t = await dnsTab({}, { [RECORD(MX)]: refused.route });
+  try {
+    await click(button(t.zone(), "Change the MX record at @"));
+    const form = t.zone().querySelector(`[data-record-form="${MX.id}"]`);
+    const value = form.querySelector('input[aria-label="Value"]');
+    await type(value, "mail");
+    await submit(form);
+    await press("Escape");
+    await act(async () => {
+      refused.release();
+      await settle();
+    });
+    assert.ok(form.isConnected, "still open");
+    assert.equal(value.value, "mail", "what was typed");
+    assert.equal(value.getAttribute("aria-invalid"), "true", "the field to fix");
+    assert.equal(form.querySelector('[role="alert"]')?.textContent, "Enter a full hostname, like mail.example.com.", "why, in the form");
+    assert.equal(t.zone().querySelectorAll('[role="alert"]').length, 1, "and nowhere else");
+  } finally {
+    await t.done();
+  }
+});
+
+await test("a remove refused: why shows under its question, which stays with Cancel focused; Esc closes only the question, focus back on its trash", async () => {
+  const RATE = "That's as many DNS changes as Orgo takes in an hour. Try again later.";
+  const t = await dnsTab({}, { [RECORD(MX)]: { status: 429, body: { error: RATE } } });
+  try {
+    const asked = () => t.line(MX).parentElement;
+    await click(button(t.zone(), "Remove the MX record at @"));
+    assert.match(asked().textContent, /Remove the MX record at @\? It stops answering in a minute or two\./, "under its line, saying when it stops answering");
+    assert.equal(doc.activeElement.textContent, "Cancel");
+    await click(button(asked(), "Remove"));
+    assert.deepEqual(calls.at(-1), { url: RECORD(MX), method: "DELETE", body: { ws: `ws_dns${tabs}`, zone: ZONE } });
+    assert.equal(asked().querySelector('[role="alert"]')?.textContent, RATE, "why, under the question");
+    assert.equal(t.zone().querySelectorAll('[role="alert"]').length, 1, "and not again under Add record");
+    assert.ok(button(asked(), "Remove") && doc.activeElement.textContent === "Cancel", "still asking, Cancel focused");
+    assert.ok(t.line(MX), "and the record is still there");
+
+    const esc = await press("Escape");
+    assert.equal(esc.heard, false, "Esc closes the question, and the app's Esc doesn't hear it");
+    assert.ok(!button(asked(), "Remove") && !t.zone().querySelector('[role="alert"]'), "the question gone, and why with it");
+    assert.ok(doc.activeElement === button(t.line(MX), "Remove the MX record at @"), "back on the trash that asked");
+    await click(button(t.zone(), "Remove the MX record at @"));
+    await click(button(asked(), "Cancel"));
+    assert.ok(doc.activeElement === button(t.line(MX), "Remove the MX record at @"), "Cancel too");
+  } finally {
+    await t.done();
+  }
+});
+
+await test("a record removed: focus goes to the next one (else the one before, else Add record); while the zone isn't answering, the question doesn't say it stops", async () => {
+  const t = await dnsTab(
+    { serving: false },
+    { [RECORD(MX)]: { body: { zone: ZONE, records: [RECORDS[0], RECORDS[1], SRV] } }, [RECORD(SRV)]: { body: { zone: ZONE, records: [RECORDS[0], RECORDS[1]] } } },
+  );
+  try {
+    await click(button(t.zone(), "Remove the MX record at @"));
+    assert.match(t.line(MX).parentElement.textContent, /Remove the MX record at @\?/);
+    assert.doesNotMatch(t.zone().textContent, /stops answering/, "its records don't answer now, so nothing stops");
+    await click(button(t.line(MX).parentElement, "Remove"));
+    assert.ok(!t.line(MX), "gone");
+    assert.ok(doc.activeElement === button(t.line(SRV), "Change the SRV record at _sip._tcp"), "the next record");
+    await click(button(t.zone(), "Remove the SRV record at _sip._tcp"));
+    await click(button(t.line(SRV).parentElement, "Remove"));
+    assert.ok(doc.activeElement === button(t.zone(), "Add record"), "the last of the user's: Add record (Orgo's own can't take focus)");
+  } finally {
+    await t.done();
+  }
+});
+
+await test("a form closed: Esc or Cancel back where it was asked, kept from the app's Esc; a record added, Add record again", async () => {
+  const t = await dnsTab({}, { "/api/hosted-apps/shop/dns/records": { body: { zone: ZONE, records: [...RECORDS, WWW] } } });
+  try {
+    await click(button(t.zone(), "Change the SRV record at _sip._tcp"));
+    assert.ok(t.zone().querySelector(`[data-record-form="${SRV.id}"]`));
+    const esc = await press("Escape");
+    assert.equal(esc.heard, false, "the app's Esc doesn't hear it");
+    assert.ok(!t.zone().querySelector("[data-record-form]"));
+    assert.ok(doc.activeElement === button(t.line(SRV), "Change the SRV record at _sip._tcp"), "back on its Change");
+
+    await click(button(t.zone(), "Add record"));
+    const fresh = t.zone().querySelector('[data-record-form="new"]');
+    await click(button(fresh, "Cancel"));
+    assert.ok(doc.activeElement === button(t.zone(), "Add record"), "back on Add record");
+
+    await click(button(t.zone(), "Add record"));
+    const form = t.zone().querySelector('[data-record-form="new"]');
+    await type(form.querySelector('input[aria-label="Name"]'), "www");
+    await type(form.querySelector('input[aria-label="Value"]'), "203.0.113.10");
+    await submit(form);
+    assert.deepEqual(calls.at(-1).body, { type: "A", name: "www", value: "203.0.113.10", ws: `ws_dns${tabs}`, zone: ZONE });
+    assert.ok(t.line(WWW) && !t.zone().querySelector("[data-record-form]"), "added");
+    assert.ok(doc.activeElement === button(t.zone(), "Add record"), "Add record, for the next one");
+  } finally {
+    await t.done();
+  }
 });
 
 console.log(`\n${passed} passed`);

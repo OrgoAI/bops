@@ -148,7 +148,8 @@ const isApp = (a: unknown): a is MadeApp => !!a && typeof a === "object" && type
  * list says was going on that isn't going on in this process stopped when Bops did.
  */
 export function loadLocalApps() {
-  if (onRunner() || !stateReady()) return;
+  // Only for an account apps are open to (lib/apps-access.ts): anyone else's list left on this Mac stays there, unread.
+  if (onRunner() || !stateReady() || !appsOpen(getState())) return;
   const file = listFile();
   if (!file) return;
   const key = `${file}\n${stateEpoch()}`;
@@ -180,7 +181,7 @@ export function loadLocalApps() {
 
 /** The list written to this Mac's copy, all or nothing (never before the copy there was read in). */
 function saveLocal() {
-  if (onRunner() || !stateReady()) return;
+  if (onRunner() || !stateReady() || !appsOpen(getState())) return;
   const file = listFile();
   if (!file) return;
   loadLocalApps();

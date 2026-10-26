@@ -8,6 +8,7 @@ import { BLOCKER_ASK, BRAINS_ON, brainOf, live, ownerSent, pairChatId, routineSe
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
 import { OpenLink } from "./panel-tabs";
+import { appsShown } from "@/lib/apps-access";
 import { crmOpen } from "@/lib/crm-access";
 import { isViewerOwn, ownerWho } from "@/lib/shared";
 import { CrmNote } from "./crm";
@@ -1420,15 +1421,18 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     ) : null;
 
   // A bot building or changing an app: Show it, Open it, or Undo the change (made-apps.tsx). Like
-  // CrmNote, a new one rises in inside a box that leaves its own alignment as it was.
+  // CrmNote, a new one rises in inside a box that leaves its own alignment as it was. Only where apps
+  // are shown (lib/apps-access.ts): anyone else's line from before isn't there at all.
   if (m.role === "system" && m.madeApp)
-    return enter ? (
-      <div className={`flex w-full flex-col ${enterClass}`}>
+    return appsShown(state) ? (
+      enter ? (
+        <div className={`flex w-full flex-col ${enterClass}`}>
+          <MadeAppLine m={m} state={state} />
+        </div>
+      ) : (
         <MadeAppLine m={m} state={state} />
-      </div>
-    ) : (
-      <MadeAppLine m={m} state={state} />
-    );
+      )
+    ) : null;
 
   // A call a bot made with one of your keys (keys.tsx): the service, the method and the path.
   const api = apiCallOf(m);

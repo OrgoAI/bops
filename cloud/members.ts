@@ -7,7 +7,7 @@ import { timeOf } from "./member-access.ts";
 import { planSigned } from "./plans.ts";
 import { MESSAGES_PER_CHAT, WS_NOT_SHAREABLE, WS_ROLES, type SharedWsState, type SharedWsUnchanged, type WsAccess, type WsRole } from "./protocol.ts";
 import { chatPage, chatsSeq, loadState, recentMessages, sendZipped, type MessageRow } from "./state.ts";
-import { botsOf, chatIdsOf, handedByOthers, sharedHash, sharedMessages, sharedSlice, type SliceViewer } from "./ws-slice.ts";
+import { appThreadsOf, botsOf, chatIdsOf, handedByOthers, sharedHash, sharedMessages, sharedSlice, type SliceViewer } from "./ws-slice.ts";
 
 /**
  * Shared workspaces, read only (protocol.ts "Shared workspaces"): someone the owner added to one of their
@@ -221,9 +221,10 @@ const STATE_PATH = /^\/v1\/ws\/([A-Za-z0-9-]{1,64})\/state$/;
 /**
  * A member's copy of the owner's messages: as they're shown (ws-slice.ts), and for anyone but the owner
  * (`bots`, the ones they see) without any other bot's, its hand-off notes too (`handed`: the threads it
- * handed over). A removed message's row (json null) is no message.
+ * handed over), nor anything of the owner's apps (`apps`: their threads). A removed message's row (json null) is no message.
  */
-const shown = (rows: MessageRow[], bots?: ReadonlySet<string>, handed?: ReadonlySet<string>) => sharedMessages(rows.flatMap((r) => (r.json ? [r.json] : [])), bots, handed);
+const shown = (rows: MessageRow[], bots?: ReadonlySet<string>, handed?: ReadonlySet<string>, apps?: ReadonlySet<string>) =>
+  sharedMessages(rows.flatMap((r) => (r.json ? [r.json] : [])), bots, handed, apps);
 
 const readState: Route = {
   method: "GET",
@@ -240,6 +241,7 @@ const readState: Route = {
     const slice = sharedSlice(blob, target.ws, viewer);
     const bots = viewer.role === "owner" ? undefined : botsOf(slice);
     const handed = bots && handedByOthers(blob, bots);
+    const apps = bots && appThreadsOf(blob);
     // The owner's state hasn't come up yet, or no longer has this workspace: nothing to show of it.
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     // Which workspace each chat is in, for an owner the cloud has seen nothing of since it started (live.ts).
@@ -258,12 +260,12 @@ const readState: Route = {
       if (!chatIds.includes(chat)) throw new HttpError(404, "No such chat");
       if (!Number.isSafeInteger(before) || before < 0) throw new HttpError(400, "before must be a time (ms)");
       const page = await chatPage(target.account, chat, before, MESSAGES_PER_CHAT, url.searchParams.get("beforeId") ?? undefined);
-      const body: SharedWsState = { ...head, state: slice, messages: shown(page.rows, bots, handed), more: page.more ? [chat] : [] };
+      const body: SharedWsState = { ...head, state: slice, messages: shown(page.rows, bots, handed, apps), more: page.more ? [chat] : [] };
       return sendZipped(req, res, 200, body);
     }
     if (url.searchParams.get("have") === `${hash}.${seq}`) return sendZipped(req, res, 200, { hash, seq, unchanged: true } satisfies SharedWsUnchanged);
     const recent = await recentMessages(target.account, chatIds, MESSAGES_PER_CHAT);
-    const body: SharedWsState = { ...head, state: slice, messages: shown(recent.rows, bots, handed), more: recent.more };
+    const body: SharedWsState = { ...head, state: slice, messages: shown(recent.rows, bots, handed, apps), more: recent.more };
     await sendZipped(req, res, 200, body);
   },
 };

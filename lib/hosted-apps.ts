@@ -78,3 +78,73 @@ export type HostedAppsAnswer = { enabled: boolean; why?: string; apps: HostedApp
  * GET /api/hosted-apps/[name]/logs?ws=&after= answers the newest deploy's { state, log, next, more }.
  */
 export type HostedAppAction = { ws: string; action: "deploy"; at?: string; botId?: string };
+
+/* ---------------- Its domains and their DNS ---------------- */
+
+/**
+ * The record types a domain bought through Orgo can have (orgo-web lib/domains/records.ts). MX has a
+ * priority; SRV a priority, a weight and a port.
+ */
+export const DNS_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "SRV"] as const;
+export type DnsType = (typeof DNS_TYPES)[number];
+
+/** What a record of that type takes besides its name and value. */
+export const dnsNeeds = (type: string) => ({ priority: type === "MX" || type === "SRV", weight: type === "SRV", port: type === "SRV" });
+
+/** One record of a bought domain's zone. `name` is relative to it ("" for the domain itself, "www", "_dmarc"). */
+export type AppDnsRecord = {
+  /** Orgo's id for it, made from what it says: any change gives it a new one. */
+  id: string;
+  type: DnsType;
+  name: string;
+  fqdn: string;
+  value: string;
+  priority?: number;
+  weight?: number;
+  port?: number;
+  /** Orgo wrote it so a domain reaches a computer, and keeps it: why, in words (null: the user's own, to change). */
+  locked: string | null;
+};
+
+/** A record as it's typed to add it, or as it becomes (a change sends all of it). Numbers may come as typed. */
+export type AppDnsInput = { type: string; name: string; value: string; priority?: number | string; weight?: number | string; port?: number | string };
+
+/**
+ * A domain bought through Orgo that points at the app (or one of its names does), and its DNS records.
+ * `id` is the bought domain's at Orgo, what a change names; `serving` is false while its nameservers are
+ * someone else's, when the records are kept but don't answer. `error`: the records couldn't be read.
+ */
+export type AppDnsZone = { id: string; domain: string; serving: boolean; ttl: number | null; records: AppDnsRecord[]; error?: string };
+
+export type AppDomainStatus = "pending" | "verifying" | "active" | "failed" | "disabled";
+
+/** One of the app's domains: one its computer serves on the app's port (orgo-web custom_domains.target_port). */
+export type AppDomain = {
+  id: string;
+  domain: string;
+  status: AppDomainStatus;
+  /** Its HTTPS certificate: issued once the edge allowed one (an active domain gets it on its first visit). */
+  cert: "pending" | "issued";
+  /** Bought through Orgo: Orgo writes its records itself, in the zone `zone` (null when it can't be told which). */
+  managed: boolean;
+  zone: string | null;
+  /**
+   * One bought elsewhere, not live yet: the records to set where its DNS is kept, and what Orgo found
+   * when it looked (none when it couldn't look). `where`: who keeps its DNS, when Orgo could tell.
+   */
+  publish: { type: string; name: string; value: string; found?: "ok" | "missing" | "wrong" }[];
+  where?: string | null;
+};
+
+/**
+ * GET /api/hosted-apps/[name]/dns?ws= : its public address on orgo.dev, the domains that point at it, and
+ * the zones of the ones bought through Orgo (each once, however many of its names point here).
+ * POST …/dns/records { ws, zone, ...AppDnsInput } adds a record, PATCH …/dns/records/[id] { ws, zone,
+ * ...AppDnsInput } changes one (all of it), DELETE …/dns/records/[id] { ws, zone } removes one (`zone`:
+ * the AppDnsZone's id). Each answers AppDnsWritten, or { error, field? }, and when the records changed
+ * since the window read them, { error, stale: true, zone?, records? } with them as they are now.
+ */
+export type AppDomainsAnswer = { url: string | null; domains: AppDomain[]; zones: AppDnsZone[] };
+
+/** A zone's records as a change wrote them (a change never moves its nameservers, so `serving` stays as it was). */
+export type AppDnsWritten = { zone: string; records: AppDnsRecord[] };

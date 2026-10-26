@@ -39,16 +39,22 @@ export async function apiKey(): Promise<string> {
   throw new Error("Not signed in to Orgo");
 }
 
-/** Orgo turned a call down: its HTTP status, its code when it sent one (VM_SLOT_ADDON, NOT_FORKABLE…), and its own words. */
+/**
+ * Orgo turned a call down: its HTTP status, its code when it sent one (VM_SLOT_ADDON, NOT_FORKABLE…), its
+ * own words, and the rest of what it answered (`answer`: the field a DNS record got wrong, the computer a
+ * name points at), for a caller that says more than the words.
+ */
 export class OrgoError extends Error {
   status: number;
   code?: string;
   said?: string;
-  constructor(message: string, status: number, code?: string, said?: string) {
+  answer?: Record<string, unknown>;
+  constructor(message: string, status: number, code?: string, said?: string, answer?: Record<string, unknown>) {
     super(message);
     this.status = status;
     this.code = code;
     this.said = said;
+    this.answer = answer;
   }
 }
 
@@ -192,6 +198,7 @@ async function call<T>(
         res.status,
         code,
         typeof json.error === "string" ? json.error : undefined,
+        json && typeof json === "object" && !Array.isArray(json) ? json : undefined,
       );
     return json as T;
   }
@@ -1177,6 +1184,90 @@ export const deploys = {
   /** A deploy's build log after the line `after` (0: from the start). */
   logs: (computerId: string, deploymentId: string, after = 0) =>
     hostingCall<OrgoDeployLog>("GET", `/computers/${encodeURIComponent(computerId)}/deployments/${encodeURIComponent(deploymentId)}/logs?after=${Math.max(0, Math.floor(after))}`),
+};
+
+/** A record Orgo says to set for a custom domain (dns_records): `name` in full, `host` as a DNS provider's Host field takes it. */
+export type OrgoDomainRecord = { type: string; name: string; host?: string; zone?: string | null; value: string };
+
+/**
+ * A custom domain on a computer (orgo-web lib/db/domains.ts presentDomain): the port it serves there, and
+ * whether Orgo writes its records itself (bought through Orgo). Which bought domain that is isn't said.
+ */
+export type OrgoCustomDomain = {
+  id: string;
+  domain: string;
+  status: "pending" | "verifying" | "active" | "failed" | "disabled";
+  target_port: number;
+  verified_at?: string | null;
+  cert_status?: "pending" | "issued";
+  managed?: boolean;
+  dns_records?: OrgoDomainRecord[];
+};
+
+/** A record of a bought domain's zone (orgo-web lib/domains/records.ts DnsRecordView); `managed` when Orgo wrote it for a computer. */
+export type OrgoDnsRecord = {
+  id: string;
+  type: string;
+  name: string;
+  fqdn: string;
+  value: string;
+  priority?: number;
+  weight?: number;
+  port?: number;
+  managed: null | { computer_id: string; computer_name: string | null; custom_domain_id: string };
+};
+
+/** A bought domain's zone as orgo-web reads it from its registrar. */
+export type OrgoZone = { domain: string; nameservers?: { mode: "orgo" | "custom"; list: string[] }; serving?: boolean; ttl_seconds?: number | null; records?: OrgoDnsRecord[] };
+
+/** What Orgo found when it looked up a custom domain's records (GET …/dns-check). */
+export type OrgoDnsCheck = {
+  zone?: string | null;
+  provider?: { id: string; name: string } | null;
+  records?: (OrgoDomainRecord & { status: "ok" | "missing" | "wrong" })[];
+};
+
+/** A record as orgo-web takes it to add or change one (the whole record either way). */
+export type OrgoRecordInput = { type: string; name: string; value: string; priority?: number | string; weight?: number | string; port?: number | string };
+
+/** One part of a path, as it goes in the URL. */
+const seg = (s: string) => encodeURIComponent(s);
+
+/**
+ * orgo-web's domains, with the user's key: the custom domains a computer serves (each on one of its ports),
+ * and the DNS of a domain bought through Orgo, in its workspace. Changes to a zone rewrite all of it at the
+ * registrar, at most 60 an hour per person, and nothing here touches a computer, so none waits for one to
+ * wake. Anything Orgo turns down throws its OrgoError, with all it answered.
+ */
+export const domains = {
+  /** The computer's custom domains, and the workspace's bought domains it can use (`owned_domains`, only when it can take one). */
+  ofComputer: (computerId: string) =>
+    call<{ enabled?: boolean; owned_domains?: { id: string; domain: string }[]; domains?: OrgoCustomDomain[] }>("GET", `/computers/${seg(computerId)}/domains`, undefined, { wait: false }),
+  /**
+   * The Orgo workspace a computer is in, whose bought domains are the ones it can serve (null: Orgo didn't
+   * say). Only the id is kept: the computer's record carries its VNC password.
+   */
+  workspaceOf: async (computerId: string) => {
+    const c = await call<{ workspace_id?: unknown; project_id?: unknown }>("GET", `/computers/${seg(computerId)}`, undefined, { wait: false });
+    const id = c.workspace_id ?? c.project_id;
+    return typeof id === "string" && id ? id : null;
+  },
+  /** What the internet answers for one of them now, beside what it should (30 looks a minute per person). */
+  check: (computerId: string, domainId: string) => call<OrgoDnsCheck>("GET", `/computers/${seg(computerId)}/domains/${seg(domainId)}/dns-check`, undefined, { wait: false }),
+  /** The workspace's bought domains. */
+  bought: (projectId: string) =>
+    call<{ enabled?: boolean; domains?: { id: string; domain: string; status: string }[] }>("GET", `/projects/${seg(projectId)}/domains`, undefined, { wait: false }),
+  /** A bought domain's zone: where it's answered and every record in it. */
+  zone: (projectId: string, domainId: string) => call<OrgoZone>("GET", `/projects/${seg(projectId)}/domains/${seg(domainId)}/dns`, undefined, { wait: false }),
+  /** Add a record; answers it and the zone as written. */
+  addRecord: (projectId: string, domainId: string, r: OrgoRecordInput) =>
+    call<{ record: OrgoDnsRecord; records: OrgoDnsRecord[] }>("POST", `/projects/${seg(projectId)}/domains/${seg(domainId)}/dns/records`, r, { wait: false }),
+  /** Change a record (`r` is all of it, as it becomes); answers it and the zone as written. */
+  changeRecord: (projectId: string, domainId: string, recordId: string, r: OrgoRecordInput) =>
+    call<{ record: OrgoDnsRecord; records: OrgoDnsRecord[] }>("PATCH", `/projects/${seg(projectId)}/domains/${seg(domainId)}/dns/records/${seg(recordId)}`, r, { wait: false }),
+  /** Remove a record; answers the zone as written. */
+  removeRecord: (projectId: string, domainId: string, recordId: string) =>
+    call<{ deleted: boolean; records: OrgoDnsRecord[] }>("DELETE", `/projects/${seg(projectId)}/domains/${seg(domainId)}/dns/records/${seg(recordId)}`, undefined, { wait: false }),
 };
 
 /** Screen id for an X display number: 99 is the boot screen, 100-102 are created screens. */

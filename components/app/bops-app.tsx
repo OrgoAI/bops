@@ -1,6 +1,6 @@
 "use client";
 
-import { appsOpen } from "@/lib/apps-access";
+import { appsShown } from "@/lib/apps-access";
 import { screenMap } from "@/lib/screens";
 import { chatAsks } from "@/lib/asks";
 import { useEffect, useRef, useState } from "react";
@@ -335,7 +335,7 @@ function Bops({ state }: { state: AppState | null }) {
   // and for apps, the ones bots made and those on the web (lib/apps-access.ts), which a shared workspace never shows (they're its owner's).
   const crm = crmOpen(state);
   const memory = categoriesOpen(state);
-  const apps = appsOpen(state) && !state.shared;
+  const apps = appsShown(state);
   const tabs = tabsShown(openTabs, state, { chatBotId, ws: currentWorkspace(state), crm, memory, apps });
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
   // The footer's pill: People while its sheet is open, else the page in sight on the right.

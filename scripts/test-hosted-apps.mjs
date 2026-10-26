@@ -19,10 +19,14 @@
 // unless Alex's own words asked); a deploy makes its project the first time (source ingot) and queues the newest or an
 // older changeset after (the project names none, and one lost track of is found by its Ingot repo), setting Ingot up
 // first on a computer with no token of the workspace's; deploy_app takes a short id; the deploy project names its repo
-// "<project>/<name>", as orgo-web takes it; the routes, writes from the Bops window only. Every script sent to a
-// computer passes bash -n, and nothing a person or a bot reads has a dash.
+// "<project>/<name>", as orgo-web takes it; an app's domains are the ones its computer serves on its deploy project's
+// port, a bought domain's zone is read once with Orgo's records locked (and why), one bought elsewhere has the records to
+// set, and DNS changes go only to the zone of a domain that points at the app, with Orgo's refusals in plain words; the
+// routes, writes from the Bops window only. Every script sent to a computer passes bash -n, and nothing a person or a
+// bot reads has a dash.
 //
-// orgo-web is a fake (a computer's status and bash, the deploy routes, answered from a stubbed fetch), the central
+// orgo-web is a fake (a computer's status and bash, the deploy routes, its custom domains and a bought domain's zone,
+// answered from a stubbed fetch), the central
 // Ingot is a fake (its workspace paths, signing in with Orgo keys and workspace roles, agent tokens), each computer is a
 // fake that runs only the commands Bops sends (one runs the token's commands in a real shell, with openssl), OpenAI is a fake, sessions.ts is a stand-in that records the tasks started, the
 // Keychain is never there, and the state lives in a throwaway folder: nothing reaches a real service. The keys in it
@@ -362,7 +366,7 @@ async function orgoWeb(req) {
   m = url.pathname.match(/^\/api\/computers\/([^/]+)$/);
   if (m && req.method === "GET") {
     const c = fleet.get(m[1]);
-    return c ? json({ id: c.id, name: c.name ?? c.id, status: c.status, cpu: 4, ram: 16, os: "linux" }) : json({ error: "Not found" }, 404);
+    return c ? json({ id: c.id, name: c.name ?? c.id, status: c.status, cpu: 4, ram: 16, os: "linux", ...(c.project ? { project_id: c.project } : {}) }) : json({ error: "Not found" }, 404);
   }
   m = url.pathname.match(/^\/api\/computers\/([^/]+)\/bash$/);
   if (m && req.method === "POST") {
@@ -409,8 +413,130 @@ async function orgoWeb(req) {
     }
     return json({ error: "no" }, 405);
   }
+  m = url.pathname.match(/^\/api\/computers\/([^/]+)\/domains(?:\/([^/]+)\/dns-check)?$/);
+  if (m && req.method === "GET") {
+    const [, computerId, domainId] = m;
+    if (!fleet.has(computerId)) return json({ error: "Desktop not found" }, 404);
+    const here = web.domains.filter((d) => d.computerId === computerId);
+    if (domainId) {
+      const d = here.find((x) => x.id === domainId);
+      if (!d) return json({ error: "Not found" }, 404);
+      // What a look at the internet finds: the challenge is there, the CNAME isn't yet (hosts relative to the zone it found).
+      const sub = d.domain.split(".").slice(0, -2).join(".");
+      return json({ zone: d.domain.split(".").slice(-2).join("."), provider: { id: "cloudflare", name: "Cloudflare", dashboard_url: null, tips: [] }, records: [{ type: "TXT", name: `_orgo-verify.${d.domain}`, host: `_orgo-verify.${sub}`, value: d.token, status: "ok", found: [d.token] }, { type: "CNAME", name: d.domain, host: sub, value: "edge.orgo.dev", status: "missing", found: [] }], extra: [], checked_at: iso() });
+    }
+    // The active bought domains of the computer's own workspace (orgo-web ownedDomainsFor).
+    const owned = web.bought.filter((b) => b.project === (fleet.get(computerId).project ?? PROJECT) && b.status === "active").map(({ id, domain }) => ({ id, domain }));
+    return json({ enabled: true, limit: -1, used: here.length, cname_target: "edge.orgo.dev", apex_ipv4: "203.0.113.10", ...(web.ownedHidden ? {} : { owned_domains: owned }), domains: here.map(customDomainView) });
+  }
+  m = url.pathname.match(/^\/api\/projects\/([^/]+)\/domains(?:\/([^/]+)(\/dns(?:\/records(?:\/([^/]+))?)?)?)?$/);
+  if (m) {
+    const [, project, domainId, dns, recordId] = m;
+    if (web.dnsClosed && (domainId || req.method !== "GET")) return json({ error: "Domains are not enabled.", code: "DOMAINS_NOT_ENABLED" }, 404);
+    if (!domainId && req.method === "GET") return json({ enabled: !web.dnsClosed, domains: web.bought.filter((b) => b.project === project).map(({ id, domain, status }) => ({ id, domain, status, pointed: [] })) });
+    const z = web.bought.find((b) => b.id === domainId && b.project === project);
+    if (!z) return json({ error: "This workspace has no such domain.", code: "DOMAIN_NOT_FOUND" }, 404);
+    if (dns === "/dns" && req.method === "GET") return json({ domain: z.domain, nameservers: { mode: z.serving ? "orgo" : "custom", list: [] }, serving: z.serving, ttl_seconds: null, records: z.records.map((r) => zoneRecordView(r, z)) });
+    if (!dns?.startsWith("/dns/records")) return json({ error: "no" }, 405);
+    if (web.dnsLimited) return json({ error: "That’s the most DNS changes for this hour. Try again later.", code: "RATE_LIMITED", retry_after: 1200 }, 429);
+    const at = recordId ? z.records.find((r) => recordIdOf(r) === recordId) : undefined;
+    if (recordId) {
+      if (!at) return json({ error: "This record changed since it was loaded. Load the records again, then try again.", code: "RECORD_NOT_FOUND" }, 404);
+      const by = managedBy(at, z);
+      if (by) return json({ error: `Orgo keeps this record for ${computerName(by.d)}. Disconnect it from ${computerName(by.d)} first.`, code: "RECORD_MANAGED", computer_name: computerName(by.d) }, 409);
+    }
+    if (req.method === "DELETE" && at) {
+      z.records = z.records.filter((r) => r !== at);
+      return json({ deleted: true, records: z.records.map((r) => zoneRecordView(r, z)) });
+    }
+    const typed = parseRecord(body, z);
+    if (typed.field) return json({ error: typed.error, code: "INVALID_RECORD", field: typed.field }, 400);
+    const r = typed.record;
+    const taken = pointedAt(z).find(({ sub }) => (["A", "AAAA", "CNAME"].includes(r.type) && r.name === sub) || r.name === challengeName(sub));
+    if (taken) return json({ error: `${r.name ? `${r.name}.${z.domain}` : z.domain} points at ${computerName(taken.d)}. Disconnect it from ${computerName(taken.d)} first, or use another name.`, code: "NAME_MANAGED", computer_name: computerName(taken.d) }, 409);
+    const others = z.records.filter((o) => o !== at);
+    if (others.some((o) => recordIdOf(o) === recordIdOf(r))) return json({ error: "This record already exists.", code: "RECORD_EXISTS" }, 409);
+    if (req.method === "POST" && !recordId) {
+      z.records.push(r);
+      return json({ record: zoneRecordView(r, z), records: z.records.map((x) => zoneRecordView(x, z)) }, 201);
+    }
+    if (req.method === "PATCH" && at) {
+      z.records = z.records.map((o) => (o === at ? r : o));
+      return json({ record: zoneRecordView(r, z), records: z.records.map((x) => zoneRecordView(x, z)) });
+    }
+    return json({ error: "no" }, 405);
+  }
   return json({ error: "Not found" }, 404);
 }
+
+/* ---------------- orgo-web's domains: a computer's custom domains, and the zone of a domain bought through Orgo ---------------- */
+
+/** Custom domains on the fake computers ({ id, computerId, domain, status, target_port, cert, zone (the bought domain's id, or null), token }). */
+web.domains = [];
+/** Domains the workspace bought through Orgo ({ id, project, domain, status, serving, records }). */
+web.bought = [];
+/** The computer's list without owned_domains (custom domains closed to the account), DNS closed to it, the hourly limit reached. */
+web.ownedHidden = false;
+web.dnsClosed = false;
+web.dnsLimited = false;
+const computerName = (d) => fleet.get(d.computerId)?.name ?? null;
+/** orgo-web's record id (lib/domains/records.ts recordId): what the record says, hashed, so a change gives it a new one. */
+const recordIdOf = (r) =>
+  createHash("sha256")
+    .update([r.type, r.name, r.value, r.priority ?? "", r.weight ?? "", r.port ?? ""].join("|"))
+    .digest("base64url")
+    .slice(0, 16);
+/** The custom domains connected to a bought domain (on any computer), each with its name under it ("" for the domain itself). */
+const pointedAt = (z) => web.domains.filter((d) => d.zone === z.id).map((d) => ({ d, sub: d.domain === z.domain ? "" : d.domain.slice(0, -(z.domain.length + 1)) }));
+const challengeName = (sub) => (sub ? `_orgo-verify.${sub}` : "_orgo-verify");
+/** The records Orgo wrote for a connected computer: the A at its name, and the TXT that proves it. */
+const managedBy = (r, z) => pointedAt(z).find(({ sub }) => (r.type === "A" && r.name === sub) || (r.type === "TXT" && r.name === challengeName(sub)));
+const zoneRecordView = (r, z) => {
+  const by = managedBy(r, z);
+  return {
+    id: recordIdOf(r),
+    type: r.type,
+    name: r.name,
+    fqdn: r.name ? `${r.name}.${z.domain}` : z.domain,
+    value: r.value,
+    ...(r.priority !== undefined ? { priority: r.priority } : {}),
+    ...(r.weight !== undefined ? { weight: r.weight } : {}),
+    ...(r.port !== undefined ? { port: r.port } : {}),
+    managed: by ? { computer_id: by.d.computerId, computer_name: computerName(by.d), custom_domain_id: by.d.id } : null,
+  };
+};
+/** orgo-web's checks on a typed record, as far as these tests type them (its own words). */
+function parseRecord(b, z) {
+  const type = typeof b?.type === "string" ? b.type.trim().toUpperCase() : "";
+  if (!["A", "AAAA", "CNAME", "MX", "TXT", "SRV"].includes(type)) return { field: "type", error: "Pick a type: A, AAAA, CNAME, MX, TXT or SRV." };
+  let name = typeof b.name === "string" ? b.name.trim().toLowerCase() : "";
+  if (name === "@" || name === z.domain) name = "";
+  if (name.endsWith(`.${z.domain}`)) name = name.slice(0, -(z.domain.length + 1));
+  if (name && !/^[a-z0-9_*-]+(\.[a-z0-9_-]+){0,3}$/.test(name)) return { field: "name", error: "Use letters, numbers, hyphens or underscores for the name, like www, or @ for the domain itself." };
+  const value = typeof b.value === "string" ? b.value.trim() : "";
+  if (type === "A" && !/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) return { field: "value", error: "Enter an IPv4 address, like 203.0.113.10." };
+  if (!value) return { field: "value", error: "Enter 1 to 254 characters of plain text, on one line." };
+  if (type !== "MX" && type !== "SRV") return { record: { type, name, value } };
+  const priority = /^\s*\d+\s*$/.test(String(b.priority ?? "")) ? Number(b.priority) : NaN;
+  if (!(priority >= 0 && priority <= 255)) return { field: "priority", error: "Enter a priority from 0 to 255." };
+  return { record: { type, name, value: value.toLowerCase(), priority } };
+}
+const customDomainView = (d) => ({
+  id: d.id,
+  domain: d.domain,
+  status: d.status,
+  target_port: d.target_port,
+  verified_at: d.status === "active" ? iso() : null,
+  cert_status: d.cert ?? "pending",
+  managed: !!d.zone,
+  dns: d.status === "active" ? null : { type: "TXT", name: `_orgo-verify.${d.domain}`, value: d.token },
+  dns_records: d.zone
+    ? [{ type: "TXT", name: `_orgo-verify.${d.domain}`, host: `_orgo-verify.${d.domain}`, zone: d.domain.split(".").slice(-2).join("."), value: d.token }]
+    : [
+        { type: "TXT", name: `_orgo-verify.${d.domain}`, host: `_orgo-verify.${d.domain}`, zone: null, value: d.token },
+        { type: "CNAME", name: d.domain, host: d.domain, zone: null, value: "edge.orgo.dev" },
+      ],
+});
 
 /* ---------------- A fake OpenAI, and the tasks started ---------------- */
 
@@ -480,6 +606,9 @@ const AppsRoute = await import(`${root}/app/api/hosted-apps/route.ts`);
 const AppRoute = await import(`${root}/app/api/hosted-apps/[name]/route.ts`);
 const CommitsRoute = await import(`${root}/app/api/hosted-apps/[name]/commits/route.ts`);
 const LogsRoute = await import(`${root}/app/api/hosted-apps/[name]/logs/route.ts`);
+const DnsRoute = await import(`${root}/app/api/hosted-apps/[name]/dns/route.ts`);
+const RecordsRoute = await import(`${root}/app/api/hosted-apps/[name]/dns/records/route.ts`);
+const RecordRoute = await import(`${root}/app/api/hosted-apps/[name]/dns/records/[recordId]/route.ts`);
 clearInterval(globalThis.__bopsRoutines);
 
 const WS = "ws_main";
@@ -514,6 +643,13 @@ const get = async (Route, path, params) => {
 };
 const post = async (name, body, window = true) => {
   const res = await AppRoute.POST(new Request(`http://localhost:3210/api/hosted-apps/${name}`, { method: "POST", headers: { "content-type": "application/json", ...(window ? { "x-bops-window": UI } : {}) }, body: JSON.stringify(body) }), { params: Promise.resolve({ name }) });
+  return { status: res.status, body: hear(await res.json()) };
+};
+/** A change to an app's DNS through its routes: POST a record, or PATCH or DELETE the one `id` names (from the Bops window unless `window` is false). */
+const dnsChange = async (method, name, body, { id, window = true } = {}) => {
+  const path = `/api/hosted-apps/${name}/dns/records${id ? `/${encodeURIComponent(id)}` : ""}`;
+  const req = new Request(`http://localhost:3210${path}`, { method, headers: { "content-type": "application/json", ...(window ? { "x-bops-window": UI } : {}) }, body: JSON.stringify(body) });
+  const res = await (id ? RecordRoute : RecordsRoute)[method](req, { params: Promise.resolve(id ? { name, recordId: id } : { name }) });
   return { status: res.status, body: hear(await res.json()) };
 };
 const outputOf = (body, i = 0) => body.input.filter((x) => x.type === "function_call_output")[i]?.output;
@@ -1304,6 +1440,221 @@ await check("The newest deploy's log, read on from where it got to", async () =>
   assert.equal(on.body.log, "");
 });
 
+/* ---------------- Its domains and their DNS ---------------- */
+
+const ZONE = "5d0c3a9e-4a2b-4c3d-8e5f-6a7b8c9d0e1f";
+const SHOP_ZONE = "5e1f2a3b-6c7d-4e8f-9a0b-1c2d3e4f5a6b";
+const EDGE = "203.0.113.10";
+const recipeProject = () => web.projects.find((p) => p.id === hostedApps()["recipe-box"].projectId);
+/** One record of what the window got, by type and name. */
+const recordIn = (records, type, name) => records.find((r) => r.type === type && r.name === name);
+const zoneWrites = (n) => web.calls.slice(n).filter((c) => c.method !== "GET" && c.path.startsWith("/api/projects/"));
+
+function domainsAgain() {
+  const port = recipeProject().port;
+  web.ownedHidden = web.dnsClosed = web.dnsLimited = false;
+  web.bought = [
+    {
+      id: ZONE,
+      project: PROJECT,
+      domain: "acme.example",
+      status: "active",
+      serving: true,
+      records: [
+        { type: "TXT", name: "_orgo-verify", value: "tok-apex" },
+        { type: "A", name: "", value: EDGE },
+        { type: "A", name: "www", value: EDGE },
+        { type: "TXT", name: "_orgo-verify.www", value: "tok-www" },
+        { type: "A", name: "blog", value: EDGE },
+        { type: "TXT", name: "_orgo-verify.blog", value: "tok-blog" },
+        { type: "A", name: "ivy", value: EDGE },
+        { type: "MX", name: "", value: "mail.acme.example", priority: 10 },
+        { type: "TXT", name: "", value: "v=spf1 include:_spf.example.com ~all" },
+      ],
+    },
+    { id: SHOP_ZONE, project: PROJECT, domain: "shop.store", status: "active", serving: true, records: [{ type: "A", name: "", value: EDGE }] },
+  ];
+  web.domains = [
+    { id: "cd_apex", computerId: "c_boppy", domain: "acme.example", status: "active", target_port: port, cert: "issued", zone: ZONE, token: "tok-apex" },
+    { id: "cd_www", computerId: "c_boppy", domain: "www.acme.example", status: "active", target_port: port, zone: ZONE, token: "tok-www" },
+    // Another app on the same computer (its own port), and one on another computer: neither is this app's.
+    { id: "cd_blog", computerId: "c_boppy", domain: "blog.acme.example", status: "active", target_port: port + 1, zone: ZONE, token: "tok-blog" },
+    { id: "cd_shop", computerId: "c_boppy", domain: "shop.store", status: "active", target_port: port + 1, zone: SHOP_ZONE, token: "tok-shop" },
+    { id: "cd_ivy", computerId: "c_ivy", domain: "ivy.acme.example", status: "active", target_port: port, zone: ZONE, token: "tok-ivy" },
+    // One bought elsewhere, still waiting for its records; and one on orgo-web's default port, which no app has.
+    { id: "cd_mine", computerId: "c_boppy", domain: "recipes.example.com", status: "pending", target_port: port, zone: null, token: "tok-mine" },
+    { id: "cd_default", computerId: "c_boppy", domain: "old.example.net", status: "active", target_port: 8642, zone: null, token: "tok-old" },
+  ];
+}
+
+await check("An app's domains: the ones its computer serves on its deploy project's port (not another app's, nor orgo-web's default), its public URL; a bought domain's zone read once for its names that point here, Orgo's records locked with why and the user's to change; one bought elsewhere with the records to set and what Orgo's look found; nothing asked of the computer", async () => {
+  domainsAgain();
+  const n = web.calls.length;
+  const was = ran.length;
+  const r = await get(DnsRoute, `/api/hosted-apps/recipe-box/dns?ws=${WS}`, { name: "recipe-box" });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.url, recipeProject().url);
+  assert.deepEqual(r.body.domains.map((d) => d.domain), ["acme.example", "www.acme.example", "recipes.example.com"], "the ones on its port, on its computer");
+  const [apex, www, mine] = r.body.domains;
+  assert.deepEqual([apex.status, apex.cert, apex.managed, apex.zone, apex.publish], ["active", "issued", true, ZONE, []]);
+  assert.deepEqual([www.cert, www.zone], ["pending", ZONE], "a name under a bought domain is in its zone");
+  assert.deepEqual([mine.status, mine.managed, mine.zone, mine.where], ["pending", false, null, "Cloudflare"]);
+  assert.deepEqual(
+    mine.publish,
+    [
+      { type: "TXT", name: "_orgo-verify.recipes", value: "tok-mine", found: "ok" },
+      { type: "CNAME", name: "recipes", value: "edge.orgo.dev", found: "missing" },
+    ],
+    "the records to set, named as its DNS provider takes them, and what Orgo found",
+  );
+  assert.deepEqual(r.body.zones.map((z) => [z.id, z.domain, z.serving, z.ttl]), [[ZONE, "acme.example", true, null]], "one zone, though two of its names point here; not another app's zone");
+  assert.equal(callsSince(n, "GET", /\/domains\/[^/]+\/dns$/).length, 1, "read once");
+  assert.equal(callsSince(n, "GET", /\/dns-check$/).length, 1, "one look, for the one that waits");
+  const records = r.body.zones[0].records;
+  assert.equal(records.length, 9, "the whole zone");
+  assert.equal(recordIn(records, "A", "").locked, "Orgo set this so acme.example reaches this app.");
+  assert.equal(recordIn(records, "TXT", "_orgo-verify").locked, "Orgo set this so acme.example reaches this app.");
+  assert.equal(recordIn(records, "TXT", "_orgo-verify.www").locked, "Orgo set this so www.acme.example reaches this app.");
+  assert.equal(recordIn(records, "A", "blog").locked, "Orgo set this so blog.acme.example reaches another app on this computer.");
+  assert.equal(recordIn(records, "A", "ivy").locked, "Orgo set this so ivy.acme.example reaches another computer.");
+  const mx = recordIn(records, "MX", "");
+  assert.deepEqual([mx.locked, mx.priority, mx.value, mx.fqdn], [null, 10, "mail.acme.example", "acme.example"], "the user's own, to change");
+  assert.equal(recordIn(records, "TXT", "").locked, null);
+  assert.deepEqual(kinds("c_boppy", was), [], "no command reaches the computer");
+  assert.ok(!web.calls.slice(n).some((c) => c.path.endsWith("/bash")));
+});
+
+await check("Its domains when Orgo's list doesn't name the workspace's bought domains (custom domains closed to the account): found in the workspace's own list; an app never deployed has none and asks Orgo nothing; on a computer in another of the user's Orgo workspaces, its zone is that one's; a zone that can't be read says why, its domains still listed", async () => {
+  domainsAgain();
+  web.ownedHidden = true;
+  const n = web.calls.length;
+  const a = hear(await H.appDomains(WS, "recipe-box"));
+  assert.deepEqual(a.zones.map((z) => z.id), [ZONE]);
+  assert.equal(callsSince(n, "GET", new RegExp(`^/api/projects/${PROJECT}/domains$`)).length, 1);
+  web.ownedHidden = false;
+
+  S.update((s) => (s.workspaces.find((w) => w.id === WS).hostedApps["never-live"] = { botId: "boppy", computerId: "c_boppy" }));
+  const m = web.calls.length;
+  assert.deepEqual(await H.appDomains(WS, "never-live"), { url: null, domains: [], zones: [] });
+  assert.equal(web.calls.length, m, "nothing asked");
+  S.update((s) => delete s.workspaces.find((w) => w.id === WS).hostedApps["never-live"]);
+
+  // The computer is in another of the user's Orgo workspaces (one two Bops workspaces share): its bought domains are that one's.
+  const OTHER = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+  boppy.project = OTHER;
+  web.bought[0].project = OTHER;
+  const k = web.calls.length;
+  try {
+    const shared = await H.appDomains(WS, "recipe-box");
+    assert.deepEqual([shared.zones[0].error, shared.zones[0].records.length], [undefined, 9]);
+    assert.equal(callsSince(k, "GET", new RegExp(`^/api/projects/${OTHER}/domains/${ZONE}/dns$`)).length, 1, "read under the computer's workspace");
+    const added = await dnsChange("POST", "recipe-box", { ws: WS, zone: ZONE, type: "TXT", name: "x", value: "y" });
+    assert.equal(added.status, 200);
+    assert.equal(callsSince(k, "POST", new RegExp(`^/api/projects/${OTHER}/domains/${ZONE}/dns/records$`)).length, 1, "and written there");
+  } finally {
+    delete boppy.project;
+    web.bought[0].project = PROJECT;
+  }
+
+  web.dnsClosed = true;
+  const closed = await get(DnsRoute, `/api/hosted-apps/recipe-box/dns?ws=${WS}`, { name: "recipe-box" });
+  assert.equal(closed.status, 200);
+  assert.deepEqual(closed.body.zones, [{ id: ZONE, domain: "acme.example", serving: false, ttl: null, records: [], error: "DNS for domains bought through Orgo isn't open to your Orgo account yet." }]);
+  assert.equal(closed.body.domains.length, 3);
+  web.dnsClosed = false;
+  const gone = await get(DnsRoute, `/api/hosted-apps/nope/dns?ws=${WS}`, { name: "nope" });
+  assert.deepEqual([gone.status, gone.body.error], [404, "There's no app by that name in this workspace."]);
+});
+
+await check("Changing its DNS: add, change and remove go to the zone of a domain that points at the app, as orgo-web takes them, each answering the zone as written (a change gives a record a new id); only from the Bops window; a zone of a domain that points elsewhere, or one never connected, is refused and nothing is written", async () => {
+  domainsAgain();
+  let n = web.calls.length;
+  const added = await dnsChange("POST", "recipe-box", { ws: WS, zone: ZONE, type: "txt", name: "_dmarc", value: "v=DMARC1; p=none", priority: "5" });
+  assert.equal(added.status, 200);
+  assert.deepEqual(zoneWrites(n).map((c) => [c.method, c.path, c.body]), [["POST", `/api/projects/${PROJECT}/domains/${ZONE}/dns/records`, { type: "TXT", name: "_dmarc", value: "v=DMARC1; p=none" }]], "only what a TXT takes");
+  assert.equal(added.body.zone, ZONE);
+  const dmarc = recordIn(added.body.records, "TXT", "_dmarc");
+  assert.deepEqual([dmarc.value, dmarc.locked], ["v=DMARC1; p=none", null]);
+  assert.equal(recordIn(added.body.records, "A", "").locked, "Orgo set this so acme.example reaches this app.", "the zone as written, Orgo's still locked");
+
+  const mx = recordIn(added.body.records, "MX", "");
+  n = web.calls.length;
+  const changed = await dnsChange("PATCH", "recipe-box", { ws: WS, zone: ZONE, type: "MX", name: "@", value: "mx.example.net", priority: "20" }, { id: mx.id });
+  assert.equal(changed.status, 200);
+  assert.deepEqual(zoneWrites(n).map((c) => [c.method, c.path, c.body]), [["PATCH", `/api/projects/${PROJECT}/domains/${ZONE}/dns/records/${mx.id}`, { type: "MX", name: "@", value: "mx.example.net", priority: "20" }]], "the whole record");
+  const now = recordIn(changed.body.records, "MX", "");
+  assert.deepEqual([now.value, now.priority], ["mx.example.net", 20]);
+  assert.notEqual(now.id, mx.id, "a new id for what it says now");
+
+  n = web.calls.length;
+  const removed = await dnsChange("DELETE", "recipe-box", { ws: WS, zone: ZONE }, { id: dmarc.id });
+  assert.equal(removed.status, 200);
+  assert.deepEqual(zoneWrites(n).map((c) => [c.method, c.path, c.body]), [["DELETE", `/api/projects/${PROJECT}/domains/${ZONE}/dns/records/${dmarc.id}`, undefined]]);
+  assert.ok(!recordIn(removed.body.records, "TXT", "_dmarc"));
+
+  // Not from the window: refused before anything is asked of Orgo.
+  n = web.calls.length;
+  for (const [method, id] of [["POST"], ["PATCH", now.id], ["DELETE", now.id]]) {
+    const r = await dnsChange(method, "recipe-box", { ws: WS, zone: ZONE, type: "TXT", name: "x", value: "y" }, { id, window: false });
+    assert.deepEqual([r.status, r.body.error], [403, "DNS can only be changed in the Bops app."], method);
+  }
+  assert.equal(web.calls.length, n, "nothing asked of Orgo");
+
+  // Another app's zone, a bought domain that points nowhere, and a made-up id: refused, nothing written.
+  web.bought.push({ id: "0f0f0f0f-1111-4222-8333-444455556666", project: PROJECT, domain: "spare.dev", status: "active", serving: true, records: [] });
+  n = web.calls.length;
+  for (const zone of [SHOP_ZONE, "0f0f0f0f-1111-4222-8333-444455556666", "11111111-2222-4333-8444-555566667777"]) {
+    const r = await dnsChange("POST", "recipe-box", { ws: WS, zone, type: "A", name: "x", value: "203.0.113.10" });
+    assert.deepEqual([r.status, r.body.error], [404, "That domain doesn't point at this app, so its DNS isn't changed here."], zone);
+    const d = await dnsChange("DELETE", "recipe-box", { ws: WS, zone }, { id: now.id });
+    assert.equal(d.status, 404);
+  }
+  assert.deepEqual(zoneWrites(n), [], "nothing written to any zone");
+  // A zone or record id that isn't one, or a type Orgo has none of: refused before Orgo is asked anything.
+  n = web.calls.length;
+  assert.equal((await dnsChange("POST", "recipe-box", { ws: WS, zone: "../../../computers/c_boppy", type: "A", name: "x", value: "203.0.113.10" })).status, 404);
+  assert.equal((await dnsChange("POST", "recipe-box", { ws: WS, type: "A", name: "x", value: "203.0.113.10" })).status, 404, "no zone named");
+  const badId = await dnsChange("DELETE", "recipe-box", { ws: WS, zone: ZONE }, { id: "../records" });
+  assert.deepEqual([badId.status, badId.body.error], [400, "That isn't a record of this domain."]);
+  const ns = await dnsChange("POST", "recipe-box", { ws: WS, zone: ZONE, type: "NS", name: "x", value: "ns1.example.com" });
+  assert.deepEqual([ns.status, ns.body.error, ns.body.field], [400, "Pick a type: A, AAAA, CNAME, MX, TXT or SRV.", "type"]);
+  assert.equal(web.calls.length, n, "nothing asked of Orgo");
+});
+
+await check("Orgo's refusals in plain words: a record that's Orgo's, a name a computer uses, a value that isn't one (with its field), one that's there already, the hourly limit, DNS not open to the account, and a record that changed since it was read (with the records as they are now)", async () => {
+  domainsAgain();
+  const records = (await H.appDomains(WS, "recipe-box")).zones[0].records;
+  const theirs = await dnsChange("PATCH", "recipe-box", { ws: WS, zone: ZONE, type: "A", name: "", value: "203.0.113.10" }, { id: recordIn(records, "A", "").id });
+  assert.deepEqual([theirs.status, theirs.body.error], [409, "Orgo keeps that record so a domain reaches bops-boppy, so it isn't changed here."]);
+  const gone = await dnsChange("DELETE", "recipe-box", { ws: WS, zone: ZONE }, { id: recordIn(records, "TXT", "_orgo-verify").id });
+  assert.equal(gone.status, 409);
+  const taken = await dnsChange("POST", "recipe-box", { ws: WS, zone: ZONE, type: "A", name: "www", value: "203.0.113.10" });
+  assert.deepEqual([taken.status, taken.body.error, taken.body.field], [409, "Orgo points that name at bops-boppy, so it can't have this record too. Use another name.", "name"]);
+  const bad = await dnsChange("POST", "recipe-box", { ws: WS, zone: ZONE, type: "A", name: "api", value: "not an address" });
+  assert.deepEqual([bad.status, bad.body.error, bad.body.field], [400, "Enter an IPv4 address, like 203.0.113.10.", "value"]);
+  const noPriority = await dnsChange("POST", "recipe-box", { ws: WS, zone: ZONE, type: "MX", name: "", value: "mx2.example.net" });
+  assert.deepEqual([noPriority.status, noPriority.body.field], [400, "priority"]);
+  const twice = await dnsChange("POST", "recipe-box", { ws: WS, zone: ZONE, type: "MX", name: "@", value: "mail.acme.example", priority: 10 });
+  assert.deepEqual([twice.status, twice.body.error], [409, "That record is there already."]);
+
+  web.dnsLimited = true;
+  const limited = await dnsChange("POST", "recipe-box", { ws: WS, zone: ZONE, type: "TXT", name: "x", value: "y" });
+  assert.deepEqual([limited.status, limited.body.error], [429, "That's as many DNS changes as Orgo takes in an hour. Try again later."]);
+  web.dnsLimited = false;
+  web.dnsClosed = true;
+  const closed = await dnsChange("POST", "recipe-box", { ws: WS, zone: ZONE, type: "TXT", name: "x", value: "y" });
+  assert.deepEqual([closed.status, closed.body.error], [404, "DNS for domains bought through Orgo isn't open to your Orgo account yet."]);
+  web.dnsClosed = false;
+
+  // Someone changed the MX since the window read it: refused, with the records as they are now.
+  const mx = recordIn(records, "MX", "");
+  web.bought[0].records = web.bought[0].records.map((r) => (r.type === "MX" ? { ...r, value: "mx.elsewhere.net" } : r));
+  const stale = await dnsChange("PATCH", "recipe-box", { ws: WS, zone: ZONE, type: "MX", name: "", value: "mx.example.net", priority: 10 }, { id: mx.id });
+  assert.deepEqual([stale.status, stale.body.error, stale.body.stale, stale.body.zone], [404, "That record changed since it was read. Here are the records as they are now, so try again.", true, ZONE]);
+  assert.equal(recordIn(stale.body.records, "MX", "").value, "mx.elsewhere.net");
+  assert.ok(recordIn(stale.body.records, "A", "").locked, "Orgo's still locked");
+});
+
 await check("Apps on the web are only for an @orgo.ai account for now: anyone else gets 404s, and a task on an app no Ingot", async () => {
   const was = S.getState().account;
   S.update((s) => (s.account = { user: { id: "u_x", email: "someone@example.com", name: "Someone" }, signedInAt: 1 }));
@@ -1318,6 +1669,12 @@ await check("Apps on the web are only for an @orgo.ai account for now: anyone el
     assert.equal((await get(CommitsRoute, `/api/hosted-apps/recipe-box/commits?ws=${WS}`, { name: "recipe-box" })).status, 404);
     assert.equal((await get(LogsRoute, `/api/hosted-apps/recipe-box/logs?ws=${WS}`, { name: "recipe-box" })).status, 404);
     assert.equal((await post("recipe-box", { ws: WS, action: "deploy" })).status, 404);
+    const n = web.calls.length;
+    assert.equal((await get(DnsRoute, `/api/hosted-apps/recipe-box/dns?ws=${WS}`, { name: "recipe-box" })).status, 404);
+    assert.equal((await dnsChange("POST", "recipe-box", { ws: WS, zone: ZONE, type: "TXT", name: "x", value: "y" })).status, 404);
+    assert.equal((await dnsChange("PATCH", "recipe-box", { ws: WS, zone: ZONE, type: "TXT", name: "x", value: "y" }, { id: "AAAAAAAAAAAAAAAA" })).status, 404);
+    assert.equal((await dnsChange("DELETE", "recipe-box", { ws: WS, zone: ZONE }, { id: "AAAAAAAAAAAAAAAA" })).status, 404);
+    assert.equal(web.calls.length, n, "nothing of its domains asked of Orgo");
     // A task on an app (one from before, or another Mac's) gets no Ingot, nor its folder made ready.
     assert.deepEqual(H.appMcp("ses_ivy_app"), {});
     assert.equal(await H.readyAppForTask("ses_ivy_app", "c_boppy"), undefined);

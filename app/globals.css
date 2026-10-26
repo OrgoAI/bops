@@ -208,8 +208,8 @@
 
 /*
  * Boppy listening to music while Bops loads (BoppyLoading in components/app/mascot.tsx): it bops to
- * the beat, leaning one way then the other, notes drift out of its headphones, and it sings along and
- * blinks now and then. The same scene as the window's splash (desktop/splash.html), so one hands over
+ * the beat, leaning one way then the other, notes drift out of its headphones, and it sings along, its
+ * eyes glancing about and blinking now and then. The same scene as the window's splash (desktop/splash.html), so one hands over
  * to the other without a jump.
  */
 .boppy-loading-scene {
@@ -228,10 +228,18 @@
 }
 /*
  * It sings along, a phrase over four bars: its mouth, shut between lines, opens on the beats, a held
- * note wavering. Its eyes blink now and then, twice sometimes. The eyes and mouth are the awake face's
- * (lib/mascot.ts), found by their shapes, since the pictures carry no classes (scripts/test-bot-moods.mjs
- * holds them to it).
+ * note wavering. Its eyes go with the song: looking up as the awake face does, over to the left,
+ * squeezed shut on the first held note, across to the right (only a little: further, the right eye
+ * slips under its cup), at you, then up, dreamy, on the last note. They blink now and then too, twice
+ * sometimes. The eyes and mouth are the awake face's (lib/mascot.ts), found by their shapes, since the
+ * pictures carry no classes (scripts/test-bot-moods.mjs holds them to it). Each look keeps the eyes' own
+ * translate(.6 -1.4), which a CSS transform replaces.
  */
+.boppy-loading-boppy g[transform="translate(.6 -1.4)"] {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: boppy-look 4.4s ease-in-out infinite;
+}
 .boppy-loading-boppy g[transform="translate(.6 -1.4)"] ellipse {
   transform-box: fill-box;
   transform-origin: center;
@@ -287,6 +295,37 @@
   }
   86% {
     transform: scale(1, 1);
+  }
+}
+@keyframes boppy-look {
+  0%,
+  10%,
+  96%,
+  100% {
+    transform: translate(0.6px, -1.4px);
+  }
+  15%,
+  24% {
+    transform: translate(-0.6px, -1.1px);
+  }
+  29%,
+  41% {
+    transform: translate(0.6px, -1.6px) scaleY(0.3);
+  }
+  46% {
+    transform: translate(0.6px, -1.4px);
+  }
+  52%,
+  66% {
+    transform: translate(1.1px, -1.2px);
+  }
+  72%,
+  78% {
+    transform: translate(0.1px, -0.4px);
+  }
+  83%,
+  90% {
+    transform: translate(0.6px, -2.2px);
   }
 }
 @keyframes boppy-blink {
@@ -402,9 +441,12 @@
     opacity: 0;
   }
 }
+/* The face's own selectors, since a plainer one loses to them however late it comes. */
 @media (prefers-reduced-motion: reduce) {
   .boppy-loading-boppy,
-  .boppy-loading-boppy ellipse,
+  .boppy-loading-boppy g[transform="translate(.6 -1.4)"],
+  .boppy-loading-boppy g[transform="translate(.6 -1.4)"] ellipse,
+  .boppy-loading-boppy ellipse[cy="26.6"],
   .boppy-loading-shadow {
     animation: none;
   }

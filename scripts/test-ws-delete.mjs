@@ -318,6 +318,25 @@ await check("the confirm names its routines and Orbit issues, and says its memor
   assert.deepEqual(bankDeletes(), [], "a preview deletes nothing");
 });
 
+await check("the confirm names the apps its bots made only for an account apps are open to (lib/apps-access.ts): Tiger's kept from before aren't said", async () => {
+  S.update((s) => (s.madeApps = [{ id: "app_tip", title: "Tip calculator", botId: "ash", chatId: botChatId("ash"), ws: "ws_acme", version: 1, versions: [{ n: 1, note: "", at: 1 }], createdAt: 1, updatedAt: 1 }]));
+  orgo.extra.p_acme = { madeApps: [{ title: "Made on Orgo" }] };
+  try {
+    const outside = await preview("ws_acme");
+    assert.equal(outside.status, 200);
+    assert.deepEqual(outside.body.madeApps, [], "tiger@example.com: none named, this Mac's or Orgo's");
+    assert.ok(!JSON.stringify(outside.body).includes("Tip calculator") && !JSON.stringify(outside.body).includes("Made on Orgo"));
+    S.update((s) => (s.account = { ...s.account, user: { ...s.account.user, email: "ava@orgo.ai" } }));
+    assert.deepEqual((await preview("ws_acme")).body.madeApps, ["Tip calculator", "Made on Orgo"], "an @orgo.ai account: both");
+  } finally {
+    S.update((s) => {
+      s.account = { ...s.account, user: { ...s.account.user, email: "tiger@example.com" } };
+      delete s.madeApps;
+    });
+    delete orgo.extra.p_acme;
+  }
+});
+
 /* ---------------- Its own bank ---------------- */
 
 await check("Delete: its own bank goes from Honcho, with what was still to forget in a bank it used before; nothing of it stays on this Mac", async () => {
