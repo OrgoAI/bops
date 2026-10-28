@@ -378,7 +378,7 @@ function BuildStrip({ app }: { app: MadeApp }) {
   const lines = Math.max(1, Math.round((app.building?.chars ?? 0) / 38));
   return (
     <div className="mx-4 mb-4 flex shrink-0 items-center gap-3 rounded-[14px] bg-ink py-2.5 pl-3.5 pr-3">
-      <span className="size-2.5 shrink-0 animate-pulse rounded-full bg-highlighter shadow-[0_0_0_4px_rgba(232,255,58,0.25)]" />
+      <span className="size-2.5 shrink-0 animate-pulse rounded-full bg-highlighter shadow-[0_0_0_4px_color-mix(in_oklab,var(--color-highlighter)_25%,transparent)]" />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="truncate text-[13px] font-medium leading-[17px] text-white">{app.version ? "Making the change" : "Writing the app"}: {app.building?.change}</span>
         <span className="font-mono text-[11px] leading-[14px] text-[color:var(--c-9a9a98)]">{app.building?.chars ? `${lines} lines written` : "starting"}</span>

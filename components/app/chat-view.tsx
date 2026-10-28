@@ -2372,7 +2372,7 @@ function Check({ on }: { on: boolean }) {
     <span className={`flex size-5 items-center justify-center rounded-md ${on ? "bg-ink" : "shadow-[0_0_0_1.5px_var(--c-c9c9c6)]"}`}>
       {on && (
         <svg width="11" height="11" viewBox="0 0 14 14">
-          <path d="M3 7.5l2.5 2.5L11 4.5" fill="none" stroke="#E9FF3B" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M3 7.5l2.5 2.5L11 4.5" fill="none" stroke="var(--color-highlighter)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       )}
     </span>

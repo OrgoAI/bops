@@ -29,6 +29,11 @@ export type Brand = {
    * font the computer loads) and its ink for the home screen's words. None: Bops' own look.
    */
   computer?: { lockup: string; mark: string; font: string; ink: string };
+  /**
+   * The colors the bots' apps use (lib/server/made-apps.ts): `rule` tells the app builder; `swap` turns
+   * Bops' yellow into the brand's in apps written before (a color black text still reads on).
+   */
+  apps: { rule: string; swap?: string };
 };
 
 const BOPS: Brand = {
@@ -39,6 +44,7 @@ const BOPS: Brand = {
   wash: "linear-gradient(160deg in oklab, oklab(96.8% -0.056 0.130) 0%, oklab(95.2% -0.090 0.182) 45%, oklab(86% -0.087 0.168) 100%)",
   bezel: "#C6DE12",
   onInk: "#E8FF3A",
+  apps: { rule: "Calm and light: a white page, neutral grays, black text, rounded-xl, generous spacing, system-ui type. One accent, used sparingly: highlighter yellow #E8FF3A with black text (bg-[#E8FF3A]), for what matters most." },
 };
 
 const MOMENTUM: Brand = {
@@ -52,6 +58,10 @@ const MOMENTUM: Brand = {
   bezel: "#A200FF",
   onInk: "#D2A1FF",
   computer: { lockup: "brand/momentum-lockup-sm.png", mark: "brand/momentum-m-sm.png", font: "Poppins", ink: "#381574" },
+  apps: {
+    rule: "Momentum AMP's purple look: a white page, headings in deep indigo #381574, body text #0C0C0C, soft lavender #F4EEF6 for panels and selected rows, purple-gray borders #E7E1EE, rounded-xl, generous spacing, system-ui type. One accent, used sparingly: violet #A200FF with white text (bg-[#A200FF] text-white) for the main button and what matters most; light violet #D2A1FF for highlights. No yellow, green or blue accents.",
+    swap: "#D2A1FF",
+  },
 };
 
 export const BRAND: Brand = process.env.NEXT_PUBLIC_BOPS_BRAND === "momentum" ? MOMENTUM : BOPS;
