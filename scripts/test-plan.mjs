@@ -911,6 +911,39 @@ assert.equal((await L.orgoPlan({ fresh: true })).freeComputerId, "c-free-0");
 freeOrgo("free", 0);
 assert.deepEqual(plain(await L.orgoPlan({ fresh: true })), { tier: "free", name: "Free", computers: 0, inUse: 0, memory: { total: 4, used: 0, newMax: 4 }, freeComputerId: null });
 
+// Building Bops (BOPS_ORGO_PLAN_COMPUTERS=1 in .env.local): the Orgo plan only, as before Bops plans. Bots on
+// the free Bops computer (whose hours are for customers) leave it, a main bot sharing it gets its own, and a
+// main bot's computer is one on the Orgo plan. The free one is kept on Orgo, untouched.
+{
+  const o = freeOrgo("enterprise", 50, { free: "c-free-dev" });
+  S.update(() => {
+    Object.assign(main(), { computerId: "c-free-dev", freeComputer: true, computerStatus: "ready" });
+    Object.assign(kai(), { computer: "shared", computerStatus: "none" });
+  });
+  process.env.BOPS_ORGO_PLAN_COMPUTERS = "1";
+  try {
+    const p = await L.orgoPlan({ fresh: true });
+    assert.equal("freeComputerId" in p, false, "no free Bops computer");
+    assert.equal(p.bops, undefined, "no Bops plan");
+    assert.equal(p.computers, 50, "the Orgo plan's");
+    assert.equal(main().computerId, undefined, "Boppy left the free computer");
+    assert.equal(main().freeComputer, undefined);
+    assert.equal(main().computerStatus, "none");
+    assert.equal(kai().computer, "own", "Kai doesn't share it any more");
+    const made = await L.makeMainComputer(main(), "boppy-dev");
+    assert.match(made.id, /^c-plan-/, "a computer on the Orgo plan");
+    assert.equal(made.free, undefined);
+    assert.equal(asked("POST", "/api/computers/c-free-dev/resume"), 0, "the free one isn't woken");
+    assert.ok(o.alive.has("c-free-dev"), "and it's kept");
+  } finally {
+    delete process.env.BOPS_ORGO_PLAN_COMPUTERS;
+    S.update(() => {
+      Object.assign(main(), { computerId: undefined, computerStatus: "none", freeComputer: undefined });
+      Object.assign(kai(), { computer: undefined, computerStatus: "none" });
+    });
+  }
+}
+
 // The words: on Free with a free Bops computer, "none" is about any more than that one. Nothing stands in
 // the main bot's way, and a bot's own copy of it takes one computer, not two.
 assert.equal(P.planShortText("none", freePlan()), "Your Orgo Free plan doesn't include computers besides your free Bops one. Orgo Hacker includes 1.");

@@ -246,10 +246,43 @@ type Limits = {
 const KEEP_MS = 60_000;
 const g = globalThis as unknown as { bopsOrgoPlan?: { key: string; changes: number; at: number; plan: Promise<OrgoPlan | null> }; bopsMaking?: Promise<unknown> };
 
+/**
+ * For people building Bops (BOPS_ORGO_PLAN_COMPUTERS=1, in ~/Library/Application Support/Bops/.env.local):
+ * the bots' computers come from the user's Orgo plan, as before Bops plans, never the free Bops computer or
+ * the Bops plan's, whose hours and count are for Bops' own customers. Bots on the free computer move off it
+ * (leaveFreeComputer): each main bot gets a computer of its own on the plan at its next task, made from the
+ * template; the free one stays on Orgo as it is, and bots take it up again once the setting is gone.
+ */
+export const orgoPlanComputers = () => process.env.BOPS_ORGO_PLAN_COMPUTERS === "1";
+
+/** With orgoPlanComputers: no bot on the free Bops computer any more, and no main bot sharing it. */
+function leaveFreeComputer() {
+  const onFree = (b: Bot) => !!b.freeComputer || (b.isMain && b.computer === "shared");
+  if (!getState().bots.some(onFree)) return;
+  update((s) => {
+    for (const b of s.bots) {
+      if (b.freeComputer) {
+        b.computerId = undefined;
+        b.freeComputer = undefined;
+        b.computerStatus = "none";
+        b.tailnet = undefined;
+        for (const key of Object.keys(s.screens ?? {})) if (key.startsWith(`${b.id}:`)) delete s.screens![key];
+      }
+      // A main bot that worked on another's free computer (shareFree) gets its own.
+      if (b.isMain && b.computer === "shared") {
+        b.computer = "own";
+        b.computerStatus = "none";
+      }
+    }
+  });
+  console.info("[computer] BOPS_ORGO_PLAN_COMPUTERS: the bots leave the free Bops computer for computers on the Orgo plan");
+}
+
 /** The user's plan (null when nobody is signed in, or Orgo didn't answer). `fresh` asks Orgo again even within the minute. */
 export async function orgoPlan({ fresh = false } = {}): Promise<OrgoPlan | null> {
   const key = await loadOrgoKey();
   if (!key) return null;
+  if (orgoPlanComputers()) leaveFreeComputer();
   const kept = g.bopsOrgoPlan;
   // Another user's key, or a computer made or deleted since: read again.
   if (!fresh && kept?.key === key && kept.changes === computerChanges() && Date.now() - kept.at < KEEP_MS) return kept.plan;
@@ -286,12 +319,13 @@ async function readPlan(key: string): Promise<OrgoPlan | null> {
       : undefined;
   // A custom deal's count or memory is the plan's whatever plan it's on (orgo-web lib/plan-limits.ts).
   const deal = typeof s?.planLimits?.maxDesktops === "number" || typeof s?.planLimits?.maxRamPerUser === "number";
-  const free = l && "bops_free_computer_id" in l ? { freeComputerId: typeof l.bops_free_computer_id === "string" ? l.bops_free_computer_id : null } : {};
+  // Building Bops (orgoPlanComputers): the Orgo plan only, as before free Bops computers and Bops plans.
+  const free = !orgoPlanComputers() && l && "bops_free_computer_id" in l ? { freeComputerId: typeof l.bops_free_computer_id === "string" ? l.bops_free_computer_id : null } : {};
   // The Bops plan decides a bot's own computer where Bops Cloud holds plans to what they include and
   // Orgo counts Bops computers (lib/orgo-plans.ts OrgoPlan.bops).
   const session = cloudOn() ? cloudSessionNow()?.plan : undefined;
   const bops =
-    session?.limits && typeof l?.bops_computers_limit === "number"
+    !orgoPlanComputers() && session?.limits && typeof l?.bops_computers_limit === "number"
       ? { bops: { tier: session.tier, limit: l.bops_computers_limit, extras: Array.isArray(l.bops_max_computer_ids) ? l.bops_max_computer_ids.filter((x): x is string => typeof x === "string") : [] } }
       : {};
   return { tier, name: tier ? planName(tier) : undefined, computers, inUse: counted?.inUse, ...(memory ? { memory } : {}), ...(deal ? { deal } : {}), ...free, ...bops };
