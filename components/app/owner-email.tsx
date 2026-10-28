@@ -19,9 +19,9 @@ export const useOwnerEmailInfo = () => useInfo<OwnerEmailInfo>("/api/owner-email
 
 const CHIP: Record<EmailSource, string> = { "sign-in": "Your sign-in email", gmail: "Connected Gmail", outlook: "Connected Outlook", env: "Set on this server", code: "Verified" };
 const chip = "rounded-full px-2 py-0.5 text-[11.5px]";
-const quiet = "text-[12px] text-[#9A9A98] hover:text-ink disabled:opacity-40";
+const quiet = "text-[12px] text-[color:var(--c-9a9a98)] hover:text-ink disabled:opacity-40";
 const link = "text-[12px] font-medium text-ink underline-offset-2 hover:underline disabled:opacity-40";
-const note = "text-[12px] leading-4 text-[#6B6B6B]";
+const note = "text-[12px] leading-4 text-[color:var(--c-6b6b6b)]";
 
 /** What keeps an address counting as the user: each source, less the sign-in email until it's counted. */
 const countingSources = (e: OwnerAddress) => e.sources.filter((s) => s !== "sign-in" || !e.off);
@@ -156,7 +156,7 @@ export function OwnerEmail({ info, onInfo }: { info: OwnerEmailInfo; onInfo: (i:
         const has = (s: EmailSource) => e.sources.includes(s);
         const counts = countingSources(e);
         return (
-          <span key={e.address} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] leading-4 text-[#3A3A38]">
+          <span key={e.address} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] leading-4 text-[color:var(--c-3a3a38)]">
             <span className="break-all font-medium text-ink">{e.address}</span>
             {e.sources.map((s) =>
               s === "code" ? (
@@ -167,7 +167,7 @@ export function OwnerEmail({ info, onInfo }: { info: OwnerEmailInfo; onInfo: (i:
                   {CHIP[s]}
                 </span>
               ) : (
-                <span key={s} className={`${chip} bg-[#F2F2F0] text-[#6B6B6B]`}>
+                <span key={s} className={`${chip} bg-[color:var(--c-f2f2f0)] text-[color:var(--c-6b6b6b)]`}>
                   {CHIP[s]}
                 </span>
               ),
@@ -181,19 +181,19 @@ export function OwnerEmail({ info, onInfo }: { info: OwnerEmailInfo; onInfo: (i:
               <button
                 disabled={busy}
                 onClick={() => void change({ action: "remove", address: e.address }, "Couldn't remove it. Try again.")}
-                className="text-[12px] text-[#9A9A98] hover:text-[#B42318] disabled:opacity-40"
+                className="text-[12px] text-[color:var(--c-9a9a98)] hover:text-[#B42318] disabled:opacity-40"
               >
                 Remove
               </button>
             )}
             {/* Only when a connected Gmail or Outlook alone keeps it counting: then disconnecting it is what removes it. */}
-            {has("gmail") && counts.length === 1 && <span className="text-[12px] text-[#9A9A98]">Disconnect Gmail to remove it.</span>}
-            {has("outlook") && counts.length === 1 && <span className="text-[12px] text-[#9A9A98]">Disconnect Outlook to remove it.</span>}
+            {has("gmail") && counts.length === 1 && <span className="text-[12px] text-[color:var(--c-9a9a98)]">Disconnect Gmail to remove it.</span>}
+            {has("outlook") && counts.length === 1 && <span className="text-[12px] text-[color:var(--c-9a9a98)]">Disconnect Outlook to remove it.</span>}
           </span>
         );
       })}
       {offer && (
-        <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] leading-4 text-[#3A3A38]">
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] leading-4 text-[color:var(--c-3a3a38)]">
           <span>
             Your sign-in email, <span className="break-all font-medium text-ink">{offer.address}</span>, doesn&apos;t count as you yet.
           </span>
@@ -210,10 +210,10 @@ export function OwnerEmail({ info, onInfo }: { info: OwnerEmailInfo; onInfo: (i:
 
       {waiting ? (
         <div className="flex flex-col gap-2 pt-1">
-          <span role="status" className="text-[12.5px] leading-4 text-[#3A3A38]">
+          <span role="status" className="text-[12.5px] leading-4 text-[color:var(--c-3a3a38)]">
             Enter the code we emailed to <span className="break-all font-medium text-ink">{waiting.address}</span>.
           </span>
-          <span className="text-[12px] leading-4 text-[#9A9A98]">Not there in a minute? Check spam, or send a new code.</span>
+          <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">Not there in a minute? Check spam, or send a new code.</span>
           <CodeInput key={round} ariaLabel="Code from the email" disabled={busy} onComplete={(c) => void check(c)} />
           <span className="flex items-center gap-3 text-[12px] leading-4">
             <ResendButton key={sends} seconds={waiting.resendInSec} refused={waiting.refused} disabled={busy} onResend={() => void send(waiting.address)} />
@@ -224,7 +224,7 @@ export function OwnerEmail({ info, onInfo }: { info: OwnerEmailInfo; onInfo: (i:
                 setDismissed(true);
                 setError(null);
               }}
-              className="text-[#9A9A98] hover:text-ink disabled:opacity-40"
+              className="text-[color:var(--c-9a9a98)] hover:text-ink disabled:opacity-40"
             >
               Use a different email
             </button>
@@ -232,7 +232,7 @@ export function OwnerEmail({ info, onInfo }: { info: OwnerEmailInfo; onInfo: (i:
         </div>
       ) : !canAdd ? (
         // With nothing listed, the line above already says what to do.
-        rows.length > 0 && <span className="text-[12px] leading-4 text-[#9A9A98]">Adding another email by code isn&apos;t available yet.</span>
+        rows.length > 0 && <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">Adding another email by code isn&apos;t available yet.</span>
       ) : adding || (!rows.length && !offer) ? (
         <div className="flex flex-col gap-1.5 pt-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -254,7 +254,7 @@ export function OwnerEmail({ info, onInfo }: { info: OwnerEmailInfo; onInfo: (i:
               autoComplete="email"
               autoCapitalize="none"
               spellCheck={false}
-              className="h-8 w-[240px] rounded-full bg-[#F7F7F6] px-3 text-[13px] outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50"
+              className="h-8 w-[240px] rounded-full bg-[color:var(--c-f7f7f6)] px-3 text-[13px] outline-none shadow-[0_0_0_1px_var(--c-e6e6e3)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] disabled:opacity-50"
             />
             <button
               disabled={busy || !!retry || !address.trim()}
@@ -269,7 +269,7 @@ export function OwnerEmail({ info, onInfo }: { info: OwnerEmailInfo; onInfo: (i:
               </button>
             )}
           </div>
-          <span className="text-[12px] leading-4 text-[#9A9A98]">We email you a code to make sure it&apos;s yours.</span>
+          <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">We email you a code to make sure it&apos;s yours.</span>
         </div>
       ) : (
         <button onClick={() => setAdding(true)} className="self-start pt-0.5 text-[12px] font-medium text-ink underline-offset-2 hover:underline">

@@ -126,7 +126,7 @@ export function MicButton({ botId, onText, onError }: { botId?: string; onText: 
       disabled={phase === "transcribing"}
       aria-label={phase === "transcribing" ? "Transcribing" : "Talk instead of typing"}
       data-tip={phase === "transcribing" ? "Writing down what you said…" : "Talk instead of typing"}
-      className="flex size-[30px] shrink-0 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0] hover:text-ink disabled:hover:bg-transparent"
+      className="flex size-[30px] shrink-0 items-center justify-center rounded-full text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-f2f2f0)] hover:text-ink disabled:hover:bg-transparent"
     >
       {phase === "transcribing" ? (
         <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="animate-spin">

@@ -155,7 +155,7 @@ export function MirrorScreen({
           }}
         />
       )}
-      {!page && <div className="absolute inset-0 flex items-center justify-center text-[12px] text-[#9A9A98]">Mirroring…</div>}
+      {!page && <div className="absolute inset-0 flex items-center justify-center text-[12px] text-[color:var(--c-9a9a98)]">Mirroring…</div>}
     </div>
   );
 }

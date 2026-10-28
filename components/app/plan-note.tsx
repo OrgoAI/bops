@@ -44,7 +44,7 @@ export function usePlan(state: AppState) {
 export function PlanNote({ info, short, text, className = "", onUpgrade }: { info: PlanInfo; short: PlanShort; text: string; className?: string; onUpgrade?: () => void }) {
   if (short === "bops")
     return (
-      <span className={`text-[12px] leading-4 text-[#6B6B6B] ${className}`}>
+      <span className={`text-[12px] leading-4 text-[color:var(--c-6b6b6b)] ${className}`}>
         {text}{" "}
         {onUpgrade && (
           <button onClick={onUpgrade} className="font-medium text-ink underline underline-offset-2">
@@ -55,7 +55,7 @@ export function PlanNote({ info, short, text, className = "", onUpgrade }: { inf
     );
   const fix = planFix(short, info.plan);
   return (
-    <span className={`text-[12px] leading-4 text-[#6B6B6B] ${className}`}>
+    <span className={`text-[12px] leading-4 text-[color:var(--c-6b6b6b)] ${className}`}>
       {text}{" "}
       <a href={info.links[fix.tab]} target="_blank" rel="noreferrer" className="font-medium text-ink underline underline-offset-2">
         {fix.label}

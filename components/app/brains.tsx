@@ -21,17 +21,17 @@ import { BRAND } from "@/lib/brand";
 type Shown = (botId: string, display: number) => void;
 
 const btn = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
-const dark = `${btn} bg-ink text-white hover:bg-[#2A2A28]`;
-const light = `${btn} bg-[#F2F2F0] text-ink hover:bg-[#EAEAE7]`;
+const dark = `${btn} bg-ink text-white hover:bg-[color:var(--c-2a2a28)]`;
+const light = `${btn} bg-[color:var(--c-f2f2f0)] text-ink hover:bg-[color:var(--c-eaeae7)]`;
 
 /**
  * Which brain runs a thread (threadRunner), or a bot's tasks, as a small plain chip: "Claude Code", "Codex",
  * or "Bops agent" ("agent", only where that isn't what the user would think: a thread that stays on Bops
  * agent while its bot is on a brain now). `className`: its background where the gray doesn't read (a profile's glass).
  */
-export function BrainBadge({ kind, title, className = "bg-[#F2F2F0]" }: { kind: BrainKind | "agent"; title: string; className?: string }) {
+export function BrainBadge({ kind, title, className = "bg-[color:var(--c-f2f2f0)]" }: { kind: BrainKind | "agent"; title: string; className?: string }) {
   return (
-    <span title={title} className={`shrink-0 rounded-full px-1.5 py-px text-[11px] leading-[14px] text-[#3A3A38] ${className}`}>
+    <span title={title} className={`shrink-0 rounded-full px-1.5 py-px text-[11px] leading-[14px] text-[color:var(--c-3a3a38)] ${className}`}>
       {kind === "agent" ? `${BRAND.name} agent` : BRAIN_NAMES[kind]}
     </span>
   );
@@ -170,10 +170,10 @@ export function BrainSettings({ state, onShowScreen, onOpenVault }: { state: App
       <div className="flex items-end justify-between gap-3">
         <div className="flex flex-col gap-0.5">
           <span className="text-[13px] font-semibold">Brain</span>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">What your bots work with. {BRAND.name} agent runs on AI credit. Claude Code and Codex run on your own plan or key.</span>
+          <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">What your bots work with. {BRAND.name} agent runs on AI credit. Claude Code and Codex run on your own plan or key.</span>
         </div>
         {!adding && (
-          <button onClick={() => setAdding(true)} className="flex shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[#2A2A28]">
+          <button onClick={() => setAdding(true)} className="flex shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[color:var(--c-2a2a28)]">
             <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
               <path d="M5 1v8M1 5h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
             </svg>
@@ -181,14 +181,14 @@ export function BrainSettings({ state, onShowScreen, onOpenVault }: { state: App
           </button>
         )}
       </div>
-      <div className="flex flex-col rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]">
-        <div className="flex flex-col gap-1.5 border-b border-[#F0F0EE] py-3 first:pt-0 last:border-0 last:pb-0">
+      <div className="flex flex-col rounded-[14px] p-3.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
+        <div className="flex flex-col gap-1.5 border-b border-[color:var(--c-f0f0ee)] py-3 first:pt-0 last:border-0 last:pb-0">
           <div className="flex min-h-7 items-center gap-2">
             <span className="min-w-0 truncate text-[13.5px] font-medium leading-[18px]">{BRAND.name} agent</span>
-            <span className="min-w-0 truncate text-[12px] leading-4 text-[#9A9A98]">AI credit</span>
+            <span className="min-w-0 truncate text-[12px] leading-4 text-[color:var(--c-9a9a98)]">AI credit</span>
           </div>
           <div className="flex flex-wrap items-center gap-1">
-            {agent.length ? agent.map((b) => <BotChip key={b.id} bot={b} tip={`${b.name} works with ${BRAND.name} agent`} />) : <span className="text-[12px] leading-4 text-[#9A9A98]">No bot uses it</span>}
+            {agent.length ? agent.map((b) => <BotChip key={b.id} bot={b} tip={`${b.name} works with ${BRAND.name} agent`} />) : <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">No bot uses it</span>}
           </div>
         </div>
         {brains.map((x) => (
@@ -234,7 +234,7 @@ function BrainRow({ state, brain: x, keys, onShowScreen }: { state: AppState; br
   const who = (b: Bot) => (b.brain === x.id && x.bots.includes(b.id) ? "use" : x.bots.includes(b.id) ? "may" : "none");
   const account = signedIn[0]?.account;
   return (
-    <div className="flex flex-col gap-1.5 border-b border-[#F0F0EE] py-3 first:pt-0 last:border-0 last:pb-0">
+    <div className="flex flex-col gap-1.5 border-b border-[color:var(--c-f0f0ee)] py-3 first:pt-0 last:border-0 last:pb-0">
       <div className="flex min-h-7 items-center gap-2">
         {naming ? (
           <input
@@ -244,14 +244,14 @@ function BrainRow({ state, brain: x, keys, onShowScreen }: { state: AppState; br
             onBlur={save}
             onKeyDown={(e) => (e.key === "Enter" ? save() : e.key === "Escape" && (e.preventDefault(), e.stopPropagation(), setName(x.name), setNaming(false)))}
             aria-label="Name"
-            className="h-7 w-[180px] rounded-lg bg-white px-2 text-[12.5px] outline-none shadow-[0_0_0_1.5px_#0A0A0A]"
+            className="h-7 w-[180px] rounded-lg bg-white px-2 text-[12.5px] outline-none shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
           />
         ) : (
           <span className="min-w-0 truncate text-[13.5px] font-medium leading-[18px]">{x.name}</span>
         )}
         <span
           data-tip={account ? [account.email, account.orgName].filter(Boolean).join(", ") || undefined : x.signingIn?.failed ? undash(x.signingIn.failed) : undefined}
-          className={`min-w-0 shrink-[3] truncate text-[12px] leading-4 ${x.signingIn?.failed && !signedIn.length ? "text-[#B54708]" : "text-[#9A9A98]"}`}
+          className={`min-w-0 shrink-[3] truncate text-[12px] leading-4 ${x.signingIn?.failed && !signedIn.length ? "text-[#B54708]" : "text-[color:var(--c-9a9a98)]"}`}
         >
           {brainLine(state, x, keys)}
         </span>
@@ -297,7 +297,7 @@ function BrainRow({ state, brain: x, keys, onShowScreen }: { state: AppState; br
           {signedIn.map((s) => {
             const host = state.bots.find((b) => b.computerId === s.computerId)!;
             return (
-              <button key={s.computerId} disabled={busy} onClick={() => void run(() => call("/api/brains/sign-out", { brainId: x.id, botId: host.id }))} className="text-[12px] leading-4 text-[#6B6B6B] hover:text-ink disabled:opacity-50">
+              <button key={s.computerId} disabled={busy} onClick={() => void run(() => call("/api/brains/sign-out", { brainId: x.id, botId: host.id }))} className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink disabled:opacity-50">
                 Sign out on {host.name}&apos;s computer
               </button>
             );
@@ -306,13 +306,13 @@ function BrainRow({ state, brain: x, keys, onShowScreen }: { state: AppState; br
       )}
       {sure && (
         <div className="flex flex-wrap items-center gap-2 rounded-[10px] bg-[#FEF3F2] px-3 py-2">
-          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">
+          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">
             Remove {x.name}? Its bots go back to {BRAND.name} agent{x.auth === "plan" ? ", and it signs out on the computers it's signed in on" : ""}.
           </span>
           <button disabled={busy} onClick={() => void run(() => call("/api/brains", { id: x.id }, "DELETE"))} className={`${btn} bg-[#B42318] text-white`}>
             {busy ? "Removing…" : "Remove"}
           </button>
-          <button disabled={busy} onClick={() => setSure(false)} className={`${btn} bg-white hover:bg-[#F7F7F6]`}>
+          <button disabled={busy} onClick={() => setSure(false)} className={`${btn} bg-white hover:bg-[color:var(--c-f7f7f6)]`}>
             Cancel
           </button>
         </div>
@@ -333,7 +333,7 @@ function PickBot({ bot: b, on, onClick }: { bot: Bot; on: boolean; onClick: () =
       type="button"
       aria-pressed={on}
       onClick={onClick}
-      className={`flex h-[26px] items-center gap-1.5 rounded-full pl-1 pr-2.5 text-[12px] font-medium leading-4 ${on ? "bg-[#FBFFE0] text-ink shadow-[0_0_0_1.5px_#0A0A0A]" : "text-[#6B6B6B] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"}`}
+      className={`flex h-[26px] items-center gap-1.5 rounded-full pl-1 pr-2.5 text-[12px] font-medium leading-4 ${on ? "bg-[color:var(--c-fbffe0)] text-ink shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" : "text-[color:var(--c-6b6b6b)] shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-fcfcfb)]"}`}
     >
       <Mascot botId={b.id} color={b.color} size={18} antenna={false} />
       {b.name}
@@ -341,7 +341,7 @@ function PickBot({ bot: b, on, onClick }: { bot: Bot; on: boolean; onClick: () =
   );
 }
 
-const choice = (on: boolean) => `flex flex-1 flex-col gap-0.5 rounded-[12px] px-3 py-2.5 text-left ${on ? "bg-[#FBFFE0] shadow-[0_0_0_1.5px_#0A0A0A]" : "shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"}`;
+const choice = (on: boolean) => `flex flex-1 flex-col gap-0.5 rounded-[12px] px-3 py-2.5 text-left ${on ? "bg-[color:var(--c-fbffe0)] shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" : "shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-fcfcfb)]"}`;
 
 /** How Claude Code signs in, in its own words: a Claude subscription, or an Anthropic (Console) API key. Codex: an OpenAI key. */
 const SIGN_INS: Record<BrainKind, { id: BrainAuth; name: string; hint: string }[]> = {
@@ -430,36 +430,36 @@ export function AddBrain({
           onDone();
         }
       }}
-      className="motion-rise-in mt-3 flex flex-col gap-2.5 rounded-[12px] bg-[#FCFCFB] p-3 shadow-[0_0_0_1px_#ECECEA]"
+      className="motion-rise-in mt-3 flex flex-col gap-2.5 rounded-[12px] bg-[color:var(--c-fcfcfb)] p-3 shadow-[0_0_0_1px_var(--c-ececea)]"
     >
-      <span className="text-[12px] font-medium leading-4 text-[#6B6B6B]">Which one?</span>
+      <span className="text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Which one?</span>
       <div className="flex gap-2">
         {(["claude", "codex"] as const).map((k) => (
           <button key={k} type="button" aria-pressed={kind === k} disabled={!!made} onClick={() => pickKind(k)} className={choice(kind === k)}>
             <span className="text-[13px] font-semibold leading-[18px]">{BRAIN_NAMES[k]}</span>
-            <span className="text-[12px] leading-4 text-[#6B6B6B]">{k === "claude" ? "Anthropic's coding agent" : "OpenAI's coding agent"}</span>
+            <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{k === "claude" ? "Anthropic's coding agent" : "OpenAI's coding agent"}</span>
           </button>
         ))}
       </div>
       {kind && (
         <>
-          <span className="pt-1 text-[12px] font-medium leading-4 text-[#6B6B6B]">How should it sign in?</span>
-          {saved && kind === "claude" && <span className="text-[12.5px] leading-[18px] text-[#3A3A38]">You have an Anthropic key saved. Use it, or sign in with your Claude plan?</span>}
+          <span className="pt-1 text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">How should it sign in?</span>
+          {saved && kind === "claude" && <span className="text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">You have an Anthropic key saved. Use it, or sign in with your Claude plan?</span>}
           <div className="flex gap-2">
             {SIGN_INS[kind].map((s) => (
               <button key={s.id} type="button" aria-pressed={auth === s.id} disabled={!!made} onClick={() => setAuth(s.id)} className={choice(auth === s.id)}>
                 <span className="text-[13px] font-semibold leading-[18px]">{s.name}</span>
-                <span className="text-[12px] leading-4 text-[#6B6B6B]">{s.hint}</span>
+                <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{s.hint}</span>
               </button>
             ))}
           </div>
           {auth === "key" &&
             (saved ? (
-              <span className="text-[12px] leading-4 text-[#6B6B6B]">
+              <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
                 Uses <span className="font-mono text-[11.5px] text-ink">{saved.name}</span> from Logins{saved.scope === "workspace" ? ", this workspace's" : ""}.
               </span>
             ) : (
-              <span className="flex flex-wrap items-center gap-2 text-[12px] leading-4 text-[#6B6B6B]">
+              <span className="flex flex-wrap items-center gap-2 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
                 {keys === null ? "Checking Logins" : `Add your ${vendor} key in Logins first. Only ${BRAIN_NAMES[kind ?? "claude"]} on the bot's computer gets it.`}
                 {keys !== null && (
                   <button type="button" onClick={onOpenVault} className="font-medium text-ink underline-offset-2 hover:underline">
@@ -472,7 +472,7 @@ export function AddBrain({
       )}
       {kind && auth && !!team.length && (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="pr-0.5 text-[12px] leading-4 text-[#9A9A98]">Bots that use it</span>
+          <span className="pr-0.5 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">Bots that use it</span>
           {team.map((b) => (
             <PickBot key={b.id} bot={b} on={bots.includes(b.id)} onClick={() => setBots(bots.includes(b.id) ? bots.filter((y) => y !== b.id) : [...bots, b.id])} />
           ))}
@@ -487,7 +487,7 @@ export function AddBrain({
         <button type="button" disabled={busy} onClick={onDone} className={light}>
           {made ? "Done" : "Cancel"}
         </button>
-        {auth === "plan" && state.host === "mac" && <span className="text-[12px] leading-4 text-[#6B6B6B]">Your bots work on this Mac, so there&apos;s no bot computer to sign in on.</span>}
+        {auth === "plan" && state.host === "mac" && <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">Your bots work on this Mac, so there&apos;s no bot computer to sign in on.</span>}
         {error && (
           <span role="alert" className="min-w-0 text-[12px] leading-4 text-[#B42318]">
             {error}
@@ -546,7 +546,7 @@ export function BotBrain({ state, bot: b, onShowScreen, className }: { state: Ap
       <div className="flex items-center gap-3">
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="text-[13px] font-semibold leading-4">Brain</span>
-          <span className={`text-[12px] leading-4 ${now?.auth === "plan" && where !== "none" && !signedIn && !going ? "text-[#B54708]" : "text-[#6B6B6B]"}`}>{hint}</span>
+          <span className={`text-[12px] leading-4 ${now?.auth === "plan" && where !== "none" && !signedIn && !going ? "text-[#B54708]" : "text-[color:var(--c-6b6b6b)]"}`}>{hint}</span>
         </div>
         <div className="flex shrink-0 flex-wrap justify-end gap-0.5 rounded-[14px] bg-black/[0.05] p-[3px]">
           {options.map((o) => (
@@ -554,7 +554,7 @@ export function BotBrain({ state, bot: b, onShowScreen, className }: { state: Ap
               key={o.id ?? "agent"}
               disabled={busy}
               onClick={() => (now?.id ?? null) !== o.id && void pick(o.id)}
-              className={`max-w-[150px] truncate rounded-full px-2.5 py-1 text-[12px] leading-4 disabled:opacity-60 ${(now?.id ?? null) === o.id ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+              className={`max-w-[150px] truncate rounded-full px-2.5 py-1 text-[12px] leading-4 disabled:opacity-60 ${(now?.id ?? null) === o.id ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}
             >
               {o.name}
             </button>
@@ -563,7 +563,7 @@ export function BotBrain({ state, bot: b, onShowScreen, className }: { state: Ap
       </div>
       {now?.auth === "plan" && where !== "none" && onShowScreen && (going || !signedIn) && (
         <div className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 text-[12px] leading-4 text-[#3A3A38]">
+          <span className="min-w-0 flex-1 text-[12px] leading-4 text-[color:var(--c-3a3a38)]">
             {going ? "Claude Code's sign-in is open on its screen." : now.signingIn?.failed ? `The last sign-in didn't finish: ${undash(now.signingIn.failed)}` : `Sign in with your Claude plan on ${computerOf(state, b)} to use it.`}
           </span>
           {going ? (

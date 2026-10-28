@@ -373,7 +373,7 @@ export function CallBar({
   return (
     <div className="relative z-30 flex animate-[call-in_220ms_ease-out] flex-col items-center">
       <audio ref={audio} autoPlay />
-      <div className="flex items-center gap-1.5 rounded-full bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_10px_28px_-14px_#00000059]">
+      <div className="flex items-center gap-1.5 rounded-full bg-white p-1.5 shadow-[0_0_0_1px_var(--c-e6e6e3),0_10px_28px_-14px_#00000059]">
         <button
           onClick={onOpen}
           disabled={!compact}
@@ -385,7 +385,7 @@ export function CallBar({
         </button>
         <div className="flex w-[74px] shrink-0 flex-col pl-1">
           <span className="truncate text-[14px] font-semibold leading-[18px]">{b.name}</span>
-          <span className={`font-mono text-[12px] leading-[15px] ${phase === "failed" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>{status}</span>
+          <span className={`font-mono text-[12px] leading-[15px] ${phase === "failed" ? "text-[#B42318]" : "text-[color:var(--c-6b6b6b)]"}`}>{status}</span>
         </div>
 
         <div className={`h-10 w-[104px] items-center justify-between px-1.5 ${compact ? "hidden" : "flex"}`} aria-hidden>
@@ -420,7 +420,7 @@ export function CallBar({
       {(error || (captions && caption && !compact)) && (
         <p
           className={`absolute ${compact ? "bottom-full mb-2" : "top-full mt-2"} line-clamp-3 w-max max-w-[400px] rounded-2xl bg-white/95 px-3.5 py-2 text-center text-[13px] leading-[19px] shadow-[0_0_0_1px_#0000000D,0_6px_16px_-8px_#00000040] ${
-            error ? "text-[#B42318]" : caption?.who === "you" ? "italic text-[#6B6B6B]" : "text-ink"
+            error ? "text-[#B42318]" : caption?.who === "you" ? "italic text-[color:var(--c-6b6b6b)]" : "text-ink"
           }`}
         >
           {error ?? caption?.text}
@@ -438,7 +438,7 @@ function RoundButton({ label, on, disabled, hidden, onClick, children }: { label
       disabled={disabled}
       aria-label={label}
       title={label}
-      className={`flex size-10 shrink-0 items-center justify-center rounded-full disabled:opacity-40 ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#E9E9E6]"}`}
+      className={`flex size-10 shrink-0 items-center justify-center rounded-full disabled:opacity-40 ${on ? "bg-ink text-white" : "bg-[color:var(--c-f2f2f0)] text-[color:var(--c-3a3a38)] hover:bg-[#E9E9E6]"}`}
     >
       <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
         {children}

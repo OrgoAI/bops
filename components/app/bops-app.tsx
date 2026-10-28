@@ -1118,7 +1118,7 @@ function TitleBar({
 }) {
   const desktop = typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
   return (
-    <div className={`grid h-11 shrink-0 border-b border-[#ECECEA] bg-[#F7F7F6] [-webkit-app-region:drag] ${columns}`}>
+    <div className={`grid h-11 shrink-0 border-b border-[color:var(--c-ececea)] bg-[color:var(--c-f7f7f6)] [-webkit-app-region:drag] ${columns}`}>
       <div className="flex items-center gap-3 px-3.5">
         {desktop && <div className="w-[56px] shrink-0" />}
         {/* The sidebar hidden: the toggle that brings it back sits here, by the window's buttons (shown, it's in the sidebar's header). */}
@@ -1127,7 +1127,7 @@ function TitleBar({
             onClick={onToggleSidebar}
             title="Show the sidebar (⌘\)"
             aria-label="Show the sidebar"
-            className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.06] [-webkit-app-region:no-drag]"
+            className="flex size-7 shrink-0 items-center justify-center rounded-md text-[color:var(--c-6b6b6b)] hover:bg-black/[0.06] [-webkit-app-region:no-drag]"
           >
             <SideToggleIcon side="left" open={false} />
           </button>
@@ -1139,7 +1139,7 @@ function TitleBar({
         <button
           onClick={onTogglePanel}
           title={panelOpen ? "Hide the side panel" : "Show the side panel"}
-          className={`flex size-7 shrink-0 items-center justify-center rounded-lg [-webkit-app-region:no-drag] ${panelOpen ? "bg-[#EEEEEC]" : "shadow-[0_0_0_1px_#E2E2DF]"}`}
+          className={`flex size-7 shrink-0 items-center justify-center rounded-lg [-webkit-app-region:no-drag] ${panelOpen ? "bg-[color:var(--c-eeeeec)]" : "shadow-[0_0_0_1px_var(--c-e2e2df)]"}`}
         >
           <SideToggleIcon side="right" open={panelOpen} />
         </button>
@@ -1182,13 +1182,13 @@ function MailSettings() {
   return (
     <div className="flex flex-col gap-2 px-[22px] pt-4">
       <span className="text-[13px] font-semibold">Email</span>
-      <div className="flex flex-col gap-2.5 rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex flex-col gap-2.5 rounded-[14px] p-3.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
         {!info.on ? (
-          <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">Off. Add AGENTMAIL_API_KEY to .env.local and every bot gets its own email address.</span>
+          <span className="text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">Off. Add AGENTMAIL_API_KEY to .env.local and every bot gets its own email address.</span>
         ) : (
           <>
-            <span className="flex items-center gap-1.5 text-[12.5px] leading-[18px] text-[#3A3A38]">
-              <span className={`size-[7px] rounded-full ${ready ? "bg-[#2BB673]" : info.status === "NOT_ADDED" ? "bg-[#C9C9C6]" : "bg-[#E59A0B]"}`} />
+            <span className="flex items-center gap-1.5 text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">
+              <span className={`size-[7px] rounded-full ${ready ? "bg-[#2BB673]" : info.status === "NOT_ADDED" ? "bg-[color:var(--c-c9c9c6)]" : "bg-[#E59A0B]"}`} />
               {ready
                 ? `Bots have ${info.domain} addresses.`
                 : info.status === "NOT_ADDED"
@@ -1196,22 +1196,22 @@ function MailSettings() {
                   : `${info.domain} is ${info.status?.toLowerCase().replace("_", " ")}. Add these records at your DNS host, then check again. Bots move to it on their own once it's verified.`}
             </span>
             {!ready && !!info.records?.length && (
-              <div className="flex flex-col overflow-hidden rounded-[10px] shadow-[0_0_0_1px_#ECECEA]">
+              <div className="flex flex-col overflow-hidden rounded-[10px] shadow-[0_0_0_1px_var(--c-ececea)]">
                 {info.records.map((r, i) => (
-                  <div key={i} className="flex items-start gap-3 border-b border-[#F0F0EE] px-3 py-2 font-mono text-[11.5px] leading-4 last:border-0">
+                  <div key={i} className="flex items-start gap-3 border-b border-[color:var(--c-f0f0ee)] px-3 py-2 font-mono text-[11.5px] leading-4 last:border-0">
                     <span className="w-9 shrink-0 font-semibold">{r.type}</span>
                     <span className="w-[150px] shrink-0 truncate" title={r.name}>{r.name}</span>
-                    <span className="min-w-0 flex-1 select-all break-all text-[#3A3A38]">
+                    <span className="min-w-0 flex-1 select-all break-all text-[color:var(--c-3a3a38)]">
                       {r.priority !== undefined ? `${r.priority} ` : ""}
                       {r.value}
                     </span>
-                    <span className={`shrink-0 font-sans ${r.status === "VERIFIED" ? "text-[#2BB673]" : "text-[#9A9A98]"}`}>{r.status.toLowerCase()}</span>
+                    <span className={`shrink-0 font-sans ${r.status === "VERIFIED" ? "text-[#2BB673]" : "text-[color:var(--c-9a9a98)]"}`}>{r.status.toLowerCase()}</span>
                   </div>
                 ))}
               </div>
             )}
             {!!info.inboxes?.length && (
-              <span className="text-[12px] leading-4 text-[#6B6B6B]">{info.inboxes.map((x) => `${x.bot}: ${x.email}`).join(" · ")}</span>
+              <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{info.inboxes.map((x) => `${x.bot}: ${x.email}`).join(" · ")}</span>
             )}
             {info.error && <span className="text-[12px] leading-4 text-[#B42318]">{info.error}</span>}
             <div className="flex gap-1.5">
@@ -1221,7 +1221,7 @@ function MailSettings() {
                 </button>
               )}
               {!ready && info.status !== "NOT_ADDED" && (
-                <button disabled={busy} onClick={() => load({ action: "verify" })} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+                <button disabled={busy} onClick={() => load({ action: "verify" })} className={`${btn} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
                   Check DNS again
                 </button>
               )}
@@ -1254,7 +1254,7 @@ function ReachNote({ label, line, retry }: { label: string; line: string; retry?
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-[13px] font-medium leading-4">{label}</span>
-      <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] leading-4 text-[#6B6B6B]">
+      <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
         <span role={retry ? "alert" : undefined}>{line}</span>
         {retry && (
           <button onClick={retry} className="font-medium text-ink underline-offset-2 hover:underline">
@@ -1279,16 +1279,16 @@ function MobileRows({ info, onInfo }: { info: PhoneInfo; onInfo: (p: PhoneInfo) 
       <ReachBanner info={info} phone={phone} />
       <OwnerPhone info={info} phone={phone} recommended collapseWhenSaved bannerFor={bannerNumber(info, phone)?.number} />
       {!!reach.length && (
-        <div className="flex flex-col gap-1 border-t border-[#F0F0EE] pt-2.5 text-[12.5px] leading-[18px] text-[#3A3A38]">
+        <div className="flex flex-col gap-1 border-t border-[color:var(--c-f0f0ee)] pt-2.5 text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">
           {reach.map((w) => {
             const who = w.main ?? "your main bot";
             const text = w.line?.phone ?? w.call;
             return (
               <div key={w.id} className="flex flex-col gap-1">
                 <span>
-                  {reach.length > 1 && <span className="text-[#9A9A98]">{w.name}: </span>}
+                  {reach.length > 1 && <span className="text-[color:var(--c-9a9a98)]">{w.name}: </span>}
                   {w.call && w.call !== text ? `Text ${who} at ${text} · call at ${w.call}` : `Text or call ${who} at ${text}`}
-                  <span className="text-[#9A9A98]"> ({who} hands work to the team)</span>
+                  <span className="text-[color:var(--c-9a9a98)]"> ({who} hands work to the team)</span>
                 </span>
                 {text && <LineLink phone={text} />}
               </div>
@@ -1323,9 +1323,9 @@ function ReachSettings() {
     <div className="flex flex-col gap-2 px-[22px] pt-4">
       <div className="flex flex-col gap-0.5">
         <span className="text-[13px] font-semibold">How your bots reach you</span>
-        <span className="text-[12px] leading-4 text-[#6B6B6B]">{intro}</span>
+        <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{intro}</span>
       </div>
-      <div className="flex flex-col gap-3 rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex flex-col gap-3 rounded-[14px] p-3.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
         {!phone ? (
           <ReachNote label="Your mobile" {...(phoneRead.failed ? { line: unreachable, retry: phoneRead.retry } : { line: "Checking" })} />
         ) : !phone.on ? (
@@ -1334,7 +1334,7 @@ function ReachSettings() {
           <MobileRows info={phone} onInfo={setPhone} />
         )}
         {mailing && (
-          <div className="border-t border-[#F0F0EE] pt-3">
+          <div className="border-t border-[color:var(--c-f0f0ee)] pt-3">
             {email ? (
               <OwnerEmail info={email} onInfo={setEmail} />
             ) : (
@@ -1355,20 +1355,20 @@ function PhoneService() {
   return (
     <div className="flex flex-col gap-2 px-[22px] pt-4">
       <span className="text-[13px] font-semibold">Phone service (AgentPhone)</span>
-      <div className="flex flex-col gap-1 rounded-[14px] p-3.5 text-[12.5px] leading-[18px] text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex flex-col gap-1 rounded-[14px] p-3.5 text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)] shadow-[0_0_0_1px_var(--c-e6e6e3)]">
         <span>
-          <span className="text-[#9A9A98]">Texting back:</span> {texting}
+          <span className="text-[color:var(--c-9a9a98)]">Texting back:</span> {texting}
           {info.texting === "none" ? " (carriers approve business texting first (A2P 10DLC), about 7 to 10 business days)" : ""}
         </span>
         <span>
-          <span className="text-[#9A9A98]">Calls to the bots&apos; numbers:</span> {info.calls === "agent" ? `on (each number's agent passes every turn to ${BRAND.name})` : (info.calls ?? "unknown")}
+          <span className="text-[color:var(--c-9a9a98)]">Calls to the bots&apos; numbers:</span> {info.calls === "agent" ? `on (each number's agent passes every turn to ${BRAND.name})` : (info.calls ?? "unknown")}
         </span>
         {info.workspaces?.map((w) => (
           <span key={w.id}>
-            <span className="text-[#9A9A98]">{w.name}:</span> {w.line ? `${w.line.phone} (${w.line.type === "imessage" ? "iMessage" : "SMS"})` : "no workspace number"}
+            <span className="text-[color:var(--c-9a9a98)]">{w.name}:</span> {w.line ? `${w.line.phone} (${w.line.type === "imessage" ? "iMessage" : "SMS"})` : "no workspace number"}
           </span>
         ))}
-        {!!info.lines?.length && <span className="text-[#6B6B6B]">Bots&apos; own numbers: {info.lines.map((l) => `${l.bot} ${l.phone}`).join(" · ")}</span>}
+        {!!info.lines?.length && <span className="text-[color:var(--c-6b6b6b)]">Bots&apos; own numbers: {info.lines.map((l) => `${l.bot} ${l.phone}`).join(" · ")}</span>}
       </div>
     </div>
   );
@@ -1388,14 +1388,14 @@ function OwnerSettings({ owner }: { owner: AppState["owner"] }) {
   return (
     <div className="flex flex-col gap-2 px-[22px] pt-[18px]">
       <span className="text-[13px] font-semibold">You</span>
-      <div className="flex flex-col gap-2.5 rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex flex-col gap-2.5 rounded-[14px] p-3.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
         <label className="flex items-center gap-3">
           <span className="w-[120px] text-[13px] font-medium">Your name</span>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="What your bots call you"
-            className="h-8 w-[260px] rounded-full bg-[#F7F7F6] px-3 text-[13px] outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+            className="h-8 w-[260px] rounded-full bg-[color:var(--c-f7f7f6)] px-3 text-[13px] outline-none shadow-[0_0_0_1px_var(--c-e6e6e3)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
           />
         </label>
         <label className="flex items-start gap-3">
@@ -1405,14 +1405,14 @@ function OwnerSettings({ owner }: { owner: AppState["owner"] }) {
             onChange={(e) => setAbout(e.target.value)}
             rows={2}
             placeholder="What every bot should know, like your role and company"
-            className="flex-1 resize-none rounded-[12px] bg-[#F7F7F6] px-3 py-1.5 text-[13px] leading-[18px] outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+            className="flex-1 resize-none rounded-[12px] bg-[color:var(--c-f7f7f6)] px-3 py-1.5 text-[13px] leading-[18px] outline-none shadow-[0_0_0_1px_var(--c-e6e6e3)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
           />
         </label>
         <div className="flex items-center gap-2 pl-[132px]">
           <button disabled={!changed || !name.trim()} onClick={() => void save()} className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-40">
             Save
           </button>
-          {saved && <span className="text-[12px] text-[#6B6B6B]">Saved</span>}
+          {saved && <span className="text-[12px] text-[color:var(--c-6b6b6b)]">Saved</span>}
         </div>
       </div>
     </div>
@@ -1427,10 +1427,10 @@ function SelfHosting({ state }: { state: AppState }) {
   const joined = state.bots.filter((b) => b.tailnet);
   const tailnet = state.host === "orgo" && joined.length > 0;
   return (
-    <div className="mt-5 flex flex-col border-t border-[#F0F0EE] pb-5">
+    <div className="mt-5 flex flex-col border-t border-[color:var(--c-f0f0ee)] pb-5">
       <div className="flex flex-col gap-0.5 px-[22px] pt-4">
         <span className="text-[15px] font-semibold">Self-hosting</span>
-        <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Your own provider accounts, set in .env.local. The hosted {BRAND.name} runs these for its users.</span>
+        <span className="text-[12.5px] leading-[17px] text-[color:var(--c-6b6b6b)]">Your own provider accounts, set in .env.local. The hosted {BRAND.name} runs these for its users.</span>
       </div>
 
       <div className="flex flex-col gap-2 px-[22px] pt-4">
@@ -1441,7 +1441,7 @@ function SelfHosting({ state }: { state: AppState }) {
               <span className="text-[14px] font-semibold">{state.host === "mac" ? "Direct on this Mac" : "Through Orgo"}</span>
               {radio(!tailnet)}
             </span>
-            <span className="text-[12.5px] leading-[18px] text-[#3A3A38]">
+            <span className="text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">
               {state.host === "mac" ? "Screens are mirrored as live pages straight from the browsers here." : "Screenshots and input go through Orgo's API. Works everywhere."}
             </span>
           </div>
@@ -1450,7 +1450,7 @@ function SelfHosting({ state }: { state: AppState }) {
               <span className="text-[14px] font-semibold">Your Tailscale tailnet</span>
               {radio(tailnet)}
             </span>
-            <span className="text-[12.5px] leading-[18px] text-[#3A3A38]">
+            <span className="text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">
               {joined.length
                 ? `${joined.length} computer${joined.length === 1 ? "" : "s"} on your tailnet. Orgo screens are mirrored as live pages, directly and privately.`
                 : "Computers join your tailnet when they start a task, for a direct, private mirror."}
@@ -1465,9 +1465,9 @@ function SelfHosting({ state }: { state: AppState }) {
       <div className="flex flex-col px-[22px] pt-4">
         <span className="pb-1 text-[13px] font-semibold">Computers (Orgo)</span>
         {state.bots.map((b) => (
-          <div key={b.id} className="flex items-center border-b border-[#F0F0EE] py-2 last:border-0">
+          <div key={b.id} className="flex items-center border-b border-[color:var(--c-f0f0ee)] py-2 last:border-0">
             <span className="w-[200px] text-[13px] font-medium">{b.name}</span>
-            <span className="font-mono text-[12px] text-[#3A3A38]">{!state.shared && state.host === "mac" ? "this Mac" : b.computerId ? `${b.computerId}${b.tailnet ? ` · ${b.tailnet.ip}` : ""}` : sharesComputer(b) ? `shares ${workBot(b, state.bots).name}'s` : "none yet"}</span>
+            <span className="font-mono text-[12px] text-[color:var(--c-3a3a38)]">{!state.shared && state.host === "mac" ? "this Mac" : b.computerId ? `${b.computerId}${b.tailnet ? ` · ${b.tailnet.ip}` : ""}` : sharesComputer(b) ? `shares ${workBot(b, state.bots).name}'s` : "none yet"}</span>
           </div>
         ))}
       </div>
@@ -1485,14 +1485,14 @@ export function Settings({ state, onClose, onShowScreen, onOpenVault }: { state:
   return (
     <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} className="motion-dialog-in flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
-        <div className="flex items-center justify-between border-b border-[#F0F0EE] px-[22px] py-[18px]">
+        <div className="flex items-center justify-between border-b border-[color:var(--c-f0f0ee)] px-[22px] py-[18px]">
           <div className="flex flex-col gap-0.5">
             <span className="text-[18px] font-semibold leading-[22px]">Settings</span>
-            <span className="text-[13px] leading-[17px] text-[#6B6B6B]">
+            <span className="text-[13px] leading-[17px] text-[color:var(--c-6b6b6b)]">
               {BRAINS_ON ? "You, how your bots reach you, this Mac, where your bots work and their brain" : "You, how your bots reach you, this Mac, and where your bots work"}
             </span>
           </div>
-          <button onClick={onClose} aria-label="Close" className="flex size-8 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3]">
+          <button onClick={onClose} aria-label="Close" className="flex size-8 items-center justify-center rounded-full shadow-[0_0_0_1px_var(--c-e6e6e3)]">
             <svg width="12" height="12" viewBox="0 0 12 12">
               <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
             </svg>
@@ -1514,7 +1514,7 @@ export function Settings({ state, onClose, onShowScreen, onOpenVault }: { state:
                   <span className="text-[14px] font-semibold">{h === "orgo" ? "Their own cloud computers" : "This Mac"}</span>
                   {radio(state.host === h)}
                 </span>
-                <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">
+                <span className="text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">
                   {h === "orgo" ? "Recommended. Your bots work on a computer in the cloud, with 4 screens, and keep working when your Mac is closed. A bot can have one of its own." : "Bots work in background browsers on this Mac, from your own internet connection."}
                 </span>
               </button>
@@ -1554,7 +1554,7 @@ function FirstLoad() {
         <div className="flex flex-col items-center gap-3">
           <span>This is taking longer than usual.</span>
           {canRestart && (
-            <button onClick={() => setConfirm(true)} className="flex items-center gap-1.5 rounded-full bg-[#F2F2F0] px-3.5 py-1.5 text-[13px] font-medium leading-4 text-ink hover:bg-[#EAEAE7]">
+            <button onClick={() => setConfirm(true)} className="flex items-center gap-1.5 rounded-full bg-[color:var(--c-f2f2f0)] px-3.5 py-1.5 text-[13px] font-medium leading-4 text-ink hover:bg-[color:var(--c-eaeae7)]">
               <RestartIcon />
               Restart {BRAND.name}
             </button>

@@ -120,7 +120,7 @@ function PillText({ watch: w, away, ago }: { watch: Watch; away: boolean; ago: s
   return away ? (
     <>
       <span className="font-semibold">Paused</span>
-      <span className="text-[#6B6B6B]"> · {watchName(w)} isn&rsquo;t showing here right now</span>
+      <span className="text-[color:var(--c-6b6b6b)]"> · {watchName(w)} isn&rsquo;t showing here right now</span>
     </>
   ) : w.alert ? (
     <>
@@ -130,7 +130,7 @@ function PillText({ watch: w, away, ago }: { watch: Watch; away: boolean; ago: s
     <>
       <span className="font-semibold">Watching</span> for {w.lookFor.charAt(0).toLowerCase()}
       {w.lookFor.slice(1)}
-      <span className="text-[#9A9A98]"> · looked {ago}</span>
+      <span className="text-[color:var(--c-9a9a98)]"> · looked {ago}</span>
     </>
   );
 }

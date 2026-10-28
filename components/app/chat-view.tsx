@@ -185,7 +185,7 @@ function Inline({ text }: { text: string }) {
                 e.preventDefault();
                 openLink(page ? new URL(link[2], window.location.href).href : link[2], page ? link[1] : undefined);
               }}
-              className={page ? "inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-0.5 font-medium no-underline shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]" : "underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink"}
+              className={page ? "inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-0.5 font-medium no-underline shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)]" : "underline decoration-[color:var(--c-c9c9c6)] underline-offset-2 hover:decoration-ink"}
             >
               {link[1]}
             </a>
@@ -436,7 +436,7 @@ export function ChatView({
   return (
     <PairOpen.Provider value={(id, focus) => setPair({ id, focus })}>
     <main
-      className="relative flex min-h-0 min-w-0 flex-1 flex-col border-r border-[#ECECEA] bg-white"
+      className="relative flex min-h-0 min-w-0 flex-1 flex-col border-r border-[color:var(--c-ececea)] bg-white"
       onDragOver={(e) => {
         // Nothing's sent in a shared workspace, so it takes no images (the window refuses them: bops-app.tsx).
         if (state.shared || ![...e.dataTransfer.types].includes("Files")) return;
@@ -456,8 +456,8 @@ export function ChatView({
       }}
     >
       {dropping && (
-        <div className="pointer-events-none absolute inset-3 z-[40] flex items-center justify-center rounded-[20px] border-2 border-dashed border-[#0A0A0A]/25 bg-white/85 backdrop-blur-[2px]">
-          <span className="text-[14px] font-medium text-[#3A3A38]">Drop images to send {solo ? `to ${solo.name}` : "to the group"}</span>
+        <div className="pointer-events-none absolute inset-3 z-[40] flex items-center justify-center rounded-[20px] border-2 border-dashed border-[color:var(--c-0a0a0a)]/25 bg-white/85 backdrop-blur-[2px]">
+          <span className="text-[14px] font-medium text-[color:var(--c-3a3a38)]">Drop images to send {solo ? `to ${solo.name}` : "to the group"}</span>
         </div>
       )}
       {pair && <PairSheet state={state} pairId={pair.id} focusId={pair.focus} onClose={() => setPair(null)} />}
@@ -478,7 +478,7 @@ export function ChatView({
             onClick={() => onCall(solo.id)}
             aria-label={`Call ${solo.name}`}
             title={`Call ${solo.name}`}
-            className="flex size-11 items-center justify-center rounded-full bg-white shadow-[0_0_0_1px_#E6E6E3,0_8px_20px_-10px_#00000040] hover:shadow-[0_0_0_1px_#C9C9C6,0_8px_20px_-10px_#00000040]"
+            className="flex size-11 items-center justify-center rounded-full bg-white shadow-[0_0_0_1px_var(--c-e6e6e3),0_8px_20px_-10px_#00000040] hover:shadow-[0_0_0_1px_var(--c-c9c9c6),0_8px_20px_-10px_#00000040]"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#0A0A0A" strokeWidth="1.7" strokeLinejoin="round">
               <path d="M5 3.5h3.2l1.6 4.2-2.1 1.4a11 11 0 0 0 5.2 5.2l1.4-2.1 4.2 1.6V17a2.5 2.5 0 0 1-2.7 2.5C9.4 19 5 14.6 4.5 8.2A2.5 2.5 0 0 1 5 3.5z" />
@@ -503,9 +503,9 @@ export function ChatView({
               <button onClick={() => solo && onShowBot(solo.id)} className="relative top-2 z-10" title={solo ? `${solo.name}'s profile` : undefined}>
                 <ChatAvatar chat={c} bots={state.bots} size={40} />
               </button>
-              <div className="relative flex flex-col items-center rounded-[14px] bg-white px-3.5 pb-1.5 pt-2.5 shadow-[0_0_0_1px_#E6E6E3,0_6px_16px_-8px_#00000020]">
+              <div className="relative flex flex-col items-center rounded-[14px] bg-white px-3.5 pb-1.5 pt-2.5 shadow-[0_0_0_1px_var(--c-e6e6e3),0_6px_16px_-8px_#00000020]">
                 <span className="text-[14px] font-semibold leading-[18px]">{chatName(c, state.bots)}</span>
-                <span className="text-[12px] leading-[15px] text-[#9A9A98]">{status}</span>
+                <span className="text-[12px] leading-[15px] text-[color:var(--c-9a9a98)]">{status}</span>
               </div>
             </>
           )}
@@ -513,7 +513,7 @@ export function ChatView({
         <div className={`flex flex-1 flex-col justify-end gap-1.5 px-5 pb-9 pt-8 ${width}`}>
           {/* An empty chat invites the user to start it, never a viewer of a shared workspace's (it's the owner's to start). */}
           {messages.length === 0 && !state.shared && (
-            <div className="m-auto max-w-[300px] py-10 text-center text-[14px] leading-5 text-[#6B6B6B]">
+            <div className="m-auto max-w-[300px] py-10 text-center text-[14px] leading-5 text-[color:var(--c-6b6b6b)]">
               {solo
                 ? solo.isMain
                   ? teamOf(state).length > 1
@@ -524,7 +524,7 @@ export function ChatView({
             </div>
           )}
           {(hiddenCount > 0 || olderThere) && (
-            <button onClick={showEarlier} className="mb-2 self-center rounded-full px-3 py-1 text-[12.5px] font-medium text-[#6B6B6B] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6] hover:text-ink">
+            <button onClick={showEarlier} className="mb-2 self-center rounded-full px-3 py-1 text-[12.5px] font-medium text-[color:var(--c-6b6b6b)] shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)] hover:text-ink">
               Show earlier messages
             </button>
           )}
@@ -533,7 +533,7 @@ export function ChatView({
             const gap = !prev || m.at - prev.at > 15 * 60_000;
             return (
               <Fragment key={m.id}>
-                {gap && <div className={`self-center py-1.5 text-[12px] leading-4 text-[#9A9A98] ${seen.has(m.id) ? "" : "motion-rise-in"}`}>{dayTime(m.at)}</div>}
+                {gap && <div className={`self-center py-1.5 text-[12px] leading-4 text-[color:var(--c-9a9a98)] ${seen.has(m.id) ? "" : "motion-rise-in"}`}>{dayTime(m.at)}</div>}
                 <MessageRow
                   m={m}
                   state={state}
@@ -547,7 +547,7 @@ export function ChatView({
                   {...rowProps(m)}
                 />
                 {i + hiddenCount === lastUserIdx && repliedAfterUser && (
-                  <div className={`${state.shared ? "self-start pl-3" : "self-end px-1"} pb-1 text-[11px] leading-[14px] text-[#9A9A98] ${readBy && !seen.has(readBy.id) ? "motion-fade-in" : ""}`}>Read {clockTime(m.at)}</div>
+                  <div className={`${state.shared ? "self-start pl-3" : "self-end px-1"} pb-1 text-[11px] leading-[14px] text-[color:var(--c-9a9a98)] ${readBy && !seen.has(readBy.id) ? "motion-fade-in" : ""}`}>Read {clockTime(m.at)}</div>
                 )}
               </Fragment>
             );
@@ -556,7 +556,7 @@ export function ChatView({
             // Up from the composer as you send it (not again when you come back to the chat before it lands).
             <div key={p.id} className={`flex max-w-[86%] flex-col items-end gap-1 self-end ${seen.has(p.id) ? "" : "motion-send-in"}`}>
               {p.previews && <MessageImages previews={p.previews} />}
-              {p.text && <div className="whitespace-pre-wrap rounded-[18px] bg-[#0A0A0A] px-3.5 py-2 text-[14px] leading-5 text-white [overflow-wrap:anywhere]">{p.text}</div>}
+              {p.text && <div className="whitespace-pre-wrap rounded-[18px] bg-[color:var(--c-0a0a0a)] px-3.5 py-2 text-[14px] leading-5 text-white [overflow-wrap:anywhere]">{p.text}</div>}
             </div>
           ))}
           {c.typing.map((b) => {
@@ -567,20 +567,20 @@ export function ChatView({
             return (
               <RiseIn key={b} fresh={!seen.has(typingKey(b))} className="flex flex-col gap-1 self-start">
                 {asking && (
-                  <span className="flex items-center gap-1.5 pl-3 text-[12.5px] leading-4 text-[#9A9A98]">
+                  <span className="flex items-center gap-1.5 pl-3 text-[12.5px] leading-4 text-[color:var(--c-9a9a98)]">
                     Asking
                     <Mascot botId={asking.id} color={asking.color} size={15} antenna={false} />
-                    <span className="text-[#6B6B6B]">{asking.name}…</span>
+                    <span className="text-[color:var(--c-6b6b6b)]">{asking.name}…</span>
                   </span>
                 )}
               <div className="flex items-end gap-2">
                 {/* Its mascot beside the dots thinks (or writes, when a thread of its is writing), in a group or 1:1. */}
                 {tb && <Mascot botId={tb.id} color={tb.color} size={24} live chatId={c.id} />}
-                <div className="flex items-center gap-[5px] rounded-[18px] bg-[#F2F2F0] px-4 py-[13px]">
+                <div className="flex items-center gap-[5px] rounded-[18px] bg-[color:var(--c-f2f2f0)] px-4 py-[13px]">
                   {/* A wave, each dot 150 ms behind the last. The delays are a whole 1.2 s wave early, so
                       no dot sits dark and still before its turn comes. */}
                   {[0, 150, 300].map((delay) => (
-                    <span key={delay} className="motion-typing-dot size-[7px] rounded-full bg-[#9A9A98]" style={{ animationDelay: `${delay - 1200}ms` }} />
+                    <span key={delay} className="motion-typing-dot size-[7px] rounded-full bg-[color:var(--c-9a9a98)]" style={{ animationDelay: `${delay - 1200}ms` }} />
                   ))}
                 </div>
               </div>
@@ -616,7 +616,7 @@ export function ChatView({
                 />
               ))}
               {threadAsks.length > shownAsks.length && (
-                <button onClick={() => setAllAsks(true)} className="self-start pl-1 text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+                <button onClick={() => setAllAsks(true)} className="self-start pl-1 text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
                   {threadAsks.length - shownAsks.length} more waiting on {ownerYou(state)}
                 </button>
               )}
@@ -638,14 +638,14 @@ export function ChatView({
           <Fold key={c.id} open={!!replying} className="relative">
             {bar && (
               <div className="pt-px">
-                <div className="mx-2 -mb-px flex items-center gap-2 rounded-t-[16px] bg-[#F7F7F6] px-3.5 py-2 shadow-[0_0_0_1px_#ECECEA]">
+                <div className="mx-2 -mb-px flex items-center gap-2 rounded-t-[16px] bg-[color:var(--c-f7f7f6)] px-3.5 py-2 shadow-[0_0_0_1px_var(--c-ececea)]">
                   <ReplyArrow />
-                  <span className="min-w-0 flex-1 truncate text-[12.5px] leading-4 text-[#6B6B6B]">
+                  <span className="min-w-0 flex-1 truncate text-[12.5px] leading-4 text-[color:var(--c-6b6b6b)]">
                     Replying to <span className="font-medium text-ink">{bar.role === "user" ? "yourself" : (state.bots.find((x) => x.id === bar.botId)?.name ?? "the bot")}</span>
                     {" · "}
                     {bar.text}
                   </span>
-                  <button onClick={() => setReplying(null)} aria-label="Cancel reply" className="flex size-5 items-center justify-center rounded-md text-[#9A9A98] hover:bg-black/[0.06] hover:text-ink">
+                  <button onClick={() => setReplying(null)} aria-label="Cancel reply" className="flex size-5 items-center justify-center rounded-md text-[color:var(--c-9a9a98)] hover:bg-black/[0.06] hover:text-ink">
                     <svg width="9" height="9" viewBox="0 0 12 12">
                       <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
                     </svg>
@@ -663,7 +663,7 @@ export function ChatView({
               e.preventDefault();
               void send();
             }}
-            className="flex flex-col rounded-[22px] bg-white py-2 pl-2 pr-2 shadow-[0_0_0_1px_#E2E2DF]"
+            className="flex flex-col rounded-[22px] bg-white py-2 pl-2 pr-2 shadow-[0_0_0_1px_var(--c-e2e2df)]"
           >
             <AttachmentTray items={attach.items} onRemove={attach.remove} />
             <div className="flex items-end gap-2">
@@ -672,7 +672,7 @@ export function ChatView({
               onClick={() => filePicker.current?.click()}
               aria-label="Attach images"
               data-tip="Attach images · or paste / drop them"
-              className="flex size-[30px] shrink-0 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0] hover:text-ink"
+              className="flex size-[30px] shrink-0 items-center justify-center rounded-full text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-f2f2f0)] hover:text-ink"
             >
               <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
                 <path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -702,7 +702,7 @@ export function ChatView({
               }}
               onKeyDown={(e) => e.key === "Escape" && replying && (e.stopPropagation(), setReplying(null))}
               placeholder={replying ? "Reply" : solo ? `Text ${solo.name}` : "Message the group · @ to mention"}
-              className="min-w-0 flex-1 bg-transparent py-[6px] text-[14px] leading-[18px] outline-none placeholder:text-[#9A9A98]"
+              className="min-w-0 flex-1 bg-transparent py-[6px] text-[14px] leading-[18px] outline-none placeholder:text-[color:var(--c-9a9a98)]"
             />
             <MicButton
               botId={solo?.id}
@@ -795,12 +795,12 @@ function RepliesView({
   return (
     <div className={`${opening ? "motion-fade-in " : ""}absolute inset-0 z-20 flex flex-col bg-white/80 px-3 pb-3 pt-[52px] backdrop-blur-md`} onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} className={`${opening ? "motion-sheet-in " : ""}mx-auto flex min-h-0 w-full max-w-[640px] flex-1 flex-col overflow-hidden rounded-[28px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000038]`}>
-        <div className="flex items-center gap-2 border-b border-[#F0F0EE] py-3 pl-4 pr-3">
+        <div className="flex items-center gap-2 border-b border-[color:var(--c-f0f0ee)] py-3 pl-4 pr-3">
           <ReplyArrow />
           <span className="flex-1 text-[14px] font-semibold leading-[18px]">
             {list.length - 1} {list.length === 2 ? "reply" : "replies"}
           </span>
-          <button onClick={onClose} aria-label="Close replies" className="flex size-[30px] items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
+          <button onClick={onClose} aria-label="Close replies" className="flex size-[30px] items-center justify-center rounded-full shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]">
             <svg width="11" height="11" viewBox="0 0 12 12">
               <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
             </svg>
@@ -822,10 +822,10 @@ function RepliesView({
                 {...rowProps(m)}
                 inReplies
               />
-              {i === 0 && <div className="my-1.5 h-px bg-[#F0F0EE]" />}
+              {i === 0 && <div className="my-1.5 h-px bg-[color:var(--c-f0f0ee)]" />}
             </Fragment>
           ))}
-          {typing.length > 0 && <span className="self-start pl-1 text-[12px] text-[#9A9A98]">{typing.map((t) => state.bots.find((b) => b.id === t)?.name).join(", ")} typing…</span>}
+          {typing.length > 0 && <span className="self-start pl-1 text-[12px] text-[color:var(--c-9a9a98)]">{typing.map((t) => state.bots.find((b) => b.id === t)?.name).join(", ")} typing…</span>}
           <div ref={end} />
         </div>
         {state.shared ? (
@@ -839,7 +839,7 @@ function RepliesView({
             setDraft("");
             void onSend(text);
           }}
-          className="m-3 mt-0 flex items-end gap-2.5 rounded-[22px] bg-white py-2 pl-4 pr-2 shadow-[0_0_0_1px_#E2E2DF]"
+          className="m-3 mt-0 flex items-end gap-2.5 rounded-[22px] bg-white py-2 pl-4 pr-2 shadow-[0_0_0_1px_var(--c-e2e2df)]"
         >
           <ComposerInput
             autoFocus
@@ -847,7 +847,7 @@ function RepliesView({
             onChange={setDraft}
             onKeyDown={(e) => e.key === "Escape" && onClose()}
             placeholder="Reply"
-            className="min-w-0 flex-1 bg-transparent py-[6px] text-[14px] leading-[18px] outline-none placeholder:text-[#9A9A98]"
+            className="min-w-0 flex-1 bg-transparent py-[6px] text-[14px] leading-[18px] outline-none placeholder:text-[color:var(--c-9a9a98)]"
           />
           <button type="submit" aria-label="Send" disabled={!draft.trim()} className="flex size-[30px] shrink-0 items-center justify-center rounded-full bg-ink disabled:opacity-30">
             <SendIcon />
@@ -860,7 +860,7 @@ function RepliesView({
 }
 
 /** A row of a small menu (the message menu, and the "⋯" ones). */
-const MENU_ITEM = "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-4 hover:bg-[#F2F2F0]";
+const MENU_ITEM = "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-4 hover:bg-[color:var(--c-f2f2f0)]";
 
 /**
  * A round "⋯" button and the small menu it opens under it, out of its right corner: the chat's (next to
@@ -890,8 +890,8 @@ function MoreMenu({ label, size, items }: { label: string; size: "chat" | "sheet
         aria-expanded={open}
         className={
           size === "chat"
-            ? "flex size-11 items-center justify-center rounded-full bg-white shadow-[0_0_0_1px_#E6E6E3,0_8px_20px_-10px_#00000040] hover:shadow-[0_0_0_1px_#C9C9C6,0_8px_20px_-10px_#00000040]"
-            : "flex size-[34px] items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]"
+            ? "flex size-11 items-center justify-center rounded-full bg-white shadow-[0_0_0_1px_var(--c-e6e6e3),0_8px_20px_-10px_#00000040] hover:shadow-[0_0_0_1px_var(--c-c9c9c6),0_8px_20px_-10px_#00000040]"
+            : "flex size-[34px] items-center justify-center rounded-full shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]"
         }
       >
         <svg width={size === "chat" ? 18 : 14} height={size === "chat" ? 18 : 14} viewBox="0 0 16 16" aria-hidden>
@@ -928,7 +928,7 @@ function MoreMenu({ label, size, items }: { label: string; size: "chat" | "sheet
 /** "Save as skill": steps in a list, with a mark for keeping them. */
 function SkillIcon() {
   return (
-    <svg width="13" height="13" viewBox="0 0 16 16" className="shrink-0 text-[#6B6B6B]" aria-hidden>
+    <svg width="13" height="13" viewBox="0 0 16 16" className="shrink-0 text-[color:var(--c-6b6b6b)]" aria-hidden>
       <path d="M6 4h7.5M6 8h7.5M6 12h5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
       <circle cx="2.8" cy="4" r="1" fill="currentColor" />
       <circle cx="2.8" cy="8" r="1" fill="currentColor" />
@@ -939,7 +939,7 @@ function SkillIcon() {
 
 function ReplyArrow() {
   return (
-    <svg width="13" height="13" viewBox="0 0 16 16" className="shrink-0 text-[#6B6B6B]">
+    <svg width="13" height="13" viewBox="0 0 16 16" className="shrink-0 text-[color:var(--c-6b6b6b)]">
       <path d="M6.5 3.5L2.5 7.5l4 4M2.5 7.5h7a4 4 0 0 1 4 4v1" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
@@ -1083,7 +1083,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   const actions = (
     <span className={`flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100 ${picking ? "opacity-100" : ""} ${outgoing ? "flex-row-reverse" : ""}`}>
       {!ro && (
-      <button onClick={() => setPicking(!picking)} aria-label="React" title="React" className="flex size-6 items-center justify-center rounded-md text-[#9A9A98] hover:bg-black/[0.05] hover:text-ink">
+      <button onClick={() => setPicking(!picking)} aria-label="React" title="React" className="flex size-6 items-center justify-center rounded-md text-[color:var(--c-9a9a98)] hover:bg-black/[0.05] hover:text-ink">
         <svg width="14" height="14" viewBox="0 0 16 16">
           <circle cx="7.5" cy="8.5" r="5.8" fill="none" stroke="currentColor" strokeWidth="1.3" />
           <path d="M5.3 9.8c.6.9 1.3 1.3 2.2 1.3s1.6-.4 2.2-1.3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
@@ -1093,7 +1093,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
       </button>
       )}
       {!inReplies && !ro && (
-        <button onClick={onReply} aria-label="Reply" title="Reply" className="flex size-6 items-center justify-center rounded-md text-[#9A9A98] hover:bg-black/[0.05] hover:text-ink">
+        <button onClick={onReply} aria-label="Reply" title="Reply" className="flex size-6 items-center justify-center rounded-md text-[color:var(--c-9a9a98)] hover:bg-black/[0.05] hover:text-ink">
           <ReplyArrow />
         </button>
       )}
@@ -1105,7 +1105,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
           setTimeout(() => setCopied(false), 1200);
         }}
         aria-label={copied ? "Copied" : "Copy"}
-        className={`flex size-6 items-center justify-center rounded-md hover:bg-black/[0.05] ${copied ? "text-[#2BB673]" : "text-[#9A9A98] hover:text-ink"}`}
+        className={`flex size-6 items-center justify-center rounded-md hover:bg-black/[0.05] ${copied ? "text-[#2BB673]" : "text-[color:var(--c-9a9a98)] hover:text-ink"}`}
       >
         {copied ? (
           <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
@@ -1147,7 +1147,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
         }}
         className={menuItem}
       >
-        <svg width="13" height="13" viewBox="0 0 16 16" className="shrink-0 text-[#6B6B6B]">
+        <svg width="13" height="13" viewBox="0 0 16 16" className="shrink-0 text-[color:var(--c-6b6b6b)]">
           <rect x="5" y="5" width="8.5" height="8.5" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.4" />
           <path d="M10.5 3.2A1.6 1.6 0 0 0 9 2.5H4.1A1.6 1.6 0 0 0 2.5 4.1V9a1.6 1.6 0 0 0 .7 1.4" fill="none" stroke="currentColor" strokeWidth="1.4" />
         </svg>
@@ -1177,13 +1177,13 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
         className={`motion-menu-in absolute bottom-[calc(100%+6px)] z-40 flex items-center gap-0.5 rounded-full bg-white px-1.5 py-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040] ${outgoing ? "right-0 origin-bottom-right" : "left-0 origin-bottom-left"}`}
       >
         {TAPBACKS.map((t) => (
-          <button key={t} onClick={() => setReaction({ type: t })} aria-label={t} className={`flex size-[34px] items-center justify-center rounded-full hover:bg-[#F2F2F0] ${mine?.type === t ? "bg-[#0088FF]/15" : ""}`}>
+          <button key={t} onClick={() => setReaction({ type: t })} aria-label={t} className={`flex size-[34px] items-center justify-center rounded-full hover:bg-[color:var(--c-f2f2f0)] ${mine?.type === t ? "bg-[#0088FF]/15" : ""}`}>
             <TapbackGlyph type={t} size={20} />
           </button>
         ))}
-        <span className="mx-0.5 h-5 w-px bg-[#ECECEA]" />
+        <span className="mx-0.5 h-5 w-px bg-[color:var(--c-ececea)]" />
         {QUICK_EMOJI.map((e) => (
-          <button key={e} onClick={() => setReaction({ emoji: e })} aria-label={e} className={`flex size-[34px] items-center justify-center rounded-full text-[19px] hover:bg-[#F2F2F0] ${mine?.emoji === e ? "bg-[#0088FF]/15" : ""}`}>
+          <button key={e} onClick={() => setReaction({ emoji: e })} aria-label={e} className={`flex size-[34px] items-center justify-center rounded-full text-[19px] hover:bg-[color:var(--c-f2f2f0)] ${mine?.emoji === e ? "bg-[#0088FF]/15" : ""}`}>
             {e}
           </button>
         ))}
@@ -1193,7 +1193,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   );
   // A reply quotes what it answers; the message replied to says how many replies it has.
   const quote = root && !inReplies && (
-    <button onClick={onOpenReplies} className={`flex max-w-full items-center gap-1.5 px-1 text-[11.5px] leading-4 text-[#9A9A98] hover:text-[#6B6B6B] ${outgoing ? "self-end" : "self-start"}`}>
+    <button onClick={onOpenReplies} className={`flex max-w-full items-center gap-1.5 px-1 text-[11.5px] leading-4 text-[color:var(--c-9a9a98)] hover:text-[color:var(--c-6b6b6b)] ${outgoing ? "self-end" : "self-start"}`}>
       <ReplyArrow />
       <span className="truncate">
         {root.role === "user" ? you : nameOf(root.botId)}: {root.text}
@@ -1224,13 +1224,13 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
           if (watch.alert) void post("/api/watches", { id: watch.id, action: "seen" }, "PATCH");
         }}
         title={page.url}
-        className="rounded-full bg-white px-3 py-1 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]"
+        className="rounded-full bg-white px-3 py-1 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)]"
       >
         Open page
       </button>
       <button
         onClick={() => void post(`/api/watches?id=${encodeURIComponent(watch.id)}`, {}, "DELETE")}
-        className="rounded-full bg-white px-3 py-1 text-[12.5px] font-medium leading-4 text-[#6B6B6B] shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#FEF3F2] hover:text-[#B42318]"
+        className="rounded-full bg-white px-3 py-1 text-[12.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)] shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[#FEF3F2] hover:text-[#B42318]"
       >
         Stop watching
       </button>
@@ -1244,7 +1244,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
           else onShowScreen(watch.botId, watch.display);
           void post("/api/watches", { id: watch.id, action: "seen" }, "PATCH");
         }}
-        className="rounded-full bg-white px-3 py-1 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]"
+        className="rounded-full bg-white px-3 py-1 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)]"
       >
         Show me
       </button>
@@ -1270,7 +1270,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
         return (
           <Fragment key={s.id}>
             {grouped && parts[0] === s && (
-              <span className={`flex items-center gap-1.5 pl-1 text-[12px] font-medium leading-4 text-[#6B6B6B] ${i ? "pt-1" : ""}`}>
+              <span className={`flex items-center gap-1.5 pl-1 text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)] ${i ? "pt-1" : ""}`}>
                 <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="shrink-0">
                   <rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
                   <rect x="9" y="1.5" width="5.5" height="5.5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
@@ -1291,7 +1291,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
       {runningHere.length > 1 && !ro && (
         <button
           onClick={() => runningHere.forEach((s) => void post("/api/sessions", { sessionId: s.id }, "DELETE"))}
-          className="pl-1 text-[12px] font-medium leading-4 text-[#9A9A98] hover:text-[#B42318]"
+          className="pl-1 text-[12px] font-medium leading-4 text-[color:var(--c-9a9a98)] hover:text-[#B42318]"
         >
           Stop all {runningHere.length}
         </button>
@@ -1304,7 +1304,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
               <MacIcon size={13} />
               On your Mac
             </button>
-            <button onClick={() => void post(`/api/sessions/${s.id}/where`, { to: "cloud" })} className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
+            <button onClick={() => void post(`/api/sessions/${s.id}/where`, { to: "cloud" })} className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)]">
               <CloudIcon />
               In the cloud
             </button>
@@ -1319,7 +1319,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
               <MacIcon size={13} />
               Move to your Mac?
             </button>
-            <button onClick={() => void post(`/api/sessions/${s.id}/where`, { move: false })} className="rounded-full bg-white px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
+            <button onClick={() => void post(`/api/sessions/${s.id}/where`, { move: false })} className="rounded-full bg-white px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)]">
               Not now
             </button>
           </div>
@@ -1330,7 +1330,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   if (m.role === "user")
     return (
       <div className={`group/msg flex max-w-[78%] flex-col gap-1 ${outgoing ? "items-end self-end" : "items-start self-start"} ${enterClass}`} style={enter?.style}>
-        {!outgoing && !continued && <div className="pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{you}</div>}
+        {!outgoing && !continued && <div className="pl-3 text-[11px] leading-[14px] text-[color:var(--c-9a9a98)]">{you}</div>}
         {quote}
         {/* Room above the bubble for its tapbacks, so they don't cover the quote or sender line (it eases open as the first one pops in). */}
         <div className={`flex min-w-0 max-w-full items-center gap-1 transition-[margin] duration-200 ease-out motion-reduce:transition-none ${m.reactions?.length ? "mt-3.5" : ""}`}>
@@ -1342,14 +1342,14 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             <div className={`flex flex-col gap-1 ${outgoing ? "items-end" : "items-start"}`}>
               {!!m.images?.length && <MessageImages images={m.images} align={outgoing ? "end" : "start"} />}
               {m.text && (
-                <div className={`select-text whitespace-pre-wrap rounded-[18px] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${outgoing ? "bg-ink text-white" : "bg-white text-ink shadow-[0_0_0_1px_#E2E2DF]"}`}>{m.text}</div>
+                <div className={`select-text whitespace-pre-wrap rounded-[18px] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${outgoing ? "bg-ink text-white" : "bg-white text-ink shadow-[0_0_0_1px_var(--c-e2e2df)]"}`}>{m.text}</div>
               )}
             </div>
           </div>
           {!outgoing && actions}
         </div>
         {m.via === "sms" && (
-          <span data-tip={`${you} texted this from ${state.shared ? "their" : "your"} phone; the answer goes back by text`} className={`flex items-center gap-1 text-[11.5px] leading-4 text-[#9A9A98] ${outgoing ? "pr-1" : "pl-1"}`}>
+          <span data-tip={`${you} texted this from ${state.shared ? "their" : "your"} phone; the answer goes back by text`} className={`flex items-center gap-1 text-[11.5px] leading-4 text-[color:var(--c-9a9a98)] ${outgoing ? "pr-1" : "pl-1"}`}>
             <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden className="shrink-0">
               <rect x="4.2" y="1.5" width="7.6" height="13" rx="1.8" fill="none" stroke="currentColor" strokeWidth="1.3" />
               <path d="M7 12.2h2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
@@ -1358,7 +1358,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
           </span>
         )}
         {m.via && m.via !== "sms" && (
-          <span data-tip={`${you} sent this in ${CHANNEL_NAME[m.via]}; the answer went back there`} className={`flex items-center gap-1 text-[11.5px] leading-4 text-[#9A9A98] ${outgoing ? "pr-1" : "pl-1"}`}>
+          <span data-tip={`${you} sent this in ${CHANNEL_NAME[m.via]}; the answer went back there`} className={`flex items-center gap-1 text-[11.5px] leading-4 text-[color:var(--c-9a9a98)] ${outgoing ? "pr-1" : "pl-1"}`}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={`/logos/${m.via}.svg`} alt="" width={11} height={11} className="shrink-0 rounded-[3px] opacity-80" />
             via {CHANNEL_NAME[m.via]}
@@ -1392,7 +1392,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     );
     return ro ? (
       <div className={`flex flex-col items-start gap-1 self-start ${enterClass}`}>
-        <div className="pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{you}</div>
+        <div className="pl-3 text-[11px] leading-[14px] text-[color:var(--c-9a9a98)]">{you}</div>
         {bubble}
       </div>
     ) : (
@@ -1451,8 +1451,8 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     <div className={`group/msg flex max-w-[86%] items-end gap-2 self-start ${enterClass}`}>
       {showSender && (b && !continued ? <Mascot botId={b.id} color={b.color} size={24} /> : <span className="w-6 shrink-0" />)}
       <div className="flex min-w-0 flex-col gap-1">
-        {showSender && b && !continued && <div className="pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{b.name}</div>}
-        {m.routine && <div className="truncate pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{fromRoutine ? `From a routine · ${undash(fromRoutine.title)}` : "From a routine"}</div>}
+        {showSender && b && !continued && <div className="pl-3 text-[11px] leading-[14px] text-[color:var(--c-9a9a98)]">{b.name}</div>}
+        {m.routine && <div className="truncate pl-3 text-[11px] leading-[14px] text-[color:var(--c-9a9a98)]">{fromRoutine ? `From a routine · ${undash(fromRoutine.title)}` : "From a routine"}</div>}
         {!!m.asked?.length && <AskedLine state={state} asked={m.asked} by={m.botId} />}
         {quote}
         <div className={`flex min-w-0 max-w-full items-center gap-1 self-start transition-[margin] duration-200 ease-out motion-reduce:transition-none ${m.reactions?.length ? "mt-3.5" : ""}`}>
@@ -1464,7 +1464,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
               {/* Pictures the bot made (make_image). */}
               {!!m.images?.length && <MessageImages images={m.images} align="start" />}
               {(m.text || !m.images?.length) && (
-                <div className="whitespace-pre-wrap rounded-[18px] bg-[#F2F2F0] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere]">
+                <div className="whitespace-pre-wrap rounded-[18px] bg-[color:var(--c-f2f2f0)] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere]">
                   <Rich text={withoutBriefing(m.text)} botId={m.botId} />
                 </div>
               )}
@@ -1480,7 +1480,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
               <button
                 key={o}
                 onClick={() => void post(`/api/chats/${encodeURIComponent(m.chatId)}/messages`, { text: o })}
-                className="rounded-full bg-white px-3 py-1.5 text-[13px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]"
+                className="rounded-full bg-white px-3 py-1.5 text-[13px] font-medium leading-4 shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)]"
               >
                 {o}
               </button>
@@ -1488,7 +1488,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
           </div>
         )}
         {m.emailed && (
-          <span data-tip={`Also sent to ${m.emailed}, as a reply to ${state.shared ? "their" : "your"} email`} className="flex items-center gap-1 pl-3 text-[11.5px] leading-4 text-[#9A9A98]">
+          <span data-tip={`Also sent to ${m.emailed}, as a reply to ${state.shared ? "their" : "your"} email`} className="flex items-center gap-1 pl-3 text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">
             <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden className="shrink-0">
               <rect x="1.8" y="3.2" width="12.4" height="9.6" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
               <path d="M2.5 4.5 8 8.6l5.5-4.1" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
@@ -1512,7 +1512,7 @@ function AskedLine({ state, asked, by }: { state: AppState; asked: NonNullable<M
   const seen = new Set<string>();
   const first = asked.filter((a) => !seen.has(a.botId) && seen.add(a.botId));
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-3 text-[12.5px] leading-4 text-[#9A9A98]">
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-3 text-[12.5px] leading-4 text-[color:var(--c-9a9a98)]">
       Asked
       {first.map((a) => {
         const t = state.bots.find((b) => b.id === a.botId);
@@ -1522,7 +1522,7 @@ function AskedLine({ state, asked, by }: { state: AppState; asked: NonNullable<M
             key={a.botId}
             onClick={() => by && open(pairChatId(by, t.id), a.questionId)}
             title={`See what was asked and what ${t.name} said`}
-            className="flex items-center gap-1 rounded-full text-[#6B6B6B] hover:text-ink"
+            className="flex items-center gap-1 rounded-full text-[color:var(--c-6b6b6b)] hover:text-ink"
           >
             <Mascot botId={t.id} color={t.color} size={15} antenna={false} />
             {t.name}
@@ -1576,11 +1576,11 @@ export function PairSheet({ state, pairId, focusId, onClose }: { state: AppState
     // A dialog: Esc closes it before the Vault or a profile on the right (see bops-app.tsx).
     <div role="dialog" aria-label={`Chat between ${state.shared ? "the owner's" : "your"} bots`} className="absolute inset-0 z-40 flex animate-[screen-in_200ms_ease-out] flex-col bg-white">
       <div className="flex shrink-0 justify-center px-5 pb-2 pt-4">
-        <div className="flex max-w-full items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-4 shadow-[0_0_0_1px_#ECECEA]">
+        <div className="flex max-w-full items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-4 shadow-[0_0_0_1px_var(--c-ececea)]">
           {bots.map((b, i) => (
             <Fragment key={b.id}>
               {i > 0 && (
-                <svg width="14" height="14" viewBox="0 0 16 16" className="shrink-0 text-[#C9C9C6]" aria-hidden>
+                <svg width="14" height="14" viewBox="0 0 16 16" className="shrink-0 text-[color:var(--c-c9c9c6)]" aria-hidden>
                   <path d="M3 5.5h9.5L10 3M13 10.5H3.5L6 13" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               )}
@@ -1594,11 +1594,11 @@ export function PairSheet({ state, pairId, focusId, onClose }: { state: AppState
       </div>
       <div ref={list} className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto px-5 pb-24 pt-4">
         {olderThere && (
-          <button onClick={() => void post("/api/workspaces/shared", { older: pairId })} className="mb-2 self-center rounded-full px-3 py-1 text-[12.5px] font-medium text-[#6B6B6B] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6] hover:text-ink">
+          <button onClick={() => void post("/api/workspaces/shared", { older: pairId })} className="mb-2 self-center rounded-full px-3 py-1 text-[12.5px] font-medium text-[color:var(--c-6b6b6b)] shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)] hover:text-ink">
             Show earlier messages
           </button>
         )}
-        {messages.length === 0 && <div className="m-auto text-[13.5px] text-[#9A9A98]">Nothing between them yet.</div>}
+        {messages.length === 0 && <div className="m-auto text-[13.5px] text-[color:var(--c-9a9a98)]">Nothing between them yet.</div>}
         {messages.map((m, i) => {
           const b = state.bots.find((x) => x.id === m.botId);
           const prev = messages[i - 1];
@@ -1609,7 +1609,7 @@ export function PairSheet({ state, pairId, focusId, onClose }: { state: AppState
           const lastOfRun = !next || next.botId !== m.botId || next.at - m.at > 15 * 60_000;
           return (
             <Fragment key={m.id}>
-              {gap && <div className="self-center py-2 text-[12px] leading-4 text-[#9A9A98]">{dayTime(m.at)}</div>}
+              {gap && <div className="self-center py-2 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{dayTime(m.at)}</div>}
               <div data-msg={m.id} className={`flex max-w-[88%] items-end gap-2 self-start ${continued ? "" : "pt-1.5"}`}>
                 {b && lastOfRun ? <Mascot botId={b.id} color={b.color} size={24} /> : <span className="w-6 shrink-0" />}
                 <div className="flex min-w-0 flex-col gap-1">
@@ -1618,7 +1618,7 @@ export function PairSheet({ state, pairId, focusId, onClose }: { state: AppState
                       {label(b)}
                     </span>
                   )}
-                  <div className={`whitespace-pre-wrap rounded-[18px] bg-[#F2F2F0] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${m.id === focusId ? "shadow-[0_0_0_2px_#0A0A0A1F]" : ""}`}>
+                  <div className={`whitespace-pre-wrap rounded-[18px] bg-[color:var(--c-f2f2f0)] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${m.id === focusId ? "shadow-[0_0_0_2px_var(--c-0a0a0a)1F]" : ""}`}>
                     <Rich text={m.text} botId={m.botId} />
                   </div>
                 </div>
@@ -1628,7 +1628,7 @@ export function PairSheet({ state, pairId, focusId, onClose }: { state: AppState
         })}
       </div>
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center bg-gradient-to-t from-white via-white/90 to-white/0 pb-5 pt-10">
-        <button onClick={onClose} className="pointer-events-auto rounded-full bg-white px-5 py-2.5 text-[14px] font-medium shadow-[0_0_0_1px_#E2E2DF,0_8px_20px_-10px_#00000040] hover:bg-[#F7F7F6]">
+        <button onClick={onClose} className="pointer-events-auto rounded-full bg-white px-5 py-2.5 text-[14px] font-medium shadow-[0_0_0_1px_var(--c-e2e2df),0_8px_20px_-10px_#00000040] hover:bg-[color:var(--c-f7f7f6)]">
           Close chat
         </button>
       </div>
@@ -1654,7 +1654,7 @@ function TextCard({ m, state, className = "" }: { m: Message; state: AppState; c
   const mins = m.call ? Math.floor(m.call.seconds / 60) : 0;
   return (
     <div className={`flex w-full max-w-[460px] flex-col gap-1.5 self-start ${className}`}>
-      <div className="flex items-center gap-1.5 pl-1 text-[11.5px] leading-4 text-[#9A9A98]">
+      <div className="flex items-center gap-1.5 pl-1 text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">
         <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="shrink-0">
           {call ? (
             <path d="M3.5 2.5h2.6l1 2.6-1.5 1a7 7 0 003.3 3.3l1-1.5 2.6 1v2.6a1 1 0 01-1 1A10 10 0 012.5 3.5a1 1 0 011-1z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
@@ -1668,12 +1668,12 @@ function TextCard({ m, state, className = "" }: { m: Message; state: AppState; c
         {call ? `Call to ${b?.name ?? "the bot"}` : `Text to ${b?.name ?? "the bot"}`} · {clockTime(m.at)}
         {call && m.call ? ` · ${mins ? `${mins}m ` : ""}${m.call.seconds % 60}s` : ""}
       </div>
-      <div className="flex flex-col gap-1 rounded-[16px] bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_#E6E6E3,0_6px_16px_-12px_#00000030]">
+      <div className="flex flex-col gap-1 rounded-[16px] bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_var(--c-e6e6e3),0_6px_16px_-12px_#00000030]">
         <div className="flex items-baseline gap-1.5 text-[12.5px] leading-4">
-          <span className="text-[#9A9A98]">From</span>
+          <span className="text-[color:var(--c-9a9a98)]">From</span>
           <span className="font-medium text-ink">{prettyPhone(t.from)}</span>
         </div>
-        <div className="select-text whitespace-pre-wrap text-[13.5px] leading-5 text-[#3A3A38] [overflow-wrap:anywhere]">{m.text}</div>
+        <div className="select-text whitespace-pre-wrap text-[13.5px] leading-5 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">{m.text}</div>
       </div>
       {!!m.images?.length && <MessageImages images={m.images} align="start" />}
     </div>
@@ -1696,7 +1696,7 @@ function EmailCard({ m, state, className = "" }: { m: Message; state: AppState; 
   const label = e.dir === "in" ? (e.fromOwner ? `${ownerWho(state.shared)} emailed ${b?.name ?? "the bot"}` : `Email to ${b?.name ?? "the bot"}`) : `${b?.name ?? "The bot"} sent an email`;
   return (
     <div className={`flex w-full max-w-[460px] flex-col gap-1.5 self-start ${e.bulk ? "opacity-75" : ""} ${className}`}>
-      <div className="flex items-center gap-1.5 pl-1 text-[11.5px] leading-4 text-[#9A9A98]">
+      <div className="flex items-center gap-1.5 pl-1 text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">
         <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="shrink-0">
           <rect x="1.8" y="3.2" width="12.4" height="9.6" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
           <path d="M2.5 4.5 8 8.6l5.5-4.1" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
@@ -1704,39 +1704,39 @@ function EmailCard({ m, state, className = "" }: { m: Message; state: AppState; 
         {label} · {clockTime(m.at)}
         {e.bulk && <span data-tip="A newsletter or automatic email: the bot doesn't speak up about these">· automatic</span>}
       </div>
-      <div className="flex flex-col gap-1 rounded-[16px] bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_#E6E6E3,0_6px_16px_-12px_#00000030]">
+      <div className="flex flex-col gap-1 rounded-[16px] bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_var(--c-e6e6e3),0_6px_16px_-12px_#00000030]">
         <div className="flex min-w-0 items-baseline gap-1.5 text-[12.5px] leading-4">
-          <span className="shrink-0 text-[#9A9A98]">{e.dir === "in" ? "From" : "To"}</span>
+          <span className="shrink-0 text-[color:var(--c-9a9a98)]">{e.dir === "in" ? "From" : "To"}</span>
           {e.dir === "in" ? (
             <span className="min-w-0 truncate" title={e.from}>
               <span className="font-medium text-ink">{from.name}</span>
-              {from.address && <span className="text-[#9A9A98]"> {from.address}</span>}
+              {from.address && <span className="text-[color:var(--c-9a9a98)]"> {from.address}</span>}
             </span>
           ) : (
             <span className="min-w-0 truncate font-medium text-ink" title={[...e.to, ...(e.cc ?? [])].join(", ")}>
               {e.to.map((t) => person(t).name).join(", ")}
-              {e.cc?.length ? <span className="font-normal text-[#9A9A98]"> · cc {e.cc.length}</span> : null}
+              {e.cc?.length ? <span className="font-normal text-[color:var(--c-9a9a98)]"> · cc {e.cc.length}</span> : null}
             </span>
           )}
         </div>
         <div className="text-[14px] font-semibold leading-5 [overflow-wrap:anywhere]">{e.subject}</div>
         {m.text && (
-          <div className={`select-text whitespace-pre-wrap text-[13.5px] leading-5 text-[#3A3A38] [overflow-wrap:anywhere] ${open ? "" : "line-clamp-4"}`}>{m.text}</div>
+          <div className={`select-text whitespace-pre-wrap text-[13.5px] leading-5 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere] ${open ? "" : "line-clamp-4"}`}>{m.text}</div>
         )}
         {long && (
-          <button onClick={() => setOpen(!open)} className="self-start text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+          <button onClick={() => setOpen(!open)} className="self-start text-[12.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
             {open ? "Show less" : "Show all"}
           </button>
         )}
         {!!e.files?.length && (
           <div className="flex flex-wrap gap-1.5 pt-1">
             {e.files.map((f, i) => (
-              <span key={i} className="flex items-center gap-1 rounded-full bg-[#F2F2F0] px-2.5 py-1 text-[12px] leading-4 text-[#3A3A38]">
+              <span key={i} className="flex items-center gap-1 rounded-full bg-[color:var(--c-f2f2f0)] px-2.5 py-1 text-[12px] leading-4 text-[color:var(--c-3a3a38)]">
                 <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden>
                   <path d="M10.5 4.5 5.6 9.4a1.6 1.6 0 0 0 2.3 2.3l5-5a3 3 0 0 0-4.3-4.3l-5 5a4.4 4.4 0 0 0 6.2 6.2l4.4-4.4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
                 </svg>
                 {f.name}
-                <span className="text-[#9A9A98]">{f.size > 1e6 ? `${(f.size / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(f.size / 1e3))} KB`}</span>
+                <span className="text-[color:var(--c-9a9a98)]">{f.size > 1e6 ? `${(f.size / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(f.size / 1e3))} KB`}</span>
               </span>
             ))}
           </div>
@@ -1750,17 +1750,17 @@ function EmailCard({ m, state, className = "" }: { m: Message; state: AppState; 
 // A short note is a pill; a long one (a message sent on to a task) a card, three lines until clicked.
 function SystemNote({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
-  if (text.length <= 80) return <div className="flex items-center gap-1.5 rounded-full bg-[#F7F7F6] px-3 py-1 text-[12px] leading-4 text-[#6B6B6B]">{text}</div>;
+  if (text.length <= 80) return <div className="flex items-center gap-1.5 rounded-full bg-[color:var(--c-f7f7f6)] px-3 py-1 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{text}</div>;
   const quoted = text.match(/^([^:“\n]{1,80}):\s*(“[\s\S]*)$/);
   return (
     <button
       type="button"
       onClick={() => setOpen((o) => !o)}
       title={open ? undefined : "Show all"}
-      className="w-full max-w-[400px] rounded-[14px] bg-[#F7F7F6] px-3 py-2 text-left text-[12px] leading-4 text-[#6B6B6B] [overflow-wrap:anywhere] hover:bg-[#F2F2F0]"
+      className="w-full max-w-[400px] rounded-[14px] bg-[color:var(--c-f7f7f6)] px-3 py-2 text-left text-[12px] leading-4 text-[color:var(--c-6b6b6b)] [overflow-wrap:anywhere] hover:bg-[color:var(--c-f2f2f0)]"
     >
       {quoted && <span className="block font-medium">{quoted[1]}</span>}
-      <span className={`whitespace-pre-wrap ${quoted ? "text-[#3A3A3A]" : ""} ${open ? "block" : "line-clamp-3"}`}>{quoted ? quoted[2] : text}</span>
+      <span className={`whitespace-pre-wrap ${quoted ? "text-[color:var(--c-3a3a3a)]" : ""} ${open ? "block" : "line-clamp-3"}`}>{quoted ? quoted[2] : text}</span>
     </button>
   );
 }
@@ -1775,14 +1775,14 @@ function MemoryNote({ m, readOnly = false, className = "" }: { m: Message; readO
   };
   const button = "shrink-0 rounded-full px-2 py-0.5 text-[12px] font-medium leading-4 text-ink hover:bg-black/[0.05] disabled:opacity-40";
   return (
-    <div className={`flex w-full max-w-[400px] flex-col self-center rounded-[14px] bg-[#F7F7F6] py-2 pl-3 pr-1.5 text-[12px] leading-4 ${className}`}>
+    <div className={`flex w-full max-w-[400px] flex-col self-center rounded-[14px] bg-[color:var(--c-f7f7f6)] py-2 pl-3 pr-1.5 text-[12px] leading-4 ${className}`}>
       <div className="flex items-start gap-2">
-        <svg width="13" height="13" viewBox="0 0 16 16" className="mt-[1.5px] shrink-0 text-[#9A9A98]" aria-hidden>
+        <svg width="13" height="13" viewBox="0 0 16 16" className="mt-[1.5px] shrink-0 text-[color:var(--c-9a9a98)]" aria-hidden>
           <path d="M8 2.5c-2.6 0-4.5 1.9-4.5 4.3 0 1.5.8 2.6 1.8 3.4v2.3h5.4v-2.3c1-.8 1.8-1.9 1.8-3.4 0-2.4-1.9-4.3-4.5-4.3zM6.3 14.5h3.4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" strokeLinecap="round" />
         </svg>
         <div className="min-w-0 flex-1 pt-px">
-          <span className="font-medium text-[#6B6B6B]">{mem.undone ? "Not remembered" : "Remembered"}</span>
-          <span className={`line-clamp-2 text-[#3A3A3A] ${mem.undone ? "text-[#9A9A98] line-through" : ""}`} title={mem.fact}>
+          <span className="font-medium text-[color:var(--c-6b6b6b)]">{mem.undone ? "Not remembered" : "Remembered"}</span>
+          <span className={`line-clamp-2 text-[color:var(--c-3a3a3a)] ${mem.undone ? "text-[color:var(--c-9a9a98)] line-through" : ""}`} title={mem.fact}>
             {mem.fact}
           </span>
         </div>
@@ -1793,12 +1793,12 @@ function MemoryNote({ m, readOnly = false, className = "" }: { m: Message; readO
         )}
       </div>
       {mem.old && !mem.undone && (
-        <div className="mt-1.5 flex items-center gap-2 border-t border-[#ECECEA] pt-1.5 pl-[21px]">
+        <div className="mt-1.5 flex items-center gap-2 border-t border-[color:var(--c-ececea)] pt-1.5 pl-[21px]">
           {mem.old.forgotten ? (
-            <span className="min-w-0 flex-1 text-[#9A9A98]">Forgot the old one</span>
+            <span className="min-w-0 flex-1 text-[color:var(--c-9a9a98)]">Forgot the old one</span>
           ) : (
             <>
-              <span className="min-w-0 flex-1 truncate text-[#9A9A98]" title={mem.old.text}>
+              <span className="min-w-0 flex-1 truncate text-[color:var(--c-9a9a98)]" title={mem.old.text}>
                 Replaces: {mem.old.text}
               </span>
               {!readOnly && (
@@ -1829,29 +1829,29 @@ function SessionChip({ session: s, state, onClick }: { session: Session; state: 
   return (
     <button
       onClick={onClick}
-      className="flex max-w-full items-center gap-[9px] rounded-[14px] bg-white py-[9px] pl-3 pr-3.5 text-left shadow-[0_0_0_1px_#E6E6E3] hover:shadow-[0_0_0_1px_#C9C9C6]"
+      className="flex max-w-full items-center gap-[9px] rounded-[14px] bg-white py-[9px] pl-3 pr-3.5 text-left shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:shadow-[0_0_0_1px_var(--c-c9c9c6)]"
     >
       <StatusIcon session={s} size={14} dark owner={!!state.shared} okWait={waitsForOk(s, state)} />
-      <span className={`truncate text-[14px] leading-[18px] ${live(s) || waiting ? "text-ink" : "text-[#6B6B6B]"}`}>{s.title}</span>
+      <span className={`truncate text-[14px] leading-[18px] ${live(s) || waiting ? "text-ink" : "text-[color:var(--c-6b6b6b)]"}`}>{s.title}</span>
       {/* The brain that runs it, when one does (threadRunner); Bops agent only where its bot is on a brain now. */}
       {badge && <BrainBadge kind={badge.kind} title={badge.title} />}
       {/* Where it runs: the user's Mac (the owner's, in a shared workspace) or the cloud (deciding: nothing yet). */}
       {s.runsOn === "mac" ? (
-        <span title={`On ${state.shared ? "the owner's" : "your"} Mac`} className="flex shrink-0 items-center gap-1 rounded-full bg-[#F2F2F0] px-1.5 py-px text-[11px] leading-[14px] text-[#3A3A38]">
+        <span title={`On ${state.shared ? "the owner's" : "your"} Mac`} className="flex shrink-0 items-center gap-1 rounded-full bg-[color:var(--c-f2f2f0)] px-1.5 py-px text-[11px] leading-[14px] text-[color:var(--c-3a3a38)]">
           <MacIcon size={11} />
           {ownerMac(state)}
         </span>
       ) : s.askWhere && live(s) ? (
-        <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">· where?</span>
+        <span className="shrink-0 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">· where?</span>
       ) : null}
-      {waiting && <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">· {s.blocker ? `needs ${blockerAsk(state, s.blocker)}` : `needs ${ownerYou(state)}`}</span>}
+      {waiting && <span className="shrink-0 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">· {s.blocker ? `needs ${blockerAsk(state, s.blocker)}` : `needs ${ownerYou(state)}`}</span>}
       {/* Which screen it's on, live: the number on the panel's tiles. */}
       {live(s) && s.runsOn !== "mac" && s.display !== undefined && (
-        <span title={`On screen ${screenNo(s.display)} of ${b?.name ?? "its bot"}'s computer`} className="shrink-0 rounded-full bg-[#F2F2F0] px-1.5 py-px text-[11px] tabular-nums leading-[14px] text-[#3A3A38]">
+        <span title={`On screen ${screenNo(s.display)} of ${b?.name ?? "its bot"}'s computer`} className="shrink-0 rounded-full bg-[color:var(--c-f2f2f0)] px-1.5 py-px text-[11px] tabular-nums leading-[14px] text-[color:var(--c-3a3a38)]">
           Screen {screenNo(s.display)}
         </span>
       )}
-      {b && !ownerSent(s) && s.chatId !== `bot:${b.id}` && <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">· {b.name}</span>}
+      {b && !ownerSent(s) && s.chatId !== `bot:${b.id}` && <span className="shrink-0 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">· {b.name}</span>}
     </button>
   );
 }
@@ -1969,14 +1969,14 @@ export function ThreadSheet({
       <div onClick={(e) => e.stopPropagation()} className={`flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000038] ${opening ? "motion-sheet-in" : ""}`}>
         {/* Portalled over everything; inside the card, so its clicks never reach the scrim and close the sheet. */}
         {saving === s.id && <SaveSkillDialog botId={s.botId} chatId={s.chatId} sessionId={s.id} onClose={closeSaving} />}
-        <div className="flex items-center gap-2.5 border-b border-[#F0F0EE] py-3.5 pl-4 pr-3.5">
+        <div className="flex items-center gap-2.5 border-b border-[color:var(--c-f0f0ee)] py-3.5 pl-4 pr-3.5">
           <Mascot botId={b.id} color={b.color} size={32} />
           <div className="flex min-w-0 flex-1 flex-col gap-px">
             <div className="flex min-w-0 items-center gap-1.5">
               <span className="truncate text-[15px] font-semibold leading-[18px]">{s.title}</span>
               {badge && <BrainBadge kind={badge.kind} title={badge.title} />}
             </div>
-            <button onClick={onShowComputer} className="flex items-center gap-1.5 text-left text-[12px] leading-4 text-[#6B6B6B] hover:text-ink">
+            <button onClick={onShowComputer} className="flex items-center gap-1.5 text-left text-[12px] leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
               {b.name} · {s.runsOn === "mac" ? `on ${state.shared ? "the owner's" : "your"} Mac · ` : ""}
               {terminal !== undefined ? "in the terminal" : s.askWhere && live(s) ? `waiting for ${ownerYou(state)}` : live(s) ? "working" : s.status === "done" ? "finished" : "stopped"} · {toolCount} steps
               {/* Its screen, by the number the panel and the bots use. */}
@@ -1989,7 +1989,7 @@ export function ThreadSheet({
             <button
               onClick={() => void post(`/api/sessions/${s.id}/where`, { move: true })}
               title="Do this on your Mac instead, on your home internet"
-              className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]"
+              className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]"
             >
               <MacIcon size={13} />
               {s.offerMac && live(s) && !s.blocker ? "Move to your Mac" : "Try on your Mac"}
@@ -2000,13 +2000,13 @@ export function ThreadSheet({
               disabled={termBusy}
               onClick={() => void toTerminal()}
               title={live(s) ? "Pause it and work with Claude Code yourself, in a terminal on its screen" : "Work with Claude Code yourself, in a terminal on its screen"}
-              className="shrink-0 rounded-full px-3 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6] disabled:opacity-50"
+              className="shrink-0 rounded-full px-3 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)] disabled:opacity-50"
             >
               Open in terminal
             </button>
           )}
           {state.shared ? null : live(s) ? (
-            <button onClick={() => void post("/api/sessions", { sessionId: s.id }, "DELETE")} className="rounded-full px-3 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
+            <button onClick={() => void post("/api/sessions", { sessionId: s.id }, "DELETE")} className="rounded-full px-3 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]">
               Stop
             </button>
           ) : (
@@ -2015,14 +2015,14 @@ export function ThreadSheet({
                 onClose();
                 void post(`/api/sessions/${s.id}`, {}, "DELETE");
               }}
-              className="rounded-full px-3 py-1.5 text-[13px] font-medium text-[#B42318] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FEF3F2]"
+              className="rounded-full px-3 py-1.5 text-[13px] font-medium text-[#B42318] shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[#FEF3F2]"
             >
               Delete
             </button>
           )}
           {/* Save as skill: the bot rereads this thread for how it did the job. Keyed by thread, so another one's sheet starts it shut. */}
           {!state.shared && <MoreMenu key={s.id} label="More" size="sheet" items={[{ label: "Save as skill", icon: <SkillIcon />, onClick: () => setSaving(s.id) }]} />}
-          <button onClick={onClose} aria-label="Close thread" className="flex size-[34px] items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
+          <button onClick={onClose} aria-label="Close thread" className="flex size-[34px] items-center justify-center rounded-full shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]">
             <svg width="12" height="12" viewBox="0 0 12 12">
               <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
             </svg>
@@ -2031,14 +2031,14 @@ export function ThreadSheet({
 
         <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-[18px] pb-3 pt-4">
           <div className="flex w-[86%] flex-col items-end gap-1.5 self-end">
-            <div className="flex items-center gap-1.5 text-[12px] leading-4 text-[#6B6B6B]">
+            <div className="flex items-center gap-1.5 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
               {via && <Mascot botId={via.id} color={via.color} size={16} antenna={false} />}
               {routineSent(s) ? (routine ? `Sent by a routine · ${undash(routine.title)}` : "Sent by a routine") : `Sent via ${via?.name ?? "the main bot"}`}
             </div>
-            <div className="flex flex-col gap-2 rounded-[18px] bg-[#FBFFE0] px-[15px] pb-2.5 pt-[11px] shadow-[0_0_0_1px_#EEF7A8]">
+            <div className="flex flex-col gap-2 rounded-[18px] bg-[color:var(--c-fbffe0)] px-[15px] pb-2.5 pt-[11px] shadow-[0_0_0_1px_#EEF7A8]">
               <div className={`whitespace-pre-wrap text-[14px] leading-[21px] ${expanded ? "" : "line-clamp-3"}`}>{s.goal}</div>
               {s.goal.length > 160 && (
-                <button onClick={() => setExpanded(!expanded)} className="flex items-center gap-1 self-start text-[13px] leading-4 text-[#6B6B6B]">
+                <button onClick={() => setExpanded(!expanded)} className="flex items-center gap-1 self-start text-[13px] leading-4 text-[color:var(--c-6b6b6b)]">
                   {expanded ? "Show less" : "Show more"}
                   <svg width="10" height="10" viewBox="0 0 10 10" className={expanded ? "rotate-180" : ""}>
                     <path d="M2 3.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
@@ -2051,21 +2051,21 @@ export function ThreadSheet({
           <div className="flex flex-col gap-2.5 pt-1.5">
             {/* It can't start until the user says where: the choice is right here, not only in the chat. */}
             {s.askWhere && live(s) && (
-              <div className="flex flex-col gap-2 rounded-[14px] bg-[#FBFFD9] px-3.5 py-3 shadow-[0_0_0_1px_#E8F28A]">
+              <div className="flex flex-col gap-2 rounded-[14px] bg-[color:var(--c-fbffd9)] px-3.5 py-3 shadow-[0_0_0_1px_#E8F28A]">
                 <span className="text-[13.5px] font-medium leading-[18px]">Where should {b.name} do this?</span>
-                <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">{state.shared ? "It starts as soon as the owner picks." : "It starts as soon as you pick. Your messages here go along with it."}</span>
+                <span className="text-[12.5px] leading-[17px] text-[color:var(--c-6b6b6b)]">{state.shared ? "It starts as soon as the owner picks." : "It starts as soon as you pick. Your messages here go along with it."}</span>
                 <div className="flex gap-1.5 pt-0.5" inert={!!state.shared}>
                   <button onClick={() => void post(`/api/sessions/${s.id}/where`, { to: "mac" })} className="flex items-center gap-1.5 rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white">
                     <MacIcon size={12} />
                     {ownerMac(state)}
                   </button>
-                  <button onClick={() => void post(`/api/sessions/${s.id}/where`, { to: "cloud" })} className="rounded-full bg-white px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
+                  <button onClick={() => void post(`/api/sessions/${s.id}/where`, { to: "cloud" })} className="rounded-full bg-white px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)]">
                     {b.name}&rsquo;s computer
                   </button>
                 </div>
               </div>
             )}
-            <span className="text-[13px] leading-4 text-[#9A9A98]">
+            <span className="text-[13px] leading-4 text-[color:var(--c-9a9a98)]">
               {s.askWhere && live(s)
                 ? `Waiting for ${ownerYou(state)} for ${since(started)}`
                 : waitsForOk(s, state)
@@ -2084,7 +2084,7 @@ export function ThreadSheet({
                   : ""}
             </span>
             <LeftOff state={state} session={s} onShow={onShowComputer} />
-            <div className="h-px bg-[#ECECEA]" />
+            <div className="h-px bg-[color:var(--c-ececea)]" />
           </div>
 
           {lines.map((l, i) =>
@@ -2096,14 +2096,14 @@ export function ThreadSheet({
               <div key={i} className="flex flex-col gap-1 self-start">
                 <button
                   onClick={() => setOpenSteps(openSteps.includes(i) ? openSteps.filter((x) => x !== i) : [...openSteps, i])}
-                  className="flex items-center gap-2 self-start rounded-[10px] bg-[#F7F7F6] py-[5px] pl-2 pr-2.5 text-left hover:bg-[#F0F0EE]"
+                  className="flex items-center gap-2 self-start rounded-[10px] bg-[color:var(--c-f7f7f6)] py-[5px] pl-2 pr-2.5 text-left hover:bg-[color:var(--c-f0f0ee)]"
                 >
                   <svg width="13" height="13" viewBox="0 0 14 14">
                     <rect x="1.5" y="2" width="11" height="7.5" rx="1.5" fill="none" stroke="#6B6B6B" strokeWidth="1.3" />
                     <path d="M5 12h4" fill="none" stroke="#6B6B6B" strokeWidth="1.3" strokeLinecap="round" />
                   </svg>
-                  <span className="max-w-[280px] truncate text-[12px] leading-4 text-[#3A3A38]">{l.steps[l.steps.length - 1].detail}</span>
-                  <span className="font-mono text-[11px] leading-[14px] text-[#9A9A98]">
+                  <span className="max-w-[280px] truncate text-[12px] leading-4 text-[color:var(--c-3a3a38)]">{l.steps[l.steps.length - 1].detail}</span>
+                  <span className="font-mono text-[11px] leading-[14px] text-[color:var(--c-9a9a98)]">
                     {l.steps.length} step{l.steps.length === 1 ? "" : "s"} {openSteps.includes(i) ? "‹" : "›"}
                   </span>
                 </button>
@@ -2111,7 +2111,7 @@ export function ThreadSheet({
                   <div className="flex flex-col gap-0.5 pl-2">
                     {l.steps.map((st, j) => (
                       <div key={j} className="flex gap-2 font-mono text-[11.5px] leading-[17px]">
-                        <span className="w-[86px] shrink-0 truncate text-[#9A9A98]">{st.who ?? st.tool}</span>
+                        <span className="w-[86px] shrink-0 truncate text-[color:var(--c-9a9a98)]">{st.who ?? st.tool}</span>
                         <span className="min-w-0 break-words">
                           {st.detail}
                         </span>
@@ -2121,14 +2121,14 @@ export function ThreadSheet({
                 )}
               </div>
             ) : l.kind === "event" ? (
-              <span key={i} className="self-center text-[12px] leading-4 text-[#9A9A98]">
+              <span key={i} className="self-center text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
                 {l.text}
               </span>
             ) : l.role === "user" && state.shared ? (
               // The owner's reply, in a workspace shared with the user: named as theirs, on the incoming side, never as the viewer's own.
               <div key={i} className="flex max-w-[80%] flex-col items-start gap-0.5 self-start">
-                <span className="pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{ownerWho(state.shared)}</span>
-                <div className="whitespace-pre-wrap rounded-[18px] bg-white px-3.5 py-2 text-[14px] leading-5 text-ink shadow-[0_0_0_1px_#E2E2DF] [overflow-wrap:anywhere]">{l.text}</div>
+                <span className="pl-3 text-[11px] leading-[14px] text-[color:var(--c-9a9a98)]">{ownerWho(state.shared)}</span>
+                <div className="whitespace-pre-wrap rounded-[18px] bg-white px-3.5 py-2 text-[14px] leading-5 text-ink shadow-[0_0_0_1px_var(--c-e2e2df)] [overflow-wrap:anywhere]">{l.text}</div>
               </div>
             ) : l.role === "user" ? (
               <div key={i} className="max-w-[80%] self-end whitespace-pre-wrap rounded-[18px] bg-ink px-3.5 py-2 text-[14px] leading-5 text-white">
@@ -2141,23 +2141,23 @@ export function ThreadSheet({
             ),
           )}
           {terminal !== undefined ? (
-            <div className="flex items-center gap-2 rounded-xl bg-[#FBFFE0] px-3 py-2.5 text-[13px] leading-5 shadow-[0_0_0_1px_#E6F57A]">
+            <div className="flex items-center gap-2 rounded-xl bg-[color:var(--c-fbffe0)] px-3 py-2.5 text-[13px] leading-5 shadow-[0_0_0_1px_var(--c-e6f57a)]">
               <span className="min-w-0 flex-1">Open in the terminal on screen {screenNo(terminal)}. Your next reply closes it, and it carries on here.</span>
               {onShowScreen && (
-                <button onClick={() => onShowScreen(s.botId, terminal)} className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
+                <button onClick={() => onShowScreen(s.botId, terminal)} className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)]">
                   Show
                 </button>
               )}
             </div>
           ) : (
-            s.status === "failed" && s.error && <div className="rounded-xl bg-[#FBFFE0] px-3 py-2.5 text-[13px] leading-5 shadow-[0_0_0_1px_#E6F57A]">{s.error}</div>
+            s.status === "failed" && s.error && <div className="rounded-xl bg-[color:var(--c-fbffe0)] px-3 py-2.5 text-[13px] leading-5 shadow-[0_0_0_1px_var(--c-e6f57a)]">{s.error}</div>
           )}
           {termError?.id === s.id && (
             <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
               {termError.text}
             </span>
           )}
-          {live(s) && !waitsForOk(s, state) && <span className="animate-pulse text-[14px] leading-[18px] text-[#B5B5B2]">{s.status === "queued" ? "Queued" : "Thinking"}</span>}
+          {live(s) && !waitsForOk(s, state) && <span className="animate-pulse text-[14px] leading-[18px] text-[color:var(--c-b5b5b2)]">{s.status === "queued" ? "Queued" : "Thinking"}</span>}
           <div ref={end} />
         </div>
 
@@ -2191,7 +2191,7 @@ export function ThreadSheet({
           }}
           className="px-3 pb-3"
         >
-          <div className="flex items-end gap-2.5 rounded-[22px] bg-white py-2 pl-3.5 pr-2 shadow-[0_0_0_1px_#E2E2DF]">
+          <div className="flex items-end gap-2.5 rounded-[22px] bg-white py-2 pl-3.5 pr-2 shadow-[0_0_0_1px_var(--c-e2e2df)]">
             <ComposerInput
               id="thread-reply"
               value={draft}
@@ -2206,7 +2206,7 @@ export function ThreadSheet({
                       : "Reply in thread · it sees this as it works"
                     : "Reply in thread · picks it back up"
               }
-              className="min-w-0 flex-1 bg-transparent py-[6px] text-[14px] leading-[18px] outline-none placeholder:text-[#9A9A98]"
+              className="min-w-0 flex-1 bg-transparent py-[6px] text-[14px] leading-[18px] outline-none placeholder:text-[color:var(--c-9a9a98)]"
             />
             <button type="submit" aria-label="Send" disabled={!draft.trim()} className="flex size-[30px] items-center justify-center rounded-full bg-ink disabled:opacity-30">
               <SendIcon />
@@ -2265,13 +2265,13 @@ export function ToPicker({ state, onOpenChat, onCancel }: { state: AppState; onO
   });
 
   return (
-    <main className="flex min-h-0 min-w-0 flex-1 flex-col border-r border-[#ECECEA] bg-white">
-      <div className="flex h-[54px] items-center gap-2 border-b border-[#ECECEA] bg-[#FCFCFB] px-5">
-        <span className="text-[15px] leading-5 text-[#6B6B6B]">To:</span>
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col border-r border-[color:var(--c-ececea)] bg-white">
+      <div className="flex h-[54px] items-center gap-2 border-b border-[color:var(--c-ececea)] bg-[color:var(--c-fcfcfb)] px-5">
+        <span className="text-[15px] leading-5 text-[color:var(--c-6b6b6b)]">To:</span>
         {picked.map((p) => {
           const b = state.bots.find((x) => x.id === p)!;
           return (
-            <button key={p} onClick={() => setPicked(picked.filter((x) => x !== p))} className="flex items-center gap-1.5 rounded-full bg-[#EEEEEC] py-0.5 pl-1 pr-2 text-[13px]">
+            <button key={p} onClick={() => setPicked(picked.filter((x) => x !== p))} className="flex items-center gap-1.5 rounded-full bg-[color:var(--c-eeeeec)] py-0.5 pl-1 pr-2 text-[13px]">
               <Mascot botId={b.id} color={b.color} size={18} />
               {b.name} ×
             </button>
@@ -2282,22 +2282,22 @@ export function ToPicker({ state, onOpenChat, onCancel }: { state: AppState; onO
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={mode === "group" ? "Add bots to the group…" : "Start a chat with…"}
-          className="min-w-0 flex-1 bg-transparent text-[15px] leading-5 outline-none placeholder:text-[#9A9A98]"
+          className="min-w-0 flex-1 bg-transparent text-[15px] leading-5 outline-none placeholder:text-[color:var(--c-9a9a98)]"
         />
-        <button onClick={onCancel} className="text-[13px] text-[#6B6B6B] hover:text-ink">
+        <button onClick={onCancel} className="text-[13px] text-[color:var(--c-6b6b6b)] hover:text-ink">
           Cancel
         </button>
       </div>
 
       {/* Clicking the empty space around the menu closes it, like clicking out of a popover. */}
       <div onClick={(e) => e.target === e.currentTarget && onCancel()} className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3.5">
-        <div className="flex flex-col gap-0.5 rounded-[20px] bg-white p-2 shadow-[0_0_0_1px_#E6E6E3,0_18px_40px_-18px_#0000002E]">
+        <div className="flex flex-col gap-0.5 rounded-[20px] bg-white p-2 shadow-[0_0_0_1px_var(--c-e6e6e3),0_18px_40px_-18px_#0000002E]">
           {mode === "bot" ? (
             <div className="flex flex-col gap-2.5 p-2">
               <span className="text-[14px] font-semibold">Create a new bot</span>
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name, e.g. Nova" className="rounded-xl px-3 py-2 text-[14px] shadow-[0_0_0_1px_#E2E2DF] outline-none" />
-              <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="What it does, e.g. Research" className="rounded-xl px-3 py-2 text-[14px] shadow-[0_0_0_1px_#E2E2DF] outline-none" />
-              <span className="text-[12px] leading-4 text-[#6B6B6B]">
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name, e.g. Nova" className="rounded-xl px-3 py-2 text-[14px] shadow-[0_0_0_1px_var(--c-e2e2df)] outline-none" />
+              <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="What it does, e.g. Research" className="rounded-xl px-3 py-2 text-[14px] shadow-[0_0_0_1px_var(--c-e2e2df)] outline-none" />
+              <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
                 It works on {teamOf(state).find((b) => b.isMain)?.name ?? "the main bot"}&apos;s computer, on screens of its own there. You can give it a computer of its own in its Details.
               </span>
               {error && <span className="text-[12px] text-[#B42318]">{error}</span>}
@@ -2305,7 +2305,7 @@ export function ToPicker({ state, onOpenChat, onCancel }: { state: AppState; onO
                 <button disabled={!name.trim()} onClick={() => void createBot()} className="rounded-full bg-ink px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-30">
                   Create
                 </button>
-                <button onClick={() => setMode("pick")} className="rounded-full px-4 py-2 text-[13px] shadow-[0_0_0_1px_#E2E2DF]">
+                <button onClick={() => setMode("pick")} className="rounded-full px-4 py-2 text-[13px] shadow-[0_0_0_1px_var(--c-e2e2df)]">
                   Back
                 </button>
               </div>
@@ -2316,12 +2316,12 @@ export function ToPicker({ state, onOpenChat, onCancel }: { state: AppState; onO
                 <>
                   <PickerRow icon={<span className="text-[16px]">+</span>} label="Create new bot" kbd={<Kbd n={1} />} onClick={() => setMode("bot")} focused />
                   <PickerRow icon={<GroupIcon />} label="Create group chat" kbd={<Kbd n={2} />} onClick={() => setMode("group")} />
-                  <div className="mx-2.5 my-1 h-px bg-[#F0F0EE]" />
+                  <div className="mx-2.5 my-1 h-px bg-[color:var(--c-f0f0ee)]" />
                 </>
               )}
               {mode === "group" && (
                 <div className="flex items-center gap-2 px-2.5 pb-1 pt-1.5">
-                  <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Group name (optional)" className="min-w-0 flex-1 rounded-xl px-3 py-2 text-[14px] shadow-[0_0_0_1px_#E2E2DF] outline-none" />
+                  <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Group name (optional)" className="min-w-0 flex-1 rounded-xl px-3 py-2 text-[14px] shadow-[0_0_0_1px_var(--c-e2e2df)] outline-none" />
                   <button disabled={picked.length < 2} onClick={() => void createGroup()} className="rounded-full bg-ink px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-30">
                     Start group
                   </button>
@@ -2348,19 +2348,19 @@ export function ToPicker({ state, onOpenChat, onCancel }: { state: AppState; onO
 function Kbd({ n }: { n: number }) {
   return (
     <span className="flex gap-[3px]">
-      <span className="rounded-[5px] bg-white px-1.5 py-0.5 text-[11px] leading-[14px] text-[#6B6B6B] shadow-[0_0_0_1px_#E2E2DF]">⌘</span>
-      <span className="rounded-[5px] bg-white px-1.5 py-0.5 font-mono text-[11px] leading-[14px] text-[#6B6B6B] shadow-[0_0_0_1px_#E2E2DF]">{n}</span>
+      <span className="rounded-[5px] bg-white px-1.5 py-0.5 text-[11px] leading-[14px] text-[color:var(--c-6b6b6b)] shadow-[0_0_0_1px_var(--c-e2e2df)]">⌘</span>
+      <span className="rounded-[5px] bg-white px-1.5 py-0.5 font-mono text-[11px] leading-[14px] text-[color:var(--c-6b6b6b)] shadow-[0_0_0_1px_var(--c-e2e2df)]">{n}</span>
     </span>
   );
 }
 
 function PickerRow({ icon, label, sub, kbd, onClick, focused }: { icon: React.ReactNode; label: string; sub?: string; kbd?: React.ReactNode; onClick: () => void; focused?: boolean }) {
   return (
-    <button onClick={onClick} className={`flex h-12 items-center gap-3 rounded-xl px-2.5 text-left ${focused ? "bg-[#EEEEEC]" : "hover:bg-[#F7F7F6]"}`}>
-      <span className="flex size-[30px] shrink-0 items-center justify-center rounded-full bg-[#F2F2F0]">{icon}</span>
+    <button onClick={onClick} className={`flex h-12 items-center gap-3 rounded-xl px-2.5 text-left ${focused ? "bg-[color:var(--c-eeeeec)]" : "hover:bg-[color:var(--c-f7f7f6)]"}`}>
+      <span className="flex size-[30px] shrink-0 items-center justify-center rounded-full bg-[color:var(--c-f2f2f0)]">{icon}</span>
       <span className="flex flex-1 items-center gap-1.5">
         <span className="text-[14px] font-medium leading-[18px]">{label}</span>
-        {sub && <span className="text-[13px] leading-4 text-[#9A9A98]">{sub}</span>}
+        {sub && <span className="text-[13px] leading-4 text-[color:var(--c-9a9a98)]">{sub}</span>}
       </span>
       {kbd}
     </button>
@@ -2369,7 +2369,7 @@ function PickerRow({ icon, label, sub, kbd, onClick, focused }: { icon: React.Re
 
 function Check({ on }: { on: boolean }) {
   return (
-    <span className={`flex size-5 items-center justify-center rounded-md ${on ? "bg-ink" : "shadow-[0_0_0_1.5px_#C9C9C6]"}`}>
+    <span className={`flex size-5 items-center justify-center rounded-md ${on ? "bg-ink" : "shadow-[0_0_0_1.5px_var(--c-c9c9c6)]"}`}>
       {on && (
         <svg width="11" height="11" viewBox="0 0 14 14">
           <path d="M3 7.5l2.5 2.5L11 4.5" fill="none" stroke="#E9FF3B" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -2474,25 +2474,25 @@ function NeedsYouCard({
   const doneAtScreen: Record<string, [string, string]> = { sign_in: ["I signed in", "I signed in. Carry on."], two_factor: ["I entered the code", "I entered the code. Carry on."], captcha: ["I solved it", "I solved the check. Carry on."] };
   const carryOn = s.blocker && !live(s) ? doneAtScreen[s.blocker] : undefined;
   const primary = "rounded-full bg-ink px-3.5 py-1.5 text-[13px] font-semibold leading-4 text-white disabled:opacity-50";
-  const plain = "rounded-full bg-white px-3.5 py-1.5 text-[13px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6] disabled:opacity-50";
+  const plain = "rounded-full bg-white px-3.5 py-1.5 text-[13px] font-medium leading-4 shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)] disabled:opacity-50";
   const showScreen = display !== undefined && (
     <button disabled={busy} onClick={onShow} className={plain}>
       Show screen
     </button>
   );
   return (
-    <div className="flex w-full max-w-[460px] flex-col gap-2.5 rounded-2xl bg-[#FBFFE0] px-3.5 py-3 shadow-[0_0_0_1px_#E6F57A]">
+    <div className="flex w-full max-w-[460px] flex-col gap-2.5 rounded-2xl bg-[color:var(--c-fbffe0)] px-3.5 py-3 shadow-[0_0_0_1px_var(--c-e6f57a)]">
       <span className="flex items-center gap-2 text-[13.5px] font-semibold leading-[18px]">
-        {pinned && b ? <Mascot botId={b.id} color={b.color} size={18} antenna={false} /> : <span className="size-2 shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" />}
+        {pinned && b ? <Mascot botId={b.id} color={b.color} size={18} antenna={false} /> : <span className="size-2 shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" />}
         <span className="min-w-0 flex-1 truncate">{title}</span>
         {pinned && onOpen && (
-          <button onClick={onOpen} className="max-w-[45%] shrink-0 truncate text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink" title="Open the thread">
+          <button onClick={onOpen} className="max-w-[45%] shrink-0 truncate text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink" title="Open the thread">
             {s.title}
             {display !== undefined ? ` · screen ${screenNo(display)}` : ""}
           </button>
         )}
       </span>
-      {question && <span className={`-mt-1 pl-4 text-[13.5px] leading-[19px] text-[#3A3A38] ${pinned ? "line-clamp-3 whitespace-pre-wrap" : ""}`}>{question}</span>}
+      {question && <span className={`-mt-1 pl-4 text-[13.5px] leading-[19px] text-[color:var(--c-3a3a38)] ${pinned ? "line-clamp-3 whitespace-pre-wrap" : ""}`}>{question}</span>}
       <div className="flex flex-wrap gap-1.5">
         {s.blocker ? (
           <>
@@ -2545,7 +2545,7 @@ function NeedsYouCard({
             <button disabled={busy} onClick={dismiss} className={plain}>
               {kind === "safety" ? "Stop" : "Never mind"}
             </button>
-            <button disabled={busy} onClick={onSomethingElse} className="px-2 py-1.5 text-[13px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+            <button disabled={busy} onClick={onSomethingElse} className="px-2 py-1.5 text-[13px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
               Something else…
             </button>
           </>
@@ -2566,7 +2566,7 @@ function NeedsYouCard({
               Never mind
             </button>
             {!!s.options?.length && (
-              <button disabled={busy} onClick={onSomethingElse} className="px-2 py-1.5 text-[13px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+              <button disabled={busy} onClick={onSomethingElse} className="px-2 py-1.5 text-[13px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
                 Something else…
               </button>
             )}
@@ -2591,7 +2591,7 @@ function AnsweredLine({ message: m, session: s, who }: { message: Message; sessi
   const said = answer ? `${who} answered: “${answer.text.length > 80 ? `${answer.text.slice(0, 79)}…` : answer.text}”` : s.dismissed ? `${who} dismissed it` : undefined;
   if (!said) return null;
   return (
-    <span className="flex items-center gap-1 pl-3 text-[11.5px] leading-4 text-[#9A9A98]">
+    <span className="flex items-center gap-1 pl-3 text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">
       <svg width="11" height="11" viewBox="0 0 14 14" aria-hidden className="shrink-0">
         <path d="M3 7.5l2.5 2.5L11 4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
@@ -2638,20 +2638,20 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
         {b && <Mascot botId={b.id} color={b.color} size={26} />}
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="text-[13.5px] font-semibold leading-[18px]">{`${name} wants to ${toDo(a.action)}`}</span>
-          {(s ?? r) && <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">For &ldquo;{(s ?? r)!.title}&rdquo;</span>}
+          {(s ?? r) && <span className="truncate text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">For &ldquo;{(s ?? r)!.title}&rdquo;</span>}
         </div>
       </div>
       {api && <ApiAsk ask={api} detail={a.preview} botName={b?.name ?? "The bot"} />}
       {!api && a.resources.length > 0 && a.kind !== "email" && (
         <div className="flex flex-wrap gap-1">
           {a.resources.map((x) => (
-            <code key={x} className="rounded-md bg-[#F7F7F6] px-1.5 py-0.5 text-[11.5px] leading-4 text-[#3A3A38] [overflow-wrap:anywhere]">
+            <code key={x} className="rounded-md bg-[color:var(--c-f7f7f6)] px-1.5 py-0.5 text-[11.5px] leading-4 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">
               {x}
             </code>
           ))}
         </div>
       )}
-      {a.preview && !api && <pre className={`${a.kind === "email" ? "max-h-[280px]" : "max-h-[180px]"} overflow-y-auto whitespace-pre-wrap rounded-xl bg-[#F7F7F6] px-3 py-2 font-sans text-[12.5px] leading-[18px] text-[#3A3A38] [overflow-wrap:anywhere]`}>{a.preview}</pre>}
+      {a.preview && !api && <pre className={`${a.kind === "email" ? "max-h-[280px]" : "max-h-[180px]"} overflow-y-auto whitespace-pre-wrap rounded-xl bg-[color:var(--c-f7f7f6)] px-3 py-2 font-sans text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]`}>{a.preview}</pre>}
       {telling && (
         <textarea
           autoFocus
@@ -2659,7 +2659,7 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
           onChange={(e) => setInstead(e.target.value)}
           placeholder={`What ${name} should do instead (optional)`}
           rows={2}
-          className="resize-none rounded-xl bg-[#F7F7F6] px-3 py-2 text-[12.5px] leading-[18px] text-ink outline-none placeholder:text-[#9A9A98] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+          className="resize-none rounded-xl bg-[color:var(--c-f7f7f6)] px-3 py-2 text-[12.5px] leading-[18px] text-ink outline-none placeholder:text-[color:var(--c-9a9a98)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
         />
       )}
       <div className="flex flex-wrap items-center gap-1.5">
@@ -2668,29 +2668,29 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
             <button disabled={busy} onClick={() => void decide("reject", instead)} className={`${btn} bg-ink text-white`}>
               Deny
             </button>
-            <button disabled={busy} onClick={() => setTelling(false)} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+            <button disabled={busy} onClick={() => setTelling(false)} className={`${btn} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
               Back
             </button>
           </>
         ) : (
           <>
-            <button disabled={busy} onClick={() => void decide("reject")} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+            <button disabled={busy} onClick={() => void decide("reject")} className={`${btn} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
               Deny
             </button>
-            <button disabled={busy} onClick={() => void decide("always")} title={alwaysScope(name, a)} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+            <button disabled={busy} onClick={() => void decide("always")} title={alwaysScope(name, a)} className={`${btn} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
               Always allow
             </button>
             <button disabled={busy} onClick={() => void decide("once")} className={`${btn} bg-ink text-white`}>
               Allow once
             </button>
-            <button disabled={busy} onClick={() => setTelling(true)} className="px-1.5 py-1.5 text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+            <button disabled={busy} onClick={() => setTelling(true)} className="px-1.5 py-1.5 text-[12.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
               Tell the bot what to do instead
             </button>
           </>
         )}
       </div>
       {/* What Always allow covers: this bot and this action from now on, whoever it's for (lib/permission.ts). */}
-      {!telling && <span className="text-[12px] leading-4 text-[#6B6B6B]">{alwaysScope(name, a)}</span>}
+      {!telling && <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{alwaysScope(name, a)}</span>}
     </div>
   );
 }
@@ -2707,8 +2707,8 @@ function OutOfCredit({ onUpgrade }: { onUpgrade?: () => void }) {
     return () => window.removeEventListener("focus", check);
   }, []);
   return (
-    <div className="mb-2.5 flex items-center gap-3 rounded-[16px] bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_#E2E2DF]">
-      <span className="min-w-0 flex-1 text-[12.5px] leading-[17px] text-[#3A3A38]">Out of AI credit. Your bots are paused until you add more.</span>
+    <div className="mb-2.5 flex items-center gap-3 rounded-[16px] bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_var(--c-e2e2df)]">
+      <span className="min-w-0 flex-1 text-[12.5px] leading-[17px] text-[color:var(--c-3a3a38)]">Out of AI credit. Your bots are paused until you add more.</span>
       {onUpgrade && (
         <button onClick={onUpgrade} className="shrink-0 rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white">
           Upgrade
@@ -2729,12 +2729,12 @@ function LeftOff({ state, session: s, onShow }: { state: AppState; session: Sess
   const taken = now && now.sessionId !== s.id && now.kind !== "free" ? state.bots.find((x) => x.id === now.botId)?.name ?? "Another task" : null;
   return (
     <div className="flex flex-col gap-1.5">
-      <span className="text-[12px] font-medium leading-4 text-[#6B6B6B]">Where it left off · screen {screenNo(s.lastDisplay)}</span>
-      <button onClick={onShow} title={taken ? `${taken} is using screen ${screenNo(s.lastDisplay)} now` : "Show its screen"} className="overflow-hidden rounded-xl shadow-[0_0_0_1px_#E6E6E3] hover:shadow-[0_0_0_1px_#C9C9C6]">
+      <span className="text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Where it left off · screen {screenNo(s.lastDisplay)}</span>
+      <button onClick={onShow} title={taken ? `${taken} is using screen ${screenNo(s.lastDisplay)} now` : "Show its screen"} className="overflow-hidden rounded-xl shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:shadow-[0_0_0_1px_var(--c-c9c9c6)]">
         {/* eslint-disable-next-line @next/next/no-img-element -- a local frame from this Mac, not a remote image */}
         <img src={`/api/frames?session=${s.id}&t=${s.lastFrameAt}`} alt={`The screen as ${s.title} left it`} className="block w-full" />
       </button>
-      <span className="truncate text-[12px] leading-4 text-[#9A9A98]">
+      <span className="truncate text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
         {s.lastPage ? (s.lastPage.title ?? s.lastPage.url) : ""}
         {taken ? `${s.lastPage ? " · " : ""}screen ${screenNo(s.lastDisplay)} is in use by ${taken} now` : ""}
       </span>

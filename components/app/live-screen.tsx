@@ -123,9 +123,9 @@ export function LiveScreen({
         // eslint-disable-next-line @next/next/no-img-element
         <img ref={img} src={src} alt={`${botId} screen :${display}`} onClick={click} onWheel={wheel} draggable={false} className="block h-full w-full select-none object-contain" />
       ) : error ? (
-        <div className="flex h-full w-full items-center justify-center text-[12px] text-[#9A9A98]">Screen unavailable</div>
+        <div className="flex h-full w-full items-center justify-center text-[12px] text-[color:var(--c-9a9a98)]">Screen unavailable</div>
       ) : (
-        <div className="relative h-full w-full bg-[#F7F7F6]">
+        <div className="relative h-full w-full bg-[color:var(--c-f7f7f6)]">
           <Waking thumbnail={scale < 0.5} bot={bot} text={bot ? `Reaching ${bot.name}'s computer…` : "Reaching the computer…"} />
         </div>
       )}

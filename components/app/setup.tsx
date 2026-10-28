@@ -173,10 +173,10 @@ type Items = ReturnType<typeof useSetupItems>;
 /* ---------------- The cards ---------------- */
 
 type Tone = "ok" | "todo" | "off" | "none";
-const DOT: Record<Tone, string> = { ok: "bg-[#2BB673]", todo: "bg-[#E59A0B]", off: "bg-[#C9C9C6]", none: "bg-[#C9C9C6]" };
+const DOT: Record<Tone, string> = { ok: "bg-[#2BB673]", todo: "bg-[#E59A0B]", off: "bg-[color:var(--c-c9c9c6)]", none: "bg-[color:var(--c-c9c9c6)]" };
 const pill = "shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
 const dark = `${pill} bg-ink text-white`;
-const light = `${pill} bg-[#F2F2F0] hover:bg-[#EAEAE7]`;
+const light = `${pill} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`;
 
 /** One thing to set up: what it is, where it stands, its buttons (`children`), and anything that goes under it (`below`, lined up with the title). */
 function Card({
@@ -199,16 +199,16 @@ function Card({
   below?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col rounded-[14px] bg-white p-3.5 shadow-[0_0_0_1px_#E6E6E3]">
+    <div className="flex flex-col rounded-[14px] bg-white p-3.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
       <div className="flex items-center gap-3">
-        <span className={`flex size-9 shrink-0 items-center justify-center rounded-[11px] ${tone === "ok" ? "bg-ink text-highlighter" : "bg-[#F2F2F0] text-ink"}`}>{icon}</span>
+        <span className={`flex size-9 shrink-0 items-center justify-center rounded-[11px] ${tone === "ok" ? "bg-ink text-highlighter" : "bg-[color:var(--c-f2f2f0)] text-ink"}`}>{icon}</span>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex items-center gap-1.5">
             <span className="text-[13.5px] font-semibold leading-[18px]">{title}</span>
-            {chip && <span className="rounded-full bg-[#F2F2F0] px-2 py-px text-[11px] font-medium leading-4 text-[#3A3A38]">{chip}</span>}
+            {chip && <span className="rounded-full bg-[color:var(--c-f2f2f0)] px-2 py-px text-[11px] font-medium leading-4 text-[color:var(--c-3a3a38)]">{chip}</span>}
           </span>
           <span className="text-[12px] leading-4 text-pencil">{line}</span>
-          <span className="flex items-center gap-1.5 pt-0.5 text-[12px] leading-4 text-[#3A3A38]">
+          <span className="flex items-center gap-1.5 pt-0.5 text-[12px] leading-4 text-[color:var(--c-3a3a38)]">
             <span className={`size-[7px] shrink-0 rounded-full ${DOT[tone]}`} />
             {status}
           </span>
@@ -407,7 +407,7 @@ export function Setup({ state, onClose }: { state: AppState; onClose: () => void
             onClick={() => void finish()}
             className={
               askable
-                ? "flex h-10 w-full items-center justify-center rounded-full text-[13.5px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB] disabled:opacity-50"
+                ? "flex h-10 w-full items-center justify-center rounded-full text-[13.5px] font-medium shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-fcfcfb)] disabled:opacity-50"
                 : "flex h-10 w-full items-center justify-center gap-2 rounded-full bg-ink text-[13.5px] font-medium text-white disabled:opacity-50"
             }
           >

@@ -160,9 +160,9 @@ function AppFrame({
 /** A web link an app asked to open: the whole address, opened in a tab of Bops only if the user says so. */
 function OpenAsk({ app, url, onAnswer }: { app: MadeApp; url: string; onAnswer: (yes: boolean) => void }) {
   return (
-    <div className="mx-4 mb-3 flex shrink-0 flex-col gap-2 rounded-[14px] bg-white p-3 shadow-[0_0_0_1px_#0A0A0A]">
+    <div className="mx-4 mb-3 flex shrink-0 flex-col gap-2 rounded-[14px] bg-white p-3 shadow-[0_0_0_1px_var(--c-0a0a0a)]">
       <span className="text-[12px] font-medium leading-4 text-ink">{app.title} wants to open this page</span>
-      <span className="max-h-[64px] overflow-auto break-all rounded-[8px] bg-[#F6F6F4] px-2.5 py-1.5 font-mono text-[11px] leading-[15px] text-ink">{url}</span>
+      <span className="max-h-[64px] overflow-auto break-all rounded-[8px] bg-[color:var(--c-f6f6f4)] px-2.5 py-1.5 font-mono text-[11px] leading-[15px] text-ink">{url}</span>
       <div className="flex gap-1.5">
         <button onClick={() => onAnswer(true)} className="rounded-full bg-ink px-3 py-1.5 text-[12px] font-semibold leading-4 text-white">
           Open
@@ -209,7 +209,7 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
   const [link, setLink] = useState<string | null>(null);
   const openLink = useContext(OpenLink);
   useNow(1000);
-  if (!app) return <div className="flex flex-1 items-center justify-center text-[13px] text-[#6B6B6B]">This app was deleted.</div>;
+  if (!app) return <div className="flex flex-1 items-center justify-center text-[13px] text-[color:var(--c-6b6b6b)]">This app was deleted.</div>;
   const maker = state.bots.find((b) => b.id === app.botId);
   const building = !!app.building;
   const shown = problem?.version === app.version ? problem.text : null;
@@ -230,21 +230,21 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
   const tab = (v: typeof view, label: string) => (
     <button
       onClick={() => setView(view === v ? "app" : v)}
-      className={`rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 ${view === v ? "bg-ink text-white" : "text-[#3A3A38] hover:bg-black/[0.05]"}`}
+      className={`rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 ${view === v ? "bg-ink text-white" : "text-[color:var(--c-3a3a38)] hover:bg-black/[0.05]"}`}
     >
       {label}
     </button>
   );
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-white">
-      <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-[#F0F0EE] px-4">
+      <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-[color:var(--c-f0f0ee)] px-4">
         <AppMark app={app} />
         <span className="truncate text-[13px] font-semibold leading-4 text-ink">{app.title}</span>
-        <span className="shrink-0 font-mono text-[11px] leading-[14px] text-[#6B6B6B]">
+        <span className="shrink-0 font-mono text-[11px] leading-[14px] text-[color:var(--c-6b6b6b)]">
           {building ? `building · ${elapsed(app.building!.since)}` : `v${app.version}${maker ? ` · by ${maker.name}` : ""}`}
         </span>
         <span className="flex-1" />
-        <span className="hidden shrink-0 items-center gap-1.5 rounded-full bg-[#F2F2F0] px-2 py-1 text-[11px] font-medium leading-[14px] text-[#3A3A38] min-[520px]:flex">
+        <span className="hidden shrink-0 items-center gap-1.5 rounded-full bg-[color:var(--c-f2f2f0)] px-2 py-1 text-[11px] font-medium leading-[14px] text-[color:var(--c-3a3a38)] min-[520px]:flex">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
             <rect x="1.5" y="2" width="9" height="6.5" rx="1" stroke="#3A3A38" strokeWidth="1.2" />
             <path d="M4 10.5h4" stroke="#3A3A38" strokeWidth="1.2" strokeLinecap="round" />
@@ -254,7 +254,7 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
         {app.versions.length > 1 && tab("history", "History")}
         {tab("code", "Code")}
         <div className="relative shrink-0">
-          <button onClick={() => setMenu(menu ? null : "open")} aria-label="More" title="More" className="flex size-7 items-center justify-center rounded-full text-[#3A3A38] hover:bg-black/[0.05]">
+          <button onClick={() => setMenu(menu ? null : "open")} aria-label="More" title="More" className="flex size-7 items-center justify-center rounded-full text-[color:var(--c-3a3a38)] hover:bg-black/[0.05]">
             <svg width="14" height="14" viewBox="0 0 14 14">
               <circle cx="3" cy="7" r="1.3" fill="currentColor" />
               <circle cx="7" cy="7" r="1.3" fill="currentColor" />
@@ -286,12 +286,12 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
                         await post(`/api/made-apps/${encodeURIComponent(app.id)}`, { action: "allow-bot", on: false });
                         setMenu(null);
                       }}
-                      className="rounded-xl px-2.5 py-2 text-left text-[13px] leading-4 text-ink hover:bg-[#F6F6F4]"
+                      className="rounded-xl px-2.5 py-2 text-left text-[13px] leading-4 text-ink hover:bg-[color:var(--c-f6f6f4)]"
                     >
                       Stop it asking {botName}
                     </button>
                   )}
-                  <button onClick={() => setMenu("delete")} className="rounded-xl px-2.5 py-2 text-left text-[13px] leading-4 text-[#B42318] hover:bg-[#F6F6F4]">
+                  <button onClick={() => setMenu("delete")} className="rounded-xl px-2.5 py-2 text-left text-[13px] leading-4 text-[#B42318] hover:bg-[color:var(--c-f6f6f4)]">
                     Delete app
                   </button>
                 </>
@@ -309,7 +309,7 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
       ) : building ? (
         <FirstBuild app={app} maker={maker?.name ?? "Your bot"} />
       ) : (
-        <div className="flex flex-1 items-center justify-center px-8 text-center text-[13px] leading-5 text-[#6B6B6B]">{app.error ? `It couldn't be built: ${app.error}` : "Nothing here yet."}</div>
+        <div className="flex flex-1 items-center justify-center px-8 text-center text-[13px] leading-5 text-[color:var(--c-6b6b6b)]">{app.error ? `It couldn't be built: ${app.error}` : "Nothing here yet."}</div>
       )}
       {shown && !building && view === "app" && <Problem app={app} text={shown} maker={maker?.name ?? "the bot"} onAsked={() => setProblem(null)} />}
       {app.error && app.version > 0 && !building && view === "app" && (
@@ -339,16 +339,16 @@ function AllowSheet({ app, botName, prompt, onAnswer }: { app: MadeApp; botName:
         <span className="text-[17px] font-bold leading-[22px] tracking-[-0.015em] text-ink">
           {app.title} wants to ask {botName}
         </span>
-        <span className="text-[13px] leading-[18px] text-[#6B6B6B]">
+        <span className="text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)]">
           {botName} looks things up in the apps you connected, Knowledge and the web to answer it. It only reads for the app: it never sends or changes anything. You&apos;re asked again after each change to the app.
         </span>
       </div>
-      {prompt && <div className="line-clamp-3 rounded-[10px] bg-[#F6F6F4] px-3 py-2.5 font-mono text-[11px] leading-[15px] text-ink">{prompt}</div>}
+      {prompt && <div className="line-clamp-3 rounded-[10px] bg-[color:var(--c-f6f6f4)] px-3 py-2.5 font-mono text-[11px] leading-[15px] text-ink">{prompt}</div>}
       <div className="flex gap-2">
         <button onClick={() => onAnswer(true)} className="flex-1 rounded-full bg-ink py-2.5 text-[13px] font-semibold leading-4 text-white">
           Allow
         </button>
-        <button onClick={() => onAnswer(false)} className="flex-1 rounded-full py-2.5 text-[13px] font-semibold leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF]">
+        <button onClick={() => onAnswer(false)} className="flex-1 rounded-full py-2.5 text-[13px] font-semibold leading-4 text-ink shadow-[0_0_0_1px_var(--c-e2e2df)]">
           Not now
         </button>
       </div>
@@ -364,9 +364,9 @@ function FirstBuild({ app, maker }: { app: MadeApp; maker: string }) {
     <div className="flex min-h-0 flex-1 flex-col justify-center gap-5 px-9">
       <div className="flex flex-col gap-1.5">
         <span className="text-[22px] font-bold leading-7 tracking-[-0.025em] text-ink">{maker} is building it</span>
-        <span className="max-w-[420px] text-[13px] leading-[18px] text-[#6B6B6B]">It opens here when it&apos;s ready, usually in a minute or two. Keep chatting: tell {maker} what to change and it&apos;s done next.</span>
+        <span className="max-w-[420px] text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)]">It opens here when it&apos;s ready, usually in a minute or two. Keep chatting: tell {maker} what to change and it&apos;s done next.</span>
       </div>
-      <pre className="max-h-[280px] min-h-[120px] overflow-hidden whitespace-pre-wrap rounded-2xl bg-[#F6F6F4] px-4 py-3 font-mono text-[11px] leading-[16px] text-[#6B6B6B] [mask-image:linear-gradient(to_bottom,transparent,black_30%)]">
+      <pre className="max-h-[280px] min-h-[120px] overflow-hidden whitespace-pre-wrap rounded-2xl bg-[color:var(--c-f6f6f4)] px-4 py-3 font-mono text-[11px] leading-[16px] text-[color:var(--c-6b6b6b)] [mask-image:linear-gradient(to_bottom,transparent,black_30%)]">
         {tail || "Planning it…"}
       </pre>
     </div>
@@ -381,7 +381,7 @@ function BuildStrip({ app }: { app: MadeApp }) {
       <span className="size-2.5 shrink-0 animate-pulse rounded-full bg-highlighter shadow-[0_0_0_4px_rgba(232,255,58,0.25)]" />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="truncate text-[13px] font-medium leading-[17px] text-white">{app.version ? "Making the change" : "Writing the app"}: {app.building?.change}</span>
-        <span className="font-mono text-[11px] leading-[14px] text-[#9A9A98]">{app.building?.chars ? `${lines} lines written` : "starting"}</span>
+        <span className="font-mono text-[11px] leading-[14px] text-[color:var(--c-9a9a98)]">{app.building?.chars ? `${lines} lines written` : "starting"}</span>
       </span>
     </div>
   );
@@ -390,7 +390,7 @@ function BuildStrip({ app }: { app: MadeApp }) {
 function Problem({ app, text, maker, onAsked }: { app: MadeApp; text: string; maker: string; onAsked: () => void }) {
   const [busy, setBusy] = useState(false);
   return (
-    <div className="mx-4 mb-3 flex shrink-0 items-center gap-3 rounded-[14px] bg-[#FDFFE6] py-2 pl-3.5 pr-2 shadow-[0_0_0_1px_#0A0A0A]">
+    <div className="mx-4 mb-3 flex shrink-0 items-center gap-3 rounded-[14px] bg-[color:var(--c-fdffe6)] py-2 pl-3.5 pr-2 shadow-[0_0_0_1px_var(--c-0a0a0a)]">
       <span className="min-w-0 flex-1 truncate text-[12px] leading-4 text-ink" title={text}>
         It hit a problem: {text}
       </span>
@@ -414,7 +414,7 @@ function CodeView({ app }: { app: MadeApp }) {
   const { code, draft } = useCode(app.id, !!app.building);
   const text = (app.building ? draft : code) ?? "";
   return (
-    <pre className="min-h-0 flex-1 overflow-auto whitespace-pre bg-[#FAFAF9] px-5 py-4 font-mono text-[11.5px] leading-[17px] text-[#3A3A38]">
+    <pre className="min-h-0 flex-1 overflow-auto whitespace-pre bg-[#FAFAF9] px-5 py-4 font-mono text-[11.5px] leading-[17px] text-[color:var(--c-3a3a38)]">
       {text || (app.building ? "Starting…" : "")}
     </pre>
   );
@@ -432,11 +432,11 @@ function History({ app, onDone }: { app: MadeApp; onDone: () => void }) {
       <span className="text-[20px] font-bold leading-6 tracking-[-0.02em] text-ink">History</span>
       <div className="flex flex-col">
         {[...app.versions].reverse().map((v, i) => (
-          <div key={v.n} className={`flex items-start gap-3 py-3.5 ${i ? "border-t border-[#F0F0EE]" : ""}`}>
-            <span className={`w-8 shrink-0 rounded-[5px] py-0.5 text-center font-mono text-[11px] font-semibold leading-[14px] ${v.n === app.version ? "bg-ink text-highlighter" : "bg-[#F2F2F0] text-[#3A3A38]"}`}>v{v.n}</span>
+          <div key={v.n} className={`flex items-start gap-3 py-3.5 ${i ? "border-t border-[color:var(--c-f0f0ee)]" : ""}`}>
+            <span className={`w-8 shrink-0 rounded-[5px] py-0.5 text-center font-mono text-[11px] font-semibold leading-[14px] ${v.n === app.version ? "bg-ink text-highlighter" : "bg-[color:var(--c-f2f2f0)] text-[color:var(--c-3a3a38)]"}`}>v{v.n}</span>
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
               <span className="text-[14px] font-medium leading-[18px] text-ink">{v.note}</span>
-              <span className="text-[12px] leading-4 text-[#6B6B6B]">
+              <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
                 {ago(v.at)}
                 {v.n === app.version ? " · live now" : ""}
               </span>
@@ -450,7 +450,7 @@ function History({ app, onDone }: { app: MadeApp; onDone: () => void }) {
         ))}
       </div>
       {error && <span className="text-[12px] text-[#B42318]">{error}</span>}
-      <div className="flex gap-2.5 rounded-[10px] bg-[#F6F6F4] p-3 text-[12px] leading-[17px] text-[#3A3A38]">Going back changes the app, not what it keeps.</div>
+      <div className="flex gap-2.5 rounded-[10px] bg-[color:var(--c-f6f6f4)] p-3 text-[12px] leading-[17px] text-[color:var(--c-3a3a38)]">Going back changes the app, not what it keeps.</div>
     </div>
   );
 }
@@ -463,7 +463,7 @@ export function MadeAppsHome({ state, ws }: { state: AppState; ws: string }) {
     <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-8 py-8">
       <div className="flex flex-col gap-1">
         <span className="text-[26px] font-bold leading-8 tracking-[-0.025em] text-ink">Apps</span>
-        <span className="text-[13.5px] leading-[18px] text-[#6B6B6B]">
+        <span className="text-[13.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">
           {apps.length ? `${apps.length} made by your bots · they keep what you put in them` : "Tools your bots make for you. Ask any bot: “make me an app that…”"}
         </span>
       </div>
@@ -473,15 +473,15 @@ export function MadeAppsHome({ state, ws }: { state: AppState; ws: string }) {
           const maker = state.bots.find((b) => b.id === a.botId);
           return (
             <button key={a.id} onClick={() => open?.(a.id)} className="group flex flex-col gap-2.5 text-left">
-              <span className="relative block h-[172px] overflow-hidden rounded-[14px] bg-white shadow-[0_0_0_1px_#ECECEA] group-hover:shadow-[0_0_0_1px_#0A0A0A]">
+              <span className="relative block h-[172px] overflow-hidden rounded-[14px] bg-white shadow-[0_0_0_1px_var(--c-ececea)] group-hover:shadow-[0_0_0_1px_var(--c-0a0a0a)]">
                 {a.version ? (
                   // The app itself, at half size, and not to be clicked here (the tile opens it).
                   <span className="pointer-events-none absolute left-0 top-0 block h-[344px] w-[200%] origin-top-left scale-50" inert>
                     <AppFrame key={`${a.id}:${a.version}`} app={a} version={a.version} className="h-full w-full border-0 bg-white" />
                   </span>
                 ) : (
-                  <span className="flex h-full items-center justify-center gap-2 text-[12px] text-[#6B6B6B]">
-                    <span className="size-2 animate-pulse rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" />
+                  <span className="flex h-full items-center justify-center gap-2 text-[12px] text-[color:var(--c-6b6b6b)]">
+                    <span className="size-2 animate-pulse rounded-full bg-highlighter shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" />
                     {a.building ? "Building…" : "Not built"}
                   </span>
                 )}
@@ -490,7 +490,7 @@ export function MadeAppsHome({ state, ws }: { state: AppState; ws: string }) {
                 <AppMark app={a} size={18} />
                 <span className="flex min-w-0 flex-col">
                   <span className="truncate text-[14px] font-medium leading-[18px] text-ink">{a.title}</span>
-                  <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">
+                  <span className="truncate text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
                     {maker?.name ?? "A bot"} · {a.building ? "building now" : `updated ${ago(a.updatedAt)}`}
                   </span>
                 </span>
@@ -516,9 +516,9 @@ export function MadeAppLine({ m, state }: { m: Message; state: AppState }) {
   const undone = app && !building && !failed && app.versions.some((x) => x.n > v && x.note === `Back to v${v - 1}`);
   const button = "shrink-0 rounded-full px-2 py-0.5 text-[12px] font-medium leading-4 text-ink hover:bg-black/[0.05] disabled:opacity-40";
   return (
-    <div className="flex w-full max-w-[400px] items-center gap-2 self-center rounded-[14px] bg-[#F7F7F6] py-2 pl-3 pr-1.5 text-[12px] leading-4">
-      {building ? <span className="size-2 shrink-0 animate-pulse rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" /> : app ? <AppMark app={app} size={14} /> : null}
-      <span className={`min-w-0 flex-1 truncate ${failed ? "text-[#B42318]" : undone ? "text-[#9A9A98] line-through" : "text-[#3A3A3A]"}`} title={m.text}>
+    <div className="flex w-full max-w-[400px] items-center gap-2 self-center rounded-[14px] bg-[color:var(--c-f7f7f6)] py-2 pl-3 pr-1.5 text-[12px] leading-4">
+      {building ? <span className="size-2 shrink-0 animate-pulse rounded-full bg-highlighter shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" /> : app ? <AppMark app={app} size={14} /> : null}
+      <span className={`min-w-0 flex-1 truncate ${failed ? "text-[#B42318]" : undone ? "text-[color:var(--c-9a9a98)] line-through" : "text-[color:var(--c-3a3a3a)]"}`} title={m.text}>
         {building ? `${m.text} · ${elapsed(app!.building!.since)}` : m.text}
       </span>
       {app && open && (
@@ -539,7 +539,7 @@ export function MadeAppLine({ m, state }: { m: Message; state: AppState }) {
           Undo
         </button>
       )}
-      {undone && <span className="shrink-0 px-2 py-0.5 font-medium text-[#9A9A98]">Undone</span>}
+      {undone && <span className="shrink-0 px-2 py-0.5 font-medium text-[color:var(--c-9a9a98)]">Undone</span>}
     </div>
   );
 }
@@ -547,12 +547,12 @@ export function MadeAppLine({ m, state }: { m: Message; state: AppState }) {
 /** Over the chat's composer while an app is open beside it: what the user says is about it (Message.lookingAt). */
 export function LookingAt({ app, onClear }: { app: MadeApp; onClear: () => void }) {
   return (
-    <div className="flex items-center gap-1.5 self-start rounded-full bg-[#F6F6F4] py-1 pl-1.5 pr-1">
+    <div className="flex items-center gap-1.5 self-start rounded-full bg-[color:var(--c-f6f6f4)] py-1 pl-1.5 pr-1">
       <AppMark app={app} size={16} />
-      <span className="text-[12px] leading-4 text-[#3A3A38]">
+      <span className="text-[12px] leading-4 text-[color:var(--c-3a3a38)]">
         Looking at <span className="font-semibold text-ink">{app.title}</span>
       </span>
-      <button onClick={onClear} aria-label="Talk about something else" title="Talk about something else" className="flex size-5 items-center justify-center rounded-full text-[#9A9A98] hover:bg-black/[0.06] hover:text-ink">
+      <button onClick={onClear} aria-label="Talk about something else" title="Talk about something else" className="flex size-5 items-center justify-center rounded-full text-[color:var(--c-9a9a98)] hover:bg-black/[0.06] hover:text-ink">
         <svg width="9" height="9" viewBox="0 0 12 12">
           <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
         </svg>

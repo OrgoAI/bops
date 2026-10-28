@@ -74,10 +74,10 @@ export function UsageData() {
   };
   return (
     <div className="flex flex-col gap-2 px-[22px] pt-4">
-      <div className="flex items-center gap-3 rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex items-center gap-3 rounded-[14px] p-3.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
         <div className="flex flex-1 flex-col gap-0.5">
           <span className="text-[13px] font-medium">Share usage data</span>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">
+          <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
             Sends Orgo counts of what you do in {BRAND.name}, like bots made and tasks run, and error reports. Never your messages, files, screens, contacts or keys.
             {info.locked && " Turned off on this Mac."}
           </span>
@@ -89,7 +89,7 @@ export function UsageData() {
           aria-label="Share usage data"
           disabled={busy}
           onClick={() => void toggle()}
-          className={`relative h-[22px] w-[38px] shrink-0 rounded-full transition-colors disabled:opacity-60 ${info.share ? "bg-ink" : "bg-[#E6E6E3]"}`}
+          className={`relative h-[22px] w-[38px] shrink-0 rounded-full transition-colors disabled:opacity-60 ${info.share ? "bg-ink" : "bg-[color:var(--c-e6e6e3)]"}`}
         >
           <span className={`absolute top-[3px] size-4 rounded-full bg-white shadow-[0_1px_2px_#00000033] transition-[left] ${info.share ? "left-[19px]" : "left-[3px]"}`} />
         </button>

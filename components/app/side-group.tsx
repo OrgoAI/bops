@@ -67,7 +67,7 @@ export function since(t: number) {
 
 /** A small action under an open row on a page: plain, or red for the one that removes it. */
 export const small = (tone: "plain" | "red") =>
-  `rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 disabled:opacity-40 ${tone === "red" ? "text-[#B42318] hover:bg-[#FEF3F2]" : "text-[#3A3A38] hover:bg-[#F2F2F0]"}`;
+  `rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 disabled:opacity-40 ${tone === "red" ? "text-[#B42318] hover:bg-[#FEF3F2]" : "text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)]"}`;
 
 /* ---------------- What's folded, on this Mac ---------------- */
 
@@ -187,7 +187,7 @@ export function InlineConfirm({ text, action, doing, busy, onConfirm, onCancel }
       }}
       className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl bg-[#FEF3F2] px-3 py-2 outline-none"
     >
-      <span className="min-w-0 flex-1 text-[12.5px] leading-[17px] text-[#3A3A38]">{text}</span>
+      <span className="min-w-0 flex-1 text-[12.5px] leading-[17px] text-[color:var(--c-3a3a38)]">{text}</span>
       <span className="flex shrink-0 items-center gap-1">
         <button onClick={onConfirm} disabled={busy} className="rounded-full bg-[#B42318] px-3 py-1 text-[12px] font-semibold leading-4 text-white disabled:opacity-60">
           {busy ? doing : action}
@@ -197,7 +197,7 @@ export function InlineConfirm({ text, action, doing, busy, onConfirm, onCancel }
           autoFocus
           onClick={onCancel}
           disabled={busy}
-          className="rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-white focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-40"
+          className="rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-[color:var(--c-3a3a38)] outline-none hover:bg-white focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] disabled:opacity-40"
         >
           Cancel
         </button>
@@ -294,7 +294,7 @@ export function DeleteX({ label, onDelete, className = "" }: { label: string; on
         e.stopPropagation();
         onDelete();
       }}
-      className={`flex size-5 shrink-0 items-center justify-center rounded-md text-[#9A9A98] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 motion-reduce:transition-none ${className}`}
+      className={`flex size-5 shrink-0 items-center justify-center rounded-md text-[color:var(--c-9a9a98)] opacity-0 transition-opacity duration-150 ease-out hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 motion-reduce:transition-none ${className}`}
     >
       <svg width="9" height="9" viewBox="0 0 12 12">
         <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />

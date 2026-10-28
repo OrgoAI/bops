@@ -138,8 +138,8 @@ const openInBrowser = (url: string) => void window.open(url, "_blank", "noopener
 
 const primary = "flex h-10 w-full items-center justify-center gap-2 rounded-full bg-ink text-[13.5px] font-medium text-white disabled:opacity-50";
 const secondary =
-  "flex h-10 w-full items-center justify-center gap-2 rounded-full text-[13.5px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB] disabled:opacity-50";
-const link = "font-medium text-ink underline underline-offset-2 hover:text-[#3A3A38] disabled:opacity-50";
+  "flex h-10 w-full items-center justify-center gap-2 rounded-full text-[13.5px] font-medium shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-fcfcfb)] disabled:opacity-50";
+const link = "font-medium text-ink underline underline-offset-2 hover:text-[color:var(--c-3a3a38)] disabled:opacity-50";
 
 export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
   const [step, setStep] = useState<Step>({ kind: "idle" });
@@ -381,14 +381,14 @@ function Waiting({ step, way, onReopen, onCancel }: { step: Extract<Step, { kind
       <Heading title="Finish in your browser" line={FINISH[way]} />
       <button
         onClick={copy}
-        className="group flex w-full flex-col items-center gap-1 rounded-[14px] bg-[#F7F7F6] py-4 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F3F3F1]"
+        className="group flex w-full flex-col items-center gap-1 rounded-[14px] bg-[color:var(--c-f7f7f6)] py-4 shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[#F3F3F1]"
       >
         <span className="font-mono text-[26px] font-semibold leading-8 tracking-[0.12em]">{step.code.userCode}</span>
         <span className="text-[11.5px] leading-4 text-pencil">{copied ? "Copied" : "Click to copy"}</span>
       </button>
       <div className="flex w-full flex-col gap-2 pb-5 pt-4">
         <div className="flex items-center justify-between text-[12.5px] leading-4">
-          <span className="flex items-center gap-2 text-[#3A3A38]">
+          <span className="flex items-center gap-2 text-[color:var(--c-3a3a38)]">
             <Spinner size={12} color="#3A3A38" />
             Waiting for you to approve
           </span>

@@ -140,7 +140,7 @@ function Bars({ wide, ...s }: Shared & { wide: boolean }) {
       {/* Names as text the page lays out (cut with an ellipsis); the whole row under them is the bar's target. */}
       {s.groups.map((g, i) => (
         <div key={g.key} className="pointer-events-none absolute left-0 flex items-center" style={{ top: top(i), height: PITCH, width: labelW }}>
-          <span className={`truncate text-[13px] leading-4 ${s.picked === i ? "font-medium text-ink" : "text-[#3A3A38]"}`}>{g.label}</span>
+          <span className={`truncate text-[13px] leading-4 ${s.picked === i ? "font-medium text-ink" : "text-[color:var(--c-3a3a38)]"}`}>{g.label}</span>
         </div>
       ))}
     </div>
@@ -231,11 +231,11 @@ function Line(s: Shared) {
 function Readout({ g, count, money, style }: { g: Group; count: boolean; money: string | null; style: React.CSSProperties }) {
   return (
     <div
-      className="pointer-events-none absolute z-10 whitespace-nowrap rounded-[10px] bg-white px-2.5 py-1.5 shadow-[0_0_0_1px_#E6E6E3,0_8px_24px_-12px_#00000040]"
+      className="pointer-events-none absolute z-10 whitespace-nowrap rounded-[10px] bg-white px-2.5 py-1.5 shadow-[0_0_0_1px_var(--c-e6e6e3),0_8px_24px_-12px_#00000040]"
       style={style}
     >
       <div className="text-[13px] font-semibold leading-[18px] text-ink tabular-nums">{count ? rowsWord(g.count) : formatNumber(g.value, { money })}</div>
-      <div className="text-[12px] leading-4 text-[#6B6B6B]">{count ? g.label : `${g.label} · ${rowsWord(g.count)}`}</div>
+      <div className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{count ? g.label : `${g.label} · ${rowsWord(g.count)}`}</div>
     </div>
   );
 }

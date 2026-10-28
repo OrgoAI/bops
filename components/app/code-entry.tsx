@@ -83,7 +83,7 @@ export function ResendButton({ seconds, disabled, onResend, refused }: { seconds
   }, [seconds]);
   if (left > 0)
     return (
-      <span className="tabular-nums text-[#9A9A98]">{refused ? `Try again in ${clock(left)}` : `Send a new code in ${seconds >= 60 ? clock(left) : `${left}s`}`}</span>
+      <span className="tabular-nums text-[color:var(--c-9a9a98)]">{refused ? `Try again in ${clock(left)}` : `Send a new code in ${seconds >= 60 ? clock(left) : `${left}s`}`}</span>
     );
   return (
     <button disabled={disabled} onClick={onResend} className="font-medium text-ink underline-offset-2 hover:underline disabled:opacity-40">
@@ -167,7 +167,7 @@ export function CodeInput({ disabled, onComplete, ariaLabel = "Code from the tex
             } else if (e.key === "ArrowLeft" && i > 0) boxes.current[i - 1]?.focus();
             else if (e.key === "ArrowRight" && i < CODE_LENGTH - 1) boxes.current[i + 1]?.focus();
           }}
-          className="h-9 w-8 rounded-[10px] bg-[#F7F7F6] text-center text-[15px] font-medium tabular-nums outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50"
+          className="h-9 w-8 rounded-[10px] bg-[color:var(--c-f7f7f6)] text-center text-[15px] font-medium tabular-nums outline-none shadow-[0_0_0_1px_var(--c-e6e6e3)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] disabled:opacity-50"
         />
       ))}
     </div>

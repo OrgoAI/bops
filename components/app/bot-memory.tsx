@@ -91,9 +91,9 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
           e.preventDefault();
           void ask();
         }}
-        className="flex items-center gap-2 rounded-full bg-[#F7F7F6] py-1 pl-3.5 pr-1 focus-within:bg-white focus-within:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
+        className="flex items-center gap-2 rounded-full bg-[color:var(--c-f7f7f6)] py-1 pl-3.5 pr-1 focus-within:bg-white focus-within:shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)]"
       >
-        <svg width="14" height="14" viewBox="0 0 16 16" className="shrink-0 text-[#9A9A98]" aria-hidden>
+        <svg width="14" height="14" viewBox="0 0 16 16" className="shrink-0 text-[color:var(--c-9a9a98)]" aria-hidden>
           <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
           <path d="M10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
         </svg>
@@ -115,10 +115,10 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
             setResults(null);
           }}
           placeholder={`Ask ${b.name} what it knows about ${you(state)}`}
-          className="h-8 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-[#9A9A98]"
+          className="h-8 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-[color:var(--c-9a9a98)]"
         />
         {searching && (
-          <button disabled={asking} className="h-7 shrink-0 rounded-full bg-[#0A0A0A] px-3 text-[12.5px] font-medium text-white disabled:opacity-50">
+          <button disabled={asking} className="h-7 shrink-0 rounded-full bg-[color:var(--c-0a0a0a)] px-3 text-[12.5px] font-medium text-white disabled:opacity-50">
             {asking ? "Thinking…" : "Ask"}
           </button>
         )}
@@ -127,9 +127,9 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
       {searching ? (
         <div className="-mt-3 flex flex-col gap-6">
           {(asking || answer) && (
-            <div className="flex flex-col gap-3 rounded-[18px] bg-[#F7F7F6] px-5 py-4">
+            <div className="flex flex-col gap-3 rounded-[18px] bg-[color:var(--c-f7f7f6)] px-5 py-4">
               {asking ? (
-                <div className="text-[13.5px] text-[#9A9A98]">Thinking back…</div>
+                <div className="text-[13.5px] text-[color:var(--c-9a9a98)]">Thinking back…</div>
               ) : (
                 answer && (
                   <>
@@ -139,9 +139,9 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
                     {answer.based.length > 0 && (
                       <div className="flex flex-col gap-1.5 border-t border-black/[0.06] pt-3">
                         {answer.based.map((f) => (
-                          <div key={f.id} className="flex items-baseline gap-3 text-[12.5px] leading-[18px] text-[#6B6B6B]">
+                          <div key={f.id} className="flex items-baseline gap-3 text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">
                             <span className="min-w-0 flex-1">{sentence(f.text)}</span>
-                            <span className="shrink-0 text-[#9A9A98]">{f.source}</span>
+                            <span className="shrink-0 text-[color:var(--c-9a9a98)]">{f.source}</span>
                           </div>
                         ))}
                       </div>
@@ -172,9 +172,9 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
           <Section
             title="Recently learned"
             right={
-              <div className="flex gap-0.5 rounded-full bg-[#F2F2F0] p-0.5 text-[12px] leading-4">
+              <div className="flex gap-0.5 rounded-full bg-[color:var(--c-f2f2f0)] p-0.5 text-[12px] leading-4">
                 {[false, true].map((m) => (
-                  <button key={String(m)} onClick={() => setMine(m)} className={`rounded-full px-2.5 py-1 ${mine === m ? "bg-white font-medium text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}>
+                  <button key={String(m)} onClick={() => setMine(m)} className={`rounded-full px-2.5 py-1 ${mine === m ? "bg-white font-medium text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}>
                     {m ? `From ${b.name}` : "All"}
                   </button>
                 ))}
@@ -196,16 +196,16 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
               <>
                 <div className="flex flex-col">
                   {(allWork ? done : done.slice(0, 3)).map((s) => (
-                    <button key={s.id} onClick={() => onOpenThread(s)} className="-mx-2.5 flex items-start gap-2.5 rounded-[12px] px-2.5 py-2 text-left hover:bg-[#F7F7F6]">
+                    <button key={s.id} onClick={() => onOpenThread(s)} className="-mx-2.5 flex items-start gap-2.5 rounded-[12px] px-2.5 py-2 text-left hover:bg-[color:var(--c-f7f7f6)]">
                       <span className="mt-0.5">
                         <StatusIcon session={s} owner={!!state.shared} okWait={waitsForOk(s, state)} />
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-baseline gap-2">
                           <span className="min-w-0 flex-1 truncate text-[14px] font-medium leading-5">{s.title}</span>
-                          <span className="shrink-0 text-[12px] text-[#9A9A98]">{ago(s.endedAt ?? s.createdAt)}</span>
+                          <span className="shrink-0 text-[12px] text-[color:var(--c-9a9a98)]">{ago(s.endedAt ?? s.createdAt)}</span>
                         </span>
-                        {s.answer && <span className="line-clamp-1 text-[13px] leading-[18px] text-[#6B6B6B]">{s.answer.replace(/\*\*|\[|\]\([^)]*\)/g, "")}</span>}
+                        {s.answer && <span className="line-clamp-1 text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)]">{s.answer.replace(/\*\*|\[|\]\([^)]*\)/g, "")}</span>}
                       </span>
                     </button>
                   ))}
@@ -217,9 +217,9 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
             )}
           </Section>
 
-          <div className="text-center text-[12px] leading-4 text-[#9A9A98]">
+          <div className="text-center text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
             Everyone on the {data.workspace} team shares this memory.{" "}
-            <button onClick={() => setManage(true)} className="font-medium text-[#6B6B6B] underline decoration-[#D9D9D6] underline-offset-2 hover:text-ink">
+            <button onClick={() => setManage(true)} className="font-medium text-[color:var(--c-6b6b6b)] underline decoration-[color:var(--c-d9d9d6)] underline-offset-2 hover:text-ink">
               Manage
             </button>
           </div>
@@ -243,11 +243,11 @@ function Section({ title, right, children }: { title: string; right?: React.Reac
   );
 }
 
-const Quiet = ({ children }: { children: React.ReactNode }) => <div className="py-2 text-[13.5px] leading-5 text-[#9A9A98]">{children}</div>;
+const Quiet = ({ children }: { children: React.ReactNode }) => <div className="py-2 text-[13.5px] leading-5 text-[color:var(--c-9a9a98)]">{children}</div>;
 
 function More({ open, onClick, count }: { open: boolean; onClick: () => void; count: number }) {
   return (
-    <button onClick={onClick} className="self-start text-[13px] font-medium text-[#6B6B6B] hover:text-ink">
+    <button onClick={onClick} className="self-start text-[13px] font-medium text-[color:var(--c-6b6b6b)] hover:text-ink">
       {open ? "Show less" : `Show all ${count}`}
     </button>
   );
@@ -307,20 +307,20 @@ function ContactCard({ ws, lines, onChange }: { ws: string; lines: Fact[]; onCha
     })
     .filter((x) => x.rows.length);
   return (
-    <div className="flex flex-col rounded-[18px] px-5 py-1 shadow-[0_0_0_1px_#ECECEA]">
+    <div className="flex flex-col rounded-[18px] px-5 py-1 shadow-[0_0_0_1px_var(--c-ececea)]">
       {groups.map(({ g, rows }) => (
-        <div key={g} className="flex flex-col gap-2 border-b border-[#F0F0EE] py-4 last:border-b-0">
-          <div className="text-[11.5px] font-medium uppercase tracking-[0.06em] text-[#B0B0AD]">{g}</div>
+        <div key={g} className="flex flex-col gap-2 border-b border-[color:var(--c-f0f0ee)] py-4 last:border-b-0">
+          <div className="text-[11.5px] font-medium uppercase tracking-[0.06em] text-[color:var(--c-b0b0ad)]">{g}</div>
           {rows.map(([label, items]) => (
             <div key={label} className="flex gap-4 text-[13.5px] leading-[21px]">
-              {g !== "Notes" && <span className="w-[116px] shrink-0 truncate text-[#9A9A98]" title={label}>{label}</span>}
+              {g !== "Notes" && <span className="w-[116px] shrink-0 truncate text-[color:var(--c-9a9a98)]" title={label}>{label}</span>}
               <span className="min-w-0 flex-1">
                 {items.map((l, i) => (
                   <span key={l.id}>
-                    {i > 0 && (stacked(items) ? <br /> : <span className="text-[#C9C9C6]"> · </span>)}
+                    {i > 0 && (stacked(items) ? <br /> : <span className="text-[color:var(--c-c9c9c6)]"> · </span>)}
                     <Editable ws={ws} item={l} onChange={onChange}>
                       {l.value}
-                      {l.note && <span className="text-[#9A9A98]"> {l.note}</span>}
+                      {l.note && <span className="text-[color:var(--c-9a9a98)]"> {l.note}</span>}
                     </Editable>
                   </span>
                 ))}
@@ -330,11 +330,11 @@ function ContactCard({ ws, lines, onChange }: { ws: string; lines: Fact[]; onCha
         </div>
       ))}
       {hidden.length > 0 && (
-        <div className="border-t border-[#F0F0EE] py-3.5 first:border-t-0">
+        <div className="border-t border-[color:var(--c-f0f0ee)] py-3.5 first:border-t-0">
           <button onClick={() => setShowPrivate((x) => !x)} className="flex w-full items-center gap-2.5 text-left">
             <LockIcon />
             <span className="flex-1 text-[13.5px] leading-5">
-              {hidden.length} private details <span className="text-[#9A9A98]">· hidden from bots while they work</span>
+              {hidden.length} private details <span className="text-[color:var(--c-9a9a98)]">· hidden from bots while they work</span>
             </span>
             <svg width="10" height="10" viewBox="0 0 12 12" className={`shrink-0 transition-transform ${showPrivate ? "rotate-90" : ""}`}>
               <path d="M4.5 3l3 3-3 3" fill="none" stroke="#9A9A98" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -344,12 +344,12 @@ function ContactCard({ ws, lines, onChange }: { ws: string; lines: Fact[]; onCha
             <div className="mt-2.5 flex flex-col gap-1.5 pl-[22px]">
               {hidden.map((l) => (
                 <div key={l.id} className="flex gap-4 text-[13.5px] leading-[21px]">
-                  <span className="w-[116px] shrink-0 truncate text-[#9A9A98]" title={l.label}>{/ Address$/.test(l.label) ? "Address" : l.label || "Note"}</span>
+                  <span className="w-[116px] shrink-0 truncate text-[color:var(--c-9a9a98)]" title={l.label}>{/ Address$/.test(l.label) ? "Address" : l.label || "Note"}</span>
                   <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
                     <Editable ws={ws} item={l} onChange={onChange}>
                       {l.value}
-                      {l.note && <span className="text-[#9A9A98]"> {l.note}</span>}
-                      {/ Address$/.test(l.label) && <span className="text-[#9A9A98]"> · {l.label.replace(/ Address$/, "")}</span>}
+                      {l.note && <span className="text-[color:var(--c-9a9a98)]"> {l.note}</span>}
+                      {/ Address$/.test(l.label) && <span className="text-[color:var(--c-9a9a98)]"> · {l.label.replace(/ Address$/, "")}</span>}
                     </Editable>
                   </span>
                 </div>
@@ -376,7 +376,7 @@ function FactList({ ws, facts, onChange, pinnable }: { ws: string; facts: Fact[]
             </Editable>
           </span>
           {f.source && (
-            <span className="text-[12px] leading-4 text-[#9A9A98]">
+            <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
               {f.source}
               {f.at ? ` · ${ago(f.at)}` : ""}
             </span>
@@ -430,11 +430,11 @@ function Editable({ ws, item, onChange, pinnable, children }: { ws: string; item
           onChange={(e) => setEditing(e.target.value)}
           onKeyDown={(e) => e.key === "Escape" && (e.preventDefault(), setEditing(null))}
           onBlur={() => setEditing(null)}
-          className="h-7 min-w-0 flex-1 rounded-[8px] px-2 text-[13.5px] shadow-[inset_0_0_0_1.5px_#0A0A0A] outline-none"
+          className="h-7 min-w-0 flex-1 rounded-[8px] px-2 text-[13.5px] shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)] outline-none"
         />
       </form>
     );
-  const pill = "rounded-full px-2.5 py-1 text-[12.5px] font-medium leading-4 hover:bg-[#F2F2F0]";
+  const pill = "rounded-full px-2.5 py-1 text-[12.5px] font-medium leading-4 hover:bg-[color:var(--c-f2f2f0)]";
   return (
     <span ref={box} className="relative">
       <span
@@ -442,7 +442,7 @@ function Editable({ ws, item, onChange, pinnable, children }: { ws: string; item
         tabIndex={0}
         onClick={() => setMenu((m) => !m)}
         onKeyDown={(e) => e.key === "Enter" && setMenu((m) => !m)}
-        className={`-mx-1 cursor-pointer rounded-[6px] px-1 transition-colors ${menu ? "bg-[#F2F2F0]" : "hover:bg-[#F7F7F6]"}`}
+        className={`-mx-1 cursor-pointer rounded-[6px] px-1 transition-colors ${menu ? "bg-[color:var(--c-f2f2f0)]" : "hover:bg-[color:var(--c-f7f7f6)]"}`}
       >
         {children}
       </span>

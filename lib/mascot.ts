@@ -1,3 +1,4 @@
+import { BRAND } from "./brand";
 /**
  * The bots' mascots, as SVG markup in a 0 0 40 40 box: plush blobs in the bot's color, each wearing
  * headphones (the Bops look). Idle, a bot vibes with its eyes closed; at work, it opens them, each
@@ -19,7 +20,8 @@ export const isMoving = (mood: Mood): mood is MovingMood => (MOVING_MOODS as rea
 const BLOB =
   "M20 4c7.5 0 13.5 4.5 15.5 11 2.8 2.4 3.8 6 2.8 9.6C36.6 32.5 29.6 37 20 37S3.4 32.5 1.7 24.6C.7 21 1.7 17.4 4.5 15 6.5 8.5 12.5 4 20 4z";
 const INK = "#1C1C1B";
-const HIGHLIGHTER = "#E9FF3B";
+// The main bot's headphones: the highlighter, or a partner's color (lib/brand.ts).
+const HIGHLIGHTER = BRAND.accent;
 
 /** A workspace's main bot (Boppy, or Sam on older installs): drawn in black, with highlighter headphones. */
 export const isMainBotId = (botId: string) => /^(boppy|sam)(-\d+)?$/.test(botId);

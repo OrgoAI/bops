@@ -186,7 +186,7 @@ function BotChip({ bot: b, on, disabled, tip, onClick }: { bot: Bot; on: boolean
       data-tip={tip}
       disabled={disabled}
       onClick={onClick}
-      className={`flex h-[26px] items-center gap-1.5 rounded-full pl-1 pr-2.5 text-[12px] font-medium leading-4 disabled:opacity-50 ${on ? "bg-[#FBFFE0] text-ink shadow-[0_0_0_1.5px_#0A0A0A]" : "text-[#6B6B6B] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"}`}
+      className={`flex h-[26px] items-center gap-1.5 rounded-full pl-1 pr-2.5 text-[12px] font-medium leading-4 disabled:opacity-50 ${on ? "bg-[color:var(--c-fbffe0)] text-ink shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" : "text-[color:var(--c-6b6b6b)] shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-fcfcfb)]"}`}
     >
       <Mascot botId={b.id} color={b.color} size={18} antenna={false} />
       {b.name}
@@ -258,18 +258,18 @@ export function KeysSettings({ state, keysFor, uses, onOpenWatch }: { state: App
   let body: React.ReactNode;
   if (!info)
     body = failed ? (
-      <span role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] leading-[18px] text-[#6B6B6B]">
+      <span role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">
         {failed}
         <button onClick={retry} className="font-medium text-ink underline-offset-2 hover:underline">
           Try again
         </button>
       </span>
     ) : (
-      <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">Checking</span>
+      <span className="text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">Checking</span>
     );
-  else if (!info.signedIn) body = <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{undash(info.error ?? "Sign in to Orgo to use Keys.")}</span>;
+  else if (!info.signedIn) body = <span className="text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">{undash(info.error ?? "Sign in to Orgo to use Keys.")}</span>;
   else if (!shown.length && !form)
-    body = <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{saved ?? (scope === "workspace" ? "No keys for this workspace yet." : "No keys yet. Add one for Stripe, OpenAI, GitHub and more.")}</span>;
+    body = <span className="text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">{saved ?? (scope === "workspace" ? "No keys for this workspace yet." : "No keys yet. Add one for Stripe, OpenAI, GitHub and more.")}</span>;
   else
     body = (
       <>
@@ -291,7 +291,7 @@ export function KeysSettings({ state, keysFor, uses, onOpenWatch }: { state: App
         {form?.replace ? null : form ? (
           <AddKey info={info} team={team} scope={addScope} bots={form.bots} first={!shown.length} onSaved={done} onCancel={() => setForm(null)} />
         ) : (
-          saved && <span className="motion-fade-in pt-3 text-[12px] leading-4 text-[#6B6B6B]">{saved}</span>
+          saved && <span className="motion-fade-in pt-3 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{saved}</span>
         )}
         {failed && (
           <span role="alert" className="pt-2 text-[12px] leading-4 text-[#B42318]">
@@ -306,10 +306,10 @@ export function KeysSettings({ state, keysFor, uses, onOpenWatch }: { state: App
       <div className="flex items-end justify-between gap-3">
         <div className="flex flex-col gap-0.5">
           <span className="text-[15px] font-semibold leading-5">API keys</span>
-          <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Kept in your Orgo vault, the same keys as Orgo&apos;s Settings, Secrets. Bots call through Orgo and never see them.</span>
+          <span className="text-[12.5px] leading-[17px] text-[color:var(--c-6b6b6b)]">Kept in your Orgo vault, the same keys as Orgo&apos;s Settings, Secrets. Bots call through Orgo and never see them.</span>
         </div>
         {info?.signedIn && !form && (
-          <button onClick={add} className="flex shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[#2A2A28]">
+          <button onClick={add} className="flex shrink-0 items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[color:var(--c-2a2a28)]">
             <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
               <path d="M5 1v8M1 5h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
             </svg>
@@ -318,7 +318,7 @@ export function KeysSettings({ state, keysFor, uses, onOpenWatch }: { state: App
         )}
       </div>
       {info?.signedIn && info.workspaceKeys && (
-        <div role="tablist" aria-label="Where the keys apply" className="flex gap-1 self-start rounded-full bg-[#F2F2F0] p-0.5">
+        <div role="tablist" aria-label="Where the keys apply" className="flex gap-1 self-start rounded-full bg-[color:var(--c-f2f2f0)] p-0.5">
           {SCOPES.map((x) => (
             <button
               key={x.id}
@@ -329,15 +329,15 @@ export function KeysSettings({ state, keysFor, uses, onOpenWatch }: { state: App
                 setTab(x.id);
                 if (form && !form.replace) setForm(null);
               }}
-              className={`rounded-full px-3 py-1 text-[12.5px] font-medium leading-4 ${scope === x.id ? "bg-white text-ink shadow-[0_0_0_1px_#E6E6E3]" : "text-[#6B6B6B] hover:text-ink"}`}
+              className={`rounded-full px-3 py-1 text-[12.5px] font-medium leading-4 ${scope === x.id ? "bg-white text-ink shadow-[0_0_0_1px_var(--c-e6e6e3)]" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}
             >
               {x.label}
-              <span className="pl-1 font-normal tabular-nums text-[#9A9A98]">{info.keys.filter((k) => k.scope === x.id).length}</span>
+              <span className="pl-1 font-normal tabular-nums text-[color:var(--c-9a9a98)]">{info.keys.filter((k) => k.scope === x.id).length}</span>
             </button>
           ))}
         </div>
       )}
-      <div className="flex flex-col rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#ECECEA]">{body}</div>
+      <div className="flex flex-col rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_var(--c-ececea)]">{body}</div>
       {routinesFor && (
         <RoutineSuggest
           key={`${routinesFor.app}:${routinesFor.botId ?? ""}`}
@@ -419,14 +419,14 @@ function KeyLine({
   // Where it applies is the tab it's under, so the line says only what's this key's own.
   const meta = [k.readOnly && "Read only", when && `Updated ${when}`].filter(Boolean).join(" · ");
   return (
-    <div className="flex flex-col gap-1.5 border-b border-[#F0F0EE] py-3 first:pt-0">
+    <div className="flex flex-col gap-1.5 border-b border-[color:var(--c-f0f0ee)] py-3 first:pt-0">
       <div className="flex items-center gap-2">
         {/* Where focus goes when the last of its routines is deleted (autopilot.tsx, focusAfterRemove). */}
         <span data-list-heading tabIndex={-1} className="min-w-0 truncate font-mono text-[13px] font-medium leading-[18px] outline-none">
           {k.name}
         </span>
         {meta && (
-          <span data-tip={`${scopeLabel(k.scope).tip}${k.readOnly ? " Orgo lets bots only read with it." : ""}`} className="min-w-0 shrink-[3] truncate text-[12px] leading-4 text-[#9A9A98]">
+          <span data-tip={`${scopeLabel(k.scope).tip}${k.readOnly ? " Orgo lets bots only read with it." : ""}`} className="min-w-0 shrink-[3] truncate text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
             {meta}
           </span>
         )}
@@ -438,7 +438,7 @@ function KeyLine({
             onClick={() => void v.toggle()}
             aria-label={v.shown !== null ? "Hide key" : "Show key"}
             data-tip={v.shown !== null ? "Hide key" : "Show key"}
-            className={`${iconBtn} w-7 ${v.shown !== null ? "bg-[#F2F2F0] text-ink" : "text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink"}`}
+            className={`${iconBtn} w-7 ${v.shown !== null ? "bg-[color:var(--c-f2f2f0)] text-ink" : "text-[color:var(--c-6b6b6b)] hover:bg-black/[0.05] hover:text-ink"}`}
           >
             <EyeIcon off={v.shown !== null} />
           </button>
@@ -448,7 +448,7 @@ function KeyLine({
             onClick={() => void v.copy()}
             aria-label="Copy key"
             data-tip={v.copied ? undefined : "Copy key"}
-            className={`${iconBtn} ${v.copied ? "bg-[#2BB673]/15 px-2.5 text-[#1E8A55]" : "w-7 text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink"}`}
+            className={`${iconBtn} ${v.copied ? "bg-[#2BB673]/15 px-2.5 text-[#1E8A55]" : "w-7 text-[color:var(--c-6b6b6b)] hover:bg-black/[0.05] hover:text-ink"}`}
           >
             {v.copied ? (
               <>
@@ -466,7 +466,7 @@ function KeyLine({
           </button>
           {onRoutines && (
             <span ref={anchorRef} className="flex pl-1">
-              <button disabled={busy} onClick={onRoutines} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+              <button disabled={busy} onClick={onRoutines} className={`${btn} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
                 Add routines
               </button>
             </span>
@@ -481,10 +481,10 @@ function KeyLine({
       </div>
       {v.shown !== null && (
         <div className="motion-fade-in flex flex-col gap-1">
-          <span className="select-text break-all rounded-[10px] bg-[#F7F7F6] px-3 py-2 font-mono text-[12px] leading-[17px] text-ink shadow-[0_0_0_1px_#ECECEA]">
+          <span className="select-text break-all rounded-[10px] bg-[color:var(--c-f7f7f6)] px-3 py-2 font-mono text-[12px] leading-[17px] text-ink shadow-[0_0_0_1px_var(--c-ececea)]">
             {v.shown}
           </span>
-          <span className="text-[11.5px] leading-4 text-[#9A9A98]">Hides in 30 seconds, or when you leave the window.</span>
+          <span className="text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">Hides in 30 seconds, or when you leave the window.</span>
         </div>
       )}
       {!!team.length && (
@@ -492,19 +492,19 @@ function KeyLine({
           <div className="min-w-0 flex-1">
             <BotChips team={team} choices={KEY_CHOICES} level={(b) => (b.keys?.includes(k.name) ? "act" : "none")} what={k.name} disabled={busy} onSet={(b, to) => void toggle(b, to === "act")} />
           </div>
-          {used && <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{used}</span>}
+          {used && <span className="shrink-0 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{used}</span>}
         </div>
       )}
       {routines}
       {sure && (
         <div className="flex flex-wrap items-center gap-2 rounded-[10px] bg-[#FEF3F2] px-3 py-2">
-          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">
+          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">
             Remove {k.name} ({scopeLabel(k.scope).label.toLowerCase()}) from your Orgo vault? Your bots stop using it, and it&apos;s gone from Orgo too.
           </span>
           <button disabled={busy} onClick={() => void remove()} className={`${btn} bg-[#B42318] text-white`}>
             {busy ? "Removing…" : "Remove"}
           </button>
-          <button disabled={busy} onClick={() => setSure(false)} className={`${btn} bg-white hover:bg-[#F7F7F6]`}>
+          <button disabled={busy} onClick={() => setSure(false)} className={`${btn} bg-white hover:bg-[color:var(--c-f7f7f6)]`}>
             Cancel
           </button>
         </div>
@@ -578,7 +578,7 @@ function AddKey({
       setBusy(false);
     }
   };
-  const field = "h-8 rounded-full bg-[#F7F7F6] px-3 text-[13px] outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]";
+  const field = "h-8 rounded-full bg-[color:var(--c-f7f7f6)] px-3 text-[13px] outline-none shadow-[0_0_0_1px_var(--c-e6e6e3)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]";
   return (
     <form
       onSubmit={(e) => {
@@ -593,7 +593,7 @@ function AddKey({
           onCancel();
         }
       }}
-      className={`flex flex-col gap-2.5 ${first ? "" : replace ? "my-3 rounded-[12px] bg-[#FCFCFB] p-3 shadow-[0_0_0_1px_#ECECEA]" : "mt-3 rounded-[12px] bg-[#FCFCFB] p-3 shadow-[0_0_0_1px_#ECECEA]"}`}
+      className={`flex flex-col gap-2.5 ${first ? "" : replace ? "my-3 rounded-[12px] bg-[color:var(--c-fcfcfb)] p-3 shadow-[0_0_0_1px_var(--c-ececea)]" : "mt-3 rounded-[12px] bg-[color:var(--c-fcfcfb)] p-3 shadow-[0_0_0_1px_var(--c-ececea)]"}`}
     >
       {replace ? (
         <span className="text-[13px] leading-[18px]">
@@ -609,7 +609,7 @@ function AddKey({
                 setPick(e.target.value);
                 setError(null);
               }}
-              className="h-8 cursor-pointer appearance-none rounded-full bg-white pl-3 pr-7 text-[13px] text-ink shadow-[0_0_0_1px_#E6E6E3] outline-none hover:bg-[#FCFCFB] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+              className="h-8 cursor-pointer appearance-none rounded-full bg-white pl-3 pr-7 text-[13px] text-ink shadow-[0_0_0_1px_var(--c-e6e6e3)] outline-none hover:bg-[color:var(--c-fcfcfb)] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
             >
               {services.map((s) => (
                 <option key={s.name} value={s.name}>
@@ -623,18 +623,18 @@ function AddKey({
               <path d="M3 4.5l3 3 3-3" fill="none" stroke="#6B6B6B" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </span>
-          <span data-tip="Its name in your Orgo vault" className="font-mono text-[11.5px] text-[#6B6B6B]">
+          <span data-tip="Its name in your Orgo vault" className="font-mono text-[11.5px] text-[color:var(--c-6b6b6b)]">
             {name}
           </span>
         </div>
       )}
       {p ? (
-        <span className="text-[12px] leading-[17px] text-[#3A3A38]">
+        <span className="text-[12px] leading-[17px] text-[color:var(--c-3a3a38)]">
           {p.tip}
-          {p.readOnly ? ` Orgo lets bots only read from ${p.label}.` : ""} <span className="text-[#9A9A98]">Get one in {p.where}.</span>
-          {isSaved && <span className="text-[#9A9A98]"> Saving replaces the one in your vault.</span>}
-          {info.workspaceKeys && <span className="text-[#9A9A98]"> {scope === "workspace" ? "For this workspace only." : "For all your workspaces."}</span>}
-          {ORGO_USES[p.name] && <span className="text-[#9A9A98]"> Orgo computers that use your {ORGO_USES[p.name]} key use this one too.</span>}
+          {p.readOnly ? ` Orgo lets bots only read from ${p.label}.` : ""} <span className="text-[color:var(--c-9a9a98)]">Get one in {p.where}.</span>
+          {isSaved && <span className="text-[color:var(--c-9a9a98)]"> Saving replaces the one in your vault.</span>}
+          {info.workspaceKeys && <span className="text-[color:var(--c-9a9a98)]"> {scope === "workspace" ? "For this workspace only." : "For all your workspaces."}</span>}
+          {ORGO_USES[p.name] && <span className="text-[color:var(--c-9a9a98)]"> Orgo computers that use your {ORGO_USES[p.name]} key use this one too.</span>}
         </span>
       ) : null}
       <input
@@ -650,7 +650,7 @@ function AddKey({
       />
       {!replace && !!team.length && (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="pr-0.5 text-[12px] leading-4 text-[#9A9A98]">Bots that may use it</span>
+          <span className="pr-0.5 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">Bots that may use it</span>
           {team.map((b) => {
             const on = bots.includes(b.id);
             return <BotChip key={b.id} bot={b} on={on} tip={on ? `${b.name} may use it` : `Let ${b.name} use it`} onClick={() => setBots(on ? bots.filter((x) => x !== b.id) : [...bots, b.id])} />;
@@ -661,7 +661,7 @@ function AddKey({
         <button type="submit" disabled={!canSave} className={`${btn} bg-ink text-white disabled:opacity-40`}>
           {busy ? "Saving…" : "Save"}
         </button>
-        <button type="button" disabled={busy} onClick={onCancel} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+        <button type="button" disabled={busy} onClick={onCancel} className={`${btn} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
           Cancel
         </button>
         {error && (
@@ -713,7 +713,7 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
     return failed ? (
       <div className={`flex w-full flex-col rounded-2xl ${className}`}>
         <span className="px-4 pb-1 pt-[11px] text-[13px] font-semibold leading-4">Keys</span>
-        <span role="alert" className="flex flex-wrap items-center gap-x-3 px-4 pb-3 pt-0.5 text-[12px] leading-4 text-[#6B6B6B]">
+        <span role="alert" className="flex flex-wrap items-center gap-x-3 px-4 pb-3 pt-0.5 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
           {failed}
           <button onClick={retry} className="font-medium text-ink underline-offset-2 hover:underline">
             Try again
@@ -737,7 +737,7 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
         )}
       </div>
       {!info.signedIn || !keys.length ? (
-        <div className="px-4 pb-3 pt-0.5 text-[12px] leading-4 text-[#6B6B6B]">{info.signedIn ? "No keys in your Orgo vault yet" : undash(info.error ?? "Sign in to Orgo to use Keys.")}</div>
+        <div className="px-4 pb-3 pt-0.5 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{info.signedIn ? "No keys in your Orgo vault yet" : undash(info.error ?? "Sign in to Orgo to use Keys.")}</div>
       ) : (
         keys.map((k, i) => {
           const on = !!b.keys?.includes(k.name);
@@ -745,14 +745,14 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
             <div key={k.name} className={`flex items-center gap-2.5 px-4 py-[9px] ${i === keys.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
               <span className="min-w-0 flex-1 truncate font-mono text-[13px] leading-[18px]">{k.name}</span>
               {/* Whose key it is, as the Vault says: an account one shows on every workspace's bots, off until switched on. */}
-              <span data-tip={scopeLabel(k.scope).tip} className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">
+              <span data-tip={scopeLabel(k.scope).tip} className="shrink-0 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
                 {scopeLabel(k.scope).label}
               </span>
               {routinesOn(k.name) && (
                 <span ref={(el) => void (el ? anchors.current.set(k.name, el) : anchors.current.delete(k.name))} className="flex shrink-0">
                   <button
                     onClick={() => setAsked(k.name)}
-                    className="h-[22px] rounded-full bg-black/[0.05] px-2 text-[11.5px] leading-4 text-[#3A3A38] outline-none hover:bg-black/[0.08] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+                    className="h-[22px] rounded-full bg-black/[0.05] px-2 text-[11.5px] leading-4 text-[color:var(--c-3a3a38)] outline-none hover:bg-black/[0.08] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
                   >
                     Add routines
                   </button>
@@ -764,7 +764,7 @@ function BotKeysCard({ state, bot: b, onAdd, className }: BotKeysProps) {
                 aria-label={on ? `Stop ${b.name} using ${k.name}` : `Let ${b.name} use ${k.name}`}
                 disabled={busy === k.name}
                 onClick={() => void toggle(k.name, !on)}
-                className={`flex h-[22px] w-[38px] shrink-0 items-center rounded-full p-0.5 disabled:opacity-60 ${on ? "justify-end bg-ink" : "justify-start bg-[#D9D9D6]"}`}
+                className={`flex h-[22px] w-[38px] shrink-0 items-center rounded-full p-0.5 disabled:opacity-60 ${on ? "justify-end bg-ink" : "justify-start bg-[color:var(--c-d9d9d6)]"}`}
               >
                 <span className={`size-[18px] rounded-full ${on ? "bg-highlighter" : "bg-white"}`} />
               </button>
@@ -820,20 +820,20 @@ export function apiCallOf(m: Message): ApiCall | null {
   return x ? { label: x[1], method: x[2], path: x[3] } : null;
 }
 
-const methodColor = (method: string) => (method === "DELETE" ? "text-[#B42318]" : method === "GET" ? "text-[#6B6B6B]" : "text-ink");
+const methodColor = (method: string) => (method === "DELETE" ? "text-[#B42318]" : method === "GET" ? "text-[color:var(--c-6b6b6b)]" : "text-ink");
 
 /** An API call in the chat, as a note like an app's: who called which service, the method and the path. */
 export function ApiNote({ call: c }: { call: ApiCall }) {
   const what = c.failed !== undefined ? `${c.who ?? "The bot"} couldn't call ${c.label}` : c.who ? `${c.who} called ${c.label}` : `Called ${c.label}`;
   return (
     <div className="flex max-w-[440px] flex-col items-center gap-1">
-      <div title={c.path.length > 48 ? c.path : undefined} className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full bg-[#F7F7F6] px-3 py-1 text-[12px] leading-4 text-[#6B6B6B]">
-        <span className="flex shrink-0 text-[#9A9A98]">
+      <div title={c.path.length > 48 ? c.path : undefined} className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full bg-[color:var(--c-f7f7f6)] px-3 py-1 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
+        <span className="flex shrink-0 text-[color:var(--c-9a9a98)]">
           <KeyIcon />
         </span>
         <span className="shrink-0">{what}</span>
         <span className={`shrink-0 font-mono text-[11px] font-semibold ${methodColor(c.method)}`}>{c.method}</span>
-        <span className="min-w-0 truncate font-mono text-[11px] text-[#3A3A38]">{c.path}</span>
+        <span className="min-w-0 truncate font-mono text-[11px] text-[color:var(--c-3a3a38)]">{c.path}</span>
       </div>
       {c.failed && <span className="line-clamp-2 px-2 text-center text-[12px] leading-4 text-[#B42318]">{undash(c.failed)}</span>}
     </div>
@@ -850,14 +850,14 @@ export function apiAskOf(a: AppApproval): { name: string; label: string; method:
 export function ApiAsk({ ask, detail, botName }: { ask: NonNullable<ReturnType<typeof apiAskOf>>; detail: string; botName: string }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="flex flex-col gap-1.5 rounded-xl bg-[#F7F7F6] px-3 py-2">
+      <div className="flex flex-col gap-1.5 rounded-xl bg-[color:var(--c-f7f7f6)] px-3 py-2">
         <div className="flex items-start gap-2 font-mono text-[12.5px] leading-[18px]">
-          <span className={`shrink-0 rounded-md bg-white px-1.5 text-[11.5px] font-semibold shadow-[0_0_0_1px_#E6E6E3] ${methodColor(ask.method)}`}>{ask.method}</span>
+          <span className={`shrink-0 rounded-md bg-white px-1.5 text-[11.5px] font-semibold shadow-[0_0_0_1px_var(--c-e6e6e3)] ${methodColor(ask.method)}`}>{ask.method}</span>
           <span className="min-w-0 select-text text-ink [overflow-wrap:anywhere]">{ask.path}</span>
         </div>
-        {detail && <pre className="max-h-[180px] overflow-y-auto whitespace-pre-wrap font-mono text-[11.5px] leading-4 text-[#3A3A38] [overflow-wrap:anywhere]">{detail}</pre>}
+        {detail && <pre className="max-h-[180px] overflow-y-auto whitespace-pre-wrap font-mono text-[11.5px] leading-4 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">{detail}</pre>}
       </div>
-      <span className="text-[12px] leading-4 text-[#6B6B6B]">
+      <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
         Orgo sends it to {ask.label} with your key (<span className="font-mono text-[11px]">{ask.name}</span>). {botName} never sees the key.
       </span>
     </div>

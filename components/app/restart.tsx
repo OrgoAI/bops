@@ -67,12 +67,12 @@ export function RestartConfirm({ onClose }: { onClose: () => void }) {
         <span id="restart-title" className="text-[15px] font-semibold leading-5">
           Restart {BRAND.name}?
         </span>
-        <span id="restart-line" className="pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
+        <span id="restart-line" className="pt-1 text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)]">
           Your bots pause for a few seconds.
         </span>
         {failed && <span className="pt-2 text-[12.5px] leading-[18px] text-[#B42318]">Couldn&apos;t restart. Quit {BRAND.name} and open it again.</span>}
         <div className="flex justify-end gap-2 pt-5">
-          <button disabled={busy} onClick={onClose} className={`${pill} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          <button disabled={busy} onClick={onClose} className={`${pill} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
             Cancel
           </button>
           <button autoFocus disabled={busy} onClick={() => void restart()} className={`${pill} flex min-w-[76px] items-center justify-center bg-ink text-white`}>
