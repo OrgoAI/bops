@@ -23,6 +23,12 @@ export type Brand = {
   wash: string;
   bezel: string;
   onInk: string;
+  /**
+   * How the bots' computers wear the brand (lib/server/desktop.ts): its lockup on the home screen and
+   * wallpaper, its mark as the tab icon and a watermark (pictures under public/), its type (a Google
+   * font the computer loads) and its ink for the home screen's words. None: Bops' own look.
+   */
+  computer?: { lockup: string; mark: string; font: string; ink: string };
 };
 
 const BOPS: Brand = {
@@ -45,6 +51,7 @@ const MOMENTUM: Brand = {
   wash: "linear-gradient(160deg, #F7F1FC 0%, #E7D5FA 45%, #C9A2F2 100%)",
   bezel: "#A200FF",
   onInk: "#D2A1FF",
+  computer: { lockup: "brand/momentum-lockup.png", mark: "brand/momentum-m.png", font: "Poppins", ink: "#381574" },
 };
 
 export const BRAND: Brand = process.env.NEXT_PUBLIC_BOPS_BRAND === "momentum" ? MOMENTUM : BOPS;

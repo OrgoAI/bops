@@ -1,6 +1,6 @@
 import "server-only";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { mascotSvg } from "@/lib/mascot";
 import { botWash } from "@/lib/look";
 import { live, type Bot } from "@/lib/types";
@@ -135,17 +135,37 @@ function doodles(motif: Motif, stroke: string, opacity: number, spots: readonly 
 
 const BASE_CSS = `*{box-sizing:border-box;margin:0}html,body{height:100%}body{font-family:Inter,"Helvetica Neue",Arial,system-ui,sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden}.d{position:absolute;pointer-events:none}`;
 
+/*
+ * A partner's build (lib/brand.ts BRAND.computer) puts its brand on the bots' computers too: its lockup
+ * at the top of the home screen and in the wallpaper's corner, its mark as a watermark and the tab's
+ * icon, and its type and ink. Its pictures go in the pages themselves (data: URLs): the computer has no
+ * copy of them.
+ */
+const serverRoot = () => (process.env.BOPS_SERVER_JS ? dirname(process.env.BOPS_SERVER_JS) : process.cwd());
+const pictures = new Map<string, string>();
+function picture(file: string) {
+  if (!pictures.has(file)) pictures.set(file, `data:image/png;base64,${readFileSync(join(serverRoot(), "public", file)).toString("base64")}`);
+  return pictures.get(file)!;
+}
+const brandFont = () => (BRAND.computer ? `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=${encodeURIComponent(BRAND.computer.font)}:wght@400;500;600&display=swap">` : "");
+const brandFamily = () => (BRAND.computer ? `body{font-family:"${BRAND.computer.font}",Inter,"Helvetica Neue",Arial,system-ui,sans-serif}` : "");
+
 /** The bot's wash with its doodles drawn in a deeper shade of its color, faint like pencil on paper. */
 function wallpaper(b: Bot, motif: Motif) {
-  return `<!doctype html><html><head><meta charset="utf-8"><style>${BASE_CSS}body{background:${botWash(b)}}</style></head><body>${doodles(motif, `color-mix(in oklab, ${accent(b)} 55%, #1a1a1a)`, 0.34, EDGE_SPOTS, 40)}</body></html>`;
+  const brand = BRAND.computer
+    ? `<img src="${picture(BRAND.computer.mark)}" style="position:absolute;right:3%;bottom:4%;height:34vh;opacity:.13" alt=""><img src="${picture(BRAND.computer.lockup)}" style="position:absolute;left:2.4%;bottom:3%;height:4.2vh;opacity:.85" alt="">`
+    : "";
+  return `<!doctype html><html><head><meta charset="utf-8"><style>${BASE_CSS}body{background:${botWash(b)}}</style></head><body>${doodles(motif, `color-mix(in oklab, ${accent(b)} 55%, #1a1a1a)`, 0.34, BRAND.computer ? EDGE_SPOTS.filter(([x, y]) => !(x < 30 && y > 86)) : EDGE_SPOTS, 40)}${brand}</body></html>`;
 }
 
 function home(b: Bot, motif: Motif) {
   const mascot = mascotSvg(b.id, b.color, 104);
-  const ink = b.isMain ? "#2E3300" : `color-mix(in oklab, ${b.color} 45%, #1a1a1a)`;
+  const ink = b.isMain ? (BRAND.computer?.ink ?? "#2E3300") : `color-mix(in oklab, ${b.color} 45%, #1a1a1a)`;
+  const lockup = BRAND.computer ? `<img class="lockup" src="${picture(BRAND.computer.lockup)}" alt="${BRAND.name}">` : "";
   return `<!doctype html><html><head><meta charset="utf-8"><title>${b.name}</title>
-<link rel="icon" href="/favicon.svg">
-<style>${BASE_CSS}
+<link rel="icon" href="/favicon.svg">${brandFont()}
+<style>${BASE_CSS}${brandFamily()}
+.lockup{position:absolute;left:28px;top:22px;height:30px}
 body{background:${tint(accent(b), 0.1)};color:${ink};display:flex;flex-direction:column;align-items:center;padding-top:9vh;overflow:auto}
 .bubble{position:relative;max-width:240px;background:#fff;border-radius:14px;padding:10px 30px 10px 13px;font-size:13px;line-height:18px;color:#3a3a38;box-shadow:0 0 0 1px #0000000f,0 8px 20px -10px #00000026}
 .bubble:after{content:"";position:absolute;left:50%;bottom:-7px;width:14px;height:14px;background:#fff;transform:translateX(-50%) rotate(45deg);border-radius:2px}
@@ -159,6 +179,7 @@ h1{font-size:19px;font-weight:450;margin-top:6px;opacity:.85}
 .app:hover i{transform:translateY(-2px)}.app img{width:30px;height:30px}.app em{font-style:normal;font-size:12px;opacity:.8;max-width:92px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .app i b{font-size:18px;font-weight:600;color:${ink}}
 </style></head><body>${doodles(motif, tint(accent(b), 0.55), 0.55)}
+${lockup}
 <div class="bubble" id="bubble">This is my computer. Watch me work, or take control when you need to.<button onclick="this.parentNode.style.visibility='hidden'">×</button></div>
 <div class="mascot">${mascot}</div>
 <div class="clock"><b id="t"></b><span id="ap"></span></div>
@@ -171,6 +192,9 @@ const tick=()=>{const d=new Date();let h=d.getHours();document.getElementById('a
 fetch('/apps').then(r=>r.json()).then(apps=>{const g=document.getElementById('apps');for(const a of apps){const el=document.createElement('button');el.className='app';el.innerHTML=(a.icon?'<i><img src="/icon?id='+encodeURIComponent(a.id)+'"></i>':'<i><b>'+a.name[0]+'</b></i>')+'<em></em>';el.querySelector('em').textContent=a.name;el.onclick=()=>fetch('/launch?id='+encodeURIComponent(a.id));g.appendChild(el)}});
 </script></body></html>`;
 }
+
+/** A bot's home screen and wallpaper as its computer gets them, for a look without a computer (scripts/preview-desktop.mjs). */
+export const desktopPages = (b: Bot, motif: Motif) => ({ home: home(b, motif), wallpaper: wallpaper(b, motif) });
 
 const b64 = (s: string | Buffer) => Buffer.from(s).toString("base64");
 
@@ -195,7 +219,8 @@ export async function applyDesktop(b: Bot, { restartChrome = true }: { restartCh
     ["/opt/bops/desktop/bot.json", JSON.stringify(look), "0644"],
     ["/opt/bops/desktop/wall.html", wallpaper(b, motif), "0644"],
     ["/opt/bops/desktop/home.html", home(b, motif), "0644"],
-    ["/opt/bops/desktop/favicon.svg", mascotSvg(b.id, b.color, 32), "0644"],
+    // The tab's icon: the bot's mascot, or a partner's mark.
+    ["/opt/bops/desktop/favicon.svg", BRAND.computer ? `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><image href="${picture(BRAND.computer.mark)}" x="2" y="4" width="28" height="24" preserveAspectRatio="xMidYMid meet"/></svg>` : mascotSvg(b.id, b.color, 32), "0644"],
     ["/opt/bops/bops-home.py", readFileSync(join(process.cwd(), "vm/bops-home.py")), "0755"],
     ["/usr/local/bin/bops-desktop", readFileSync(join(process.cwd(), "vm/bin/bops-desktop")), "0755"],
     ["/usr/local/bin/bops-chrome", readFileSync(join(process.cwd(), "vm/bin/bops-chrome")), "0755"],
