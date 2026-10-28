@@ -12,6 +12,7 @@ import { menuPoint, PinIcon, SideMenu, useFavorites, type Favorites } from "./fa
 import { Fold } from "./fold";
 import { Chevron, since, small, undash } from "./side-group";
 import { clockTime, CloseButton, useNow } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Knowledge: what Bops knows, sorted into kinds that fill themselves from the workspace's memory
@@ -250,7 +251,7 @@ async function change(user: string, ws: string, body: MemoryAction): Promise<str
     const note = (j as { note?: unknown }).note;
     return typeof note === "string" ? { note } : null;
   } catch {
-    return "Couldn't reach Bops. Try again.";
+    return `Couldn't reach ${BRAND.name}. Try again.`;
   }
 }
 
@@ -284,7 +285,7 @@ async function sendForget(s: Shared, ids: string[], keepalive = false) {
     const said = (j as { error?: unknown } | null)?.error;
     failForget(s, ids, typeof said === "string" && said ? said : "Couldn't forget that. Try again.");
   } catch {
-    failForget(s, ids, "Couldn't reach Bops, so nothing was forgotten. Try again.");
+    failForget(s, ids, `Couldn't reach ${BRAND.name}, so nothing was forgotten. Try again.`);
   }
 }
 
@@ -357,7 +358,7 @@ async function previewDelete(ws: string, id: string): Promise<DeleteSession[] | 
         alsoFor: names(x.alsoFor ?? x.sharedWith),
       }));
   } catch {
-    return "Couldn't reach Bops. Try again.";
+    return `Couldn't reach ${BRAND.name}. Try again.`;
   }
 }
 
@@ -744,7 +745,7 @@ function KnowledgeView({
   const ask = useCallback(async (question: string): Promise<Answer | string> => {
     const r = await fetch("/api/memory", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "ask", ws, question }) })
       .then((x) => x.json() as Promise<Answer & { error?: string }>)
-      .catch(() => ({ error: "Couldn't reach Bops." }) as Answer & { error?: string });
+      .catch(() => ({ error: `Couldn't reach ${BRAND.name}.` }) as Answer & { error?: string });
     return r.error ?? r;
   }, [ws]);
   if (category === "issues")
@@ -1742,8 +1743,8 @@ function DeleteEverywhere({ sessions, busy, onConfirm, onCancel }: { sessions: D
     >
       <span className="text-[12.5px] font-medium leading-[17px] text-[#3A3A38]">
         {sessions.length
-          ? `Delete everywhere? Bops forgets this and deletes ${sessions.length === 1 ? "this chat" : `these ${sessions.length} chats`} from memory:`
-          : "Delete everywhere? No Bops chat in memory taught Knowledge this, so Bops only forgets it."}
+          ? `Delete everywhere? ${BRAND.name} forgets this and deletes ${sessions.length === 1 ? "this chat" : `these ${sessions.length} chats`} from memory:`
+          : `Delete everywhere? No ${BRAND.name} chat in memory taught Knowledge this, so ${BRAND.name} only forgets it.`}
       </span>
       {sessions.length > 0 && (
         <ul className="flex flex-col gap-1">
@@ -1760,7 +1761,7 @@ function DeleteEverywhere({ sessions, busy, onConfirm, onCancel }: { sessions: D
           ))}
         </ul>
       )}
-      {sessions.length > 0 && <span className="text-[11.5px] leading-4 text-[#6B6B6B]">These chats stay in your Bops chat history; their memory copy is deleted</span>}
+      {sessions.length > 0 && <span className="text-[11.5px] leading-4 text-[#6B6B6B]">These chats stay in your {BRAND.name} chat history; their memory copy is deleted</span>}
       <span className="flex items-center gap-1">
         <button onClick={onConfirm} disabled={busy} className="rounded-full bg-[#B42318] px-3 py-1 text-[12px] font-semibold leading-4 text-white disabled:opacity-60">
           {busy ? "Deleting…" : "Delete everywhere"}

@@ -8,6 +8,7 @@ import { LiveScreen, type ScreenInput } from "./live-screen";
 import { WatchBadge, WatchEye, WatchOverlay, type Spot } from "./watch-overlay";
 import { Mascot } from "./mascot";
 import { botBezel, post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /**
  * Your Mac, shown like a bot's computer (computer.tsx): one big live screen in a frame, a row of
@@ -385,7 +386,7 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
       {mode === "panel" && !blocked && followRow && (
         <div className="-mb-1 flex items-center gap-2">
           {following ? (
-            <span className="flex items-center gap-1.5 text-[12px] leading-4 text-[#6B6B6B]" title="Bops shows the window being worked on. Pick one to stay on it.">
+            <span className="flex items-center gap-1.5 text-[12px] leading-4 text-[#6B6B6B]" title={`${BRAND.name} shows the window being worked on. Pick one to stay on it.`}>
               <span className="size-1.5 animate-pulse rounded-full bg-[#2BB673]" />
               {grid.length ? `Watching ${grid.length} windows at once` : "Following the action"}
             </span>
@@ -412,7 +413,7 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
                 title={i.session ? `${i.bot?.name} · ${i.session.title}` : i.sub}
                 style={
                   waitingOn(i)
-                    ? { boxShadow: "0 0 0 2px #0A0A0A, 0 0 0 4px #E8FF3A" }
+                    ? { boxShadow: "0 0 0 2px #0A0A0A, 0 0 0 4px var(--color-highlighter)" }
                     : !inView && acting(i) && i.bot
                       ? { boxShadow: `0 0 0 2px ${botBezel(i.bot)}, 0 0 14px -2px ${botBezel(i.bot)}` }
                       : undefined
@@ -569,10 +570,10 @@ function Blocked({ why }: { why: "app" | "loading" | "permission" | "nothing" })
   if (why === "loading") return <div className="h-full w-full animate-pulse" />;
   const [title, body] =
     why === "app"
-      ? ["Open the Bops app to watch your Mac", "A browser tab can't see your screen. In the Bops app, your displays and the windows bots use show here live."]
+      ? [`Open the ${BRAND.name} app to watch your Mac`, `A browser tab can't see your screen. In the ${BRAND.name} app, your displays and the windows bots use show here live.`]
       : why === "permission"
-        ? ["Let Bops see your screen", "macOS asks once: turn on Bops under Screen Recording, then quit and reopen Bops."]
-        : ["Nothing to show yet", "Bops can't find a display to show."];
+        ? [`Let ${BRAND.name} see your screen`, `macOS asks once: turn on ${BRAND.name} under Screen Recording, then quit and reopen ${BRAND.name}.`]
+        : ["Nothing to show yet", `${BRAND.name} can't find a display to show.`];
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-8 text-center">
       <span className="flex size-11 items-center justify-center rounded-2xl bg-ink text-highlighter">
@@ -680,7 +681,7 @@ function MacWatchSheet({ target, onClose }: { target: { app?: string; title?: st
         </div>
         {!picked ? (
           <>
-            <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Pick the window. Bops reads its text when it changes (no screenshots, nothing clicked) and tells you when something needs you.</span>
+            <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Pick the window. {BRAND.name} reads its text when it changes (no screenshots, nothing clicked) and tells you when something needs you.</span>
             <div className="flex max-h-[300px] flex-col overflow-y-auto rounded-xl shadow-[0_0_0_1px_#ECECEA]">
               {windows === null ? (
                 <span className="px-3 py-3 text-[12.5px] text-[#9A9A98]">Looking at your windows…</span>

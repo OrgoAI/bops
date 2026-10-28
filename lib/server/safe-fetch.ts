@@ -186,7 +186,8 @@ const bare = (hostname: string) => hostname.replace(/^\[(.*)\]$/, "$1").replace(
 const portOf = (u: URL) => (u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80);
 
 /** Ports BOPS_FETCH_ALLOW can never open: Bops itself, the relay, and DevTools for bots and computers. */
-const neverPort = (port: number) => port === 3210 || port === 8897 || (port >= 9200 && port <= 9399);
+// Bops itself, on 3210 or a partner build's own port (desktop/brand.cjs).
+const neverPort = (port: number) => port === 3210 || port === Number(process.env.PORT) || port === 8897 || (port >= 9200 && port <= 9399);
 
 /** A test fixture's host:port named in BOPS_FETCH_ALLOW (see the top of this file). */
 function allowedForTests(u: URL): boolean {

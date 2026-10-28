@@ -5,6 +5,7 @@ import { live, type AppState } from "@/lib/types";
 import { MacStream, useAppWindowSource } from "./mac-screens";
 import { Mascot } from "./mascot";
 import { post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * The user's Mac, as a place bots work: whether it's ready, what's running there, and the words that
@@ -40,7 +41,7 @@ export function MacSettings({ state }: { state: AppState }) {
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">Your Mac</span>
             <span className="flex items-center gap-1.5 text-[13px] leading-[19px] text-[#6B6B6B]">
               <span className={`size-2 rounded-full ${m?.ready ? "bg-[#2BB673]" : "bg-[#C9C9C6]"}`} />
-              {m?.ready ? "Bots can browse here in a Chrome of their own, on your home internet, with Bops AI credit. They can't use your Mac's apps for now." : (m?.reason ?? "Checking…")}
+              {m?.ready ? `Bots can browse here in a Chrome of their own, on your home internet, with ${BRAND.name} AI credit. They can't use your Mac's apps for now.` : (m?.reason ?? "Checking…")}
             </span>
           </div>
           {/* An install of Codex that failed (it runs bots' tools here) starts again; anything else is looked at again. */}
@@ -55,7 +56,7 @@ export function MacSettings({ state }: { state: AppState }) {
         <div className={section}>
           <div className="flex flex-col gap-0.5">
             <span className={heading}>These mean your Mac</span>
-            <span className={sub}>A task that mentions one of these runs on your Mac. Otherwise Bops decides, and asks you when it can&apos;t tell.</span>
+            <span className={sub}>A task that mentions one of these runs on your Mac. Otherwise {BRAND.name} decides, and asks you when it can&apos;t tell.</span>
           </div>
           <div className="flex flex-wrap gap-1.5">
             {m?.rules.map((r) => (

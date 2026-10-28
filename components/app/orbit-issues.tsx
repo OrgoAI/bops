@@ -9,6 +9,7 @@ import { Spinner } from "./mascot";
 import { OpenLink } from "./panel-tabs";
 import { InlineConfirm, since, small, undash } from "./side-group";
 import { CloseButton, useNow } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Issues, the first section of Orbit: what a routine or a bot opened because someone needs it handled
@@ -258,7 +259,7 @@ async function update(user: string, ws: string, id: string, patch: IssuePatch): 
     return null;
   } catch {
     if (before) patchHere(s, (all) => all.map((i) => (i.id === id ? before : i)));
-    return "Couldn't reach Bops. Try again.";
+    return `Couldn't reach ${BRAND.name}. Try again.`;
   }
 }
 
@@ -283,7 +284,7 @@ async function remove(user: string, ws: string, id: string): Promise<string | nu
     patchHere(s, (all) => all.filter((i) => i.id !== id));
     return null;
   } catch {
-    return "Couldn't reach Bops. Try again.";
+    return `Couldn't reach ${BRAND.name}. Try again.`;
   }
 }
 

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { startAnalytics, type AnalyticsInfo } from "@/lib/analytics";
 import type { AppState } from "@/lib/types";
 import { post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 const readInfo = async (): Promise<AnalyticsInfo | null> => {
   try {
@@ -77,7 +78,7 @@ export function UsageData() {
         <div className="flex flex-1 flex-col gap-0.5">
           <span className="text-[13px] font-medium">Share usage data</span>
           <span className="text-[12px] leading-4 text-[#6B6B6B]">
-            Sends Orgo counts of what you do in Bops, like bots made and tasks run, and error reports. Never your messages, files, screens, contacts or keys.
+            Sends Orgo counts of what you do in {BRAND.name}, like bots made and tasks run, and error reports. Never your messages, files, screens, contacts or keys.
             {info.locked && " Turned off on this Mac."}
           </span>
         </div>

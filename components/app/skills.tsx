@@ -9,6 +9,7 @@ import { Fold } from "./fold";
 import { Mascot, Spinner } from "./mascot";
 import { Chevron, readSectionOpen, writeSectionOpen } from "./side-group";
 import { CloseButton, currentWorkspace, post, teamOf } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Skills: a workspace's ways of doing a kind of job (skills) and the tools Bops built that bots run (apps),
@@ -134,7 +135,7 @@ async function call<T>(body: Record<string, unknown>): Promise<{ ok: true; json:
     const json = (await res.json().catch(() => ({}))) as T & { error?: string; problems?: Problem[] };
     return res.ok ? { ok: true, json } : { ok: false, error: json.error ?? "That didn't work. Try again.", problems: json.problems };
   } catch {
-    return { ok: false, error: "Couldn't reach Bops. Try again." };
+    return { ok: false, error: `Couldn't reach ${BRAND.name}. Try again.` };
   }
 }
 
@@ -330,7 +331,7 @@ function BuiltinView({ skill: s, onBack }: { skill: BuiltinSkill; onBack: () => 
           <span className={CHIP}>{cleanLabel(s.label)}</span>
         </span>
         <span className="text-[13px] leading-[19px] text-[#3A3A38]">{s.description}</span>
-        <span className="text-[12px] leading-4 text-[#9A9A98]">Every bot has it. It comes with Bops, so it can&apos;t be changed here.</span>
+        <span className="text-[12px] leading-4 text-[#9A9A98]">Every bot has it. It comes with {BRAND.name}, so it can&apos;t be changed here.</span>
       </div>
       {files.length > 0 && (
         <Group title="Files">

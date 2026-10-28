@@ -83,7 +83,9 @@ fi
 # node_modules folder, so package.json copies .next/standalone/node_modules on its own).
 npx electron-builder --mac "$@"
 
-app="$root/dist-desktop/mac-arm64/Bops.app"
+# A partner's build (scripts/brand.sh) is named for it.
+name="${BOPS_APP_NAME:-Bops}"
+app="$root/dist-desktop/mac-arm64/$name.app"
 
 # 5. Smoke test: the bundled server starts with the app's own Node and serves the app and its state
 # without a missing file. It runs as a fresh install does: no keys (env -i drops this shell's), an
@@ -93,7 +95,7 @@ smoke="$(mktemp -d)"
 for f in "$app/Contents/Resources/server/"* "$app/Contents/Resources/server/.next"; do ln -s "$f" "$smoke/"; done
 (cd "$smoke" && exec env -i HOME="$smoke" PATH=/usr/bin:/bin:/usr/sbin:/sbin ELECTRON_RUN_AS_NODE=1 NODE_ENV=production \
   PORT=3299 HOSTNAME=127.0.0.1 BOPS_SERVER_JS="$app/Contents/Resources/server/server.js" \
-  "$app/Contents/MacOS/Bops" -e "process.chdir = () => {}; require(process.env.BOPS_SERVER_JS)" > "$smoke/server.log" 2>&1) &
+  "$app/Contents/MacOS/$name" -e "process.chdir = () => {}; require(process.env.BOPS_SERVER_JS)" > "$smoke/server.log" 2>&1) &
 smoke_pid=$!
 ok=""
 for _ in $(seq 1 60); do

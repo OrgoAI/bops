@@ -15,8 +15,10 @@ const { startRenderService } = require("./render.cjs");
 const { createUpdates } = require("./updates.cjs");
 const { installAppFrames } = require("./app-frames.cjs");
 const { ownCall } = require("./own-call.cjs");
+const BRAND = require("./brand.cjs");
 
-const PORT = 3210;
+// Bops' port, or a partner build's own (desktop/brand.cjs), so the two run side by side.
+const PORT = BRAND.port;
 const URL = `http://localhost:${PORT}`;
 /*
  * The server listens on 127.0.0.1 only. "localhost" can also mean ::1, where another account on this
@@ -68,7 +70,7 @@ const REPO = (() => {
     return path.resolve(__dirname, "..");
   }
 })();
-const ICON = path.join(__dirname, "icon.png");
+const ICON = BRAND.icon ?? path.join(__dirname, "icon.png");
 
 let server;
 let mainWin;
@@ -534,7 +536,7 @@ async function startOrFind() {
 }
 
 /** Boppy bopping to music while the server starts (desktop/splash.html). */
-const SPLASH = path.join(__dirname, "splash.html");
+const SPLASH = BRAND.splash ?? path.join(__dirname, "splash.html");
 /** What the window shows when Bops can't start, with Try again (desktop/trouble.html). */
 const TROUBLE = path.join(__dirname, "trouble.html");
 
@@ -648,7 +650,7 @@ async function serverGone(what = "server") {
       // The trouble page itself crashed: the same words again, a few times; then a dialog, which needs no page.
       if (failures.length <= 8) return showTrouble(win, lastTrouble ?? { reason: "page-crashed", detail: lastPageGone });
       mainLog("the trouble page keeps crashing: asking in a dialog");
-      const { response } = await dialog.showMessageBox(win, { type: "warning", message: "Bops' window keeps crashing", detail: `Try again, and if it happens again, send us the logs (${app.getPath("logs")}).`, buttons: ["Try again", "Quit"], defaultId: 0, cancelId: 1 });
+      const { response } = await dialog.showMessageBox(win, { type: "warning", message: `${BRAND.name}'s window keeps crashing`, detail: `Try again, and if it happens again, send us the logs (${app.getPath("logs")}).`, buttons: ["Try again", "Quit"], defaultId: 0, cancelId: 1 });
       mainLog(`dialog: ${response === 1 ? "Quit" : "Try again"}`);
       if (response === 1) return app.quit();
       failures = [];
@@ -687,7 +689,7 @@ async function createWindow() {
     height: 860,
     minWidth: 1180,
     minHeight: 640,
-    title: "Bops",
+    title: BRAND.name,
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 14, y: 14 },
     backgroundColor: "#FFFFFF",
@@ -926,7 +928,7 @@ function askNotify() {
       }
       resolve(status);
     };
-    const n = new Notification({ title: "Bops", body: "Your bots can tell you when something needs you.", silent: true });
+    const n = new Notification({ title: BRAND.name, body: "Your bots can tell you when something needs you.", silent: true });
     n.once("show", () => done("granted"));
     n.once("failed", () => done("denied"));
     const timer = setTimeout(() => done(notifyKnown() ?? "not-determined"), 30_000);
@@ -1335,7 +1337,7 @@ ipcMain.handle("update-install", () => restart());
 ipcMain.handle("update-auto", () => (updates ? { auto: updates.auto(), canSelfUpdate: updates.canSelfUpdate() } : null));
 ipcMain.handle("update-set-auto", (_, on) => updates?.setAuto(!!on) ?? null);
 
-app.setName("Bops");
+app.setName(BRAND.name);
 /*
  * One Bops at a time. Every copy shares the same Application Support folder and server, so a second
  * one (another copy opened from a download, say) brings the first to the front and closes, instead
@@ -1353,7 +1355,8 @@ app.whenReady().then(() => {
   mainLog(`Bops ${app.getVersion()} opening (pid ${process.pid})`);
   if (process.platform === "darwin" && fs.existsSync(ICON)) app.dock.setIcon(nativeImage.createFromPath(ICON));
   // Release builds only: not `npm run app`, nor a build that runs the source folder (desktop/repo.json).
-  if (isRelease()) {
+  // A partner's build (desktop/brand.cjs) never updates itself from Bops' releases.
+  if (isRelease() && BRAND.updates) {
     updates = createUpdates({ autoUpdater, app, fs, path, note: updateNote, send: sendUpdate });
     // macOS logging out or shutting down quits Bops itself: that quit isn't held (see before-quit).
     powerMonitor.on("shutdown", () => (systemQuit = true));

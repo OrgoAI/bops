@@ -13,6 +13,7 @@ import { Mascot, Spinner } from "./mascot";
 import { Chevron, QuestionScope, small, undash } from "./side-group";
 import { post, teamOf, useNow } from "./ui";
 import { watchName } from "./watch-overlay";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Routines from a Connected App. Once an app is connected, the bot that handles it offers what it can
@@ -281,7 +282,7 @@ export function RoutineSuggest({
       }
       onClose();
     } catch {
-      setError("Couldn't reach Bops. Try again.");
+      setError(`Couldn't reach ${BRAND.name}. Try again.`);
       setBusy(false);
     }
   };

@@ -6,6 +6,7 @@ import type { AppState, MadeApp, Message } from "@/lib/types";
 import { HostedApps } from "./hosted-apps";
 import { electron, OpenLink } from "./panel-tabs";
 import { ago, post, useNow } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Apps the bots make (lib/server/made-apps.ts), in Bops' right panel: an app's tab (built live, then
@@ -29,8 +30,8 @@ export function AppsIcon({ size = 14, color = "currentColor" }: { size?: number;
 
 /** An app's mark: its first letter on a color of its own (from its id, so it never changes). */
 const MARKS = [
-  { bg: "#E8FF3A", fg: "#0A0A0A", ring: true },
-  { bg: "#0A0A0A", fg: "#E8FF3A" },
+  { bg: "var(--color-highlighter)", fg: "#0A0A0A", ring: true },
+  { bg: "#0A0A0A", fg: "var(--color-highlighter)" },
   { bg: "#8FB3FF", fg: "#0A0A0A" },
   { bg: "#9EDBB0", fg: "#0A0A0A" },
   { bg: "#F2C6A8", fg: "#0A0A0A" },
@@ -248,7 +249,7 @@ export function MadeAppTab({ state, appId }: { state: AppState; appId: string })
             <rect x="1.5" y="2" width="9" height="6.5" rx="1" stroke="#3A3A38" strokeWidth="1.2" />
             <path d="M4 10.5h4" stroke="#3A3A38" strokeWidth="1.2" strokeLinecap="round" />
           </svg>
-          Runs in Bops
+          Runs in {BRAND.name}
         </span>
         {app.versions.length > 1 && tab("history", "History")}
         {tab("code", "Code")}

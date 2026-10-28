@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { CodeInput, ErrorLine, postJson, ResendButton, RetryLabel, useInfo, type CodeAnswer } from "./code-entry";
+import { BRAND } from "@/lib/brand";
 
 /** Where one of the user's addresses comes from (ownerEmailSources in lib/server/mail.ts). */
 export type EmailSource = "sign-in" | "gmail" | "outlook" | "env" | "code";
@@ -139,9 +140,9 @@ export function OwnerEmail({ info, onInfo }: { info: OwnerEmailInfo; onInfo: (i:
 
   const canAdd = info.codes;
   const line = rows.length
-    ? "Emails you send from these addresses count as you. Bops checks that each one really came from you. Your bots can email you here without asking first."
+    ? `Emails you send from these addresses count as you. ${BRAND.name} checks that each one really came from you. Your bots can email you here without asking first.`
     : offer
-      ? "Count an email you write from, and emails you send from it count as you. Bops checks that each one really came from you."
+      ? `Count an email you write from, and emails you send from it count as you. ${BRAND.name} checks that each one really came from you.`
       : canAdd || waiting
         ? "Add the email you write from, so emails from it count as you."
         : "Connect Gmail or Outlook in Logins, and emails you send from it count as you.";

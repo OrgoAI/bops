@@ -9,6 +9,7 @@ import { TrashIcon } from "./apps";
 import { Mascot, Spinner } from "./mascot";
 import { focusAfterRemove, InlineConfirm, undash, useQuestion } from "./side-group";
 import { post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * The week on the Routines page: seven days from today, each with a dot for every run coming that day in
@@ -264,7 +265,7 @@ export function RoutineWeek({
       const j = (await res.json().catch(() => null)) as { error?: unknown } | null;
       if (!res.ok || typeof j?.error === "string") setError({ key, text: typeof j?.error === "string" ? undash(j.error) : "That didn't work. Try again." });
     } catch {
-      setError({ key, text: "Couldn't reach Bops. Try again." });
+      setError({ key, text: `Couldn't reach ${BRAND.name}. Try again.` });
     }
     setBusy(null);
   };
@@ -292,7 +293,7 @@ export function RoutineWeek({
       const j = (await res.json().catch(() => null)) as { error?: unknown } | null;
       if (!res.ok || typeof j?.error === "string") failed = typeof j?.error === "string" ? undash(j.error) : "That didn't work. Try again.";
     } catch {
-      failed = "Couldn't reach Bops. Try again.";
+      failed = `Couldn't reach ${BRAND.name}. Try again.`;
     }
     if (failed) {
       setError({ key, text: failed });

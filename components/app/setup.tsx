@@ -7,6 +7,7 @@ import { useMacApp } from "./mac-screens";
 import { RestartConfirm, useCanRestart } from "./restart";
 import { post } from "./ui";
 import { UpdateSettings } from "./update-notice";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Everything Bops needs on this Mac, in one place (Setup). It never stands in the way: signing in goes
@@ -254,7 +255,7 @@ const ICONS = {
 };
 
 const COPY: Record<"screen" | "microphone" | "notifications", { title: string; line: string }> = {
-  screen: { title: "Screen recording", line: "See your Mac live in Bops, and watch bots work on it." },
+  screen: { title: "Screen recording", line: `See your Mac live in ${BRAND.name}, and watch bots work on it.` },
   microphone: { title: "Microphone", line: "Talk to your bots on a call." },
   notifications: { title: "Notifications", line: "Hear from bots when something needs you." },
 };
@@ -265,14 +266,14 @@ function PermissionCard({ id, items }: { id: "screen" | "microphone" | "notifica
   const s = perms.status?.[id];
   const copy = COPY[id];
   if (!perms.inApp)
-    return <Card icon={ICONS[id]} title={copy.title} line={copy.line} tone="none" status="Needs the Bops app for Mac" />;
+    return <Card icon={ICONS[id]} title={copy.title} line={copy.line} tone="none" status={`Needs the ${BRAND.name} app for Mac`} />;
   if (!s) return <Card icon={ICONS[id]} title={copy.title} line={copy.line} tone="none" status="Checking" />;
   // Screen Recording turned on while Bops was open: macOS applies it on the next launch.
   const restart = id === "screen" && (perms.restart || (s !== "granted" && sentToSettings.has("screen")));
   const status =
     s === "granted"
       ? id === "screen" && perms.restart
-        ? "Allowed. Restart Bops to use it"
+        ? `Allowed. Restart ${BRAND.name} to use it`
         : "Allowed"
       : s === "restricted"
         ? id === "notifications"
@@ -280,7 +281,7 @@ function PermissionCard({ id, items }: { id: "screen" | "microphone" | "notifica
           : "Blocked by your Mac's settings or admin"
         : s === "denied"
           ? restart
-            ? "Turn on Bops in System Settings, then restart Bops"
+            ? `Turn on ${BRAND.name} in System Settings, then restart ${BRAND.name}`
             : "Off. Turn it on in System Settings"
           : id === "notifications" && s === "unknown"
             ? "Asked. Check System Settings if none showed"
@@ -290,7 +291,7 @@ function PermissionCard({ id, items }: { id: "screen" | "microphone" | "notifica
     <Card icon={ICONS[id]} title={copy.title} line={copy.line} tone={tone} status={status}>
       {restart && (
         <button onClick={() => setRestarting(true)} className={s === "granted" ? dark : light}>
-          Restart Bops
+          Restart {BRAND.name}
         </button>
       )}
       {restarting && <RestartConfirm onClose={() => setRestarting(false)} />}
@@ -376,11 +377,11 @@ export function Setup({ state, onClose }: { state: AppState; onClose: () => void
       >
         <div className="flex flex-col items-center gap-1.5 pb-5 text-center">
           <Mascot botId="boppy" color="#0A0A0A" size={48} />
-          <span className="pt-3 text-[20px] font-semibold leading-6 tracking-[-0.01em]">Set up Bops on this Mac</span>
+          <span className="pt-3 text-[20px] font-semibold leading-6 tracking-[-0.01em]">Set up {BRAND.name} on this Mac</span>
           <span className="max-w-[380px] text-[13.5px] leading-[19px] text-pencil">
             {items.perms.inApp
               ? "A few things your bots need. Allow what you want now; you can change any of it later in Settings."
-              : "Screen, microphone and notifications need the Bops app for Mac. You can set up the rest here."}
+              : `Screen, microphone and notifications need the ${BRAND.name} app for Mac. You can set up the rest here.`}
           </span>
         </div>
         <div className="flex flex-col gap-2">
@@ -417,7 +418,7 @@ export function Setup({ state, onClose }: { state: AppState; onClose: () => void
             <span className="text-center text-[12px] leading-4 text-pencil">
               Something not working?{" "}
               <button onClick={() => setRestart(true)} className="underline underline-offset-2 hover:text-ink">
-                Restart Bops
+                Restart {BRAND.name}
               </button>
             </span>
           )}
@@ -503,7 +504,7 @@ function FullAccessSetup({ items }: { items: Items }) {
       {row(
         disk,
         "Your files",
-        disk ? "Bops has Full Disk Access." : "Give Bops Full Disk Access in System Settings, then come back.",
+        disk ? `${BRAND.name} has Full Disk Access.` : `Give ${BRAND.name} Full Disk Access in System Settings, then come back.`,
         !disk && (
           <button onClick={() => void items.openSettings("fullDisk")} className={dark}>
             Open Settings
@@ -545,7 +546,7 @@ function FullAccessCard({ items }: { items: Items }) {
       icon={ICONS.fullAccess}
       title="Full access for bots"
       chip={on ? "On" : undefined}
-      line="Bots' tasks on this Mac get a shell, your files and your apps, outside Bops' sandbox. Anything you could do here, they can."
+      line={`Bots' tasks on this Mac get a shell, your files and your apps, outside ${BRAND.name}' sandbox. Anything you could do here, they can.`}
       tone={on ? (set || !items.perms.inApp ? "ok" : "todo") : "off"}
       status={on ? (set || !items.perms.inApp ? "Bots can use your files and apps" : "Two steps left, so macOS never stops a bot mid-task") : "Off: bots on this Mac only browse, in a Chrome of their own"}
       below={on && items.perms.inApp ? <FullAccessSetup items={items} /> : undefined}

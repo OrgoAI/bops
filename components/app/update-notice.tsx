@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { BRAND } from "@/lib/brand";
 
 /*
  * A newer Bops. The Mac app asks bops.bot for the newest release at launch and every hour and
@@ -66,16 +67,16 @@ export function UpdateCard({ info, late, onDismiss }: { info: UpdateInfo; late: 
         {/* Read out as it changes (ready, or the download didn't finish), without taking focus. */}
         <span role="status" className="min-w-0 flex-1 text-[12.5px] leading-[17px] text-[#6B6B6B]">
           {phase === "ready" ? (
-            <span className="font-medium text-ink">Bops {info.version} is ready.</span>
+            <span className="font-medium text-ink">{BRAND.name} {info.version} is ready.</span>
           ) : phase === "downloading" ? (
-            <span className="font-medium text-ink">Bops {info.version} is downloading.</span>
+            <span className="font-medium text-ink">{BRAND.name} {info.version} is downloading.</span>
           ) : phase === "available" && info.failed ? (
             <span className="font-medium text-ink">The download didn&apos;t finish.</span>
           ) : phase === "available" ? (
-            <span className="font-medium text-ink">Bops {info.version} is out.</span>
+            <span className="font-medium text-ink">{BRAND.name} {info.version} is out.</span>
           ) : (
             <>
-              <span className="font-medium text-ink">Bops {info.version} is out.</span> Get it at bops.bot
+              <span className="font-medium text-ink">{BRAND.name} {info.version} is out.</span> Get it at bops.bot
             </>
           )}
         </span>
@@ -105,7 +106,7 @@ export function UpdateCard({ info, late, onDismiss }: { info: UpdateInfo; late: 
       {notes.length > 0 && (
         <div className="mt-1.5 pb-0.5 pr-1.5">
           <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">What&apos;s new</span>
-          <ul aria-label={`What's new in Bops ${info.version}`} className="mt-0.5 flex flex-col gap-0.5">
+          <ul aria-label={`What's new in ${BRAND.name} ${info.version}`} className="mt-0.5 flex flex-col gap-0.5">
             {notes.map((note, i) => (
               <li key={i} className="flex gap-1.5 text-[12px] leading-4 text-[#6B6B6B]">
                 <span aria-hidden="true" className="mt-[7px] size-[3px] shrink-0 rounded-full bg-[#9A9A98]" />
@@ -148,7 +149,7 @@ export function UpdateSettings() {
     <div className="flex items-center gap-3 rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]">
       <div className="flex flex-1 flex-col gap-0.5">
         <span className="text-[13px] font-medium">Download updates automatically</span>
-        <span className="text-[12px] leading-4 text-[#6B6B6B]">New versions download in the background. Restart Bops to use one.</span>
+        <span className="text-[12px] leading-4 text-[#6B6B6B]">New versions download in the background. Restart {BRAND.name} to use one.</span>
       </div>
       <button
         type="button"

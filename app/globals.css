@@ -138,6 +138,22 @@
   --color-highlighter: #e9ff3b;
 }
 
+/*
+ * Momentum AMP's build (lib/brand.ts, momentumamp.com): deep indigo where Bops has ink, a light brand
+ * violet where Bops has the highlighter (still the color of "needs you", dark text on it as before),
+ * a lavender desk, and Poppins throughout. The brand's own violet (#A200FF) is the accent below.
+ */
+html[data-brand="momentum"] {
+  --color-ink: #381574;
+  --color-paper: #ffffff;
+  --color-desk: #f6f1f9;
+  --color-pencil: #5f5a70;
+  --color-rule: #e7e1ee;
+  --color-highlighter: #d2a1ff;
+  --color-brand: #a200ff;
+  --font-geist-sans: var(--font-brand);
+}
+
 @keyframes drift {
   0%, 100% { transform: translate(0, 0); }
   30% { transform: translate(-38px, -46px); }

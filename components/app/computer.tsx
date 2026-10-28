@@ -20,6 +20,7 @@ import { botBezel, botOnInk, botWash, MonitorIcon, post, screenNo } from "./ui";
 import { readOnly, yourMac } from "@/lib/shared";
 import { useWindowVisible } from "./window-visible";
 import { ago, onSameComputer, screenMap, teamScreens, type ScreenKind, type TeamScreen } from "@/lib/screens";
+import { BRAND } from "@/lib/brand";
 
 /* A bot's computer, shown as the work on it: it runs up to four things at once, one per screen. */
 
@@ -678,7 +679,7 @@ export function ComputerView({
                 <button
                   onClick={() => void takeControl()}
                   disabled={asleep && hoursOut}
-                  title={asleep && hoursOut ? "Your Bops computer has used its free hours" : asleep ? "Wake the computer and drive this screen yourself" : "Pause the bot here and drive the screen yourself"}
+                  title={asleep && hoursOut ? `Your ${BRAND.name} computer has used its free hours` : asleep ? "Wake the computer and drive this screen yourself" : "Pause the bot here and drive the screen yourself"}
                   className="flex items-center gap-1.5 rounded-full bg-ink py-1.5 pl-2 pr-3.5 text-[13px] font-semibold leading-4 text-white disabled:cursor-default disabled:bg-[#B0B0AD]"
                 >
                   <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
@@ -818,7 +819,7 @@ export function ComputerView({
           </span>
           <span className="flex-1" />
           {follow?.on ? (
-            <span className="flex shrink-0 items-center gap-1.5" title={`Bops shows the screen being worked on, and cuts to one that needs ${you}. Pick one to stay on it.`}>
+            <span className="flex shrink-0 items-center gap-1.5" title={`${BRAND.name} shows the screen being worked on, and cuts to one that needs ${you}. Pick one to stay on it.`}>
               <span className="size-1.5 animate-pulse rounded-full" style={{ background: botBezel(b) }} />
               {grid ? `Watching ${working.length} things at once` : "Following the action"}
             </span>
@@ -855,7 +856,7 @@ export function ComputerView({
                 // a watched screen with something waiting for the user gets the "needs you" yellow.
                 style={
                   alert
-                    ? { boxShadow: "0 0 0 2px #0A0A0A, 0 0 0 4px #E8FF3A" }
+                    ? { boxShadow: "0 0 0 2px #0A0A0A, 0 0 0 4px var(--color-highlighter)" }
                     : !inView && acting(d)
                       ? { boxShadow: `0 0 0 2px ${botBezel(b)}, 0 0 14px -2px ${botBezel(b)}` }
                       : undefined
@@ -1231,11 +1232,11 @@ function NoComputer({ state, bot: b, host }: { state: AppState; bot: Bot; /** Th
       <Mascot botId={b.id} color={b.color} size={44} />
       <span className="max-w-[300px] text-[14px] leading-5">
         {b.isMain
-          ? `${b.name} doesn't have a computer yet. ${free ? `Your free Bops computer starts the first time ${b.name} needs it` : `It starts the first time ${b.name} needs one`}, or set it up now. The bots you add work on it too, unless you give one its own.`
+          ? `${b.name} doesn't have a computer yet. ${free ? `Your free ${BRAND.name} computer starts the first time ${b.name} needs it` : `It starts the first time ${b.name} needs one`}, or set it up now. The bots you add work on it too, unless you give one its own.`
           : host.id !== b.id
             ? `${b.name} works on ${host.name}'s computer, which isn't set up yet. It starts the first time either of them needs it.`
             : plan?.plan?.bops
-              ? `${b.name} doesn't have a computer yet. It gets a Bops computer of its own, fresh from the Bops template.`
+              ? `${b.name} doesn't have a computer yet. It gets a ${BRAND.name} computer of its own, fresh from the ${BRAND.name} template.`
               : `${b.name} doesn't have a computer yet. It gets a copy of the main bot's computer: apps, logins and open screens.`}
       </span>
       {plan && noRoom ? (
@@ -1407,7 +1408,7 @@ function TeamRow({ state, mainId, hidden, onShow }: { state: AppState; mainId: s
               key={`${t.computerBotId}-${t.display}`}
               onClick={() => onShow?.(t.computerBotId, t.display)}
               title={`${who?.name ?? "A bot"} · screen ${t.no} of ${host?.name ?? "its"}'s computer · ${words}${t.doing ? ` · now: ${t.doing}` : ""}`}
-              style={t.kind === "needsYou" ? { boxShadow: "0 0 0 2px #0A0A0A, 0 0 0 4px #E8FF3A" } : undefined}
+              style={t.kind === "needsYou" ? { boxShadow: "0 0 0 2px #0A0A0A, 0 0 0 4px var(--color-highlighter)" } : undefined}
               className={`group/team relative flex min-w-0 shrink-0 flex-col gap-1.5 rounded-xl bg-[#F7F7F6] p-1.5 text-left ${grid ? "" : "w-[170px]"}`}
             >
               <div className={`relative shrink-0 overflow-hidden rounded-[7px] ${grid ? "h-[110px]" : "h-[52px]"}`} style={{ backgroundImage: host ? botWash(host) : undefined }}>

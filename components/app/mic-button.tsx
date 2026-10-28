@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { BRAND } from "@/lib/brand";
 
 type Phase = "idle" | "recording" | "transcribing";
 
@@ -66,7 +67,7 @@ export function MicButton({ botId, onText, onError }: { botId?: string; onText: 
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
     } catch (e) {
-      return onError(/denied|permission|notallowed/i.test(`${(e as Error).name} ${(e as Error).message}`) ? "Bops needs microphone access. Turn it on in System Settings → Privacy & Security → Microphone." : (e as Error).message);
+      return onError(/denied|permission|notallowed/i.test(`${(e as Error).name} ${(e as Error).message}`) ? `${BRAND.name} needs microphone access. Turn it on in System Settings → Privacy & Security → Microphone.` : (e as Error).message);
     } finally {
       asking.current = false;
     }

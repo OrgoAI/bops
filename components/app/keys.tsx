@@ -9,6 +9,7 @@ import { anchorOf, AppRoutines, hasTemplates, RoutineSuggest, usePendingSuggest 
 import { KeyIcon } from "./screen-cards";
 import { undash } from "./side-group";
 import { post, teamOf } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Keys (lib/server/keys.ts): the user's API keys their bots may call services with. They're kept in the
@@ -56,7 +57,7 @@ function useKeys(ws: string) {
           setFailed(null);
         } else setFailed(undash(j.error ?? "Couldn't read your keys."));
       })
-      .catch(() => setFailed("Couldn't reach Bops."));
+      .catch(() => setFailed(`Couldn't reach ${BRAND.name}.`));
   }, []);
   useEffect(() => {
     read();
@@ -85,7 +86,7 @@ async function reveal(name: string, scope: Scope): Promise<{ value: string } | {
     const j = (await res.json().catch(() => ({}))) as { value?: unknown; error?: string };
     return res.ok && typeof j.value === "string" ? { value: j.value } : { error: undash(j.error ?? "Couldn't get the key. Try again.") };
   } catch {
-    return { error: "Couldn't reach Bops. Try again." };
+    return { error: `Couldn't reach ${BRAND.name}. Try again.` };
   }
 }
 
@@ -200,7 +201,7 @@ async function grant(name: string, botId: string, allowed: boolean): Promise<str
     const j = (await res.json().catch(() => ({}))) as { error?: string };
     return res.ok ? null : undash(j.error ?? "That didn't change. Try again.");
   } catch {
-    return "Couldn't reach Bops. Try again.";
+    return `Couldn't reach ${BRAND.name}. Try again.`;
   }
 }
 
@@ -410,7 +411,7 @@ function KeyLine({
       setSure(false);
       keysChanged();
     } catch {
-      setError("Couldn't reach Bops. Try again.");
+      setError(`Couldn't reach ${BRAND.name}. Try again.`);
       setBusy(false);
     }
   };
@@ -572,7 +573,7 @@ function AddKey({
       keysChanged();
       onSaved(name);
     } catch {
-      setError("Couldn't reach Bops. Try again.");
+      setError(`Couldn't reach ${BRAND.name}. Try again.`);
     } finally {
       setBusy(false);
     }

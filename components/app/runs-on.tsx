@@ -5,6 +5,7 @@ import { workBot, type AppState, type Bot, type RunnerState } from "@/lib/types"
 import { Mascot } from "./mascot";
 import { undash } from "./side-group";
 import { option, post, radio, teamOf } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /**
  * What /api/runs-on says: where routines run (null: Orgo didn't answer), whether Orgo can keep it yet,
@@ -15,7 +16,7 @@ export type RunsOnInfo = { runsOn: "cloud" | "mac" | null; missing: boolean; asl
 
 const CHOICES = [
   { id: "cloud", name: "Cloud", line: "Tasks keep running when your Mac is closed." },
-  { id: "mac", name: "This Mac", line: "Only while Bops is open on this Mac." },
+  { id: "mac", name: "This Mac", line: `Only while ${BRAND.name} is open on this Mac.` },
 ] as const;
 
 /**

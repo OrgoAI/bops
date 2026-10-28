@@ -22,6 +22,7 @@ import { WhereToFind } from "./channels";
 import { undash } from "./side-group";
 import { readOnly, you, your, Your, yourMac } from "@/lib/shared";
 import { BOOK_A_CALL } from "@/lib/links";
+import { BRAND } from "@/lib/brand";
 
 /** The parts of a bot's profile. Its computer has a tab of its own (see panel-tabs.tsx). */
 export type Section = "details" | "skills" | "routines" | "memory" | "phone";
@@ -120,7 +121,7 @@ export function BotPanel({
         <div className="flex flex-col items-center gap-px">
           <div className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{b.name}</div>
           <div className="flex items-center gap-1.5 text-[13px] leading-4 text-[#6B6B6B]">
-            {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}
+            {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · ${BRAND.name} team`}
             <BotBrainBadge state={state} bot={b} />
           </div>
         </div>
@@ -193,7 +194,7 @@ function Details({
   const glass = "bg-white/60 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]";
 
   const share = async () => {
-    await navigator.clipboard.writeText([`${b.name} (${b.role}, Bops)`, b.phone, b.email].filter(Boolean).join("\n"));
+    await navigator.clipboard.writeText([`${b.name} (${b.role}, ${BRAND.name})`, b.phone, b.email].filter(Boolean).join("\n"));
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -207,7 +208,7 @@ function Details({
       <div className="flex flex-col items-center gap-0.5">
         <div className="text-[26px] font-bold leading-[30px] tracking-[-0.02em]">{b.name}</div>
         <div className="flex items-center gap-1.5 text-[13px] font-medium leading-4 text-[#3A3A38]">
-          {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}
+          {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · ${BRAND.name} team`}
           <BotBrainBadge state={state} bot={b} className="bg-white/60 shadow-[0_0_0_1px_#0000000F]" />
         </div>
       </div>
@@ -224,7 +225,7 @@ function Details({
           <path d="M3 2.2h2.6l1 2.6-1.6 1a7 7 0 003 3l1-1.6 2.6 1V11a.9.9 0 01-.9.9A9.6 9.6 0 012.1 3.1.9.9 0 013 2.2z" fill="#0A0A0A" />
         </ActionButton>
         {/* Video calls with bots aren't here yet; meanwhile it books a video call with the Bops team. */}
-        <ActionButton label="Book a 20-minute video call with the Bops team" onClick={() => window.open(BOOK_A_CALL)}>
+        <ActionButton label={`Book a 20-minute video call with the ${BRAND.name} team`} onClick={() => window.open(BOOK_A_CALL)}>
           <rect x="1.2" y="3.5" width="8" height="7" rx="1.5" fill="#0A0A0A" />
           <path d="M9.6 6.2l3.2-2v5.6L9.6 7.8z" fill="#0A0A0A" />
         </ActionButton>
@@ -401,11 +402,11 @@ function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppSta
           <span className="text-[13px] font-semibold leading-4">Computer</span>
           <span className="text-[12px] leading-4 text-[#6B6B6B]">
             {b.isMain
-              ? `Works on ${your(state)} free Bops computer, which ${main.name} has, with ${b.name}'s team`
+              ? `Works on ${your(state)} free ${BRAND.name} computer, which ${main.name} has, with ${b.name}'s team`
               : shared
                 ? `Works on ${main.name}'s computer, on screens no one else is using`
                 : plan?.plan?.bops
-                  ? "Its own Bops computer"
+                  ? `Its own ${BRAND.name} computer`
                   : "Its own cloud computer, a copy of the main bot's"}
           </span>
         </div>
@@ -851,7 +852,7 @@ function HowIWork({ bot: b, className }: { bot: Bot; className: string }) {
       setSaved(true);
       setTimeout(() => setSaved(false), 1500);
     } catch {
-      setError("Couldn't reach Bops. Try again.");
+      setError(`Couldn't reach ${BRAND.name}. Try again.`);
     } finally {
       setBusy(false);
     }

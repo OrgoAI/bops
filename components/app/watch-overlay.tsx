@@ -48,7 +48,7 @@ export function WatchOverlay({ watch: w, small = false, rounded = "rounded-[22px
   const ago = useAgo(w.readAt);
   // Away: the screen shows something else right now, so the watch waits (grey) until it's back.
   const away = !!w.away && !w.alert;
-  const ring = w.alert ? "#E8FF3A" : away ? "#C9C9C6" : WATCH;
+  const ring = w.alert ? "var(--color-highlighter)" : away ? "#C9C9C6" : WATCH;
   return (
     <div className={`pointer-events-none absolute inset-0 z-20 overflow-hidden ${rounded}`}>
       <div className={`absolute inset-0 ${rounded}`} style={{ boxShadow: `inset 0 0 0 ${small ? 2 : 3}px ${ring}${w.alert ? "" : "B3"}` }} />
@@ -68,7 +68,7 @@ export function WatchOverlay({ watch: w, small = false, rounded = "rounded-[22px
           }`}
         >
           <span className="flex size-[22px] shrink-0 items-center justify-center rounded-full text-white" style={{ background: w.alert ? "#0A0A0A" : away ? "#9A9A98" : WATCH }}>
-            <WatchEye size={13} blink={!w.alert && !away} color={w.alert ? "#E8FF3A" : "#FFFFFF"} />
+            <WatchEye size={13} blink={!w.alert && !away} color={w.alert ? "var(--color-highlighter)" : "#FFFFFF"} />
           </span>
           <span className="min-w-0 truncate text-[12px] leading-4 text-ink">
             <PillText watch={w} away={away} ago={ago} />
@@ -106,7 +106,7 @@ function AnchoredPill({ watch: w, anchor: a, away, ago }: { watch: Watch; anchor
         top: `calc(${pct(a.top)} - 1px)`,
         width: `calc(${pct(a.width)} + 2px)`,
         height: `calc(${pct(a.height)} + 2px)`,
-        background: w.alert ? "#E8FF3A" : away ? "#9A9A98" : WATCH,
+        background: w.alert ? "var(--color-highlighter)" : away ? "#9A9A98" : WATCH,
       }}
     >
       <WatchEye size={12} blink={!w.alert && !away} color={w.alert ? "#0A0A0A" : "#FFFFFF"} />
@@ -140,7 +140,7 @@ export function WatchBadge({ watch: w }: { watch: Watch }) {
   return (
     <span
       className="absolute left-1 top-1 z-10 flex size-[18px] items-center justify-center rounded-full shadow-[0_0_0_1.5px_#FFFFFF]"
-      style={{ background: w.alert ? "#E8FF3A" : w.away ? "#9A9A98" : WATCH }}
+      style={{ background: w.alert ? "var(--color-highlighter)" : w.away ? "#9A9A98" : WATCH }}
       title={w.alert ? `New: ${w.alert.text}` : w.away ? `Paused: ${watchName(w)} isn't showing right now` : `Watching for ${w.lookFor}`}
     >
       <WatchEye size={11} blink={!w.alert && !w.away} color={w.alert ? "#0A0A0A" : "#FFFFFF"} />

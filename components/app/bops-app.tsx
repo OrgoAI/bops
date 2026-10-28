@@ -50,6 +50,7 @@ import { OwnerPhone, useOwnerPhone, usePhoneInfo, type OwnerNumber, type Pending
 import { LineLink } from "./line-link";
 import { EmailAddresses, MailAddressStep } from "./mail-address";
 import { bannerNumber, ReachBanner } from "./reach-banner";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Bops. Layout and values follow the Paper designs: a Messages list, a chat per bot (and group
@@ -1317,7 +1318,7 @@ function ReachSettings() {
       : texting
         ? "Text or call your bots, and they reach you back. They know it's you from the numbers listed here."
         : "Email your bots, and they reach you back. They know it's you from the emails listed here.";
-  const unreachable = "Couldn't reach Bops.";
+  const unreachable = `Couldn't reach ${BRAND.name}.`;
   return (
     <div className="flex flex-col gap-2 px-[22px] pt-4">
       <div className="flex flex-col gap-0.5">
@@ -1360,7 +1361,7 @@ function PhoneService() {
           {info.texting === "none" ? " (carriers approve business texting first (A2P 10DLC), about 7 to 10 business days)" : ""}
         </span>
         <span>
-          <span className="text-[#9A9A98]">Calls to the bots&apos; numbers:</span> {info.calls === "agent" ? "on (each number's agent passes every turn to Bops)" : (info.calls ?? "unknown")}
+          <span className="text-[#9A9A98]">Calls to the bots&apos; numbers:</span> {info.calls === "agent" ? `on (each number's agent passes every turn to ${BRAND.name})` : (info.calls ?? "unknown")}
         </span>
         {info.workspaces?.map((w) => (
           <span key={w.id}>
@@ -1429,7 +1430,7 @@ function SelfHosting({ state }: { state: AppState }) {
     <div className="mt-5 flex flex-col border-t border-[#F0F0EE] pb-5">
       <div className="flex flex-col gap-0.5 px-[22px] pt-4">
         <span className="text-[15px] font-semibold">Self-hosting</span>
-        <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Your own provider accounts, set in .env.local. The hosted Bops runs these for its users.</span>
+        <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Your own provider accounts, set in .env.local. The hosted {BRAND.name} runs these for its users.</span>
       </div>
 
       <div className="flex flex-col gap-2 px-[22px] pt-4">
@@ -1548,14 +1549,14 @@ function FirstLoad() {
     return () => clearTimeout(t);
   }, []);
   return (
-    <BoppyLoading label="Loading Bops…">
+    <BoppyLoading label={`Loading ${BRAND.name}…`}>
       {slow && (
         <div className="flex flex-col items-center gap-3">
           <span>This is taking longer than usual.</span>
           {canRestart && (
             <button onClick={() => setConfirm(true)} className="flex items-center gap-1.5 rounded-full bg-[#F2F2F0] px-3.5 py-1.5 text-[13px] font-medium leading-4 text-ink hover:bg-[#EAEAE7]">
               <RestartIcon />
-              Restart Bops
+              Restart {BRAND.name}
             </button>
           )}
           {confirm && <RestartConfirm onClose={() => setConfirm(false)} />}

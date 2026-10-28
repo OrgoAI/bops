@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Typing back a code we sent, to the user's mobile (owner-phone.tsx) or to an email address
@@ -13,7 +14,7 @@ const CODE_LENGTH = 6;
 /** A verify route's answer: ok, or why not, when to try again, and whether only a new code can help now. */
 export type CodeAnswer = { ok: boolean; error?: string; retryInSec?: number; resendInSec?: number; attemptsLeft?: number; restart?: boolean; expiresAt?: number };
 
-const UNREACHABLE = "Couldn't reach Bops. Try again.";
+const UNREACHABLE = `Couldn't reach ${BRAND.name}. Try again.`;
 
 /** POST to a verify route. Not reaching Bops is an answer too, so there's always something to show. */
 export async function postJson<A extends CodeAnswer>(url: string, body: Record<string, unknown>): Promise<A> {

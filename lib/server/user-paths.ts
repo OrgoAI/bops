@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { BRAND } from "@/lib/brand";
 
 /**
  * Where each Orgo user's things on this Mac go. Bops keeps the state itself in Bops Cloud
@@ -24,7 +25,8 @@ export const legacyStateFile = () => join(dataRoot(), "state.json");
 export const scopeOf = (userId: string) => userId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80) || "_";
 
 export const userDataDir = (userId: string | null) => (userId ? join(dataRoot(), "users", scopeOf(userId)) : dataRoot());
-export const bopsHome = () => join(homedir(), ".bops");
+// A partner's build (lib/brand.ts) keeps its bots' workspace apart from Bops' own, so both can run on one Mac.
+export const bopsHome = () => join(homedir(), BRAND.id === "bops" ? ".bops" : `.bops-${BRAND.id}`);
 export const userBopsHome = (userId: string | null) => (userId ? join(bopsHome(), "users", scopeOf(userId)) : bopsHome());
 /** Each bot's Chrome profiles (one per screen) live under here. */
 export const chromeRoot = () => join(bopsHome(), "chrome");

@@ -1,0 +1,22 @@
+<!doctype html>
+<!--
+  What the Momentum AMP window shows while its server starts (desktop/brand.cjs): the M, breathing, on
+  white. A static page with nothing to load from the network.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Momentum AMP</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; font: 13px/1.5 -apple-system, system-ui, sans-serif; color: #5f5a70; -webkit-app-region: drag; user-select: none; }
+  img { width: 76px; height: auto; animation: breathe 1.6s ease-in-out infinite; }
+  @keyframes breathe { 0%, 100% { transform: translateY(0) scale(1); opacity: 1; } 50% { transform: translateY(-4px) scale(1.04); opacity: .86; } }
+  @media (prefers-reduced-motion: reduce) { img { animation: none; } }
+</style>
+</head>
+<body>
+  <img src="mark.png" alt="Momentum AMP">
+  <div>Starting Momentum AMP…</div>
+</body>
+</html>

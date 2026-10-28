@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Spinner } from "./mascot";
 import { post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * "Save as skill", from a chat's menu (or a thread's): the bot rereads the chat and the threads it started
@@ -38,7 +39,7 @@ function draftOnce(key: string, body: { botId: string; chatId: string; sessionId
         const json = ((await res.json().catch(() => null)) as Drafted | null) ?? {};
         return res.ok && json.draft ? json : { error: json.error ?? "Couldn't write a draft. Try again." };
       })
-      .catch(() => ({ error: "Couldn't reach Bops. Try again." }));
+      .catch(() => ({ error: `Couldn't reach ${BRAND.name}. Try again.` }));
     drafting.set(key, asked);
     void asked.finally(() => drafting.delete(key));
   }
@@ -132,7 +133,7 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
       }
       setSaved(how);
     } catch {
-      setError("Couldn't reach Bops. Try again.");
+      setError(`Couldn't reach ${BRAND.name}. Try again.`);
       setBusy(null);
     }
   };

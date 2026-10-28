@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Bot } from "@/lib/types";
 import { Mascot } from "./mascot";
+import { BRAND } from "@/lib/brand";
 
 type Phase = "connecting" | "live" | "ending" | "ended" | "failed";
 
@@ -292,7 +293,7 @@ export function CallBar({
       } catch (e) {
         if (gone) return;
         hush();
-        setError((e as Error).message.includes("Permission") ? "Bops needs microphone access for calls." : (e as Error).message);
+        setError((e as Error).message.includes("Permission") ? `${BRAND.name} needs microphone access for calls.` : (e as Error).message);
         setPhase("failed");
         cleanup();
       }

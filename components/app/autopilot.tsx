@@ -28,6 +28,7 @@ import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, t
 import { CloseButton, currentWorkspace, needsYou, post, ReadOnlyLine, teamOf } from "./ui";
 import { FooterButton } from "./sidebar-footer";
 import { deleteQuestion, RoutineWeek, useClock, weekPlan, WeekLegend, WeekLetters } from "./routine-week";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Routines: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
@@ -187,7 +188,7 @@ function deliveryName(d: Delivery, state: AppState) {
 
 /** Every place a schedule's results go: the bot's chat in Bops always, then what it delivers to. */
 function destinations(r: Routine, state: AppState) {
-  const to = ["Bops chat"];
+  const to = [`${BRAND.name} chat`];
   if (r.deliverTo) to.push(deliveryName(r.deliverTo, state));
   if (r.textTo && r.deliverTo?.kind !== "text") to.push("Text");
   return to.join(", ");
@@ -232,7 +233,7 @@ async function send(url: string, body: unknown, method: string, answered?: (json
     if (r.ok && !said) return answered?.(j) ?? null;
     return typeof said === "string" && said ? undash(said) : "That didn't work. Try again.";
   } catch {
-    return "Couldn't reach Bops. Try again.";
+    return `Couldn't reach ${BRAND.name}. Try again.`;
   }
 }
 
@@ -1455,7 +1456,7 @@ export function MonitorRow({
         sure && (
           <>
             <InlineConfirm
-              text="Stop watching this? Bops stops checking it."
+              text={`Stop watching this? ${BRAND.name} stops checking it.`}
               action="Stop"
               doing="Stopping…"
               busy={busy === "remove"}

@@ -34,6 +34,7 @@ import type { AppState } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { signOutOfOrgo as signOutAsking } from "./sign-in";
 import { refreshState } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * The account: who you are on Orgo, your Bops plan (Free, Pro or Max; an Orgo plan doesn't change it,
@@ -128,17 +129,17 @@ export function Account({ state, onClose, onThisMac }: { state: AppState; onClos
         {info ? (
           <Usage info={info} />
         ) : failed && !loading ? (
-          <Section title="Bops usage">
+          <Section title={`${BRAND.name} usage`}>
             <LoadFailed onRetry={load} />
           </Section>
         ) : (
-          <Placeholder title="Bops usage" />
+          <Placeholder title={`${BRAND.name} usage`} />
         )}
         {info && <Reach info={info} />}
 
         <div className="flex items-center justify-between gap-3 px-[22px] pb-5 pt-5">
           <span className="text-[12px] leading-4 text-[#9A9A98]">
-            Your Bops computer is free. AI credit pays for what your bots do, at cost.
+            Your {BRAND.name} computer is free. AI credit pays for what your bots do, at cost.
             {onThisMac && (
               <>
                 {" "}
@@ -858,7 +859,7 @@ function Usage({ info }: { info: AccountInfo }) {
     ["Inboxes", t.inboxes, "added"],
   ];
   return (
-    <Section title="Bops usage" aside={tabs}>
+    <Section title={`${BRAND.name} usage`} aside={tabs}>
       <div className="grid grid-cols-5 gap-2">
         {tiles.map(([label, n, unit]) => (
           <div key={label} className="flex flex-col gap-1 rounded-[14px] px-3.5 py-3 shadow-[0_0_0_1px_#E6E6E3]">

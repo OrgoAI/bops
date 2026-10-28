@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CHANNELS, PAIR_CODE_MS, PAIR_CODE_TRIES, pairCodeLive, workspaceOf, type AppState, type Bot, type ChannelLink } from "@/lib/types";
 import { Spinner } from "./mascot";
 import { BrandTile, post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Where to find a bot: the places it lives besides Bops. One row of tiles; a tile that's set up says
@@ -133,7 +134,7 @@ function TokenSetup({ bot: b, kind }: { bot: Bot; kind: "telegram" | "discord" }
           <>
             Under <b>Bot</b>: turn on <b>Message Content Intent</b>, then <b>Reset Token</b>.
           </>,
-          <>Paste the token. Bops then gives you the link to add it to your server.</>,
+          <>Paste the token. {BRAND.name} then gives you the link to add it to your server.</>,
         ];
   return (
     <div className={card}>
@@ -175,7 +176,7 @@ function SlackSetup({ state, bot: b }: { state: AppState; bot: Bot }) {
     return (
       <div className={card}>
         <span className="text-[12.5px] leading-[18px] text-[#3A3A38]">
-          Add Bops to your Slack workspace once (Slack asks you to allow it). Then pick the channels {b.name} joins; your other bots join through the same app.
+          Add {BRAND.name} to your Slack workspace once (Slack asks you to allow it). Then pick the channels {b.name} joins; your other bots join through the same app.
         </span>
         <div className="flex items-center gap-2">
           {waiting?.status === "waiting" ? (
@@ -298,7 +299,7 @@ function Linked({ bot: b, link: l }: { bot: Bot; link: ChannelLink }) {
     </>
   ) : (
     <span className="text-[12.5px] leading-[18px] text-[#3A3A38]">
-      Send {l.kind === "slack" ? "the Bops app a direct message" : `${l.handle} a direct message (or mention it in a channel)`} with just the code <Code>{l.pairCode}</Code>
+      Send {l.kind === "slack" ? `the ${BRAND.name} app a direct message` : `${l.handle} a direct message (or mention it in a channel)`} with just the code <Code>{l.pairCode}</Code>
     </span>
   );
   return (

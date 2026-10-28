@@ -8,6 +8,7 @@ import { CHECK_TIMES, checkerOf, isKeyApp } from "@/lib/routine-catalog";
 import { Mascot, Spinner } from "./mascot";
 import { KeyIcon } from "./screen-cards";
 import { ago, post, teamOf } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * The user's apps, in the Vault. Only what's connected is listed, one row per app (however many
@@ -634,8 +635,8 @@ export function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }:
     a.auth === "open"
       ? `${a.name} needs no sign-in: your bots can use it straight away.`
       : a.auth === "key"
-        ? `${a.name} connects with an API key. A secure page opens in your browser and asks for it. Bops never sees it.`
-        : `${a.name}'s own sign-in opens in your browser. Bops never sees your password.`;
+        ? `${a.name} connects with an API key. A secure page opens in your browser and asks for it. ${BRAND.name} never sees it.`
+        : `${a.name}'s own sign-in opens in your browser. ${BRAND.name} never sees your password.`;
   return (
     <div className="flex flex-col gap-4 p-5">
       <div className="flex items-start gap-3">

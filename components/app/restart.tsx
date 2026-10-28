@@ -3,6 +3,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { Spinner } from "./mascot";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Restart Bops, for when something's off: in the account menu, on the setup screen (the badge on your
@@ -64,12 +65,12 @@ export function RestartConfirm({ onClose }: { onClose: () => void }) {
         className="motion-dialog-in flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
       >
         <span id="restart-title" className="text-[15px] font-semibold leading-5">
-          Restart Bops?
+          Restart {BRAND.name}?
         </span>
         <span id="restart-line" className="pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
           Your bots pause for a few seconds.
         </span>
-        {failed && <span className="pt-2 text-[12.5px] leading-[18px] text-[#B42318]">Couldn&apos;t restart. Quit Bops and open it again.</span>}
+        {failed && <span className="pt-2 text-[12.5px] leading-[18px] text-[#B42318]">Couldn&apos;t restart. Quit {BRAND.name} and open it again.</span>}
         <div className="flex justify-end gap-2 pt-5">
           <button disabled={busy} onClick={onClose} className={`${pill} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
             Cancel

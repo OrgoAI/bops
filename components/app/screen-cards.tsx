@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { Bot, ScreenRead, VaultLogin } from "@/lib/types";
 import { Mascot } from "./mascot";
 import { post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Generative cards: native Bops UI drawn over the bot's real page when Jev reads something on it
@@ -128,7 +129,7 @@ export function SignInCard({
           </button>
         </div>
         <span className="text-[11px] leading-[15px] text-[#9A9A98]">
-          Goes straight into the page on {b.name}&apos;s screen. {save ? "Saved logins stay in your Mac's Keychain." : "Bops doesn't keep it."} No AI sees it.
+          Goes straight into the page on {b.name}&apos;s screen. {save ? "Saved logins stay in your Mac's Keychain." : `${BRAND.name} doesn't keep it.`} No AI sees it.
         </span>
       </form>
     </CardShell>
