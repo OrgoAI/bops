@@ -104,14 +104,14 @@ await test("which page is open: People's sheet, Knowledge, Routines, Apps, else 
   assert.equal(footerPageOf({ tab: "memory", knowledge: false }), "vault", "no Knowledge: not its page");
 });
 
-await test("two in the row: you, the pill with your name at rest, and Connect apps, round with its icon and tooltip", () => {
+await test("two in the row: you, the pill with your name at rest, and Connect apps, round with its icon", () => {
   for (const open of ["vault", "routines", "knowledge", "apps", "people"]) {
     const html = renderYou(base, open);
     const s = slots(html);
     assert.deepEqual(s.map((x) => x.label), ["You", "Connect apps"], `${open}: the order and nothing else`);
     assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["You"], `${open}: you are the pill`);
     assert.equal(s[0].title, undefined, "the pill needs no tooltip");
-    assert.equal(s[1].title, "Connect apps: your accounts and logins, and which bots can use them");
+    assert.equal(s[1].title, undefined, "no tooltip: pointed at, it says what it is");
     assert.ok(!s[1].pressed, "not pressed while round");
     assert.match(html, /motion-footer-label[^"]*max-w-\[200px\][^"]*opacity-100[^"]*">Tess Ito<\/span>/, "your name shown");
   }
@@ -151,6 +151,8 @@ await test("pointed at, Connect apps is the pill with the apps you've connected,
   assert.match(html, /max-w-\[48px\] opacity-100[^"]*"><svg/, "the icon where the logos go");
   html = renderYou({ ...base, account: { user: { id: "u1", email: "tess@example.com" } } }, "vault");
   assert.match(html, /opacity-100[^"]*">tess@example\.com<\/span>/, "no name: the email");
+  html = renderYou({ ...base, owner: { name: "Tess" }, account: { user: { id: "u1", email: "tess@example.com" } } }, "vault");
+  assert.match(html, /opacity-100[^"]*">Tess<\/span>/, "no Orgo name: the one Bops knows you by, before the email");
 });
 
 await test("no hover expansion where nothing hovers (a touch screen)", () => {

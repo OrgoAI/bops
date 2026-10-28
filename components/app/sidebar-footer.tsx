@@ -137,7 +137,8 @@ export function FooterButton({
   expanded: boolean;
   pressed?: boolean;
   label: string;
-  tip: string;
+  /** None: pointing at it grows it into the pill, which says what it is (Connect apps). */
+  tip?: string;
   ariaLabel?: string;
   icon?: ReactNode;
   trail?: ReactNode;

@@ -315,7 +315,6 @@ export function SidebarFooter({
         expanded={pill === "vault"}
         pressed={open === "vault" && pill === "vault"}
         label="Connect apps"
-        tip="Connect apps: your accounts and logins, and which bots can use them"
         onClick={onVault}
         trail={<AppsTrail state={state} expanded={pill === "vault"} />}
       />
@@ -452,7 +451,8 @@ function YouMenuView({
     fn();
   };
   const item = "flex h-9 items-center gap-2.5 rounded-[10px] px-2.5 text-left text-[14px] font-medium hover:bg-black/[0.04]";
-  const name = user?.name?.trim() || user?.email || state.owner?.name?.trim() || "You";
+  // Your Orgo name, else the one Bops knows you by, else your email.
+  const name = user?.name?.trim() || state.owner?.name?.trim() || user?.email || "You";
   return (
     <div ref={box} data-footer-slot="You" data-footer-key="you" className={`motion-footer-slot relative flex h-9 min-w-9 basis-9 ${expanded ? "grow" : "grow-0"} shrink`}>
       <button
