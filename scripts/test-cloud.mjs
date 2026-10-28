@@ -1568,6 +1568,29 @@ mineNow.rows.set("msg_other", { id: "msg_other", seq: ++seqs, json: { id: "msg_o
 await S.pullState();
 assert.ok(S.getState().messages.some((m) => m.text === "from my other Mac"));
 S.update((s) => (s.bots = s.bots.filter((b) => b.id !== "zed")));
+// It deleted that message and a thread there: merged in, this Mac hears what went (store.ts watchGone), for
+// what it keeps beside them (privacy.ts: the images and the last frame of a delete gone at once there).
+const thereThread = { id: "ses_there", botId: "boppy", chatId: botChatId("boppy"), goal: "Book it", title: "Book it", status: "done", replies: [], steps: [], createdAt: 1, sentVia: "you", host: "orgo" };
+S.update((s) => s.sessions.push(thereThread));
+assert.equal(await S.flushState(5000), true);
+const heardGone = [];
+S.watchGone("test-cloud", (g) => heardGone.push({ messages: g.messages.map((m) => m.id), sessions: g.sessions.map((x) => x.id) }));
+const withThread = states.get("u1");
+withThread.blob = { ...withThread.blob, sessions: withThread.blob.sessions.filter((x) => x.id !== "ses_there") };
+withThread.version++;
+withThread.rows.set("msg_other", { id: "msg_other", seq: ++seqs, json: null });
+await S.pullState();
+S.watchGone("test-cloud", () => {});
+assert.ok(!S.getState().messages.some((m) => m.id === "msg_other") && !S.getState().sessions.some((x) => x.id === "ses_there"));
+assert.deepEqual(heardGone, [{ messages: ["msg_other"], sessions: ["ses_there"] }]);
+// A removal made here is up once the cloud took it, whatever else waits (the sweep's batches go by it: privacy.ts inBatches).
+const leaving = S.addMessage({ chatId: botChatId("boppy"), role: "user", text: "said, then deleted" }).id;
+assert.equal(await S.flushState(5000), true);
+S.update((s) => (s.messages = s.messages.filter((m) => m.id !== leaving)));
+assert.equal(S.removalsUp([leaving]), false, "not up before the save");
+assert.equal(await S.flushState(5000), true);
+assert.equal(S.removalsUp([leaving]), true);
+assert.equal(S.threadsUp(["ses_there"]), true, "the thread is gone from the cloud's copy");
 
 // Offline: the change waits, the app works from memory, and it goes up when the cloud is back.
 process.env.BOPS_CLOUD_URL = "http://127.0.0.1:9";
@@ -1841,6 +1864,12 @@ assert.deepEqual([sl1.status, JSON.parse(Buffer.from(sl1.body, "base64").toStrin
 // One that waited in the cloud is handled and acknowledged (here it's for no bot of this Mac's).
 c1.ws.send(JSON.stringify({ t: "event", id: "44", kind: "slack", payload: { type: "event_callback", team_id: "T0NONE", event: { type: "message", channel: "C0X", user: "U0X", text: "hi", ts: "1.1" } }, at: "2026-10-05T12:00:00Z" }));
 await frame(c1, (f) => f.t === "ack" && f.id === "44", "the Slack event's ack");
+// What a member with Write did in a shared workspace (lib/server/member-acts.ts): handed to the event route and
+// acknowledged, done only when this state gives them Write there. This one's workspace isn't this Mac's: nothing's said.
+const messagesBefore = S.getState().messages.length;
+c1.ws.send(JSON.stringify({ t: "event", id: "45", kind: "member", payload: { projectId: "proj_x", wsId: "ws_not_here", member: { userId: "user_sam", email: "sam@example.com", name: "Sam" }, key: "key_00000001", at: Date.now(), act: { act: "chat", chatId: "bot:boppy", text: "hi" } }, at: new Date().toISOString() }));
+await frame(c1, (f) => f.t === "ack" && f.id === "45", "the member event's ack");
+assert.equal(S.getState().messages.length, messagesBefore, "not this Mac's workspace: nothing done");
 // Events: handed over, then acknowledged; one handed over again is acknowledged again but handled once.
 const ownersNote = { ...ownersCall, message: { text: "Book the dentist" } };
 for (let i = 0; i < 2; i++) c1.ws.send(JSON.stringify({ t: "event", id: "41", kind: "call", payload: ownersNote, at: "2026-10-05T12:00:00Z" }));

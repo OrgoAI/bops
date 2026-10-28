@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { waitsForOk, type AppState, type Bot, type Session } from "@/lib/types";
 import { MemorySheet } from "./memory-sheet";
-import { ago, post, quietNothing, StatusIcon } from "./ui";
+import { ago, memberAnswers, post, quietNothing, StatusIcon } from "./ui";
 import { you } from "@/lib/shared";
 
 type Fact = { id: string; text: string; private: boolean; at?: number; source?: string };
@@ -198,7 +198,7 @@ export function BotMemory({ state, bot: b, onOpenThread }: { state: AppState; bo
                   {(allWork ? done : done.slice(0, 3)).map((s) => (
                     <button key={s.id} onClick={() => onOpenThread(s)} className="-mx-2.5 flex items-start gap-2.5 rounded-[12px] px-2.5 py-2 text-left hover:bg-[#F7F7F6]">
                       <span className="mt-0.5">
-                        <StatusIcon session={s} owner={!!state.shared} okWait={waitsForOk(s, state)} />
+                        <StatusIcon session={s} owner={!!state.shared && !memberAnswers(state, s)} member={memberAnswers(state, s)} okWait={waitsForOk(s, state)} />
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-baseline gap-2">
@@ -442,7 +442,7 @@ function Editable({ ws, item, onChange, pinnable, children }: { ws: string; item
         tabIndex={0}
         onClick={() => setMenu((m) => !m)}
         onKeyDown={(e) => e.key === "Enter" && setMenu((m) => !m)}
-        className={`-mx-1 cursor-pointer rounded-[6px] px-1 transition-colors ${menu ? "bg-[#F2F2F0]" : "hover:bg-[#F7F7F6]"}`}
+        className={`-mx-1 rounded-[6px] px-1 transition-colors ${menu ? "bg-[#F2F2F0]" : "hover:bg-[#F7F7F6]"}`}
       >
         {children}
       </span>

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { after, before, test } from "node:test";
 import { closeDb, query } from "../db.ts";
 import { closeAll } from "../live.ts";
 import { resetMembers } from "../members.ts";
-import type { SharedWsState, SharedWsUnchanged } from "../protocol.ts";
-import { dropUsers, fakeOrgo, keyOf, newUserId, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
+import { MEMBER_ACTS_A_MINUTE, type CloudToMac, type MemberActPayload, type SharedWsState, type SharedWsUnchanged } from "../protocol.ts";
+import { connectMac, dropUsers, fakeOrgo, keyOf, newUserId, pending, prepareDb, startCloud, until, type Listening } from "./edge-fakes.ts";
 
 /**
  * A shared workspace's state, read by a member (members.ts GET /v1/ws/:projectId/state): the owner's
@@ -12,7 +13,9 @@ import { dropUsers, fakeOrgo, keyOf, newUserId, prepareDb, startCloud, until, ty
  * profile gives them; someone given none, no bot) and everything of each, its chats' newest messages
  * (the owner's own and one kept "between us" too) and none of another workspace's or of a bot they
  * weren't given, a copy that's still current answered in a line, and the stream's "state" events carrying
- * the same fingerprint the read does. orgo-web is a fake on localhost.
+ * the same fingerprint the read does. orgo-web is a fake on localhost. A member with Write acts (POST
+ * /v1/ws/:projectId/act): what they did waits for the owner's Mac in bops.cloud_pending, once per key, is
+ * handed over on the tunnel, counted a minute at a time, and dropped when orgo-web says they're out.
  */
 
 let orgo: Listening;
@@ -21,10 +24,16 @@ const owner = newUserId("owner");
 const member = newUserId("member");
 const outsider = newUserId("outsider");
 const both = newUserId("both");
+const actOwner = newUserId("act-owner");
+const writer = newUserId("writer");
+const other = newUserId("other-writer");
+const ACT_PROJECT = "66666666-7777-8888-9999-000000000000";
+const SECRET = "edge-members-plan-secret-0123456789abcdef"; // gitleaks:allow (made up for this test)
 const PROJECT = "11111111-2222-3333-4444-555555555555";
 const roles: Record<string, unknown> = {};
 
 before(async () => {
+  process.env.BOPS_CLOUD_PLAN_SECRET = SECRET;
   await prepareDb();
   roles[`${member} ${PROJECT}`] = { role: "member", ownerUserId: owner, bopsWsId: "ws_acme", name: "Acme" };
   orgo = await fakeOrgo(roles);
@@ -37,7 +46,8 @@ after(async () => {
   await cloud.close();
   await orgo.close();
   await query("DELETE FROM bops.chat_messages WHERE user_id = ANY($1::text[])", [[owner, member]]);
-  await dropUsers([owner, member, outsider, both]);
+  await query("DELETE FROM bops.cloud_limits WHERE key = ANY($1::text[])", [[`member:act:${writer}`, `member:act:${other}`]]);
+  await dropUsers([owner, member, outsider, both, actOwner, writer, other]);
   await closeDb();
 });
 
@@ -251,4 +261,79 @@ test("a page boundary between two messages of the same millisecond (a bot's answ
   // An id of none of that chat's messages at that time (or none): the ones before that millisecond, as before.
   for (const qs of ["?chat=bot:max&before=5000", "?chat=bot:max&before=5000&beforeId=t0", "?chat=bot:max&before=5000&beforeId=d1"])
     assert.ok(!(await read(member, qs)).body.messages.some((m) => String(m.id).startsWith("t-")), qs);
+});
+
+/* ---------------- Acting, for a member with Write ---------------- */
+
+const actBlob = () => ({
+  workspaces: [{ id: "ws_act", name: "Acts", memberAccess: { [`${writer}@example.com`]: { others: "none", bots: { max: "write" } }, [`${other}@example.com`]: { others: "none", bots: { max: "write" } } } }],
+  bots: [{ id: "max", name: "Max", workspaceId: "ws_act" }],
+  chats: [{ id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_act" }],
+});
+const act = (userId: string, key: string, text = "Book the 9am train") =>
+  fetch(`${cloud.url}/v1/ws/${ACT_PROJECT}/act`, { method: "POST", headers: { Authorization: `Bearer ${keyOf(userId)}`, "content-type": "application/json" }, body: JSON.stringify({ key, act: { act: "chat", chatId: "bot:max", text } }) }).then(
+    async (r) => ({ status: r.status, json: (await r.json()) as Record<string, unknown> }),
+  );
+const signedNotice = (body: unknown) => {
+  const text = JSON.stringify(body);
+  const ts = String(Math.floor(Date.now() / 1000));
+  return fetch(`${cloud.url}/v1/internal/members-changed`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-bops-timestamp": ts, "x-bops-signature": `sha256=${createHmac("sha256", SECRET).update(`${ts}.${text}`).digest("hex")}` },
+    body: text,
+  });
+};
+
+test("a Write member's act waits for the owner's Mac once per key, and is handed over on the tunnel when it connects", async () => {
+  roles[`${writer} ${ACT_PROJECT}`] = { role: "member", ownerUserId: actOwner, bopsWsId: "ws_act", name: "Acts" };
+  assert.equal((await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: headers(actOwner), body: JSON.stringify({ base: 0, state: actBlob() }) })).status, 200);
+  const first = await act(writer, "edge_key_0001");
+  assert.deepEqual([first.status, first.json], [202, { ok: true, macOn: false }], "the owner's Mac is away");
+  assert.equal((await act(writer, "edge_key_0001")).status, 202, "sent again");
+  const rows = await pending(actOwner);
+  assert.equal(rows.length, 1, "the same key adds nothing");
+  assert.deepEqual([rows[0].kind, rows[0].dedupe_key, rows[0].delivered_at], ["member", `member:${writer}:edge_key_0001`, null]);
+  const p = rows[0].payload as MemberActPayload;
+  assert.deepEqual([p.wsId, p.member.userId, p.member.email, p.act], ["ws_act", writer, `${writer}@example.com`, { act: "chat", chatId: "bot:max", text: "Book the 9am train" }]);
+  const expires = (await query<{ expires_at: Date }>("SELECT expires_at FROM bops.cloud_pending WHERE id = $1", [rows[0].id])).rows[0].expires_at;
+  assert.ok(Math.abs(expires.getTime() - (Date.now() + 10 * 60_000)) < 60_000, "kept ten minutes");
+  // The owner's Mac connects: it gets it as a "member" event, acks it, and it's delivered.
+  const mac = await connectMac(cloud.url, actOwner);
+  await until(async () => (await pending(actOwner)).every((r) => r.delivered_at), "the Mac to ack it");
+  const events = mac.frames.filter((f): f is Extract<CloudToMac, { t: "event" }> => f.t === "event");
+  assert.deepEqual(events.map((e) => [e.kind, (e.payload as MemberActPayload).key]), [["member", "edge_key_0001"]]);
+  // With the Mac on, the next one goes at once.
+  assert.deepEqual((await act(writer, "edge_key_0002")).json, { ok: true, macOn: true });
+  await until(() => mac.frames.filter((f) => f.t === "event").length === 2, "the second event");
+  mac.ws.close();
+});
+
+test("a member's acts are counted a minute at a time: one past MEMBER_ACTS_A_MINUTE is told to slow down", async () => {
+  roles[`${writer} ${ACT_PROJECT}`] = { role: "member", ownerUserId: actOwner, bopsWsId: "ws_act", name: "Acts" };
+  // Not across a minute's end, so every one is in the same count.
+  if (Date.now() % 60_000 > 50_000) await new Promise((r) => setTimeout(r, 60_000 - (Date.now() % 60_000) + 50));
+  await query("DELETE FROM bops.cloud_limits WHERE key = $1", [`member:act:${writer}`]);
+  const got: number[] = [];
+  for (let i = 0; i <= MEMBER_ACTS_A_MINUTE; i++) got.push((await act(writer, `edge_rate_${String(i).padStart(4, "0")}`)).status);
+  assert.deepEqual(got.slice(0, MEMBER_ACTS_A_MINUTE), Array(MEMBER_ACTS_A_MINUTE).fill(202));
+  const over = await act(writer, "edge_rate_over");
+  assert.equal(over.status, 429);
+  assert.equal(over.json.code, "slow_down");
+  assert.ok(typeof over.json.retryAfter === "number" && over.json.retryAfter > 0);
+  await query("DELETE FROM bops.cloud_limits WHERE key = $1", [`member:act:${writer}`]);
+});
+
+test("orgo-web's notice that a member is out drops what they did that still waits, and nobody else's", async () => {
+  roles[`${writer} ${ACT_PROJECT}`] = { role: "member", ownerUserId: actOwner, bopsWsId: "ws_act", name: "Acts" };
+  roles[`${other} ${ACT_PROJECT}`] = { role: "member", ownerUserId: actOwner, bopsWsId: "ws_act", name: "Acts" };
+  await query("DELETE FROM bops.cloud_pending WHERE user_id = $1", [actOwner]);
+  assert.equal((await act(writer, "edge_drop_001")).status, 202);
+  assert.equal((await act(other, "edge_keep_001")).status, 202);
+  assert.equal((await pending(actOwner)).length, 2);
+  delete roles[`${writer} ${ACT_PROJECT}`];
+  assert.equal((await signedNotice({ projectId: ACT_PROJECT, userId: writer })).status, 204);
+  await until(async () => (await pending(actOwner)).length === 1, "the removed member's to go");
+  assert.deepEqual((await pending(actOwner)).map((r) => (r.payload as MemberActPayload).member.userId), [other]);
+  assert.equal((await act(writer, "edge_drop_002")).status, 404, "and they act no more");
+  delete roles[`${other} ${ACT_PROJECT}`];
 });

@@ -1,7 +1,8 @@
-import type { CloudCallPayload, CloudPlanPayload, PendingKind } from "@/cloud/protocol";
+import type { CloudCallPayload, CloudPlanPayload, MemberActPayload, PendingKind } from "@/cloud/protocol";
 import { slackDelivery } from "@/lib/server/channels";
 import { adoptPlan } from "@/lib/server/cloud-plan";
 import { fromCloudTunnel } from "@/lib/server/cloud-tunnel";
+import { memberEvent } from "@/lib/server/member-acts";
 import { agentPhoneEvent, cloudCall, verdictOf } from "@/lib/server/phone";
 import { notReady } from "@/lib/server/ready";
 
@@ -28,6 +29,8 @@ function parsed(payload: unknown) {
  *   old), handled as if the cloud had just replayed it to /api/channels/slack/events.
  * - "plan": the user's plan changed, or what it brings the main bot did (a number and an inbox Bops
  *   Cloud set up, paused or gave back): taken into the state (lib/server/cloud-plan.ts).
+ * - "member": something a member with Write did in one of the user's shared workspaces from their own
+ *   Bops (lib/server/member-acts.ts), checked again here against this state and done as theirs.
  * A kind this app doesn't know isn't acknowledged, so it waits for one that does.
  */
 export async function POST(request: Request) {
@@ -50,6 +53,7 @@ export async function POST(request: Request) {
     if (!delivery) console.warn(`[cloud] event ${e.id}: not a Slack delivery`);
     else slackDelivery(delivery);
   } else if (e.kind === "plan") await adoptPlan(e.payload as CloudPlanPayload);
+  else if (e.kind === "member") await memberEvent(e.payload as MemberActPayload, e.id);
   else return Response.json({ error: `unknown kind ${String(e.kind)}` }, { status: 422 });
   return Response.json({ ok: true });
 }

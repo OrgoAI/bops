@@ -638,7 +638,7 @@ function Pick({ label, value, onChange, children }: { label: string; value: stri
           aria-label={label}
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="h-8 max-w-[220px] cursor-pointer appearance-none truncate rounded-full bg-white pl-3 pr-7 text-[13px] text-ink shadow-[0_0_0_1px_#E6E6E3] outline-none hover:bg-[#FCFCFB] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+          className="h-8 max-w-[220px] appearance-none truncate rounded-full bg-white pl-3 pr-7 text-[13px] text-ink shadow-[0_0_0_1px_#E6E6E3] outline-none hover:bg-[#FCFCFB] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
         >
           {children}
         </select>

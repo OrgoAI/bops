@@ -554,7 +554,7 @@ const [setup] = await until(() => ofEvent("bops_setup_finished", mark).length &&
 assert.deepEqual(setup.properties.skipped, ["relay"]);
 
 // Starting over keeps the switch.
-assert.match(readFileSync(join(root, "lib/server/store.ts"), "utf8"), /const \{ host, account, usage, relay, macs, analyticsOff \} = box\.state;[\s\S]{0,200}migrate\(\{ host, account, usage, relay, macs, analyticsOff,/);
+assert.match(readFileSync(join(root, "lib/server/store.ts"), "utf8"), /const \{ host, account, usage, relay, macs, analyticsOff(?:, \w+)* \} = box\.state;[\s\S]{0,200}migrate\(\{ host, account, usage, relay, macs, analyticsOff,/);
 
 // Signed out: the switch can't be set.
 S.update((s) => (s.account = undefined));

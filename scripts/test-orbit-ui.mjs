@@ -848,8 +848,41 @@ await test("near the bottom of the window it opens above its anchor", async () =
   }
 });
 
+await test("an issue from Gmail shows the email itself under its summary, read from its own route as it opens (source-view.tsx, scripts/test-source-view.mjs); one from Plain reads nothing", async () => {
+  const thread = {
+    app: "gmail",
+    account: { id: "ca_1", title: "Work" },
+    threadId: "18c0a1b2c3d4e5f6",
+    subject: "Acme is down",
+    messages: [{ id: "g1", from: { name: "Kevin Example", email: "kevin@example.com" }, to: [{ email: "alex@example.com", me: true }], cc: [], at: 1000, snippet: "Nothing loads", body: "Nothing loads since 9.", files: [] }],
+    reply: { to: { name: "Kevin Example", email: "kevin@example.com" }, all: { to: [], cc: [] } },
+  };
+  tagged = [issue("issue-9", { ws: "w9", sourceApp: "gmail", summary: "Acme can't load the dashboard.", url: "https://mail.google.com/mail/u/0/#inbox/18c0a1b2c3d4e5f6" }), issue("issue-8", { ws: "w9", sourceApp: "plain", summary: "A ticket." })];
+  const before = answer;
+  answer = (url, method, body) => (url === "/api/orbit/issues/issue-9/source?ws=w9" && method === "GET" ? { status: 200, body: { source: thread } } : before(url, method, body));
+  const m = await mount(opened("issue-9", "u9src"));
+  try {
+    assert.ok(calls.some((c) => c.url === "/api/orbit/issues/issue-9/source?ws=w9" && c.method === "GET"));
+    const text = m.box.textContent;
+    const at = (s) => text.indexOf(s);
+    assert.ok(at("Acme can't load the dashboard.") < at("Open in Gmail") && at("Open in Gmail") < at("Acme is down") && at("Acme is down") < at("History"), "summary, its link, the email, then the history");
+    assert.ok(m.box.querySelector('[data-thread="gmail"] [data-reply] textarea'));
+  } finally {
+    await m.done();
+    answer = before;
+  }
+  calls.length = 0;
+  const n = await mount(opened("issue-8", "u9src2"));
+  try {
+    assert.ok(!calls.some((c) => c.url.includes("/source")), "nothing to read for Plain");
+    assert.ok(!n.box.querySelector("[data-source]"));
+  } finally {
+    await n.done();
+  }
+});
+
 await test("no em or en dashes in what these files show", async () => {
-  for (const f of ["components/app/orbit-issues.tsx", "components/app/memory-categories.tsx", "components/app/autopilot.tsx", "components/app/skills.tsx"]) {
+  for (const f of ["components/app/orbit-issues.tsx", "components/app/memory-categories.tsx", "components/app/autopilot.tsx", "components/app/skills.tsx", "components/app/source-view.tsx", "components/app/reply-drafts.tsx"]) {
     const src = readFileSync(`${root}/${f}`, "utf8");
     // Strings and JSX text only: the comments may say anything.
     const shown = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");

@@ -429,6 +429,32 @@ export class LiveHub {
     this.timer = undefined;
   }
 
+  /**
+   * The account's user was deleted (delete-user.ts): every stream of its workspaces ends (the user's own
+   * devices and the members watching them), so does every stream they had open of someone else's as a
+   * member, and what the hub kept of the account (moods, buffered events, its state's fingerprints)
+   * goes. Nobody comes back in: the user's sign-in is turned down, and a member reads no workspace of
+   * theirs (there's no state). How many streams ended.
+   */
+  closeAccount(account: string): number {
+    let ended = 0;
+    for (const mine of this.accounts.values())
+      for (const e of mine.values())
+        for (const s of [...e.subs]) {
+          if (e.account !== account && s.caller !== account) continue;
+          try {
+            s.end();
+          } catch {}
+          this.close(e, s);
+          ended++;
+        }
+    for (const e of this.accounts.get(account)?.values() ?? []) this.cut(e, e.ring.length);
+    this.accounts.delete(account);
+    this.seen.delete(account);
+    this.budgets.delete(account);
+    return ended;
+  }
+
   /** End every stream (the cloud stopping): each device reconnects to the next start and is reset. */
   closeAll() {
     for (const mine of this.accounts.values())

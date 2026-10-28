@@ -1,4 +1,7 @@
+import { appsOpenTo } from "@/cloud/apps-team";
 import type { AppState } from "./types";
+
+export { appsOpenTo };
 
 /**
  * Who has apps while they're being finished: Orgo's own team, an account signed in with an @orgo.ai
@@ -9,15 +12,10 @@ import type { AppState } from "./types";
  * the web list; their bots get none of those tools, no apps note, nothing about Apps in How Bops works,
  * and none of those skills (not listed, read or copied to a computer); /api/made-apps and
  * /api/hosted-apps answer 404; and nothing of apps syncs with Orgo or sets Ingot up for them. The app
- * and the server ask this one rule (as lib/crm-access.ts does for the CRM). Opening it to everyone is
- * this file alone.
+ * and the server ask this one rule (as lib/crm-access.ts does for the CRM), and so does Bops Cloud: who
+ * it is (appsOpenTo) is kept in cloud/apps-team.ts, which imports nothing. Opening it to everyone is that
+ * file alone.
  */
-const TEAM = /@orgo\.ai$/i;
-
-/** Are apps open to this sign-in email? */
-export function appsOpenTo(email: string | null | undefined): boolean {
-  return typeof email === "string" && TEAM.test(email.trim());
-}
 
 /** Are apps open to the account signed in to this state? */
 export const appsOpen = (state: Pick<AppState, "account"> | null | undefined): boolean => appsOpenTo(state?.account?.user.email);

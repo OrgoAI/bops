@@ -184,7 +184,7 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
                 <span className={LABEL_TEXT}>Files</span>
                 {fields.files.map((f) => (
                   <details key={f.path} className="rounded-[12px] bg-[#F7F7F6] px-3 py-2 text-[12px] leading-[17px] text-[#3A3A38]">
-                    <summary className="cursor-pointer font-mono">{f.path}</summary>
+                    <summary className="font-mono">{f.path}</summary>
                     <pre className="whitespace-pre-wrap pt-1.5 font-mono text-[11.5px]">{f.content}</pre>
                   </details>
                 ))}

@@ -2,7 +2,7 @@ import { trackCloudEvent } from "./analytics.ts";
 import type pg from "pg";
 import type { CloudUser } from "./auth.ts";
 import { config } from "./config.ts";
-import { ensureUserRow, query, tx } from "./db.ts";
+import { accountDeleted, ensureUserRow, query, tx } from "./db.ts";
 import { HttpError, readJson, sendJson, type Route } from "./http.ts";
 import { linkVerifiedNumber } from "./lines.ts";
 import type { VerifyCheckBody, VerifyResult, VerifyStartBody } from "./protocol.ts";
@@ -140,10 +140,13 @@ async function count(c: pg.PoolClient, key: string, limit: number, message: (min
 /**
  * Before a send: hold the recipient for this user (or keep holding it; another user's unexpired hold
  * wins), keep the gap since the last send, and count the send against every limit. All or nothing.
- * `fresh` is true when this call started the hold, so a send that fails can let it go.
+ * `fresh` is true when this call started the hold, so a send that fails can let it go. A user deleted
+ * lately (bops.deleted_users, delete-user.ts) holds nothing and is sent nothing (accountDeleted): a hold
+ * names them.
  */
 async function reserve(userId: string, channel: Channel, to: string): Promise<{ fresh: boolean }> {
   return tx(async (c) => {
+    if ((await c.query("SELECT 1 FROM bops.deleted_users WHERE user_id = $1", [userId])).rowCount) throw accountDeleted();
     const held = await c.query<{ fresh: boolean }>(
       `INSERT INTO bops.cloud_objects (provider, object_id, kind, user_id) VALUES ('twilio', $1, 'verification', $2)
        ON CONFLICT (provider, object_id) DO UPDATE

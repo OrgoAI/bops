@@ -1,8 +1,9 @@
 import "server-only";
 import { readlinkSync } from "node:fs";
 import { trackServerEvent } from "./analytics";
-import { botChatId, lastWorkOf, levelOf, live, pausedForOk, workspaceOf, type Bot, type Delivery, type Message, type Routine, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
+import { botChatId, lastWorkOf, levelOf, live, pausedForOk, workspaceOf, type Bot, type Delivery, type Message, type ReplyDraft, type Routine, type SkillProposal, type RoutineRun, type RoutineSource, type Schedule, type Session } from "@/lib/types";
 import { appNameFor, CHECK_TEMPLATE, tagsOf } from "@/lib/routine-catalog";
+import { draftsText } from "@/lib/reply-drafts";
 import { describeSchedule as describe, EVENT_CHECK_MINUTES, eventWindow, inHours, nextRun, sameWallTime, normalizeSchedule, resolveOnce, validTimeZone, whenText } from "@/cloud/schedule";
 import { cleanText, routineChanged, routineRan, syncRoutinesOnStart } from "./routine-sync";
 import { liveRoutine } from "./live-core";
@@ -108,9 +109,10 @@ const inSentence = (when: string) => when.replace(/^(Today|Tomorrow|Yesterday)\b
  * (RoutineRun.by): if its bot moves off the computer before the run ends, Bops Cloud still takes the run's
  * end and its words in the chat from it (cloud/computer-scope.ts runsOf, runsBy), so its result isn't lost.
  * A meeting routine's run that finished handled its window: the next one starts where it ended
- * (eventsThrough).
+ * (eventsThrough). `said`: what a run that went well said in the chat (its message), which goes to Orgo
+ * with its record (routine-sync.ts runSummary), so its report is there on another Mac too.
  */
-function record(routineId: string, given: RoutineRun): RoutineRun {
+function record(routineId: string, given: RoutineRun, said?: string): RoutineRun {
   const device = onRunner() ? stateDevice() : null;
   const before = getState().routines.find((x) => x.id === routineId);
   const run: RoutineRun = { ...given, ...(device ? { by: device } : {}) };
@@ -124,7 +126,7 @@ function record(routineId: string, given: RoutineRun): RoutineRun {
     if (w && w.to > (r.eventsThrough ?? 0)) r.eventsThrough = w.to;
     r.last = run;
   });
-  routineRan(routineId, run);
+  routineRan(routineId, run, said);
   return run;
 }
 
@@ -569,10 +571,11 @@ const keepRanNow = (sessionId: string, r: Routine, opts: RunOpts) => {
 };
 
 /**
- * What a run posts in the chat carries its routine, and whether a chat message asked for it (Run now), so a
- * turn by text or in a channel sends it back (types.ts turnsOwn). One asked for in the app is no turn's.
+ * What a run posts in the chat carries its routine, when its run began (`at`, so its report goes with that
+ * run: lib/routine-reports.ts), and whether a chat message asked for it (Run now), so a turn by text or in a
+ * channel sends it back (types.ts turnsOwn). One asked for in the app is no turn's.
  */
-const tagOf = (r: Routine, opts: RunOpts): NonNullable<Message["routine"]> => ({ id: r.id, ...(opts.manual && opts.manual !== "app" ? { manual: true as const } : {}) });
+const tagOf = (r: Routine, opts: RunOpts, at: number): NonNullable<Message["routine"]> => ({ id: r.id, at, ...(opts.manual && opts.manual !== "app" ? { manual: true as const } : {}) });
 
 /**
  * A reminder: recorded first, and on a computer's runner posted and sent only once Bops Cloud took that
@@ -582,17 +585,18 @@ const tagOf = (r: Routine, opts: RunOpts): NonNullable<Message["routine"]> => ({
  */
 async function remind(r: Routine, b: Bot, at: number, opts: RunOpts): Promise<RoutineRun> {
   const chatId = botChatId(b.id);
-  record(r.id, { at, status: "ok" });
+  const outside = r.fromOutside ? `Reminder set up by ${r.fromOutside}: ${r.reminder}` : undefined;
+  record(r.id, { at, status: "ok" }, outside ?? r.reminder);
   if (onRunner() && !(await runLanded(r.id, at))) return notLanded(at);
   // Late: said first, so "call Bob at 9" read at 11 isn't taken for on time.
   if (isLate(opts, at)) addMessage({ chatId, role: "system", text: chipText(r, opts) });
   // Someone else's words are a note saying whose they are, never the bot's own (which it would later read as what it said).
-  if (r.fromOutside) {
-    addMessage({ chatId, role: "system", text: `Reminder set up by ${r.fromOutside}: ${r.reminder}`, routine: tagOf(r, opts) });
+  if (outside) {
+    addMessage({ chatId, role: "system", text: outside, routine: tagOf(r, opts, at) });
     return routine(r.id)?.last ?? { at, status: "ok" };
   }
-  const m = addMessage({ chatId, role: "bot", botId: b.id, text: r.reminder!, routine: tagOf(r, opts) });
-  recordDelivery(r.id, at, await sendOut(r, r.reminder!, m.id));
+  const m = addMessage({ chatId, role: "bot", botId: b.id, text: r.reminder!, routine: tagOf(r, opts, at) });
+  recordDelivery(r.id, at, await sendOut(r, r.reminder!, m.id, at));
   return routine(r.id)?.last ?? { at, status: "ok" };
 }
 
@@ -631,7 +635,7 @@ const chatPaused = (r: Routine) => (getState().appApprovals ?? []).some((a) => a
  * A chat run's turn that paused for the user's OK went on from their reply (chat.ts resumeChat) and ended: the run
  * ends as any chat run does, posted, recorded and sent on, as the run that began at its running record's time.
  */
-export async function chatRunResumed(routineId: string, out: { text: string | null; error?: string; sessionId?: string }): Promise<void> {
+export async function chatRunResumed(routineId: string, out: { text: string | null; error?: string; sessionId?: string; drafts?: ReplyDraft[]; skillProposals?: SkillProposal[] }): Promise<void> {
   const r = routine(routineId);
   const b = r && getState().bots.find((x) => x.id === r.botId);
   if (!r || !b) return;
@@ -639,16 +643,21 @@ export async function chatRunResumed(routineId: string, out: { text: string | nu
   await endChatRun(r, b, at, {}, out).catch((e: Error) => failed(r, at, e.message));
 }
 
-/** What a chat run does with its turn's answer: says it (or keeps quiet), records the run, and sends it on. */
-async function endChatRun(r: Routine, b: Bot, at: number, opts: RunOpts, out: { text: string | null; error?: string; sessionId?: string }, before?: RoutineRun): Promise<RoutineRun> {
+/**
+ * What a chat run does with its turn's answer: says it (or keeps quiet), records the run, and sends it on. Replies it
+ * offered for the user to send (Message.drafts) go on its message as cards; where they can't (a text, an email, a
+ * channel) and in the run's record, as words after it (lib/reply-drafts.ts draftsText). Changes it proposed to a
+ * skill (Message.skillProposals, skill-proposals.ts) go on its message as cards too, for the owner to accept in Bops.
+ */
+async function endChatRun(r: Routine, b: Bot, at: number, opts: RunOpts, out: { text: string | null; error?: string; sessionId?: string; drafts?: ReplyDraft[]; skillProposals?: SkillProposal[] }, before?: RoutineRun): Promise<RoutineRun> {
   if (out.error) return failed(r, at, out.error, before);
   const answer = out.text?.trim() ?? "";
   const text = isNothing(answer) || (out.sessionId && r.quiet) ? "" : answer;
   const chatId = botChatId(b.id);
   let posted: string | undefined;
   if (text) {
-    if (isLate(opts, at)) addMessage({ chatId, role: "system", text: chipText(r, opts), routine: tagOf(r, opts) });
-    const m = addMessage({ chatId, role: "bot", botId: b.id, text, routine: tagOf(r, opts) });
+    if (isLate(opts, at)) addMessage({ chatId, role: "system", text: chipText(r, opts), routine: tagOf(r, opts, at) });
+    const m = addMessage({ chatId, role: "bot", botId: b.id, text, routine: tagOf(r, opts, at), ...(out.drafts?.length ? { drafts: out.drafts } : {}), ...(out.skillProposals?.length ? { skillProposals: out.skillProposals } : {}) });
     // Words that only start a thread aren't news: its result is asked about when it comes.
     if (!out.sessionId) pingIfWorthIt(m.id, r.title, text);
     posted = m.id;
@@ -659,8 +668,9 @@ async function endChatRun(r: Routine, b: Bot, at: number, opts: RunOpts, out: { 
     return record(r.id, { at, status: "running", sessionId: out.sessionId, ...prevError(before) });
   }
   if (!posted) return record(r.id, { at, status: "quiet" });
-  record(r.id, { at, status: "ok" });
-  recordDelivery(r.id, at, await sendOut(r, text, posted));
+  const whole = out.drafts?.length ? `${text}\n\n${draftsText(out.drafts)}` : text;
+  record(r.id, { at, status: "ok" }, whole);
+  recordDelivery(r.id, at, await sendOut(r, whole, posted, at));
   return routine(r.id)?.last ?? { at, status: "ok" };
 }
 
@@ -692,8 +702,8 @@ async function failed(r: Routine, at: number, error: string, before?: RoutineRun
   const again = before?.status === "failed" && before.error === error;
   record(r.id, { at, status: "failed", error });
   if (onRunner() && !(await runLanded(r.id, at))) return notLanded(at);
-  if (!again) addMessage({ chatId: botChatId(r.botId), role: "system", text: `"${r.title}" didn't run: ${error}`, routine: { id: r.id } });
-  if (!again && error !== NO_CREDIT_FOR_ROUTINES) recordDelivery(r.id, at, await sendOut(r, `"${r.title}" didn't run: ${error}`));
+  if (!again) addMessage({ chatId: botChatId(r.botId), role: "system", text: `"${r.title}" didn't run: ${error}`, routine: { id: r.id, at } });
+  if (!again && error !== NO_CREDIT_FOR_ROUTINES) recordDelivery(r.id, at, await sendOut(r, `"${r.title}" didn't run: ${error}`, undefined, at));
   return routine(r.id)?.last ?? { at, status: "failed", error };
 }
 
@@ -795,23 +805,24 @@ export async function onRoutineTaskEnd(s: Session, answer: string | undefined, f
     chip();
     // Stopped by the user: they know. Set up by text before deliverTo: the thread texts its failure back itself (textBack).
     if (r.deliverTo && !opts.chatOnly && !/^(Stopped by you|Paused while you took over)/.test(failure))
-      void deliver(r, `"${r.title}" didn't finish: ${failure}`).then((d) => recordDelivery(r.id, at, d));
+      void deliver(r, `"${r.title}" didn't finish: ${failure}`, at).then((d) => recordDelivery(r.id, at, d));
     return { suppress: false };
   }
   if (r.quiet && (!answer?.trim() || isNothing(answer))) {
     record(r.id, { at, status: "quiet", sessionId: s.id });
     return { suppress: true };
   }
-  record(r.id, { at, status: "ok", sessionId: s.id });
+  // What it said: its result, as sessions.ts posts it.
+  record(r.id, { at, status: "ok", sessionId: s.id }, answer?.trim() || "Done.");
   chip();
   // The thread's own text back (textBack) covers routines set up by text before deliverTo.
-  if (r.deliverTo) void deliver(r, answer?.trim() || "Done.").then((d) => recordDelivery(r.id, at, d));
+  if (r.deliverTo) void deliver(r, answer?.trim() || "Done.", at).then((d) => recordDelivery(r.id, at, d));
   return { suppress: false };
 }
 
-/** A run's words to wherever the routine's results go: deliverTo, else (set up by text before that) the number it was set up from. */
-async function sendOut(r: Routine, text: string, tag?: string): Promise<RoutineRun["delivery"]> {
-  if (r.deliverTo) return deliver(r, text);
+/** A run's words to wherever the routine's results go: deliverTo, else (set up by text before that) the number it was set up from. `at`: when the run began. */
+async function sendOut(r: Routine, text: string, tag?: string, at?: number): Promise<RoutineRun["delivery"]> {
+  if (r.deliverTo) return deliver(r, text, at);
   if (!r.textTo) return undefined;
   const to = r.textTo.to;
   try {
@@ -821,7 +832,7 @@ async function sendOut(r: Routine, text: string, tag?: string): Promise<RoutineR
     await sendText(r.textTo.botId, to, forText(text), { tag });
     return { status: "sent", to, at: Date.now() };
   } catch (e) {
-    return notSent(r, "by text", to, (e as Error).message);
+    return notSent(r, "by text", to, (e as Error).message, at);
   }
 }
 
@@ -834,9 +845,12 @@ function forText(text: string) {
   return `${(at > TEXT_MAX / 2 ? cut.slice(0, at) : cut).trimEnd()}… (the rest is in Bops)`;
 }
 
-/** It couldn't be sent: said in the bot's chat, and returned to be recorded (`to` is a short name the window shows: "Text", "Email", "Slack #sales"). */
-function notSent(r: Routine, how: string, to: string, error: string): NonNullable<RoutineRun["delivery"]> {
-  addMessage({ chatId: botChatId(r.botId), role: "system", text: `Couldn't send "${r.title}" ${how}: ${error}`, routine: { id: r.id } });
+/**
+ * It couldn't be sent: said in the bot's chat (with when its run began, `at`), and returned to be recorded
+ * (`to` is a short name the window shows: "Text", "Email", "Slack #sales").
+ */
+function notSent(r: Routine, how: string, to: string, error: string, at?: number): NonNullable<RoutineRun["delivery"]> {
+  addMessage({ chatId: botChatId(r.botId), role: "system", text: `Couldn't send "${r.title}" ${how}: ${error}`, routine: { id: r.id, ...(at !== undefined ? { at } : {}) } });
   return { status: "failed", to, error, at: Date.now() };
 }
 
@@ -845,9 +859,9 @@ function notSent(r: Routine, how: string, to: string, error: string): NonNullabl
  * from the bot's number (or its team's), an email to the user from the bot's inbox (or its team's; to the
  * user's own address it goes without asking), or a post in Slack, Telegram or Discord, where markdown
  * links read as words and an address. Undefined when it goes nowhere else. A failure is said in the bot's
- * chat too.
+ * chat too, with when its run began (`at`).
  */
-export async function deliver(r: Routine, text: string): Promise<RoutineRun["delivery"]> {
+export async function deliver(r: Routine, text: string, at?: number): Promise<RoutineRun["delivery"]> {
   const d = r.deliverTo;
   if (!d || !text.trim()) return undefined;
   const b = bot(r.botId);
@@ -862,7 +876,7 @@ export async function deliver(r: Routine, text: string): Promise<RoutineRun["del
       await sendText(via.from.id, to, via.from.id === b.id ? body : `${b.name}: ${body}`);
       return { status: "sent", to, at: Date.now() };
     } catch (e) {
-      return notSent(r, "by text", "Text", (e as Error).message);
+      return notSent(r, "by text", "Text", (e as Error).message, at);
     }
   }
   if (d.kind === "email") {
@@ -876,7 +890,7 @@ export async function deliver(r: Routine, text: string): Promise<RoutineRun["del
       if (!/^Sent to /.test(said)) throw new Error(said.replace(/\s*Nothing was sent\.?$/, "").replace(/\.$/, ""));
       return { status: "sent", to, at: Date.now() };
     } catch (e) {
-      return notSent(r, "by email", "Email", (e as Error).message);
+      return notSent(r, "by email", "Email", (e as Error).message, at);
     }
   }
   const link = (getState().channels ?? []).find((l) => l.id === d.linkId);
@@ -888,7 +902,7 @@ export async function deliver(r: Routine, text: string): Promise<RoutineRun["del
     await postTo(d.linkId, link && b && link.botId !== b.id ? `${b.name}: ${words}` : words, d.chat);
     return { status: "sent", to: place, at: Date.now() };
   } catch (e) {
-    return notSent(r, `to ${place}`, place, (e as Error).message);
+    return notSent(r, `to ${place}`, place, (e as Error).message, at);
   }
 }
 

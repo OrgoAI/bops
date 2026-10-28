@@ -1,7 +1,7 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
 import { lastWorkOf, live, pausedForOk, workspaceOf, MAIN_WORKSPACE, botChatId, type AppState, type Bot, type Chat, type Message, type Session, type Reaction, type Tapback } from "@/lib/types";
-import { fileStore, onPostgres, onRunner, selfHosted, type Persistence, type StateAccess } from "./persist";
+import { fileStore, onPostgres, onRunner, selfHosted, type Persistence, type StateAccess, type Went } from "./persist";
 import { cloudStore } from "./persist-cloud";
 import { pgStore } from "./persist-pg";
 import { userBopsHome, userChromeDir, userDataDir } from "./user-paths";
@@ -219,9 +219,11 @@ const g = globalThis as unknown as {
   __bops2?: { state: AppState; version: number; swaps?: number; arrivals?: number };
   __bopsWatchers?: Map<string, () => void>;
   __bopsArrivalWatchers?: Map<string, () => void>;
+  __bopsGoneWatchers?: Map<string, (gone: Went) => void>;
   __bopsLoadWatchers?: Map<string, () => void>;
 };
 const arrivalWatchers = (g.__bopsArrivalWatchers ??= new Map());
+const goneWatchers = (g.__bopsGoneWatchers ??= new Map());
 const loadWatchers = (g.__bopsLoadWatchers ??= new Map());
 const access: StateAccess = {
   get: () => box.state,
@@ -237,6 +239,9 @@ const access: StateAccess = {
     box.arrivals = (box.arrivals ?? 0) + 1;
     box.version++;
     for (const fn of arrivalWatchers.values()) fn();
+  },
+  went(gone) {
+    for (const fn of goneWatchers.values()) fn(gone);
   },
 };
 // A computer's runner keeps the user's state where their Mac does, in Bops Cloud, whatever else is set (instrumentation.ts refuses to start one that sets it).
@@ -302,6 +307,22 @@ export const statePulledAt = () => store.pulledAt();
 export const stateDevice = () => store.device();
 /** A newer Bops of the user's wrote their state, so this one runs no routines and says nothing is in use until it's updated. */
 export const stateTooNew = () => store.tooNew();
+/**
+ * Whether these messages, gone from the state here, are gone from Bops Cloud too as far as this Mac knows (its
+ * last save took their removal); null for a store that doesn't keep the state elsewhere, whose flushState says.
+ */
+export const removalsUp = (ids: readonly string[]): boolean | null => (store.removedUp ? store.removedUp(ids) : null);
+/**
+ * Whether Bops Cloud's copy of the state, as this server last saved or read it, holds none of these threads:
+ * their delete is up. Null for a store that doesn't keep the state elsewhere, whose flushState says.
+ */
+export function threadsUp(ids: readonly string[]): boolean | null {
+  if (!store.cloudCopy) return null;
+  const copy = store.cloudCopy();
+  if (!copy) return false;
+  const want = new Set(ids);
+  return !(Array.isArray(copy.sessions) ? (copy.sessions as { id?: unknown }[]) : []).some((x) => typeof x?.id === "string" && want.has(x.id));
+}
 
 /** How long Bops waits before it tries again to save a change Bops Cloud couldn't be reached for (changeLanded). */
 const START_AGAIN_MS = 5_000;
@@ -454,6 +475,8 @@ const watchers = (g.__bopsWatchers ??= new Map());
 export const watchChanges = (name: string, fn: () => void) => void watchers.set(name, fn);
 /** Run `fn` after changes made elsewhere come in (another Mac's or a runner's, merged in), by name so a code reload replaces it. */
 export const watchArrivals = (name: string, fn: () => void) => void arrivalWatchers.set(name, fn);
+/** Run `fn` with what another Mac's changes took out of the state here as they're merged in (persist.ts Went: it deleted them there), by name. */
+export const watchGone = (name: string, fn: (gone: Went) => void) => void goneWatchers.set(name, fn);
 
 /** A change: saved behind, and passed on to whatever watches for one. */
 function changed() {
@@ -479,7 +502,7 @@ export function updateUnseen(fn: (state: AppState) => void) {
   changed();
 }
 
-export const id = (prefix: string) => `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+export const id = (prefix: string) => `${prefix}_${Date.now().toString(36)}${randomBytes(2).toString("hex")}`;
 
 export const bot = (botId: string) => box.state.bots.find((b) => b.id === botId);
 export const chat = (chatId: string) => box.state.chats.find((c) => c.id === chatId);
@@ -546,10 +569,10 @@ export async function resetState() {
   // Starting over isn't signing out: who's signed in stays (their key stays in the Keychain), and
   // the bots call them by their Orgo name again, as on a first sign-in. What Bops has cost so far
   // stays too, and so do this Mac's routing switch and the user's other Macs' own settings.
-  // The user's usage data switch stays as they set it. Everything else goes: the bots with their
-  // chats, threads, routines and procedures.
-  const { host, account, usage, relay, macs, analyticsOff } = box.state;
+  // The user's usage data switch stays as they set it, and so do their Your data choices (how long
+  // chats are kept). Everything else goes: the bots with their chats, threads, routines and procedures.
+  const { host, account, usage, relay, macs, analyticsOff, privacy } = box.state;
   const name = account?.user.name?.slice(0, 80);
-  box.state = migrate({ host, account, usage, relay, macs, analyticsOff, owner: name ? { name } : undefined });
+  box.state = migrate({ host, account, usage, relay, macs, analyticsOff, privacy, owner: name ? { name } : undefined });
   update(() => {});
 }

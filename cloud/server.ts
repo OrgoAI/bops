@@ -7,6 +7,7 @@ import { captureCloudException, inTelemetryScope, shutdownTelemetry } from "./an
 import { config } from "./config.ts";
 import { checkCreditAccess } from "./credit.ts";
 import { migrate, query } from "./db.ts";
+import * as deleteUser from "./delete-user.ts";
 import { HttpError, matches, refuseUpgrade, sendJson, type Route, type Upgrade } from "./http.ts";
 import { BOPS_DEVICE_HEADER, COMPUTER_NOT_ALLOWED } from "./protocol.ts";
 import * as handles from "./handles.ts";
@@ -31,7 +32,7 @@ import * as verify from "./verify.ts";
 /**
  * Bops Cloud. One process serves every user: each module owns its routes (session.ts, proxy.ts,
  * verify.ts, lines.ts, handles.ts, plans.ts, ops.ts, tunnel.ts, hooks.ts, slack.ts, state.ts, pages.ts,
- * usage.ts, agent.ts, live.ts, members.ts) and this file only puts them together. See README.md.
+ * usage.ts, agent.ts, live.ts, members.ts, delete-user.ts) and this file only puts them together. See README.md.
  */
 
 const health: Route = {
@@ -67,6 +68,7 @@ export const routes = (): Route[] => [
   ...agent.routes,
   ...live.routes,
   ...members.routes,
+  ...deleteUser.routes,
 ];
 export const upgrades = (): Upgrade[] => [...tunnel.upgrades, ...proxy.upgrades];
 
@@ -227,7 +229,7 @@ async function main() {
   const stopReconcile = reconcile.startSweeps();
   // Agent turns are held to the user's AI credit while they run, and stopped when it's used up (turn-guard.ts).
   const stopGuard = guard.startGuard();
-  // Messages removed more than 30 days ago go for good (state.ts).
+  // Messages removed more than 30 days ago go for good, and so do copies before Start over past 30 days or the newest 5 (state.ts).
   const stopStateSweeps = state.startStateSweeps();
   // Which apps the cloud serves (bops.app_policy), read every minute (app-version.ts).
   const stopAppPolicy = startAppPolicy();

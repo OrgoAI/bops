@@ -546,6 +546,15 @@ assert.deepEqual(
   "no CRM tools",
 );
 assert.doesNotMatch(outsideAsk.instructions, /Bops CRM:/, "and no CRM note");
+assert.ok(!outsideAsk.tools.some((t) => t.name === "sign_in_from_vault"), "nor the owner's saved logins");
+// One a member with Write asked for (StartOptions.member): none of the owner's own either, logins, CRM or keys.
+answers.push(() => response("resp_m1", [said("The table is booked for 6.")]));
+const fromMember = X.startSession({ botId: main.id, goal: "Book a table for 6", title: "Table for 6", where: "cloud", fresh: true, member: { userId: "user_dee", email: "dee@example.com", name: "Dee" } });
+s = await ended(fromMember.id);
+assert.equal(s.status, "done", `it finished (${s.error ?? ""})`);
+const memberNames = asked.at(-1).tools.map((t) => t.name ?? t.type);
+assert.ok(!memberNames.some((n) => n === "sign_in_from_vault" || n === "call_api" || n.startsWith("crm_")), `a member's task has none of the owner's own: ${memberNames}`);
+assert.doesNotMatch(asked.at(-1).instructions, /call sign_in_from_vault|Bops CRM:/, "and isn't told of them");
 // The user's own tasks still have them.
 answers.push(() => response("resp_o2", [said("Done.")]));
 await task("Book a table for 4", "Table for 4");

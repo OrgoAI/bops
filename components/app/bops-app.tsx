@@ -22,13 +22,15 @@ import { BoppyLoading, BotMoodsFrom, CallTalking, talkingStore } from "./mascot"
 import { MemoryView, type MemoryOpen } from "./memory-categories";
 import { CHAT_TAB, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
 import { MadeAppsHome, MadeAppTab, OpenMadeApp } from "./made-apps";
-import { HostedAppTab, OpenHostedApp } from "./hosted-apps";
+import { HostedAppTab, OpenAppTask, OpenHostedApp } from "./hosted-apps";
 
 /** Your Mac's tab, and the chat's bot's profile (it follows the chat, like the computer tab); both open on demand. */
 const MAC_TAB = "tab_mac";
 import { opensMacTab, PROFILE_TAB, tabsShown } from "./tabs-shown";
 import { Sidebar } from "./sidebar";
-import { footerPageOf } from "./sidebar-footer";
+import { SidebarRail } from "./sidebar-rail";
+import type { BotMenuActions } from "./bot-menu";
+import { footerPageOf, openFooterPage } from "./sidebar-footer";
 import { CloudUnreachable, SignIn, useAuthStatus } from "./sign-in";
 import { Setup, ThisMacSettings } from "./setup";
 import { TooltipLayer } from "./tooltip";
@@ -44,6 +46,7 @@ import { viewOnly } from "./view-only";
 import { readOnlyLine } from "@/lib/shared";
 import { duePings } from "@/lib/pings";
 import { UsageData, useAnalytics } from "./usage-data";
+import { YourData } from "./your-data";
 import { trackEvent } from "@/lib/analytics";
 import { OwnerEmail, useOwnerEmailInfo } from "./owner-email";
 import { OwnerPhone, useOwnerPhone, usePhoneInfo, type OwnerNumber, type PendingCode } from "./owner-phone";
@@ -115,13 +118,29 @@ function Bops({ state }: { state: AppState | null }) {
   }, [threadId]);
   const [composing, setComposing] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
-  // The sidebar on the left, shown unless you hid it (this Mac remembers; ⌘\ or the toggle).
+  // The sidebar on the left, or its rail of icons once you collapse it (sidebar-rail.tsx; this Mac
+  // remembers; ⌘\ or the toggle).
   const [sidebarOpen, setSidebarOpen] = useState(() => typeof window === "undefined" || localStorage.getItem(SIDEBAR_KEY) !== "0");
-  const toggleSidebar = () =>
-    setSidebarOpen((open) => {
-      localStorage.setItem(SIDEBAR_KEY, open ? "0" : "1");
-      return !open;
+  // Collapsing or expanding, the column slides (SLIDE), what's in it cut off at its edge until it's done
+  // (then a menu in it may open past its edge again, as the rail's account menu does). Counted, so a
+  // second toggle mid-slide waits its own full slide. Clipped, not hidden: a search opening focused in
+  // it can't scroll the column sideways.
+  const [sliding, setSliding] = useState(0);
+  useEffect(() => {
+    if (!sliding) return;
+    const t = setTimeout(() => setSliding(0), SIDEBAR_SLIDE_MS + 60);
+    return () => clearTimeout(t);
+  }, [sliding]);
+  // Expanded from the rail's Search or its workspace: the sidebar opens with that open.
+  const [openWith, setOpenWith] = useState<"search" | "workspaces" | null>(null);
+  const toggleSidebar = (open: "search" | "workspaces" | null = null) => {
+    setOpenWith(open);
+    setSliding((n) => n + 1);
+    setSidebarOpen((was) => {
+      localStorage.setItem(SIDEBAR_KEY, was ? "0" : "1");
+      return !was;
     });
+  };
   const [focus, setFocus] = useState(false);
   // Full width shows your Mac instead of a bot's computer.
   const [macFocus, setMacFocus] = useState(false);
@@ -255,6 +274,16 @@ function Bops({ state }: { state: AppState | null }) {
       window.removeEventListener("resize", measure);
     };
   }, [callSlot]);
+  // The sidebar collapsing or expanding moves the chat column without resizing it: measured again once it
+  // has slid (before the slide's own end clears `sliding`, which would cancel this).
+  useEffect(() => {
+    if (!callSlot || !sliding) return;
+    const t = setTimeout(() => {
+      const r = callSlot.getBoundingClientRect();
+      setSlotBox({ x: r.left + r.width / 2, y: r.top });
+    }, SIDEBAR_SLIDE_MS + 30);
+    return () => clearTimeout(t);
+  }, [callSlot, sliding]);
   // (No app-wide clock: redrawing everything every second cost a full render a second. What shows a
   // running time keeps its own: the open thread, the sidebar's "5m", watch pills, the call timer.)
 
@@ -279,9 +308,11 @@ function Bops({ state }: { state: AppState | null }) {
         e.preventDefault();
         setComposing(true);
       }
-      // ⌘\ shows or hides the sidebar.
+      // ⌘\ collapses the sidebar to its rail, or expands it.
       if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
         e.preventDefault();
+        setOpenWith(null);
+        setSliding((n) => n + 1);
         setSidebarOpen((open) => {
           localStorage.setItem(SIDEBAR_KEY, open ? "0" : "1");
           return !open;
@@ -308,11 +339,11 @@ function Bops({ state }: { state: AppState | null }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // A workspace shared with the user open: nothing in the window changes anything (view-only.ts). Set as
-  // it renders, not in an effect: what it draws runs its effects first (a chat's mark read), and the
-  // ids there are often the user's own too.
-  const sharedRole = state?.shared?.role;
-  viewOnly(sharedRole ? readOnlyLine(sharedRole) : null);
+  // A workspace shared with the user open: nothing in the window changes anything through the app's own routes
+  // (view-only.ts); what a member with Write does there goes only through /api/workspaces/shared. Set as it
+  // renders, not in an effect: what it draws runs its effects first (a chat's mark read), and the ids there are
+  // often the user's own too.
+  viewOnly(state?.shared ? readOnlyLine() : null);
 
   if (!state) return <FirstLoad />;
 
@@ -340,6 +371,8 @@ function Bops({ state }: { state: AppState | null }) {
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
   // The footer's pill: People while its sheet is open, else the page in sight on the right.
   const footer = footerPageOf({ people: members, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory });
+  // The rail fills in only a page that's really open (no resting pill to fall back on).
+  const openPage = openFooterPage({ people: members, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory });
   if (recent.at(-1) !== active) {
     setRecent([...recent.filter((id) => id !== active), active].slice(-20));
     // Gone on to another tab: leaving that one later shouldn't hide the panel this one opened.
@@ -440,7 +473,8 @@ function Bops({ state }: { state: AppState | null }) {
   };
   // Something new waiting on you here (in the main bot's chat, from any bot): the panel shows its screen,
   // with its card, unless you're reading something (a page, the Vault) or have a computer full width.
-  // Never in a shared workspace: what waits there waits on its owner, not the viewer.
+  // Never in a shared workspace: its bots' screens are the owner's, which this window doesn't read (view-only.ts
+  // OWN_READS), and a Write member answers its card in the chat.
   const [ask] = state.shared ? [] : chatAsks(state, chat.id);
   const askKey = ask ? `${ask.id}:${ask.endedAt ?? ""}:${ask.blocker ?? ""}` : "";
   if (shownAsk !== askKey) {
@@ -644,6 +678,12 @@ function Bops({ state }: { state: AppState | null }) {
     openChat(id);
     if (state.chats.some((c) => c.id === id)) setPrefill({ chatId: id, text: text ?? "", at: Date.now() });
   };
+  /** The task Add app started (hosted-apps.tsx): its thread once the window has it, else its bot's chat, where its chip is. */
+  const openAppTask = (a: { chatId: string; sessionId: string }) => {
+    const s = state.sessions.find((x) => x.id === a.sessionId);
+    if (s) openThread(s);
+    else openChat(a.chatId);
+  };
   const openThread = (s: Session) => {
     const inView = s.chatId === chat.id || chat.botIds.includes(s.botId);
     if (!inView) setChatId(state.chats.some((c) => c.id === s.chatId) ? s.chatId : botChatId(s.botId));
@@ -718,17 +758,32 @@ function Bops({ state }: { state: AppState | null }) {
 
   const callBot = call ? state.bots.find((b) => b.id === call) : undefined;
   const callHere = !!callBot && !composing && !focus && !!callSlot && chat.kind === "bot" && chat.botIds[0] === callBot.id;
-  // The sidebar hidden, the chat (and panel) take its room; the title bar keeps a corner for the window's
-  // buttons and the toggle. (Whole class names, so Tailwind sees each one.)
+  // The sidebar collapsed to its rail, the chat (and panel) take the rest; the title bar's corner over the
+  // rail still clears the window's buttons. The title bar's columns are the same, sliding together.
+  // (Whole class names, so Tailwind sees each one.)
   const wide = focus || !panelOpen;
   const columns = sidebarOpen
     ? wide
       ? "grid-cols-[340px_minmax(0,1fr)]"
       : "grid-cols-[340px_440px_minmax(0,1fr)]"
     : wide
-      ? "grid-cols-[0px_minmax(0,1fr)]"
-      : "grid-cols-[0px_440px_minmax(0,1fr)]";
-  const titleColumns = sidebarOpen ? columns : wide ? "grid-cols-[120px_minmax(0,1fr)]" : "grid-cols-[120px_440px_minmax(0,1fr)]";
+      ? "grid-cols-[72px_minmax(0,1fr)]"
+      : "grid-cols-[72px_440px_minmax(0,1fr)]";
+  // What a bot's right-click menu does, in the sidebar and on its rail (bot-menu.tsx).
+  const botMenuActions: BotMenuActions = {
+    onChat: (id) => openChat(botChatId(id)),
+    onCall: (id) => {
+      openChat(botChatId(id));
+      setCall(id);
+    },
+    onComputer: openComputer,
+    onProfile: (id, section) => openProfile(id, section),
+    // Its chat, with the composer focused for the task (once the chat is on screen).
+    onNewTask: (id) => {
+      openChat(botChatId(id));
+      setTimeout(() => document.getElementById("composer")?.focus(), 60);
+    },
+  };
   const tabBar = (panelOpen || focus) && (
     <TabBar
       state={state}
@@ -751,15 +806,14 @@ function Bops({ state }: { state: AppState | null }) {
     <OpenCrm.Provider value={openCrm}>
     <OpenMadeApp.Provider value={openMadeApp}>
     <OpenHostedApp.Provider value={openHostedApp}>
+    <OpenAppTask.Provider value={openAppTask}>
       <TooltipLayer />
       <NoticePopup />
       {/* A shared workspace's chats aren't the user's own: nothing of them is said as what they're looking at. */}
       <ViewReporter chatId={state.shared ? "" : chat.id} threadId={state.shared ? null : (thread?.id ?? null)} />
       <div className="flex h-screen flex-col overflow-clip bg-white font-sans text-ink antialiased">
         <TitleBar
-          columns={titleColumns}
-          sidebarOpen={sidebarOpen}
-          onToggleSidebar={toggleSidebar}
+          columns={`${columns} ${SLIDE}`}
           wide={focus || !panelOpen}
           tabs={tabBar}
           panelOpen={panelOpen && !focus}
@@ -770,15 +824,36 @@ function Bops({ state }: { state: AppState | null }) {
             else setPanelOpen(!panelOpen);
           }}
         />
-        <div className={`grid min-h-0 flex-1 ${columns}`}>
-          {/* Hidden, an empty cell keeps the grid's columns in place. */}
+        <div className={`grid min-h-0 flex-1 ${columns} ${SLIDE}`}>
+          {/* The sidebar's column, its color and edge whichever it shows (an inset edge, so the sidebar's 340px fit). */}
+          <div className={`flex min-h-0 min-w-0 bg-[#F9F9F8] shadow-[inset_-1px_0_0_#ECECEA] ${sliding ? "overflow-clip" : ""}`}>
           {!sidebarOpen ? (
-            <div />
+            <SidebarRail
+              state={state}
+              chatId={chat.id}
+              footer={openPage}
+              menuActions={botMenuActions}
+              onExpand={() => toggleSidebar()}
+              onSearch={() => toggleSidebar("search")}
+              onWorkspaces={() => toggleSidebar("workspaces")}
+              onCompose={() => setComposing(true)}
+              onOpenChat={openChat}
+              onAccount={() => setAccount(true)}
+              onSettings={() => setSettings(true)}
+              onSetup={() => setSetup(true)}
+              onMembers={() => setMembers(true)}
+              onVault={() => openVault()}
+              onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item, null)}
+              onOpenMemory={openMemory}
+              onApps={openApps}
+            />
           ) : (
           <Sidebar
             state={state}
             chatId={chat.id}
-            onCollapse={toggleSidebar}
+            search={openWith === "search" ? "" : null}
+            workspaces={openWith === "workspaces"}
+            onCollapse={() => toggleSidebar()}
             onOpenChat={openChat}
             onOpenThread={openThread}
             onCompose={() => setComposing(true)}
@@ -792,22 +867,10 @@ function Bops({ state }: { state: AppState | null }) {
             onOpenMemory={openMemory}
             onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item, null)}
             footer={footer}
-            menuActions={{
-              onChat: (id) => openChat(botChatId(id)),
-              onCall: (id) => {
-                openChat(botChatId(id));
-                setCall(id);
-              },
-              onComputer: openComputer,
-              onProfile: (id, section) => openProfile(id, section),
-              // Its chat, with the composer focused for the task (once the chat is on screen).
-              onNewTask: (id) => {
-                openChat(botChatId(id));
-                setTimeout(() => document.getElementById("composer")?.focus(), 60);
-              },
-            }}
+            menuActions={botMenuActions}
           />
           )}
+          </div>
           {focus && crmFocus && crm ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
               <CrmView
@@ -990,6 +1053,7 @@ function Bops({ state }: { state: AppState | null }) {
                         onOpenWatch={showWatch}
                         onOpenSkills={() => openSkills()}
                         onAsk={askBot}
+                        onOpenThread={openThread}
                         onClose={() => leaveTab(tab.id)}
                       />
                     </div>
@@ -1037,7 +1101,8 @@ function Bops({ state }: { state: AppState | null }) {
           // One call bar for the whole app, never remounted while the call lasts: it only moves.
           <div
             className="fixed z-40"
-            style={callHere && slotBox ? { left: slotBox.x, top: slotBox.y, transform: "translateX(-50%)" } : { left: 12, bottom: 76 }}
+            // Compact, it waits in the sidebar's corner over its footer; by the rail, just past it, so the rail's buttons stay clear.
+            style={callHere && slotBox ? { left: slotBox.x, top: slotBox.y, transform: "translateX(-50%)" } : { left: sidebarOpen ? 12 : 84, bottom: 76 }}
           >
             <CallBar bot={callBot} owner={state.owner?.name} compact={!(callHere && slotBox)} onOpen={() => openChat(botChatId(callBot.id))} onClose={() => setCall(null)} onSpeaking={callTalking.set} />
           </div>
@@ -1083,6 +1148,7 @@ function Bops({ state }: { state: AppState | null }) {
         {/* What bots are doing on the user's Mac, live, in the corner (hidden while the Your Mac tab is open). */}
         {!(tab?.kind === "mac" && panelOpen) && !state.shared && <MacPreviews state={state} onOpen={openMac} />}
       </div>
+    </OpenAppTask.Provider>
     </OpenHostedApp.Provider>
     </OpenMadeApp.Provider>
     </OpenCrm.Provider>
@@ -1094,6 +1160,10 @@ function Bops({ state }: { state: AppState | null }) {
 
 /** Where this Mac remembers whether the sidebar is shown ("0": hidden). */
 const SIDEBAR_KEY = "bops.sidebar";
+/** How long the sidebar takes to collapse to its rail or expand (none with reduced motion). */
+const SIDEBAR_SLIDE_MS = 200;
+/** The grid's columns slide as the sidebar's width changes, the title bar's with them. */
+const SLIDE = "transition-[grid-template-columns] duration-200 ease-out motion-reduce:transition-none";
 
 /* ---------------- Title bar ---------------- */
 
@@ -1104,33 +1174,19 @@ function TitleBar({
   tabs,
   panelOpen,
   onTogglePanel,
-  sidebarOpen,
-  onToggleSidebar,
 }: {
   columns: string;
   wide: boolean;
   tabs: React.ReactNode;
   panelOpen: boolean;
   onTogglePanel: () => void;
-  sidebarOpen: boolean;
-  onToggleSidebar: () => void;
 }) {
   const desktop = typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
   return (
     <div className={`grid h-11 shrink-0 border-b border-[#ECECEA] bg-[#F7F7F6] [-webkit-app-region:drag] ${columns}`}>
       <div className="flex items-center gap-3 px-3.5">
+        {/* Room for the window's buttons (the sidebar's toggle is in its header, or at the top of its rail). */}
         {desktop && <div className="w-[56px] shrink-0" />}
-        {/* The sidebar hidden: the toggle that brings it back sits here, by the window's buttons (shown, it's in the sidebar's header). */}
-        {!sidebarOpen && (
-          <button
-            onClick={onToggleSidebar}
-            title="Show the sidebar (⌘\)"
-            aria-label="Show the sidebar"
-            className="flex size-7 shrink-0 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.06] [-webkit-app-region:no-drag]"
-          >
-            <SideToggleIcon side="left" open={false} />
-          </button>
-        )}
       </div>
       {!wide && <div />}
       <div className="flex min-w-0 items-center gap-2 pl-3 pr-3.5">
@@ -1500,6 +1556,8 @@ export function Settings({ state, onClose, onShowScreen, onOpenVault }: { state:
 
         <OwnerSettings owner={state.owner} />
         {!selfHosted && <UsageData />}
+        {/* Where the user's things are kept and for how long: their own, never a shared workspace's owner's. */}
+        {!selfHosted && !state.shared && <YourData />}
         <ReachSettings />
         {!selfHosted && <EmailAddresses state={state} />}
         <ThisMacSettings state={state} />

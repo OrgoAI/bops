@@ -116,7 +116,7 @@ async function readOrgo(key: string): Promise<OrgoBilling> {
       compEndsAt: s?.compExpiresAt ? s.compExpiresAt * 1000 : undefined,
     };
   if (plan) {
-    const bops = bopsComputers(getState().bots);
+    const bops = bopsComputers(getState().bots, plan);
     out.computers = { allowed: plan.computers, inUse: plan.inUse, outsideBops: plan.inUse === undefined ? undefined : Math.max(0, plan.inUse - bops) };
     // No room for another computer: why, in plain words, under the plan's name as shown. Either way, the next plan up Orgo sells.
     const short = planShort(plan);

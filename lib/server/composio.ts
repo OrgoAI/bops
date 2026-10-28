@@ -3,7 +3,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { Composio } from "@composio/core";
 import { USAGE_APP_HEADER, USAGE_BOT_HEADER } from "@/cloud/protocol";
-import { CHANNEL_APPS, levelOf, live as running, MAIN_WORKSPACE, openToTeam, workspaceOf, type AccessUse, type AppAccount, type AppConnecting, type AppLevel, type Bot } from "@/lib/types";
+import { CHANNEL_APPS, levelOf, live as running, MAIN_WORKSPACE, openToTeam, othersThread, workspaceOf, type AccessUse, type AppAccount, type AppConnecting, type AppLevel, type Bot } from "@/lib/types";
 import { logUse, targetNameOf, viaOf, type UseWhere } from "./access-sync";
 import { trackServerEvent } from "./analytics";
 import { appHeaders } from "./app-version";
@@ -628,14 +628,12 @@ export const APP_TOOLS = (b: Bot) => {
 const clip = (s: string, n = 14_000) => (s.length > n ? `${s.slice(0, n)}… (cut short)` : s);
 
 /**
- * A thread someone outside Bops started (an email, a text or a call to a bot), or a part of one: it gets
- * no apps, like their turns in the chat (chat.ts), whatever access its bot has.
+ * A thread someone outside Bops started (an email, a text or a call to a bot), one a member with Write started or
+ * told something, or a part of one (lib/types.ts othersThread): it gets no apps, like their turns in the chat
+ * (chat.ts), whatever access its bot has. Asked as each call comes, so a member's reply mid-task counts at once.
  */
-function fromOutside(sessionId?: string) {
-  const s = sessionId ? threadOf(sessionId) : undefined;
-  return !!s && (!!s.fromOutside || (!!s.partOf && !!threadOf(s.partOf)?.fromOutside));
-}
-const NOT_FOR_OUTSIDE = () => `Not on this task: someone outside Bops started it, and ${ownerName()}'s apps are only for their own work.`;
+const fromOutside = (sessionId?: string) => !!sessionId && othersThread(threadOf(sessionId), threadOf);
+const NOT_FOR_OUTSIDE = () => `Not on this task: someone other than ${ownerName()} asked for it, and ${ownerName()}'s apps are only for their own work.`;
 
 /** find_app_actions: Composio's search, cut down to what the model needs. */
 export async function findAppActions(botId: string, query: string, where: { sessionId?: string } = {}) {
@@ -692,7 +690,8 @@ export async function runAppAction(
   args: Record<string, unknown>,
   where: UseWhere,
   accountHint?: string | null,
-  opts: { readOnly?: boolean; approved?: boolean } = {},
+  /** `onRead`: told of each read action that ran, with the account it ran in, its inputs and the app's whole answer (chat.ts draft_reply's targets). */
+  opts: { readOnly?: boolean; approved?: boolean; onRead?: (r: { accountId: string; app: string; args: Record<string, unknown>; data: unknown }) => void } = {},
 ): Promise<string> {
   const b = bot(botId);
   if (!b) return "Unknown bot.";
@@ -731,6 +730,7 @@ export async function runAppAction(
     const ok = !res.error && res.successful !== false;
     used(ok ? "ok" : "failed", approvedBy);
     if (ok) markUsed(account.id);
+    if (ok && reads) opts.onRead?.({ accountId: account.id, app, args: sent, data: res.data ?? {} });
     return ok ? clip(JSON.stringify(res.data ?? {})) : `Failed: ${res.error ?? "the app said no"}`;
   };
   if (reads) return run();

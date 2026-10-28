@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { config } from "./config.ts";
+import { isDeleted } from "./db.ts";
 import { deviceIdOf } from "./device.ts";
 import { HttpError } from "./http.ts";
+import { ACCOUNT_DELETED } from "./protocol.ts";
 
 /**
  * Who is calling. A Bops user is an Orgo user: the Mac sends the user's Orgo API key as a Bearer
@@ -120,14 +122,33 @@ async function signInOf(key: string, fetchImpl: typeof fetch): Promise<{ user: C
   return { user };
 }
 
-/** The user an Orgo key belongs to, or null when Orgo turns it down. Throws (503) when Orgo can't be asked. */
-export async function userForKey(key: string, fetchImpl: typeof fetch = fetch): Promise<CloudUser | null> {
-  return (await signInOf(key, fetchImpl)).user;
+/**
+ * A sign-in, unless its user was deleted lately (delete-user.ts: in bops.deleted_users, db.ts
+ * isDeleted): then it's turned down as Orgo turns down their keys, whatever an answer kept from before
+ * says, so a Mac (or a computer's runner) still signed in when the delete came can't write its copy of
+ * their state back. Checked on every call, a kept answer too: nothing has to be forgotten for it. It's
+ * the table that counts (asked at most once a minute per user, and at once after a delete or an
+ * undelete here), so a restart turns them down just the same. 503 when Postgres can't be asked, as
+ * when Orgo can't be.
+ */
+async function liveSignInOf(key: string, fetchImpl: typeof fetch): Promise<{ user: CloudUser | null; code?: string }> {
+  const r = await signInOf(key, fetchImpl);
+  if (!r.user) return r;
+  const deleted = await isDeleted(r.user.id).catch((e: Error) => {
+    console.warn(`[auth] ${r.user!.id}: couldn't check for a delete: ${e.message}`);
+    throw new HttpError(503, "Can't check who you are right now");
+  });
+  return deleted ? { user: null, code: ACCOUNT_DELETED } : r;
 }
 
-/** The signed-in user for a request, or a 401 (with Orgo's code when it gave one: an identity token's says why). */
+/** The user an Orgo key belongs to, or null when Orgo turns it down (or the user was deleted lately). Throws (503) when Orgo can't be asked. */
+export async function userForKey(key: string, fetchImpl: typeof fetch = fetch): Promise<CloudUser | null> {
+  return (await liveSignInOf(key, fetchImpl)).user;
+}
+
+/** The signed-in user for a request, or a 401 (with Orgo's code when it gave one: an identity token's says why; a deleted user's is ACCOUNT_DELETED). */
 export async function requireUser(req: IncomingMessage): Promise<CloudUser> {
-  const { user, code } = await signInOf(bearer(req), fetch);
+  const { user, code } = await liveSignInOf(bearer(req), fetch);
   if (!user) throw new HttpError(401, "Sign in with Orgo", code ? { code } : undefined);
   return user;
 }

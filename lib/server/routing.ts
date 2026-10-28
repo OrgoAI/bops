@@ -1,5 +1,5 @@
 import "server-only";
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { chose, decide, yes, type Answer } from "./decide";
 import { setting } from "./models";
@@ -209,13 +209,17 @@ export async function routeChat(base: Config, words: string, botId?: string): Pr
 /**
  * What the router picked next to what ran, one JSON line each in this Mac's ~/.bops routes.jsonl (the
  * comparison and the shadow week read it). The job's words stay on this Mac; nothing on a hosted server.
+ * Appended at once, in this tick (one short line): the Keep chats and calls sweep swaps the file for a copy
+ * without its old lines in a tick of its own (privacy.ts pruneLog), and a write that ran on beside it could
+ * land in the file it replaced, and be lost.
  */
 export function logRoute(entry: Record<string, unknown>) {
   // ~/.bops (the bots' workspace on this Mac), not the state's folder: a cloud user keeps no state files here.
   const dir = userHome();
   if (!dir || process.env.BOPS_DATABASE_URL) return;
   const line = `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`;
-  void mkdir(dir, { recursive: true })
-    .then(() => appendFile(join(dir, "routes.jsonl"), line, { mode: 0o600 }))
-    .catch(() => {});
+  try {
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(join(dir, "routes.jsonl"), line, { mode: 0o600 });
+  } catch {}
 }

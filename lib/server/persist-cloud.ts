@@ -25,10 +25,10 @@ import {
 import { botIdsOn, chatsOn, computersMessage, keepAllowed, runsBy, threadsOf } from "@/cloud/computer-scope";
 import { deviceIdOf } from "@/cloud/device";
 import { nextRun, validTimeZone, type ScheduleLike } from "@/cloud/schedule";
-import type { AppState, Message } from "@/lib/types";
+import type { AppState, Message, Session } from "@/lib/types";
 import { appHeaders } from "./app-version";
 import { cloudUrl } from "./cloud-url";
-import { hookExit, onExit, onRunner, StateLoadError, type Persistence, type StateAccess } from "./persist";
+import { hookExit, onExit, onRunner, StateLoadError, type Persistence, type StateAccess, type Went } from "./persist";
 import { applyShared, fromShared, merge3, same, toShared, type Blob } from "./state-merge";
 import { moveLegacyState, userDataDir } from "./user-paths";
 import { vmIdentityRejected } from "./vm-identity";
@@ -415,7 +415,7 @@ function buildKept(who: Who, loaded: Loaded, kept: Kept) {
 
 /* ---------------- The store ---------------- */
 
-export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
+export function cloudStore({ get, replace, touch, went }: StateAccess): Persistence {
   const g = globalThis as unknown as { __bopsCloudStore?: Box };
   const box: Box = (g.__bopsCloudStore ??= { failures: 0, lane: Promise.resolve(), aside: new Map() });
 
@@ -489,7 +489,8 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
    * routine out, a bot the Mac moved off its computer), Bops Cloud's copy stands here too. Else its copy
    * would stay apart for good: it never sends those, and later merges would keep its side.
    */
-  function mergeIn(sync: Sync, state: AppState, theirs: { version: number; state: Blob }, actual?: Blob) {
+  function mergeIn(sync: Sync, state: AppState, theirs: { version: number; state: Blob }, actual?: Blob): Session[] {
+    const had = state.sessions;
     const mine = JSON.parse(shared(state, sync.device)) as Blob;
     const scope = runnerScope(sync);
     const all = merge3(sync.base, mine, theirs.state, { device: sync.device, runner: onRunner(), nextRunOf: nextRunWith(state.owner) });
@@ -505,6 +506,15 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
       sync.base = actual;
       sync.blobHash = "";
     }
+    // The threads it took out (deleted on another Mac): applyShared made the list anew, so `had` is as it was.
+    const left = new Set((state.sessions ?? []).map((x) => x.id));
+    return (had ?? []).filter((x) => !left.has(x.id));
+  }
+
+  /** Changes from another Mac merged in: the app polls again, and whoever keeps things beside what they took out hears what went. */
+  function arrived(gone?: Went) {
+    touch();
+    if (gone && (gone.messages.length || gone.sessions.length)) went?.(gone);
   }
 
   /**
@@ -627,8 +637,8 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
       // Another Mac wrote first: theirs and this Mac's together, then written over theirs.
       const target = state();
       if (!target) return 0;
-      mergeIn(sync, target, conflict);
-      if (shown) touch();
+      const gone = mergeIn(sync, target, conflict);
+      if (shown) arrived({ messages: [], sessions: gone });
     }
     // What was kept on this Mac while the cloud couldn't take it (before this save began) is all up now:
     // the file goes, so it's never merged in again over newer changes. Changes since go with the next save.
@@ -688,7 +698,7 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
   /* -------- Reading what another Mac changed -------- */
 
   /** A message row from the cloud, into the live state: unless this Mac changed that message and hasn't sent it yet. */
-  function takeRows(sync: Sync, rows: CloudMessageRow[], seen?: Set<string>) {
+  function takeRows(sync: Sync, rows: CloudMessageRow[], seen?: Set<string>, out?: Message[]) {
     const st = get();
     const byId = new Map(st.messages.map((m) => [m.id, m]));
     const gone = new Set<string>();
@@ -701,6 +711,7 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
         if (local && untouched) {
           gone.add(row.id);
           byId.delete(row.id);
+          out?.push(local);
         }
         if (!local || untouched) sync.msgHashes.delete(row.id);
         continue;
@@ -736,12 +747,13 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     const h = await call<CloudStateHead>(sync, "/v1/state/head");
     if (h.status !== 200) refused("Reading your Bops", h);
     let changed = false;
+    const gone: Went = { messages: [], sessions: [] };
     if (h.body.version !== sync.version) {
       const r = await call<CloudState>(sync, "/v1/state");
       if (box.sync !== sync) return;
       if (r.status === 200 && r.body.version !== sync.version) {
         const theirs = heldFromComputer(sync, r.body);
-        mergeIn(sync, get(), theirs, theirs === r.body ? undefined : r.body.state);
+        gone.sessions.push(...mergeIn(sync, get(), theirs, theirs === r.body ? undefined : r.body.state));
         changed = true;
       } else if (r.status !== 200 && r.status !== 404) refused("Reading your Bops", r);
     }
@@ -753,7 +765,7 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
         const p = await call<CloudMessagesPage>(sync, `/v1/messages?after=${after}&limit=${PAGE}`);
         if (p.status !== 200) refused("Reading your chats", p);
         if (box.sync !== sync) return;
-        changed = takeRows(sync, p.body.messages, seen) || changed;
+        changed = takeRows(sync, p.body.messages, seen, gone.messages) || changed;
         after = p.body.seq;
         if (!p.body.more) break;
       }
@@ -763,7 +775,11 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
         const keep = st.messages.filter((m) => seen.has(m.id) || fp(m) !== sync.msgHashes.get(m.id));
         if (keep.length !== st.messages.length) {
           const kept = new Set(keep);
-          for (const m of st.messages) if (!kept.has(m)) sync.msgHashes.delete(m.id);
+          for (const m of st.messages)
+            if (!kept.has(m)) {
+              sync.msgHashes.delete(m.id);
+              gone.messages.push(m);
+            }
           st.messages = keep;
           changed = true;
         }
@@ -773,7 +789,7 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     sync.pulledAt = Date.now();
     box.tooNew = false;
     if (changed) {
-      touch();
+      arrived(gone);
       // Merged with changes of this Mac's own: those go up.
       schedule();
     }
@@ -997,5 +1013,9 @@ export function cloudStore({ get, replace, touch }: StateAccess): Persistence {
     device: () => box.sync?.device ?? null,
     tooNew: () => !!box.sync && !!box.tooNew,
     cloudCopy: () => box.sync?.base ?? null,
+    removedUp: (ids) => {
+      const sync = box.sync;
+      return !!sync && ids.every((x) => !sync.msgHashes.has(x));
+    },
   };
 }

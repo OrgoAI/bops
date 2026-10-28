@@ -469,6 +469,74 @@
   }
 }
 
+/*
+ * What you can click shows the hand: a button, anything that acts as one (a tab, a menu's item, an
+ * option, a switch, a checkbox or radio drawn as one), a <summary>, a <select>, a checkbox or radio
+ * and the label that ticks it, and the inputs that are buttons or pickers. Disabled, the arrow.
+ * Text fields keep the I-beam, even inside something you click. In the base layer, and all in
+ * :where so nothing here outranks anything, so a component's own cursor class still wins: a
+ * screen's crosshair or none (the remote screen draws its own cursor), a tab's grab, a cell's I-beam.
+ * scripts/test-pointer-cursor.mjs checks it.
+ */
+@layer base {
+  :where(
+    textarea,
+    input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"], [type="submit"], [type="button"], [type="reset"], [type="image"], [type="hidden"])
+  ) {
+    cursor: auto;
+  }
+  :where(
+    button,
+    [role="button"],
+    [role="tab"],
+    [role="menuitem"],
+    [role="menuitemcheckbox"],
+    [role="menuitemradio"],
+    [role="option"],
+    [role="switch"],
+    [role="checkbox"],
+    [role="radio"],
+    summary,
+    select,
+    input:is([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"], [type="submit"], [type="button"], [type="reset"], [type="image"]),
+    label:has(input:is([type="checkbox"], [type="radio"])),
+    input:is([type="checkbox"], [type="radio"]) + label[for]
+  ) {
+    cursor: pointer;
+  }
+  :where(
+    :disabled,
+    [aria-disabled="true"],
+    [data-disabled]:not([data-disabled="false"])
+  ):where(
+    button,
+    [role="button"],
+    [role="tab"],
+    [role="menuitem"],
+    [role="menuitemcheckbox"],
+    [role="menuitemradio"],
+    [role="option"],
+    [role="switch"],
+    [role="checkbox"],
+    [role="radio"],
+    summary,
+    select,
+    input:is([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"], [type="submit"], [type="button"], [type="reset"], [type="image"])
+  ),
+  :where(
+    label:has(input:is([type="checkbox"], [type="radio"]):disabled),
+    input:is([type="checkbox"], [type="radio"]):disabled + label[for]
+  ) {
+    cursor: default;
+  }
+  ::file-selector-button {
+    cursor: pointer;
+  }
+  :disabled::file-selector-button {
+    cursor: default;
+  }
+}
+
 /* A watched screen's eye: open, with a quick blink every few seconds. */
 @keyframes watch-blink {
   0%,

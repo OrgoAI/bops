@@ -14,7 +14,9 @@
 // where focus goes; a refusal said in place; and an opened row's actions above what it does, cut to four
 // lines with Show all. The trash sits on the chevron's place, so a hidden one takes no room from the name;
 // one question at a time on the page (its week too) and in an app's list, closed as a row opens or shuts;
-// Cancel's focus when the row it was asked in has shut; and a check named by the account it looks at.
+// Cancel's focus when the row it was asked in has shut; and a check named by the account it looks at. And a run's
+// replies to send in its report (reply-drafts.tsx): who and where exactly, the words changed and sent once, sending,
+// sent, failed, a Send gone unanswered, and read only in a shared workspace.
 //
 // Nothing reaches a server (fetch is a fake). The .tsx files are compiled with the TypeScript in node_modules as they load.
 // Usage: node scripts/test-app-routines-ui.mjs   (not with --conditions=react-server: these are client components)
@@ -363,6 +365,8 @@ await test("what Continue sends: How often only when picked and there's a bot to
 const { parseHTML } = await import("linkedom");
 const { window: win } = parseHTML("<!doctype html><html><body></body></html>");
 const doc = win.document;
+// React types into a box by its input event only where the document says it has one (a reply's words: reply-drafts.tsx).
+doc.oninput = null;
 const focused = { on: null };
 win.HTMLElement.prototype.focus = function () {
   focused.on = this;
@@ -738,6 +742,676 @@ await test("an app's routines: one question across its bots' lists; a check name
   assert.equal(checkedOf({ ...s, accounts: [{ ...home }] }, { app: "gmail", template: "check", account: "ca_2" }), "Gmail", "the only one, unlabeled: the app");
   assert.equal(checkedOf(s, { app: "gmail", template: "check", account: "gone" }), "Gmail", "an account that's gone: the app");
   assert.equal(checkedOf({ ...s, accounts: [{ id: "open:hackernews", app: "hackernews", appName: "Hacker News", status: "active", at: now }] }, { app: "hackernews", template: "check", account: "open:hackernews" }), "Hacker News");
+});
+
+/* ---------------- A routine's reports ---------------- */
+
+const { routineReports, PAIR_GRACE_MS, tookWords } = await import(pathToFileURL(`${root}/lib/routine-reports.ts`).href);
+const M = 60_000;
+const D = 86_400_000;
+const said = (id, at, text, extra = {}) => ({ id, chatId: "bot:bot_main", role: "bot", botId: "bot_main", text, at, ...extra });
+const recorded = (startedAt, status, extra = {}) => ({ startedAt, finishedAt: startedAt + 30_000, status, ms: 30_000, summary: null, error: null, ...extra });
+const thread = (id, createdAt, extra = {}) => ({ id, botId: "bot_main", chatId: "bot:bot_main", routineId: "t", title: "Portal", goal: "Check the portal", sentVia: "routine", status: "done", createdAt, steps: [], replies: [], ...extra });
+
+await test("reports: Orgo's runs and the last run, newest first; quiet from its record; words by their stamp, else by time, never across runs", () => {
+  const [t0, t1, t2, t3, t4] = [5, 4, 3, 2, 1].map((k) => now - k * D);
+  const last = { at: now - 1000, status: "ok", delivery: { status: "sent", to: "Slack #sales", at: now } };
+  const r = routine("a", "bot_main", "Morning inbox", undefined, { last });
+  const runs = [
+    recorded(t4, "ok", { summary: "Two new emails." }),
+    recorded(t3, "ok", { summary: "Nothing needed the user." }),
+    recorded(t2, "failed", { error: "Gmail signed out" }),
+    recorded(t1, "skipped", { error: "The last run was still going." }),
+    recorded(t0, "ok"),
+  ];
+  const messages = [
+    said("m_last", now - 500, "Three new emails, one from Dana.", { routine: { id: "a", at: last.at } }),
+    // From before the stamp: by time, inside its run.
+    said("m_old", t0 + 20_000, "One new email.", { routine: { id: "a" } }),
+    // After that run's end and before the next that could say anything: no run's, so its own.
+    said("m_stray", t0 + 30_000 + PAIR_GRACE_MS + M, "A note no run claims.", { routine: { id: "a" } }),
+    said("m_other", t4 + 1000, "Another routine's words.", { routine: { id: "b", at: t4 } }),
+    said("m_user", t4 + 2000, "Thanks!", { role: "user" }),
+    { id: "m_note", chatId: "bot:bot_main", role: "system", text: '"Morning inbox" didn\'t run: Gmail signed out', at: t2 + 1000, routine: { id: "a", at: t2 } },
+  ];
+  const out = routineReports({ routine: r, runs, messages, sessions: [] });
+  assert.deepEqual(
+    out.map((x) => [x.at, x.status, x.messages.map((m) => m.id), !!x.fromChat]),
+    [
+      [last.at, "ok", ["m_last"], false],
+      [t4, "ok", [], false],
+      [t3, "quiet", [], false],
+      [t2, "failed", [], false],
+      [t1, "skipped", [], false],
+      [messages[2].at, "ok", ["m_stray"], true],
+      [t0, "ok", ["m_old"], false],
+    ],
+  );
+  assert.equal(out[0].delivery.to, "Slack #sales", "where the last run was sent");
+  assert.ok(out[0].last);
+  assert.ok(out.slice(1).every((x) => !x.delivery), "only the last run says where it went");
+  assert.equal(out[1].summary, undefined, "the chat goes back past it, so its words were deleted there: Orgo's copy isn't shown");
+  assert.equal(out[3].error, "Gmail signed out");
+  assert.equal(out[1].ms, 30_000);
+  // A run Bops has that Orgo has too: one line, how it went Bops' to say.
+  const both = routineReports({ routine: { ...r, last: { at: t4, status: "quiet" } }, runs, messages: [], sessions: [] });
+  assert.deepEqual(both.slice(0, 2).map((x) => [x.at, x.status, x.ms]), [[t4, "quiet", 30_000], [t3, "quiet", 30_000]]);
+  assert.equal(tookWords(42_000), "42s");
+  assert.equal(tookWords(4 * M), "4m");
+  assert.equal(tookWords(65 * M), "1h 5m");
+});
+
+await test("when a run began, in the owner's zone: today, yesterday, this past week by its day, then its date", async () => {
+  const { ranWhen } = await import(pathToFileURL(`${root}/components/app/routine-reports.tsx`).href);
+  const LA = "America/Los_Angeles";
+  const at = Date.parse("2026-10-26T19:00:00Z"); // Monday, noon in Los Angeles
+  assert.equal(ranWhen(Date.parse("2026-10-26T15:00:00Z"), at, LA), "Today 8 AM");
+  assert.equal(ranWhen(Date.parse("2026-10-25T23:29:00Z"), at, LA), "Yesterday 4:29 PM");
+  assert.equal(ranWhen(Date.parse("2026-10-22T15:00:00Z"), at, LA), "Thu 8 AM");
+  assert.equal(ranWhen(Date.parse("2026-10-12T15:00:00Z"), at, LA), "Oct 12, 8 AM");
+  assert.equal(ranWhen(Date.parse("2025-12-30T16:00:00Z"), at, LA), "Dec 30, 2025, 8 AM");
+});
+
+await test("reports: a task's result by its thread (one replaced later too), a thread moved to the Mac, and a run still going though the last was skipped", () => {
+  const t1 = now - 2 * D;
+  const t2 = now - D;
+  const s1 = thread("s1", t1 + 1000, { endedAt: t1 + 4 * M, answer: "One order." });
+  const s2 = thread("s2", t2 + 1000, { endedAt: t2 + 9 * M });
+  const s2mac = thread("s2mac", t2 + 2 * M, { movedFrom: "s2", endedAt: t2 + 9 * M });
+  const s3 = thread("s3", now - 10 * M, { status: "running" });
+  const last = { at: now - 2 * M, status: "skipped", error: "The last run was still going.", sessionId: "s3", threadAt: now - 10 * M - 500 };
+  const r = routine("t", "bot_main", "Portal", undefined, { run: "task", last });
+  const runs = [recorded(t2, "ok", { finishedAt: t2 + 9 * M, ms: 9 * M }), recorded(t1, "ok", { finishedAt: t1 + 4 * M, ms: 4 * M })];
+  const messages = [
+    said("r1", t1 + 4 * M, "One order.", { resultOf: "s1", sessionIds: ["s1"] }),
+    // Replied to hours later: the newer result took the old one's place, long after its run.
+    said("r2", t2 + 5 * 60 * M, "Two orders, and one refund.", { resultOf: "s2mac", sessionIds: ["s2mac"] }),
+    said("r_other", t2 + 1000, "Another routine's thread.", { resultOf: "s_other", sessionIds: ["s_other"] }),
+  ];
+  const sessions = [s1, s2, s2mac, s3, thread("s_other", t2, { routineId: "zz" })];
+  const out = routineReports({ routine: r, runs, messages, sessions });
+  assert.deepEqual(
+    out.map((x) => [x.at, x.status, x.thread?.id, x.messages.map((m) => m.id)]),
+    [
+      [last.at, "skipped", undefined, []],
+      [last.threadAt, "running", "s3", []],
+      [t2, "ok", "s2mac", ["r2"]],
+      [t1, "ok", "s1", ["r1"]],
+    ],
+  );
+  assert.equal(out[0].error, "The last run was still going.");
+});
+
+await test("reports with no record from Orgo: the last run and the chat's words, each run of them on its own; with every run listed, older words aren't", () => {
+  const last = { at: now - 1000, status: "quiet" };
+  const r = routine("a", "bot_main", "Morning inbox", undefined, { last });
+  const messages = [said("s1", now - D + 1000, "Monday's news.", { routine: { id: "a", at: now - D } }), said("s1b", now - D + 2000, "And one more thing.", { routine: { id: "a", at: now - D } }), said("u1", now - 2 * D, "Sunday's news.", { routine: { id: "a" } })];
+  const out = routineReports({ routine: r, runs: null, messages, sessions: [] });
+  assert.deepEqual(
+    out.map((x) => [x.at, x.status, x.messages.map((m) => m.id), !!x.fromChat]),
+    [
+      [last.at, "quiet", [], false],
+      [now - D, "ok", ["s1", "s1b"], true],
+      [now - 2 * D, "ok", ["u1"], true],
+    ],
+  );
+  // Orgo listed as many as were asked for: words older than all of them are past the runs shown.
+  const full = routineReports({ routine: { ...r, last: undefined }, runs: [recorded(now - D / 2, "ok"), recorded(now - D - 5 * M, "ok")], messages, sessions: [], limit: 2 });
+  assert.deepEqual(full.map((x) => x.at), [now - D / 2, now - D, now - D - 5 * M]);
+  assert.equal(routineReports({ routine: { ...r, last: undefined }, runs: [], messages: [], sessions: [] }).length, 0);
+});
+
+await test("reports: Orgo's copy of what a run said only for a run from before the chat goes back; one whose message was deleted stays gone", () => {
+  const r = routine("a", "bot_main", "Morning inbox");
+  const runs = [recorded(now - D, "ok", { summary: "The gate code is 4417." }), recorded(now - 3 * D, "ok", { summary: "Two new emails." })];
+  const chats = [{ id: "bot:bot_main", kind: "bot", botIds: ["bot_main"], createdAt: now - 2 * D, typing: [] }];
+  // Yesterday's message deleted (the chat's only one): the chat began before that run, so its words stay gone.
+  const out = routineReports({ routine: r, runs, messages: [], sessions: [], chats });
+  assert.deepEqual(out.map((x) => [x.at, x.summary]), [[now - D, undefined], [now - 3 * D, "Two new emails."]]);
+  // With no chat to go by, from its oldest message; another chat's messages don't count.
+  const messages = [said("u1", now - 2 * D, "Hi", { role: "user" }), said("g1", now - 5 * D, "Hello all", { chatId: "group:1" })];
+  assert.deepEqual(routineReports({ routine: r, runs, messages, sessions: [] }).map((x) => [x.at, x.summary]), [[now - D, undefined], [now - 3 * D, "Two new emails."]]);
+});
+
+await test("reports with no record of a run: how it went as its thread says, never Ran for a thread that failed", () => {
+  const r = routine("t", "bot_main", "Vendor portal sweep", undefined, { run: "task", last: { at: now - 1000, status: "ok", sessionId: "tB" } });
+  const sessions = [
+    thread("tA", now - D + 1000, { status: "failed", error: "The page never loaded", endedAt: now - D + 3 * M }),
+    thread("tB", now - 900, { endedAt: now - 100 }),
+    // Answered, then replied to: working again.
+    thread("tC", now - 2 * D + 1000, { status: "running" }),
+    thread("tD", now - 3 * D + 1000, { endedAt: now - 3 * D + 2 * M }),
+  ];
+  const messages = [
+    said("rD", now - 3 * D + 2 * M, "Three invoices paid.", { resultOf: "tD", sessionIds: ["tD"] }),
+    said("rC", now - 2 * D + 4 * M, "One invoice is late.", { resultOf: "tC", sessionIds: ["tC"] }),
+    said("rA", now - D + 3 * M, "I couldn't finish Vendor portal sweep: The page never loaded", { resultOf: "tA", sessionIds: ["tA"], bops: true }),
+    said("rB", now - 100, "All clear.", { resultOf: "tB", sessionIds: ["tB"] }),
+  ];
+  for (const runs of [null, [], [recorded(now - 1000, "ok", { summary: "All clear." })]]) {
+    const out = routineReports({ routine: r, runs, messages, sessions });
+    assert.deepEqual(
+      out.map((x) => [x.thread?.id, x.status, x.error, !!x.fromChat]),
+      [
+        ["tB", "ok", undefined, false],
+        ["tA", "failed", "The page never loaded", true],
+        ["tC", "running", undefined, true],
+        ["tD", "ok", undefined, true],
+      ],
+      `runs ${JSON.stringify(runs)}`,
+    );
+  }
+});
+
+await test("reports with no record of a run: a chat run's words and the result of the task it started are one run, two tasks too; a thread begun after its turn isn't", () => {
+  const r = routine("c", "bot_main", "Supplier check", undefined, { last: { at: now - 1000, status: "ok" } });
+  const t1 = now - D;
+  const t2 = now - 2 * D;
+  const sessions = [
+    thread("s1", t1 + 10_000, { routineId: "c", endedAt: t1 + 5 * M }),
+    thread("s2a", t2 + 5_000, { routineId: "c", endedAt: t2 + 4 * M }),
+    thread("s2b", t2 + 8_000, { routineId: "c", endedAt: t2 + 6 * M }),
+    thread("s3", t2 + 30 * M, { routineId: "c", endedAt: t2 + 35 * M }),
+  ];
+  const messages = [
+    said("m2", t2 + 12_000, "Started on two of them.", { routine: { id: "c", at: t2 }, sessionIds: ["s2a", "s2b"] }),
+    said("r2a", t2 + 4 * M, "Acme ships Friday.", { resultOf: "s2a", sessionIds: ["s2a"] }),
+    said("r2b", t2 + 6 * M, "Globex is out of stock.", { resultOf: "s2b", sessionIds: ["s2b"] }),
+    said("r3", t2 + 35 * M, "A later look.", { resultOf: "s3", sessionIds: ["s3"] }),
+    said("m1", t1 + 20_000, "Started on it.", { routine: { id: "c", at: t1 }, sessionIds: ["s1"] }),
+    said("r1", t1 + 5 * M, "Initech confirmed the order.", { resultOf: "s1", sessionIds: ["s1"] }),
+  ];
+  // No record (null), and a record that leaves those runs out though they're inside what it lists.
+  for (const runs of [null, [recorded(now - 1000, "ok"), recorded(now - 4 * D, "ok")]]) {
+    const out = routineReports({ routine: r, runs, messages, sessions });
+    assert.deepEqual(
+      out.filter((x) => x.fromChat).map((x) => [x.at, x.messages.map((m) => m.id), x.thread?.id]),
+      [
+        [t1, ["m1", "r1"], "s1"],
+        [t2 + 30 * M, ["r3"], "s3"],
+        [t2, ["m2", "r2a", "r2b"], "s2b"],
+      ],
+      `runs ${JSON.stringify(runs)}`,
+    );
+  }
+});
+
+// The window's listeners (Esc), which the page's sheet listens on.
+const listeners = new Map();
+const realAdd = globalThis.addEventListener;
+const realRemove = globalThis.removeEventListener;
+const listen = () => {
+  globalThis.addEventListener = (t, f) => listeners.set(t, [...(listeners.get(t) ?? []), f]);
+  globalThis.removeEventListener = (t, f) => listeners.set(t, (listeners.get(t) ?? []).filter((x) => x !== f));
+};
+const unlisten = () => {
+  globalThis.addEventListener = realAdd;
+  globalThis.removeEventListener = realRemove;
+  listeners.clear();
+};
+const press = (key, target) =>
+  act(async () => {
+    const e = { key, target, defaultPrevented: false, preventDefault() {
+      this.defaultPrevented = true;
+    } };
+    for (const f of listeners.get("keydown") ?? []) f(e);
+  });
+/** Orgo's runs, as /api/routines/{id}/runs answers, once `release` is called. */
+function runsApi(answer) {
+  const calls = [];
+  let release;
+  const answered = new Promise((r) => (release = r));
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push(`${init.method ?? "GET"} ${url}`);
+    await answered;
+    return typeof answer === "function" ? answer(url) : { ok: true, status: 200, json: async () => answer };
+  };
+  return { calls, release: () => act(async () => (release(), await sleep(5))) };
+}
+const sheetOf = (box) => box.querySelector('[role="dialog"]');
+const headsOf = (box) => [...sheetOf(box).querySelectorAll("[data-report-head]")];
+const reportState = (extra = {}) => {
+  const last = { at: now - 1000, status: "ok", delivery: { status: "failed", to: "Email", error: "No inbox yet", at: now } };
+  const s = state([routine("a", "bot_main", "Morning inbox", undefined, { last, ...extra })]);
+  const long = Array.from({ length: 14 }, (_, i) => `Line ${i + 1}: an email that needs a reply today.`).join("\n");
+  s.messages = [said("m_last", now - 500, long, { routine: { id: "a", at: now - 1000 } })];
+  s.sessions = [thread("s_old", now - 2 * D + 1000, { routineId: "a", answer: "Done." })];
+  return s;
+};
+const orgoRuns = {
+  orgo: "ok",
+  runs: [
+    recorded(now - D, "ok", { summary: "Nothing needed the user." }),
+    recorded(now - 2 * D, "ok", { summary: "Kept by Orgo: two new emails." }),
+    recorded(now - 3 * D, "failed", { error: "Gmail signed out" }),
+    recorded(now - 4 * D, "skipped", { error: "The last run was still going." }),
+  ],
+};
+
+await test("a run in the week opens its routine's reports at that run: the last run at once, the rest from Orgo under it; Esc closes and focus goes back", async () => {
+  listen();
+  const api = runsApi(orgoRuns);
+  const m = await mount(pageEl(reportState()));
+  try {
+    const line = m.box.querySelector("[data-report-line]");
+    assert.match(line.textContent, /Morning inbox.*Ran/, "the line of what ran is the button");
+    assert.equal(line.getAttribute("data-tip"), "See the report");
+    await click(line);
+    const sheet = sheetOf(m.box);
+    assert.equal(sheet.getAttribute("aria-label"), "Reports for Morning inbox");
+    assert.deepEqual(api.calls, ["GET /api/routines/a/runs"]);
+    // While Orgo is asked: the last run, open, and a line as tall as a run's where the rest come.
+    assert.equal(headsOf(m.box).length, 1);
+    assert.equal(headsOf(m.box)[0].getAttribute("aria-expanded"), "true");
+    assert.ok(doc.activeElement === headsOf(m.box)[0], "focus on the run it opened at");
+    assert.match(sheet.querySelector("[data-reports-loading]").className, /h-\[52px\]/);
+    assert.match(sheet.textContent, /Line 1: an email/);
+    assert.ok(m.box.querySelector("[data-rows]").closest("[inert]"), "the page behind takes no focus or click");
+    const first = headsOf(m.box)[0];
+    await api.release();
+    assert.ok(!sheet.querySelector("[data-reports-loading]"));
+    assert.ok(headsOf(m.box)[0] === first, "the last run stays where it was: the rest come in under it");
+    assert.deepEqual(
+      headsOf(m.box).map((x) => x.textContent.replace(/^(Today|Yesterday|Sun|Mon|Tue|Wed|Thu|Fri|Sat) [0-9:]+ [AP]M/, "").trim()),
+      ["Ran", "Ran, nothing for you · took 30s", "Ran · took 30s" + "Kept by Orgo: two new emails.", "Failed · took 30sGmail signed out", "Didn't run"],
+    );
+    await press("Escape");
+    assert.ok(!sheetOf(m.box), "closed");
+    assert.ok(!m.box.querySelector("[data-rows]").closest("[inert]"), "the page takes focus again");
+    assert.ok(doc.activeElement === m.box.querySelector("[data-report-line]"), "focus back on the line");
+  } finally {
+    await m.done();
+    unlisten();
+    offline();
+  }
+});
+
+await test("a report opened: what it said in full (Show all when long), why it failed or didn't run, Nothing needed you, where it was sent, and its thread", async () => {
+  listen();
+  const api = runsApi(orgoRuns);
+  const opened = [];
+  const s = reportState();
+  const m = await mount(pageEl(s, { onOpenThread: (x) => opened.push(x.id) }));
+  try {
+    await click(m.box.querySelector("[data-report-line]"));
+    await api.release();
+    const rows = [...sheetOf(m.box).querySelectorAll("[data-report]")];
+    const body = (i) => rows[i].querySelector("[data-report-body]");
+    // The last: its message, cut with Show all, and where it went.
+    const more = button(body(0), "Show all");
+    assert.equal(more.getAttribute("aria-expanded"), "false");
+    assert.match(more.previousElementSibling.className, /max-h-\[220px\]/);
+    await click(more);
+    assert.doesNotMatch(more.previousElementSibling.className, /max-h-/);
+    assert.match(body(0).textContent, /Line 14: an email/, "in full");
+    assert.match(body(0).textContent, /Couldn’t send to Email: No inbox yet/);
+    // One at a time: opening another shuts it.
+    const open = async (i) => click(rows[i].querySelector("[data-report-head]"));
+    await open(1);
+    assert.equal(rows[0].querySelector("[data-report-head]").getAttribute("aria-expanded"), "false");
+    assert.match(body(1).textContent, /^Nothing needed you$/);
+    await open(2);
+    assert.match(body(2).textContent, /Saved with the run/);
+    assert.match(body(2).textContent, /Kept by Orgo: two new emails\./);
+    assert.ok(button(body(2), "Open its thread"), "it ran on a computer: its thread");
+    await click(button(body(2), "Open its thread"));
+    assert.deepEqual(opened, ["s_old"]);
+    await open(3);
+    assert.equal(body(3).textContent, "Gmail signed out");
+    await open(4);
+    assert.equal(body(4).textContent, "The last run was still going.");
+    assert.ok(!/[‒–—―]/.test(sheetOf(m.box).textContent), "no dashes");
+  } finally {
+    await m.done();
+    unlisten();
+    offline();
+  }
+});
+
+await test("a routine's card opens its reports: Reports with none open and focus on its name, See report at the last run; the × closes back to the button", async () => {
+  listen();
+  const api = runsApi(orgoRuns);
+  const m = await mount(pageEl(reportState(), { focus: "a", focusAt: 1 }));
+  try {
+    const a = row(m.box, "a");
+    const t = a.textContent;
+    assert.ok(t.indexOf("Reports") > t.indexOf("Edit") && t.indexOf("Reports") < t.indexOf("What it does"), "with what can be done to it");
+    await click(button(a, "Reports"));
+    await api.release();
+    assert.ok(headsOf(m.box).every((x) => x.getAttribute("aria-expanded") === "false"), "none open");
+    assert.equal(doc.activeElement.textContent, "Morning inbox", "focus on its name");
+    await click(sheetOf(m.box).querySelector('[aria-label="Close reports"]'));
+    assert.ok(!sheetOf(m.box));
+    assert.ok(doc.activeElement === button(row(m.box, "a"), "Reports"), "back on Reports");
+    await click(button(row(m.box, "a"), "See report"));
+    assert.equal(headsOf(m.box)[0].getAttribute("aria-expanded"), "true", "the last run, open");
+    // A click outside the sheet closes it too.
+    await click(sheetOf(m.box));
+    assert.ok(!sheetOf(m.box));
+    assert.ok(doc.activeElement === button(row(m.box, "a"), "See report"));
+  } finally {
+    await m.done();
+    unlisten();
+    offline();
+  }
+});
+
+await test("Orgo not answering: the last run and what's in the chat, said plainly; nothing ran yet: one plain line", async () => {
+  listen();
+  const api = runsApi(() => ({ ok: false, status: 502, json: async () => ({}) }));
+  const s = reportState();
+  s.messages.push(said("m_mon", now - 3 * D, "Monday's inbox: all clear.", { routine: { id: "a", at: now - 3 * D } }));
+  const m = await mount(pageEl(s));
+  try {
+    await click(m.box.querySelector("[data-report-line]"));
+    await api.release();
+    assert.equal(sheetOf(m.box).querySelector("[data-reports-note]").textContent, "Couldn't load earlier runs right now. Here's the last run and what's in the chat.");
+    assert.equal(headsOf(m.box).length, 2, "the last run, and Monday's words as its own run");
+    assert.match(headsOf(m.box)[1].textContent, /Ran.*Monday's inbox: all clear\./);
+  } finally {
+    await m.done();
+  }
+  // Nothing ran yet, and nothing in Orgo either.
+  const none = runsApi({ orgo: "ok", runs: [] });
+  const m2 = await mount(pageEl({ ...state([routine("n", "bot_main", "Weekly report")]), messages: [] }, { focus: "n", focusAt: 3 }));
+  try {
+    await click(button(row(m2.box, "n"), "Reports"));
+    await none.release();
+    assert.equal(sheetOf(m2.box).querySelector("[data-reports-empty]").textContent, "No runs yet");
+    assert.ok(!sheetOf(m2.box).querySelector("[data-reports-note]"));
+    assert.ok(!button(row(m2.box, "n"), "See report"), "no last run: nothing to see");
+  } finally {
+    await m2.done();
+    unlisten();
+    offline();
+  }
+});
+
+await test("a workspace shared with the viewer: only what its view shows, the last run and the chat; nothing is asked of Orgo; a quiet run had nothing for the owner", async () => {
+  listen();
+  const api = runsApi(orgoRuns);
+  const s = { ...reportState({ last: { at: now - 1000, status: "quiet" } }), shared: { projectId: "p1", name: "Acme", owner: "Alex", role: "member", wsId: "ws_acme" } };
+  s.messages = [said("m_tue", now - 2 * D, "Tuesday's inbox.", { routine: { id: "a", at: now - 2 * D } })];
+  const m = await mount(pageEl(s, { focus: "a", focusAt: 4 }));
+  try {
+    const a = row(m.box, "a");
+    for (const b of ["Run now", "Pause", "Edit"]) assert.ok(!button(a, b), `no ${b}`);
+    await click(button(a, "Reports"));
+    await sleep(10);
+    assert.deepEqual(api.calls, [], "the viewer's own Bops has none of the owner's runs: not asked");
+    const sheet = sheetOf(m.box);
+    assert.equal(sheet.querySelector("[data-reports-note]").textContent, "In a shared workspace, only the last run and what's in the chat show here.");
+    assert.ok(!sheet.querySelector("[data-reports-loading]"));
+    assert.equal(headsOf(m.box).length, 2);
+    assert.match(headsOf(m.box)[0].textContent, /Ran, nothing for the owner/);
+    await click(headsOf(m.box)[0]);
+    assert.equal(sheet.querySelector("[data-report-body]").textContent, "Nothing needed the owner");
+    assert.match(headsOf(m.box)[1].textContent, /Tuesday's inbox\./);
+  } finally {
+    await m.done();
+    unlisten();
+    offline();
+  }
+});
+
+await test("how long a run took: only for one that ran, never under a second (a skip, or a failure at once)", async () => {
+  listen();
+  const api = runsApi({
+    orgo: "ok",
+    runs: [recorded(now - D, "failed", { finishedAt: now - D, ms: 0, error: "Out of AI credit" }), recorded(now - 2 * D, "ok", { finishedAt: now - 2 * D, ms: 0, summary: "Call the bank." }), recorded(now - 3 * D, "skipped", { finishedAt: now - 3 * D, ms: 0 })],
+  });
+  const m = await mount(pageEl({ ...state([routine("n", "bot_main", "Weekly report")]), messages: [] }, { focus: "n", focusAt: 5 }));
+  try {
+    await click(button(row(m.box, "n"), "Reports"));
+    await api.release();
+    assert.deepEqual(
+      headsOf(m.box).map((x) => x.textContent.replace(/^(Today|Yesterday|Sun|Mon|Tue|Wed|Thu|Fri|Sat) [0-9:]+ [AP]M/, "").trim()),
+      ["FailedOut of AI credit", "RanCall the bank.", "Didn't run"],
+    );
+  } finally {
+    await m.done();
+    unlisten();
+    offline();
+  }
+});
+
+await test("a report's Show all only when its words are taller than the cut, as measured once laid out", async () => {
+  listen();
+  const api = runsApi({ orgo: "ok", runs: [] });
+  // Laid out: each report's words this tall (none is otherwise, so the guess from their length stands).
+  const heights = new Map();
+  const proto = win.HTMLElement.prototype;
+  const tall = function () {
+    return this.hasAttribute("data-said") ? (heights.get(this.textContent) ?? 0) : 0;
+  };
+  Object.defineProperty(proto, "clientHeight", { configurable: true, get: tall });
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get: tall });
+  const wide = `A long paragraph about the inbox. `.repeat(21).trim();
+  const narrow = "Short, but in a narrow panel it wraps a lot.";
+  heights.set(wide, 196);
+  heights.set(narrow, 300);
+  const s = { ...state([routine("a", "bot_main", "Morning inbox", undefined, { last: { at: now - 1000, status: "ok" } })]), messages: [] };
+  s.messages = [said("m_wide", now - 500, wide, { routine: { id: "a", at: now - 1000 } }), said("m_narrow", now - D + 500, narrow, { routine: { id: "a", at: now - D } })];
+  const m = await mount(pageEl(s, { focus: "a", focusAt: 6 }));
+  try {
+    assert.ok(wide.length > 700, "past the length's guess");
+    await click(button(row(m.box, "a"), "See report"));
+    await api.release();
+    const rows = [...sheetOf(m.box).querySelectorAll("[data-report]")];
+    const body0 = rows[0].querySelector("[data-report-body]");
+    assert.ok(!button(body0, "Show all"), "it fits: no Show all");
+    assert.doesNotMatch(body0.querySelector("[data-said]").className, /max-h-/, "nor cut or faded");
+    await click(rows[1].querySelector("[data-report-head]"));
+    const body1 = rows[1].querySelector("[data-report-body]");
+    assert.ok(button(body1, "Show all"), "taller than the cut, though short");
+    assert.match(body1.querySelector("[data-said]").className, /max-h-\[220px\]/);
+  } finally {
+    await m.done();
+    delete proto.clientHeight;
+    delete proto.scrollHeight;
+    unlisten();
+    offline();
+  }
+});
+
+await test("Esc typed in a box outside the reports (the chat beside the page) stays there: the sheet stays open and focus stays in the box", async () => {
+  listen();
+  const api = runsApi(orgoRuns);
+  const chat = doc.createElement("textarea");
+  doc.body.appendChild(chat);
+  const m = await mount(pageEl(reportState()));
+  try {
+    await click(m.box.querySelector("[data-report-line]"));
+    await api.release();
+    chat.focus();
+    await press("Escape", chat);
+    assert.ok(sheetOf(m.box), "still open");
+    assert.ok(doc.activeElement === chat, "focus still in the chat's box");
+    // Closed by its × while typing there: focus isn't pulled out of the box.
+    await click(sheetOf(m.box).querySelector('[aria-label="Close reports"]'));
+    assert.ok(!sheetOf(m.box));
+    assert.ok(doc.activeElement === chat);
+    // Esc on the sheet itself still closes it.
+    await click(m.box.querySelector("[data-report-line]"));
+    await press("Escape", headsOf(m.box)[0]);
+    assert.ok(!sheetOf(m.box));
+    assert.ok(doc.activeElement === m.box.querySelector("[data-report-line]"), "focus back on the line");
+  } finally {
+    await m.done();
+    chat.remove();
+    unlisten();
+    offline();
+  }
+});
+
+await test("Orgo not answering for a routine that never ran: the note promises nothing over No runs yet", async () => {
+  listen();
+  const api = runsApi({ orgo: "offline", runs: null });
+  const m = await mount(pageEl({ ...state([routine("n", "bot_main", "Weekly report")]), messages: [] }, { focus: "n", focusAt: 7 }));
+  try {
+    await click(button(row(m.box, "n"), "Reports"));
+    await api.release();
+    assert.equal(sheetOf(m.box).querySelector("[data-reports-note]").textContent, "Couldn't load earlier runs right now.");
+    assert.equal(sheetOf(m.box).querySelector("[data-reports-empty]").textContent, "No runs yet");
+  } finally {
+    await m.done();
+    unlisten();
+    offline();
+  }
+});
+
+/* ---------------- Replies to send, in a run's report (reply-drafts.tsx) ---------------- */
+
+const typeIn = (el, value) =>
+  act(async () => {
+    Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, "value").set.call(el, value);
+    el.dispatchEvent(new win.Event("input", { bubbles: true }));
+  });
+const KEVIN = { id: "drf_k", app: "gmail", accountId: "acc_gmail", threadId: "18c0a1b2c3d4e5f6", to: "kevin@example.com", subject: "Invoice for October", toName: "Kevin Example", text: "Yes, it's right." };
+const draftsState = (drafts, extra = {}) => {
+  const s = reportState();
+  s.accounts = [{ id: "acc_dbot", app: "discordbot", appName: "Discord Bot", name: "Helper Bot", status: "active", at: 0 }];
+  s.messages = [{ ...s.messages[0], text: "Replies to send.", drafts }];
+  return { ...s, ...extra };
+};
+/** Bops, faked for a report with replies to send: Orgo's runs (none), and each Send, held until `answer` is called. */
+function sendApi() {
+  const sent = [];
+  let answer;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).includes("/runs")) return { ok: true, status: 200, json: async () => ({ orgo: "ok", runs: [] }) };
+    sent.push({ url: String(url), method: init.method, body: JSON.parse(init.body) });
+    const [status, body] = await new Promise((r) => (answer = (...a) => r(a)));
+    return { ok: status < 400, status, json: async () => body };
+  };
+  return { sent, answer: (status = 200, body = { ok: true }) => act(async () => (answer(status, body), await sleep(5))) };
+}
+const cardsOf = (box) => [...sheetOf(box).querySelectorAll("[data-draft]")];
+
+await test("a run's replies to send: a card each in its report, saying exactly who and where; the words can change, and Send sends those once, waiting while it goes", async () => {
+  listen();
+  const api = sendApi();
+  const s = draftsState([KEVIN]);
+  const m = await mount(pageEl(s));
+  try {
+    await click(m.box.querySelector("[data-report-line]"));
+    await act(async () => await sleep(5));
+    const [card] = cardsOf(m.box);
+    assert.equal(card.getAttribute("data-draft-status"), "draft");
+    assert.match(card.textContent, /^Reply to Kevin Example/);
+    const where = card.querySelector("[data-draft-where]");
+    assert.equal(where.querySelector("code").textContent, "kevin@example.com", "the exact address");
+    assert.match(where.textContent, /Invoice for October/);
+    const box = card.querySelector("textarea");
+    assert.equal(box.value, "Yes, it's right.");
+    assert.equal(box.getAttribute("aria-label"), "Reply to Kevin Example");
+    await typeIn(box, "Yes, it's right. Thanks, Alex");
+    await click(button(card, "Send"));
+    assert.deepEqual(api.sent, [{ url: "/api/drafts/send", method: "POST", body: { messageId: "m_last", draftId: "drf_k", text: "Yes, it's right. Thanks, Alex" } }]);
+    // While it goes: says so, nothing to change, and a second click sends nothing more.
+    assert.equal(card.getAttribute("data-draft-status"), "sending");
+    const going = [...card.querySelectorAll("button")].find((b) => b.textContent === "Sending");
+    assert.ok(going?.disabled, "Sending, disabled");
+    assert.ok(card.querySelector("textarea").disabled);
+    await click(going);
+    assert.equal(api.sent.length, 1);
+    await api.answer();
+    // Sent (the state says so): one line, opening to what went.
+    await m.again(pageEl(draftsState([{ ...KEVIN, sent: { at: now - 60_000, text: "Yes, it's right. Thanks, Alex" } }])));
+    const done = cardsOf(m.box)[0];
+    assert.equal(done.getAttribute("data-draft-status"), "sent");
+    const line = done.querySelector("button");
+    assert.match(line.textContent, /^Sent to Kevin Example · \d{1,2}:\d{2}\s?[AP]M$/);
+    assert.equal(line.getAttribute("aria-expanded"), "false");
+    assert.ok(!done.querySelector("textarea") && !button(done, "Send"), "nothing to send again");
+    await click(line);
+    assert.equal(done.querySelector("[data-draft-sent]").textContent, "Yes, it's right. Thanks, Alex");
+  } finally {
+    await m.done();
+    unlisten();
+    offline();
+  }
+});
+
+await test("a reply that didn't go says why, with Send again; one the server refuses says what it answered; Slack and Discord ones say the channel, and as which Discord bot", async () => {
+  listen();
+  const api = sendApi();
+  const failed = { id: "drf_f", app: "discord", accountId: "acc_dbot", channel: "1100000000000000001", messageId: "1200000000000000002", toName: "kev", text: "Reset it.", error: "Discord didn't take it: Missing Permissions" };
+  const slack = { id: "drf_s", app: "slack", accountId: "acc_slack", channel: "C0SUPPORT1", threadTs: "1730000000.000100", where: "#support", toName: "Kevin", text: "On it." };
+  const m = await mount(pageEl(draftsState([failed, slack, KEVIN])));
+  try {
+    await click(m.box.querySelector("[data-report-line]"));
+    await act(async () => await sleep(5));
+    const [f, sl, k] = cardsOf(m.box);
+    assert.deepEqual(cardsOf(m.box).map((c) => c.getAttribute("data-draft-status")), ["failed", "draft", "draft"]);
+    assert.equal(f.querySelector('[role="alert"]').textContent, "Discord didn't take it: Missing Permissions");
+    assert.ok(button(f, "Send again"));
+    assert.equal(f.querySelector("[data-draft-where]").textContent, "Discord · channel 1100000000000000001, as a reply · as Helper Bot");
+    assert.equal(sl.querySelector("[data-draft-where]").textContent, "Slack · #support, in its thread");
+    // Refused (the account went meanwhile): what the server said, in place.
+    await click(button(k, "Send"));
+    await api.answer(410, { ok: false, error: "That Gmail account isn't connected anymore. Connect it again in Logins, or copy the reply." });
+    assert.equal(k.querySelector('[role="alert"]').textContent, "That Gmail account isn't connected anymore. Connect it again in Logins, or copy the reply.");
+    assert.equal(k.getAttribute("data-draft-status"), "draft");
+    // A Send gone unanswered (Bops quit as it went): it may have gone, so it says to check.
+    await m.again(pageEl(draftsState([{ ...KEVIN, sending: now - 3 * 60_000 }])));
+    const lost = cardsOf(m.box)[0];
+    assert.equal(lost.getAttribute("data-draft-status"), "failed");
+    assert.equal(lost.querySelector('[role="alert"]').textContent, "Bops didn't hear back. Check whether it went before you send it again.");
+    await m.again(pageEl(draftsState([{ ...KEVIN, sending: now - 1000 }])));
+    assert.equal(cardsOf(m.box)[0].getAttribute("data-draft-status"), "sending", "one going now, from another window");
+    assert.ok(!/[‒–—―]/.test(sheetOf(m.box).textContent), "no dashes");
+  } finally {
+    await m.done();
+    unlisten();
+    offline();
+  }
+});
+
+await test("in a workspace shared with the user, a run's replies are shown and copied, never sent", async () => {
+  listen();
+  const calls = server();
+  const m = await mount(pageEl(draftsState([{ id: "drf_k", app: "gmail", to: "kevin@example.com", subject: "Invoice", toName: "Kevin Example", text: "Yes, it's right." }], { shared: { projectId: "p1", name: "Acme", role: "member" } })));
+  try {
+    await click(m.box.querySelector("[data-report-line]"));
+    const [card] = cardsOf(m.box);
+    assert.match(card.textContent, /Yes, it's right\./);
+    assert.ok(!card.querySelector("textarea"), "nothing to change");
+    assert.ok(!button(card, "Send") && !button(card, "Send again"), "nothing to send");
+    await click(button(card, "Copy"));
+    assert.ok(button(card, "Copied"));
+    assert.ok(!calls.some((c) => c.url.includes("/api/drafts")), "nothing asked of Bops");
+  } finally {
+    await m.done();
+    unlisten();
+    offline();
+  }
+});
+
+await test("lib/reply-drafts.ts: where a draft stands, and drafts as words where their cards can't go", async () => {
+  const { draftStatus, draftsText, draftWhere, SEND_STALE_MS } = await import(pathToFileURL(`${root}/lib/reply-drafts.ts`).href);
+  const t = 1_000_000;
+  assert.equal(draftStatus({}, t), "draft");
+  assert.equal(draftStatus({ sending: t - 1000 }, t), "sending");
+  assert.equal(draftStatus({ sending: t - SEND_STALE_MS }, t), "failed");
+  assert.equal(draftStatus({ error: "no" }, t), "failed");
+  assert.equal(draftStatus({ sent: { at: t, text: "x" }, error: "old" }, t), "sent");
+  assert.equal(draftWhere({ app: "slack", channel: "D0DIRECT1" }), "a direct message");
+  assert.equal(draftWhere({ app: "gmail" }), "its thread");
+  assert.equal(
+    draftsText([KEVIN, { id: "drf_s", app: "slack", channel: "C0SUPPORT1", threadTs: "1.2", where: "#support", toName: "Kevin", text: "On it.", sent: { at: t, text: "On it, today." } }]),
+    "Reply to Kevin Example <kevin@example.com> (Gmail, Invoice for October):\nYes, it's right.\n\nReply to Kevin (Slack, #support, in its thread), sent:\nOn it, today.\n\nSend them from Bops.",
+  );
+  assert.equal(draftsText([]), "");
+});
+
+await test("no em or en dashes in what the reports show", () => {
+  for (const f of ["components/app/routine-reports.tsx", "lib/routine-reports.ts", "components/app/reply-drafts.tsx", "lib/reply-drafts.ts", "lib/server/reply-drafts.ts"]) {
+    const src = readFileSync(`${root}/${f}`, "utf8");
+    // Strings and JSX text only: the comments may say anything.
+    const shown = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    assert.ok(!/[–—]/.test(shown), `${f} shows a dash`);
+  }
 });
 
 console.log(`app routines ui: ${passed} passed`);

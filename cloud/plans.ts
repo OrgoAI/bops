@@ -5,7 +5,7 @@ import { db, ensureUserRow, query } from "./db.ts";
 import { currentHandle, MAIN_WORKSPACE } from "./handles.ts";
 import { HttpError, readBody, sendJson, type Route } from "./http.ts";
 import { lineDigits } from "./lines.ts";
-import { BOPS_TIERS, PLAN_LIMIT, PLAN_REQUIRED, type BopsTier, type CloudPlanPayload } from "./protocol.ts";
+import { ACCOUNT_DELETED, BOPS_TIERS, PLAN_LIMIT, PLAN_REQUIRED, type BopsTier, type CloudPlanPayload } from "./protocol.ts";
 import { ensurePlanInbox, ensurePlanPhone, mainBotOf, pausePlanItems, releaseAfterPause } from "./provision.ts";
 import { queueForMac } from "./tunnel.ts";
 
@@ -157,8 +157,12 @@ async function oneOfFew<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Run `work` holding the user's plan lock in Postgres (a second cloud process, or the sweep, waits for it). */
-function locked<T>(userId: string, work: () => Promise<T>): Promise<T> {
+/**
+ * Run `work` holding the user's plan lock in Postgres (a second cloud process, or the sweep, waits for
+ * it). Deleting a user (delete-user.ts) holds it too, so a number being bought for their plan is
+ * bought before the delete looks, and given back with the rest.
+ */
+export function locked<T>(userId: string, work: () => Promise<T>): Promise<T> {
   return oneOfFew(async () => {
     const c = await db().connect();
     try {
@@ -381,7 +385,17 @@ export const routes: Route[] = [
       const at = typeof n?.at === "string" ? new Date(n.at) : new Date(NaN);
       if (typeof n?.userId !== "string" || !USER_ID.test(n.userId) || !isTier(n.tier) || Number.isNaN(at.getTime()) || at.getTime() > Date.now() + 5 * 60_000)
         throw new HttpError(400, "Send {userId, tier, at}");
-      const { kept, before } = await recordTier(n.userId, n.tier, at, "notice");
+      // A user deleted lately (delete-user.ts) gets no plan row back: the Stripe cancel that came with
+      // their deletion sends a notice too, and it's answered as taken so orgo-web doesn't send it again.
+      const recorded = await recordTier(n.userId, n.tier, at, "notice").catch((e: unknown) => {
+        if (e instanceof HttpError && e.extra?.code === ACCOUNT_DELETED) return null;
+        throw e;
+      });
+      if (!recorded) {
+        console.log(`[plans] ${n.userId}: ${n.tier} at ${at.toISOString()} (the user was deleted: ignored)`);
+        return sendJson(res, 200, { ok: true, applied: false });
+      }
+      const { kept, before } = recorded;
       // Answered at once (orgo-web waits a few seconds at most); the setting up runs after.
       if (kept) void settle(n.userId, { force: before !== n.tier, tierChanged: before !== n.tier });
       console.log(`[plans] ${n.userId}: ${n.tier} at ${at.toISOString()}${kept ? (before !== n.tier ? ` (was ${before})` : " (no change)") : " (older than what's kept: ignored)"}`);

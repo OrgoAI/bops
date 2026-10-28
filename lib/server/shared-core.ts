@@ -1,13 +1,15 @@
-import type { SharedWsState, SharedWsUnchanged } from "@/cloud/protocol";
+import { MEMBER_ACT_MS, MEMBER_MAX_TEXT, MEMBER_OWNER_ONLY, MEMBER_READ_ONLY, type MemberAct, type SharedWsState, type SharedWsUnchanged } from "@/cloud/protocol";
+import { ownerOnlyAsk } from "@/lib/member-access";
 import { duePings } from "@/lib/pings";
 import { ownerCall, ownerCredit, ownerVoice, sharedWsId, type SharedOpen, type SharedWorkspace } from "@/lib/shared";
-import { pairChatId, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type Message, type Routine, type Session, type Watch, type Workspace } from "@/lib/types";
+import { pairChatId, workspaceOf, type AppApproval, type AppState, type Bot, type Chat, type MemberSaid, type MemberSend, type Message, type Routine, type Session, type ThreadReply, type Watch, type Workspace } from "@/lib/types";
 import type { RemoteMood } from "./live-core";
 
 /**
- * A workspace shared with the user, open here read only (lib/shared.ts), without the server: what's
- * kept of it (SharedCopy), read from Bops Cloud (GET /v1/ws/<project>/state) through `read`, which
- * lib/server/shared.ts wires to the signed-in key, and the state the window is shown while it's open
+ * A workspace shared with the user, open here (lib/shared.ts), without the server: what's kept of it
+ * (SharedCopy), read from Bops Cloud (GET /v1/ws/<project>/state) through `read`, which lib/server/shared.ts
+ * wires to the signed-in key, what the user did there for a bot they have at Write that the owner's Bops
+ * hasn't written yet (SharedCopy.acting, actWith), and the state the window is shown while it's open
  * (viewState). The copy lives in this object alone: it's never put in the user's state, saved or synced,
  * and it goes the moment the user may no longer see the workspace.
  */
@@ -25,6 +27,57 @@ export const GONE = [401, 403, 404, 409];
 
 /** A chat's older messages read so far, oldest first, and whether Bops Cloud has older ones still. */
 type Older = { messages: Record<string, unknown>[]; more: boolean };
+
+/**
+ * Something the user did in the workspace (MemberAct) that the owner's Bops hasn't written yet: on its way to
+ * Bops Cloud ("sending"), there and waiting for the owner's Bops to open ("waiting"), or not sent (`error`).
+ * `me`: who they are on it, as their own words show until the owner's copy comes.
+ */
+export type PendingAct = { key: string; act: MemberAct; at: number; state: MemberSend["state"]; error?: string; me: MemberSaid };
+/** What an act waiting past MEMBER_ACT_MS, or one the owner's access no longer lets go, says. */
+export const ACT_EXPIRED = "The owner's Bops didn't open in time, so this didn't go.";
+export const ACT_ACCESS_CHANGED = "The owner changed your access, so this didn't go.";
+/** What one too long to send says (more than MEMBER_MAX_TEXT, or a body Bops Cloud won't take). */
+export const ACT_TOO_LONG = "That's too long to send. Make it shorter.";
+/** What Bops Cloud says of what only the owner does (MEMBER_OWNER_ONLY): the same words, from the copy. */
+const ON_THEIR_MAC = "This runs on the owner's Mac. Only the owner can tell it more.";
+const THEIR_LOGINS = "This uses the owner's apps or keys. Only the owner can answer it.";
+const LIVE = new Set(["running", "queued", "starting"]);
+
+/** The bots an act touches, as the copy has them: none when what it names is gone. */
+function botsOfAct(d: SharedWsState, act: MemberAct): string[] {
+  const thread = (id: string) => d.state.sessions.find((x) => x.id === id);
+  const ids = (xs: unknown[]) => xs.flatMap((x) => (typeof x === "string" ? [x] : []));
+  if (act.act === "chat") {
+    const c = d.state.chats.find((x) => x.id === act.chatId);
+    return c && Array.isArray(c.botIds) ? ids(c.botIds) : [];
+  }
+  if (act.act === "answer") return ids([d.state.approvals?.find((x) => x.id === act.askId)?.botId]);
+  return ids((act.act === "stop" ? act.sessionIds : [act.sessionId]).map((id) => thread(id)?.botId));
+}
+
+/** Whether the copy has what an act did now (the owner's Bops wrote it): their words, by their key; the ask answered; the threads stopped. */
+function landed(d: SharedWsState, messages: Record<string, unknown>[], p: PendingAct): boolean {
+  const mine = (x: unknown) => !!x && typeof x === "object" && (x as { member?: { ref?: unknown } }).member?.ref === p.key;
+  const a = p.act;
+  const thread = (id: string) => d.state.sessions.find((x) => x.id === id);
+  switch (a.act) {
+    case "chat":
+      return messages.some((m) => m.chatId === a.chatId && mine(m));
+    case "reply": {
+      const t = thread(a.sessionId);
+      return !t || (Array.isArray(t.replies) && t.replies.some(mine));
+    }
+    case "answer":
+      return !d.state.approvals?.some((x) => x.id === a.askId);
+    case "stop":
+      return a.sessionIds.every((id) => !LIVE.has(String(thread(id)?.status)));
+    case "dismiss": {
+      const t = thread(a.sessionId);
+      return !t || t.dismissed === true || !LIVE.has(String(t.status));
+    }
+  }
+}
 type Copy = { open: SharedOpen; data: SharedWsState; older: Map<string, Older> };
 
 /** Whether the window can show it: the workspace, with a chat to open (the window always has one). */
@@ -83,6 +136,10 @@ export class SharedCopy {
   private again = false;
   /** Counts every change to what's kept, so the window's state has a new version each time. */
   rev = 0;
+  /** What the user did there that the owner's Bops hasn't written yet, by their key for it (PendingAct). */
+  private pending = new Map<string, PendingAct>();
+  /** The clock acts are timed by (tests). */
+  now: () => number = () => Date.now();
   private read: Read;
   private onChange: () => void;
   private onGone: (w: SharedOpen) => void;
@@ -102,6 +159,7 @@ export class SharedCopy {
     }
     if (!showable(r.body)) return { ok: false, status: 404, error: "This workspace has nothing to show yet." };
     this.copy = { open: { ...w, name: r.body.name || w.name, role: r.body.role, wsId: sharedWsId(w.projectId) }, data: r.body, older: new Map() };
+    this.pending.clear();
     this.changed();
     return { ok: true };
   }
@@ -135,7 +193,80 @@ export class SharedCopy {
     if (!showable(r.body)) return this.gone();
     const older = olderKept(was, r.body, this.going.keys());
     this.copy = { open: { ...was.open, name: r.body.name || was.open.name, role: r.body.role }, data: r.body, older };
+    this.settle();
     this.changed();
+  }
+
+  /**
+   * What the user did that the copy has now goes (their own copy gives way to the owner's); one whose bots the
+   * owner no longer gives them at Write didn't go, and says so.
+   */
+  private settle() {
+    const c = this.copy;
+    if (!c) return;
+    const messages = this.messagesOf(c);
+    const levels = c.data.state.levels ?? {};
+    for (const [key, p] of this.pending) {
+      if (p.state !== "failed" && landed(c.data, messages, p)) this.pending.delete(key);
+      else if (p.state !== "failed" && botsOfAct(c.data, p.act).some((id) => levels[id] !== "write")) this.pending.set(key, { ...p, state: "failed", error: ACT_ACCESS_CHANGED });
+    }
+  }
+
+  /** Something the user does there, shown as theirs at once (`me`) until the owner's Bops writes it: on its way. The same key again (Try again) starts it over. */
+  acting(key: string, act: MemberAct, me: MemberSaid) {
+    if (!this.copy) return;
+    this.pending.set(key, { key, act, at: this.now(), state: "sending", me });
+    this.changed();
+  }
+
+  /** Bops Cloud took it: on its way to the owner's Bops ("sending"), or waiting for it to open ("waiting"). */
+  acted(key: string, state: "sending" | "waiting") {
+    const p = this.pending.get(key);
+    if (!p) return;
+    this.pending.set(key, { ...p, state });
+    this.changed();
+    // Still waiting by then, it says it didn't go (acts): the window's state changes then too.
+    const t = setTimeout(() => this.pending.get(key)?.state === "waiting" && this.changed(), MEMBER_ACT_MS + 1000);
+    (t as { unref?: () => void }).unref?.();
+  }
+
+  /** It didn't go, and why (shown under it, with Try again). */
+  failed(key: string, error: string) {
+    const p = this.pending.get(key);
+    if (!p) return;
+    this.pending.set(key, { ...p, state: "failed", error });
+    this.changed();
+  }
+
+  /** Forget one (it went, or the user let it be). */
+  forget(key: string) {
+    if (this.pending.delete(key)) this.changed();
+  }
+
+  /** What's still on its way, as it stands now: one waiting longer than MEMBER_ACT_MS for the owner's Bops didn't go. */
+  acts(): PendingAct[] {
+    const now = this.now();
+    return [...this.pending.values()].map((p) => (p.state !== "failed" && now - p.at > MEMBER_ACT_MS ? { ...p, state: "failed" as const, error: ACT_EXPIRED } : p));
+  }
+
+  /** Why the user can't do this here, from the copy (Bops Cloud decides, this only saves a round trip), or null. */
+  refusal(act: MemberAct): { status: number; error: string; code?: string } | null {
+    const c = this.copy;
+    if (!c) return { status: 409, error: "Open the workspace again." };
+    if ((act.act === "chat" || act.act === "reply") && act.text.trim().length > MEMBER_MAX_TEXT) return { status: 400, error: ACT_TOO_LONG };
+    const bots = botsOfAct(c.data, act);
+    if (!bots.length) return { status: 404, error: "That's gone from the workspace." };
+    const levels = c.data.state.levels ?? {};
+    if (!bots.every((id) => levels[id] === "write")) return { status: 403, error: "You can watch this bot, not act for it. Ask the owner for Write.", code: MEMBER_READ_ONLY };
+    // What only the owner does, whatever the level (cloud/members.ts botsTouched says the same).
+    const onMac = (id: unknown) => typeof id === "string" && c.data.state.sessions.some((x) => x.id === id && x.runsOn === "mac");
+    if ((act.act === "reply" || act.act === "dismiss") && onMac(act.sessionId)) return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
+    if (act.act === "answer") {
+      const a = c.data.state.approvals?.find((x) => x.id === act.askId);
+      if (a && ownerOnlyAsk(a.kind)) return { status: 403, error: THEIR_LOGINS, code: MEMBER_OWNER_ONLY };
+      if (a && onMac(a.threadId)) return { status: 403, error: ON_THEIR_MAC, code: MEMBER_OWNER_ONLY };
+    }
+    return null;
   }
 
   /** Older pages being read, by chat: one at a time each. */
@@ -204,6 +335,7 @@ export class SharedCopy {
     const was = this.copy;
     if (!was) return;
     this.copy = null;
+    this.pending.clear();
     this.changed();
     this.onGone(was.open);
   }
@@ -212,6 +344,7 @@ export class SharedCopy {
   close() {
     if (!this.copy) return;
     this.copy = null;
+    this.pending.clear();
     this.changed();
   }
 
@@ -224,6 +357,44 @@ export class SharedCopy {
     this.rev++;
     this.onChange();
   }
+}
+
+/** What Bops Cloud answered an act (POST /v1/ws/<project>/act): its status (0: it didn't answer) and body. */
+export type ActResult = { status: number; body?: { ok?: boolean; macOn?: boolean; error?: string; code?: string } };
+
+/** The words for an act Bops Cloud turned down, plain: its own where it says them, else by its status. */
+function actError(r: ActResult): string {
+  if (!r.status) return "Couldn't reach Bops Cloud. Try again.";
+  if (r.status === 503) return "Can't reach Orgo to check your access. Try again.";
+  if (r.status === 404) return "That's gone from the workspace.";
+  // Too long for Bops Cloud (its body limit, or more than MEMBER_MAX_TEXT): never its own words for it ("Send {key, act}").
+  if (r.status === 413 || r.status === 400) return ACT_TOO_LONG;
+  return r.body?.error || "That didn't go. Try again.";
+}
+
+/**
+ * Do something in the shared workspace open in `copy`, for bots the user has at Write (lib/server/shared.ts actShared
+ * sends it to Bops Cloud, `send`): shown as theirs at once, then as Bops Cloud said (on its way, waiting for the owner's
+ * Bops to open, or not sent and why). A refusal the copy can tell saves the round trip. Bops Cloud saying they may no
+ * longer see the workspace drops the copy, as a read would (GONE); a bot taken down to Read reads it again, so the
+ * window closes what's no longer theirs.
+ */
+export async function actWith(copy: SharedCopy, act: MemberAct, key: string, me: MemberSaid, send: (body: string) => Promise<ActResult>): Promise<{ ok: true; key: string; macOn: boolean } | { ok: false; status: number; error: string; code?: string }> {
+  const no = copy.refusal(act);
+  if (no) return { ok: false, ...no };
+  copy.acting(key, act, me);
+  const r = await send(JSON.stringify({ key, act })).catch((): ActResult => ({ status: 0 }));
+  if (r.status === 202) {
+    copy.acted(key, r.body?.macOn ? "sending" : "waiting");
+    void copy.refresh();
+    return { ok: true, key, macOn: !!r.body?.macOn };
+  }
+  const error = actError(r);
+  copy.failed(key, error);
+  // No access at all (the workspace, not something in it): what a read would drop it for.
+  if ((r.status === 404 && r.body?.error === "No such workspace") || r.status === 401) copy.gone();
+  else if (r.body?.code === MEMBER_READ_ONLY) void copy.refresh();
+  return { ok: false, status: r.status, error, ...(r.body?.code ? { code: r.body.code } : {}) };
 }
 
 /**
@@ -250,7 +421,7 @@ const onTheirMac = (text: string) => text.replace(/ · on your Mac\b/g, " · on 
  * taken for the user's own. `moods`: its bots' moods from its stream. Made for each read of the window
  * and never kept: the user's state is untouched.
  */
-export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, moods: Record<string, RemoteMood>): AppState {
+export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, moods: Record<string, RemoteMood>, acts: PendingAct[] = []): AppState {
   const ws = open.wsId;
   const s = data.state;
   const workspace: Workspace = { id: ws, name: open.name, createdAt: Number(s.workspace?.createdAt) || 0 };
@@ -261,13 +432,19 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
   // your Mac") read as the owner's (ownerVoice): why a thread or a routine's last run stopped, a thread's
   // notes, its status steps (Bops', never what it typed, searched for or ran: those are as they were), the
   // chat's notes. (The Mac part of a thread's work is titled by Bops "<title> · on your Mac": that Mac is the owner's.)
+  // What the viewer did that the owner's Bops hasn't written yet (SharedCopy.acts): their replies under the
+  // threads, and the threads they stopped saying so, until the copy has the owner's.
+  const sendOf = (p: PendingAct): MemberSend => ({ state: p.state, ...(p.error ? { error: p.error } : {}), key: p.key });
+  const stopping = new Set(acts.flatMap((p) => (p.act.act === "stop" && p.state !== "failed" ? p.act.sessionIds : [])));
   const sessions = s.sessions.map((x) => {
     const t = { steps: [], replies: [], host: "orgo", ...x } as unknown as Session;
+    const mine: ThreadReply[] = acts.flatMap((p) => (p.act.act === "reply" && p.act.sessionId === t.id ? [{ id: `acting_${p.key}`, role: "user" as const, text: p.act.text, at: p.at, member: { ...p.me, ref: p.key }, memberSend: sendOf(p) }] : []));
     return {
       ...t,
+      ...(stopping.has(t.id) && !t.stopAsked ? { stopAsked: "Stopping" } : {}),
       ...(typeof t.title === "string" ? { title: onTheirMac(t.title) } : {}),
       ...(typeof t.error === "string" ? { error: ownerVoice(t.error) } : {}),
-      replies: (Array.isArray(t.replies) ? t.replies : []).map((r) => (typeof r.note === "string" ? { ...r, note: ownerVoice(r.note) } : r)),
+      replies: [...(Array.isArray(t.replies) ? t.replies : []).map((r) => (typeof r.note === "string" ? { ...r, note: ownerVoice(r.note) } : r)), ...mine],
       steps: (Array.isArray(t.steps) ? t.steps : []).map((st) => (typeof st.detail === "string" && BOPS_STEPS.has(st.tool) ? { ...st, detail: ownerVoice(st.detail, searched(st.detail)) } : st)),
     };
   });
@@ -287,6 +464,11 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
             { ...m, text: m.bops ? ownerVoice(m.text, titlesIn(m)) : ownerCredit(theirHeadsUp(m)) }
           : m;
   });
+  // The viewer's own words on their way to the owner's Bops, in the chats they're in (their own copy, until the owner's comes).
+  const chatIds = new Set(chats.map((c) => c.id));
+  for (const p of acts)
+    if (p.act.act === "chat" && chatIds.has(p.act.chatId))
+      messages.push({ id: `acting_${p.key}`, chatId: p.act.chatId, role: "user", text: p.act.text, at: p.at, ...(p.act.replyTo ? { replyTo: p.act.replyTo } : {}), member: { ...p.me, ref: p.key }, memberSend: sendOf(p) });
   // (A watch's heads-up, "Heads up, something new in <window> on your Mac: “…”" or "Heads up, <site> changed. It looks like what
   // you're watching for: …" (watches.ts tell), and the digest, "While you were busy:" (attention.ts flush): the owner's Mac, what
   // the owner watches for, the owner who was busy. The window's title, the news and what's watched for stay as written.)
@@ -365,16 +547,23 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
     sessions,
     routines,
     watches,
-    // What the shared one's bots wait on the owner's OK for: shown, never answered here (the owner's alone,
-    // from a Bops of their own: this Bops has none of their asks to answer). None of the user's own.
-    appApprovals: ((s.approvals ?? []) as unknown as AppApproval[]).filter((a) => ids.has(a.botId) && !a.reply),
+    // What the shared one's bots wait on the owner's OK for: answered here only for a bot the viewer has at Write
+    // (POST /api/workspaces/shared { act }), sent to the owner's Bops through Bops Cloud; this Bops has none of their
+    // asks to answer itself. One the viewer answered stays, with how their answer stands (AppApproval.memberSend: on
+    // its way, waiting for the owner's Bops, or not gone and why), until the owner's Bops has it. None of the user's own.
+    appApprovals: ((s.approvals ?? []) as unknown as AppApproval[])
+      .filter((a) => ids.has(a.botId) && !a.reply)
+      .map((a) => {
+        const p = acts.filter((x) => x.act.act === "answer" && x.act.askId === a.id).sort((x, y) => y.at - x.at)[0];
+        return p ? { ...a, memberSend: sendOf(p) } : a;
+      }),
     digest: [],
     takeover: undefined,
     suggest: undefined,
     screens: undefined,
     screenLog: undefined,
     liveMoods: Object.keys(moods).some((id) => ids.has(id)) ? Object.fromEntries(Object.entries(moods).filter(([id]) => ids.has(id))) : undefined,
-    shared: { ...open, ownBots, more: data.more },
+    shared: { ...open, ownBots, more: data.more, levels: s.levels ?? {}, ...(data.you ? { you: data.you } : {}) },
     // What of the user's own is worth a chime meanwhile: their own news still reaches them (lib/pings.ts).
     ownPings: duePings(own),
   };
