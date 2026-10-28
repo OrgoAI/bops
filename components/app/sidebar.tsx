@@ -3,11 +3,10 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { MAIN_WORKSPACE, waitingAsks, WORKSPACE_APPS_SINCE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
-import { AutopilotButton, AutopilotSections, type AutopilotOpen } from "./autopilot";
+import { AutopilotIcon, AutopilotSections, routinesEntry, type AutopilotOpen } from "./autopilot";
 import { categoriesOpen } from "@/lib/memory-categories";
-import { KeyIcon } from "./screen-cards";
-import { MembersButton } from "./members";
-import { FooterButton, footerPillOf, useFooterHover, type FooterKey, type FooterPage } from "./sidebar-footer";
+import { PeopleIcon, useMembersCount } from "./members";
+import { FooterButton, useFooterHover, type FooterKey, type FooterPage } from "./sidebar-footer";
 import { AppsIcon } from "./made-apps";
 import { KnowledgeIcon, useKnowledgeNews, type MemoryOpen } from "./memory-categories";
 import { AppLogo } from "./apps";
@@ -264,16 +263,22 @@ export function Sidebar({
       )}
       {/* A newer Bops: downloading, ready to Restart into, or out on bops.bot (the Mac app checks and downloads it). */}
       <UpdateNotice />
-      {/* You, then People, your logins (the Vault, with the apps you've connected), Routines, Knowledge and the apps your bots made (sidebar-footer.tsx). New bots are the + at the top. */}
+      {/* You (with People, Routines, Knowledge and Apps in your menu), then Connect apps: your logins, with the apps you've connected (sidebar-footer.tsx). New bots are the + at the top. */}
       <SidebarFooter
         state={state}
         open={footer}
-        you={(expanded) => <YouMenuView state={state} expanded={expanded} needsYou={setup.length > 0} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />}
-        onMembers={onMembers}
+        you={(expanded) => (
+          <YouMenuView
+            state={state}
+            expanded={expanded}
+            needsYou={setup.length > 0}
+            onAccount={onAccount}
+            onSettings={onSettings}
+            onSetup={onSetup}
+            pages={{ open: footer, onMembers, onOpenAutopilot, onOpenMemory, onApps }}
+          />
+        )}
         onVault={onVault}
-        onOpenAutopilot={onOpenAutopilot}
-        onOpenMemory={onOpenMemory}
-        onApps={onApps}
       />
       {menu && menuBot && menuActions && <BotMenu state={state} bot={menuBot} x={menu.x} y={menu.y} onClose={() => setMenu(null)} actions={menuActions} />}
     </aside>
@@ -281,83 +286,40 @@ export function Sidebar({
 }
 
 /**
- * The footer's row: `you` (your account: the initials and their menu, given whether it's the pill), then
- * People, Logins, Routines, Knowledge and Apps (the apps your bots made). The pill (with its label) is
- * the one pointed at or tabbed to, else the one `open` names (sidebar-footer.tsx footerPageOf,
- * footerPillOf); the others are round.
- * Picking one opens its page, and that one is the pill at rest. `hover` seeds the pointed-at one, and
- * `news` whether Knowledge has something new (tests).
+ * The footer's row: `you` (your initials and name, and your menu, given whether it's the pill: People,
+ * Routines, Knowledge and Apps are in it), then Connect apps, round with its icon. You are the pill at
+ * rest; pointing at (or tabbing to) Connect apps grows it into the pill, with the apps you've connected,
+ * as you shrink to your initials (sidebar-footer.tsx). It opens your logins (the Vault). `hover` seeds
+ * the pointed-at one (tests).
  */
 export function SidebarFooter({
   state,
   open = "vault",
   hover: initialHover,
-  news,
   you,
-  onMembers,
   onVault,
-  onOpenAutopilot,
-  onOpenMemory,
-  onApps,
 }: {
   state: AppState;
   open?: FooterPage;
   hover?: FooterKey;
-  news?: boolean;
   you: (expanded: boolean) => ReactNode;
-  onMembers: () => void;
   onVault: () => void;
-  onOpenAutopilot: (open: AutopilotOpen) => void;
-  onOpenMemory: (open: MemoryOpen) => void;
-  /** The Apps home: the apps the bots made (made-apps.tsx). */
-  onApps: () => void;
 }) {
-  const knowledge = categoriesOpen(state);
-  // Apps only for an @orgo.ai account for now (lib/apps-access.ts), and never in a shared workspace (they're its owner's).
-  const apps = appsShown(state);
-  const page = (open === "knowledge" && !knowledge) || (open === "apps" && !apps) ? "vault" : open;
   const { hover, row } = useFooterHover(initialHover);
-  const pill = footerPillOf({ rest: page, hover: (hover === "knowledge" && !knowledge) || (hover === "apps" && !apps) ? null : hover });
+  const pill = hover === "vault" ? "vault" : "you";
   return (
     <div {...row} data-footer-row className="flex items-center gap-1 pb-1 pt-3">
       {you(pill === "you")}
-      <MembersButton state={state} expanded={pill === "people"} pressed={page === "people"} onClick={onMembers} />
       <FooterButton
         name="vault"
         expanded={pill === "vault"}
-        pressed={page === "vault"}
-        label="Logins"
-        tip="Your accounts and logins, and which bots can use them"
+        pressed={open === "vault" && pill === "vault"}
+        label="Connect apps"
+        tip="Connect apps: your accounts and logins, and which bots can use them"
         onClick={onVault}
         trail={<AppsTrail state={state} expanded={pill === "vault"} />}
       />
-      <AutopilotButton state={state} expanded={pill === "routines"} pressed={page === "routines"} onOpen={onOpenAutopilot} />
-      {knowledge && <KnowledgeButton state={state} expanded={pill === "knowledge"} pressed={page === "knowledge"} news={news} onOpen={() => onOpenMemory({})} />}
-      {apps && <FooterButton name="apps" expanded={pill === "apps"} pressed={page === "apps"} label="Apps" tip="Apps your bots made for you" onClick={onApps} icon={<AppsIcon size={16} />} />}
     </div>
-  );
-}
-
-/**
- * Knowledge in the footer, with a blue dot on its corner while there's something new in it (what memory
- * learned since it was last open: memory-categories.tsx useKnowledgeNews), none while it's the open page.
- * `news` is for the tests.
- */
-export function KnowledgeButton({ state, expanded, pressed, news: given, onOpen }: { state: AppState; expanded: boolean; pressed: boolean; news?: boolean; onOpen: () => void }) {
-  const fresh = useKnowledgeNews(currentWorkspace(state), state.account?.user.id ?? "");
-  const news = (given ?? fresh) && !pressed;
-  return (
-    <FooterButton
-      name="knowledge"
-      expanded={expanded}
-      pressed={pressed}
-      label="Knowledge"
-      tip={state.shared ? "Knowledge: what the owner's bots know" : news ? "Knowledge: something new your bots learned" : "Knowledge: what your bots know, learned as you chat"}
-      ariaLabel={news ? "Knowledge, something new" : undefined}
-      onClick={onOpen}
-      icon={<KnowledgeIcon size={16} />}
-      badge={news && <NewDot />}
-    />
   );
 }
 
@@ -372,7 +334,7 @@ function NewDot() {
 }
 
 /**
- * Logins' end: as the pill, the apps you've connected; round, the Vault's key. Both are there
+ * Connect apps' end: as the pill, the apps you've connected; round, its icon. Both are there
  * and fade with the label (globals.css .motion-footer-label), so the logos don't pop in or out as it
  * grows or shrinks; the key sits over the middle of the round button.
  */
@@ -383,16 +345,28 @@ function AppsTrail({ state, expanded }: { state: AppState; expanded: boolean }) 
         <AppStack state={state} />
       </span>
       <span aria-hidden className={`motion-footer-label pointer-events-none absolute inset-0 flex items-center justify-center ${expanded ? "opacity-0" : "opacity-100"}`}>
-        <KeyIcon />
+        <ConnectIcon />
       </span>
     </span>
   );
 }
 
-/** The apps you've connected, as up to three overlapping logos (none yet: the Vault's key). */
+/** Connect apps' icon: three apps and a plus where a fourth goes. */
+function ConnectIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" className="shrink-0 text-ink">
+      <rect x="1.8" y="1.8" width="5" height="5" rx="1.4" />
+      <rect x="9.2" y="1.8" width="5" height="5" rx="1.4" />
+      <rect x="1.8" y="9.2" width="5" height="5" rx="1.4" />
+      <path d="M11.7 9.2v5M9.2 11.7h5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** The apps you've connected, as up to three overlapping logos (none yet: Connect apps' icon). */
 function AppStack({ state }: { state: AppState }) {
   const apps = [...new Map((state.accounts ?? []).filter((a) => a.status === "active").map((a) => [a.app, a])).values()].slice(0, 3);
-  if (!apps.length) return <KeyIcon />;
+  if (!apps.length) return <ConnectIcon />;
   return (
     <span className="flex shrink-0 items-center">
       {apps.map((a, i) => (
@@ -405,16 +379,26 @@ function AppStack({ state }: { state: AppState }) {
 }
 
 /**
- * You, at the bottom of the sidebar: your initials, and a menu with your Orgo account (plan and
- * usage), Settings, this Mac's permissions, Restart Bops (in the Mac app; restart.tsx) and signing
- * out. Like the footer's other buttons it's a slot that grows into the pill while pointed at
- * (`expanded`), with your name (or email) after the initials. While something on this Mac still needs
- * you (and you haven't skipped it on the setup screen), a badge on your initials opens that screen and
- * the menu item carries the same mark.
+ * You, at the bottom of the sidebar: your initials, and a menu with People, Routines, Knowledge and
+ * Apps (`pages`, the sidebar's), your Orgo account (plan and usage), Settings, this Mac's permissions,
+ * Restart Bops (in the Mac app; restart.tsx) and signing out. It's a slot that's the footer's pill at
+ * rest (`expanded`), with your name (or email) after the initials, and shrinks to them while Connect apps
+ * is pointed at. While something on this Mac still needs you (and you haven't skipped it on the setup
+ * screen), a badge on your initials opens that screen and the menu item carries the same mark; while a
+ * monitor or Knowledge has news, a blue dot on them says so, as their items in the menu do.
  */
-export function YouMenu(props: { state: AppState; expanded?: boolean; onAccount: () => void; onSettings: () => void; onSetup: () => void }) {
+export function YouMenu(props: { state: AppState; expanded?: boolean; onAccount: () => void; onSettings: () => void; onSetup: () => void; pages?: MenuPages; news?: boolean; opened?: boolean }) {
   return <YouMenuView {...props} needsYou={useSetupNeedsYou(props.state)} />;
 }
+
+/** The pages in your menu: the one open on the right (sidebar-footer.tsx footerPageOf), and how to open each. */
+type MenuPages = {
+  open?: FooterPage;
+  onMembers: () => void;
+  onOpenAutopilot: (open: AutopilotOpen) => void;
+  onOpenMemory: (open: MemoryOpen) => void;
+  onApps: () => void;
+};
 
 /** YouMenu, told whether this Mac needs something (the sidebar reads that once, for Needs you too). */
 function YouMenuView({
@@ -424,6 +408,9 @@ function YouMenuView({
   onAccount,
   onSettings,
   onSetup,
+  pages,
+  news: givenNews,
+  opened = false,
 }: {
   state: AppState;
   expanded?: boolean;
@@ -431,8 +418,19 @@ function YouMenuView({
   onAccount: () => void;
   onSettings: () => void;
   onSetup: () => void;
+  pages?: MenuPages;
+  /** Whether Knowledge has something new, and the menu starts open (tests). */
+  news?: boolean;
+  opened?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const members = useMembersCount(state);
+  const routines = routinesEntry(state);
+  const knowledge = categoriesOpen(state);
+  const fresh = useKnowledgeNews(currentWorkspace(state), state.account?.user.id ?? "");
+  const knowledgeNews = (givenNews ?? fresh) && knowledge && pages?.open !== "knowledge";
+  // Apps only for an @orgo.ai account for now (lib/apps-access.ts), and never in a shared workspace (they're its owner's).
+  const apps = appsShown(state);
+  const [open, setOpen] = useState(opened);
   const [restart, setRestart] = useState(false);
   const canRestart = useCanRestart();
   const box = useRef<HTMLDivElement>(null);
@@ -463,13 +461,18 @@ function YouMenuView({
         aria-label={`${name}: account and settings`}
         aria-haspopup="menu"
         aria-expanded={open}
-        className={`flex h-9 w-full min-w-0 items-center justify-center overflow-hidden rounded-full px-2.5 text-[13px] font-semibold outline-none transition-[background-color,color,transform] duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] active:scale-[.96] motion-reduce:transition-none ${open ? "bg-ink text-highlighter" : "bg-[color:var(--c-eeeeec)] text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-e6e6e3)]"}`}
+        className="group/you flex h-9 w-full min-w-0 items-center overflow-hidden rounded-full text-[13px] font-semibold outline-none transition-[background-color,transform] duration-150 ease-out hover:bg-black/[0.04] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] active:scale-[.96] motion-reduce:transition-none"
       >
-        <span className="shrink-0">{initialsOf(state)}</span>
-        <span aria-hidden className={`motion-footer-label min-w-0 truncate whitespace-nowrap text-[13.5px] font-medium ${open ? "text-highlighter" : "text-ink"} ${expanded ? "max-w-[160px] translate-x-0 pl-1.5 opacity-100" : "max-w-0 -translate-x-1 pl-0 opacity-0"}`}>
+        <span className={`flex size-9 shrink-0 items-center justify-center rounded-full transition-colors duration-150 ${open ? "bg-ink text-highlighter" : "bg-[color:var(--c-eeeeec)] text-[color:var(--c-6b6b6b)] group-hover/you:bg-[color:var(--c-e6e6e3)]"}`}>{initialsOf(state)}</span>
+        <span aria-hidden className={`motion-footer-label min-w-0 truncate whitespace-nowrap text-[14px] font-medium text-ink ${expanded ? "max-w-[200px] translate-x-0 pl-2.5 pr-3 opacity-100" : "max-w-0 -translate-x-1 pl-0 pr-0 opacity-0"}`}>
           {name}
         </span>
       </button>
+      {pages && (routines.news > 0 || knowledgeNews) && !open && (
+        <span className="pointer-events-none absolute left-0 top-0 size-9">
+          <NewDot />
+        </span>
+      )}
       {/* Pops as it appears: YouMenu stays mounted, so polls don't replay it (at launch it may pop once, as the permissions are first read). */}
       {needsYou && (
         <button
@@ -491,6 +494,42 @@ function YouMenuView({
             <span className="truncate text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{user ? (user.email ?? "Signed in with Orgo") : "Not signed in"}</span>
           </div>
           <div className="mx-2 mb-1 h-px bg-[color:var(--c-ececea)]" />
+          {pages && (
+            <>
+              <button onClick={pick(pages.onMembers)} className={`${item} ${pages.open === "people" ? "bg-black/[0.04]" : ""}`}>
+                <PeopleIcon size={15} />
+                <span className="flex-1">People</span>
+                {!!members && <span className="text-[12px] font-medium tabular-nums text-[color:var(--c-9a9a98)]">{members}</span>}
+              </button>
+              <button onClick={pick(() => pages.onOpenAutopilot(routines.open))} className={`${item} ${pages.open === "routines" ? "bg-black/[0.04]" : ""}`}>
+                <AutopilotIcon size={15} />
+                <span className="flex-1">Routines</span>
+                {routines.news > 0 && (
+                  <span title={`${routines.news === 1 ? "A monitor has" : `${routines.news} monitors have`} news`} className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-highlighter px-1 text-[11px] font-semibold leading-none tabular-nums text-ink">
+                    {routines.news}
+                  </span>
+                )}
+              </button>
+              {knowledge && (
+                <button
+                  onClick={pick(() => pages.onOpenMemory({}))}
+                  title={state.shared ? "What the owner's bots know" : "What your bots know, learned as you chat"}
+                  className={`${item} ${pages.open === "knowledge" ? "bg-black/[0.04]" : ""}`}
+                >
+                  <KnowledgeIcon size={15} />
+                  <span className="flex-1">Knowledge</span>
+                  {knowledgeNews && <span title="Something new your bots learned" className="size-2 rounded-full bg-[#2F7BFF]" />}
+                </button>
+              )}
+              {apps && (
+                <button onClick={pick(pages.onApps)} className={`${item} ${pages.open === "apps" ? "bg-black/[0.04]" : ""}`}>
+                  <AppsIcon size={15} />
+                  <span className="flex-1">Apps</span>
+                </button>
+              )}
+              <div className="mx-2 my-1 h-px bg-[color:var(--c-ececea)]" />
+            </>
+          )}
           <button onClick={pick(onAccount)} className={item}>
             <svg width="15" height="15" viewBox="0 0 16 16" className="shrink-0">
               <circle cx="8" cy="5.5" r="2.8" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />

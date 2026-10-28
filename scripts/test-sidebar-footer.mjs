@@ -1,10 +1,9 @@
 // Tests for the sidebar's footer (components/app/sidebar-footer.tsx and SidebarFooter in sidebar.tsx):
-// which button is the pill for each page open on the right (People's sheet, Logins, Routines, Knowledge,
-// the Apps home or an app a bot made; none: Logins), that the one pointed at wins over it (your account
-// too) and leaving goes back to it, that the others are round with their tooltips, that the Routines badge
-// shows in both shapes, that Knowledge's blue dot shows while it has something new (and when that is), that
-// all six fit the sidebar, and that the motion is a flex-grow swap the reduced-motion setting turns off and
-// touch skips. Also the workspace switcher's line under the default while its name waits for the apps (why
+// you (the pill at rest, with your name) and Connect apps (round with its icon; pointed at, the pill with
+// the apps you've connected, as you shrink to your initials), your menu with People, Routines, Knowledge
+// and Apps (the open one marked, Routines' count, Knowledge's dot, and a dot on your initials while either
+// has news), when Knowledge has something new, which page is open, and that the motion is a flex-grow
+// swap the reduced-motion setting turns off and touch skips. Also the workspace switcher's line under the default while its name waits for the apps (why
 // Orgo still shows bops).
 //
 // The .tsx files are compiled with the TypeScript in node_modules as they load, and rendered to HTML.
@@ -49,7 +48,7 @@ globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} }
 globalThis.matchMedia = () => ({ matches: false });
 globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
 
-const { footerPageOf, footerPillOf, canHover, FOOTER_LEAVE_MS } = await import(pathToFileURL(`${root}/components/app/sidebar-footer.tsx`).href);
+const { footerPageOf, canHover } = await import(pathToFileURL(`${root}/components/app/sidebar-footer.tsx`).href);
 const { SidebarFooter, YouMenu, WorkspaceSwitcher, heldNameNote } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
 const { newSince, newestOf, markSeen, seenOf } = await import(pathToFileURL(`${root}/components/app/memory-categories.tsx`).href);
 const { renderToStaticMarkup } = await import("react-dom/server");
@@ -76,10 +75,10 @@ const base = {
   accounts: [],
 };
 const render = (state, open, hover) =>
-  renderToStaticMarkup(h(SidebarFooter, { state, open, hover, you: (expanded) => h("span", { id: "you", "data-expanded": String(expanded) }, "TI"), onMembers: noop, onVault: noop, onOpenAutopilot: noop, onOpenMemory: noop, onApps: noop }));
+  renderToStaticMarkup(h(SidebarFooter, { state, open, hover, you: (expanded) => h("span", { id: "you", "data-expanded": String(expanded) }, "TI"), onVault: noop }));
 /** The same row with the real account button (YouMenu) first. */
 const renderYou = (state, open, hover) =>
-  renderToStaticMarkup(h(SidebarFooter, { state, open, hover, you: (expanded) => h(YouMenu, { state, expanded, onAccount: noop, onSettings: noop, onSetup: noop }), onMembers: noop, onVault: noop, onOpenAutopilot: noop, onOpenMemory: noop, onApps: noop }));
+  renderToStaticMarkup(h(SidebarFooter, { state, open, hover, you: (expanded) => h(YouMenu, { state, expanded, onAccount: noop, onSettings: noop, onSetup: noop }), onVault: noop }));
 
 /** Each footer button's slot, in order: its label, whether it's the pill, and its button's title. */
 function slots(html) {
@@ -92,7 +91,7 @@ function slots(html) {
   }));
 }
 
-await test("which page is open picks the pill: People's sheet, Knowledge, Routines, Apps, else Logins", () => {
+await test("which page is open: People's sheet, Knowledge, Routines, Apps, else Logins", () => {
   assert.equal(footerPageOf({}), "vault", "nothing open: Logins, as before");
   assert.equal(footerPageOf({ tab: "vault" }), "vault");
   assert.equal(footerPageOf({ tab: "memory" }), "knowledge");
@@ -101,59 +100,57 @@ await test("which page is open picks the pill: People's sheet, Knowledge, Routin
   assert.equal(footerPageOf({ tab: "made-app" }), "apps", "an app a bot made");
   assert.equal(footerPageOf({ people: true, tab: "made-app" }), "people");
   assert.equal(footerPageOf({ tab: "computer" }), "vault", "a computer or a web page: back to Logins");
-  assert.equal(footerPageOf({ tab: "web" }), "vault");
   assert.equal(footerPageOf({ people: true, tab: "memory" }), "people", "People's sheet is over everything");
-  assert.equal(footerPageOf({ tab: "memory", knowledge: false }), "vault", "no Knowledge in the footer: not its pill");
+  assert.equal(footerPageOf({ tab: "memory", knowledge: false }), "vault", "no Knowledge: not its page");
 });
 
-await test("exactly one pill, the open page's, the others round with their tooltips", () => {
-  const cases = { people: "People", vault: "Logins", routines: "Routines", knowledge: "Knowledge", apps: "Apps" };
-  for (const [open, label] of Object.entries(cases)) {
-    const s = slots(render(base, open));
-    assert.deepEqual(s.map((x) => x.label), ["People", "Logins", "Routines", "Knowledge", "Apps"], "the order stays, Apps last");
-    assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), [label], `${open}: one pill`);
-    for (const x of s) {
-      assert.equal(x.pressed, x.label === label, `${x.label}: aria-pressed on the pill only`);
-      assert.equal(x.round, x.label !== label);
-      if (x.round) assert.ok(x.title, `${x.label}: a round one keeps its tooltip`);
-      else assert.equal(x.title, undefined, `${x.label}: the pill needs no tooltip`);
-    }
+await test("two in the row: you, the pill with your name at rest, and Connect apps, round with its icon and tooltip", () => {
+  for (const open of ["vault", "routines", "knowledge", "apps", "people"]) {
+    const html = renderYou(base, open);
+    const s = slots(html);
+    assert.deepEqual(s.map((x) => x.label), ["You", "Connect apps"], `${open}: the order and nothing else`);
+    assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["You"], `${open}: you are the pill`);
+    assert.equal(s[0].title, undefined, "the pill needs no tooltip");
+    assert.equal(s[1].title, "Connect apps: your accounts and logins, and which bots can use them");
+    assert.ok(!s[1].pressed, "not pressed while round");
+    assert.match(html, /motion-footer-label[^"]*max-w-\[200px\][^"]*opacity-100[^"]*">Tess Ito<\/span>/, "your name shown");
   }
+  assert.doesNotMatch(renderYou(base, "vault"), /aria-label="(People|Routines|Knowledge|Apps)"/, "the pages are in your menu, not the row");
+  // Round: Connect apps' icon over the middle; its name for a screen reader.
+  const html = render(base, "vault");
+  assert.match(html, /aria-label="Connect apps"/);
+  assert.match(html, /motion-footer-label pointer-events-none absolute[^"]*opacity-100[^"]*"><svg[^>]*><rect/, "the icon, shown round");
+  assert.equal(html.match(/data-expanded="(\w+)"/)[1], "true", "the row tells `you` it's the pill");
 });
 
-await test("the button pointed at is the pill over the open page's, which stays pressed; leaving goes back", () => {
-  assert.equal(footerPillOf({ rest: "vault", hover: "knowledge" }), "knowledge", "pointed at wins");
-  assert.equal(footerPillOf({ rest: "routines", hover: "you" }), "you", "your account too");
-  assert.equal(footerPillOf({ rest: "routines", hover: null }), "routines", "left the row: the resting one");
-  assert.equal(footerPillOf({ rest: "people" }), "people");
-  assert.ok(FOOTER_LEAVE_MS > 0 && FOOTER_LEAVE_MS <= 120, "a short wait on leaving, so the pill never blinks");
-  const s = slots(render(base, "routines", "knowledge"));
-  assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["Knowledge"], "one pill, the pointed one");
-  assert.deepEqual(s.filter((x) => x.pressed).map((x) => x.label), ["Routines"], "aria-pressed stays on the open page");
-  assert.equal(s.find((x) => x.label === "Knowledge").title, undefined, "the pill needs no tooltip");
-  assert.ok(s.find((x) => x.label === "Routines").title, "the shrunk one gets its tooltip back");
-  // Pointed at Knowledge with no Knowledge in the footer: the resting one.
-  const none = slots(render({ ...base, account: undefined }, "routines", "knowledge"));
-  assert.deepEqual(none.filter((x) => x.pill).map((x) => x.label), ["Routines"]);
-});
-
-await test("your account takes part: pointed at, it's the pill with your name (or email), the rest round", () => {
-  let html = renderYou(base, "vault", "you");
+await test("pointed at, Connect apps is the pill with the apps you've connected, and you shrink to your initials", () => {
+  const state = { ...base, accounts: [{ app: "gmail", appName: "Gmail", status: "active" }] };
+  let html = renderYou(state, "vault", "vault");
   let s = slots(html);
-  assert.deepEqual(s.map((x) => x.label), ["You", "People", "Logins", "Routines", "Knowledge", "Apps"]);
+  assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["Connect apps"]);
+  assert.ok(s[0].round && s[0].title, "you: round, with your tooltip");
+  assert.ok(s[1].pressed, "Logins open and pointed at: pressed");
+  assert.equal(s[1].title, undefined);
+  assert.match(html, /opacity-0[^"]*">Tess Ito<\/span>/, "your name hidden");
+  assert.match(html, /max-w-\[160px\][^"]*opacity-100[^"]*">Connect apps<\/span>/, "its label shown");
+  assert.match(html, /Gmail/, "a connected app's logo");
+  // Both ends are there so they fade with the label: the logos only on the pill, the icon only round.
+  const ends = (html) => {
+    const logos = html.match(/<span aria-hidden="true" class="motion-footer-label flex min-w-0 overflow-hidden[^"]*"/)?.[0] ?? "";
+    const icon = html.match(/<span aria-hidden="true" class="motion-footer-label pointer-events-none absolute[^"]*"/)?.[0] ?? "";
+    return { logos: /max-w-\[48px\] opacity-100/.test(logos), icon: /opacity-100/.test(icon) };
+  };
+  assert.deepEqual(ends(html), { logos: true, icon: false });
+  assert.deepEqual(ends(render(state, "vault")), { logos: false, icon: true }, "round: the icon");
+  // Pointed at you (or at nothing): you stay the pill.
+  s = slots(renderYou(state, "vault", "you"));
   assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["You"]);
-  assert.equal(s[0].title, undefined, "the pill needs no tooltip");
-  assert.match(html, /motion-footer-label[^"]*max-w-\[160px\][^"]*opacity-100[^"]*">Tess Ito<\/span>/, "the name shown");
-  assert.match(html, /aria-expanded="false"/, "the menu's state, not the hover");
-  html = renderYou({ ...base, account: { user: { id: "u1", email: "tess@example.com" } } }, "vault", "you");
+  // No apps yet: the pill ends in its icon.
+  html = render(base, "vault", "vault");
+  assert.ok(!/<img/.test(html));
+  assert.match(html, /max-w-\[48px\] opacity-100[^"]*"><svg/, "the icon where the logos go");
+  html = renderYou({ ...base, account: { user: { id: "u1", email: "tess@example.com" } } }, "vault");
   assert.match(html, /opacity-100[^"]*">tess@example\.com<\/span>/, "no name: the email");
-  // At rest it's round, with its tooltip, and Logins is the pill.
-  html = renderYou(base, "vault");
-  s = slots(html);
-  assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["Logins"]);
-  assert.ok(s[0].round && s[0].title, "round with its tooltip");
-  assert.match(html, /opacity-0[^"]*">Tess Ito<\/span>/, "the name hidden");
-  assert.equal(render(base, "vault", "you").match(/data-expanded="(\w+)"/)[1], "true", "the row tells `you` it's the pill");
 });
 
 await test("no hover expansion where nothing hovers (a touch screen)", () => {
@@ -173,48 +170,37 @@ await test("no hover expansion where nothing hovers (a touch screen)", () => {
   assert.match(src, /\(hover: none\)/);
 });
 
-await test("none open: Logins is the pill, the key until apps are connected, then their logos", () => {
-  let html = render(base, undefined);
-  assert.deepEqual(slots(html).filter((x) => x.pill).map((x) => x.label), ["Logins"]);
-  assert.ok(!/<img/.test(html));
-  html = render({ ...base, accounts: [{ app: "gmail", appName: "Gmail", status: "active" }] }, "vault");
-  assert.match(html, /Gmail/, "a connected app's logo in the pill");
-  // Both ends are there so they fade with the label: the logos shown only on the pill, the key only round.
-  const ends = (html) => {
-    const logos = html.match(/<span aria-hidden="true" class="motion-footer-label flex min-w-0 overflow-hidden[^"]*"/)?.[0] ?? "";
-    const key = html.match(/<span aria-hidden="true" class="motion-footer-label pointer-events-none absolute[^"]*"/)?.[0] ?? "";
-    return { logos: /max-w-\[48px\] opacity-100/.test(logos), key: /opacity-100/.test(key) };
-  };
-  assert.deepEqual(ends(html), { logos: true, key: false });
-  html = render({ ...base, accounts: [{ app: "gmail", appName: "Gmail", status: "active" }] }, "routines");
-  assert.deepEqual(ends(html), { logos: false, key: true }, "round, it's the key");
-  // The pill's padding is main's.
-  assert.match(html, /rounded-full bg-white px-2\.5 /);
+await test("your menu has People, Routines, Knowledge and Apps, the open one marked, with their counts", () => {
+  const watch = { id: "w1", botId: "boppy", site: "acme.example", lookFor: "a price drop", alert: { at: 1, text: "Down 10%" }, page: { url: "https://acme.example" } };
+  const menu = (state, pages = {}, news = false) => renderToStaticMarkup(h(YouMenu, { state, opened: true, news, onAccount: noop, onSettings: noop, onSetup: noop, pages: { onMembers: noop, onOpenAutopilot: noop, onOpenMemory: noop, onApps: noop, ...pages } }));
+  const items = (html) => [...html.matchAll(/<span class="flex-1">([^<]+)<\/span>/g)].map((m) => m[1]);
+  let html = menu(base, { open: "routines" });
+  assert.deepEqual(items(html).slice(0, 4), ["People", "Routines", "Knowledge", "Apps"]);
+  assert.ok(html.indexOf(">People<") < html.indexOf("Account and usage"), "above your account");
+  assert.match(html, /bg-black\/\[0\.04\]"><svg[^]*?<span class="flex-1">Routines/, "the open page marked");
+  html = menu({ ...base, watches: [watch] });
+  assert.match(html, /title="A monitor has news"[^>]*>1<\/span>/, "Routines' count of monitors with news");
+  html = menu(base, {}, true);
+  assert.match(html, /title="Something new your bots learned" class="size-2 rounded-full bg-\[#2F7BFF\]"/, "Knowledge's blue dot");
+  assert.doesNotMatch(menu(base, { open: "knowledge" }, true), /Something new your bots learned/, "open: no dot");
+  // No account: no Knowledge and no Apps. Not @orgo.ai, or in a shared workspace: no Apps (lib/apps-access.ts).
+  assert.deepEqual(items(menu({ ...base, account: undefined })).slice(0, 2), ["People", "Routines"]);
+  assert.ok(!items(menu({ ...base, account: undefined })).includes("Knowledge"));
+  const other = { ...base, account: { user: { id: "u2", name: "Sam", email: "sam@example.com" } } };
+  assert.ok(!items(menu(other)).includes("Apps"));
+  assert.ok(!items(menu({ ...base, shared: { projectId: "p1", wsId: "ws_shared", name: "Acme", role: "viewer" } })).includes("Apps"));
+  // Without pages (YouMenu on its own): just your account.
+  assert.ok(!renderToStaticMarkup(h(YouMenu, { state: base, opened: true, onAccount: noop, onSettings: noop, onSetup: noop })).includes(">People<"));
 });
 
-await test("the label is there in both shapes, shown only on the pill; the avatar stays first", () => {
-  const html = render(base, "routines");
-  assert.ok(html.indexOf('id="you"') < html.indexOf("data-footer-slot"), "the initials first, as they were");
-  assert.match(html, /data-expanded="false"/, "your account round at rest");
-  const labels = [...html.matchAll(/<span aria-hidden="true" class="motion-footer-label ([^"]+)">([^<]+)<\/span>/g)].map(([, cls, t]) => ({ t: t.replace("&amp;", "&"), open: /max-w-\[160px\]/.test(cls) && /opacity-100/.test(cls) }));
-  assert.deepEqual(labels, [
-    { t: "People", open: false },
-    { t: "Logins", open: false },
-    { t: "Routines", open: true },
-    { t: "Knowledge", open: false },
-    { t: "Apps", open: false },
-  ]);
-  // Each button keeps its name for a screen reader, round or not.
-  for (const n of ["People", "Logins", "Routines", "Knowledge", "Apps"]) assert.match(html, new RegExp(`aria-label="${n}"`));
-});
-
-await test("the Routines badge shows round and as the pill", () => {
-  const state = { ...base, watches: [{ id: "w1", botId: "boppy", site: "acme.example", lookFor: "a price drop", alert: { at: 1, text: "Down 10%" }, page: { url: "https://acme.example" } }] };
-  for (const open of ["vault", "routines"]) {
-    const html = render(state, open);
-    assert.match(html, /aria-label="Routines, 1 with news"/);
-    assert.match(html, /bg-highlighter[^"]*">1<\/span>/, `${open}: the badge`);
-  }
+await test("news in your menu shows as a blue dot on your initials, none while the menu is open", () => {
+  const watch = { id: "w1", botId: "boppy", site: "acme.example", lookFor: "a price drop", alert: { at: 1, text: "Down 10%" }, page: { url: "https://acme.example" } };
+  const you = (state, news, opened = false) => renderToStaticMarkup(h(YouMenu, { state, news, opened, onAccount: noop, onSettings: noop, onSetup: noop, pages: { onMembers: noop, onOpenAutopilot: noop, onOpenMemory: noop, onApps: noop } }));
+  assert.match(you(base, true), /data-new-dot/, "Knowledge has news");
+  assert.match(you({ ...base, watches: [watch] }, false), /data-new-dot/, "a monitor has news");
+  assert.doesNotMatch(you(base, false), /data-new-dot/, "nothing new");
+  assert.doesNotMatch(you(base, true, true), /data-new-dot/, "menu open: its items say it");
+  assert.match(you(base, true), /<span class="pointer-events-none absolute left-0 top-0 size-9"><span data-new-dot/, "on your initials' corner");
 });
 
 await test("Knowledge is new when an item was learned or mentioned after the newest one seen there", () => {
@@ -245,76 +231,10 @@ await test("Knowledge is new when an item was learned or mentioned after the new
   globalThis.localStorage = was;
 });
 
-await test("Knowledge's dot: blue on its corner, softly pulsing (not with reduced motion), said in its name; none while it's open", () => {
-  const renderNews = (open, news) => renderToStaticMarkup(h(SidebarFooter, { state: base, open, news, you: () => null, onMembers: noop, onVault: noop, onOpenAutopilot: noop, onOpenMemory: noop, onApps: noop }));
-  for (const open of ["vault", "routines"]) {
-    const html = renderNews(open, true);
-    const dot = html.match(/<span data-new-dot="true" class="([^"]+)">([\s\S]*?)<\/span><\/span>/);
-    assert.ok(dot, `${open}: the dot`);
-    assert.match(dot[1], /absolute -right-px -top-px/, "on the top right corner, outside the clipped button");
-    assert.match(dot[2], /motion-new-pulse[^"]*motion-reduce:hidden/, "the pulse, gone with reduced motion");
-    assert.match(dot[2], /bg-\[#2F7BFF\]/);
-    assert.equal(dot[2].replace(/<[^>]+>/g, "").trim(), "", "no number");
-    assert.match(html, /aria-label="Knowledge, something new"/);
-  }
-  assert.match(renderNews("vault", true), /title="Knowledge: something new your bots learned"/, "round: the tooltip says so");
-  assert.doesNotMatch(renderNews("knowledge", true), /data-new-dot/, "open: no dot");
-  assert.match(renderNews("knowledge", true), /aria-label="Knowledge"/);
-  assert.doesNotMatch(renderNews("vault", false), /data-new-dot/, "nothing new: no dot");
-  assert.doesNotMatch(render(base, "vault"), /data-new-dot/, "on the server, before the copy is in: no dot");
-  const css = readFileSync(`${root}/app/globals.css`, "utf8");
-  assert.match(css, /\.motion-new-pulse \{\s*animation: new-pulse [^;]*infinite;/);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.motion-new-pulse \{\s*animation: none;/);
-});
-
-await test("no Knowledge for the account: four buttons, and Knowledge asked for falls back to Logins", () => {
-  const s = slots(render({ ...base, account: undefined }, "knowledge"));
-  assert.deepEqual(s.map((x) => x.label), ["People", "Logins", "Routines"], "no account: no Knowledge, and no Apps either");
-  assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["Logins"]);
-});
-
-await test("Apps only for an @orgo.ai account (lib/apps-access.ts): anyone else has no Apps button, and Apps asked for or pointed at falls back to Logins", () => {
-  const other = { ...base, account: { user: { id: "u2", name: "Sam", email: "sam@example.com" } } };
-  let s = slots(render(other, "apps"));
-  assert.deepEqual(s.map((x) => x.label), ["People", "Logins", "Routines", "Knowledge"]);
-  assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["Logins"]);
-  s = slots(render(other, "routines", "apps"));
-  assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["Routines"]);
-  assert.deepEqual(slots(render(base, "apps")).filter((x) => x.pill).map((x) => x.label), ["Apps"], "the @orgo.ai one has it");
-  // Nor in a workspace shared with them: its apps are its owner's.
-  const shared = { ...base, shared: { projectId: "p1", wsId: "ws_shared", name: "Acme", role: "viewer" } };
-  assert.deepEqual(slots(render(shared, "vault")).map((x) => x.label), ["People", "Logins", "Routines", "Knowledge"]);
-});
-
-await test("Apps (what the bots made) is one of the pill's buttons: open, pointed at, or round with its tooltip", () => {
-  // The Apps home or an app open on the right: Apps is the pill, pressed, with its label and no tooltip.
-  let html = render(base, footerPageOf({ tab: "made-app" }));
-  let s = slots(html);
-  assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["Apps"]);
-  assert.deepEqual(s.filter((x) => x.pressed).map((x) => x.label), ["Apps"]);
-  assert.equal(s.find((x) => x.label === "Apps").title, undefined);
-  assert.match(html, /motion-footer-label[^"]*max-w-\[160px\][^"]*opacity-100[^"]*">Apps<\/span>/, "its label shown");
-  assert.equal(s.find((x) => x.label === "Logins").title, "Your accounts and logins, and which bots can use them", "Logins round, with its tooltip");
-  // Pointed at from another page: the pill, while that page stays pressed; leaving goes back.
-  s = slots(render(base, "routines", "apps"));
-  assert.deepEqual(s.filter((x) => x.pill).map((x) => x.label), ["Apps"]);
-  assert.deepEqual(s.filter((x) => x.pressed).map((x) => x.label), ["Routines"]);
-  assert.equal(footerPillOf({ rest: "apps", hover: "knowledge" }), "knowledge");
-  assert.equal(footerPillOf({ rest: "apps", hover: null }), "apps");
-  // Round: the grid icon, its tooltip and its name.
-  html = render(base, "vault");
-  s = slots(html);
-  assert.ok(s.find((x) => x.label === "Apps").round);
-  assert.equal(s.find((x) => x.label === "Apps").title, "Apps your bots made for you");
-  assert.match(html, /data-footer-key="apps"[^>]*><button[^>]*aria-label="Apps"[^>]*><svg[^>]*aria-hidden="true"/);
-  // The same slot as the others, so it takes part in the swap.
-  assert.match(html, /data-footer-slot="Apps" data-footer-key="apps" class="motion-footer-slot relative flex h-9 min-w-9 basis-9 grow-0 shrink"/);
-});
-
 await test("the motion: a flex-grow swap on one curve, inside the row, and none with reduced motion", () => {
-  const html = render(base, "knowledge");
-  // Every slot starts 36px wide and only the pill takes the free space, so the row never gets wider.
-  for (const m of html.matchAll(/data-footer-slot="[^"]+" class="([^"]+)"/g)) {
+  const html = renderYou(base, "vault");
+  // Each slot starts 36px wide and only the pill takes the free space, so the row never gets wider.
+  for (const m of html.matchAll(/data-footer-slot="[^"]+" data-footer-key="[^"]+" class="([^"]+)"/g)) {
     assert.match(m[1], /motion-footer-slot/);
     assert.match(m[1], /basis-9/);
     assert.match(m[1], /min-w-9/);
@@ -322,28 +242,13 @@ await test("the motion: a flex-grow swap on one curve, inside the row, and none 
   }
   assert.match(html, /active:scale-\[\.96\]/, "a small press");
   assert.match(html, /motion-reduce:transition-none/, "the press too, with reduced motion");
+  assert.match(html, /data-footer-row="true" class="flex items-center gap-1 pb-1 pt-3"/);
   const css = readFileSync(`${root}/app/globals.css`, "utf8");
   const curve = "250ms cubic-bezier(0.2, 0.8, 0.2, 1)";
   assert.match(css, new RegExp(`\\.motion-footer-slot \\{\\s*transition: flex-grow ${curve.replace(/[().]/g, "\\$&")};`));
   assert.match(css, /\.motion-footer-label \{[^}]*max-width 250ms[^}]*opacity/);
-  // Reduced motion: the swap is instant.
   const reduced = [...css.matchAll(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/g)].map((m) => m[1]).join("\n");
   assert.match(reduced, /\.motion-footer-slot,\s*\.motion-footer-label \{\s*transition: none;/);
-});
-
-await test("all six fit the sidebar: five 36px circles 4px apart leave the pill 119px, room for Knowledge's (112px in Chrome)", () => {
-  const html = renderYou(base, "knowledge");
-  assert.equal(slots(html).length, 6);
-  assert.match(html, /data-footer-row="true" class="flex items-center gap-1 pb-1 pt-3"/, "4px apart, no padding at the sides");
-  const app = readFileSync(`${root}/components/app/bops-app.tsx`, "utf8");
-  const side = readFileSync(`${root}/components/app/sidebar.tsx`, "utf8");
-  const width = Number(app.match(/grid-cols-\[(\d+)px_minmax/)[1]);
-  assert.equal(width, 340, "the sidebar's width");
-  assert.match(side, /<aside className="flex min-h-0 flex-col [^"]*px-2\.5 /, "10px at each side");
-  assert.match(side, /<aside className="flex min-h-0 flex-col border-r /, "and a 1px border on the right");
-  const pill = width - 1 - 2 * 10 - 5 * 36 - 5 * 4;
-  assert.equal(pill, 119);
-  assert.ok(pill >= 112, "Knowledge with its icon needs 112px; Logins with three logos 106");
 });
 
 await test("the workspace switcher says under the default why Orgo still shows bops while its name waits for the apps", () => {
