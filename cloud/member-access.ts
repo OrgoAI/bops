@@ -5,9 +5,9 @@
  *
  * Per bot: none (they don't see it at all), read (everything of it: its chats with the owner's own
  * messages there, a message kept "between us" too, its threads with their notes and results, routines,
- * watches, moods and screen), or write (chat with it and run it too, once people can act in a shared
- * workspace; until then it reads as read). The same levels as orgo-web's API key permissions
- * (lib/api-keys/permission-groups.ts KeyLevel): write takes in read.
+ * watches, moods and screen), or write (everything read has, and they can chat with it, have it work,
+ * answer what it asks and stop it, from their own Bops: cloud/members.ts act). The same levels as
+ * orgo-web's API key permissions (lib/api-keys/permission-groups.ts KeyLevel): write takes in read.
  *
  * A person's `bots` says their level for each bot named; `others` covers every bot not named, the ones
  * made later included. So a bot made after they joined stays hidden unless `others` lets them see it.
@@ -124,6 +124,44 @@ export const visibleBots = (access: MemberAccess, botIds: string[]) => botIds.fi
  * them stays hidden, as its messages would show that bot's side).
  */
 export const seesChat = (access: MemberAccess, botIds: string[]) => botIds.length > 0 && botIds.every((id) => levelOf(access, id) !== "none");
+
+/**
+ * Whether a person may act in a chat (cloud/members.ts act): every bot in it at write. A group with one
+ * bot at read stays watch only for them, as what they say there would set that bot going too.
+ */
+export const writesChat = (access: MemberAccess, botIds: string[]) => botIds.length > 0 && botIds.every((id) => permits(levelOf(access, id), "write"));
+
+/** Who a member is on what they said or did in the owner's workspace, as Bops Cloud vouched for them (cloud/members.ts act). */
+export type MemberWho = { userId: string; email?: string; name: string };
+
+/**
+ * Whether an ask (lib/types.ts AppApproval.kind) is the owner's alone to answer, whoever has Write on its bot: a use
+ * of the owner's Connected apps ("app", and one from before kinds, which is one) or of their API keys ("api"). Those
+ * are the owner's logins, and an Always allow there would save a rule their own turns go by too. The bot's own
+ * email, business data and its brain's tools are the bot's: a member with Write answers those.
+ */
+export const ownerOnlyAsk = (kind: unknown) => kind === undefined || kind === null || kind === "app" || kind === "api";
+
+/** The most a member's name may be, as their words carry it. */
+export const MEMBER_NAME_MAX = 80;
+
+/**
+ * A member's name as their words carry it (MemberWho.name): their Orgo name is theirs to set, and it goes into the
+ * bot's instructions and the chat as it reads them, so nothing in it can pass for something else there: no control
+ * characters or line breaks, no brackets or quotes (what marks who's talking: "[Sam, someone ... gave this bot to]"),
+ * spaces made one, at most MEMBER_NAME_MAX characters. Empty when nothing's left. Bops Cloud and the owner's Mac
+ * (lib/server/member-acts.ts) both make it so.
+ */
+export function cleanName(v: unknown): string {
+  if (typeof v !== "string") return "";
+  return v
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
+    .replace(/[[\]{}()<>"“”`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MEMBER_NAME_MAX)
+    .trim();
+}
 
 /** A short line for a person's access: "Every bot, read", "2 bots, 1 to write", "No bots". */
 export function accessSummary(access: MemberAccess, botIds: string[]): string {

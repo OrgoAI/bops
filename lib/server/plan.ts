@@ -3,7 +3,7 @@ import { BOPS_TIERS, type BopsTier } from "@/cloud/protocol";
 import type { BopsPlan } from "@/lib/account";
 import { pendingFrom, savedCardFrom, type PendingTopUp, type SavedCard } from "@/lib/credit-topup";
 import { botChatId, freeComputerBot, workspaceOf, type Bot } from "@/lib/types";
-import { bopsComputerShort, bopsComputers, computerRam, mainOwnShort, ownComputerShort, planComputers, planFix, planName, planShort, planShortText, type OrgoPlan, type PlanShort } from "@/lib/orgo-plans";
+import { bopsComputerShort, bopsComputers, computerRam, mainOwnShort, ownComputerShort, ownOnOrgoPlan, planComputers, planFix, planName, planShort, planShortText, type OrgoPlan, type PlanShort } from "@/lib/orgo-plans";
 import { orgoHeaders } from "./app-version";
 import { cloudOn, cloudSessionNow } from "./cloud";
 import { callOrgo, computerChanges, orgo, OrgoError, ownedWorkspace } from "./orgo";
@@ -355,24 +355,24 @@ function bopsRefusal(e: unknown) {
 
 /**
  * One more Bops computer, fresh from the Bops template (orgo-web makes it one of Max's when the free
- * one is taken), when the Bops plan has room for `more` (lib/orgo-plans.ts bopsComputerShort). Null
- * with `onShort` called when it hasn't, or Orgo turns it down for the plan.
+ * one is taken), when the Bops plan has room for `more` (lib/orgo-plans.ts bopsComputerShort). What
+ * `onShort` answers when it hasn't, or Orgo turns it down for the plan.
  */
-async function makeBopsComputer<T>(name: string, epoch: number, onShort: (why: PlanLimit) => T, wsId?: string): Promise<{ id: string } | T> {
+async function makeBopsComputer<T>(name: string, epoch: number, onShort: (why: PlanLimit) => T | Promise<T>, wsId?: string): Promise<{ id: string } | T> {
   let plan = await orgoPlan();
   let short = bopsComputerShort(plan, 1);
   if (short) {
     plan = await orgoPlan({ fresh: true });
     short = bopsComputerShort(plan, 1);
   }
-  if (short) return onShort(bopsLimit(short));
+  if (short) return await onShort(bopsLimit(short));
   sameUser(epoch);
   try {
     return await orgo.create(name, { free: true, wsId });
   } catch (e) {
     const refused = bopsRefusal(e);
     if (!refused) throw e;
-    return onShort(refused);
+    return await onShort(refused);
   }
 }
 
@@ -384,7 +384,7 @@ function linkFor(short: PlanShort, plan: OrgoPlan | null) {
 
 /** The PlanLimit for a shortfall, worded with the plan's numbers. */
 function limitOf(short: PlanShort, plan: OrgoPlan | null, main: Bot) {
-  return new PlanLimit(planShortText(short, plan, { bops: bopsComputers(getState().bots), main: main.name }), linkFor(short, plan));
+  return new PlanLimit(planShortText(short, plan, { bops: bopsComputers(getState().bots, plan), main: main.name }), linkFor(short, plan));
 }
 
 /** Orgo turned a computer down for the plan: why, with numbers read again. Null when it was turned down for anything else. */
@@ -589,8 +589,8 @@ export async function makeOwnComputer(b: Bot, main: Bot, name: string, epoch = s
     if (ram && main.computerRam !== ram && main.computerId === from) update(() => (main.computerRam = ram));
     const { plan, short } = await planNow((p) => planShort(p, 1, ram));
     // The Bops plan decides: one of Max's Bops computers, fresh from the template (a copy would be an
-    // Orgo plan computer), else it shares the main bot's and says why.
-    if (plan?.bops) return makeBopsComputer(name, epoch, (why) => shareInstead(b, main, why, epoch), workspaceOf(b));
+    // Orgo plan computer), else one on the Orgo plan (onOrgoPlan), else it shares the main bot's and says why.
+    if (plan?.bops) return makeBopsComputer(name, epoch, (why) => onOrgoPlan(b, main, name, why, epoch), workspaceOf(b));
     if (short) return shareInstead(b, main, limitOf(short, plan, main), epoch);
     try {
       sameUser(epoch);
@@ -611,6 +611,25 @@ export async function makeOwnComputer(b: Bot, main: Bot, name: string, epoch = s
       return shareInstead(b, main, refused, epoch);
     }
   });
+}
+
+/**
+ * Max's Bops computers are all taken (`why`): `b`'s own comes from the Orgo plan, when it has room
+ * (ownOnOrgoPlan), fresh from the Bops template. A copy of the main bot's can't be made: that's a Bops
+ * computer, on a Bops host, where Orgo makes no copies. Else it shares the main bot's, saying why: the
+ * Bops plan's words, or Orgo's when Orgo turns it down. Runs inside makeOwnComputer's oneAtATime.
+ */
+async function onOrgoPlan(b: Bot, main: Bot, name: string, why: PlanLimit, epoch: number) {
+  const { plan } = await planNow((p) => (ownOnOrgoPlan(p) ? null : "count"));
+  if (!ownOnOrgoPlan(plan)) return shareInstead(b, main, why, epoch);
+  sameUser(epoch);
+  try {
+    return await orgo.create(name, { ram: computerRam(plan), wsId: workspaceOf(b) });
+  } catch (e) {
+    const refused = await refusedFor(e, main);
+    if (!refused) throw e;
+    return shareInstead(b, main, refused, epoch);
+  }
 }
 
 /**

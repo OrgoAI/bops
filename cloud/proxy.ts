@@ -9,7 +9,7 @@ import { config } from "./config.ts";
 import { creditLeft, creditsOn, outOfCredit, requireCredit } from "./credit.ts";
 import { seal } from "./crypto.ts";
 import { banksOn, botIdsOn, grantsOn, inboxesOn, linesOn, ownerNumbers, type Blob as StateBlob, type Level } from "./computer-scope.ts";
-import { objectInfo, objectOwner, ownObject, query, sessionUsed } from "./db.ts";
+import { accountDeleted, isDeleted, objectInfo, objectOwner, ownObject, query, sessionUsed } from "./db.ts";
 import { HttpError, readBody, refuseUpgrade, type Route, type Upgrade } from "./http.ts";
 import { recordLine } from "./lines.ts";
 import { refuseSecondPlanNumber, requireRoomForNumber, sendingStopped } from "./plans.ts";
@@ -17,6 +17,7 @@ import { imageModelPriced, numberCost, smsSegments } from "./pricing.ts";
 import { COMPUTER_NOT_ALLOWED, PLAN_REQUIRED, USAGE_APP_HEADER, USAGE_BOT_HEADER, USAGE_SOURCE_HEADER } from "./protocol.ts";
 import { accountFor, composioUserId, honchoPrefix, ownsWorkspace, podKeyOf } from "./session.ts";
 import { loadState } from "./state.ts";
+import { DELETED_CLOSE } from "./tunnel.ts";
 import { admitTurn, follow, userStopped, verdict, watchSession, type Start } from "./turn-guard.ts";
 import { isWebSearch, liveSecondsOf, recordImages, recordJev, recordTokens, recordTranscription, recordTreg, recordUsage, recordUsageFor, recordWebSearch } from "./usage.ts";
 
@@ -1852,20 +1853,86 @@ async function handle(provider: Provider, prefix: string, req: IncomingMessage, 
   const { path, query: q } = target(req.url, prefix);
   const call: Call = { user, orgoKey: bearer(req), method: req.method ?? "GET", path, params: {}, query: q, headers: {}, owned: new Set(), asked: req.headers, ...usageHeaders(req) };
   const r = match(spec, call);
-  if (Number(req.headers["content-length"] ?? 0) > MAX_BODY) throw new HttpError(413, "Request too large");
-  let body: IncomingMessage | null = null;
-  if (hasBody(req)) {
-    if (r.upload && isUpload(req)) call.upload = await readUpload(req);
-    else if (spec.body === "json" || (spec.body === "json-or-upload" && !isUpload(req))) call.json = parseBody(await readBody(req, MAX_BODY));
-    else body = req;
-  }
+  // One that may make something a delete deletes at its provider is waited for by a delete (callsEnded) until it's over.
+  const over = mayMake(provider, r) ? underWayFor(user.id, provider) : null;
   try {
-    await sendOn(provider, spec, key, r, call, req, res, user, body);
+    // Signed in before a delete of theirs came (auth.ts, which just asked: this is from memory), and only here after it: nothing goes on. One here first is waited for.
+    if (over && (await isDeleted(user.id))) throw accountDeleted();
+    if (Number(req.headers["content-length"] ?? 0) > MAX_BODY) throw new HttpError(413, "Request too large");
+    let body: IncomingMessage | null = null;
+    if (hasBody(req)) {
+      if (r.upload && isUpload(req)) call.upload = await readUpload(req);
+      else if (spec.body === "json" || (spec.body === "json-or-upload" && !isUpload(req))) call.json = parseBody(await readBody(req, MAX_BODY));
+      else body = req;
+    }
+    try {
+      await sendOn(provider, spec, key, r, call, req, res, user, body);
+    } finally {
+      // What the call held on the user's credit (a treg call) goes back once what it cost is recorded.
+      if (call.release) await call.recording?.catch(() => {});
+      call.release?.();
+    }
   } finally {
-    // What the call held on the user's credit (a treg call) goes back once what it cost is recorded.
-    if (call.release) await call.recording?.catch(() => {});
-    call.release?.();
+    over?.();
   }
+}
+
+/* ---------------- Calls under way, for a delete (delete-user.ts) ---------------- */
+
+/**
+ * Each user's calls under way here that may make or record something a delete deletes at its provider
+ * (mayMake), each with its provider, and settled once the call is over and what it made is recorded
+ * (handle). A delete waits for them before it asks the providers (callsEnded), so what they made is
+ * there for it to delete: a response stored at OpenAI, which is recorded only once its whole answer is
+ * in (and a long one takes minutes), a connected account at Composio, a memory bank at Honcho (nothing
+ * here records one: the delete finds it by listing). They're waited for, not ended: one ended part way
+ * may still be made there, and then nothing here ever hears its id.
+ */
+const underWay = new Map<string, Map<Promise<void>, Provider>>();
+
+/** A call of the user's under way (underWay): what's returned is called once it's over. */
+function underWayFor(userId: string, provider: Provider): () => void {
+  let end!: () => void;
+  const ended = new Promise<void>((resolve) => (end = resolve));
+  const mine = underWay.get(userId) ?? new Map<Promise<void>, Provider>();
+  mine.set(ended, provider);
+  underWay.set(userId, mine);
+  return () => {
+    end();
+    mine.delete(ended);
+    if (!mine.size && underWay.get(userId) === mine) underWay.delete(userId);
+  };
+}
+
+/**
+ * Whether a call may make or record something a delete deletes at its provider (delete-user.ts, its
+ * step 3): at OpenAI only a response (POST v1/responses; the rest make nothing anyone deletes, and a
+ * task's event stream, which can last as long as the task, is never waited for); at AgentPhone a number,
+ * at AgentMail an inbox, at Honcho a memory bank or what's in one, at Composio a connected account, made
+ * or claimed from a list, so any call there; at Typesafe and treg, nothing.
+ */
+function mayMake(provider: Provider, r: Rule): boolean {
+  if (provider === "openai") return r === RESPONSES_RULE;
+  return provider !== "typesafe" && provider !== "treg";
+}
+
+/**
+ * Wait, at most `ms`, for the user's calls under way that may make something a delete deletes (each one
+ * over, what it made recorded). A delete asks once they're turned down (db.ts markDeleted), so none
+ * starts meanwhile: one signed in before that and only here after is refused (handle). The providers of
+ * those still going after `ms` (sorted), or none once they've all ended.
+ */
+export async function callsEnded(userId: string, ms: number): Promise<string[]> {
+  const going = [...(underWay.get(userId) ?? [])];
+  if (!going.length) return [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+  await Promise.race([Promise.all(going.map(([ended]) => ended)), late]).finally(() => clearTimeout(timer));
+  const still = underWay.get(userId);
+  return [...new Set(going.filter(([ended]) => still?.has(ended)).map(([, provider]) => provider))].sort();
 }
 
 /** handle's work once the request is read: its checks, the credit, and sending it on and answering. */
@@ -1909,6 +1976,31 @@ async function sendOn(provider: Provider, spec: Spec, key: string, r: Rule, call
  * so a refusal reaches the Mac as an HTTP status.
  */
 const sidebands = new WebSocketServer({ noServer: true, maxPayload: MAX_BODY });
+
+/** Each user's sockets open here (a call's sideband, Responses over a WebSocket): signed in once, at the upgrade, so a delete ends them (closeSidebands). */
+const openSockets = new Map<string, Set<WebSocket>>();
+
+function opened(userId: string, client: WebSocket) {
+  const mine = openSockets.get(userId) ?? new Set<WebSocket>();
+  mine.add(client);
+  openSockets.set(userId, mine);
+  client.once("close", () => {
+    mine.delete(client);
+    if (!mine.size && openSockets.get(userId) === mine) openSockets.delete(userId);
+  });
+}
+
+/**
+ * The user was deleted (delete-user.ts): every socket of theirs here ends now (as their tunnel does,
+ * DELETED_CLOSE), and its other end at OpenAI with it, so a task's socket opened before the delete
+ * makes no response after it that the delete never hears of. How many ended.
+ */
+export function closeSidebands(userId: string): number {
+  const mine = [...(openSockets.get(userId) ?? [])];
+  for (const ws of mine) ws.close(DELETED_CLOSE, "account deleted");
+  openSockets.delete(userId);
+  return mine.length;
+}
 
 /** Close codes that may be sent on (ws refuses the reserved ones). */
 const sendable = (code: number) => ((code >= 1000 && code <= 1014 && ![1004, 1005, 1006].includes(code)) || (code >= 3000 && code <= 4999) ? code : 1000);
@@ -2037,7 +2129,7 @@ async function attach(req: IncomingMessage, socket: Duplex, head: Buffer, user: 
   await openaiRefs({ user, orgoKey: "", method: "GET", path, params, query: q, headers: {}, owned: new Set(), asked: {} });
   const upstream = await connectUpstream(`${config.upstream.openai().replace(/\/+$/, "").replace(/^http/, "ws")}/${path.join("/")}${qs(q)}`, key, req);
   if (socket.destroyed) return upstream.ws.terminate();
-  sidebands.handleUpgrade(req, socket, head, (client) => bridge(client, upstream, user.id, params.live));
+  sidebands.handleUpgrade(req, socket, head, (client) => (opened(user.id, client), bridge(client, upstream, user.id, params.live)));
 }
 
 /* ---------------- Responses over a WebSocket ---------------- */
@@ -2060,7 +2152,7 @@ async function responsesSocket(req: IncomingMessage, socket: Duplex, head: Buffe
   const base: Call = { user, orgoKey: bearer(req), method: "POST", path: ["v1", "responses"], params: {}, query: new URLSearchParams(), headers: {}, owned: new Set(), asked: req.headers, ...usageHeaders(req) };
   const upstream = await connectUpstream(`${config.upstream.openai().replace(/\/+$/, "").replace(/^http/, "ws")}/v1/responses`, key, req);
   if (socket.destroyed) return upstream.ws.terminate();
-  sidebands.handleUpgrade(req, socket, head, (client) => responsesBridge(client, upstream, base));
+  sidebands.handleUpgrade(req, socket, head, (client) => (opened(user.id, client), responsesBridge(client, upstream, base)));
 }
 
 /** What a refused `response.create` comes back as: OpenAI's error event, with the cloud's words, status and code. */
@@ -2105,6 +2197,11 @@ function responsesBridge(client: WebSocket, { ws: upstream, early, keep }: Upstr
       delete body.type;
       const call: Call = { ...base, json: body, owned: new Set() };
       try {
+        // Signed in once, at the upgrade: a user deleted since (one whose socket a delete didn't reach) sends nothing more.
+        if (await isDeleted(base.user.id)) {
+          if (client.readyState === WebSocket.OPEN) client.send(refusal(accountDeleted()));
+          return closeBoth(DELETED_CLOSE, Buffer.from("account deleted"));
+        }
         await openai.check?.(call);
         await RESPONSES_RULE.check?.(call);
         if (RESPONSES_RULE.spends) await requireCredit(base.user.id, await RESPONSES_RULE.minCost?.(call));

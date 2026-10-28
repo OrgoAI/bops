@@ -114,12 +114,22 @@ export function useFooterHover(initial: FooterKey | null = null) {
  * Vault, and the default). `knowledge`: whether the footer has Knowledge at all (lib/memory-categories.ts
  * categoriesOpen).
  */
-export function footerPageOf({ people, tab, knowledge = true }: { people?: boolean; tab?: string; knowledge?: boolean }): FooterPage {
+export function footerPageOf(open: { people?: boolean; tab?: string; knowledge?: boolean }): FooterPage {
+  return openFooterPage(open) ?? "vault";
+}
+
+/**
+ * The footer's page that's really open, as footerPageOf reads it, but null when none is (a chat's computer
+ * or a web tab on the right, the panel hidden): the folded sidebar's column (sidebar-rail.tsx) fills in
+ * only the open one, with no resting pill to fall back on.
+ */
+export function openFooterPage({ people, tab, knowledge = true }: { people?: boolean; tab?: string; knowledge?: boolean }): FooterPage | null {
   if (people) return "people";
   if (tab === "memory" && knowledge) return "knowledge";
   if (tab === "autopilot") return "routines";
   if (tab === "made-apps" || tab === "made-app" || tab === "hosted-app") return "apps";
-  return "vault";
+  if (tab === "vault") return "vault";
+  return null;
 }
 
 /**

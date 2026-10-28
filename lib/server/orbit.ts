@@ -2,9 +2,12 @@ import "server-only";
 import { CATEGORIES, CATEGORY_IDS, GROUP_NAME, categoryOf, settled, upcoming, type MemoryItem, type MemorySnapshot } from "@/lib/memory-categories";
 import { isIssueId, ISSUE_PRIORITIES, ISSUE_STATUSES, PRIORITY_IDS, priorityLabel, STATUS_IDS, statusLabel, type Issue, type IssuePriority, type IssueStatus } from "@/lib/orbit-issues";
 import { tagsOf } from "@/lib/routine-catalog";
+import { discordRefOf, gmailThreadIdOf, slackRefOf } from "@/lib/source-parse";
+import { sourceAppOf } from "@/lib/source-view";
 import { workspaceOf, type Bot } from "@/lib/types";
 import { categoriesOn, editItem, forgetItems, snapshot } from "./memory-categories";
 import { issuesOn, listIssues, openIssue, updateIssue } from "./orbit-issues";
+import { TOOLKIT } from "./reply-drafts";
 import { bot, getState, ownerName } from "./store";
 
 /*
@@ -92,7 +95,7 @@ function issueTools(b: Bot) {
         tags: { ...TAGS, description: `The workspace's tags that fit: ${tags.join(", ")}. Null for none.` },
         status: { ...STATUS, description: `${statuses}; null for open.` },
         source_app: NULLABLE("string", "The app it came from (gmail, slack, discord, plain), or null."),
-        external_id: NULLABLE("string", "Its id in that app: the email thread id, the Slack or Discord thread, the ticket. Null when there is none."),
+        external_id: NULLABLE("string", "Its id in that app: the email's thread id (threadId); for Slack the channel's id and the thread's first ts, as C0123ABCD/1700000000.000100; for Discord the channel's id, then the message's id after a slash; the ticket's id. Null when there is none."),
         url: NULLABLE("string", "A link to it in that app, or null."),
         customer: NULLABLE("string", "Who it's for (a person or company), or null."),
         note: NULLABLE("string", "A note for its history, or null."),
@@ -138,8 +141,29 @@ function line(i: MemoryItem) {
 /** What matters now in an item's section: an event not past, an open task or promise not long settled; everything else. */
 const isNow = (i: MemoryItem) => (i.category === "events" ? !i.when || upcoming(i) : i.category === "todos" || i.category === "promises" ? !i.done && !settled(i) : true);
 
-/** The turn a tool runs in: its chat, and on a routine's run, the routine. */
-export type OrbitContext = { chatId?: string; routineId?: string };
+/**
+ * The turn a tool runs in: its chat, and on a routine's run, the routine. `readIn`: the accounts whose reads
+ * this turn had an id (chat.ts, from its ReadLog), so an issue knows which account its thread is in.
+ */
+export type OrbitContext = { chatId?: string; routineId?: string; readIn?: (key: string) => string[] };
+
+/**
+ * The one account of the user's this turn read an issue's thread or ticket in (its id, or the parts of it: a
+ * Slack channel and ts, a Gmail thread), when it's one; else none, and the issue's page tries each account.
+ */
+function accountReadIn(ctx: OrbitContext, sourceApp?: string, externalId?: string, url?: string): string | undefined {
+  const app = sourceAppOf(sourceApp);
+  if (!app || !ctx.readIn || !externalId) return undefined;
+  const parts = app === "gmail" ? [gmailThreadIdOf(externalId, url)] : app === "slack" ? [slackRefOf(externalId, url).ts, slackRefOf(externalId, url).channel] : [discordRefOf(externalId, url).message, discordRefOf(externalId, url).channel];
+  const mine = new Set((getState().accounts ?? []).filter((a) => a.app === TOOLKIT[app]).map((a) => a.id));
+  for (const key of [externalId, ...parts]) {
+    if (!key) continue;
+    const found = [...new Set(ctx.readIn(key))].filter((id) => mine.has(id));
+    if (found.length === 1) return found[0];
+    if (found.length > 1) return undefined;
+  }
+  return undefined;
+}
 
 /** Forgets the bot asked the user about (chat and item), and when: confirmed only by a message of theirs after. */
 const asked = new Map<string, number>();
@@ -175,6 +199,7 @@ async function runIssueTool(b: Bot, name: string, args: Record<string, unknown>,
         customer: str(args.customer),
         note: str(args.note),
         lastMessageAt: Number.isFinite(Date.parse(String(args.last_message_at ?? ""))) ? Date.parse(String(args.last_message_at)) : undefined,
+        accountId: accountReadIn(ctx, str(args.source_app), str(args.external_id), str(args.url)),
       },
       by,
     );

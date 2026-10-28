@@ -19,7 +19,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ name: strin
   const { name } = await ctx.params;
   const wsId = new URL(request.url).searchParams.get("ws") ?? getState().workspace ?? MAIN_WORKSPACE;
   try {
-    return Response.json(await appDomains(wsId, name));
+    return Response.json(await appDomains(wsId, name, new URL(request.url).searchParams.get("site") ?? undefined));
   } catch (e) {
     return e instanceof HostedAppError ? Response.json({ error: e.message, ...e.extra }, { status: e.status }) : Response.json({ error: (e as Error).message }, { status: 500 });
   }

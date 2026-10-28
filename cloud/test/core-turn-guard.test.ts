@@ -9,8 +9,10 @@ import pg from "pg";
 import { WebSocketServer } from "ws";
 import { creditLeft } from "../credit.ts";
 import { closeDb, ownObject, query } from "../db.ts";
+import { deleteUser } from "../delete-user.ts";
 import { AI_CREDIT_EMPTY, AI_CREDIT_LOW } from "../protocol.ts";
 import { guardClock, guardSweep, guardTiming, isWatched, KEEP_GOING, seed, startReserve } from "../turn-guard.ts";
+import { recordTokens } from "../usage.ts";
 import { LEDGER_IN_USE, TEST_DATABASE_URL, call, dropUsers, fakeOrgo, fakeProvider, keyOf, prepareDb, seedUser, startCloud, until, type Listening } from "./core-fakes.ts";
 
 /**
@@ -235,6 +237,7 @@ after(async () => {
   await query("DELETE FROM public.bops_ai_credit_grants WHERE user_id = ANY($1::uuid[])", [users]);
   await query("DELETE FROM public.bops_ai_credit WHERE user_id = ANY($1::uuid[])", [users]);
   await query("DELETE FROM bops.cloud_accounts WHERE user_id = ANY($1::text[])", [users]);
+  await query("DELETE FROM bops.deleted_users WHERE user_id = ANY($1::text[])", [users]);
   await query("DELETE FROM public.profiles WHERE id = ANY($1::uuid[])", [users]);
   await Promise.all([cloud?.close(), orgo?.close(), openai?.close(), ledger?.end()]);
   await closeDb();
@@ -321,6 +324,23 @@ test("a finished turn is paid at once (and once), a task with nothing running is
   const again = await as(u, "POST", `/proxy/openai/v1/agents/sessions/${task}/events`, work("again"));
   assert.equal(again.status, 202, again.text);
   assert.ok(isWatched(task));
+});
+
+test("a deleted user's tasks aren't watched any more, and a turn that finishes after the delete is neither counted nor paid, whoever reads it", async () => {
+  const u = await newUser(5_000_000);
+  const task = await newTask(u, { since: now() - 10 });
+  await sweep();
+  assert.ok(isWatched(task));
+  assert.equal((await deleteUser(u)).left, false);
+  assert.equal(isWatched(task), false, "the delete let it go");
+  // Its turn finishes after the delete. The guard's sweeps, reconcile.ts reading back a session it had already loaded, or a phone turn's end: none of them counts it.
+  const t = finished(turns.get(task)![0], { input_tokens: 0, output_tokens: 1_000 });
+  for (let i = 0; i < 2; i++) await sweep();
+  await ownObject(u, "openai", "agent_turn", t.id);
+  await recordTokens(u, t.id, t.usage, { model: "gpt-6.1-sol", source: "agent" });
+  const rows = async (table: string) => Number((await query<{ n: string }>(`SELECT count(*) AS n FROM bops.${table} WHERE user_id = $1`, [u])).rows[0].n);
+  assert.deepEqual([await rows("cloud_usage"), await rows("cloud_objects")], [0, 0]);
+  assert.equal(await creditLeft(u), 5_000_000, "nothing is taken from their credit");
 });
 
 /* ---------------- Set going again, or not ---------------- */

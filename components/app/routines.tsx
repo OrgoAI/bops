@@ -427,7 +427,7 @@ function OfferRow({
           onChange={(e) => onTick(e.target.checked)}
           className="mt-0.5 size-4 shrink-0 accent-[#0A0A0A] disabled:opacity-50"
         />
-        <label htmlFor={id} className="flex min-w-0 flex-1 cursor-default flex-col">
+        <label htmlFor={id} className="flex min-w-0 flex-1 flex-col">
           <span className={`text-[13.5px] font-medium leading-[18px] ${t.already ? "text-[#9A9A98]" : "text-ink"}`}>{undash(t.title)}</span>
           <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">{t.already ? `Already on · ${when}` : when}</span>
         </label>

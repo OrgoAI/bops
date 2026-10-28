@@ -1,12 +1,14 @@
 /**
  * Workspaces shared with the user (cloud/members.ts, lib/server/shared.ts): someone added them to one of
- * their Bops workspaces' Orgo projects, and they watch it here, read only. Shared by the window and the
- * server; no server imports.
+ * their Bops workspaces' Orgo projects, and they watch it here. With Write on a bot (the owner's choice,
+ * per bot) they act there too: chat with it, reply in its threads, answer what it asks and stop it, sent
+ * to the owner's Bops through Bops Cloud (canAct). Shared by the window and the server; no server imports.
  *
  * A shared workspace is never the user's own: what's shown of it comes from Bops Cloud and is kept in
  * the server's memory alone (never in the user's state, never synced, never on disk), and it's shown in
  * place of the user's own workspace while it's open.
  */
+import { ownerOnlyAsk } from "@/lib/member-access";
 
 /** Orgo's roles in a workspace: owner everything, admin Full access, member View only. */
 export type SharedRole = "owner" | "admin" | "member";
@@ -21,14 +23,23 @@ export type SharedWorkspace = { projectId: string; name: string; owner: string; 
 /**
  * The shared workspace open now. `more`: its chats with older messages in Bops Cloud than the window has,
  * read a page at a time ("Show earlier messages": POST /api/workspaces/shared { older: <chat id> }).
+ * `levels`: the viewer's level for each of its bots, as the owner set it (Write lets them act: canAct).
+ * `you`: the viewer's Orgo user id, which tells their own words there from other members' (saidBy).
  */
-export type SharedOpen = SharedWorkspace & { wsId: string; ownBots?: Record<string, number>; more?: string[] };
+export type SharedOpen = SharedWorkspace & { wsId: string; ownBots?: Record<string, number>; more?: string[]; levels?: Record<string, "read" | "write">; you?: string };
 
 /** The id a shared workspace has in the window's state: its own Bops id could be the same as one of the user's ("ws_main"). */
 export const sharedWsId = (projectId: string) => `shared_${projectId}`;
 
-/** The one line in place of everything that would change something in a shared workspace. */
-export const readOnlyLine = (role: SharedRole) => (role === "member" ? "View only" : "Chatting in a shared workspace is coming soon");
+/**
+ * The one line in place of what the viewer can't do in a shared workspace, for these bots: a bot of theirs at
+ * Read, a group with one at Read, or (no bots) what's never theirs to change there, its settings and routines.
+ */
+export function readOnlyLine(botIds: readonly string[] = [], levels: Record<string, string> = {}): string {
+  if (!botIds.length) return "Only the owner changes this.";
+  if (botIds.length > 1 && botIds.some((id) => levels[id] !== "write")) return "You can chat here once the owner gives you Write on every bot in it.";
+  return "You can watch this bot. Ask the owner for Write to chat with it.";
+}
 
 /** Who the owner's own words and doings are said by: "You" in the user's own workspace, "Owner" in one shared with them (they're never the user's). */
 export const ownerWho = (shared: SharedOpen | undefined) => (shared ? "Owner" : "You");
@@ -49,8 +60,56 @@ export const your = (state: Viewing) => (state.shared ? "the owner's" : "your");
 export const Your = (state: Viewing) => (state.shared ? "The owner's" : "Your");
 /** "your Mac" to the owner, "the owner's Mac" in a shared workspace. */
 export const yourMac = (state: Viewing) => `${your(state)} Mac`;
-/** Nothing in a shared workspace may be changed from here: every control that would is left out. */
-export const readOnly = (state: Viewing) => !!state.shared;
+/**
+ * Whether the viewer may act in a shared workspace for these bots: every one at Write (a group with one at Read
+ * stays watch only). Never in the user's own, where everything's theirs and nothing goes through Bops Cloud.
+ */
+export const canAct = (state: Viewing, botIds: readonly string[]) => !!state.shared && botIds.length > 0 && botIds.every((id) => state.shared!.levels?.[id] === "write");
+/**
+ * Nothing here may be changed from this window for these bots: in a shared workspace, unless the viewer has Write
+ * on every one. No bots: the whole workspace (its settings, its routines), never theirs to change, so every control
+ * that would is left out.
+ */
+export const readOnly = (state: Viewing, botIds: readonly string[] = []) => !!state.shared && !canAct(state, botIds);
+
+/**
+ * Who said a message or a thread reply, as the window shows it: "you" (the viewer's own: the owner's in their own
+ * workspace; in one shared with them, their words as a member), "owner" (the owner's, in a shared workspace), or a
+ * member by name (someone the owner gave Write, Message.member: in the owner's own window, and to anyone else).
+ */
+export function saidBy(m: { role: string; member?: { userId: string; name: string } }, state: Viewing): "you" | "owner" | { name: string } | null {
+  if (m.role !== "user") return null;
+  if (m.member) return state.shared?.you && m.member.userId === state.shared.you ? "you" : { name: m.member.name };
+  return state.shared ? "owner" : "you";
+}
+
+/** Who said it, as a line names them: "You", "Owner" or the member's name (saidBy). Null for a bot's. */
+export function saidName(m: { role: string; member?: { userId: string; name: string } }, state: Viewing): string | null {
+  const who = saidBy(m, state);
+  return who === null ? null : who === "you" ? "You" : who === "owner" ? "Owner" : who.name;
+}
+
+/**
+ * Whether the viewer may tell a thread something here (reply, Nothing to add, answer its asks): theirs in their own
+ * workspace; in a shared one, with Write on its bot, and never one on the owner's Mac (Bops Cloud refuses it: a
+ * member's words never reach work there).
+ */
+export const writesThread = (state: Viewing, s: { botId: string; runsOn?: string }) => !readOnly(state, [s.botId]) && !(state.shared && s.runsOn === "mac");
+
+/**
+ * Whether the viewer may answer an ask (lib/types.ts AppApproval) here: theirs in their own workspace; in a shared one,
+ * with Write on its bot, never one to use the owner's Connected apps or keys (cloud/member-access.ts ownerOnlyAsk), and
+ * never one of a thread on the owner's Mac (writesThread).
+ */
+export function answersAsk(state: Viewing & { sessions?: readonly { id: string; botId: string; runsOn?: string }[] }, a: { botId: string; kind?: string; threadId?: string }): boolean {
+  if (!state.shared) return true;
+  if (readOnly(state, [a.botId]) || ownerOnlyAsk(a.kind)) return false;
+  const t = a.threadId ? state.sessions?.find((x) => x.id === a.threadId) : undefined;
+  return !t || writesThread(state, t);
+}
+
+/** The line on something in a shared workspace only the owner can answer or do, for a viewer who can't. */
+export const OWNER_ONLY_LINE = "Only the owner can answer this.";
 
 /** The role as the switcher says it, in Orgo's words for it (lib/members.ts). */
 export const roleLabel = (role: SharedRole) => (role === "member" ? "View only" : role === "admin" ? "Full access" : "Owner");

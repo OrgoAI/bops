@@ -164,7 +164,8 @@ function CardShell({
     <div className="pointer-events-none absolute inset-0 z-10 flex items-end justify-center bg-gradient-to-t from-black/25 via-black/5 to-transparent p-4">
       <div
         onClick={(e) => e.stopPropagation()}
-        className={`pointer-events-auto flex max-h-full w-full flex-col gap-3 overflow-y-auto rounded-[22px] bg-white/95 p-4 shadow-[0_0_0_1px_#0000000F,0_24px_60px_-18px_#00000059] backdrop-blur ${compact ? "max-w-[360px]" : "max-w-[440px]"}`}
+        // The arrow over the card, not the hand of the clickable screen under it (as WatchSheet): a click on the card itself does nothing.
+        className={`pointer-events-auto flex max-h-full w-full cursor-default flex-col gap-3 overflow-y-auto rounded-[22px] bg-white/95 p-4 shadow-[0_0_0_1px_#0000000F,0_24px_60px_-18px_#00000059] backdrop-blur ${compact ? "max-w-[360px]" : "max-w-[440px]"}`}
       >
         <div className="flex items-center gap-2.5">
           <Mascot botId={b.id} color={b.color} size={30} />

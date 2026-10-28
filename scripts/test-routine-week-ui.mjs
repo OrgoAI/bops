@@ -482,4 +482,37 @@ await test("its routine leaves the day while it asks (paused elsewhere): the que
   }
 });
 
+await test("a line of what ran is one button that opens its report at that run; a coming one still opens its row; without reports it opens its row as before", async () => {
+  const ran = { at: Z("2026-10-19T11:00:05Z"), status: "quiet" };
+  const g = routine("g", { kind: "daily", time: "07:00" }, { title: "Outage and customer alerts", nextRunAt: Z("2026-10-20T11:00:00Z"), last: ran });
+  const a = routine("a", { kind: "daily", time: "09:00" }, { nextRunAt: Z("2026-10-19T13:00:00Z") });
+  const reports = [];
+  const opened = [];
+  const m = await mount(week([g, a], { onReport: (id, at, from) => reports.push([id, at, from]), onOpen: (id) => opened.push(id) }));
+  try {
+    const line = m.box.querySelector('li[data-routine="g"] [data-report-line]');
+    assert.ok(line, "the ran line's button");
+    assert.equal(line.textContent, "Outage and customer alertsBoppy · Ran, nothing for you", "its name and how it went, together");
+    assert.equal(line.getAttribute("data-tip"), "See the report");
+    await click(line);
+    assert.deepEqual(reports, [["g", ran.at, line]], "its routine and that run, from the line (where focus goes back)");
+    assert.deepEqual(opened, []);
+    assert.ok(!m.box.querySelector('li[data-routine="a"] [data-report-line]'), "a coming run has no report");
+    await click(m.box.querySelector('li[data-routine="a"] [data-row-head]'));
+    assert.deepEqual(opened, ["a"]);
+    // Its trash is still there, after its buttons.
+    assert.ok(m.box.querySelector('li[data-routine="g"] [data-line-trash]'));
+  } finally {
+    await m.done();
+  }
+  const plain = await mount(week([g], { onOpen: (id) => opened.push(id) }));
+  try {
+    assert.ok(!plain.box.querySelector("[data-report-line]"));
+    await click(plain.box.querySelector("[data-row-head]"));
+    assert.deepEqual(opened, ["a", "g"]);
+  } finally {
+    await plain.done();
+  }
+});
+
 console.log(`routine week ui: ${passed} passed`);

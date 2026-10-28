@@ -1,6 +1,7 @@
 import "server-only";
 import { allows as rulesAllow, alwaysRule, ruleFor } from "@/lib/permission";
 import { computerStaysDown, live, type AppApproval, type AskAnswer, type AskReply, type AskResume, type Bot } from "@/lib/types";
+import type { MemberWho } from "@/lib/member-access";
 import { onRunner } from "./persist";
 import { addMessage, bot, changeLanded, getState, id, ownerName, pullState, session, stateDevice, update, watchArrivals, watchLoads } from "./store";
 
@@ -130,16 +131,17 @@ const mine = (a: AppApproval, me = stateDevice()) => (a.askedBy ?? null) === (me
  * rule for the bot and the action, whatever its recipients or details (Claude Code's "don't ask again"), and answers
  * the bot's other requests for that action (as OpenCode does). Never from a bot's computer, never twice. Says why
  * when it isn't taken; undefined when it is. A request a bot's computer made wakes that computer, its run going on
- * there.
+ * there. `member`: answered by a member with Write on its bot, from their own Bops (member-acts.ts): the same
+ * answer, named as theirs (AskAnswer.member), their Always allow saving the rule on the owner's bot as the owner's would.
  */
-export function replyToAsk(askId: string, reply: AskReply, message?: string): string | undefined {
+export function replyToAsk(askId: string, reply: AskReply, message?: string, member?: MemberWho): string | undefined {
   if (onRunner()) return "A bot's computer can't answer for you.";
   const a = getState().appApprovals?.find((x) => x.id === askId);
   if (!a || a.reply) return "That isn't waiting on you anymore.";
   const me = stateDevice();
   const at = Date.now();
   const said = reply === "reject" ? message?.trim().slice(0, 2000) : undefined;
-  const answer: AskAnswer = { reply, ...(said ? { message: said } : {}), ...(me ? { by: me } : {}), at };
+  const answer: AskAnswer = { reply, ...(said ? { message: said } : {}), ...(me ? { by: me } : {}), at, ...(member ? { member } : {}) };
   const answered: AppApproval[] = [];
   update((s) => {
     const x = s.appApprovals?.find((y) => y.id === askId);
@@ -153,7 +155,7 @@ export function replyToAsk(askId: string, reply: AskReply, message?: string): st
     if (added) b.permissions = [...(b.permissions ?? []), added];
     for (const y of s.appApprovals ?? [])
       if (!y.reply && y.botId === x.botId && ruleFor(b, y.action) === "allow") {
-        y.reply = { reply: "always", ...(me ? { by: me } : {}), at };
+        y.reply = { reply: "always", ...(me ? { by: me } : {}), at, ...(member ? { member } : {}) };
         answered.push(y);
       }
   });

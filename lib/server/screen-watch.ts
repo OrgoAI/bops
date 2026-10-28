@@ -1,5 +1,5 @@
 import "server-only";
-import { live, type Blocker, type FormField, type PageKind, type ScreenRead } from "@/lib/types";
+import { live, othersThread, type Blocker, type FormField, type PageKind, type ScreenRead } from "@/lib/types";
 import { chose, decide, yes, type Question } from "./decide";
 import { pageText, type PageButton, type PageField } from "./local";
 import { mirror } from "./mirror";
@@ -199,8 +199,9 @@ export function watchScreen(botId: string, display: number, endpoint: string, se
     last = fingerprint;
     const read = await readScreen(botId, display, endpoint, session(sessionId)?.goal ?? "", sessionId);
     if (!read || stopped) return;
-    // A sign-in the vault can handle by itself never needs the user.
-    if (read.blocker && read.form) {
+    // A sign-in the vault can handle by itself never needs the user. Not on someone else's work (lib/types.ts
+    // othersThread: a member with Write asked for it, or someone outside Bops): the owner's saved logins are theirs alone.
+    if (read.blocker && read.form && !othersThread(session(sessionId), session)) {
       const { autoSignIn } = await import("./vault");
       if (await autoSignIn(botId, display, read).catch(() => false)) return;
     }

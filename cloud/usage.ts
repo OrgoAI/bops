@@ -11,7 +11,7 @@ import type { CloudUsage } from "./protocol.ts";
  * A row is written as the use passes through the cloud, with what it cost Orgo (cost_micros,
  * pricing.ts), and with AI credit on that much is taken from the user's credit in the same
  * transaction (credit.ts). Nothing here ever holds up the call it counts. Tasks on the user's Mac are
- * agent turns like any other, so they're here too.
+ * agent turns like any other, so they're here too. A user deleted lately is never counted (deletedIn).
  *
  * Kinds, and what's in detail besides `ref` (recordUsageFor) and `botId` (the bot it was for, when known):
  * - "openai.tokens": units = input + output tokens; model, input, cached, cacheWrite, output,
@@ -40,6 +40,17 @@ import type { CloudUsage } from "./protocol.ts";
 /** A use that couldn't be recorded or paid for: who, what and how much, for the log. */
 class UsageError extends Error {}
 
+/**
+ * A user deleted lately (bops.deleted_users, delete-user.ts): nothing of theirs is counted or paid for.
+ * What the cloud still had under way when the delete came (a turn the guard or reconcile.ts reads back
+ * finishing, a phone turn's answer, a call's last seconds) would otherwise write a row that names them
+ * after the delete answered 200, and take from an account that's being deleted. Asked in the same
+ * transaction as the write.
+ */
+async function deletedIn(c: pg.PoolClient, userId: string) {
+  return !!(await c.query("SELECT 1 FROM bops.deleted_users WHERE user_id = $1", [userId])).rowCount;
+}
+
 async function recorded<T>(userId: string, kind: string, micros: () => number, work: (c: pg.PoolClient) => Promise<T>): Promise<T> {
   try {
     return await tx(work);
@@ -57,6 +68,7 @@ export async function recordUsage(userId: string, kind: string, units: number, d
     kind,
     () => cost,
     async (c) => {
+      if (await deletedIn(c, userId)) return;
       await c.query("INSERT INTO bops.cloud_usage (user_id, kind, units, detail, cost_micros) VALUES ($1, $2, $3, $4::jsonb, $5)", [
         userId,
         kind,
@@ -84,6 +96,7 @@ export async function recordUsageFor(userId: string, kind: string, ref: string, 
     kind,
     () => paid,
     async (c) => {
+      if (await deletedIn(c, userId)) return;
       // Two sightings at once take turns, so neither misses the other's row.
       await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`bops-usage:${userId}:${kind}:${ref}`]);
       const seen = (

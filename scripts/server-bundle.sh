@@ -71,11 +71,16 @@ build_id="$(cat .next/BUILD_ID)"
 name="bops-server-$version-$build_id.tgz"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
-cp -Rc .next/standalone "$stage/server" 2>/dev/null || cp -R .next/standalone "$stage/server"
+# A clone where APFS can, else a plain copy (a build on another volume than the stage's). A clone that
+# fails partway leaves a folder behind, which the plain copy would go into, a level down: it goes first.
+copy() { cp -Rc "$1" "$2" 2>/dev/null || { rm -rf "$2"; cp -R "$1" "$2"; }; }
+copy .next/standalone "$stage/server"
 mkdir -p "$stage/server/.next"
 rm -rf "$stage/server/.next/static" "$stage/server/public"
-cp -Rc .next/static "$stage/server/.next/static" 2>/dev/null || cp -R .next/static "$stage/server/.next/static"
-cp -Rc public "$stage/server/public" 2>/dev/null || cp -R public "$stage/server/public"
+copy .next/static "$stage/server/.next/static"
+copy public "$stage/server/public"
+# The runner installs only a bundle with its server.js on top (lib/server/runner-install.ts installScript).
+[ -f "$stage/server/server.js" ] || { echo "The runner bundle has no server.js at its top. Not shipping." >&2; exit 1; }
 mkdir -p dist-runner
 rm -f dist-runner/bops-server-*.tgz dist-runner/bops-server-*.tgz.sha256
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root -czf "dist-runner/$name" -C "$stage/server" .

@@ -4,13 +4,15 @@ import { screenMap, screenNo } from "@/lib/screens";
 import { askKind, chatAsks } from "@/lib/asks";
 import { alwaysScope, toDo } from "@/lib/permission";
 import { createContext, Fragment, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { BLOCKER_ASK, BRAINS_ON, brainOf, live, ownerSent, pairChatId, routineSent, threadRunner, waitingAsks, WAITING_FOR_OK, waitsForOk, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Blocker, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback } from "@/lib/types";
+import { BLOCKER_ASK, BRAINS_ON, brainOf, live, ownerSent, pairChatId, routineSent, threadRunner, waitingAsks, WAITING_FOR_OK, waitsForOk, workspaceOf, TAPBACK_EMOJI, TAPBACKS, type AppApproval, type AppState, type Blocker, type Bot, type Chat, type MadeApp, type Message, type Session, type Tapback, type ThreadReply } from "@/lib/types";
 import { Tapback as TapbackBalloon, TapbackGlyph, tapbackVars } from "@/components/message-ui/tapback";
 import { Mascot } from "./mascot";
 import { OpenLink } from "./panel-tabs";
 import { appsShown } from "@/lib/apps-access";
 import { crmOpen } from "@/lib/crm-access";
-import { isViewerOwn, ownerWho } from "@/lib/shared";
+import { answersAsk, canAct, isViewerOwn, OWNER_ONLY_LINE, ownerWho, readOnly, saidBy, saidName, writesThread } from "@/lib/shared";
+import { memberAct } from "./shared-act";
+import { MEMBER_STOP_MAX } from "@/cloud/protocol";
 import { CrmNote } from "./crm";
 import { LookingAt, MadeAppLine } from "./made-apps";
 import { MacIcon } from "./mac-tab";
@@ -22,7 +24,9 @@ import { SaveSkillDialog } from "./skill-dialog";
 import { undash } from "./side-group";
 import { ApiAsk, apiAskOf, apiCallOf, ApiNote } from "./keys";
 import { BrainBadge, brainSignIn, openInTerminal, threadBadge } from "./brains";
-import { ChatAvatar, chatName, clockTime, needsYou, post, ReadOnlyLine, StatusIcon, teamOf, useNow } from "./ui";
+import { ChatAvatar, chatName, clockTime, memberAnswers, needsYou, post, ReadOnlyLine, StatusIcon, teamOf, useNow } from "./ui";
+import { ReplyDrafts } from "./reply-drafts";
+import { SkillProposals } from "./skill-proposals";
 
 /** Light markdown for bot text: **bold** and [links](url). */
 /** How many messages a chat draws at first, and how many more each "Show earlier messages" adds. */
@@ -33,6 +37,28 @@ const PAGE = 60;
  * workspace, its owner ("the owner") in one shared with them, where none of it is the viewer's (ownerWho).
  */
 const ownerYou = (state: AppState) => (state.shared ? "the owner" : "you");
+/** Whose message the reply bar names, as "Replying to …" says it: "yourself", "the owner" or a member by name (saidBy). */
+function repliedToWho(m: Message, state: AppState): string {
+  const who = saidBy(m, state);
+  return who === "you" || who === null ? "yourself" : who === "owner" ? "the owner" : who.name;
+}
+
+/**
+ * A card in a shared workspace that only the owner can answer or act on (`only`): an ask of a bot the viewer has at
+ * Read, of a thread on the owner's Mac, to use the owner's apps or keys, or to approve on the owner's phone. Dimmed,
+ * nothing on it does anything, and a line says so, so it never looks like one of theirs that just doesn't work.
+ */
+function OwnerOnly({ only, children }: { only: boolean; children: React.ReactNode }) {
+  if (!only) return <div className="contents">{children}</div>;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="opacity-60" inert>
+        {children}
+      </div>
+      <span className="pl-1 text-[12px] leading-4 text-[#9A9A98]">{OWNER_ONLY_LINE}</span>
+    </div>
+  );
+}
 /** Whose Mac a thread runs on or could move to, the same way: "Your Mac", or the owner's in a shared workspace. */
 const ownerMac = (state: AppState) => (state.shared ? "Owner's Mac" : "Your Mac");
 /** What a blocked thread needs (BLOCKER_ASK says it of the user), of the owner in a shared workspace. */
@@ -374,6 +400,20 @@ export function ChatView({
   const send = async () => {
     const text = draft.trim();
     if (!text && !attaching.length) return;
+    // In a shared workspace (the viewer has Write on every bot here): their words go to the owner's Bops through
+    // Bops Cloud (shared-act.ts), shown as theirs at once. Pictures stay on this Mac (view-only.ts uploads).
+    if (state.shared) {
+      if (attaching.length || !text) return setMicError("Pictures can't be sent in a shared workspace.");
+      setDraft("");
+      setReplying(null);
+      const mine = { id: `pending_${Date.now()}`, chatId: c.id, text, at: Date.now() };
+      setPending((p) => [...p, mine]);
+      setSent((x) => [...x.slice(-19), { chatId: c.id, text, at: mine.at }]);
+      const r = await memberAct({ act: "chat", chatId: c.id, text, ...(replying ? { replyTo: replying.id } : {}) });
+      setPending((p) => p.filter((x) => x.id !== mine.id));
+      if (!r.ok && r.error) setMicError(r.error);
+      return;
+    }
     const items = attaching;
     // Every preview in the tray (the failed ones too), let go once the pending copy showing them has gone.
     const previews = attach.items.map((a) => a.preview);
@@ -538,7 +578,7 @@ export function ChatView({
                   m={m}
                   state={state}
                   showSender={c.kind === "group" || (!!m.botId && m.botId !== solo?.id)}
-                  continued={!!prev && prev.role === m.role && prev.botId === m.botId && !gap}
+                  continued={!!prev && prev.role === m.role && prev.botId === m.botId && prev.member?.userId === m.member?.userId && !gap}
                   sessionById={sessionById}
                   chipIds={chipsFor(m)}
                   onOpenThread={onOpenThread}
@@ -547,7 +587,7 @@ export function ChatView({
                   {...rowProps(m)}
                 />
                 {i + hiddenCount === lastUserIdx && repliedAfterUser && (
-                  <div className={`${state.shared ? "self-start pl-3" : "self-end px-1"} pb-1 text-[11px] leading-[14px] text-[#9A9A98] ${readBy && !seen.has(readBy.id) ? "motion-fade-in" : ""}`}>Read {clockTime(m.at)}</div>
+                  <div className={`${saidBy(m, state) === "you" ? "self-end px-1" : "self-start pl-3"} pb-1 text-[11px] leading-[14px] text-[#9A9A98] ${readBy && !seen.has(readBy.id) ? "motion-fade-in" : ""}`}>Read {clockTime(m.at)}</div>
                 )}
               </Fragment>
             );
@@ -600,9 +640,10 @@ export function ChatView({
           {state.credits?.out && !state.shared && <OutOfCredit onUpgrade={onUpgrade} />}
           {(appAsks.length > 0 || threadAsks.length > 0) && (
             <div className="mb-2.5 flex max-h-[45vh] flex-col gap-2 overflow-y-auto">
-              {/* A shared workspace's asks are the owner's to answer: shown, never answered here. */}
-              <div className="contents" inert={!!state.shared}>
+              {/* A shared workspace's asks are the owner's to answer, but for a bot the viewer has at Write: shown, answered only then. */}
+              <div className="contents">
               {shownAsks.map((x) => (
+                <OwnerOnly key={x.id} only={!writesThread(state, x) || (!!state.shared && askKind(x) === "elsewhere")}>
                 <NeedsYouCard
                   key={x.id}
                   session={x}
@@ -614,14 +655,18 @@ export function ChatView({
                   onSomethingElse={() => onOpenThread(x)}
                   onOpen={() => onOpenThread(x)}
                 />
+                </OwnerOnly>
               ))}
               {threadAsks.length > shownAsks.length && (
                 <button onClick={() => setAllAsks(true)} className="self-start pl-1 text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
-                  {threadAsks.length - shownAsks.length} more waiting on {ownerYou(state)}
+                  {/* (In a shared workspace some are the viewer's to answer, with Write: just how many more.) */}
+                  {threadAsks.length - shownAsks.length} more waiting{state.shared ? "" : ` on ${ownerYou(state)}`}
                 </button>
               )}
               {appAsks.map((a) => (
-                <AppApprovalCard key={a.id} state={state} approval={a} className={seen.has(a.id) ? "" : "motion-rise-in"} />
+                <OwnerOnly key={a.id} only={!answersAsk(state, a)}>
+                  <AppApprovalCard state={state} approval={a} className={seen.has(a.id) ? "" : "motion-rise-in"} />
+                </OwnerOnly>
               ))}
               </div>
             </div>
@@ -641,7 +686,7 @@ export function ChatView({
                 <div className="mx-2 -mb-px flex items-center gap-2 rounded-t-[16px] bg-[#F7F7F6] px-3.5 py-2 shadow-[0_0_0_1px_#ECECEA]">
                   <ReplyArrow />
                   <span className="min-w-0 flex-1 truncate text-[12.5px] leading-4 text-[#6B6B6B]">
-                    Replying to <span className="font-medium text-ink">{bar.role === "user" ? "yourself" : (state.bots.find((x) => x.id === bar.botId)?.name ?? "the bot")}</span>
+                    Replying to <span className="font-medium text-ink">{bar.role === "user" ? repliedToWho(bar, state) : (state.bots.find((x) => x.id === bar.botId)?.name ?? "the bot")}</span>
                     {" · "}
                     {bar.text}
                   </span>
@@ -655,18 +700,20 @@ export function ChatView({
             )}
           </Fold>
 
-          {state.shared ? (
-            <ReadOnlyLine state={state} />
+          {readOnly(state, c.botIds) ? (
+            <ReadOnlyLine state={state} botIds={c.botIds} />
           ) : (
           <form
             onSubmit={(e) => {
               e.preventDefault();
               void send();
             }}
-            className="flex flex-col rounded-[22px] bg-white py-2 pl-2 pr-2 shadow-[0_0_0_1px_#E2E2DF]"
+            className={`flex flex-col rounded-[22px] bg-white py-2 ${state.shared ? "pl-4" : "pl-2"} pr-2 shadow-[0_0_0_1px_#E2E2DF]`}
           >
             <AttachmentTray items={attach.items} onRemove={attach.remove} />
             <div className="flex items-end gap-2">
+            {/* No pictures in a shared workspace: they'd stay on this Mac (view-only.ts uploads). */}
+            {!state.shared && (
             <button
               type="button"
               onClick={() => filePicker.current?.click()}
@@ -678,6 +725,7 @@ export function ChatView({
                 <path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
               </svg>
             </button>
+            )}
             <input
               ref={filePicker}
               type="file"
@@ -696,7 +744,7 @@ export function ChatView({
               onChange={setDraft}
               onPaste={(e) => {
                 const files = filesOf(e.clipboardData);
-                if (!files.length) return;
+                if (!files.length || state.shared) return;
                 e.preventDefault();
                 attach.add(files);
               }}
@@ -704,6 +752,8 @@ export function ChatView({
               placeholder={replying ? "Reply" : solo ? `Text ${solo.name}` : "Message the group · @ to mention"}
               className="min-w-0 flex-1 bg-transparent py-[6px] text-[14px] leading-[18px] outline-none placeholder:text-[#9A9A98]"
             />
+            {/* The mic's words are read by the app's own server: not while a shared workspace is open (view-only.ts). */}
+            {!state.shared && (
             <MicButton
               botId={solo?.id}
               onError={setMicError}
@@ -713,6 +763,7 @@ export function ChatView({
                 document.getElementById("composer")?.focus();
               }}
             />
+            )}
             <button type="submit" aria-label="Send" disabled={!draft.trim() && !attaching.length} className="flex size-[30px] shrink-0 items-center justify-center rounded-full bg-ink disabled:opacity-30">
               <SendIcon />
             </button>
@@ -734,7 +785,7 @@ export function ChatView({
             repliesShown = null;
             setRepliesOpen(null);
           }}
-          onSend={(text) => post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: openReplies })}
+          onSend={(text) => (state.shared ? memberAct({ act: "chat", chatId: c.id, text, replyTo: openReplies }) : post(`/api/chats/${encodeURIComponent(c.id)}/messages`, { text, replyTo: openReplies }))}
           rowProps={rowProps}
           sessionById={sessionById}
           onOpenThread={onOpenThread}
@@ -783,6 +834,8 @@ function RepliesView({
     end.current?.scrollIntoView({ block: "end" });
   }, [list.length]);
   const typing = state.chats.find((x) => x.id === list[0]?.chatId)?.typing ?? [];
+  // Its chat's bots: in a shared workspace, replied in only with Write on every one (lib/shared.ts readOnly).
+  const botIds = state.chats.find((x) => x.id === list[0]?.chatId)?.botIds ?? [];
   // What was here when it opened just shows; a reply that comes in while it's open moves in, and
   // yours (sent from here, with nothing pending before it) goes up from the composer.
   const [seen] = useState(() => new Set(list.map((m) => m.id)));
@@ -828,8 +881,8 @@ function RepliesView({
           {typing.length > 0 && <span className="self-start pl-1 text-[12px] text-[#9A9A98]">{typing.map((t) => state.bots.find((b) => b.id === t)?.name).join(", ")} typing…</span>}
           <div ref={end} />
         </div>
-        {state.shared ? (
-          <ReadOnlyLine state={state} className="m-3 mt-0" />
+        {readOnly(state, botIds) ? (
+          <ReadOnlyLine state={state} botIds={botIds} className="m-3 mt-0" />
         ) : (
         <form
           onSubmit={(e) => {
@@ -1018,6 +1071,24 @@ function lasts(all: Message[]) {
   return v;
 }
 
+/**
+ * How one of the viewer's own words in a shared workspace stands until the owner's Bops has written it
+ * (Message.memberSend, ThreadReply.memberSend): on its way, waiting for the owner's Bops to open, or not sent,
+ * with why and Try again (the same act, by its key: it's never done twice).
+ */
+function MemberSendLine({ send, retry }: { send: NonNullable<Message["memberSend"]>; retry: (key: string) => void }) {
+  return (
+    <span className={`px-1 text-[11.5px] leading-4 ${send.state === "failed" ? "text-[#B42318]" : "text-[#9A9A98]"}`}>
+      {send.state === "sending" ? "Sending…" : send.state === "waiting" ? "Waiting for the owner's Bops to open." : (send.error ?? "That didn't go.")}
+      {send.state === "failed" && (
+        <button onClick={() => retry(send.key)} className="ml-1.5 font-medium underline-offset-2 hover:underline">
+          Try again
+        </button>
+      )}
+    </span>
+  );
+}
+
 function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onOpenThread, onShowScreen, onShowMac, replyCount, root, onReply, onOpenReplies, inReplies, arrival }: RowProps) {
   // Decided once, as the row mounts: a poll or a new tapback draws it again but never replays it.
   // Yours carries on its pending copy's motion (a negative delay starts it partway, or past the end).
@@ -1046,11 +1117,15 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     onPointerUp: () => press.current && clearTimeout(press.current),
     onPointerLeave: () => press.current && clearTimeout(press.current),
   };
-  // A shared workspace's messages are the owner's: read and copied, never reacted to, replied to or deleted here.
+  // A shared workspace's messages are the owner's: read and copied, never reacted to or deleted here; replied to
+  // only where the viewer has Write on every bot in the chat (canAct).
   const ro = !!state.shared;
+  const writes = canAct(state, state.chats.find((x) => x.id === m.chatId)?.botIds ?? []);
   // The user's own words go out on the right. In a workspace shared with them the owner's come in on the left,
-  // named as the owner's, never in the viewer's own outgoing bubble.
-  const outgoing = m.role === "user" && !ro;
+  // named as the owner's, never in the viewer's own outgoing bubble; and so does a member's (someone the owner
+  // gave Write, Message.member), named as theirs, in the owner's own window too.
+  const said = saidBy(m, state);
+  const outgoing = said === "you";
   // The bot's latest message can offer replies as buttons (see ASKING); tapping one sends it.
   const newest = lasts(state.messages).byChat.get(m.chatId) === m.id;
   const mine = m.reactions?.find((r) => r.by === "owner");
@@ -1062,6 +1137,8 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   };
   // In a shared workspace the owner's words are theirs, never the user's.
   const you = ownerWho(state.shared);
+  // Who's named over words that come in on the left: the owner's, or a member's by name.
+  const sender = said && typeof said === "object" ? said.name : you;
   const nameOf = (by: string | undefined) => (by === "owner" ? you : (state.bots.find((x) => x.id === by)?.name ?? "A bot"));
 
   // Tapbacks sit on the bubble's top corner, away from its sender, like Messages: yours blue, the bots' gray.
@@ -1092,7 +1169,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
         </svg>
       </button>
       )}
-      {!inReplies && !ro && (
+      {!inReplies && (!ro || writes) && (
         <button onClick={onReply} aria-label="Reply" title="Reply" className="flex size-6 items-center justify-center rounded-md text-[#9A9A98] hover:bg-black/[0.05] hover:text-ink">
           <ReplyArrow />
         </button>
@@ -1128,7 +1205,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   // Both open out of the bubble's corner they hang from: right for yours, left for the bot's.
   const actionMenu = menu && (
     <div className={`motion-menu-in absolute top-[calc(100%+6px)] z-40 flex w-[168px] flex-col rounded-xl bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040] ${outgoing ? "right-0 origin-top-right" : "left-0 origin-top-left"}`}>
-      {!inReplies && !ro && (
+      {!inReplies && (!ro || writes) && (
         <button
           onClick={() => {
             close();
@@ -1196,7 +1273,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
     <button onClick={onOpenReplies} className={`flex max-w-full items-center gap-1.5 px-1 text-[11.5px] leading-4 text-[#9A9A98] hover:text-[#6B6B6B] ${outgoing ? "self-end" : "self-start"}`}>
       <ReplyArrow />
       <span className="truncate">
-        {root.role === "user" ? you : nameOf(root.botId)}: {root.text}
+        {root.role === "user" ? (root.member ? (saidBy(root, state) === "you" ? "You" : root.member.name) : you) : nameOf(root.botId)}: {root.text}
       </span>
     </button>
   );
@@ -1288,12 +1365,14 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
           </Fragment>
         );
       })}
-      {runningHere.length > 1 && !ro && (
+      {runningHere.length > 1 && (!ro || canAct(state, [...new Set(runningHere.map((s) => s.botId))])) && (
         <button
-          onClick={() => runningHere.forEach((s) => void post("/api/sessions", { sessionId: s.id }, "DELETE"))}
+          // In a shared workspace: one act for all of them (at most MEMBER_STOP_MAX), each bot's at Write.
+          onClick={() => (ro ? void memberAct({ act: "stop", sessionIds: runningHere.slice(0, MEMBER_STOP_MAX).map((s) => s.id) }) : runningHere.forEach((s) => void post("/api/sessions", { sessionId: s.id }, "DELETE")))}
           className="pl-1 text-[12px] font-medium leading-4 text-[#9A9A98] hover:text-[#B42318]"
         >
-          Stop all {runningHere.length}
+          {/* (Only as many as one Stop sends from a shared workspace: the rest stay, with Stop all again for them.) */}
+          Stop all {ro ? Math.min(runningHere.length, MEMBER_STOP_MAX) : runningHere.length}
         </button>
       )}
       {!ro && chips
@@ -1330,7 +1409,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
   if (m.role === "user")
     return (
       <div className={`group/msg flex max-w-[78%] flex-col gap-1 ${outgoing ? "items-end self-end" : "items-start self-start"} ${enterClass}`} style={enter?.style}>
-        {!outgoing && !continued && <div className="pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{you}</div>}
+        {!outgoing && !continued && <div className="pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{sender}</div>}
         {quote}
         {/* Room above the bubble for its tapbacks, so they don't cover the quote or sender line (it eases open as the first one pops in). */}
         <div className={`flex min-w-0 max-w-full items-center gap-1 transition-[margin] duration-200 ease-out motion-reduce:transition-none ${m.reactions?.length ? "mt-3.5" : ""}`}>
@@ -1364,6 +1443,7 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
             via {CHANNEL_NAME[m.via]}
           </span>
         )}
+        {m.memberSend && <MemberSendLine send={m.memberSend} retry={(key) => void memberAct({ act: "chat", chatId: m.chatId, text: m.text, ...(m.replyTo ? { replyTo: m.replyTo } : {}) }, key)} />}
         {replies}
         {chipList}
       </div>
@@ -1472,14 +1552,18 @@ function MessageRow({ m, state, showSender, continued, sessionById, chipIds, onO
           </div>
           {actions}
         </div>
+        {/* Replies it wrote for the user to send, each a card with Send (read only in a shared workspace). */}
+        <ReplyDrafts message={m} state={state} />
+        {/* Changes it proposed to a skill, each a card with Accept and Reject (read only in a shared workspace). */}
+        <SkillProposals message={m} state={state} />
         {replies}
-        {m.needed && m.resultOf && <AnsweredLine message={m} session={sessionById(m.resultOf)} who={you} />}
-        {newest && !ro && !!m.options?.length && (
+        {m.needed && m.resultOf && <AnsweredLine message={m} session={sessionById(m.resultOf)} state={state} />}
+        {newest && (!ro || writes) && !!m.options?.length && (
           <div className="flex flex-wrap gap-1.5 pt-0.5">
             {m.options.map((o) => (
               <button
                 key={o}
-                onClick={() => void post(`/api/chats/${encodeURIComponent(m.chatId)}/messages`, { text: o })}
+                onClick={() => void (ro ? memberAct({ act: "chat", chatId: m.chatId, text: o }) : post(`/api/chats/${encodeURIComponent(m.chatId)}/messages`, { text: o }))}
                 className="rounded-full bg-white px-3 py-1.5 text-[13px] font-medium leading-4 shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]"
               >
                 {o}
@@ -1825,13 +1909,15 @@ function readableOn(hex: string) {
 function SessionChip({ session: s, state, onClick }: { session: Session; state: AppState; onClick: () => void }) {
   const b = state.bots.find((x) => x.id === s.botId);
   const waiting = needsYou(s);
+  // In a shared workspace, what it waits on is the viewer's to answer too (Write on its bot): said so, not "the owner".
+  const theirs = memberAnswers(state, s);
   const badge = threadBadge(s, state);
   return (
     <button
       onClick={onClick}
       className="flex max-w-full items-center gap-[9px] rounded-[14px] bg-white py-[9px] pl-3 pr-3.5 text-left shadow-[0_0_0_1px_#E6E6E3] hover:shadow-[0_0_0_1px_#C9C9C6]"
     >
-      <StatusIcon session={s} size={14} dark owner={!!state.shared} okWait={waitsForOk(s, state)} />
+      <StatusIcon session={s} size={14} dark owner={!!state.shared && !theirs} member={theirs} okWait={waitsForOk(s, state)} />
       <span className={`truncate text-[14px] leading-[18px] ${live(s) || waiting ? "text-ink" : "text-[#6B6B6B]"}`}>{s.title}</span>
       {/* The brain that runs it, when one does (threadRunner); Bops agent only where its bot is on a brain now. */}
       {badge && <BrainBadge kind={badge.kind} title={badge.title} />}
@@ -1844,7 +1930,7 @@ function SessionChip({ session: s, state, onClick }: { session: Session; state: 
       ) : s.askWhere && live(s) ? (
         <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">· where?</span>
       ) : null}
-      {waiting && <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">· {s.blocker ? `needs ${blockerAsk(state, s.blocker)}` : `needs ${ownerYou(state)}`}</span>}
+      {waiting && <span className="shrink-0 text-[12px] leading-4 text-[#6B6B6B]">· {s.blocker ? `needs ${blockerAsk(state, s.blocker)}` : theirs ? "needs an answer" : `needs ${ownerYou(state)}`}</span>}
       {/* Which screen it's on, live: the number on the panel's tiles. */}
       {live(s) && s.runsOn !== "mac" && s.display !== undefined && (
         <span title={`On screen ${screenNo(s.display)} of ${b?.name ?? "its bot"}'s computer`} className="shrink-0 rounded-full bg-[#F2F2F0] px-1.5 py-px text-[11px] tabular-nums leading-[14px] text-[#3A3A38]">
@@ -1861,7 +1947,7 @@ function SessionChip({ session: s, state, onClick }: { session: Session; state: 
 type Line =
   | { kind: "note"; at: number; text: string }
   | { kind: "steps"; at: number; steps: { tool: string; detail: string; who?: string; screen?: number }[] }
-  | { kind: "reply"; at: number; role: "user" | "bot"; text: string }
+  | { kind: "reply"; at: number; role: "user" | "bot"; text: string; member?: ThreadReply["member"]; memberSend?: ThreadReply["memberSend"] }
   | { kind: "event"; at: number; text: string };
 
 /** Build the thread's transcript: narration as prose, tool steps folded, replies in order. */
@@ -1878,7 +1964,7 @@ function timeline(s: Session): Line[] {
   }
   // Passed on from outside Bops (someone's email): shown as that, not as the user's words.
   for (const r of s.replies)
-    lines.push(r.note ? { kind: "event", at: r.at, text: r.note } : r.from ? { kind: "event", at: r.at, text: `Passed on from ${r.from}: ${r.text}` } : { kind: "reply", at: r.at, role: r.role, text: r.text });
+    lines.push(r.note ? { kind: "event", at: r.at, text: r.note } : r.from ? { kind: "event", at: r.at, text: `Passed on from ${r.from}: ${r.text}` } : { kind: "reply", at: r.at, role: r.role, text: r.text, ...(r.member ? { member: r.member } : {}), ...(r.memberSend ? { memberSend: r.memberSend } : {}) });
   if (!s.replies.length && s.answer) lines.push({ kind: "reply", at: s.endedAt ?? Date.now(), role: "bot", text: s.answer });
   return lines.sort((a, b) => a.at - b.at);
 }
@@ -1955,11 +2041,16 @@ export function ThreadSheet({
     end.current?.scrollIntoView({ block: "end" });
   }, [lines.length, s.status]);
 
+  // In a shared workspace (the viewer has Write on its bot), through Bops Cloud to the owner's Bops (shared-act.ts).
+  const writes = canAct(state, [s.botId]);
+  // Why a Stop from a shared workspace didn't go (it shows Stop again, with this under the header).
+  const [stopError, setStopError] = useState<string | null>(null);
   const send = async () => {
     const text = draft.trim();
     if (!text) return;
     setDraft("");
-    await post(`/api/sessions/${s.id}/reply`, { text });
+    if (state.shared) await memberAct({ act: "reply", sessionId: s.id, text });
+    else await post(`/api/sessions/${s.id}/reply`, { text });
   };
 
   return (
@@ -2005,7 +2096,14 @@ export function ThreadSheet({
               Open in terminal
             </button>
           )}
-          {state.shared ? null : live(s) ? (
+          {/* Stop for a viewer with Write on its bot (through the owner's Bops); deleting stays the owner's. */}
+          {state.shared ? (
+            writes && live(s) && (
+              <button disabled={!!s.stopAsked} onClick={() => void memberAct({ act: "stop", sessionIds: [s.id] }).then((r) => setStopError(r.ok ? null : (r.error ?? "That didn't go. Try again.")))} className="rounded-full px-3 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6] disabled:opacity-50">
+                {s.stopAsked ? "Stopping" : "Stop"}
+              </button>
+            )
+          ) : live(s) ? (
             <button onClick={() => void post("/api/sessions", { sessionId: s.id }, "DELETE")} className="rounded-full px-3 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
               Stop
             </button>
@@ -2028,12 +2126,17 @@ export function ThreadSheet({
             </svg>
           </button>
         </div>
+        {stopError && (
+          <span role="alert" className="border-b border-[#F0F0EE] px-4 py-2 text-[12px] leading-4 text-[#B42318]">
+            {stopError}
+          </span>
+        )}
 
         <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-[18px] pb-3 pt-4">
           <div className="flex w-[86%] flex-col items-end gap-1.5 self-end">
             <div className="flex items-center gap-1.5 text-[12px] leading-4 text-[#6B6B6B]">
               {via && <Mascot botId={via.id} color={via.color} size={16} antenna={false} />}
-              {routineSent(s) ? (routine ? `Sent by a routine · ${undash(routine.title)}` : "Sent by a routine") : `Sent via ${via?.name ?? "the main bot"}`}
+              {routineSent(s) ? (routine ? `Sent by a routine · ${undash(routine.title)}` : "Sent by a routine") : s.member ? `Asked by ${state.shared?.you === s.member.userId ? "you" : s.member.name}` : `Sent via ${via?.name ?? "the main bot"}`}
             </div>
             <div className="flex flex-col gap-2 rounded-[18px] bg-[#FBFFE0] px-[15px] pb-2.5 pt-[11px] shadow-[0_0_0_1px_#EEF7A8]">
               <div className={`whitespace-pre-wrap text-[14px] leading-[21px] ${expanded ? "" : "line-clamp-3"}`}>{s.goal}</div>
@@ -2069,7 +2172,7 @@ export function ThreadSheet({
               {s.askWhere && live(s)
                 ? `Waiting for ${ownerYou(state)} for ${since(started)}`
                 : waitsForOk(s, state)
-                  ? state.shared
+                  ? state.shared && !writes
                     ? "Waiting for the owner's OK"
                     : WAITING_FOR_OK
                   : live(s)
@@ -2124,11 +2227,18 @@ export function ThreadSheet({
               <span key={i} className="self-center text-[12px] leading-4 text-[#9A9A98]">
                 {l.text}
               </span>
-            ) : l.role === "user" && state.shared ? (
-              // The owner's reply, in a workspace shared with the user: named as theirs, on the incoming side, never as the viewer's own.
+            ) : l.role === "user" && saidBy(l, state) !== "you" ? (
+              // The owner's reply, in a workspace shared with the user, or a member's (by name, in the owner's own window
+              // too): named as theirs, on the incoming side, never as the viewer's own.
               <div key={i} className="flex max-w-[80%] flex-col items-start gap-0.5 self-start">
-                <span className="pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{ownerWho(state.shared)}</span>
+                <span className="pl-3 text-[11px] leading-[14px] text-[#9A9A98]">{l.member ? l.member.name : ownerWho(state.shared)}</span>
                 <div className="whitespace-pre-wrap rounded-[18px] bg-white px-3.5 py-2 text-[14px] leading-5 text-ink shadow-[0_0_0_1px_#E2E2DF] [overflow-wrap:anywhere]">{l.text}</div>
+              </div>
+            ) : l.role === "user" && l.memberSend ? (
+              // The viewer's own reply in a shared workspace, on its way to the owner's Bops: how it stands under it.
+              <div key={i} className="flex max-w-[80%] flex-col items-end gap-0.5 self-end">
+                <div className="whitespace-pre-wrap rounded-[18px] bg-ink px-3.5 py-2 text-[14px] leading-5 text-white">{l.text}</div>
+                <MemberSendLine send={l.memberSend} retry={(key) => void memberAct({ act: "reply", sessionId: s.id, text: l.text }, key)} />
               </div>
             ) : l.role === "user" ? (
               <div key={i} className="max-w-[80%] self-end whitespace-pre-wrap rounded-[18px] bg-ink px-3.5 py-2 text-[14px] leading-5 text-white">
@@ -2161,16 +2271,19 @@ export function ThreadSheet({
           <div ref={end} />
         </div>
 
-        {/* Waiting for your OK: its request's card, with Deny, Always allow and Allow once (the owner's alone in a shared workspace). */}
+        {/* Waiting for your OK: its request's card, with Deny, Always allow and Allow once (in a shared workspace, only for a viewer with Write on its bot). */}
         {waitingAsks(state, s.id).length > 0 && (
-          <div className="flex flex-col gap-2 px-3 pb-2" inert={!!state.shared}>
+          <div className="flex flex-col gap-2 px-3 pb-2">
             {waitingAsks(state, s.id).map((a) => (
-              <AppApprovalCard key={a.id} state={state} approval={a} />
+              <OwnerOnly key={a.id} only={!answersAsk(state, a)}>
+                <AppApprovalCard state={state} approval={a} />
+              </OwnerOnly>
             ))}
           </div>
         )}
         {needsYou(s) && (
-          <div className={`px-3 pb-2 ${askedAtOpen.asked ? "" : "motion-rise-in"}`} inert={!!state.shared}>
+          <div className={`px-3 pb-2 ${askedAtOpen.asked ? "" : "motion-rise-in"}`}>
+            <OwnerOnly only={!writesThread(state, s) || (!!state.shared && askKind(s) === "elsewhere")}>
             <NeedsYouCard
               session={s}
               state={state}
@@ -2179,10 +2292,16 @@ export function ThreadSheet({
               onShowScreen={onShowScreen}
               onSomethingElse={() => document.getElementById("thread-reply")?.focus()}
             />
+            </OwnerOnly>
           </div>
         )}
-        {state.shared ? (
-          <ReadOnlyLine state={state} className="mx-3 mb-3" />
+        {readOnly(state, [s.botId]) ? (
+          <ReadOnlyLine state={state} botIds={[s.botId]} className="mx-3 mb-3" />
+        ) : !writesThread(state, s) ? (
+          // With Write on its bot, but it runs on the owner's Mac: a member's words never reach work there (Bops Cloud refuses them).
+          <div data-read-only className="mx-3 mb-3 rounded-[14px] bg-[#F7F7F5] px-3.5 py-2.5 text-center text-[13px] leading-[18px] text-[#6B6B6B]">
+            This runs on the owner&apos;s Mac. Only the owner can tell it more.
+          </div>
         ) : (
         <form
           onSubmit={(e) => {
@@ -2425,13 +2544,23 @@ function NeedsYouCard({
   onSomethingElse: () => void;
   onOpen?: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
+  const [working, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const b = state.bots.find((x) => x.id === s.botId);
   const name = b?.name ?? "The bot";
+  // In a shared workspace (only shown live for a viewer with Write on its bot: the caller makes it inert otherwise),
+  // answered through Bops Cloud on the owner's Bops (shared-act.ts), as the owner's own taps would be.
+  const writes = canAct(state, [s.botId]);
+  // The viewer's own answer here since the bot last asked, as it stands until the owner's Bops has it (a shared
+  // workspace: ThreadReply.memberSend): on its way the card waits, saying so; one that didn't go says why. Read from
+  // the window's state, not this card's: it may have been shut and opened again meanwhile.
+  const lastBot = [...s.replies].reverse().find((r) => r.role === "bot")?.at ?? 0;
+  const sent = state.shared ? [...s.replies].reverse().find((r) => r.role === "user" && r.memberSend && r.at > lastBot)?.memberSend : undefined;
+  const going = !!sent && sent.state !== "failed";
   const reply = async (text: string) => {
     setBusy(true);
-    await post(`/api/sessions/${s.id}/reply`, { text });
+    const r = state.shared ? await memberAct({ act: "reply", sessionId: s.id, text }) : (await post(`/api/sessions/${s.id}/reply`, { text }), { ok: true });
+    if (!r.ok && "error" in r && r.error) setError(r.error);
     setBusy(false);
   };
   // The user's own Mac (state.mac): never where a shared workspace's thread goes.
@@ -2439,11 +2568,18 @@ function NeedsYouCard({
   // Dismiss means done with it: the thread stops and never asks again.
   const dismiss = () => {
     setBusy(true);
-    void post(`/api/sessions/${s.id}`, { dismiss: true }, "PATCH");
+    if (state.shared)
+      void memberAct({ act: "dismiss", sessionId: s.id }).then((r) => {
+        if (!r.ok && r.error) setError(r.error);
+        setBusy(false);
+      });
+    else void post(`/api/sessions/${s.id}`, { dismiss: true }, "PATCH");
   };
   const kind = askKind(s);
   const failed = kind === "failed";
   const display = s.display ?? s.lastDisplay;
+  const busy = working || going;
+  const shownError = error ?? (sent?.state === "failed" ? (sent.error ?? "That didn't go. Try again.") : null);
   const brain = kind === "brain" ? state.brains?.find((x) => x.id === s.brainRun?.brainId) : undefined;
   const signIn = async () => {
     if (!brain) return;
@@ -2463,8 +2599,10 @@ function NeedsYouCard({
           ? `${name} needs the owner to approve it on their phone`
           : `${name} needs you to approve it on your phone`
         : kind === "safety"
-          ? `${name} needs ${state.shared ? "the owner's" : "your"} OK to go on`
-          : `${name} is waiting on ${ownerYou(state)}`;
+          ? `${name} needs ${state.shared ? (writes ? "an" : "the owner's") : "your"} OK to go on`
+          : state.shared && writes
+            ? `${name} is waiting on an answer`
+            : `${name} is waiting on ${ownerYou(state)}`;
   const answer = withoutBriefing(s.answer ?? "").trim();
   // The question itself, so the card says what to answer (the last sentence that asks something); pinned, the bot's words when none asks.
   const asked = answer.split(/(?<=[.!?])\s+|\n+/).reverse().find((x) => x.trim().endsWith("?"))?.trim();
@@ -2493,7 +2631,8 @@ function NeedsYouCard({
         )}
       </span>
       {question && <span className={`-mt-1 pl-4 text-[13.5px] leading-[19px] text-[#3A3A38] ${pinned ? "line-clamp-3 whitespace-pre-wrap" : ""}`}>{question}</span>}
-      <div className="flex flex-wrap gap-1.5">
+      {/* A sign in, a code or a check at the screen, or a brain's sign in: the owner's own logins and screens, never a viewer's to do. */}
+      <div className="flex flex-wrap gap-1.5" inert={!!state.shared && (!!s.blocker || kind === "brain")}>
         {s.blocker ? (
           <>
             <button disabled={busy} onClick={onShow} className={primary}>
@@ -2573,22 +2712,29 @@ function NeedsYouCard({
           </>
         )}
       </div>
-      {error && (
+      {going && <span className="pl-1 text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : "Waiting for the owner's Bops to open."}</span>}
+      {shownError && (
         <span role="alert" className="pl-1 text-[12px] leading-4 text-[#B42318]">
-          {error}
+          {shownError}
         </span>
       )}
     </div>
   );
 }
 
-/** Under a thread's question kept in the chat: how the user answered it, once they have. */
-/** `who`: who answered (ownerWho: the owner in a shared workspace). */
-function AnsweredLine({ message: m, session: s, who }: { message: Message; session?: Session; who: string }) {
+/**
+ * Under a thread's question kept in the chat: how it was answered, once it has been, and by whom (saidName: "You",
+ * "Owner" or a member with Write by name, never a member's words as the owner's). Not one of the viewer's own still on
+ * its way that didn't go (ThreadReply.memberSend).
+ */
+function AnsweredLine({ message: m, session: s, state }: { message: Message; session?: Session; state: AppState }) {
   if (!s) return null;
-  // The owner's own answer: never what a bot passed on (`from`: a computer's runner may add one) nor a note of Bops'.
-  const answer = s.replies.find((r) => r.role === "user" && !r.from && !r.note && r.at > m.at);
-  const said = answer ? `${who} answered: “${answer.text.length > 80 ? `${answer.text.slice(0, 79)}…` : answer.text}”` : s.dismissed ? `${who} dismissed it` : undefined;
+  // The answer: never what a bot passed on (`from`: a computer's runner may add one) nor a note of Bops'.
+  const answer = s.replies.find((r) => r.role === "user" && !r.from && !r.note && r.at > m.at && r.memberSend?.state !== "failed");
+  // Dismissed by a member: the reason names them ("Dismissed by Sam": member-acts.ts); else by the owner.
+  const by = /^Dismissed by (?!you$|the owner$)(.+)$/.exec(s.error ?? "")?.[1];
+  const dismisser = by ?? ownerWho(state.shared);
+  const said = answer ? `${saidName(answer, state)} answered: “${answer.text.length > 80 ? `${answer.text.slice(0, 79)}…` : answer.text}”` : s.dismissed ? `${dismisser} dismissed it` : undefined;
   if (!said) return null;
   return (
     <span className="flex items-center gap-1 pl-3 text-[11.5px] leading-4 text-[#9A9A98]">
@@ -2618,7 +2764,12 @@ const CHANNEL_NAME: Record<string, string> = { slack: "Slack", telegram: "Telegr
  * shared workspace it's the owner's to answer: shown, never answered (the caller makes it inert).
  */
 function AppApprovalCard({ state, approval: a, className = "" }: { state: AppState; approval: AppApproval; className?: string }) {
-  const [busy, setBusy] = useState(false);
+  const [working, setBusy] = useState(false);
+  // The viewer's answer from a shared workspace, as it stands (AppApproval.memberSend): the card stays while it's on
+  // its way, saying so, and says why when it didn't go, whatever this card saw (it may have been shut meanwhile).
+  const sent = a.memberSend;
+  const going = !!sent && sent.state !== "failed";
+  const busy = working || going;
   const [telling, setTelling] = useState(false);
   const [instead, setInstead] = useState("");
   const b = state.bots.find((x) => x.id === a.botId);
@@ -2627,10 +2778,21 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
   const name = b?.name ?? "A bot";
   // A call to an API with one of your keys (keys.tsx): which service, and the method and path in full.
   const api = apiAskOf(a);
+  // What went wrong answering it from a shared workspace (it shows again, with why).
+  const [error, setError] = useState<string | null>(null);
   const decide = async (reply: "once" | "always" | "reject", message?: string) => {
     setBusy(true);
-    await post("/api/apps/approvals", { id: a.id, reply, ...(message?.trim() ? { message: message.trim() } : {}) });
+    const note = message?.trim() ? { message: message.trim() } : {};
+    // In a shared workspace, a viewer with Write on its bot answers through the owner's Bops (shared-act.ts): named as theirs there.
+    if (state.shared) {
+      const r = await memberAct({ act: "answer", askId: a.id, reply, ...note });
+      setError(r.ok ? null : (r.error ?? null));
+      setBusy(false);
+      return;
+    }
+    await post("/api/apps/approvals", { id: a.id, reply, ...note });
   };
+  const shownError = going ? null : (error ?? (sent?.state === "failed" ? (sent.error ?? "That didn't go. Try again.") : null));
   const btn = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
   return (
     <div className={`flex flex-col gap-2.5 rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#0000000F,0_10px_30px_-16px_#00000059] ${className}`}>
@@ -2691,6 +2853,12 @@ function AppApprovalCard({ state, approval: a, className = "" }: { state: AppSta
       </div>
       {/* What Always allow covers: this bot and this action from now on, whoever it's for (lib/permission.ts). */}
       {!telling && <span className="text-[12px] leading-4 text-[#6B6B6B]">{alwaysScope(name, a)}</span>}
+      {going && <span className="text-[12px] leading-4 text-[#9A9A98]">{sent?.state === "sending" ? "Sending…" : "Waiting for the owner's Bops to open."}</span>}
+      {shownError && (
+        <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+          {shownError}
+        </span>
+      )}
     </div>
   );
 }

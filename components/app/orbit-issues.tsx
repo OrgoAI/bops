@@ -8,6 +8,7 @@ import { AppLogo } from "./apps";
 import { Spinner } from "./mascot";
 import { OpenLink } from "./panel-tabs";
 import { InlineConfirm, since, small, undash } from "./side-group";
+import { IssueSource } from "./source-view";
 import { CloseButton, useNow } from "./ui";
 
 /*
@@ -19,6 +20,7 @@ import { CloseButton, useNow } from "./ui";
  *   GET    /api/orbit/issues?ws=            { issues: Issue[], tags?: string[] }  (or Issue[])
  *   PATCH  /api/orbit/issues/{id}?ws=       { status?, priority?, tags?, note?, newTags? }  -> { issue } (or Issue)
  *   DELETE /api/orbit/issues/{id}?ws=       -> anything ok
+ *   GET    /api/orbit/issues/{id}/source?ws=  the email or thread itself (source-view.tsx)
  *
  * One copy per account and workspace, shared by the sidebar and the page, read when the first of them
  * opens, when Bops comes back in sight, and every minute while it's in sight.
@@ -412,7 +414,7 @@ export function IssuesPage({
   const allTags = [...new Set([...wsTags, ...(list?.tags ?? []), ...issues.flatMap((i) => i.tags)])];
   const open = openId ? issues.find((i) => i.id === openId) : undefined;
 
-  if (open) return <IssueView key={open.id} issue={open} acts={acts} tags={allTags} onBack={() => setOpenId(null)} onClose={onClose} />;
+  if (open) return <IssueView key={open.id} issue={open} ws={ws} acts={acts} tags={allTags} onBack={() => setOpenId(null)} onClose={onClose} />;
 
   const shown = issues
     .filter((i) => (status === "all" ? true : status === "active" ? isOpen(i) : i.status === status))
@@ -720,7 +722,7 @@ function TagPicker({
               onMouseDown={(e) => e.preventDefault()}
               onMouseMove={() => n !== at && setActive(n)}
               onClick={() => choose(r)}
-              className={`flex h-7 shrink-0 cursor-default items-center gap-2 rounded-lg px-2 text-[12.5px] leading-4 ${off ? "text-[#C9C9C6]" : "text-ink"} ${n === at ? "bg-[#F2F2F0]" : ""}`}
+              className={`flex h-7 shrink-0 items-center gap-2 rounded-lg px-2 text-[12.5px] leading-4 ${off ? "text-[#C9C9C6]" : "text-ink"} ${n === at ? "bg-[#F2F2F0]" : ""}`}
             >
               <span className="flex w-3 shrink-0 justify-center">
                 {r.make ? (
@@ -796,8 +798,12 @@ function TagFilter({ tags, value, onChange }: { tags: string[]; value: string; o
   );
 }
 
-/** One issue: what it's about, where it came from, its status, priority and tags to change, its history, a note to add, and Delete. */
-function IssueView({ issue, acts, tags, onBack, onClose }: { issue: Issue; acts: IssueActs; tags: string[]; onBack: () => void; onClose: () => void }) {
+/**
+ * One issue: what it's about, where it came from (the email or thread itself, read live from the user's own
+ * account, with a Reply box: source-view.tsx), its status, priority and tags to change, its history, a note to
+ * add, and Delete.
+ */
+function IssueView({ issue, ws, acts, tags, onBack, onClose }: { issue: Issue; ws: string; acts: IssueActs; tags: string[]; onBack: () => void; onClose: () => void }) {
   const openLink = useContext(OpenLink);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState("");
@@ -948,6 +954,8 @@ function IssueView({ issue, acts, tags, onBack, onClose }: { issue: Issue; acts:
             )}
           </div>
         )}
+
+        <IssueSource issue={issue} ws={ws} onReplied={() => readHistory(issue.id)} />
 
         <div className="flex flex-col gap-2">
           <span className="px-1 text-[12px] font-medium leading-4 text-[#9A9A98]">History</span>

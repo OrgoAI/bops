@@ -853,12 +853,13 @@ await check("a chat run: quiet NOTHING posts nothing, an answer posts as the bot
   const posted = msgsSince(n).find((m) => m.role === "bot");
   assert.equal(posted.text, "The blue chair is $40 now, down from $60.");
   // Run now asked for in a chat message: marked so, so a turn in Slack or by text that asked for it sends it back there (lib/types.ts turnsOwn).
-  assert.deepEqual(posted.routine, { id, manual: true });
+  // And stamped with when its run began, so its report goes with that run (lib/routine-reports.ts).
+  assert.deepEqual(posted.routine, { id, manual: true, at: ok.at });
   assert.equal(fake.pings.length, pings + 1, "worth a chime is asked");
   // Run now in the app: no turn's, so a text or channel turn running meanwhile doesn't send it.
   const k = state.messages.length;
-  await R.runRoutine(id, { manual: "app" });
-  assert.deepEqual(msgsSince(k).find((m) => m.role === "bot").routine, { id });
+  const fromApp = await R.runRoutine(id, { manual: "app" });
+  assert.deepEqual(msgsSince(k).find((m) => m.role === "bot").routine, { id, at: fromApp.at });
   fake.chatAnswer = async () => ({ text: null, error: "Out of AI credit" });
   const bad = await R.runRoutine(id, { manual: true });
   assert.equal(bad.status, "failed");
@@ -1487,6 +1488,72 @@ await check("mirrored to Orgo: a change and a run of a routine in a workspace wi
     assert.ok(!orgoCalls[0].body.routines.some((x) => x.bopsId === r.id), "gone from the copy");
   } finally {
     clock = saved;
+    delete state.workspaces;
+    Sync.reset();
+  }
+});
+
+await check("what each run said goes to Orgo with its record (cut to 2000), and its words in the chat carry when its run began", async () => {
+  const Sync = (await import("@/lib/server/routine-sync")).routineSyncForTests;
+  const saved = clock;
+  const answer = fake.chatAnswer;
+  state.workspaces = [{ id: "ws_main", name: "Main", createdAt: 0, orgoProjectId: "proj_1" }];
+  const made = [];
+  try {
+    clock = Z("2026-10-13T20:30:00Z");
+    const ping = R.createRoutine("bot_main", "Stretch", "Stretch", { kind: "daily", time: "09:00" }, { reminder: "Stretch and drink some water." }).routine;
+    const digest = R.createRoutine("bot_main", "Digest", "Sum up the news", { kind: "daily", time: "08:00" }, { run: "chat" }).routine;
+    const watch = R.createRoutine("bot_main", "Price watch", "Watch the price of the blue chair", { kind: "daily", time: "07:00" }, { run: "chat", quiet: true }).routine;
+    const task = R.createRoutine("bot_main", "Portal", "Check the portal for new orders", { kind: "daily", time: "10:00" }).routine;
+    made.push(ping, digest, watch, task);
+    await Sync.flushAll();
+    orgoCalls.length = 0;
+    const n = state.messages.length;
+    const a = await R.runRoutine(ping.id, { manual: "app" });
+    clock += 60_000;
+    const long = `**News** ${"word ".repeat(700)}`;
+    fake.chatAnswer = async () => ({ text: `  ${long}  ` });
+    const b = await R.runRoutine(digest.id, { manual: "app" });
+    clock += 60_000;
+    fake.chatAnswer = async () => ({ text: "NOTHING" });
+    const c = await R.runRoutine(watch.id, { manual: "app" });
+    clock += 60_000;
+    fake.chatAnswer = async () => ({ text: null, error: "The news site is down" });
+    const d = await R.runRoutine(digest.id, { manual: "app" });
+    clock += 60_000;
+    const e = await R.runRoutine(task.id, { manual: "app" });
+    assert.equal(e.status, "running");
+    const s = state.sessions.find((x) => x.id === e.sessionId);
+    s.status = "done";
+    clock += 5 * 60_000;
+    await R.onRoutineTaskEnd(s, "  Two new orders, both paid.  ");
+    await Sync.flushAll();
+
+    // In the chat: each run's words with when it began.
+    const posted = msgsSince(n);
+    assert.deepEqual(posted.find((m) => m.role === "bot" && m.text === "Stretch and drink some water.").routine, { id: ping.id, at: a.at });
+    assert.deepEqual(posted.find((m) => m.role === "bot" && m.text.startsWith("**News**")).routine, { id: digest.id, at: b.at });
+    assert.deepEqual(posted.find((m) => m.text === '"Digest" didn\'t run: The news site is down').routine, { id: digest.id, at: d.at });
+    assert.ok(!posted.some((m) => m.routine?.id === watch.id), "a quiet run posts nothing");
+
+    // To Orgo: each run with what it said.
+    const runs = orgoCalls.filter((x) => x.method === "POST").map((x) => ({ routine: x.path.split("/")[5], ...x.body }));
+    const of = (r, at) => runs.find((x) => x.routine === `orgo-${r.id}` && x.startedAt === new Date(at).toISOString());
+    assert.equal(of(ping, a.at).summary, "Stretch and drink some water.", "a reminder: its words");
+    const sum = of(digest, b.at).summary;
+    assert.ok(sum.length <= 2000, `never more than 2000 (${sum.length})`);
+    assert.ok(sum.length >= 1990, "cut there (a space before the cut goes)");
+    assert.ok(sum.startsWith("**News** word") && sum.endsWith("…"), "trimmed, and cut with an ellipsis");
+    assert.equal(of(watch, c.at).summary, "Nothing needed the user.", "quiet: as before");
+    assert.equal(of(digest, d.at).summary, undefined, "a failure has its error, no summary");
+    assert.equal(of(digest, d.at).error, "The news site is down");
+    assert.equal(of(task, e.at).summary, "Two new orders, both paid.", "a task: its result, trimmed");
+    assert.equal(of(task, e.at).status, "ok");
+  } finally {
+    clock = saved;
+    fake.chatAnswer = answer;
+    for (const r of made) R.deleteRoutine(r.id);
+    await Sync.flushAll();
     delete state.workspaces;
     Sync.reset();
   }

@@ -326,9 +326,11 @@ Only the owner's own Bops replies (a person's action). A runner may add its own 
 out, never write a reply: `replyToAsk` refuses on a runner, Bops Cloud refuses its write
 (`cloud/computer-scope.ts`: `appApprovals.<id>`), the runner never sends it (keepAllowed), and the Mac puts it
 back as it was if a Bops Cloud from before these rules let it through; nor may it write a bot's rules.
-Someone the owner shared a workspace with sees the requests of the bots they were given, read only
-(`cloud/ws-slice.ts` approvals: never the reply, which device asked, or what resumes it), and never replies:
-the window sends no reply in a shared workspace, and their own Bops has none of the owner's requests. Two
+Someone the owner shared a workspace with sees the requests of the bots they were given (`cloud/ws-slice.ts`
+approvals: never the reply, which device asked, or what resumes it). One with Write on the bot may answer them
+from their own Bops, but never through it: their answer goes to Bops Cloud (`POST /v1/ws/<id>/act`), which checks
+it and queues it for the owner's Mac, and the owner's own Bops writes the reply (`lib/server/member-acts.ts`,
+`replyToAsk` with the member named). Their own Bops has none of the owner's requests. Two
 copies of a request changed at once keep the reply (`state-merge.ts` mergeApproval: never back to
 unanswered; two replies, the first; at once, a reject). Bops v0.0.29 never synced requests, and ignores them.
 

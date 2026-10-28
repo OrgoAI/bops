@@ -1,6 +1,6 @@
 import "server-only";
 import { createHmac } from "node:crypto";
-import { DISPLAYS, live, type ScreenRead, type VaultLogin } from "@/lib/types";
+import { DISPLAYS, live, othersThread, type ScreenRead, type VaultLogin } from "@/lib/types";
 import { deleteUserSecret, getUserSecret, setUserSecret } from "./keychain";
 import { onTab, openPages } from "./local";
 import { readScreen } from "./screen-watch";
@@ -212,6 +212,12 @@ export async function vaultSignIn(botId: string, display: number, sessionId: str
     return `${owner}'s saved logins sign in only from Bops on their Mac, not here. Say in one short line that you need ${owner} to sign in on your screen, and stop there: once they have, you carry on.`;
   }
   if (!s || !live(s)) return "This task isn't running anymore.";
+  // Someone else's work (an outside turn's task, or one a member with Write started or told something: othersThread):
+  // the owner's saved logins are theirs alone. The thread waits for the owner to sign it in, as on a runner.
+  if (othersThread(s, session)) {
+    if (!s.blocker) patchSession(sessionId, { blocker: "sign_in" });
+    return `${owner}'s saved logins are only for ${owner}'s own work, and someone else asked for this task. Say in one short line that you need ${owner} to sign in on your screen, and stop there: once they have, you carry on.`;
+  }
   const ep = screenEndpoint(b, display);
   if (!ep) return "Bops can't reach that screen right now.";
   const pages = await openPages(ep).catch(() => []);

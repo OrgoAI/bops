@@ -4,7 +4,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { flushSync } from "react-dom";
 import { describeSchedule, whenText } from "@/cloud/schedule";
 import { appNameFor, canonicalApp, CHECK_TEMPLATE, CHECK_TIMES, sameApp, templateById } from "@/lib/routine-catalog";
-import { botChatId, computerWait, DISPLAYS, isScreenWatch, onceDone, runningNow, waitingAsks, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type RoutineSource, type Watch } from "@/lib/types";
+import { botChatId, computerWait, DISPLAYS, isScreenWatch, onceDone, runningNow, waitingAsks, type AppState, type Bot, type Delivery, type Routine, type RoutineRun, type RoutineSource, type Session, type Watch } from "@/lib/types";
 import { you, your, yourMac } from "@/lib/shared";
 import { Fold } from "./fold";
 import { Mascot } from "./mascot";
@@ -28,6 +28,7 @@ import { asCadence, asSchedule, CadencePicker, sameCadence, suggestedOf, tidy, t
 import { CloseButton, currentWorkspace, needsYou, post, ReadOnlyLine, teamOf } from "./ui";
 import { FooterButton } from "./sidebar-footer";
 import { deleteQuestion, RoutineWeek, useClock, weekPlan, WeekLegend, WeekLetters } from "./routine-week";
+import { ReportsSheet } from "./routine-reports";
 
 /*
  * Routines: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
@@ -531,6 +532,7 @@ export function RoutineList({
   openId,
   onToggle,
   onOpenWatch,
+  onReport,
   chips = false,
   className = "shadow-[0_0_0_1px_#ECECEA]",
 }: {
@@ -540,6 +542,8 @@ export function RoutineList({
   openId: string | null;
   onToggle: (id: string) => void;
   onOpenWatch: (w: Watch) => void;
+  /** A schedule's reports (the Routines page's sheet), at one of its runs (its start) when given; `from`: where focus goes back. */
+  onReport?: (id: string, at?: number, from?: HTMLElement) => void;
   chips?: boolean;
   className?: string;
 }) {
@@ -549,7 +553,17 @@ export function RoutineList({
   return (
     <div className={`flex flex-col overflow-hidden rounded-2xl ${className}`}>
       {schedules.map((r, i) => (
-        <ScheduleRow key={r.id} routine={r} state={state} tz={tz} chip={chips} last={i === n - 1} open={openId === r.id} onToggle={() => onToggle(r.id)} />
+        <ScheduleRow
+          key={r.id}
+          routine={r}
+          state={state}
+          tz={tz}
+          chip={chips}
+          last={i === n - 1}
+          open={openId === r.id}
+          onToggle={() => onToggle(r.id)}
+          onReport={onReport && ((at, from) => onReport(r.id, at, from))}
+        />
       ))}
       {monitors.map((w, i) => (
         <MonitorRow
@@ -619,7 +633,8 @@ export function RoutinesEmpty({ bot, asks, onAsk, children }: { bot?: Bot; asks?
  * page is asked for at it, from a bot's profile), a Connected App they came from, and Needs you (a failed
  * run or delivery, a run waiting on the user, a page that can't be read). Nothing yet, for the workspace
  * or the bot picked: what to ask for, and a way to ask (RoutinesEmpty). How a bot does each job is a
- * skill: a link goes there.
+ * skill: a link goes there. A run in the week (its line), or a row's Reports (its Last run's See report),
+ * opens that routine's reports over the page (routine-reports.tsx): every run and what each said.
  */
 export function AutopilotPage({
   state,
@@ -630,6 +645,7 @@ export function AutopilotPage({
   onOpenWatch,
   onOpenSkills,
   onAsk,
+  onOpenThread,
   onClose,
 }: {
   state: AppState;
@@ -648,6 +664,8 @@ export function AutopilotPage({
   onOpenSkills: () => void;
   /** Ask a bot: its chat, with `text` in the message box to change and send (bops-app.tsx askBot). */
   onAsk: (botId: string, text?: string) => void;
+  /** Open a routine run's thread (bops-app.tsx openThread), from its report. */
+  onOpenThread?: (s: Session) => void;
   onClose: () => void;
 }) {
   // "Tomorrow 9 AM", "5m ago" stay current.
@@ -697,95 +715,117 @@ export function AutopilotPage({
   const chips = team.length > 1 && !pickedBot;
   const week = shown.schedules.length > 0;
   const appFilters = total > 0 && (apps.length > 0 || needsN > 0 || !!filter.needsYou);
+  // A routine's reports, over the page (routine-reports.tsx), at a run when one was picked; focus goes back where it was opened from.
+  const [report, setReport] = useState<{ id: string; at?: number; key: number } | null>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const reported = report ? state.routines.find((r) => r.id === report.id) : undefined;
+  const openReport = (id: string, at?: number, from?: HTMLElement) => {
+    const had = document.activeElement as HTMLElement | null;
+    opener.current = from ?? (had && had !== document.body && typeof had.focus === "function" ? had : null);
+    setReport({ id, at, key: Date.now() });
+  };
+  const closeReport = useCallback(() => {
+    // Back where it was opened from, unless focus has moved out of the sheet since (into the chat beside the page).
+    const had = document.activeElement;
+    const back = !had || had === document.body || !!had.closest('[role="dialog"]');
+    flushSync(() => setReport(null));
+    if (back && opener.current?.isConnected) opener.current.focus();
+    opener.current = null;
+  }, []);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
-      <div className="flex w-full max-w-[560px] flex-col gap-5">
-        {/* A shared workspace's routines are the owner's: shown, never changed here (view-only.ts holds every change). */}
-        <ReadOnlyLine state={state} />
-        <div className="flex items-start gap-3.5">
-          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-ink text-highlighter">
-            <AutopilotIcon size={20} />
-          </span>
-          <div className="flex min-w-0 flex-1 flex-col gap-1">
-            {/* Where focus goes when the last routine is deleted (focusAfterRemove). */}
-            <span data-list-heading tabIndex={-1} className="text-[20px] font-semibold leading-6 tracking-[-0.01em] outline-none">
-              {GROUP_NAME}
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      {/* Behind the reports while they're open: nothing here takes focus or a click. */}
+      <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7" inert={!!reported}>
+        <div className="flex w-full max-w-[560px] flex-col gap-5">
+          {/* A shared workspace's routines are the owner's: shown, never changed here (view-only.ts holds every change). */}
+          <ReadOnlyLine state={state} />
+          <div className="flex items-start gap-3.5">
+            <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-ink text-highlighter">
+              <AutopilotIcon size={20} />
             </span>
-            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
-              {state.shared ? "What the owner's bots do on their own" : "What your bots do on their own"}. How they do each job is in{" "}
-              {/* The link and its period together, so the period never starts a line on its own. */}
-              <span className="whitespace-nowrap">
-                <button onClick={onOpenSkills} className="font-medium text-ink underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink">
-                  Skills
-                </button>
-                .
+            <div className="flex min-w-0 flex-1 flex-col gap-1">
+              {/* Where focus goes when the last routine is deleted (focusAfterRemove). */}
+              <span data-list-heading tabIndex={-1} className="text-[20px] font-semibold leading-6 tracking-[-0.01em] outline-none">
+                {GROUP_NAME}
               </span>
-            </span>
+              <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
+                {state.shared ? "What the owner's bots do on their own" : "What your bots do on their own"}. How they do each job is in{" "}
+                {/* The link and its period together, so the period never starts a line on its own. */}
+                <span className="whitespace-nowrap">
+                  <button onClick={onOpenSkills} className="font-medium text-ink underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink">
+                    Skills
+                  </button>
+                  .
+                </span>
+              </span>
+            </div>
+            <CloseButton onClick={onClose} className="mt-1.5" />
           </div>
-          <CloseButton onClick={onClose} className="mt-1.5" />
-        </div>
 
-        {(team.length > 1 || appFilters) && (
-          <div className="flex flex-col gap-2">
-            {/* Every bot, with how many each runs: whose each color in the week is, and which bot's to show. */}
-            {team.length > 1 && <WeekLegend bots={team} on={botOn} counts={counts} all={total} onPick={(bot) => setFilter({ ...filter, bot })} />}
-            {appFilters && (
-              <div className="flex flex-wrap gap-1.5" role="group" aria-label={state.shared ? "Connected App" : "Connected App and Needs you"}>
-                {(needsN > 0 || filter.needsYou) && (
-                  <FilterPill on={!!filter.needsYou} onClick={() => setFilter({ ...filter, needsYou: !filter.needsYou })}>
-                    Needs you
-                    <span className={`tabular-nums ${filter.needsYou ? "text-white/60" : "text-[#9A9A98]"}`}>{needsN}</span>
-                  </FilterPill>
-                )}
-                {apps.map((a) => (
-                  <FilterPill key={a} on={filter.app === a} onClick={() => setFilter({ ...filter, app: filter.app === a ? undefined : a })}>
-                    <AppLogo app={a} name={appNameOf(state, a)} size={14} />
-                    {appNameOf(state, a)}
-                  </FilterPill>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* One remove question at a time, in the week or the list; opening a row, or another filter, closes it. */}
-        <QuestionScope reset={`${openId ?? ""}|${botOn ?? ""}|${filter.app ?? ""}|${filter.needsYou ? 1 : 0}`}>
-          {week && (
-            <RoutineWeek
-              routines={shown.schedules}
-              // One bot's: its lines needn't say its name.
-              bots={pickedBot ? [pickedBot] : team}
-              tz={tz}
-              now={now}
-              zoneOf={zone}
-              running={(r) => runningNow(r, state.sessions)}
-              needsYou={(r) => scheduleNeedsYou(r, state)}
-              checked={(x) => checkedOf(state, x)}
-              onOpen={(id) => setPicked({ id, at: Date.now() })}
-              viewOnly={!!state.shared}
-            />
+          {(team.length > 1 || appFilters) && (
+            <div className="flex flex-col gap-2">
+              {/* Every bot, with how many each runs: whose each color in the week is, and which bot's to show. */}
+              {team.length > 1 && <WeekLegend bots={team} on={botOn} counts={counts} all={total} onPick={(bot) => setFilter({ ...filter, bot })} />}
+              {appFilters && (
+                <div className="flex flex-wrap gap-1.5" role="group" aria-label={state.shared ? "Connected App" : "Connected App and Needs you"}>
+                  {(needsN > 0 || filter.needsYou) && (
+                    <FilterPill on={!!filter.needsYou} onClick={() => setFilter({ ...filter, needsYou: !filter.needsYou })}>
+                      Needs you
+                      <span className={`tabular-nums ${filter.needsYou ? "text-white/60" : "text-[#9A9A98]"}`}>{needsN}</span>
+                    </FilterPill>
+                  )}
+                  {apps.map((a) => (
+                    <FilterPill key={a} on={filter.app === a} onClick={() => setFilter({ ...filter, app: filter.app === a ? undefined : a })}>
+                      <AppLogo app={a} name={appNameOf(state, a)} size={14} />
+                      {appNameOf(state, a)}
+                    </FilterPill>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
-          <div ref={list} data-rows className="flex flex-col gap-5">
-            {pickedBot && !counts[pickedBot.id] ? (
-              <RoutinesEmpty bot={pickedBot} asks={askable(state, pickedBot)} onAsk={onAsk} />
-            ) : !total ? (
-              <RoutinesEmpty asks={askable(state, main)} onAsk={onAsk} />
-            ) : !shown.schedules.length && !shown.monitors.length ? (
-              <div className="flex flex-col items-center gap-2 py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">
-                Nothing matches these filters
-                <button onClick={() => setFilter({})} className={small("plain")}>
-                  Show all
-                </button>
-              </div>
-            ) : (
-              // One list, in its order, each row with the bot that runs it (the row of bots above picks one).
-              <RoutineList state={state} schedules={shown.schedules} monitors={shown.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} chips={chips} />
+          {/* One remove question at a time, in the week or the list; opening a row, or another filter, closes it. */}
+          <QuestionScope reset={`${openId ?? ""}|${botOn ?? ""}|${filter.app ?? ""}|${filter.needsYou ? 1 : 0}`}>
+            {week && (
+              <RoutineWeek
+                routines={shown.schedules}
+                // One bot's: its lines needn't say its name.
+                bots={pickedBot ? [pickedBot] : team}
+                tz={tz}
+                now={now}
+                zoneOf={zone}
+                running={(r) => runningNow(r, state.sessions)}
+                needsYou={(r) => scheduleNeedsYou(r, state)}
+                checked={(x) => checkedOf(state, x)}
+                onOpen={(id) => setPicked({ id, at: Date.now() })}
+                onReport={openReport}
+                viewOnly={!!state.shared}
+              />
             )}
-          </div>
-        </QuestionScope>
+
+            <div ref={list} data-rows className="flex flex-col gap-5">
+              {pickedBot && !counts[pickedBot.id] ? (
+                <RoutinesEmpty bot={pickedBot} asks={askable(state, pickedBot)} onAsk={onAsk} />
+              ) : !total ? (
+                <RoutinesEmpty asks={askable(state, main)} onAsk={onAsk} />
+              ) : !shown.schedules.length && !shown.monitors.length ? (
+                <div className="flex flex-col items-center gap-2 py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">
+                  Nothing matches these filters
+                  <button onClick={() => setFilter({})} className={small("plain")}>
+                    Show all
+                  </button>
+                </div>
+              ) : (
+                // One list, in its order, each row with the bot that runs it (the row of bots above picks one).
+                <RoutineList state={state} schedules={shown.schedules} monitors={shown.monitors} openId={openId} onToggle={toggle} onOpenWatch={onOpenWatch} onReport={openReport} chips={chips} />
+              )}
+            </div>
+          </QuestionScope>
+        </div>
       </div>
+      {reported && report && <ReportsSheet key={report.key} state={state} routine={reported} at={report.at} onClose={closeReport} onOpenThread={onOpenThread} />}
     </div>
   );
 }
@@ -1191,6 +1231,7 @@ export function ScheduleRow({
   last,
   open,
   onToggle,
+  onReport,
 }: {
   routine: Routine;
   state: AppState;
@@ -1199,6 +1240,8 @@ export function ScheduleRow({
   last: boolean;
   open: boolean;
   onToggle: () => void;
+  /** Its reports (every run, what each said), at one run (its start) when given; `from`: the button, where focus goes back. */
+  onReport?: (at?: number, from?: HTMLElement) => void;
 }) {
   const { busy, error, setError, sure, ask, run, cancelRemove, remove, row, removeButton } = useActions("schedule", r.id, open);
   const [editing, setEditing] = useState(false);
@@ -1272,7 +1315,14 @@ export function ScheduleRow({
         )
       }
     >
-      {/* What can be done to it first, above what it does (often long). The question takes their place. A shared workspace's are the owner's to do. */}
+      {/* What can be done to it first, above what it does (often long). The question takes their place. A shared workspace's are the owner's to do; its reports are there to read. */}
+      {!sure && state.shared && onReport && (
+        <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
+          <button onClick={(e) => onReport(undefined, e.currentTarget)} className={small("plain")}>
+            Reports
+          </button>
+        </div>
+      )}
       {!sure && !state.shared && (
         <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
           <button onClick={() => void run("run", "/api/routines", { id: r.id, action: "run" }, "PATCH")} disabled={!!busy || runningNow(r, state.sessions)} className={small("plain")}>
@@ -1296,6 +1346,11 @@ export function ScheduleRow({
           {!r.reminder && (
             <button onClick={() => setEditing(true)} disabled={!!busy} className={small("plain")}>
               Edit
+            </button>
+          )}
+          {onReport && (
+            <button onClick={(e) => onReport(undefined, e.currentTarget)} className={small("plain")}>
+              Reports
             </button>
           )}
           <button ref={removeButton} onClick={() => ask("inside")} disabled={!!busy} className={small("red")}>
@@ -1370,6 +1425,11 @@ export function ScheduleRow({
               <span className="flex flex-col gap-0.5">
                 <span>
                   {ranWords(ran.status, state)} · {since(ran.at)}
+                  {onReport && (
+                    <button onClick={(e) => onReport(ran.at, e.currentTarget)} className="ml-1.5 text-[12px] font-medium leading-4 text-ink underline-offset-2 outline-none hover:underline focus-visible:underline">
+                      See report
+                    </button>
+                  )}
                 </span>
                 {ran.error && <span className="text-[#B42318]">{undash(ran.error)}</span>}
               </span>

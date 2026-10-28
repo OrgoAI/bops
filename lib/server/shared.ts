@@ -1,5 +1,5 @@
 import "server-only";
-import { BOPS_DEVICE_HEADER, type SharedWsState } from "@/cloud/protocol";
+import { BOPS_DEVICE_HEADER, type MemberAct, type SharedWsState } from "@/cloud/protocol";
 import type { SharedOpen, SharedWorkspace } from "@/lib/shared";
 import type { AppState } from "@/lib/types";
 import { appHeaders } from "./app-version";
@@ -9,12 +9,12 @@ import { sharedWorkspaces } from "./orgo";
 import { orgoKey } from "./orgo-auth";
 import { onExit } from "./persist";
 import { deviceIdFor } from "./persist-cloud";
-import { SharedCopy, viewState, type ReadResult } from "./shared-core";
-import { getVersion, stateUser, touchState } from "./store";
+import { actWith, SharedCopy, viewState, type ActResult, type ReadResult } from "./shared-core";
+import { getState, getVersion, stateUser, touchState } from "./store";
 
 /**
- * Workspaces shared with the user, read only (lib/shared.ts; the parts without the server are
- * shared-core.ts). The switcher lists them (Orgo's list: sharedWorkspaces), and opening one reads it from
+ * Workspaces shared with the user (lib/shared.ts; the parts without the server are shared-core.ts), watched,
+ * and acted in for the bots the owner gave them Write on (actShared). The switcher lists them (Orgo's list: sharedWorkspaces), and opening one reads it from
  * Bops Cloud (GET /v1/ws/<project>/state) and watches its stream (GET /v1/live?project=): a change reads
  * it again (at most every 5 seconds, PULL_MIN_MS, with one more at the end), its bots' moods come as they
  * happen, and "revoked", 403 or 404 drops the copy and leaves it. Everything of it stays in this
@@ -97,6 +97,31 @@ export async function olderShared(chatId: string): Promise<boolean> {
   return open ? open.copy.older(chatId) : false;
 }
 
+/**
+ * Something the user does in the shared workspace open now, for a bot the owner gave them Write on: sent to Bops
+ * Cloud (POST /v1/ws/<project>/act), which checks it with Orgo and the owner's access and hands it to the owner's
+ * Bops. Shown here at once as theirs (SharedCopy.acting), until the copy has the owner's. `key` is theirs for it:
+ * the same key sends it again as the same act (Try again), never twice.
+ */
+export async function actShared(act: MemberAct, key: string): Promise<{ ok: true; key: string; macOn: boolean } | { ok: false; status: number; error: string; code?: string }> {
+  const open = openNow();
+  if (!open || !open.data.you) return { ok: false, status: 409, error: "Open the workspace again." };
+  const device = deviceIdFor(open.user);
+  const u = getState().account?.user;
+  const me = { userId: open.data.you, ...(u?.email ? { email: u.email } : {}), name: u?.name?.trim() || u?.email?.split("@")[0] || "You" };
+  return actWith(open.copy, act, key, me, async (body): Promise<ActResult> => {
+    const res = await fetch(`${cloudUrl()}/v1/ws/${encodeURIComponent(open.at.projectId)}/act`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${open.key}`, [BOPS_DEVICE_HEADER]: device, ...appHeaders(), "Content-Type": "application/json" },
+      body,
+      cache: "no-store",
+      signal: AbortSignal.timeout(20_000),
+    }).catch(() => null);
+    if (!res) return { status: 0 };
+    return { status: res.status, body: (await res.json().catch(() => undefined)) as ActResult["body"] };
+  });
+}
+
 /** Leave the shared workspace open now (the user switched to one of their own, or signed out): its copy and stream go. */
 export function closeShared() {
   const open = g.bopsShared;
@@ -120,6 +145,9 @@ function openNow(): (Open & { at: SharedOpen; data: SharedWsState }) | null {
   return at && data ? { ...open, at, data } : null;
 }
 
+/** Whether a workspace shared with the user is open now: the window shows its owner's state, where nothing is the user's to do (a Send among them). */
+export const sharedOpen = () => !!openNow();
+
 /**
  * What the window is shown: with a shared workspace open, its state in place of the user's own
  * workspace (shared-core.ts viewState), with a version of its own (the user's own changes and the
@@ -128,7 +156,7 @@ function openNow(): (Open & { at: SharedOpen; data: SharedWsState }) | null {
 export function sharedForApp(own: AppState): { version: number; state: AppState } | null {
   const open = openNow();
   if (!open) return null;
-  return { version: 2 ** 40 + open.copy.rev * 2 ** 24 + (getVersion() % 2 ** 24), state: viewState(own, open.at, open.data, open.moods.forApp()) };
+  return { version: 2 ** 40 + open.copy.rev * 2 ** 24 + (getVersion() % 2 ** 24), state: viewState(own, open.at, open.data, open.moods.forApp(), open.copy.acts()) };
 }
 
 // On the way out, the stream closes.

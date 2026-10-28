@@ -1,10 +1,13 @@
 "use client";
 
+import { useState } from "react";
+import { botHasLabel, cleanLabel, sameLabel } from "@/lib/skill-labels";
 import { APP_LEVELS, botChatId, workBot, workspaceOf, type AppLevel, type AppState, type Bot } from "@/lib/types";
 import { categoriesOpen, GROUP_NAME as ORBIT } from "@/lib/memory-categories";
 import { AppLogo, accountTitle, botApps } from "./apps";
 import { BotKeys } from "./keys";
-import { botSkills } from "./skills";
+import { botSkills, skillsIn, workspaceLabelsOf } from "./skills";
+import { post } from "./ui";
 import { undash } from "./side-group";
 import { you, yourMac } from "@/lib/shared";
 
@@ -14,7 +17,8 @@ import { you, yourMac } from "@/lib/shared";
  * its API keys, and what it can always do. What it runs on its own is its Routines tab (routines.tsx).
  * Everything is read from the app's state; opening a row goes where it's managed already (the Skills
  * page, the Vault, the chat's "Save as skill"). A group with nothing in it isn't shown: one quiet line at the end
- * says how to add what's missing.
+ * says how to add what's missing. Skill labels is the owner's checklist of the workspace's labels this bot has
+ * (Bot.skillLabels, as Who has what in Skills sets it), only in their own window.
  */
 
 const GLASS = "bg-white/60 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]";
@@ -51,6 +55,8 @@ export function BotSkills({
 
   return (
     <div className="flex w-full flex-col gap-3">
+      {!state.shared && <LabelChecklist state={state} bot={b} />}
+
       {skills.length > 0 && (
         <Group title="Skills" count={skills.length} action={{ label: "All skills ›", onClick: () => onOpenSkills() }}>
           {skills.map((r, i) => (
@@ -166,5 +172,63 @@ function Row({ title, line, dim, last, onClick }: { title: string; line?: string
       <span className={`truncate text-[14px] leading-[18px] ${dim ? "text-[#9A9A98]" : "text-ink"}`}>{title}</span>
       {line && <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">{line}</span>}
     </button>
+  );
+}
+
+/**
+ * Which of the workspace's skill labels this bot has (Bot.skillLabels: lib/skill-labels.ts botHasSkill), as a short
+ * checklist with Every label (new ones too) above it. A skill that names its own bots goes by them whatever this
+ * says. The owner's, in the window (app/api/skills refuses it in a shared workspace).
+ */
+function LabelChecklist({ state, bot: b }: { state: AppState; bot: Bot }) {
+  const ws = workspaceOf(b);
+  const { skills } = skillsIn(state, ws);
+  const labels = workspaceLabelsOf(skills, state.workspaces?.find((w) => w.id === ws)?.skillLabelInfo);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!labels.length) return null;
+  const send = async (body: Record<string, unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await post("/api/skills", { ws, botId: b.id, ...body });
+      if (!res.ok) setError(((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? "That didn't work. Try again.");
+    } catch {
+      setError("Couldn't reach Bops. Try again.");
+    }
+    setBusy(false);
+  };
+  const every = !b.skillLabels;
+  const box = (on: boolean) => `flex size-4 shrink-0 items-center justify-center rounded-[4px] ${on ? "bg-ink text-white" : "bg-white shadow-[0_0_0_1px_#D6D6D3]"}`;
+  const tick = (
+    <svg width="9" height="9" viewBox="0 0 12 12" aria-hidden>
+      <path d="M2.5 6.5l2.5 2.5 4.5-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+  return (
+    <Group title="Skill labels" count={every ? labels.length : labels.filter((l) => botHasLabel(b, l)).length}>
+      <div data-bot-labels className="flex flex-col gap-0.5 px-4 pb-3 pt-1">
+        <button type="button" role="checkbox" aria-checked={every} disabled={busy} onClick={() => void send({ action: "bot-labels", labels: every ? labels : null })} className="flex items-center gap-2 py-1 text-left text-[13px] leading-4 disabled:opacity-50">
+          <span className={box(every)}>{every && tick}</span>
+          Every label, new ones too
+        </button>
+        {labels.map((l) => {
+          const on = botHasLabel(b, l);
+          const n = skills.filter((r) => sameLabel(cleanLabel(r.label), l)).length;
+          return (
+            <button key={l} type="button" role="checkbox" aria-checked={on} disabled={busy} onClick={() => void send({ action: "bot-label", label: l, on: !on })} className="flex items-center gap-2 py-1 pl-4 text-left text-[13px] leading-4 disabled:opacity-50">
+              <span className={box(on)}>{on && tick}</span>
+              <span className="min-w-0 flex-1 truncate">{l}</span>
+              <span className="tabular-nums text-[12px] text-[#9A9A98]">{n}</span>
+            </button>
+          );
+        })}
+        {error && (
+          <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+            {error}
+          </span>
+        )}
+      </div>
+    </Group>
   );
 }

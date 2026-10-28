@@ -14,7 +14,8 @@ import { createPortal } from "react-dom";
 const DELAY_MS = 320;
 const WARM_MS = 600;
 
-type Tip = { text: string; x: number; y: number; below: boolean };
+/** Where it shows: over its element, under it (at the window's top edge), or beside it on the right (the folded sidebar's, data-tip-side="right"). */
+type Tip = { text: string; x: number; y: number; side: "above" | "below" | "right" };
 
 /** What an element's tooltip says, if it has one. */
 function tipOf(el: HTMLElement) {
@@ -58,8 +59,9 @@ export function TooltipLayer() {
       const show = () => {
         if (current !== el || !el.isConnected) return;
         const r = el.getBoundingClientRect();
+        if (el.closest("[data-tip-side]")?.getAttribute("data-tip-side") === "right") return setTip({ text, x: r.right + 8, y: r.top + r.height / 2, side: "right" });
         const below = r.top < 44;
-        setTip({ text, x: Math.min(Math.max(r.left + r.width / 2, 12), window.innerWidth - 12), y: below ? r.bottom + 6 : r.top - 6, below });
+        setTip({ text, x: Math.min(Math.max(r.left + r.width / 2, 12), window.innerWidth - 12), y: below ? r.bottom + 6 : r.top - 6, side: below ? "below" : "above" });
       };
       if (Date.now() < warmUntil) show();
       else timer = setTimeout(show, DELAY_MS);
@@ -88,7 +90,7 @@ export function TooltipLayer() {
     <div
       role="tooltip"
       className="pointer-events-none fixed z-[1000] max-w-[280px] animate-[screen-in_120ms_ease-out] rounded-[8px] bg-[#0A0A0A]/92 px-2 py-1 text-center text-[12px] font-medium leading-4 text-white shadow-[0_6px_16px_-6px_#00000080]"
-      style={{ left: tip.x, top: tip.y, transform: `translate(-50%, ${tip.below ? "0" : "-100%"})` }}
+      style={{ left: tip.x, top: tip.y, transform: tip.side === "right" ? "translate(0, -50%)" : `translate(-50%, ${tip.side === "below" ? "0" : "-100%"})` }}
     >
       {tip.text}
     </div>,

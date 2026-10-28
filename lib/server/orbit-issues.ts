@@ -179,6 +179,9 @@ function urlOf(u: unknown) {
   }
 }
 
+/** An account's id as Bops keeps one (AppAccount.id: Composio's "ca_…"), or nothing. */
+const accountIdOf = (v: unknown) => (typeof v === "string" && /^[A-Za-z0-9_:.-]{1,120}$/.test(v) ? v : undefined);
+
 /** Who it's for, and their item in Orbit (a person or a company there by that name). */
 function customerOf(ws: string, name: unknown): Issue["customer"] {
   const n = plain(name, 120);
@@ -215,6 +218,7 @@ function issueOf(ws: string, s: { id: string; metadata?: Record<string, unknown>
     ...(str(m.sourceApp) ? { sourceApp: str(m.sourceApp) } : {}),
     ...(str(m.externalId) ? { externalId: str(m.externalId) } : {}),
     ...(str(m.url) ? { url: str(m.url) } : {}),
+    ...(accountIdOf(m.accountId) ? { accountId: accountIdOf(m.accountId) } : {}),
     ...(customer && typeof customer.name === "string" ? { customer: { name: customer.name, ...(typeof customer.itemKey === "string" ? { itemKey: customer.itemKey } : {}) } } : {}),
     ...(str(m.botId) ? { botId: str(m.botId) } : {}),
     ...(str(m.routineId) ? { routineId: str(m.routineId) } : {}),
@@ -353,6 +357,7 @@ function fromRow(ws: string, r: unknown, prev?: Issue): Issue | null {
     updatedAt: msOf(x.updatedAt) ?? prev?.updatedAt ?? 0,
     ...(msOf(x.closedAt) ? { closedAt: msOf(x.closedAt) } : {}),
     ...(prev?.lastMessageAt ? { lastMessageAt: prev.lastMessageAt } : {}),
+    ...(prev?.accountId ? { accountId: prev.accountId } : {}),
   };
 }
 
@@ -503,6 +508,7 @@ export function openIssue(ws: string, input: IssueOpen, by: IssueBy = {}): Promi
     const priority = PRIORITY_IDS.includes(input.priority as IssuePriority) ? (input.priority as IssuePriority) : undefined;
     const url = urlOf(input.url);
     const customer = customerOf(ws, input.customer);
+    const accountId = accountIdOf(input.accountId);
     const orgo = onOrgo(ws);
     const update = async (had: HonchoSession, was: Issue) => {
       // Something new on the thread (a newer message than the issue last saw, or a bot that doesn't say
@@ -518,6 +524,7 @@ export function openIssue(ws: string, input: IssueOpen, by: IssueBy = {}): Promi
         ...(priority ? { priority } : {}),
         ...(url ? { url } : {}),
         ...(customer ? { customer } : {}),
+        ...(accountId ? { accountId } : {}),
         ...(last && fresh ? { lastMessageAt: last } : {}),
         status: fresh ? (status ?? (was.status === "done" ? "open" : was.status)) : was.status,
         updatedAt: now,
@@ -531,7 +538,7 @@ export function openIssue(ws: string, input: IssueOpen, by: IssueBy = {}): Promi
       if (input.note) lines.push(["note", text(input.note, 2000)]);
       const same = (k: keyof Issue) => JSON.stringify(next[k]) === JSON.stringify(was[k]);
       // Nothing changed: nothing written, no line in its history.
-      if (!lines.length && (["tags", "priority", "url", "customer", "lastMessageAt"] as const).every(same)) return { issue: was, created: false };
+      if (!lines.length && (["tags", "priority", "url", "customer", "lastMessageAt", "accountId"] as const).every(same)) return { issue: was, created: false };
       if (orgo) next = absorb(ws, await orbitCall(ws, "POST", "/issues", rowOf(next, x.bank, by, input.note ? text(input.note, 2000) : undefined)), next, ours);
       await had.setMetadata(metadataOf(next));
       for (const [kind, line] of lines) await say(ws, had, by, kind, line);
@@ -556,6 +563,7 @@ export function openIssue(ws: string, input: IssueOpen, by: IssueBy = {}): Promi
       ...(input.lastMessageAt && Number.isFinite(input.lastMessageAt) ? { lastMessageAt: input.lastMessageAt } : {}),
       ...(url ? { url } : {}),
       ...(customer ? { customer } : {}),
+      ...(accountId ? { accountId } : {}),
       ...(by.botId ? { botId: by.botId } : {}),
       ...(by.routineId ? { routineId: by.routineId } : {}),
       openedAt: now,
@@ -634,6 +642,9 @@ export function updateIssue(ws: string, id: string, patch: IssuePatch, by: Issue
     if (note) lines.push(["note", note]);
     const draft = text(patch.draft, 4000);
     if (draft) lines.push(["reply", `Reply drafted: ${draft}`]);
+    // A reply the user sent from the issue's page (issue-source.ts): in its history as theirs, and in Orgo's as a note.
+    const replied = text(patch.replied, 4000);
+    if (replied) lines.push(["reply", `Replied: ${replied}`]);
     if (!lines.length) return { ...was, history: await historyOf(session) };
     next.updatedAt = Date.now();
     if (onOrgo(ws)) {
@@ -646,10 +657,12 @@ export function updateIssue(ws: string, id: string, patch: IssuePatch, by: Issue
             ...(next.priority !== was.priority ? { priority: next.priority } : {}),
             ...(next.tags.join(",") !== was.tags.join(",") ? { tags: next.tags } : {}),
             ...(note ? { note } : {}),
-            ...(draft ? { events: [{ kind: "reply_drafted", text: cleanText(draft, 2000) }] } : {}),
+            ...(draft || replied
+              ? { events: [...(draft ? [{ kind: "reply_drafted", text: cleanText(draft, 2000) }] : []), ...(replied ? [{ kind: "note", text: cleanText(`Replied: ${replied}`, 2000) }] : [])] }
+              : {}),
             ...(actor ? { actor: actor.slice(0, 128) } : {}),
           })
-        : await orbitCall(ws, "POST", "/issues", rowOf(next, x.bank, by, note || undefined));
+        : await orbitCall(ws, "POST", "/issues", rowOf(next, x.bank, by, note || (replied ? `Replied: ${replied}` : undefined)));
       // Deleted there (on another Mac): gone here too.
       if (orgoId && r && r !== "off" && r.status === 404) {
         cacheMark(ws, ours, (c) => (c.gone = [...new Set([...(c.gone ?? []), id])]));

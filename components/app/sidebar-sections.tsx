@@ -4,6 +4,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { favoriteCount, favoriteLabel, movedFavorite, nudgedFavorite, toggledFavorite, type FavoriteKind } from "@/lib/favorites";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { alwaysScope, toDo } from "@/lib/permission";
+import { answersAsk, canAct, writesThread } from "@/lib/shared";
+import { askKind } from "@/lib/asks";
+import { memberAct } from "./shared-act";
 import { live, waitingAsks, workspaceOf, type AppApproval, type AppState, type Session, type Watch } from "@/lib/types";
 import { menuPoint, SideMenu, useFavorites, type MenuItem } from "./favorites";
 import { Fold } from "./fold";
@@ -74,6 +77,19 @@ export function threadsByBot(state: AppState) {
  */
 export const chipMark = (threads: Session[], shared?: boolean) =>
   !shared && threads.some((s) => needsYou(s)) ? "you" : threads.some((s) => live(s) && !s.askWhere) ? "working" : null;
+
+/**
+ * A bot's mark on the folded sidebar (sidebar-rail.tsx): how many things from it wait on the user, counted
+ * as attentionOf counts them for Needs your attention (its threads that need them, then its cards, a
+ * request of a thread already counted not again), so the rail's numbers add up to that one; and whether
+ * one of its threads is working.
+ */
+export function railMark(threads: Session[], needs: BotNeeds | undefined, shared?: boolean) {
+  const asking = shared ? [] : threads.filter((s) => needsYou(s));
+  const counted = new Set(asking.map((s) => s.id));
+  const cards = needs ? needs.asks.filter((x) => !x.ask.threadId || !counted.has(x.ask.threadId)).length + needs.issues.length + needs.alerts.length + needs.setup.length : 0;
+  return { waiting: asking.length + cards, working: threads.some((s) => live(s) && !s.askWhere) };
+}
 
 /** One thread under its bot: in ink with its mark while it's working or needs you; × deletes it once it's stopped. */
 /**
@@ -185,16 +201,29 @@ function NeedCard({ id, icon, title, meta, onClick }: { id: string; icon: ReactN
  * (lib/server/permission.ts); the title opens the chat or thread it's in. One that comes after the sidebar's
  * first paint rises in, once.
  */
-function AskCard({ ask: a, botName, where, onOpen }: { ask: AppApproval; botName: string; where?: string; onOpen: () => void }) {
+function AskCard({ ask: a, botName, where, shared, onOpen }: { ask: AppApproval; botName: string; where?: string; shared?: boolean; onOpen: () => void }) {
   const row = useRise(() => arrived(`ask:${a.id}`));
-  const [busy, setBusy] = useState(false);
+  const [working, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // From a shared workspace, the answer as it stands (AppApproval.memberSend): waits while it's on its way, says why it didn't go.
+  const sent = a.memberSend;
+  const busy = working || (!!sent && sent.state !== "failed");
   const decide = async (reply: "once" | "always" | "reject") => {
     setBusy(true);
+    // In a shared workspace (a bot the viewer has at Write): through the owner's Bops (shared-act.ts).
+    if (shared) {
+      const r = await memberAct({ act: "answer", askId: a.id, reply });
+      setError(r.ok ? null : (r.error ?? null));
+      setBusy(false);
+      return;
+    }
     await post("/api/apps/approvals", { id: a.id, reply });
   };
   const title = `${botName} wants to ${toDo(undash(a.action))}`;
   const scope = alwaysScope(botName, { ...a, action: undash(a.action) });
-  const meta = [where ? `For ${undash(where)}` : "Waiting for your OK", ago(a.at)].join(" · ");
+  const meta = [where ? `For ${undash(where)}` : shared ? "Waiting for an OK" : "Waiting for your OK", ago(a.at)].join(" · ");
+  const said = sent && sent.state !== "failed" ? (sent.state === "sending" ? "Sending…" : "Waiting for the owner's Bops to open.") : null;
+  const shownError = said ? null : (error ?? (sent?.state === "failed" ? (sent.error ?? "That didn't go. Try again.") : null));
   const btn = "rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 disabled:opacity-50";
   return (
     <div
@@ -225,6 +254,12 @@ function AskCard({ ask: a, botName, where, onOpen }: { ask: AppApproval; botName
       <span title={scope} className="truncate pl-6 text-[11.5px] leading-[14px] text-[#9A9A98]">
         {scope}
       </span>
+      {said && <span className="pl-6 text-[11.5px] leading-[14px] text-[#9A9A98]">{said}</span>}
+      {shownError && (
+        <span role="alert" className="pl-6 text-[11.5px] leading-[14px] text-[#B42318]">
+          {shownError}
+        </span>
+      )}
     </div>
   );
 }
@@ -235,7 +270,7 @@ export type NeedActs = { onOpenIssue: (issue: Issue) => void; onOpenWatch: (w: W
 /** A bot's cards (needsByBot): what it asked your OK for, its urgent alerts, the issues waiting on us, then what Setup still needs. */
 function needCards(n: BotNeeds, acts: NeedActs) {
   return [
-    ...n.asks.map((x) => <AskCard key={`ask:${x.ask.id}`} ask={x.ask} botName={x.botName} where={x.where} onOpen={() => acts.onOpenAsk?.(x.ask)} />),
+    ...n.asks.map((x) => <AskCard key={`ask:${x.ask.id}`} ask={x.ask} botName={x.botName} where={x.where} shared={x.shared} onOpen={() => acts.onOpenAsk?.(x.ask)} />),
     ...n.alerts.map((w) => (
       <NeedCard
         key={`alert:${w.id}`}
@@ -367,7 +402,8 @@ export function WithThreads({
 /* ---------------- Needs your attention ---------------- */
 
 /** What waits on the user under one bot (needsByBot): what it asked their OK for (with its name, and the thread or routine it's for), its issues, alerts and setup. */
-export type BotNeeds = { asks: { ask: AppApproval; botName: string; where?: string }[]; issues: Issue[]; alerts: Watch[]; setup: SetupItem[] };
+/** `shared`: an ask in a workspace shared with the user, of a bot they have at Write (answered through the owner's Bops). */
+export type BotNeeds = { asks: { ask: AppApproval; botName: string; where?: string; shared?: boolean }[]; issues: Issue[]; alerts: Watch[]; setup: SetupItem[] };
 
 /**
  * What waits on the user in this workspace, under the bot it's from: what it asked their OK for and waits on
@@ -375,13 +411,12 @@ export type BotNeeds = { asks: { ask: AppApproval; botName: string; where?: stri
  * wait on us (Orbit's Waiting on us), its alerts worth interrupting for (a watch at level "now", or one
  * from before alerts had a level, the newest first), and under the main bot, which runs the team, what
  * this Mac still needs set up (setup.tsx useSetupWaiting). An issue no bot here opened is the main bot's
- * too. The threads that asked the user something stay first among their own bot's threads. Nothing in a
- * workspace shared with the user: its alerts are its owner's to answer, and the user's own issues and
- * setup aren't its.
+ * too. The threads that asked the user something stay first among their own bot's threads. In a workspace
+ * shared with the user, only the asks of bots they have at Write (theirs to answer too): its alerts are its
+ * owner's to answer, and the user's own issues and setup aren't its.
  */
 export function needsByBot(state: AppState, issues: Issue[] | null, setup: SetupItem[]) {
   const out = new Map<string, BotNeeds>();
-  if (state.shared) return out;
   const ws = currentWorkspace(state);
   const team = state.bots.filter((b) => workspaceOf(b) === ws);
   const main = (team.find((b) => b.isMain) ?? team[0])?.id;
@@ -392,10 +427,12 @@ export function needsByBot(state: AppState, issues: Issue[] | null, setup: Setup
   };
   for (const a of waitingAsks(state).sort((x, y) => y.at - x.at)) {
     const b = team.find((x) => x.id === a.botId);
-    if (!b) continue;
+    // (Never one only the owner answers: their apps or keys, or a thread on their Mac: answersAsk.)
+    if (!b || (state.shared && (!canAct(state, [b.id]) || !answersAsk(state, a)))) continue;
     const where = state.sessions.find((x) => x.id === a.threadId)?.title ?? state.routines.find((x) => x.id === a.routineId)?.title;
-    of(b.id).asks.push({ ask: a, botName: b.name, ...(where ? { where } : {}) });
+    of(b.id).asks.push({ ask: a, botName: b.name, ...(where ? { where } : {}), ...(state.shared ? { shared: true } : {}) });
   }
+  if (state.shared) return out;
   const owner = (id?: string) => (id && team.some((b) => b.id === id) ? id : main);
   for (const i of (issues ?? []).filter((i) => i.status === "waiting_us").sort(issueOrder)) {
     const id = owner(i.botId);
@@ -410,11 +447,14 @@ export function needsByBot(state: AppState, issues: Issue[] | null, setup: Setup
 
 /**
  * Needs your attention: how many things wait on the user (what's under each bot, and the threads that
- * asked them something), and the bots they're under, which it opens. None in a workspace shared with
- * the user: what its threads ask waits on its owner.
+ * asked them something), and the bots they're under, which it opens. In a workspace shared with the user,
+ * only what the threads of bots they have at Write ask that's theirs to answer (never a sign in at the
+ * owner's screen, where it runs, an OK on the owner's phone, or anything of a thread on the owner's Mac: writesThread):
+ * the rest waits on its owner.
  */
 export function attentionOf(state: AppState, needs: Map<string, BotNeeds>) {
-  const waiting = state.shared ? [] : threadsOf(state).filter((s) => needsYou(s));
+  const theirs = (s: Session) => writesThread(state, s) && !s.blocker && s.brainRun?.waits !== "sign_in" && !(s.askWhere && live(s)) && askKind(s) !== "elsewhere";
+  const waiting = threadsOf(state).filter((s) => needsYou(s) && (!state.shared || theirs(s)));
   let count = waiting.length;
   // A request of a thread already counted counts once.
   const counted = new Set(waiting.map((s) => s.id));

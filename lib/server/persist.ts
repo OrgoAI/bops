@@ -2,7 +2,7 @@ import "server-only";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AppState } from "@/lib/types";
+import type { AppState, Message, Session } from "@/lib/types";
 import { legacyStateFile, moveLegacyState, userDataDir } from "./user-paths";
 
 /**
@@ -55,7 +55,16 @@ export type Persistence = {
   tooNew(): boolean;
   /** The state as Bops Cloud has it, as this server last wrote or read it (the Mac app's and a runner's store); none for a store that's only ever this one's. */
   cloudCopy?(): Record<string, unknown> | null;
+  /**
+   * Whether Bops Cloud, as this server last saved to it, holds none of these messages (gone from the state
+   * here): their removal is up, or they never were. None for a store that's only ever this one's, whose flush
+   * says it.
+   */
+  removedUp?(ids: readonly string[]): boolean;
 };
+
+/** What another Mac's changes, merged in here, took out of the state in memory: it deleted them there. */
+export type Went = { messages: Message[]; sessions: Session[] };
 
 /** What a backend needs from the store: the state, a way to swap in one loaded from elsewhere, and to say it changed. */
 export type StateAccess = {
@@ -64,6 +73,8 @@ export type StateAccess = {
   replace(raw: Record<string, unknown> | null): void;
   /** The state in memory changed in place (another Mac's changes merged in): the app polls it again. Not a new epoch. */
   touch(): void;
+  /** What those changes took out of it (Went), told after touch: what this Mac keeps beside them can go too (store.ts watchGone). */
+  went?(gone: Went): void;
 };
 
 /** A sign-in's state couldn't be loaded (Bops Cloud down, or this Mac offline): the sign-in is refused, and the app says so. */
@@ -84,7 +95,8 @@ export const onRunner = () => process.env.BOPS_RUNNER === "1";
  * bots' computers, routing through home internet, the Mac's zone, Codex on the Mac, the free computer
  * found again, the cloud tunnel (one per user: a runner's would take the Mac's), the live stream (Bops
  * Cloud's /v1/live is for devices, not computers: live.ts), the Mac's own check, memory sorting and
- * Orbit, and setting up runners.
+ * Orbit, setting up runners, and the Keep chats and calls sweep (privacy.ts: it deletes for every Mac, and
+ * prunes this Mac's own files).
  */
 export const RUNNER_LOOPS = ["routines", "routine-sync", "sessions", "in-use"] as const;
 export const MAC_LOOPS = [
@@ -106,6 +118,7 @@ export const MAC_LOOPS = [
   "categories",
   "orbit",
   "runner-install",
+  "privacy",
 ] as const;
 export type Loop = (typeof RUNNER_LOOPS)[number] | (typeof MAC_LOOPS)[number];
 /** Whether `loop` runs on this server: everywhere but a runner, where only RUNNER_LOOPS do. */

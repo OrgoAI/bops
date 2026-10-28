@@ -608,7 +608,7 @@ function AddKey({
                 setPick(e.target.value);
                 setError(null);
               }}
-              className="h-8 cursor-pointer appearance-none rounded-full bg-white pl-3 pr-7 text-[13px] text-ink shadow-[0_0_0_1px_#E6E6E3] outline-none hover:bg-[#FCFCFB] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+              className="h-8 appearance-none rounded-full bg-white pl-3 pr-7 text-[13px] text-ink shadow-[0_0_0_1px_#E6E6E3] outline-none hover:bg-[#FCFCFB] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
             >
               {services.map((s) => (
                 <option key={s.name} value={s.name}>

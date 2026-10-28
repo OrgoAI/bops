@@ -182,7 +182,7 @@ function Copy({ ws, info, others }: { ws: string; info: Info; others: { id: stri
       {preview && (
         <div className="flex flex-col gap-2 rounded-[14px] bg-[#F7F7F6] p-3">
           {(["personal", "work"] as const).map((k) => (
-            <label key={k} className="flex cursor-pointer items-start gap-2.5">
+            <label key={k} className="flex items-start gap-2.5">
               <input type="checkbox" checked={kinds[k]} onChange={(e) => setKinds((x) => ({ ...x, [k]: e.target.checked }))} className="mt-0.5 size-4 accent-[#0A0A0A]" />
               <span className="min-w-0">
                 <span className="block text-[14px] font-medium leading-5">

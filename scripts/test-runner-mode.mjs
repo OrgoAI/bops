@@ -310,7 +310,7 @@ await check("on a runner only the routines timer, its own routines' mirror, its 
   assert.deepEqual([...P.RUNNER_LOOPS].sort(), ["in-use", "routine-sync", "routines", "sessions"]);
   for (const l of P.RUNNER_LOOPS) assert.equal(P.loopHere(l), true, `${l} on a runner`);
   for (const l of P.MAC_LOOPS) assert.equal(P.loopHere(l), false, `${l} not on a runner`);
-  for (const l of ["watches", "digest", "access-sync", "bops-sync", "mail", "phone", "channels", "computer-checks", "relay", "zone", "codex", "free-computer", "tunnel", "live", "runner-install"])
+  for (const l of ["watches", "digest", "access-sync", "bops-sync", "mail", "phone", "channels", "computer-checks", "relay", "zone", "codex", "free-computer", "tunnel", "live", "runner-install", "privacy"])
     assert.ok(P.MAC_LOOPS.includes(l), `${l} is the Mac's`);
   asMac();
 });
@@ -335,6 +335,7 @@ const GATED = {
   "memory-categories.ts": ['loopHere("categories")'],
   "orbit-sync.ts": ['loopHere("orbit")'],
   "runner-install.ts": ['loopHere("runner-install")'],
+  "privacy.ts": ['loopHere("privacy")'],
   "access-sync.ts": ["onRunner()"],
   "bops-sync.ts": ["onRunner()"],
   "made-apps-sync.ts": ["if (!onRunner())", "const synced = () => !onRunner()", "if (!synced() || !stateReady() || stateTooNew()) return;"],
