@@ -1,5 +1,0 @@
-- Teammates you give Write can chat with your bots and run them.
-- Choose how long Bops keeps your chats.
-- Bots draft replies to emails, Slack and Discord messages.
-- A routine shows every run and what it said.
-- The sidebar folds into a rail of icons.
