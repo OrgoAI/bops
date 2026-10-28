@@ -187,8 +187,9 @@ test("each kind of use is priced at what it costs Orgo, rounded up to a whole mi
   assert.equal(costOf("agentphone.numbers", 1, { type: "imessage" }), 250_000_000);
   assert.equal(costOf("agentphone.sms", 2), 40_000);
   assert.equal(costOf("agentphone.sms", 1, { mms: true }), 30_000);
-  // Jev: $0.042 per 1M input tokens, output free; jev-latest is jev-1.13.0, and a Jev model with no price here is priced as it.
+  // Jev: $0.042 per 1M input tokens, output free, on 1.13 and 1.14 (jev-latest since 2026-10-14); a Jev model with no price here is priced as them.
   assert.equal(costOf("typesafe.tokens", 1_000, { model: "jev-1.13.0", input: 1_000, output: 0 }), 42);
+  assert.equal(costOf("typesafe.tokens", 1_000, { model: "jev-1.14.0", input: 1_000, output: 0 }), 42);
   assert.equal(costOf("typesafe.tokens", 1_000_000, { model: "jev-latest", input: 1_000_000, output: 3 }), 42_000);
   assert.equal(costOf("typesafe.tokens", 100, { model: "jev-2.0.0", input: 100 }), 5);
   assert.equal(costOf("typesafe.calls", 1), 0, "the old flat per-call estimate is gone");

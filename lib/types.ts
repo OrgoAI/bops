@@ -505,6 +505,11 @@ export type TaskRoute = {
   router?: { model: string; effort: TaskEffort; tier: RouteTier; why: string };
   bumps?: number;
   long?: boolean;
+  /**
+   * A new cloud task's runner, as Jev read its goal (lib/server/routing.ts runnerFrom): an Agents API
+   * session (code, building, separate jobs at once) or the computer tool. What ran is Session.runner.
+   */
+  runner?: { pick: "agents" | "computer"; why: string };
 };
 
 /** Where bots' screens live: Chrome windows on the user's Mac, or Orgo cloud computers. */

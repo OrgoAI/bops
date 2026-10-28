@@ -29,8 +29,8 @@
  *   only, $250 sends too); 2 cents a text segment and 3 cents a picture message, in or out; 13 cents a
  *   minute of a call through the webhook voice agent (what Bops uses), billed by the second. The words
  *   the bot says on a call are its own model answers, counted as tokens.
- * - Typesafe Jev (jev-latest is jev-1.13.0): $0.042 per 1M input tokens, output free (Typesafe's
- *   models page, as orgo-web's lib/credits-shared.ts has it).
+ * - Typesafe Jev (1.13 and 1.14, which jev-latest is since 2026-10-14): $0.042 per 1M input tokens,
+ *   output free (Typesafe's models page, as orgo-web's lib/credits-shared.ts has it).
  * - Twilio Verify: a texted code is the SMS ($0.0083) and the verification ($0.05), charged when it's
  *   sent; an emailed one, the verification.
  * - Composio and Honcho: counted, at $0 for now (Composio's price is still being agreed; Honcho's
@@ -91,7 +91,7 @@ const IMESSAGE_OUTBOUND = 250_000_000;
 const SMS_SEGMENT = 20_000;
 const MMS = 30_000;
 /** Per Jev token, by model: input, and output (free). */
-const JEV: { model: RegExp; input: number; output: number }[] = [{ model: /^jev(-latest|-1\.13(\.\d+)?)$/, input: 0.042, output: 0 }];
+const JEV: { model: RegExp; input: number; output: number }[] = [{ model: /^jev(-latest|-1\.1[34](\.\d+)?)$/, input: 0.042, output: 0 }];
 const JEV_DEAREST = { input: 0.042, output: 0 };
 const VERIFY_SMS = 58_300;
 const VERIFY_EMAIL = 50_000;
