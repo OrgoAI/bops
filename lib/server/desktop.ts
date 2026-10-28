@@ -235,9 +235,16 @@ export async function applyDesktop(b: Bot, { restartChrome = true }: { restartCh
     "mkdir -p /opt/bops/desktop && (command -v hsetroot >/dev/null && command -v plank >/dev/null && command -v gsettings >/dev/null || (apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq hsetroot plank libglib2.0-bin >/dev/null 2>&1))",
     180,
   );
-  // One file per call: Orgo drops very long commands.
+  // One file per call, and a big one (a brand's pictures in its pages) in pieces: Orgo drops very long commands.
+  const PIECE = 60_000;
   for (const [path, body, mode] of files) {
-    const r = await run(`echo ${b64(body)} | base64 -d > ${path} && chmod ${mode} ${path} && echo ok`);
+    const all = b64(body);
+    let r;
+    if (all.length <= PIECE) r = await run(`echo ${all} | base64 -d > ${path} && chmod ${mode} ${path} && echo ok`);
+    else {
+      for (let i = 0; i < all.length; i += PIECE) await run(`echo ${all.slice(i, i + PIECE)} ${i ? ">>" : ">"} ${path}.b64`);
+      r = await run(`base64 -d ${path}.b64 > ${path} && rm -f ${path}.b64 && chmod ${mode} ${path} && echo ok`);
+    }
     if (!r.output.includes("ok")) throw new Error(`couldn't write ${path}: ${r.output.slice(0, 200)}`);
   }
   // Restart the home server so it serves this version, then dress the screens. The script runs
