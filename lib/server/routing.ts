@@ -23,8 +23,9 @@ import type { Effort, RouteTier, TaskEffort, TaskRoute } from "@/lib/types";
  * makes for focused, high-volume work.
  *
  * What a new cloud task runs on is a judgment too, asked in the same call (RUNNER_QUESTIONS): the
- * computer tool (computer-task.ts: faster and cheaper on screen work) or an Agents API session (Codex's
- * tools and helpers, for building and code). In shadow until the coding comparison runs (BOPS_TASK_RUNNER).
+ * computer tool (computer-task.ts: faster and cheaper on screen work; it has a shell and parts side by
+ * side too) or an Agents API session (Codex's own coding tools, for building and code). In shadow until
+ * the coding comparison runs (BOPS_TASK_RUNNER).
  */
 
 export type { TaskEffort, TaskRoute };
