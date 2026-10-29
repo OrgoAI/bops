@@ -13,7 +13,7 @@
 // throwaway folder: nothing reaches a real service or the user's own data.
 // Usage: node --conditions=react-server scripts/test-orbit-issues.mjs
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -171,6 +171,31 @@ globalThis.fetch = async (input, init) => {
   }
   throw new TypeError(`fetch failed (the test is offline: ${url.host})`);
 };
+/**
+ * Composio (composio.ts runAs), only for the actions a test puts in `cx.tools`: each one's app and answer, a function
+ * of its inputs and the account it ran in ({ data }, { error }, or a promise of one). `cx.ran` is every action that
+ * ran, with its account and inputs. Anything else is offline.
+ */
+const cx = { tools: {}, ran: [] };
+const cxTool = (slug, t) => ({ slug, name: slug, description: slug, tags: t.tags ?? [], toolkit: { slug: t.app, name: t.app, logo: "" }, input_parameters: { type: "object", properties: {} }, output_parameters: {}, version: "1", available_versions: ["1"], no_auth: false, scopes: [], is_deprecated: false, deprecated: { displayName: slug, version: "1", available_versions: ["1"], toolkit: { logo: "" }, is_deprecated: false } });
+const offline = globalThis.fetch;
+globalThis.fetch = async (input, init) => {
+  const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  const url = new URL(href);
+  if (url.origin !== "https://backend.composio.dev") return offline(input, init);
+  const req = new Request(input, init);
+  const execute = url.pathname.match(/^\/api\/v3(?:\.1)?\/tools\/execute\/([A-Z0-9_]+)$/)?.[1];
+  const get = url.pathname.match(/^\/api\/v3(?:\.1)?\/tools\/([A-Z0-9_]+)$/)?.[1];
+  const t = cx.tools[execute ?? get];
+  if (t && get) return json(cxTool(get, t));
+  if (t && execute) {
+    const body = JSON.parse(await req.text());
+    cx.ran.push({ slug: execute, account: body.connected_account_id, args: body.arguments });
+    const out = (await t.answer?.(body.arguments, body.connected_account_id)) ?? { data: {} };
+    return json({ data: out.data ?? {}, error: out.error ?? null, successful: !out.error, log_id: "log_1" });
+  }
+  throw new TypeError(`fetch failed (the test is offline: ${url.host}${url.pathname})`);
+};
 const warned = [];
 console.warn = (...a) => warned.push(a.join(" "));
 const emitWarning = process.emitWarning.bind(process);
@@ -186,6 +211,10 @@ const Chat = await import(`${root}/lib/server/chat.ts`);
 const C = await import(`${root}/lib/routine-catalog.ts`);
 const R = await import(`${root}/app/api/orbit/issues/route.ts`);
 const R1 = await import(`${root}/app/api/orbit/issues/[id]/route.ts`);
+const RS = await import(`${root}/app/api/orbit/issues/[id]/source/route.ts`);
+const RDS = await import(`${root}/app/api/drafts/source/route.ts`);
+const IS = await import(`${root}/lib/server/issue-source.ts`);
+const RD = await import(`${root}/lib/server/reply-drafts.ts`);
 const { botChatId, MAIN_WORKSPACE } = await import(`${root}/lib/types.ts`);
 clearInterval(globalThis.__bopsRoutines);
 
@@ -571,6 +600,311 @@ await check("a tag the user makes on an issue (Create tag) joins the workspace's
   }
 });
 
+/* ---------------- The email or thread itself, on the issue's page (lib/server/issue-source.ts) ---------------- */
+
+process.env.COMPOSIO_API_KEY = "ck-test-issues";
+const WINDOW = "tok-test-window-000000000001";
+const T_HOME = "18c0a1b2c3d4e5f6";
+const TS = "1700000000.000100";
+const b64 = (x) => Buffer.from(x, "utf8").toString("base64url");
+const hdrs = (o) => Object.entries(o).map(([name, value]) => ({ name, value }));
+/** A Gmail thread as GMAIL_FETCH_MESSAGE_BY_THREAD_ID answers it: Kevin wrote, Tiger answered, Kevin again with Ava copied. */
+const kevinThread = (id) => ({
+  messages: [
+    { messageId: "g1", threadId: id, labelIds: ["INBOX"], internalDate: "1760879640000", payload: { mimeType: "text/plain", headers: hdrs({ From: "Kevin Example <kevin@example.com>", To: "alex.home@example.net", Subject: "Invoice for October" }), body: { data: b64("The invoice for October looks wrong: 12 seats.") } } },
+    { messageId: "g2", threadId: id, labelIds: ["SENT"], internalDate: "1760883240000", payload: { mimeType: "text/plain", headers: hdrs({ From: "Tiger <alex.home@example.net>", To: "kevin@example.com", Subject: "Re: Invoice for October" }), body: { data: b64("Looking now.") } } },
+    { messageId: "g3", threadId: id, labelIds: ["INBOX"], internalDate: "1760886840000", payload: { mimeType: "text/html", headers: hdrs({ From: "Kevin Example <kevin@example.com>", To: "alex.home@example.net", Cc: "Ava Lee <ava@example.org>", Subject: "Re: Invoice for October" }), body: { data: b64("<p>Thanks!</p><script>alert(1)</script>") } } },
+  ],
+});
+const NOT_FOUND = { error: "Requested entity was not found." };
+/** Gmail: the thread in the account that has it (`where`: thread id to account), not found anywhere else. */
+const gmailHas = (where) => {
+  cx.tools.GMAIL_FETCH_MESSAGE_BY_THREAD_ID = { app: "gmail", tags: ["readOnlyHint"], answer: (a, acc) => (where[a.thread_id] === acc ? { data: kevinThread(a.thread_id) } : NOT_FOUND) };
+  cx.tools.GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID = { app: "gmail", tags: ["readOnlyHint"], answer: () => NOT_FOUND };
+};
+const SLACK_THREAD = [
+  { ts: TS, thread_ts: TS, user: "U01KEVIN", text: "The dashboard is down for <@U02AVA>" },
+  { ts: "1700000060.000200", thread_ts: TS, user: "U02AVA", text: "Looking." },
+];
+const slackHas = () => {
+  cx.tools.SLACK_FETCH_MESSAGE_THREAD_FROM_A_CONVERSATION = {
+    app: "slack",
+    tags: ["readOnlyHint"],
+    answer: (a) => (a.channel !== "C0123ABCD" ? { error: "channel_not_found" } : a.ts === TS ? { data: { ok: true, messages: SLACK_THREAD } } : a.ts === "1700000060.000200" ? { data: { ok: true, messages: [SLACK_THREAD[1]] } } : { error: "thread_not_found" }),
+  };
+  cx.tools.SLACK_RETRIEVE_DETAILED_USER_INFORMATION = { app: "slack", tags: ["readOnlyHint"], answer: (a) => ({ data: { ok: true, user: { id: a.user, profile: { display_name: { U01KEVIN: "Kevin Example", U02AVA: "Ava Lee" }[a.user] } } } }) };
+  cx.tools.SLACK_RETRIEVE_CONVERSATION_INFORMATION = { app: "slack", tags: ["readOnlyHint"], answer: () => ({ data: { ok: true, channel: { id: "C0123ABCD", name: "support" } } }) };
+};
+const ACCOUNTS = () => [
+  { id: "ca_gmail_work", app: "gmail", appName: "Gmail", name: "alex@example.com", label: "Work", status: "active", at: 1, usedAt: 20, workspaceId: MAIN },
+  { id: "ca_gmail_home", app: "gmail", appName: "Gmail", name: "alex.home@example.net", status: "active", at: 1, usedAt: 10, workspaceId: MAIN },
+  { id: "ca_slack", app: "slack", appName: "Slack", name: "Acme", status: "active", at: 1, workspaceId: MAIN },
+];
+const withAccounts = (accounts = ACCOUNTS()) => S.update((s) => void (s.accounts = accounts));
+/** A call to the source routes, from the Bops window unless `window` is false. */
+const src = async (handler, method, path, { body, id, window = true } = {}) => {
+  const init = { method, headers: { "content-type": "application/json", ...(window ? { "x-bops-window": WINDOW } : {}) } };
+  if (body !== undefined) init.body = JSON.stringify(body);
+  const res = await handler(new Request(`http://localhost:3210${path}`, init), id ? { params: Promise.resolve({ id }) } : undefined);
+  const out = { status: res.status, body: await res.json() };
+  hear(out.body.error ?? "");
+  return out;
+};
+const source = (id, q = "") => src(RS.GET, "GET", `/api/orbit/issues/${id}/source?ws=${MAIN}${q}`, { id });
+const replyTo = (id, body, opts = {}) => src(RS.POST, "POST", `/api/orbit/issues/${id}/source`, { id, body: { ws: MAIN, ...body }, ...opts });
+const ran = (k) => cx.ran.slice(k).map((r) => `${r.slug}@${r.account}`);
+/** Every file under the throwaway folder (the state, the issues' cache), read as text. */
+const everyFile = (dir = scratch) => {
+  const out = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) out.push(...everyFile(p));
+    else if (e.isFile()) out.push(readFileSync(p, "utf8"));
+  }
+  return out;
+};
+process.env.BOPS_UI_TOKEN = WINDOW;
+
+let gmailIssue;
+await check("an issue's email: read live in the account that has it (each tried, the issue's workspace and the most used first), kept a minute in memory only: nothing of it in the state or on disk", async () => {
+  withAccounts();
+  IS.sourceKeptForTests.clear();
+  gmailHas({ [T_HOME]: "ca_gmail_home" });
+  gmailIssue = (await open(MAIN, { title: "Kevin's invoice is wrong", sourceApp: "gmail", externalId: T_HOME, url: `https://mail.google.com/mail/u/0/#inbox/${T_HOME}` })).body.issue;
+  const k = cx.ran.length;
+  const r = await source(gmailIssue.id);
+  assert.equal(r.status, 200);
+  // Work first (used most recently): not there, nor as a message's id; then home, which has it.
+  assert.deepEqual(ran(k), ["GMAIL_FETCH_MESSAGE_BY_THREAD_ID@ca_gmail_work", "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID@ca_gmail_work", "GMAIL_FETCH_MESSAGE_BY_THREAD_ID@ca_gmail_home"]);
+  assert.deepEqual(cx.ran.at(-1).args, { thread_id: T_HOME, user_id: "me" });
+  const s = r.body.source;
+  assert.deepEqual([s.app, s.account.id, s.threadId, s.subject, s.messages.length], ["gmail", "ca_gmail_home", T_HOME, "Invoice for October", 3]);
+  assert.equal(s.messages[1].mine, true, "the user's own, by its SENT label");
+  assert.equal(s.messages[2].body, "Thanks!");
+  assert.deepEqual(s.reply, { to: { name: "Kevin Example", email: "kevin@example.com" }, all: { to: [], cc: [{ name: "Ava Lee", email: "ava@example.org" }] } });
+  // Again within the minute: from memory. Fresh: read again, in the account that had it.
+  const k2 = cx.ran.length;
+  assert.equal((await source(gmailIssue.id)).status, 200);
+  assert.deepEqual(ran(k2), []);
+  assert.equal((await source(gmailIssue.id, "&fresh=1")).status, 200);
+  assert.deepEqual(ran(k2), ["GMAIL_FETCH_MESSAGE_BY_THREAD_ID@ca_gmail_home"]);
+  // Nothing of what it says kept anywhere but memory.
+  await S.flushState(5000);
+  const files = everyFile();
+  assert.ok(files.some((f) => f.includes("Kevin's invoice is wrong")), "the issues' cache on disk was looked at too");
+  for (const text of [JSON.stringify(S.getState()), ...files]) assert.ok(!text.includes("looks wrong") && !text.includes("Thanks!"), "the email's words are nowhere on disk or in the state");
+  assert.ok(!JSON.stringify(honcho.banks.get(BANK).sessions.get(gmailIssue.id)).includes("looks wrong"), "nor in memory's issue");
+});
+
+await check("the account the turn read the thread in is kept on the issue it opens (a routine's run: use_app, then orbit_issue_open), and its page reads there first", async () => {
+  withAccounts();
+  IS.sourceKeptForTests.clear();
+  const T3 = "18c0aaaabbbbcccc";
+  gmailHas({ [T3]: "ca_gmail_home" });
+  cx.tools.GMAIL_FETCH_MESSAGE_BY_THREAD_ID.answer = (a, acc) => (a.thread_id === T3 && acc === "ca_gmail_home" ? { data: kevinThread(T3) } : NOT_FOUND);
+  answers.push(
+    calling(toolCall("use_app", { action: "GMAIL_FETCH_MESSAGE_BY_THREAD_ID", arguments: { thread_id: T3, user_id: "me" }, account: "alex.home" })),
+    calling(toolCall("orbit_issue_open", { title: "Kevin again", summary: null, priority: null, tags: null, status: null, source_app: "gmail", external_id: T3, url: null, customer: "Kevin", note: null, last_message_at: null })),
+    reply("NOTHING"),
+  );
+  await Chat.backgroundTurn("boppy", { routineId: "rtn_support", title: "Support watch", goal: "Read the support inbox.", quiet: true });
+  const made = issueSessions(BANK).find((x) => x.metadata.externalId === T3);
+  assert.ok(made, "opened");
+  assert.equal(made.metadata.accountId, "ca_gmail_home");
+  const k = cx.ran.length;
+  const r = await source(made.id);
+  assert.equal(r.status, 200);
+  assert.deepEqual(ran(k), ["GMAIL_FETCH_MESSAGE_BY_THREAD_ID@ca_gmail_home"], "straight to the account it was read in");
+  // A turn that read it in two accounts can't tell: nothing kept, the page tries each.
+  const read = new RD.ReadLog();
+  read.note("ca_gmail_work", { thread_id: "18c0ddddeeeeffff" }, {});
+  read.note("ca_gmail_home", { thread_id: "18c0ddddeeeeffff" }, {});
+  await O.runOrbitTool("boppy", "orbit_issue_open", { title: "Both", summary: null, priority: null, tags: null, status: null, source_app: "gmail", external_id: "18c0ddddeeeeffff", url: null, customer: null, note: null, last_message_at: null }, { readIn: (key) => read.accountsWith(key) });
+  assert.equal(issueSessions(BANK).find((x) => x.metadata.externalId === "18c0ddddeeeeffff").metadata.accountId, undefined);
+});
+
+await check("what failed, in plain words: signed out (every account, or the one that could have it), gone, down, no account, an id that can't be read, an app it can't show", async () => {
+  IS.sourceKeptForTests.clear();
+  gmailHas({});
+  withAccounts(ACCOUNTS().map((a) => (a.app === "gmail" ? { ...a, status: "expired" } : a)));
+  let r = await source(gmailIssue.id);
+  assert.deepEqual([r.status, r.body.code, r.body.error], [409, "signed_out", "Gmail is signed out. Sign in to Gmail again in Logins to see the email here."]);
+  withAccounts();
+  cx.tools.GMAIL_FETCH_MESSAGE_BY_THREAD_ID.answer = (a, acc) => (acc === "ca_gmail_work" ? { error: "401 Unauthorized: invalid_grant" } : NOT_FOUND);
+  r = await source(gmailIssue.id);
+  assert.deepEqual([r.status, r.body.code, r.body.error], [409, "signed_out", "Gmail (Work · alex@example.com) is signed out. Sign in to Gmail again in Logins to see the email here."]);
+  gmailHas({});
+  r = await source(gmailIssue.id);
+  assert.deepEqual([r.status, r.body.code, r.body.error], [404, "gone", "This email isn't in your Gmail anymore."]);
+  cx.tools.GMAIL_FETCH_MESSAGE_BY_THREAD_ID.answer = () => ({ error: "Service temporarily unavailable" });
+  const k = cx.ran.length;
+  r = await source(gmailIssue.id);
+  assert.deepEqual([r.status, r.body.code, r.body.error], [502, "down", "Couldn't reach Gmail just now."]);
+  assert.equal(ran(k).length, 1, "down for one is down for all: said at once");
+  const discord = (await open(MAIN, { title: "Build red", sourceApp: "discord", externalId: "222222222222222222/333333333333333333" })).body.issue;
+  r = await source(discord.id);
+  assert.deepEqual([r.status, r.body.code, r.body.error], [409, "no_account", "No Discord bot is connected. Connect one in Logins to see the thread here."]);
+  const tsOnly = (await open(MAIN, { title: "A ts alone", sourceApp: "slack", externalId: TS })).body.issue;
+  r = await source(tsOnly.id);
+  assert.deepEqual([r.status, r.body.code, r.body.error], [422, "unparsed", "Bops can't tell which Slack thread this is."]);
+  const plain = (await open(MAIN, { title: "A ticket", sourceApp: "plain", externalId: "th_plain_1" })).body.issue;
+  r = await source(plain.id);
+  assert.deepEqual([r.status, r.body.code], [422, "unsupported"]);
+  r = await source("issue-00000000-0000-4000-8000-000000000000");
+  assert.deepEqual([r.status, r.body.code], [404, "gone"]);
+});
+
+let slackIssue;
+await check("Slack: the thread from its channel and ts (a reply's ts finds its thread), people and the channel by name; Discord through a Discord bot", async () => {
+  withAccounts();
+  IS.sourceKeptForTests.clear();
+  slackHas();
+  slackIssue = (await open(MAIN, { title: "Dashboard down", sourceApp: "slack", externalId: `C0123ABCD:${TS}` })).body.issue;
+  let r = await source(slackIssue.id);
+  assert.equal(r.status, 200);
+  const s = r.body.source;
+  assert.deepEqual([s.app, s.account.id, s.channel, s.thread], ["slack", "ca_slack", { id: "C0123ABCD", name: "support" }, TS]);
+  assert.deepEqual(s.messages.map((m) => [m.id, m.user.name]), [[TS, "Kevin Example"], ["1700000060.000200", "Ava Lee"]]);
+  assert.deepEqual(s.names, { U01KEVIN: "Kevin Example", U02AVA: "Ava Lee" });
+  const replyIssue = (await open(MAIN, { title: "From a reply", sourceApp: "slack", externalId: "x", url: "https://acme-example.slack.com/archives/C0123ABCD/p1700000060000200" })).body.issue;
+  r = await source(replyIssue.id);
+  assert.equal(r.body.source.thread, TS, "the reply's thread");
+  assert.equal(r.body.source.messages.length, 2);
+  // Discord, read with the Discord bot account the user connected.
+  withAccounts([...ACCOUNTS(), { id: "ca_discordbot", app: "discordbot", appName: "Discord Bot", name: "Helper", status: "active", at: 1, workspaceId: MAIN }]);
+  cx.tools.DISCORDBOT_LIST_MESSAGES = { app: "discordbot", tags: ["readOnlyHint"], answer: () => ({ data: { messages: [{ id: "333333333333333333", author: { id: "9", username: "ava" }, content: "Build is red", timestamp: "2026-10-20T10:00:00Z" }] } }) };
+  cx.tools.DISCORDBOT_GET_CHANNEL = { app: "discordbot", tags: ["readOnlyHint"], answer: () => ({ data: { id: "222222222222222222", name: "builds" } }) };
+  const discord = issueSessions(BANK).find((x) => x.metadata.sourceApp === "discord");
+  const k = cx.ran.length;
+  r = await source(discord.id);
+  assert.equal(r.status, 200);
+  assert.deepEqual(cx.ran.slice(k).map((x) => [x.slug, x.args]).sort(), [
+    ["DISCORDBOT_GET_CHANNEL", { channel_id: "222222222222222222" }],
+    ["DISCORDBOT_LIST_MESSAGES", { channel_id: "222222222222222222", limit: 50, around: "333333333333333333" }],
+  ]);
+  assert.deepEqual([r.body.source.channel, r.body.source.message], [{ id: "222222222222222222", name: "builds" }, "333333333333333333"]);
+});
+
+await check("only from the Bops window, and never with a shared workspace open: nothing read, nothing sent", async () => {
+  withAccounts();
+  IS.sourceKeptForTests.clear();
+  gmailHas({ [T_HOME]: "ca_gmail_home" });
+  const k = cx.ran.length;
+  let r = await src(RS.GET, "GET", `/api/orbit/issues/${gmailIssue.id}/source?ws=${MAIN}`, { id: gmailIssue.id, window: false });
+  assert.deepEqual([r.status, r.body.code, r.body.error], [403, "window", "Only the Bops app can show the original."]);
+  r = await replyTo(gmailIssue.id, { text: "Hi", nonce: "nonce-window-0001" }, { window: false });
+  assert.deepEqual([r.status, r.body.code], [403, "window"]);
+  r = await src(RDS.GET, "GET", "/api/drafts/source?messageId=m&draftId=d", { window: false });
+  assert.deepEqual([r.status, r.body.code], [403, "window"]);
+  const g = globalThis;
+  g.bopsShared = { user: S.stateUser(), key: g.bopsOrgoKey ?? null, copy: { openNow: () => ({ projectId: "p_owner" }), data: () => ({}), rev: 0, close() {} }, subscriber: { stop() {} }, moods: { forApp: () => ({}) } };
+  try {
+    r = await source(gmailIssue.id);
+    assert.deepEqual([r.status, r.body.code, r.body.error], [403, "shared", "Only the workspace's owner can see the original."]);
+    r = await replyTo(gmailIssue.id, { text: "Hi", nonce: "nonce-shared-0001" });
+    assert.deepEqual([r.status, r.body.code], [403, "shared"]);
+    r = await src(RDS.GET, "GET", "/api/drafts/source?messageId=m&draftId=d");
+    assert.deepEqual([r.status, r.body.code], [403, "shared"]);
+  } finally {
+    g.bopsShared = null;
+  }
+  assert.deepEqual(ran(k), [], "Composio never asked");
+});
+
+await check("a reply from the page: in the thread, to the newest sender that isn't the user, from the account it was read in, once per click and one at a time; Reply all copies the others; its history says Replied", async () => {
+  withAccounts();
+  IS.sourceKeptForTests.clear();
+  gmailHas({ [T_HOME]: "ca_gmail_home" });
+  const sends = [];
+  let gate = null;
+  cx.tools.GMAIL_REPLY_TO_THREAD = { app: "gmail", answer: async (a, acc) => (sends.push({ a, acc }), await gate, { data: { id: "sent_1" } }) };
+  assert.equal((await source(gmailIssue.id)).status, 200);
+  let r = await replyTo(gmailIssue.id, { text: "  Fixed: it's 10 seats now.  ", nonce: "nonce-reply-0001" });
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.body.ok, r.body.logged, r.body.sent.to], [true, true, "kevin@example.com"]);
+  assert.deepEqual(sends, [{ acc: "ca_gmail_home", a: { thread_id: T_HOME, recipient_email: "kevin@example.com", message_body: "Fixed: it's 10 seats now.", is_html: false, user_id: "me" } }]);
+  const h = (await one(MAIN, gmailIssue.id)).body.issue.history.at(-1);
+  assert.deepEqual([h.kind, h.text, h.who], ["reply", "Replied: Fixed: it's 10 seats now.", "Tiger"]);
+  // The same click again: refused, nothing sent.
+  r = await replyTo(gmailIssue.id, { text: "Fixed: it's 10 seats now.", nonce: "nonce-reply-0001" });
+  assert.deepEqual([r.status, r.body.error], [409, "It was sent already."]);
+  assert.equal(sends.length, 1);
+  // Reply all: Ava, who was copied, too.
+  r = await replyTo(gmailIssue.id, { text: "Copying Ava.", all: true, nonce: "nonce-reply-0002" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(sends[1].a, { thread_id: T_HOME, recipient_email: "kevin@example.com", message_body: "Copying Ava.", is_html: false, user_id: "me", cc: ["ava@example.org"] });
+  assert.equal(r.body.sent.to, "kevin@example.com, ava@example.org");
+  // Two at once (two clicks, two windows): one goes, the other waits its turn and is told so.
+  let open_;
+  gate = new Promise((x) => (open_ = x));
+  const both = Promise.all([replyTo(gmailIssue.id, { text: "One", nonce: "nonce-reply-0003" }), replyTo(gmailIssue.id, { text: "Two", nonce: "nonce-reply-0004" })]);
+  for (let n = 0; n < 50 && sends.length < 3; n++) await new Promise((x) => setTimeout(x, 5));
+  open_();
+  const [a, b] = await both;
+  assert.deepEqual([a.status, b.status].sort(), [200, 409]);
+  assert.equal([a, b].find((x) => x.status === 409).body.error, "A reply is being sent.");
+  assert.equal(sends.length, 3);
+  gate = null;
+  // Words only, and within what the app takes; a click with no nonce isn't one.
+  assert.deepEqual([(await replyTo(gmailIssue.id, { text: "   ", nonce: "nonce-reply-0005" })).status, (await replyTo(gmailIssue.id, { text: "x".repeat(50_001), nonce: "nonce-reply-0006" })).body.error], [400, "Gmail takes 50000 characters at most."]);
+  assert.equal((await replyTo(gmailIssue.id, { text: "Hi" })).status, 400);
+  // The app said no: why, and the history doesn't say it went.
+  cx.tools.GMAIL_REPLY_TO_THREAD.answer = () => ({ error: "Invalid recipient" });
+  const before = (await one(MAIN, gmailIssue.id)).body.issue.history.length;
+  r = await replyTo(gmailIssue.id, { text: "Again", nonce: "nonce-reply-0007" });
+  assert.deepEqual([r.status, r.body.error], [502, "Gmail didn't take it: Invalid recipient"]);
+  assert.equal((await one(MAIN, gmailIssue.id)).body.issue.history.length, before);
+  // Signed out since it was read: not sent, and why.
+  withAccounts(ACCOUNTS().map((x) => (x.id === "ca_gmail_home" ? { ...x, status: "expired" } : x)));
+  r = await replyTo(gmailIssue.id, { text: "Again", nonce: "nonce-reply-0008" });
+  assert.deepEqual([r.status, r.body.code], [409, "signed_out"]);
+  assert.equal(sends.length, 3);
+  withAccounts();
+});
+
+await check("a Slack reply goes in its thread as the user (SLACK_SEND_MESSAGE with thread_ts), and its history says so", async () => {
+  IS.sourceKeptForTests.clear();
+  slackHas();
+  const sent = [];
+  cx.tools.SLACK_SEND_MESSAGE = { app: "slack", answer: (a, acc) => (sent.push({ a, acc }), { data: { ok: true, ts: "1700000999.000100" } }) };
+  const r = await replyTo(slackIssue.id, { text: "On it, *rolling back* now.", nonce: "nonce-slack-0001" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(sent, [{ acc: "ca_slack", a: { channel: "C0123ABCD", markdown_text: "On it, *rolling back* now.", thread_ts: TS } }]);
+  assert.equal(r.body.sent.to, "#support");
+  assert.equal((await one(MAIN, slackIssue.id)).body.issue.history.at(-1).text, "Replied: On it, *rolling back* now.");
+});
+
+await check("a drafted reply's thread (its card's Show the email): read only in the account the draft goes from, never another", async () => {
+  withAccounts();
+  IS.sourceKeptForTests.clear();
+  gmailHas({ [T_HOME]: "ca_gmail_home" });
+  S.update((s) =>
+    s.messages.push({
+      id: "m_drafted",
+      chatId: botChatId("boppy"),
+      role: "bot",
+      botId: "boppy",
+      text: "Two replies for you.",
+      at: Date.now(),
+      drafts: [
+        { id: "drf_home", app: "gmail", accountId: "ca_gmail_home", threadId: T_HOME, to: "kevin@example.com", toName: "Kevin Example", text: "Yes." },
+        { id: "drf_work", app: "gmail", accountId: "ca_gmail_work", threadId: T_HOME, to: "kevin@example.com", toName: "Kevin Example", text: "Yes." },
+      ],
+    }),
+  );
+  const k = cx.ran.length;
+  let r = await src(RDS.GET, "GET", "/api/drafts/source?messageId=m_drafted&draftId=drf_home");
+  assert.equal(r.status, 200);
+  assert.equal(r.body.source.account.id, "ca_gmail_home");
+  r = await src(RDS.GET, "GET", "/api/drafts/source?messageId=m_drafted&draftId=drf_work");
+  assert.deepEqual([r.status, r.body.code], [404, "gone"]);
+  assert.ok(!ran(k).slice(1).some((x) => x.endsWith("@ca_gmail_home")), "the work draft's thread isn't looked for elsewhere");
+  r = await src(RDS.GET, "GET", "/api/drafts/source?messageId=m_drafted&draftId=nope");
+  assert.deepEqual([r.status, r.body.error], [404, "That reply isn't here anymore."]);
+  S.update((s) => void (s.messages = s.messages.filter((m) => m.id !== "m_drafted")));
+  delete process.env.BOPS_UI_TOKEN;
+});
+
 await check("memory off, or signed out: no issues, and the routes say so", async () => {
   delete process.env.HONCHO_API_KEY;
   try {
@@ -586,11 +920,12 @@ await check("memory off, or signed out: no issues, and the routes say so", async
 
 await check("plain words, and nothing unexpected: no dashes, no stray warnings, no unknown Honcho calls about sessions, no rejections", () => {
   for (const s of spoken) noDashes(s, "in what was said");
-  for (const file of ["lib/server/orbit-issues.ts", "lib/orbit-issues.ts", "lib/server/orbit.ts", "app/api/orbit/issues/route.ts", "app/api/orbit/issues/[id]/route.ts"])
+  for (const file of ["lib/server/orbit-issues.ts", "lib/orbit-issues.ts", "lib/server/orbit.ts", "app/api/orbit/issues/route.ts", "app/api/orbit/issues/[id]/route.ts", "lib/server/issue-source.ts", "app/api/orbit/issues/[id]/source/route.ts", "app/api/drafts/source/route.ts"])
     readFileSync(join(root, file), "utf8")
       .split("\n")
       .forEach((line, n) => assert.ok(!/[–—]/.test(line), `${file}:${n + 1} has a dash`));
   assert.deepEqual(warned.filter((w) => /^\[issues\]/.test(w) && !/list: /.test(w)), []);
+  assert.deepEqual(warned.filter((w) => /^\[source\]/.test(w) && !/Service temporarily unavailable/.test(w)), []);
   assert.deepEqual(honcho.unknown.filter((u) => /sessions/.test(u)), []);
   assert.deepEqual(rejections, []);
 });

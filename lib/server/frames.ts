@@ -1,5 +1,5 @@
 import "server-only";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { userHome } from "./store";
 
@@ -7,9 +7,10 @@ import { userHome } from "./store";
  * Each thread's last frame: its screen as it let go of it (sessions.ts leaveScreen), so a finished
  * thread can show where it left off even after another task has the screen. Kept on this Mac in the
  * user's ~/.bops (not the state's folder, which a cloud user doesn't have here), one JPEG per thread,
- * replaced each time; served by /api/frames.
+ * replaced each time; served by /api/frames. It goes with its thread (lib/server/remove.ts deleteThread), and
+ * after the user's Keep chats and calls (lib/server/privacy.ts).
  */
-const framesDir = () => {
+export const framesDir = () => {
   const home = userHome();
   return home ? join(home, "frames") : null;
 };
@@ -34,3 +35,9 @@ export const hasFrame = (sessionId: string) => {
   const p = framePath(sessionId);
   return !!p && existsSync(/*turbopackIgnore: true*/ p);
 };
+
+/** A thread's frame goes (its thread did). */
+export function dropFrame(sessionId: string) {
+  const p = framePath(sessionId);
+  if (p) rmSync(/*turbopackIgnore: true*/ p, { force: true });
+}

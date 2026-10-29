@@ -149,7 +149,8 @@ const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DOW_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTH = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-const RAN_WORDS: Record<RoutineRun["status"], string> = { running: "Running now", ok: "Ran", quiet: "Ran, nothing for you", failed: "Failed", skipped: "Didn't run" };
+/** How a run went, in the page's words (the week's lines, a routine's reports). */
+export const RAN_WORDS: Record<RoutineRun["status"], string> = { running: "Running now", ok: "Ran", quiet: "Ran, nothing for you", failed: "Failed", skipped: "Didn't run" };
 
 /**
  * What's asked before a routine is deleted: by its name (`named`: in the week, where a line is one of its
@@ -193,7 +194,8 @@ type Busy = { key: string; what: "run" | "skip" | "unskip" | "pause" | "remove" 
 const lineKey = (it: DayItem) => `${it.kind}:${it.routine.id}:${"at" in it ? it.at : "first" in it ? it.first : ""}`;
 
 /**
- * The week strip and the picked day's runs. `onOpen` opens a routine's row below (its details, Edit, Delete).
+ * The week strip and the picked day's runs. `onOpen` opens a routine's row below (its details, Edit, Delete);
+ * `onReport`, on a line of what ran, opens that run's report (routine-reports.tsx), the line itself the button.
  * `bots` colors each run, and with more than one, each line says its bot's name by its mascot; `running`
  * and `needsYou` say a routine's state as the rows do; `checked` names what a Connected App's check looks
  * at (in the question before it's deleted). One question at a time, with the page's rows (QuestionScope).
@@ -208,6 +210,7 @@ export function RoutineWeek({
   needsYou,
   checked,
   onOpen,
+  onReport,
   viewOnly = false,
 }: {
   routines: Routine[];
@@ -219,6 +222,8 @@ export function RoutineWeek({
   needsYou: (r: Routine) => boolean;
   checked?: (source: RoutineSource) => string;
   onOpen: (id: string) => void;
+  /** A run that's been: its routine's reports, open at it (`from`: the line, where focus goes back). */
+  onReport?: (id: string, at: number, from?: HTMLElement) => void;
   /** A workspace shared with the user: its routines are the owner's, said so, with nothing to run, skip, pause or delete. */
   viewOnly?: boolean;
 }) {
@@ -379,6 +384,7 @@ export function RoutineWeek({
                     busy={busy?.key === key ? busy.what : busy ? "other" : null}
                     error={error?.key === key ? error.text : null}
                     onOpen={() => onOpen(it.routine.id)}
+                    onReport={it.kind === "ran" && onReport ? (from) => onReport(it.routine.id, it.at, from) : undefined}
                     onRun={() => void act(key, "run", { id: it.routine.id, action: "run" })}
                     onSkip={(at) => void act(key, "skip", { id: it.routine.id, action: "skip", at })}
                     onUnskip={(at) => void act(key, "unskip", { id: it.routine.id, action: "unskip", at })}
@@ -437,9 +443,12 @@ function Item({
   onUnskip,
   onPause,
   onDelete,
+  onReport,
   viewOnly = false,
 }: {
   viewOnly?: boolean;
+  /** A line of what ran: the line opens its report (`from`: the line). */
+  onReport?: (from: HTMLElement) => void;
   item: DayItem;
   bot?: Bot;
   named: boolean;
@@ -482,6 +491,17 @@ function Item({
   // A one-off can't skip (pause or delete it); a meeting routine's checks aren't skipped one by one.
   const skipAt = s.kind === "once" || s.kind === "before_event" || !r.enabled ? undefined : it.kind === "run" && !it.skipped ? it.at : it.kind === "many" ? it.next : undefined;
   const any = busy !== null;
+  const words = (
+    <span className={`text-[12px] leading-4 ${status === "failed" || needsYou ? "text-[#B42318]" : "text-[color:var(--c-6b6b6b)]"} [overflow-wrap:anywhere]`}>
+      {named && bot && (
+        <>
+          <span className="font-medium text-[color:var(--c-3a3a38)]">{bot.name}</span>
+          <span className="text-[color:var(--c-9a9a98)]">{" · "}</span>
+        </>
+      )}
+      {line}
+    </span>
+  );
   return (
     <div className={`group flex items-start gap-2.5 rounded-xl px-1 py-1.5 ${off ? "opacity-60" : ""}`}>
       <span className={`w-[52px] shrink-0 pt-[5px] text-right text-[11.5px] font-medium tabular-nums leading-4 ${it.kind === "ran" ? "text-[color:var(--c-9a9a98)]" : "text-[color:var(--c-3a3a38)]"} ${off ? "line-through" : ""}`}>{when}</span>
@@ -490,18 +510,20 @@ function Item({
         {status && <StatusMark status={status} />}
       </span>
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <button data-row-head onClick={onOpen} className={`min-w-0 truncate text-left text-[13.5px] font-medium leading-[18px] outline-none hover:underline focus-visible:underline ${off ? "line-through decoration-[color:var(--c-9a9a98)]" : ""}`}>
-          {undash(r.title)}
-        </button>
-        <span className={`text-[12px] leading-4 ${status === "failed" || needsYou ? "text-[#B42318]" : "text-[color:var(--c-6b6b6b)]"} [overflow-wrap:anywhere]`}>
-          {named && bot && (
-            <>
-              <span className="font-medium text-[color:var(--c-3a3a38)]">{bot.name}</span>
-              <span className="text-[color:var(--c-9a9a98)]">{" · "}</span>
-            </>
-          )}
-          {line}
-        </span>
+        {onReport ? (
+          // What ran: the whole line opens its report.
+          <button data-row-head data-report-line onClick={(e) => onReport(e.currentTarget)} data-tip="See the report" className="group/ran flex min-w-0 flex-col gap-0.5 text-left outline-none">
+            <span className="min-w-0 truncate text-[13.5px] font-medium leading-[18px] group-hover/ran:underline group-focus-visible/ran:underline">{undash(r.title)}</span>
+            {words}
+          </button>
+        ) : (
+          <>
+            <button data-row-head onClick={onOpen} className={`min-w-0 truncate text-left text-[13.5px] font-medium leading-[18px] outline-none hover:underline focus-visible:underline ${off ? "line-through decoration-[color:var(--c-9a9a98)]" : ""}`}>
+              {undash(r.title)}
+            </button>
+            {words}
+          </>
+        )}
         {error && (
           <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
             {error}
@@ -547,7 +569,7 @@ function Item({
 }
 
 /** How a run went, as a small mark on its bot. */
-function StatusMark({ status }: { status: "ok" | "failed" | "running" | "quiet" | "skipped" }) {
+export function StatusMark({ status }: { status: "ok" | "failed" | "running" | "quiet" | "skipped" }) {
   const look = {
     ok: { bg: "#1E8A55", path: <path d="M2.6 5.2l1.6 1.6 3.2-3.4" /> },
     quiet: { bg: "#9A9A98", path: <path d="M2.8 5h4.4" /> },

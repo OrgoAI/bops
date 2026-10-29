@@ -1,5 +1,6 @@
 import "server-only";
 import { createHash } from "node:crypto";
+import { isUnsorted, keptLabel } from "@/lib/skill-labels";
 
 /**
  * A skill (or an app) is a folder in the Anthropic Agent Skill shape: SKILL.md (YAML frontmatter, then
@@ -242,7 +243,7 @@ export function scanSecrets(path: string, text: string): Problem[] {
 
 /**
  * Vault names a text uses ($STRIPE_SECRET_KEY, ${GITHUB_TOKEN}) that the frontmatter doesn't declare in
- * requires_secrets: flagged, never refused (a script's own variables look the same).
+ * metadata.requires-secrets (or requires_secrets, as before): flagged, never refused (a script's own variables look the same).
  */
 export function undeclaredSecrets(files: { path: string; content: string | null }[], declared: string[]): Problem[] {
   const known = new Set(declared);
@@ -255,7 +256,7 @@ export function undeclaredSecrets(files: { path: string; content: string | null 
       const name = m[1];
       if (known.has(name) || seen.has(name) || !looksSecret.test(name)) continue;
       seen.add(name);
-      out.push({ path: f.path, line: lineAt(f.content, m.index ?? 0), reason: `uses ${name}, which requires_secrets doesn't declare` });
+      out.push({ path: f.path, line: lineAt(f.content, m.index ?? 0), reason: `uses ${name}, which metadata.requires-secrets doesn't declare` });
     }
   }
   return out;
@@ -413,39 +414,189 @@ export function renderSkillMd(frontmatter: Record<string, unknown>, body: string
   return `---\n${keys.map((k) => `${k}: ${yamlValue(frontmatter[k])}\n`).join("")}---\n${body.startsWith("\n") ? body : `\n${body}`}`;
 }
 
+/* ---------------- The Agent Skills spec's form ---------------- */
+
 /**
- * A skill's label as its SKILL.md keeps it: `metadata.label`, in the Agent Skills metadata map, which
- * orgo-web keeps as it is (an unknown key passes its checks), so the label syncs with Orgo unchanged. A
- * top level `label` someone wrote by hand is read too. Undefined when it has none.
+ * The Agent Skills spec (agentskills.io/specification) keeps only name, description, license, compatibility,
+ * metadata (a map of string to string) and allowed-tools at the top of SKILL.md's frontmatter. Bops' own
+ * fields live in metadata, as strings: metadata.label (the skill's one label), metadata.version (semver),
+ * metadata.risk (read, write or destructive), metadata.runs-on (local, remote-host or container) and
+ * metadata.requires-secrets (vault key names, space separated: never a value). Bops writes only that form
+ * (toSpecForm). It reads the form from before too (top level version, risk, runs_on, a requires_secrets list,
+ * label), so every skill kept or synced before keeps working, and a stored version is never refused for it;
+ * a skill takes the new form on its next write. The same in orgo-web (lib/skills/bundle.ts there).
  */
-export function labelOf(fm: Record<string, unknown> | null | undefined): string | undefined {
-  const meta = fm?.metadata;
-  const said = meta && typeof meta === "object" && !Array.isArray(meta) ? (meta as Record<string, unknown>).label : undefined;
-  const v = typeof said === "string" ? said : typeof fm?.label === "string" ? fm.label : undefined;
-  const s = v?.replace(/\s+/g, " ").trim();
-  return s ? s : undefined;
+export type SkillSpec = { label?: string; version?: string; risk?: string; runsOn?: string; requiresSecrets?: string[] };
+
+/** The spec's name: 1 to 64 of a to z, 0 to 9 and single hyphens, none at either end. */
+export const NAME_MAX = 64;
+export const COMPATIBILITY_MAX = 500;
+/** Bops' keys in metadata, and the top level ones they were before. */
+const META = { label: "label", version: "version", risk: "risk", runsOn: "runs-on", requiresSecrets: "requires-secrets" } as const;
+const OLD = { label: "label", version: "version", risk: "risk", runsOn: "runs_on", requiresSecrets: "requires_secrets" } as const;
+
+const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+/** A frontmatter's metadata map (none: empty). */
+export const metadataOf = (fm: Record<string, unknown> | null | undefined): Record<string, unknown> => (isMap(fm?.metadata) ? fm.metadata : {});
+/** A metadata value as the spec keeps one: a string (a number or true as written; a list as its words). */
+const asString = (v: unknown): string | undefined =>
+  typeof v === "string" ? v : typeof v === "number" || typeof v === "boolean" ? String(v) : Array.isArray(v) ? v.map((x) => String(x)).join(" ") : v === null || v === undefined ? undefined : JSON.stringify(v);
+const words = (v: unknown): string[] | undefined => {
+  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+  if (typeof v === "string") return v.split(/[\s,]+/).filter(Boolean);
+  return undefined;
+};
+
+/**
+ * Whether a value of one of Bops' fields is one Bops takes: any label, a version such as 1.2.0, a risk and a
+ * runs-on from their lists, vault key names (100 at most). The same as orgo-web's (lib/skills/bundle.ts there).
+ */
+const FITS: Record<keyof typeof META, (v: unknown) => boolean> = {
+  label: () => true,
+  version: (v) => isVersion(asString(v)?.trim()),
+  risk: (v) => (RISKS as readonly unknown[]).includes(asString(v)?.trim()),
+  runsOn: (v) => (RUNS_ON as readonly unknown[]).includes(asString(v)?.trim()),
+  requiresSecrets: (v) => {
+    const names = words(v);
+    return !!names && names.length <= 100 && names.every((s) => VAULT_NAME_RE.test(s));
+  },
+};
+
+/**
+ * Bops' fields in a frontmatter, in either form: metadata first, else the top level key from before. A value
+ * Bops wouldn't take (a version such as "1.0", as the spec's own example writes metadata.version, or a risk
+ * outside the list) reads as none, and the old form is tried: a stored version is read, never refused, as
+ * orgo-web's skillMeta reads one. A version that isn't one is numbered when it's published.
+ */
+export function specOf(fm: Record<string, unknown> | null | undefined): SkillSpec {
+  const meta = metadataOf(fm);
+  const pick = (k: keyof typeof META) => (meta[META[k]] !== undefined && FITS[k](meta[META[k]]) ? meta[META[k]] : fm?.[OLD[k]] !== undefined && FITS[k](fm[OLD[k]]) ? fm[OLD[k]] : undefined);
+  const label = asString(pick("label"))?.replace(/\s+/g, " ").trim();
+  const version = asString(pick("version"))?.trim();
+  const risk = asString(pick("risk"))?.trim();
+  const runsOn = asString(pick("runsOn"))?.trim();
+  const secrets = words(pick("requiresSecrets"));
+  return { ...(label ? { label } : {}), ...(version ? { version } : {}), ...(risk ? { risk } : {}), ...(runsOn ? { runsOn } : {}), ...(secrets?.length ? { requiresSecrets: secrets } : {}) };
 }
 
-/** Frontmatter with its label kept in `metadata.label` (the rest of metadata as it was); unchanged when there's no label to keep. */
-export function withLabel(fm: Record<string, unknown>, label: string | undefined): Record<string, unknown> {
-  if (!label) return fm;
-  const meta = fm.metadata && typeof fm.metadata === "object" && !Array.isArray(fm.metadata) ? (fm.metadata as Record<string, unknown>) : {};
-  const out: Record<string, unknown> = { ...fm, metadata: { ...meta, label } };
-  // The one place it's kept: a hand written top level label would say something else after a move.
-  delete out.label;
+/**
+ * A frontmatter in the spec's form, as Bops writes every SKILL.md: its own fields from the top level moved into
+ * metadata as strings (requires-secrets space separated), every metadata value a string, `set` applied on top
+ * (a label or a version; null takes one out). Keys that aren't Bops' (license, compatibility, allowed-tools, or
+ * anyone's own) stay where they are.
+ */
+export function toSpecForm(fm: Record<string, unknown>, set: { label?: string | null; version?: string | null } = {}): Record<string, unknown> {
+  const meta: Record<string, string> = {};
+  for (const [k, v] of Object.entries(metadataOf(fm))) {
+    const s = asString(v);
+    if (s !== undefined) meta[k] = s;
+  }
+  const out: Record<string, unknown> = { ...fm };
+  for (const k of Object.keys(META) as (keyof typeof META)[]) {
+    const old = out[OLD[k]];
+    delete out[OLD[k]];
+    if (meta[META[k]] !== undefined || old === undefined || old === null) continue;
+    const s = k === "requiresSecrets" ? words(old)?.join(" ") : asString(old);
+    if (s) meta[META[k]] = k === "label" ? s.replace(/\s+/g, " ").trim() : s;
+  }
+  if (set.label !== undefined) {
+    if (set.label) meta.label = set.label;
+    else delete meta.label;
+  }
+  if (set.version !== undefined) {
+    if (set.version) meta.version = set.version;
+    else delete meta.version;
+  }
+  // Unsorted is no label: never kept as one ("Other", as it was called before, neither).
+  if (meta.label !== undefined && isUnsorted(meta.label)) delete meta.label;
+  delete out.metadata;
+  if (Object.keys(meta).length) out.metadata = meta;
   return out;
 }
 
-/** Checks the keys Orgo knows when they're there. */
+/** A skill's label as its SKILL.md keeps it: metadata.label (a top level label from before is read too). Undefined when it has none, or says Unsorted or Other. */
+export const labelOf = (fm: Record<string, unknown> | null | undefined): string | undefined => keptLabel(specOf(fm).label);
+
+/** Frontmatter in the spec's form with its label kept in metadata.label (Unsorted or empty: none there); unchanged when no label is given. */
+export function withLabel(fm: Record<string, unknown>, label: string | undefined): Record<string, unknown> {
+  return label === undefined ? fm : toSpecForm(fm, { label: keptLabel(label) ?? null });
+}
+
+/** Frontmatter in the spec's form with its version in metadata.version. */
+export const withVersion = (fm: Record<string, unknown>, version: string) => toSpecForm(fm, { version });
+
+/** Why a name isn't the spec's (1 to 64 of a to z, 0 to 9 and single hyphens; the folder's own name when one is given), or null. */
+export function nameProblem(name: unknown, folder?: string): string | null {
+  if (typeof name !== "string" || !name) return "a name is needed";
+  if (name.length > NAME_MAX) return `${NAME_MAX} characters at most`;
+  if (!SLUG_RE.test(name)) return "lowercase letters, digits and single hyphens only, none at the start or the end";
+  if (folder !== undefined && name !== folder) return `must be its folder's name, ${JSON.stringify(folder)}`;
+  return null;
+}
+
+/**
+ * Checks the keys Orgo knows when they're there, in either form, as orgo-web checks a new save: metadata a map,
+ * a risk and a runs-on from their lists and vault key names, in metadata or at the top level, and a top level
+ * version (the old form, checked as before). Only for what's taken in here (an import, a skill made or changed
+ * here): one brought from Orgo is made fit instead (fitFrontmatter), never refused. A metadata.version that isn't
+ * a version and a compatibility that isn't the spec's only warn (frontmatterWarnings).
+ */
 export function validateFrontmatter(fm: Record<string, unknown>): Problem[] {
   const errors: Problem[] = [];
   const bad = (key: string, reason: string) => errors.push({ path: "SKILL.md", reason: `frontmatter ${key}: ${reason}` });
-  if (fm.version !== undefined && (typeof fm.version !== "string" || !SEMVER_RE.test(fm.version))) bad("version", "a version such as 1.2.0");
-  if (fm.risk !== undefined && !(RISKS as readonly unknown[]).includes(fm.risk)) bad("risk", `one of ${RISKS.join(", ")}`);
-  if (fm.runs_on !== undefined && !(RUNS_ON as readonly unknown[]).includes(fm.runs_on)) bad("runs_on", `one of ${RUNS_ON.join(", ")}`);
-  if (fm.requires_secrets !== undefined && (!Array.isArray(fm.requires_secrets) || !fm.requires_secrets.every((s) => typeof s === "string" && VAULT_NAME_RE.test(s))))
-    bad("requires_secrets", "a list of vault key names (never the values)");
+  const meta = metadataOf(fm);
+  if (fm.metadata !== undefined && fm.metadata !== null && !isMap(fm.metadata)) bad("metadata", "a map of names to text");
+  if (fm.version !== undefined && !(typeof fm.version === "string" && FITS.version(fm.version))) bad("version", "a version such as 1.2.0");
+  for (const [k, says] of [["risk", `one of ${RISKS.join(", ")}`], ["runsOn", `one of ${RUNS_ON.join(", ")}`]] as const) {
+    if (meta[META[k]] !== undefined && !FITS[k](meta[META[k]])) bad(`metadata.${META[k]}`, says);
+    if (fm[OLD[k]] !== undefined && !FITS[k](fm[OLD[k]])) bad(OLD[k], says);
+  }
+  if (meta[META.requiresSecrets] !== undefined && !FITS.requiresSecrets(meta[META.requiresSecrets])) bad("metadata.requires-secrets", "vault key names separated by spaces (never the values)");
+  if (fm.requires_secrets !== undefined && !(Array.isArray(fm.requires_secrets) && FITS.requiresSecrets(fm.requires_secrets))) bad("requires_secrets", "a list of vault key names (never the values)");
   return errors;
+}
+
+/**
+ * What's taken but not as written, said as a warning: a metadata.version that isn't a version such as 1.2.0 (the
+ * spec's own example writes "1.0"; it's numbered when published, as orgo-web does), and a compatibility that
+ * isn't the spec's (text, 500 characters at most).
+ */
+export function frontmatterWarnings(fm: Record<string, unknown>): Problem[] {
+  const out: Problem[] = [];
+  const v = metadataOf(fm)[META.version];
+  if (v !== undefined && !FITS.version(v)) out.push({ path: "SKILL.md", reason: "metadata.version is not a version such as 1.2.0, so the version number is set for you" });
+  if (fm.compatibility !== undefined && (typeof fm.compatibility !== "string" || fm.compatibility.length > COMPATIBILITY_MAX)) out.push({ path: "SKILL.md", reason: `compatibility is text of ${COMPATIBILITY_MAX} characters at most` });
+  return out;
+}
+
+/**
+ * A frontmatter kept elsewhere (a version on Orgo) made fit to keep here, so it's never refused for its form, as
+ * orgo-web's textMetadata carries a stored version: metadata that isn't a map goes, its values become text, and
+ * each of Bops' fields a new save would refuse goes, in either form (an earlier build kept metadata as the
+ * author's free text, so a stored one may say risk: high). A metadata.version that isn't a version goes too:
+ * the version is the one Orgo numbered. The rest as it is.
+ */
+export function fitFrontmatter(fm: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...fm };
+  if (out.metadata !== undefined) {
+    if (!isMap(out.metadata)) delete out.metadata;
+    else {
+      const meta: Record<string, string> = {};
+      for (const [k, v] of Object.entries(out.metadata)) {
+        const s = asString(v);
+        if (s !== undefined) meta[k] = s;
+      }
+      for (const k of Object.keys(META) as (keyof typeof META)[]) if (meta[META[k]] !== undefined && !FITS[k](meta[META[k]])) delete meta[META[k]];
+      out.metadata = meta;
+    }
+  }
+  for (const k of Object.keys(OLD) as (keyof typeof OLD)[]) {
+    const v = out[OLD[k]];
+    if (v === undefined) continue;
+    const ok = k === "version" ? typeof v === "string" && FITS.version(v) : k === "requiresSecrets" ? Array.isArray(v) && FITS.requiresSecrets(v) : FITS[k](v);
+    if (!ok) delete out[OLD[k]];
+  }
+  return out;
 }
 
 /** The slug a name starts from: lowercase ASCII words joined by "-". */
@@ -612,13 +763,14 @@ export function checkFolder(input: FolderFile[], opts: { folderName?: string; st
   if (doc === null) body = `# ${name || "Skill"}\n\nDrafted on import: this folder had no SKILL.md, README.md or SPEC.md.\n\n## Files\n\n${files.map((f) => `- \`${f.path}\`${f.executable ? " (executable)" : ""}${f.content === null ? " (binary)" : ""}`).join("\n")}\n`;
   if (byteLength(body) > BUNDLE_LIMITS.body) errors.push({ path: "SKILL.md", reason: `body is over ${BUNDLE_LIMITS.body / 1024} KB` });
   errors.push(...validateFrontmatter(frontmatter));
+  warnings.push(...frontmatterWarnings(frontmatter));
   const total = files.reduce((n, f) => n + f.size, 0) + byteLength(body);
   if (files.length + 1 > BUNDLE_LIMITS.files) errors.push({ path: "", reason: `a skill holds ${BUNDLE_LIMITS.files} files at most` });
   if (total > BUNDLE_LIMITS.total) errors.push({ path: "", reason: `a skill is ${mb(BUNDLE_LIMITS.total)} at most` });
   if (errors.length) return { ok: false, errors, skipped };
   if (body.split("\n").length > 500) warnings.push({ path: "SKILL.md", reason: "body is over 500 lines; move long tables to references/" });
   for (const f of files) if (f.content !== null && /StrictHostKeyChecking\s*=?\s*no/.test(f.content)) warnings.push({ path: f.path, reason: "turns off SSH host key checking" });
-  const declared = Array.isArray(frontmatter.requires_secrets) ? (frontmatter.requires_secrets as string[]) : [];
+  const declared = specOf(frontmatter).requiresSecrets ?? [];
   warnings.push(...undeclaredSecrets([{ path: "SKILL.md", content: body }, ...files], declared));
   const slugBase = fmName && SLUG_RE.test(fmName) && fmName.length <= BUNDLE_LIMITS.slug ? fmName : slugify(fmName || name);
   return { ok: true, name, slugBase, description, frontmatter, body, files, skipped, warnings, drafted };

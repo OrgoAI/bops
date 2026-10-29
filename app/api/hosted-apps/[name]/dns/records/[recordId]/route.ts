@@ -36,7 +36,7 @@ export async function PATCH(request: Request, ctx: Ctx) {
   const { name, recordId } = await ctx.params;
   const b = await asked(request);
   try {
-    return Response.json(await changeRecord(wsOf(b), name, b.zone, recordId, b));
+    return Response.json(await changeRecord(wsOf(b), name, b.zone, recordId, b, b.site));
   } catch (e) {
     return failed(e);
   }
@@ -50,7 +50,7 @@ export async function DELETE(request: Request, ctx: Ctx) {
   const { name, recordId } = await ctx.params;
   const b = await asked(request);
   try {
-    return Response.json(await removeRecord(wsOf(b), name, b.zone, recordId));
+    return Response.json(await removeRecord(wsOf(b), name, b.zone, recordId, b.site));
   } catch (e) {
     return failed(e);
   }

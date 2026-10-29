@@ -1,4 +1,5 @@
 import "server-only";
+import { isAppName } from "@/lib/hosted-apps";
 import { constants, createHash, createPublicKey, publicEncrypt, randomBytes, type KeyObject } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -51,7 +52,7 @@ const tokenFile = (workspace: string) => `${TOKENS}/${workspace}`;
 export const INGOT_MCP = { type: "stdio", command: INGOT_BIN, args: ["mcp", "--hosted"] } as const;
 
 /** An Ingot repo's name: lowercase letters and digits in words joined by single dashes, at most 64 characters. */
-export const isRepoName = (s: unknown): s is string => typeof s === "string" && s.length <= 64 && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(s);
+export const isRepoName = isAppName;
 
 /** A repo name for an app called `words` ("Recipe Box" is recipe-box): "app" when nothing in it can be one. */
 export function repoNameFor(words: string): string {
@@ -645,6 +646,17 @@ export const ingot = {
     if (r.status === 201) return true;
     if (r.status === 409) return false;
     throw refusal(`Couldn't make the app ${name}`, r);
+  },
+  /**
+   * A repo deleted, with all its history (the workspace's owner or an admin only: never an agent token).
+   * Says whether it was there to delete (false: there was no such repo).
+   */
+  deleteRepo: async (wsId: string, name: string, signal?: AbortSignal): Promise<boolean> => {
+    if (!isRepoName(name)) throw new IngotError(`"${name}" can't be an app's name.`);
+    const r = await api(wsId, "DELETE", `/repos/${name}`, { signal });
+    if (r.status === 200 || r.status === 204) return true;
+    if (r.status === 404) return false;
+    throw refusal(`Couldn't delete ${name}'s code`, r);
   },
   /** A repo's changesets on main, newest first (`before`: older than that one), and `next` for the page after; null when there's no such repo. */
   log: async (wsId: string, name: string, opts: { before?: string; limit?: number; signal?: AbortSignal } = {}): Promise<{ changesets: IngotChangeset[]; next: string | null } | null> => {

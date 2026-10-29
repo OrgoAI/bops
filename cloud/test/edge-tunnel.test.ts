@@ -171,6 +171,18 @@ test("what no Mac will take is cleared out as events come in: never taken in its
   );
 });
 
+test("one with the same key that expired untaken holds no place: the same act again (Try again) is kept and goes; one still waiting, or taken, keeps its place", async () => {
+  const id = user("again");
+  await tunnel.queueForMac(id, "member", { n: "first" }, "member:u1:k1", new Date(Date.now() - 1_000));
+  await tunnel.queueForMac(id, "member", { n: "again" }, "member:u1:k1", new Date(Date.now() + 60_000));
+  assert.deepEqual((await pending(id)).map((p) => p.payload), [{ n: "again" }], "the expired one went; the new one waits");
+  await tunnel.queueForMac(id, "member", { n: "third" }, "member:u1:k1", new Date(Date.now() + 60_000));
+  assert.deepEqual((await pending(id)).map((p) => p.payload), [{ n: "again" }], "one still waiting is kept once");
+  await query("UPDATE bops.cloud_pending SET delivered_at = now(), expires_at = now() - interval '1 second' WHERE user_id = $1", [id]);
+  await tunnel.queueForMac(id, "member", { n: "after" }, "member:u1:k1", new Date(Date.now() + 60_000));
+  assert.equal((await query("SELECT count(*)::int AS n FROM bops.cloud_pending WHERE user_id = $1", [id])).rows[0].n, 1, "one taken keeps its key");
+});
+
 test("pings keep a Mac; one that stops answering is dropped", async () => {
   const saved = { ...tunnel.timing };
   tunnel.timing.pingMs = 50;

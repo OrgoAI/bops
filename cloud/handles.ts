@@ -18,6 +18,8 @@ import { loadState } from "./state.ts";
  *   wanting the same one at once, only one gets it. One current row per (user, workspace).
  * - Changed (at most 3 times), the old handle stays the user's (retired): mail to the old addresses
  *   still arrives, so nobody else may take it, and the user may go back to it.
+ * - A deleted user's handles stay too, retired and nobody's (user_id NULL, delete-user.ts): taken for
+ *   everyone, for good.
  * - Within one handle, bot names are unique: they're the user's own bots in one workspace.
  *
  * The app asks GET /v1/mail/handle as the user types, and POST /v1/mail/handle when they pick one
@@ -69,10 +71,13 @@ export function handleProblem(h: string): string | null {
 /** `base` with a number on the end, cut to fit 30 characters (tiger, tiger2…). */
 const numbered = (base: string, n: number) => (n === 1 ? base : `${base.slice(0, 30 - String(n).length).replace(/-+$/, "")}${n}`);
 
-/** The handles in `hs` that someone other than this workspace holds (current or retired). */
+/**
+ * The handles in `hs` that someone other than this workspace holds (current or retired), a deleted user's
+ * too: theirs stay, retired and nobody's (user_id NULL, delete-user.ts), so they're never claimed again.
+ */
 async function takenOf(hs: string[], userId: string, workspaceId: string): Promise<Set<string>> {
   if (!hs.length) return new Set();
-  const r = await query<{ handle: string }>("SELECT handle FROM bops.mail_handles WHERE handle = ANY($1::text[]) AND NOT (user_id = $2 AND workspace_id = $3)", [hs, userId, workspaceId]);
+  const r = await query<{ handle: string }>("SELECT handle FROM bops.mail_handles WHERE handle = ANY($1::text[]) AND (user_id IS DISTINCT FROM $2 OR workspace_id <> $3)", [hs, userId, workspaceId]);
   return new Set(r.rows.map((x) => x.handle));
 }
 
@@ -132,7 +137,7 @@ export async function checkHandle(user: CloudUser, workspaceId: string, tried: s
   const problem = handleProblem(handle);
   const fromTried = slugOf(handle);
   if (problem) return { handle, status: "invalid", problem, suggestion: await suggestHandle(user, workspaceId, fromTried.length >= 2 ? { from: fromTried } : { workspaceName }), current };
-  const holder = (await query<{ user_id: string; workspace_id: string }>("SELECT user_id, workspace_id FROM bops.mail_handles WHERE handle = $1", [handle])).rows[0];
+  const holder = (await query<{ user_id: string | null; workspace_id: string }>("SELECT user_id, workspace_id FROM bops.mail_handles WHERE handle = $1", [handle])).rows[0];
   if (!holder) return { handle, status: "available", suggestion: handle, current };
   if (holder.user_id === user.id && holder.workspace_id === workspaceId) return { handle, status: "yours", suggestion: handle, current };
   return {
@@ -194,7 +199,7 @@ async function changeHandle(user: Pick<CloudUser, "id" | "name" | "email">, work
       if (!cur) throw new HttpError(409, "That workspace has no address yet. Try again.");
       if (cur.handle === wanted) return { workspaceId, ...claimOf(cur) };
       if (cur.changes >= MAX_CHANGES) throw new HttpError(429, `You've changed this address ${MAX_CHANGES} times, the most it can be changed.`, { code: "handle_changes_used" });
-      const holder = (await c.query<{ user_id: string; workspace_id: string }>("SELECT user_id, workspace_id FROM bops.mail_handles WHERE handle = $1 FOR UPDATE", [wanted])).rows[0];
+      const holder = (await c.query<{ user_id: string | null; workspace_id: string }>("SELECT user_id, workspace_id FROM bops.mail_handles WHERE handle = $1 FOR UPDATE", [wanted])).rows[0];
       if (holder && !(holder.user_id === user.id && holder.workspace_id === workspaceId)) throw taken("", holder.user_id === user.id ? "Another of your workspaces has it." : undefined);
       await c.query("UPDATE bops.mail_handles SET retired_at = now() WHERE handle = $1", [cur.handle]);
       const r = holder

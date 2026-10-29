@@ -1107,6 +1107,12 @@ export type OrgoDeployment = {
   id: string;
   project_id: string;
   state: DeployState;
+  /** Why it ran: by hand, a changeset built again, or an earlier release put back (rollback). */
+  trigger?: string;
+  /** Its release is the one live now (through it, or another deploy of the same release). */
+  release_live?: boolean;
+  /** Its release is still on the computer and isn't the live one: a rollback can put it back without a build. */
+  can_rollback?: boolean;
   phase?: string | null;
   error?: string | null;
   at?: string | null;
@@ -1130,6 +1136,14 @@ export type OrgoDeployProject = {
   url: string | null;
   /** The port its app listens on there (each project on a computer has its own). */
   port?: number;
+  /** Its commands (null: Orgo finds them). */
+  install_cmd?: string | null;
+  build_cmd?: string | null;
+  start_cmd?: string | null;
+  /** The path Orgo asks for to tell a new release answers, before it puts it live ("/" by default). */
+  health_path?: string;
+  /** Its variables' names (never their values). */
+  env_keys?: string[];
   current?: OrgoDeployment | null;
   deployments?: OrgoDeployment[];
 };
@@ -1149,7 +1163,7 @@ export type Hosting<T> = { enabled: true; value: T } | { enabled: false; why: st
 
 export const HOSTING_CLOSED = "Hosting apps on the web isn't open to your Orgo account yet.";
 
-async function hostingCall<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<Hosting<T>> {
+async function hostingCall<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<Hosting<T>> {
   try {
     return { enabled: true, value: await call<T>(method, path, body, { wait: false }) };
   } catch (e) {
@@ -1174,13 +1188,44 @@ export const deploys = {
    * A new project for an app (its Ingot repo, "<project>/<name>", on that computer), named for its public URL, its app listening
    * on `port` (one no other project or app on that computer has). It names no changeset: one named here
    * would be kept (ingot_at) and built by every deploy that names none after it. Nothing is deployed yet:
-   * deploy queues that.
+   * deploy queues that. `env`: its variables, saved with it (Orgo keeps them encrypted), so its first build
+   * has them; sent only when there are some.
    */
-  create: (computerId: string, app: { repo: string; name: string; port: number }) =>
-    hostingCall<OrgoDeployProject>("POST", `/computers/${encodeURIComponent(computerId)}/deploy-projects`, { source: "ingot", repo: app.repo, name: app.name, port: app.port, deploy: false }),
+  create: (computerId: string, app: { repo: string; name: string; port: number; env?: Record<string, string> }) =>
+    hostingCall<OrgoDeployProject>("POST", `/computers/${encodeURIComponent(computerId)}/deploy-projects`, {
+      source: "ingot",
+      repo: app.repo,
+      name: app.name,
+      port: app.port,
+      deploy: false,
+      ...(app.env && Object.keys(app.env).length ? { env: app.env } : {}),
+    }),
   /** Queue a deploy of one changeset (none: the newest on main). A newer deploy replaces one still queued. */
   deploy: (computerId: string, projectId: string, at?: string) =>
     hostingCall<OrgoDeployment>("POST", `/computers/${encodeURIComponent(computerId)}/deploy-projects/${encodeURIComponent(projectId)}/deployments`, at ? { at } : {}),
+  /**
+   * Change what of a project can be changed (orgo-web PATCH: its name is fixed): its port (its app and its
+   * public URL move, and the live release is built again for it), its install, build and start commands
+   * ("" for the ones Orgo finds itself), and its health check's path. Answers the project as it is now.
+   */
+  change: (computerId: string, projectId: string, patch: { port?: number; install_cmd?: string; build_cmd?: string; start_cmd?: string; health_path?: string }) =>
+    hostingCall<OrgoDeployProject>("PATCH", `/computers/${encodeURIComponent(computerId)}/deploy-projects/${encodeURIComponent(projectId)}`, patch),
+  /**
+   * Set (a value) or remove (null) a project's variables; the rest stay. Orgo keeps the values encrypted and
+   * never gives them back: it answers their names. They apply from the next deploy on.
+   */
+  env: (computerId: string, projectId: string, env: Record<string, string | null>) =>
+    hostingCall<{ env_keys?: string[] }>("PATCH", `/computers/${encodeURIComponent(computerId)}/deploy-projects/${encodeURIComponent(projectId)}/env`, { env }),
+  /**
+   * Remove a project: its runner, containers and releases on the computer (while it runs; one asleep keeps
+   * its folder), its app there, its deployments and logs, and the public URL its deploy made. Its custom
+   * domains stay the computer's: they're removed on their own.
+   */
+  remove: (computerId: string, projectId: string) =>
+    hostingCall<{ deleted?: boolean }>("DELETE", `/computers/${encodeURIComponent(computerId)}/deploy-projects/${encodeURIComponent(projectId)}`),
+  /** Put an earlier deploy's release live again, without a build (only one that went live and is still on the computer). */
+  rollback: (computerId: string, deploymentId: string) =>
+    hostingCall<OrgoDeployment>("POST", `/computers/${encodeURIComponent(computerId)}/deployments/${encodeURIComponent(deploymentId)}/rollback`, {}),
   /** A deploy's build log after the line `after` (0: from the start). */
   logs: (computerId: string, deploymentId: string, after = 0) =>
     hostingCall<OrgoDeployLog>("GET", `/computers/${encodeURIComponent(computerId)}/deployments/${encodeURIComponent(deploymentId)}/logs?after=${Math.max(0, Math.floor(after))}`),
@@ -1227,6 +1272,32 @@ export type OrgoDnsCheck = {
   records?: (OrgoDomainRecord & { status: "ok" | "missing" | "wrong" })[];
 };
 
+/** A name a search found, priced in cents of Orgo credits for its shortest term (only an available one). */
+export type OrgoDomainOffer = { domain: string; tld?: string; status: string; price_cents: number | null; renewal_cents_per_year: number | null; min_years: number | null };
+
+/** A domain the workspace bought through Orgo (orgo-web presentRegisteredDomain): never its registrant. */
+export type OrgoBoughtDomain = {
+  id: string;
+  domain: string;
+  status: string;
+  expires_at?: string | null;
+  auto_renew?: boolean;
+  renewal_cents?: number | null;
+  renewal_years?: number;
+  renewal_paid_by?: "you" | "member" | null;
+  renewal_state?: "off" | "scheduled" | "renewing" | "retrying" | "expired";
+  renewal_error?: "insufficient_credits" | "no_payer" | "registry_refused" | null;
+  /** The names under it that point at a computer, on any computer. */
+  pointed?: { domain: string; computer_id: string; computer_name: string | null; status: string }[];
+};
+
+/**
+ * The workspace's bought domains (GET /projects/{id}/domains): `registrar` when buying is open to this
+ * account, `can_buy` when this key may (full access, a person's own key), and `last_contact`, who they
+ * registered their last one to, which only goes back to the window (Bops never keeps it).
+ */
+export type OrgoBoughtList = { enabled?: boolean; registrar?: boolean; can_buy?: boolean; renewals_enabled?: boolean; domains?: OrgoBoughtDomain[]; last_contact?: Record<string, unknown> | null };
+
 /** A record as orgo-web takes it to add or change one (the whole record either way). */
 export type OrgoRecordInput = { type: string; name: string; value: string; priority?: number | string; weight?: number | string; port?: number | string };
 
@@ -1254,9 +1325,35 @@ export const domains = {
   },
   /** What the internet answers for one of them now, beside what it should (30 looks a minute per person). */
   check: (computerId: string, domainId: string) => call<OrgoDnsCheck>("GET", `/computers/${seg(computerId)}/domains/${seg(domainId)}/dns-check`, undefined, { wait: false }),
-  /** The workspace's bought domains. */
-  bought: (projectId: string) =>
-    call<{ enabled?: boolean; domains?: { id: string; domain: string; status: string }[] }>("GET", `/projects/${seg(projectId)}/domains`, undefined, { wait: false }),
+  /** The workspace's bought domains, whether this key may buy one, and who the user last registered one to. */
+  bought: (projectId: string) => call<OrgoBoughtList>("GET", `/projects/${seg(projectId)}/domains`, undefined, { wait: false }),
+  /**
+   * Point a domain at a port of the computer: one typed in full (the user's own, or a name under one of the
+   * workspace's bought domains, which Orgo then writes the records of), or a bought one picked by its id.
+   * Answers it with the records to set, if any. Never made again by itself: it's added once.
+   */
+  connect: (computerId: string, d: { domain: string } | { registered_domain_id: string; subdomain: string }, port: number) =>
+    call<OrgoCustomDomain>("POST", `/computers/${seg(computerId)}/domains`, { ...d, target_port: port }, { wait: false }),
+  /** Ask Orgo to check a domain's DNS now and turn it on once it answers (a 409 with what's missing while it doesn't). */
+  verify: (computerId: string, domainId: string) => call<{ status: string }>("POST", `/computers/${seg(computerId)}/domains/${seg(domainId)}/verify`, {}, { wait: false }),
+  /** Point a domain at another port of its computer (the app it serves moved). */
+  move: (computerId: string, domainId: string, port: number) =>
+    call<OrgoCustomDomain>("PATCH", `/computers/${seg(computerId)}/domains/${seg(domainId)}`, { target_port: port }, { wait: false }),
+  /** Take a domain off the computer (a bought one's records Orgo wrote for it go too; the domain stays the workspace's). */
+  remove: (computerId: string, domainId: string) => call<{ deleted?: boolean }>("DELETE", `/computers/${seg(computerId)}/domains/${seg(domainId)}`, undefined, { wait: false }),
+  /** Names to buy for `q`, a page of extensions at a time, priced in Orgo credits (30 searches a minute per person). */
+  search: (q: string, page: number) =>
+    call<{ results?: OrgoDomainOffer[]; next_page?: number | null; registrar_error?: boolean }>("GET", `/domains/search?q=${seg(q)}&page=${Math.max(0, Math.floor(page))}`, undefined, { wait: false }),
+  /**
+   * Buy a domain for the workspace, charged to the user's Orgo credits: `expected` is the price in cents the
+   * user saw and agreed to, which Orgo checks against a fresh quote (409 PRICE_CHANGED with the new one).
+   * Never sent again by itself (an answer lost is REGISTRATION_UNKNOWN, settled by Orgo).
+   */
+  buy: (projectId: string, domain: string, registrant: Record<string, string>, expected: number) =>
+    call<OrgoBoughtDomain>("POST", `/projects/${seg(projectId)}/domains`, { domain, registrant, expected_price_cents: expected }, { wait: false, timeoutMs: 120_000 }),
+  /** Turn a bought domain's auto-renew on (the caller pays its renewals from their credits from then on) or off. */
+  autoRenew: (projectId: string, domainId: string, on: boolean) =>
+    call<{ domain: OrgoBoughtDomain }>("PATCH", `/projects/${seg(projectId)}/domains/${seg(domainId)}`, { auto_renew: on }, { wait: false }),
   /** A bought domain's zone: where it's answered and every record in it. */
   zone: (projectId: string, domainId: string) => call<OrgoZone>("GET", `/projects/${seg(projectId)}/domains/${seg(domainId)}/dns`, undefined, { wait: false }),
   /** Add a record; answers it and the zone as written. */

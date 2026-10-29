@@ -257,7 +257,7 @@ export function OwnerPhone({
           </button>
         )}
       </div>
-      <label className="flex max-w-[560px] cursor-pointer items-start gap-2 text-[12px] leading-[17px] text-[color:var(--c-6b6b6b)]">
+      <label className="flex max-w-[560px] items-start gap-2 text-[12px] leading-[17px] text-[color:var(--c-6b6b6b)]">
         <input type="checkbox" checked={agree} disabled={busy} onChange={(e) => phone.setAgree(e.target.checked)} className="mt-[2px] accent-[color:var(--c-0a0a0a)]" />
         <span>
           Yes, text me from my {BRAND.name} bots ({BRAND.name} by Orgo): replies to my texts, finished tasks and heads-ups. How often depends on what I ask for. Message and data rates may apply. Reply STOP to opt out, HELP for help. Texts and calls from this number count as me.{" "}

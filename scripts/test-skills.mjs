@@ -402,7 +402,7 @@ await check("Import a folder: junk, links out of it and a file holding a secret 
     r.body.skipped.map((p) => `${p.path}${p.line ? `:${p.line}` : ""} ${p.reason}`).sort(),
     [".DS_Store junk: .DS_Store", "SKILL.md.bak-1 junk: backup file", "__pycache__ junk: __pycache__", "hosts link to outside the folder", "node_modules junk: node_modules", "scripts/fix-vnc.sh:3 secret: private key block", "sweep.log junk: log file", ".netrc credentials file: never kept", ".env credentials file: never kept"].sort(),
   );
-  assert.deepEqual(r.body.warnings, [{ path: "scripts/check-health.sh", line: 3, reason: "uses GITHUB_TOKEN, which requires_secrets doesn't declare" }]);
+  assert.deepEqual(r.body.warnings, [{ path: "scripts/check-health.sh", line: 3, reason: "uses GITHUB_TOKEN, which metadata.requires-secrets doesn't declare" }]);
   const d = W.skillDetail("ws_main", "skill", "vm-health");
   assert.deepEqual(d.files.map((x) => [x.path, x.executable, x.script, x.binary]), [["faults-link.md", false, false, false], ["logo.bin", false, false, true], ["references/faults.md", false, false, false], ["scripts/check-health.sh", true, true, false]]);
   assert.deepEqual(readFileSync(join(dataDir(), "ws_main", "skills", "vm-health", "logo.bin")), Buffer.from([0, 1, 2, 3]), "a binary file kept byte for byte");
@@ -471,18 +471,18 @@ await check("Versions are version shaped (never a path); a key in a description 
 await check("The prompts list skills and apps under their labels: up to 15 of its own by name and description, more as one line per label", async () => {
   W.publishSkill("ws_main", "app", "orgo-doctor");
   const note = hear(W.skillsNote("max"));
-  assert.match(note, /^Your skills: [^\n]+\nApps and source control \(5\): [^\n]+\nWriting \(1\):\n- Weekly report: [^\n]+\nOther \(1\):\n- Orgo doctor \(app\): Finds what's wrong with a computer and says the fix\.$/);
+  assert.match(note, /^Your skills: [^\n]+\nApps and source control \(5\): [^\n]+\nWriting \(1\):\n- Weekly report: [^\n]+\nUnsorted \(1\):\n- Orgo doctor \(app\): Finds what's wrong with a computer and says the fix\.$/);
   for (let i = 0; i < 20; i++) W.createSkill("ws_main", { name: `Many ${i}`, description: `Number ${i}`, body: `# ${i}\n`, status: "published" });
   const many = W.skillsNote("max");
-  assert.deepEqual(many.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(0, l.indexOf(":"))), ["- Apps and source control (5)", "- Writing (1)", "- Other (21)"]);
-  assert.match(many, /\n- Other \(21\): Orgo doctor \(app\), Many 0, Many 1, /);
+  assert.deepEqual(many.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(0, l.indexOf(":"))), ["- Apps and source control (5)", "- Writing (1)", "- Unsorted (21)"]);
+  assert.match(many, /\n- Unsorted \(21\): Orgo doctor \(app\), Many 0, Many 1, /);
   assert.doesNotMatch(many, /Number \d/, "past 15 of its own, no descriptions: read_skill with the label lists them");
   for (let i = 0; i < 20; i++) await W.deleteSkill("ws_main", "skill", `many-${i}`);
   // Signed in as someone apps aren't open to (lib/apps-access.ts): the same list without Bops' own for apps.
   const was = S.getState().account;
   S.update((s) => (s.account = { user: { id: "u_2", email: "tiger@example.com" }, signedInAt: 0 }));
   try {
-    assert.match(hear(W.skillsNote("max")), /^Your skills: [^\n]+\nWriting \(1\):\n- Weekly report: [^\n]+\nOther \(1\):\n- Orgo doctor \(app\): [^\n]+$/);
+    assert.match(hear(W.skillsNote("max")), /^Your skills: [^\n]+\nWriting \(1\):\n- Weekly report: [^\n]+\nUnsorted \(1\):\n- Orgo doctor \(app\): [^\n]+$/);
   } finally {
     S.update((s) => (s.account = was));
   }

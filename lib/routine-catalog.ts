@@ -10,7 +10,9 @@ import type { AppLevel, Routine, Schedule, Workspace, WorkspaceTag } from "@/lib
  * for vault keys, Orbit and memory for people. They read; anything that sends, saves, labels, posts,
  * changes or pays asks the user first. The support watches keep Orbit's issues (orbit_issue_open), one
  * per thread or ticket, by its id there. An "every" starter, and every monitor, is quiet: it says something
- * only when something needs the user.
+ * only when something needs the user. A reply it writes for the user is offered with draft_reply, a card under
+ * its message that the user sends from (lib/server/reply-drafts.ts); a routine made before that is told so by its
+ * run's job (chat.ts jobNote).
  *
  * Imported by the window and the server alike: no server imports here.
  */
@@ -138,8 +140,9 @@ const chatApp = (app: "slack" | "discord", name: string): RoutineTemplate[] => [
     goal: [
       `Read the new messages and threads in my ${name} channels since the last run (find_app_actions, then use_app).`,
       "Tag each new thread Customer, Bug, Outage or FYI.",
-      "For a question someone is still waiting on, write a short draft answer in your reply, in my voice.",
-      ISSUE(app, "each thread tagged Customer, Bug or Outage (not FYI)", `the thread's id in ${name}`),
+      "For a question someone is still waiting on, offer a short draft answer in my voice with draft_reply, in its thread, for me to send from Bops.",
+      // The channel and where in it, so the issue's page can show the thread itself (lib/server/issue-source.ts).
+      ISSUE(app, "each thread tagged Customer, Bug or Outage (not FYI)", app === "slack" ? "the thread's id in Slack (its channel's id and its first message's ts, as C0123ABCD/1700000000.000100)" : "the thread's id in Discord (its channel's id, then the message's id after a slash)"),
       "Put anything tagged Outage first.",
       `Read only in ${name}: don't post, reply, react or change anything there. ${READS_ONLY}`,
       "If nothing new needs me, answer NOTHING.",
@@ -178,7 +181,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     id: "gmail-morning-inbox",
     app: "gmail",
     title: "Morning inbox",
-    summary: "Sorts new mail with your tags, drafts replies for what needs you, and sends one short summary.",
+    summary: "Sorts new mail with your tags, drafts replies for you to send, and sends one short summary.",
     when: "Every day at 8 AM",
     kind: "schedule",
     defaultOn: true,
@@ -188,9 +191,9 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
       "Check my Gmail for mail since the last run, or the last 24 hours (find_app_actions, then use_app).",
       `${SORT} Give each email one tag.`,
       "Look people up in Knowledge (orbit_read) and memory (recall) when it helps to know who they are.",
-      "For each email that needs an answer from me, write a short draft reply in my voice in your answer.",
+      "For each email that needs an answer from me, offer a short draft reply in my voice with draft_reply, for me to send from Bops.",
       ISSUE("gmail", "each email from a customer that needs me, an outage or a bug report", "the email's thread id"),
-      "Answer with one short summary: what needs me first, then a line per tag that has mail, then the drafts.",
+      "Answer with one short summary: what needs me first, then a line per tag that has mail.",
       `Read only in Gmail: don't send, save drafts, label, archive or delete anything. ${READS_ONLY}`,
     ].join(" "),
     tags: ALL_TAGS,
@@ -234,8 +237,8 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     goal: [
       "Check my Gmail for new mail since the last run that needs a reply from me (find_app_actions, then use_app).",
       "Skip newsletters, receipts and notifications. Look the sender up in Knowledge (orbit_read) and memory (recall).",
-      "For each one, give who it's from, the subject, and a short draft reply in my voice.",
-      `Don't send it or save it in Gmail: I'll send what I like. ${READS_ONLY}`,
+      "For each one, offer a short draft reply in my voice with draft_reply, and say in a line who it's from and what it's about.",
+      `Don't send it or save it in Gmail: I'll send the ones I like from Bops. ${READS_ONLY}`,
       "If nothing new needs a reply, answer NOTHING.",
     ].join(" "),
     tags: ["Customer", "Bug", "Office"],
@@ -254,7 +257,7 @@ export const ROUTINE_TEMPLATES: RoutineTemplate[] = [
     goal: [
       "Look through the mail I sent in the last 14 days that got no reply yet (find_app_actions, then use_app), and the open promises in Knowledge (orbit_read).",
       "List who I'm waiting on and since when, most important first.",
-      "For each one worth chasing, write a short, friendly follow up in my voice.",
+      "For each one worth chasing, offer a short, friendly follow up in my voice with draft_reply, in that email's thread.",
       `Don't send anything. ${READS_ONLY}`,
     ].join(" "),
     neverWithoutAsking: MAIL_NEVER,

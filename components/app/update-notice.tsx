@@ -33,6 +33,44 @@ const button = "shrink-0 rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medi
 
 /** One calm line above the sidebar's bottom row while a newer release is out, and what's new in it under that. */
 export function UpdateNotice() {
+  const { info, late, dismiss } = useUpdate();
+  return <UpdateCard info={info} late={late} onDismiss={dismiss} />;
+}
+
+/**
+ * The notice on the folded sidebar (sidebar-rail.tsx): one round button with a blue dot, its tooltip
+ * saying where the update is at. It unfolds the sidebar (`onOpen`), where the card has Restart and the
+ * rest: one click on an icon never restarts Bops. Shown when the card would be.
+ */
+export function UpdateButton({ onOpen }: { onOpen: () => void }) {
+  const { info } = useUpdate();
+  if (!info) return null;
+  const phase = info.phase ?? "manual";
+  if (phase === "downloading" && !info.asked) return null;
+  const tip =
+    phase === "ready"
+      ? `${BRAND.name} ${info.version} is ready to install`
+      : phase === "downloading"
+        ? `${BRAND.name} ${info.version} is downloading`
+        : phase === "available" && info.failed
+          ? "The download didn't finish"
+          : `${BRAND.name} ${info.version} is out`;
+  return (
+    <button
+      onClick={onOpen}
+      aria-label={tip}
+      className="relative flex size-9 shrink-0 items-center justify-center rounded-full bg-white shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-fcfcfb)] active:scale-[.96]"
+    >
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
+        <path d="M7 11.5V2.8M3.2 6.4L7 2.6l3.8 3.8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      <span aria-hidden className="absolute -right-px -top-px size-2.5 rounded-full bg-[#2F7BFF] shadow-[0_0_0_2px_var(--c-f9f9f8)]" />
+    </button>
+  );
+}
+
+/** Where a newer release is at, as the Mac app says (nothing in a browser), and putting the notice away. */
+function useUpdate() {
   // `late`: the card turned up while Bops was open (a check after launch), so it rises in; what launch
   // already knew just shows. Set as the card appears and kept while it stays, so a later check never replays it.
   const [{ info, late }, setShown] = useState<{ info: UpdateInfo; late: boolean }>({ info: null, late: false });
@@ -50,7 +88,7 @@ export function UpdateNotice() {
       off();
     };
   }, []);
-  return <UpdateCard info={info} late={late} onDismiss={() => setShown({ info: null, late: false })} />;
+  return { info, late, dismiss: () => setShown({ info: null, late: false }) };
 }
 
 /** The notice itself, for where the update is at. Nothing while it downloads unasked (it shows once ready). */

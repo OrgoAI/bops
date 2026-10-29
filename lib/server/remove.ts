@@ -1,7 +1,12 @@
 import "server-only";
-import { botChatId, freeComputerOnDelete, live, MAIN_WORKSPACE, workspaceOf } from "@/lib/types";
+import { botChatId, freeComputerOnDelete, live, MAIN_WORKSPACE, workspaceOf, type Message } from "@/lib/types";
+import { privacyOf, uploadIdsOf } from "@/lib/privacy";
 import { dropGuestKey, resetComputer, stopSession } from "./sessions";
-import { bot, getState, session, update } from "./store";
+import { bot, chat, getState, session, update } from "./store";
+import { keepDeleted, type Deleted, type DeletedKind } from "./deleted";
+import { dropFrame } from "./frames";
+import { dropUploads } from "./uploads";
+import { onPostgres } from "./persist";
 import { stopWatch } from "./watches";
 import { deleteInboxes } from "./mail";
 import { dropBotFromSkills, dropWorkspaceSkills } from "./workspace-skills";
@@ -11,38 +16,160 @@ import { routinesRemovedInWorkspace } from "./routine-sync";
 import { brainsOf, removeBrain } from "./brains";
 
 /**
- * Delete one message from a chat. One the user kept "between us" (Message.secret) leaves the bots' answers
- * to it there (until the user's next message) kept the same, so a procedure's draft still leaves them out
- * (procedures.ts notSecret knew them by the message before them).
+ * What a delete leaves behind on this Mac (Settings → Your data, lib/privacy.ts), once its messages, thread or
+ * chat left the state (and so Bops Cloud and the user's other Macs, with the next save). With days to keep
+ * what the user deletes (deletedDays), a copy under Recently deleted on this Mac (lib/server/deleted.ts),
+ * with the images and the thread's frame moved into it. Never of what the user kept "between us"
+ * (Message.secret; a thread started for one, Session.secret, whole): no copy ever holds a secret, so those go
+ * for good at once, whatever deletedDays says. Nor on a hosted server, which is no one's Mac. Otherwise
+ * (`forGood`, the Keep chats and calls sweep's, is always so), or when the copy couldn't be written (a full
+ * disk: nothing of it is left), gone at once: the images on this Mac that no message left in the chats
+ * shows, and the thread's last frame. A file that won't go never undoes the delete: the sweep looks again.
  */
-export function deleteMessage(messageId: string) {
-  update((state) => {
-    const at = state.messages.findIndex((m) => m.id === messageId);
-    const gone = state.messages[at];
-    if (gone?.secret && gone.role === "user")
-      for (const m of state.messages.slice(at + 1)) {
-        if (m.chatId !== gone.chatId) continue;
-        if (m.role === "user") break;
-        if (m.role === "bot") m.secret = true;
-      }
-    state.messages = state.messages.filter((m) => m.id !== messageId);
-  });
+function leaveBehind(kind: DeletedKind, what: Deleted, forGood: boolean) {
+  const copying = !forGood && !onPostgres() && privacyOf(getState()).deletedDays > 0 && !what.session?.secret;
+  const copied = copying ? copyable(what.messages) : [];
+  const left = new Set(copied);
+  let kept = false;
+  if (copying && (copied.length || what.session || what.chat))
+    try {
+      kept = !!keepDeleted(kind, { ...what, messages: copied });
+    } catch (e) {
+      console.warn(`[remove] a copy for Recently deleted: ${(e as Error).message}`);
+    }
+  // What no copy holds: the secrets beside one, or all of it.
+  dropLeft(kept ? what.messages.filter((m) => !left.has(m)) : what.messages, what.session && !kept ? [what.session.id] : []);
 }
 
-/** Delete a finished thread, its result in the chat, and its chips. A running one has to be stopped first. */
+/**
+ * The deleted messages a copy may hold: none the user kept "between us" (Message.secret), nor a bot's answer
+ * to one (its bot lines after it in that chat, until the user's next message), marked or not: deleteMessages
+ * marks the answers only when their message goes on its own, so a chat or thread deleted whole still holds
+ * unmarked ones. The message before each answer is looked for among what went and what's still in the chats,
+ * by time.
+ */
+function copyable(messages: readonly Message[]): Message[] {
+  const all = [...messages, ...getState().messages].sort((a, b) => a.at - b.at);
+  const lastSaidSecret = new Map<string, boolean>();
+  const beside = new Set<string>();
+  for (const m of all) {
+    if (m.role === "user") lastSaidSecret.set(m.chatId, !!m.secret);
+    else if (m.role === "bot" && lastSaidSecret.get(m.chatId)) beside.add(m.id);
+  }
+  return messages.filter((m) => !m.secret && !beside.has(m.id));
+}
+
+/** What a delete with no copy leaves on this Mac goes: the images no message left in the chats shows, and the threads' last frames. */
+function dropLeft(messages: readonly Message[], sessionIds: readonly string[]) {
+  try {
+    if (messages.length) dropUploads(uploadIdsOf(messages), uploadIdsOf(getState().messages));
+    for (const x of sessionIds) dropFrame(x);
+  } catch (e) {
+    console.warn(`[remove] what the delete left on this Mac: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * Delete messages from their chats: the one way a message goes, whether the user deleted it (deleteMessage)
+ * or it's older than they keep chats (lib/server/privacy.ts, `forGood`: never kept under Recently deleted).
+ * Gone from the state, so from Bops Cloud with the next save, which every Mac and the iPhone hear of. One the
+ * user kept "between us" (Message.secret) leaves the bots' answers to it there (until the user's next
+ * message) kept the same, so a procedure's draft still leaves them out (procedures.ts notSecret knew them by
+ * the message before them). How many went.
+ */
+export function deleteMessages(ids: readonly string[], { forGood = false }: { forGood?: boolean } = {}): number {
+  const want = new Set(ids);
+  if (!getState().messages.some((m) => want.has(m.id))) return 0;
+  let gone: Message[] = [];
+  update((state) => {
+    const list = state.messages;
+    for (let at = 0; at < list.length; at++) {
+      const m = list[at];
+      if (!want.has(m.id) || !m.secret || m.role !== "user") continue;
+      for (let i = at + 1; i < list.length; i++) {
+        const x = list[i];
+        if (x.chatId !== m.chatId) continue;
+        if (x.role === "user") break;
+        if (x.role === "bot") x.secret = true;
+      }
+    }
+    gone = list.filter((m) => want.has(m.id));
+    state.messages = list.filter((m) => !want.has(m.id));
+  });
+  leaveBehind("message", { messages: gone }, forGood);
+  return gone.length;
+}
+
+/** The user deletes one message from a chat (its menu's Delete). */
+export const deleteMessage = (messageId: string) => void deleteMessages([messageId]);
+
+/**
+ * Delete a finished thread, its result in the chat, and its chips, and its last frame on this Mac (or, with
+ * days to keep what the user deletes, all of it under Recently deleted: lib/server/deleted.ts). A running
+ * one has to be stopped first.
+ */
 export function deleteThread(sessionId: string) {
   const s = session(sessionId);
   if (!s) return;
   if (live(s)) throw new Error("stop it first");
+  deleteThreads([sessionId]);
+}
+
+/**
+ * Delete finished threads (deleteThread's, many at once: one change to the state): each with its goal,
+ * replies, steps and result, the note that only pointed at it ("On it."), its chip on the messages that had
+ * it, and its last frame on this Mac. `forGood` (the Keep chats and calls sweep's, lib/server/privacy.ts):
+ * never into Recently deleted. One still going is never touched. How many went.
+ */
+export function deleteThreads(sessionIds: readonly string[], { forGood = false }: { forGood?: boolean } = {}): number {
+  const want = new Set(sessionIds);
+  const going = getState().sessions.filter((x) => want.has(x.id) && !live(x));
+  if (!going.length) return 0;
+  const ids = new Set(going.map((x) => x.id));
+  const gone = new Map<string, Message[]>(going.map((x) => [x.id, []]));
+  const stripped = new Map<string, string[]>(going.map((x) => [x.id, []]));
   update((state) => {
-    state.sessions = state.sessions.filter((x) => x.id !== sessionId);
-    state.messages = state.messages
-      .filter((m) => m.resultOf !== sessionId)
-      .map((m) => (m.sessionIds?.includes(sessionId) ? { ...m, sessionIds: m.sessionIds.filter((x) => x !== sessionId) } : m))
-      // A note that only pointed at this thread ("On it.") has nothing left to point at.
-      .filter((m) => !(m.sessionIds && m.sessionIds.length === 0 && m.role === "bot" && m.text.length < 40));
-    delete state.screens?.[`${s.botId}:${s.display}`];
+    state.sessions = state.sessions.filter((x) => !ids.has(x.id));
+    const kept: Message[] = [];
+    for (const m of state.messages) {
+      if (m.resultOf && ids.has(m.resultOf)) {
+        gone.get(m.resultOf)!.push(m);
+        continue;
+      }
+      const had = m.sessionIds?.filter((x) => ids.has(x)) ?? [];
+      if (!had.length) {
+        kept.push(m);
+        continue;
+      }
+      const next = { ...m, sessionIds: m.sessionIds!.filter((x) => !ids.has(x)) };
+      // A note that only pointed at these threads ("On it.") has nothing left to point at.
+      if (next.sessionIds.length === 0 && next.role === "bot" && next.text.length < 40) {
+        gone.get(had[0])!.push(m);
+        continue;
+      }
+      for (const x of had) stripped.get(x)!.push(m.id);
+      kept.push(next);
+    }
+    state.messages = kept;
+    for (const s of going) delete state.screens?.[`${s.botId}:${s.display}`];
   });
+  // For good, many at once: what they left on this Mac goes in one go.
+  if (forGood) dropLeft([...gone.values()].flat(), [...ids]);
+  else for (const s of going) leaveBehind("thread", { messages: gone.get(s.id)!, session: s, stripped: stripped.get(s.id)! }, false);
+  return going.length;
+}
+
+/** Delete a group chat and its messages (a bot's own chat goes when the bot does: deleteBot). */
+export function deleteGroupChat(chatId: string) {
+  const c = chat(chatId);
+  if (!c || c.kind !== "group") return;
+  let gone: Message[] = [];
+  update((state) => {
+    state.chats = state.chats.filter((x) => x.id !== chatId);
+    gone = state.messages.filter((m) => m.chatId === chatId);
+    state.messages = state.messages.filter((m) => m.chatId !== chatId);
+  });
+  leaveBehind("chat", { messages: gone, chat: c }, false);
 }
 
 /**

@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { appsShown } from "@/lib/apps-access";
 import { builtinLabels, builtinSkills, type BuiltinSkill } from "@/lib/builtin-skills";
-import { cleanLabel, OTHER, sameLabel, SKILL_LABEL_MAX, type SkillGroup } from "@/lib/skill-labels";
+import { botHasLabel, botHasSkill, cleanLabel, isUnsorted, LABEL_ABOUT_MAX, labelInfoOf, sameLabel, SKILL_LABEL_MAX, UNSORTED, type SkillGroup, type SkillLabelInfo } from "@/lib/skill-labels";
 import { workspaceOf, type AppState, type Bot, type SkillKind, type SkillRef } from "@/lib/types";
 import { Fold } from "./fold";
 import { Mascot, Spinner } from "./mascot";
@@ -16,10 +16,15 @@ import { BRAND } from "@/lib/brand";
  * each a folder in the Agent Skill shape on this Mac (lib/server/workspace-skills.ts). A kind in Knowledge
  * (memory-categories.tsx): its chip opens a page (SkillsPage) in the Knowledge tab with the skills under
  * their labels (lib/skill-labels.ts), Bops' own labels first, each a heading that folds; one opens in place:
- * its SKILL.md and files, its label (a chip to move it), which bots have it, its versions (Publish, Roll
- * back), its scripts to approve, Open in Finder and Delete. Bops' own skills open read only. Import folder
- * takes a folder picked in Finder through the Mac app. The lists are the app's state (Workspace.skills,
- * Workspace.apps), so they're as current as everything else.
+ * its SKILL.md and files, its label (a chip to move it; Bops' suggestion says auto, with Confirm and Change), which bots have it, its versions (Publish, Roll
+ * back), its scripts to approve, Open in Finder, Update from folder and Delete. Bops' own skills open read only.
+ * Import folder takes a folder picked in Finder through the Mac app. Who has what (the owner's, in the window)
+ * is a grid of the workspace's labels by its bots: a tick gives a bot every skill in that label
+ * (Bot.skillLabels, lib/skill-labels.ts botHasSkill), a label opens to its skills, where a skill naming its own
+ * bots stays the exception, and a label can be renamed (its skills move with it) and given a line about what
+ * it's for (the line its bots' prompts show). Suggest labels with AI (the owner's) turns off a small model's pick
+ * of a label for a new skill. The lists are the app's state (Workspace.skills, Workspace.apps,
+ * Workspace.skillLabelInfo, the bots), so they're as current as everything else.
  */
 
 type Problem = { path: string; reason: string; line?: number };
@@ -37,11 +42,26 @@ export function skillsIn(state: AppState, wsId = currentWorkspace(state)) {
   return { skills: [...(w?.skills ?? [])].sort(newest), apps: [...(w?.apps ?? [])].sort(newest) };
 }
 
-/** The skills and apps a bot has: its workspace's, every bot's or named for it. Drafts too (they say so). */
+/** The skills and apps a bot has (lib/skill-labels.ts botHasSkill): named for it, or under a label it has. Drafts too (they say so). */
 export function botSkills(state: AppState, b: Bot) {
   // Apps hidden in the prod build for now.
   const { skills /* , apps */ } = skillsIn(state, workspaceOf(b));
-  return [...skills /* , ...apps */].filter((r) => !r.botIds.length || r.botIds.includes(b.id));
+  return [...skills /* , ...apps */].filter((r) => botHasSkill(r, b));
+}
+
+/**
+ * The workspace's own labels, as Who has what lists them (workspace-skills.ts workspaceLabels): the ones the owner
+ * wrote about first in their order, then those its skills are under, Unsorted last.
+ */
+export function workspaceLabelsOf(refs: SkillRef[], info: SkillLabelInfo[] = []): string[] {
+  const out: string[] = [];
+  const add = (l: string | undefined) => {
+    const c = cleanLabel(l);
+    if (!out.some((x) => sameLabel(x, c))) out.push(c);
+  };
+  for (const x of [...info].sort((a, b) => a.position - b.position)) add(x.name);
+  for (const r of refs) add(r.label);
+  return [...out.filter((l) => !isUnsorted(l)), ...out.filter((l) => isUnsorted(l))];
 }
 
 /** The Skills mark: a folder with a spark. */
@@ -67,7 +87,7 @@ export type LabelGroup = SkillGroup & { refs: SkillRef[]; builtins: BuiltinSkill
 /**
  * Skills under their labels, as the page lists them and in the order a bot sees them (skillGroups in
  * lib/server/workspace-skills.ts): Bops' own labels first, in their order (with any of the workspace's
- * skills given one of their names), then the workspace's, the most skills first, then by name, Other
+ * skills given one of their names), then the workspace's, the most skills first, then by name, Unsorted
  * last. Each list keeps the order it came in (newest first). `withBuiltins` false: only the workspace's
  * labels (apps have no built-in ones). `apps`: whether apps are open to the account (lib/apps-access.ts),
  * without which Bops' own Apps and source control skills aren't listed.
@@ -88,7 +108,7 @@ export function labelGroups(refs: SkillRef[], withBuiltins = true, apps = true):
     if (!g) theirs.push((g = make(label, "", false)));
     g.refs.push(r);
   }
-  const other = (g: LabelGroup) => (sameLabel(g.label, OTHER) ? 1 : 0);
+  const other = (g: LabelGroup) => (isUnsorted(g.label) ? 1 : 0);
   theirs.sort((a, b) => other(a) - other(b) || b.refs.length - a.refs.length || a.label.localeCompare(b.label));
   // A label of Bops' with nothing in it isn't listed.
   return [...ours.filter((g) => g.builtins.length || g.refs.length), ...theirs].map((g) => {
@@ -97,10 +117,10 @@ export function labelGroups(refs: SkillRef[], withBuiltins = true, apps = true):
   });
 }
 
-/** The labels a skill can be moved to: every one on the page, and Other. */
+/** The labels a skill can be moved to: every one on the page, and Unsorted. */
 export function labelChoices(refs: SkillRef[], apps = true) {
   const all = labelGroups(refs, true, apps).map((g) => g.label);
-  return all.some((l) => sameLabel(l, OTHER)) ? all : [...all, OTHER];
+  return all.some((l) => isUnsorted(l)) ? all : [...all, UNSORTED];
 }
 
 /** What the update route takes to move a skill to `label` (app/api/skills, action "update"). */
@@ -156,7 +176,7 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
     if (focus) setOpen(focus);
   }
   const [importing, setImporting] = useState<SkillKind | null>(null);
-  const [imported, setImported] = useState<{ name?: string; skipped: Problem[]; warnings: Problem[]; error?: string } | null>(null);
+  const [imported, setImported] = useState<{ name?: string; skipped: Problem[]; warnings: Problem[]; error?: string; updated?: boolean } | null>(null);
   const [orgo, setOrgo] = useState(false);
   // Opened: kept in step with Orgo, where the workspace has its own and Orgo has the routes.
   useEffect(() => {
@@ -185,10 +205,13 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
   };
 
   const ref = open ? [...skills, ...apps].find((r) => `${r.kind}:${r.slug}` === open) : undefined;
+  const info = state.workspaces?.find((w) => w.id === ws)?.skillLabelInfo ?? [];
   // Bops' own Apps and source control skills only where apps are shown (lib/apps-access.ts): never in a shared workspace.
   const appsHere = appsShown(state);
   const ours = open?.startsWith("builtin:") ? builtinSkills(appsHere).find((s) => `builtin:${s.slug}` === open) : undefined;
   const kinds: SkillKind[] = only ? [only] : ["skill", "app"];
+  // Who has what: the owner's, in their own window (never in a workspace shared with them).
+  const grid = !state.shared && kinds.includes("skill") && team.length > 0 && skills.length > 0;
   const groups = [
     { kind: "skill" as const, label: "Skills", list: skills },
     { kind: "app" as const, label: "Apps", list: apps },
@@ -224,7 +247,7 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
         {imported && <ImportNote result={imported} onDismiss={() => setImported(null)} />}
 
         {ref ? (
-          <SkillView key={open} state={state} ws={ws} skill={ref} team={team} labels={labelChoices(skills, appsHere)} onBack={() => setOpen(null)} />
+          <SkillView key={open} state={state} ws={ws} skill={ref} team={team} labels={labelChoices(skills, appsHere)} onBack={() => setOpen(null)} onUpdated={setImported} />
         ) : ours ? (
           <BuiltinView key={open} skill={ours} onBack={() => setOpen(null)} />
         ) : (
@@ -239,6 +262,8 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
                 ))}
               </div>
             )}
+            {grid && <WhoHasWhat ws={ws} team={team} refs={skills} info={info} onOpen={(r) => setOpen(`${r.kind}:${r.slug}`)} />}
+            {!state.shared && kinds.includes("skill") && <SuggestToggle ws={ws} on={!state.workspaces?.find((w) => w.id === ws)?.skillLabelsAIOff} />}
             {sections.map((s, i) => (
               <section key={s.kind} className="flex flex-col gap-3">
                 {/* Both kinds on one page: each under its own name. */}
@@ -249,7 +274,7 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
                       <SkillRow key={`builtin:${b.slug}`} name={b.name} description={b.description} onOpen={() => setOpen(`builtin:${b.slug}`)} />
                     ))}
                     {g.refs.map((r) => (
-                      <SkillRow key={`${r.kind}:${r.slug}`} name={r.name} description={r.description} draft={r.status === "draft"} onOpen={() => setOpen(`${r.kind}:${r.slug}`)} />
+                      <SkillRow key={`${r.kind}:${r.slug}`} name={r.name} description={r.description} draft={r.status === "draft"} auto={r.kind === "skill" && suggestedLabel(r)} onOpen={() => setOpen(`${r.kind}:${r.slug}`)} />
                     ))}
                   </LabelSection>
                 ))}
@@ -299,8 +324,11 @@ function LabelSection({ user, ws, group: g, first, children }: { user: string; w
   );
 }
 
-/** A skill on one line: its name, what it does (all of it in the tooltip), and Draft until it's published. */
-function SkillRow({ name, description, draft, onOpen }: { name: string; description: string; draft?: boolean; onOpen: () => void }) {
+/** Its label is Bops' suggestion, not confirmed yet (SkillRef.labelBy "auto"). */
+export const suggestedLabel = (r: SkillRef) => r.labelBy === "auto" && !!r.label;
+
+/** A skill on one line: its name, what it does (all of it in the tooltip), auto while its label is Bops' suggestion, and Draft until it's published. */
+function SkillRow({ name, description, draft, auto, onOpen }: { name: string; description: string; draft?: boolean; auto?: boolean; onOpen: () => void }) {
   return (
     <button
       type="button"
@@ -310,6 +338,7 @@ function SkillRow({ name, description, draft, onOpen }: { name: string; descript
     >
       <span className="max-w-[45%] shrink-0 truncate text-[13px] font-medium leading-[18px]">{name}</span>
       <span className="min-w-0 flex-1 truncate text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">{description}</span>
+      {auto && <span className={`${CHIP} shrink-0`} data-tip={`Label picked by ${BRAND.name}. Open it to confirm or change it`}>auto</span>}
       {draft && <span className={DRAFT}>Draft</span>}
     </button>
   );
@@ -361,11 +390,14 @@ function BuiltinView({ skill: s, onBack }: { skill: BuiltinSkill; onBack: () => 
 
 const MENU_ITEM = "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-4 text-ink outline-none hover:bg-[color:var(--c-f2f2f0)] focus-visible:bg-[color:var(--c-f2f2f0)]";
 
-/** A skill's label as a chip, which opens the labels there are to move it to one, or to a new one. */
-function LabelChip({ label, labels, busy, onPick }: { label: string; labels: string[]; busy: boolean; onPick: (label: string) => void }) {
+/**
+ * A skill's label as a chip, which opens the labels there are to move it to one, or to a new one. `auto`: Bops
+ * picked it, so it says so, with Confirm (keeps it as the owner's) and Change (the same menu).
+ */
+function LabelChip({ label, labels, busy, auto, onPick }: { label: string; labels: string[]; busy: boolean; auto?: boolean; onPick: (label: string) => void }) {
   const [open, setOpen] = useState(false);
   return (
-    <span className="relative flex">
+    <span className="relative flex items-center gap-1.5">
       <button
         type="button"
         disabled={busy}
@@ -381,6 +413,19 @@ function LabelChip({ label, labels, busy, onPick }: { label: string; labels: str
           <path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
+      {auto && (
+        <>
+          <span className={CHIP} data-tip={`${BRAND.name} picked this label. It stays on this Mac until you confirm it`}>
+            auto
+          </span>
+          <button type="button" disabled={busy} data-label-confirm onClick={() => onPick(label)} className="text-[12px] font-medium leading-4 text-ink disabled:opacity-50">
+            Confirm
+          </button>
+          <button type="button" disabled={busy} onClick={() => setOpen(true)} className="text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink disabled:opacity-50">
+            Change
+          </button>
+        </>
+      )}
       {open && (
         <LabelMenu
           current={label}
@@ -483,12 +528,12 @@ export function LabelMenu({ current, labels, onPick, onClose }: { current: strin
 }
 
 /** What an import did: what it's called now, and what it left out and why (paths only). */
-function ImportNote({ result: r, onDismiss }: { result: { name?: string; skipped: Problem[]; warnings: Problem[]; error?: string }; onDismiss: () => void }) {
+function ImportNote({ result: r, onDismiss }: { result: { name?: string; skipped: Problem[]; warnings: Problem[]; error?: string; updated?: boolean }; onDismiss: () => void }) {
   const lines = [...r.skipped, ...r.warnings];
   return (
     <div role="status" className={`flex flex-col gap-1.5 rounded-2xl px-3.5 py-3 text-[12.5px] leading-[18px] ${r.error ? "bg-[#FEF3F2] text-[color:var(--c-3a3a38)]" : "bg-[color:var(--c-f7f7f6)] text-[color:var(--c-3a3a38)]"}`}>
       <span className="flex items-start gap-2">
-        <span className="min-w-0 flex-1 font-medium">{r.error ?? `Imported ${r.name} as a draft.${r.skipped.length ? ` Left out ${r.skipped.length} file${r.skipped.length === 1 ? "" : "s"}:` : ""}`}</span>
+        <span className="min-w-0 flex-1 font-medium">{r.error ?? `${r.updated ? `Updated ${r.name} from the folder. Publish it to have its bots use it.` : `Imported ${r.name} as a draft.`}${r.skipped.length ? ` Left out ${r.skipped.length} file${r.skipped.length === 1 ? "" : "s"}:` : ""}`}</span>
         <button onClick={onDismiss} className="text-[12px] font-medium text-[color:var(--c-6b6b6b)] hover:text-ink">
           Dismiss
         </button>
@@ -509,7 +554,24 @@ function ImportNote({ result: r, onDismiss }: { result: { name?: string; skipped
 }
 
 /** One skill or app opened: what it is, who has it, its versions, its SKILL.md and files. */
-function SkillView({ state, ws, skill: r, team, labels, onBack }: { state: AppState; ws: string; skill: SkillRef; team: Bot[]; labels: string[]; onBack: () => void }) {
+function SkillView({
+  state,
+  ws,
+  skill: r,
+  team,
+  labels,
+  onBack,
+  onUpdated,
+}: {
+  state: AppState;
+  ws: string;
+  skill: SkillRef;
+  team: Bot[];
+  labels: string[];
+  onBack: () => void;
+  /** What Update from folder left out, said over the page as an import's is. */
+  onUpdated: (result: { name?: string; skipped: Problem[]; warnings: Problem[]; error?: string; updated?: boolean }) => void;
+}) {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [version, setVersion] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
@@ -555,6 +617,24 @@ function SkillView({ state, ws, skill: r, team, labels, onBack }: { state: AppSt
     return true;
   };
   const reveal = bridge()?.revealFolder;
+  const picker = bridge()?.pickFolder;
+  // Update from folder: a folder picked in Finder is its next version (a draft to publish), checked as an import is.
+  const fromFolder = async () => {
+    const path = await picker?.().catch(() => null);
+    if (!path) return;
+    setBusy("folder");
+    setError(null);
+    setProblems([]);
+    const res = await call<{ ref: SkillRef; skipped: Problem[]; warnings: Problem[] }>({ action: "import", ws, kind: r.kind, slug: r.slug, path });
+    setBusy(null);
+    if (!res.ok) {
+      setError(res.error);
+      setProblems(res.problems ?? []);
+      return;
+    }
+    onUpdated({ name: res.json.ref.name, skipped: res.json.skipped, warnings: res.json.warnings, updated: true });
+    await read();
+  };
   const latest = r.versions?.at(-1)?.version;
   const canPublish = !version && (r.status === "draft" || !!detail?.changed);
   const word = r.kind === "app" ? "app" : "skill";
@@ -568,7 +648,7 @@ function SkillView({ state, ws, skill: r, team, labels, onBack }: { state: AppSt
         <span className="flex flex-wrap items-center gap-1.5">
           <span className="text-[17px] font-semibold leading-[22px]">{r.name}</span>
           {r.status === "draft" ? <span className={DRAFT}>Draft</span> : <span className={CHIP}>v{r.version}</span>}
-          {r.kind === "skill" && <LabelChip label={labels.find((l) => sameLabel(l, cleanLabel(r.label))) ?? cleanLabel(r.label)} labels={labels} busy={!!busy} onPick={(l) => void act("label", labelEdit(l))} />}
+          {r.kind === "skill" && <LabelChip label={labels.find((l) => sameLabel(l, cleanLabel(r.label))) ?? cleanLabel(r.label)} labels={labels} busy={!!busy} auto={suggestedLabel(r)} onPick={(l) => void act("label", labelEdit(l))} />}
           {r.risk && <span className={CHIP}>{RISK[r.risk] ?? r.risk}</span>}
           {r.runsOn && <span className={CHIP}>Runs {r.runsOn === "local" ? "on its computer" : `on ${r.runsOn}`}</span>}
         </span>
@@ -586,6 +666,12 @@ function SkillView({ state, ws, skill: r, team, labels, onBack }: { state: AppSt
         {reveal && detail?.dir && !detail.missing && (
           <button onClick={() => void reveal(detail.dir!)} className={`${PILL} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
             Open in Finder
+          </button>
+        )}
+        {picker && !version && (
+          <button disabled={!!busy} onClick={() => void fromFolder()} data-tip="Pick a folder to be its next version. Publish it after." className={`${PILL} flex items-center gap-1.5 bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
+            {busy === "folder" && <Spinner size={11} color="#6B6B6B" />}
+            Update from folder
           </button>
         )}
         <button disabled={!!busy} onClick={() => setSure(true)} className={`${PILL} text-[#B42318] hover:bg-[#FEF3F2]`}>
@@ -618,7 +704,7 @@ function SkillView({ state, ws, skill: r, team, labels, onBack }: { state: AppSt
         <Group title="Bots">
           <div className="flex flex-wrap gap-1.5 px-4 pb-3 pt-1">
             {team.map((b) => {
-              const on = !r.botIds.length || r.botIds.includes(b.id);
+              const on = botHasSkill(r, b);
               return (
                 <button
                   key={b.id}
@@ -841,4 +927,232 @@ export function SkillMarkdown({ text }: { text: string }) {
     );
   }
   return <div className="flex flex-col gap-2 text-[13px] leading-[19px] text-[color:var(--c-3a3a38)]">{out}</div>;
+}
+
+/** Suggest labels with AI: whether a small model picks a label for a new skill (on unless the owner turned it off). */
+function SuggestToggle({ ws, on }: { ws: string; on: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const flip = async () => {
+    setBusy(true);
+    setError(null);
+    const r = await call<unknown>({ ws, action: "label-suggest", on: !on });
+    setBusy(false);
+    if (!r.ok) setError(r.error);
+  };
+  return (
+    <div className="flex flex-col gap-1">
+      <button type="button" role="switch" aria-checked={on} disabled={busy} data-label-suggest onClick={() => void flip()} className="flex items-center gap-2.5 self-start text-left disabled:opacity-50">
+        <span className={`flex h-[18px] w-[30px] shrink-0 items-center rounded-full p-0.5 transition-colors ${on ? "bg-ink" : "bg-[color:var(--c-d6d6d3)]"}`}>
+          <span className={`size-[14px] rounded-full bg-white transition-transform ${on ? "translate-x-[12px]" : ""}`} />
+        </span>
+        <span className="flex flex-col gap-0.5">
+          <span className="text-[13px] font-medium leading-4">Suggest labels with AI</span>
+          <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">A small model picks a label for a new skill. You confirm or change it.</span>
+        </span>
+      </button>
+      {error && (
+        <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Who has what ---------------- */
+
+const CELL = "flex size-[18px] items-center justify-center rounded-[5px] outline-none focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] disabled:opacity-50";
+
+/**
+ * Who has what: the workspace's labels (rows, each with how many skills) by its bots (columns), a tick where a bot
+ * has the label's skills (Bot.skillLabels; a bot never set has every label). The first untick of a bot with every
+ * label leaves it every label but that one (lib/skill-labels.ts nextBotLabels). A row opens to its skills: one that
+ * names its own bots says so with their pills (the exception to the label), and opens on a click. Edit on a row
+ * renames the label (every skill in it moves) and sets its line about what it's for. The owner's, in the window.
+ */
+function WhoHasWhat({ ws, team, refs, info, onOpen }: { ws: string; team: Bot[]; refs: SkillRef[]; info: SkillLabelInfo[]; onOpen: (r: SkillRef) => void }) {
+  const labels = workspaceLabelsOf(refs, info);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [openRow, setOpenRow] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const run = async (key: string, body: Record<string, unknown>) => {
+    setBusy(key);
+    setError(null);
+    const r = await call<unknown>({ ws, ...body });
+    setBusy(null);
+    if (!r.ok) setError(r.error);
+    return r.ok;
+  };
+  if (!labels.length) return null;
+  return (
+    <section data-who-has-what className="flex flex-col gap-2">
+      <span className="flex flex-col gap-0.5">
+        <span className="text-[13px] font-semibold leading-4">Who has what</span>
+        <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">A tick gives that bot every skill in the label, new ones too. A skill that names its own bots goes by them.</span>
+      </span>
+      <div className="overflow-x-auto rounded-2xl border border-[color:var(--c-ececea)] bg-white">
+        <table className="w-full border-collapse text-left">
+          <thead>
+            <tr className="border-b border-black/[0.05]">
+              <th className="px-3.5 py-2 text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Label</th>
+              {team.map((b) => (
+                <th key={b.id} scope="col" className="px-1.5 py-2 text-center">
+                  <span className="flex flex-col items-center gap-0.5" title={b.name}>
+                    <Mascot botId={b.id} color={b.color} size={18} antenna={false} />
+                    <span className="max-w-[64px] truncate text-[11px] font-medium leading-3 text-[color:var(--c-3a3a38)]">{b.name}</span>
+                  </span>
+                </th>
+              ))}
+              <th className="w-px" />
+            </tr>
+          </thead>
+          <tbody>
+            {labels.map((label) => {
+              const inIt = refs.filter((r) => sameLabel(cleanLabel(r.label), label));
+              const rowOpen = openRow === label;
+              return (
+                <Fragment key={label}>
+                  <tr data-label-row={label} className="border-b border-black/[0.05] last:border-b-0">
+                    <td className="px-3.5 py-2">
+                      <button
+                        type="button"
+                        aria-expanded={rowOpen}
+                        onClick={() => setOpenRow(rowOpen ? null : label)}
+                        title={labelInfoOf(info, label)?.about || undefined}
+                        className="flex items-center gap-1.5 text-[13px] font-medium leading-4 text-ink"
+                      >
+                        <span className="text-[color:var(--c-9a9a98)]">
+                          <Chevron open={rowOpen} />
+                        </span>
+                        <span className="max-w-[180px] truncate">{label}</span>
+                        <span className="font-normal tabular-nums text-[color:var(--c-9a9a98)]">{inIt.length}</span>
+                      </button>
+                    </td>
+                    {team.map((b) => {
+                      const on = botHasLabel(b, label);
+                      return (
+                        <td key={b.id} className="px-1.5 py-2 text-center">
+                          <span className="flex justify-center">
+                            <button
+                              type="button"
+                              role="checkbox"
+                              aria-checked={on}
+                              aria-label={`${b.name} has ${label}`}
+                              disabled={!!busy}
+                              onClick={() => void run(`cell:${b.id}:${label}`, { action: "bot-label", botId: b.id, label, on: !on })}
+                              className={`${CELL} ${on ? "bg-ink text-white" : "bg-white shadow-[0_0_0_1px_var(--c-d6d6d3)] hover:bg-[color:var(--c-fcfcfb)]"}`}
+                            >
+                              {busy === `cell:${b.id}:${label}` ? (
+                                <Spinner size={9} color={on ? "#FFFFFF" : "#6B6B6B"} />
+                              ) : (
+                                on && (
+                                  <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden>
+                                    <path d="M2.5 6.5l2.5 2.5 4.5-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                )
+                              )}
+                            </button>
+                          </span>
+                        </td>
+                      );
+                    })}
+                    <td className="px-2 py-2 text-right">
+                      <button type="button" onClick={() => setEditing(editing === label ? null : label)} className="text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
+                        Edit
+                      </button>
+                    </td>
+                  </tr>
+                  {editing === label && (
+                    <tr className="border-b border-black/[0.05] bg-[color:var(--c-fcfcfb)]">
+                      <td colSpan={team.length + 2} className="px-3.5 py-2.5">
+                        <LabelEditor
+                          label={label}
+                          about={labelInfoOf(info, label)?.about ?? ""}
+                          busy={!!busy}
+                          onCancel={() => setEditing(null)}
+                          onSave={async (name, about) => {
+                            const renamed = name !== label;
+                            if (renamed && !(await run("rename", { action: "label-rename", from: label, to: name }))) return;
+                            // Unsorted has no line of its own (Bops and Orgo keep none for it).
+                            const now = renamed ? name : label;
+                            if (!isUnsorted(now) && about !== (labelInfoOf(info, label)?.about ?? "") && !(await run("about", { action: "label-about", label: now, about }))) return;
+                            setEditing(null);
+                          }}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                  {rowOpen && (
+                    <tr className="border-b border-black/[0.05]">
+                      <td colSpan={team.length + 2} className="px-3.5 pb-2.5 pt-0.5">
+                        {inIt.length ? (
+                          <ul className="flex flex-col gap-1">
+                            {inIt.map((r) => (
+                              <li key={r.slug} className="flex min-w-0 flex-wrap items-center gap-1.5">
+                                <button type="button" onClick={() => onOpen(r)} className="min-w-0 truncate text-[12.5px] leading-[18px] text-ink hover:underline">
+                                  {r.name}
+                                </button>
+                                {r.status === "draft" && <span className={DRAFT}>Draft</span>}
+                                {r.botIds.length > 0 ? (
+                                  <span className="flex flex-wrap items-center gap-1 text-[11.5px] leading-4 text-[color:var(--c-6b6b6b)]">
+                                    Only
+                                    {r.botIds.map((id) => (
+                                      <span key={id} className={CHIP}>
+                                        {team.find((b) => b.id === id)?.name ?? "a bot"}
+                                      </span>
+                                    ))}
+                                  </span>
+                                ) : null}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">No skills in it yet.</span>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {error && (
+        <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+          {error}
+        </span>
+      )}
+    </section>
+  );
+}
+
+/** A label's name (renaming it moves every skill in it) and its one line about what it's for, as its bots' prompts show it (none for Unsorted: a name only). */
+function LabelEditor({ label, about, busy, onSave, onCancel }: { label: string; about: string; busy: boolean; onSave: (name: string, about: string) => Promise<void>; onCancel: () => void }) {
+  const [name, setName] = useState(label);
+  const [line, setLine] = useState(about);
+  const field = "min-w-0 rounded-lg bg-white px-2 py-1.5 text-[13px] leading-4 text-ink shadow-[0_0_0_1px_var(--c-e2e2df)] outline-none placeholder:text-[color:var(--c-9a9a98)] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]";
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (name.trim()) void onSave(cleanLabel(name), line.trim());
+      }}
+      className="flex flex-col gap-1.5"
+    >
+      <input value={name} maxLength={SKILL_LABEL_MAX} onChange={(e) => setName(e.target.value)} aria-label="Label name" className={field} />
+      {!isUnsorted(label) && <input value={line} maxLength={LABEL_ABOUT_MAX} onChange={(e) => setLine(e.target.value)} placeholder="What its skills are for, in one line" aria-label="What it's for" className={field} />}
+      <span className="flex flex-wrap items-center gap-1.5">
+        <button type="submit" disabled={busy || !name.trim()} className={`${PILL} bg-ink text-white`}>
+          Save
+        </button>
+        <button type="button" onClick={onCancel} className={`${PILL} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
+          Cancel
+        </button>
+        <span className="text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">A new name moves every skill in it.</span>
+      </span>
+    </form>
+  );
 }

@@ -666,5 +666,166 @@ await check("Orgo's copy sent astray by a Mac still on v0.0.29 is put right at t
   assert.deepEqual(calls, []);
 });
 
+await check("a run goes with what it said: trimmed, never more than 2000 (as orgo-web counts), no half emoji; quiet keeps its words; a failure and a skip have none", async () => {
+  reset();
+  const at = Date.parse("2026-10-20T12:00:00Z");
+  assert.equal(Sync.runPayload({ at, status: "ok" }, at + 1000, "  Three new orders.\n\n").summary, "Three new orders.");
+  assert.equal(Sync.runPayload({ at, status: "ok" }, at + 1000).summary, undefined, "nothing said: no summary");
+  assert.equal(Sync.runPayload({ at, status: "ok" }, at + 1000, "   ").summary, undefined);
+  assert.equal(Sync.runPayload({ at, status: "quiet" }, at + 1000, "NOTHING").summary, "Nothing needed the user.");
+  assert.equal(Sync.runPayload({ at, status: "failed", error: "Gmail signed out" }, at + 1000, "Partial words").summary, undefined);
+  assert.equal(Sync.runPayload({ at, status: "skipped", error: "The last run was still going." }, at + 1000, "x").summary, undefined);
+  // Long: cut to 2000 UTF-16 units with an ellipsis; an emoji across the cut goes whole or not at all.
+  for (const long of ["a".repeat(5000), `${"a".repeat(1997)}😀😀😀${"b".repeat(100)}`, `${"a".repeat(1998)}😀${"b".repeat(100)}`, "😀".repeat(1500)]) {
+    const s = Sync.runSummary(long);
+    assert.ok(s.length <= 2000, `at most 2000 (${s.length})`);
+    assert.ok(s.endsWith("…"));
+    assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s), "no half emoji");
+  }
+  assert.equal(Sync.runSummary("x".repeat(2000)), "x".repeat(2000), "exactly 2000: whole");
+  assert.equal(Sync.runSummary("Done\u0000."), "Done.", "a NUL Postgres refuses is dropped");
+  for (const x of ["ok", "quiet", "failed"]) assert.ok(!/[‒–—―]/.test(JSON.stringify(Sync.runPayload({ at, status: x }, at, "Fine."))), "no dashes");
+});
+
+await check("what a run said goes in its POST, and waits in the outbox on disk with it while Orgo is away", async () => {
+  reset();
+  userFolder = mkdtempSync(join(tmpdir(), "bops-test-routine-said-"));
+  try {
+    const file = join(userFolder, "outbox", "routine-runs.json");
+    state.routines = [routine({ id: "rtn_said" })];
+    const at = Date.parse("2026-10-20T12:00:00Z");
+    answer = () => {
+      throw new Error("ECONNREFUSED");
+    };
+    Sync.routineRan("rtn_said", { at, status: "ok" }, `  The digest: ${"x".repeat(3000)}`);
+    Sync.routineRan("rtn_said", { at: at + 1, status: "quiet" }, "NOTHING");
+    await T.flushAll();
+    outboxForTests.writeAll();
+    const kept = JSON.parse(readFileSync(file, "utf8")).entries.map((e) => e.item);
+    assert.equal(kept.length, 2, "both wait");
+    assert.ok(kept[0].said.startsWith("The digest: ") && kept[0].said.length <= 2000, "kept cut, not whole");
+    assert.equal(kept[1].said, undefined, "a quiet run's words aren't kept: its record says it");
+    // Bops starts again with Orgo back: each goes with what it said.
+    T.reset();
+    outboxForTests.restart();
+    answer = ORGO;
+    calls.length = 0;
+    Sync.syncRoutinesOnStart();
+    await T.flushAll();
+    const posts = calls.filter((c) => c.method === "POST");
+    assert.deepEqual(posts.map((c) => c.body.summary?.slice(0, 12)), ["The digest: ", "Nothing need"]);
+    assert.ok(posts[0].body.summary.length <= 2000 && posts[0].body.summary.endsWith("…"));
+  } finally {
+    outboxForTests.restart();
+    rmSync(userFolder, { recursive: true, force: true });
+    userFolder = null;
+  }
+});
+
+await check("a routine's runs read back: by the Orgo id the PUT answered, else Orgo's list; newest first, bad ones dropped", async () => {
+  reset();
+  const r = routine({ id: "rtn_read" });
+  const other = routine({ id: "rtn_local", botId: "bot_local" });
+  state.routines = [r, other];
+  const id = orgoId(r.id);
+  const listed = [
+    { id: "x1", routineId: id, startedAt: 1_000, finishedAt: 2_000, status: "ok", ms: 1000, summary: "Two new orders.", error: null },
+    { id: "x2", routineId: id, startedAt: 5_000, finishedAt: 5_000, status: "ok", ms: 0, summary: "Nothing needed the user.", error: null },
+    { id: "bad", startedAt: "soon", status: "ok" },
+    { id: "x3", routineId: id, startedAt: 3_000, finishedAt: 3_500, status: "failed", ms: 500, summary: null, error: "Gmail signed out" },
+  ];
+  answer = (method, path, body) =>
+    method === "GET" && path === `/api/projects/${PID}/routines`
+      ? { status: 200, json: { routines: [{ id, bopsId: r.id }] } }
+      : method === "GET" && path.startsWith(`/api/projects/${PID}/routines/${id}/runs`)
+        ? { status: 200, json: { runs: listed } }
+        : ORGO(method, path, body);
+  // Nothing learned yet: Orgo's list first, for its id.
+  let out = await Sync.routineRuns(r.id);
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), [`GET /api/projects/${PID}/routines`, `GET /api/projects/${PID}/routines/${id}/runs?limit=100`]);
+  assert.equal(out.orgo, "ok");
+  assert.deepEqual(out.runs.map((x) => [x.startedAt, x.status, x.summary, x.error]), [
+    [5_000, "ok", "Nothing needed the user.", null],
+    [3_000, "failed", null, "Gmail signed out"],
+    [1_000, "ok", "Two new orders.", null],
+  ]);
+  // Learned: the runs alone, and a limit kept to orgo-web's.
+  calls.length = 0;
+  out = await Sync.routineRuns(r.id, 500);
+  assert.deepEqual(calls.map((c) => c.path), [`/api/projects/${PID}/routines/${id}/runs?limit=100`]);
+  // A PUT's answer teaches it too.
+  reset();
+  state.routines = [r, other];
+  Sync.routineChanged("bot_main");
+  await T.flushAll();
+  calls.length = 0;
+  answer = (method, path) => (method === "GET" && path.includes("/runs") ? { status: 200, json: { runs: [] } } : { status: 500, json: {} });
+  out = await Sync.routineRuns(r.id, 20);
+  assert.deepEqual(calls.map((c) => c.path), [`/api/projects/${PID}/routines/${id}/runs?limit=20`]);
+  assert.deepEqual(out, { orgo: "ok", runs: [] });
+  // A workspace with no Orgo project: nothing to read, nothing asked.
+  calls.length = 0;
+  assert.deepEqual(await Sync.routineRuns(other.id), { orgo: "none", runs: null });
+  assert.equal(await Sync.routineRuns("rtn_nope"), undefined, "a routine Bops hasn't");
+  assert.deepEqual(calls, []);
+});
+
+await check("a routine's runs: an id Orgo no longer knows is looked up once more; Orgo away, failing, or signed out is offline; a runner asks nothing", async () => {
+  reset();
+  const r = routine({ id: "rtn_gone" });
+  state.routines = [r];
+  let fresh = "00000000-0000-4000-8000-0000000000aa";
+  answer = (method, path) => {
+    if (method === "GET" && path === `/api/projects/${PID}/routines`) return { status: 200, json: { routines: [{ id: fresh, bopsId: r.id }] } };
+    if (path.includes(`/routines/${fresh}/runs`)) return { status: 200, json: { runs: [{ startedAt: 9, finishedAt: 10, status: "ok", ms: 1, summary: null, error: null }] } };
+    return { status: 404, json: {} };
+  };
+  // Learned an id, since gone from Orgo (deleted and sent again).
+  Sync.routineChanged("bot_main");
+  const put = answer;
+  answer = (method, path, body) => (method === "PUT" ? ORGO(method, path, body) : put(method, path, body));
+  await T.flushAll();
+  answer = put;
+  calls.length = 0;
+  let out = await Sync.routineRuns(r.id);
+  assert.deepEqual(calls.map((c) => c.path), [`/api/projects/${PID}/routines/${orgoId(r.id)}/runs?limit=100`, `/api/projects/${PID}/routines`, `/api/projects/${PID}/routines/${fresh}/runs?limit=100`]);
+  assert.equal(out.runs.length, 1);
+  // Not in Orgo's copy yet: no runs there.
+  reset();
+  state.routines = [r];
+  fresh = undefined;
+  answer = (method, path) => (method === "GET" && !path.includes("/runs") ? { status: 200, json: { routines: [] } } : { status: 404, json: {} });
+  assert.deepEqual(await Sync.routineRuns(r.id), { orgo: "ok", runs: [] });
+  // Away, 500, a bad answer, signed out: offline, and nothing throws.
+  for (const a of [
+    () => {
+      throw new Error("offline");
+    },
+    () => ({ status: 500, json: {} }),
+    (method, path) => (path.includes("/runs") ? { status: 200, json: { nope: true } } : { status: 200, json: { routines: [{ id: "abc", bopsId: r.id }] } }),
+  ]) {
+    reset();
+    state.routines = [r];
+    answer = a;
+    assert.deepEqual(await Sync.routineRuns(r.id), { orgo: "offline", runs: null });
+  }
+  reset();
+  state.routines = [r];
+  key = "";
+  calls.length = 0;
+  assert.deepEqual(await Sync.routineRuns(r.id), { orgo: "offline", runs: null }, "signed out");
+  assert.deepEqual(calls, []);
+  // A computer's runner: its key may only write them.
+  reset();
+  state.routines = [r];
+  process.env.BOPS_RUNNER = "1";
+  try {
+    assert.deepEqual(await Sync.routineRuns(r.id), { orgo: "offline", runs: null });
+  } finally {
+    delete process.env.BOPS_RUNNER;
+  }
+  assert.deepEqual(calls, []);
+});
+
 console.log(`routine sync: ${passed} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

@@ -432,6 +432,18 @@ function drop(w: Watched) {
   s?.settle(unsureVerdict());
 }
 
+/**
+ * The user was deleted (delete-user.ts): none of their sessions is read again, and no start of theirs
+ * is held for. A sweep already reading theirs finishes its read, and what it counts is refused
+ * (usage.ts, a user deleted lately is never counted). How many sessions were let go.
+ */
+export function forgetUser(userId: string): number {
+  const mine = usersWatched(userId);
+  for (const w of mine) drop(w);
+  starting.delete(userId);
+  return mine.length;
+}
+
 /** What a session's open turns come to now, as last seen: one running then has run on since (a read that fails can't say otherwise). */
 function heldAsLastSeen(w: Watched, now: number) {
   let held = 0;

@@ -1,9 +1,10 @@
 /** Shared shapes for the Bops app state, used by both the server and the UI. */
 
 import type { AppHosting, IngotToken } from "./hosted-apps";
-import type { MemberAccessMap } from "./member-access";
+import type { MemberAccessMap, MemberWho } from "./member-access";
 import type { Ping } from "./pings";
 import type { SharedOpen } from "./shared";
+import { botHasSkill, type SkillLabelInfo } from "./skill-labels";
 
 export type BotId = string;
 
@@ -116,6 +117,13 @@ export type Bot = {
    * agent too (brainOf).
    */
   brain?: string;
+  /**
+   * The labels of its workspace's skills it has (lib/skill-labels.ts botHasSkill): unset is every label
+   * (as every bot had before), an empty list none. A skill whose own bot list names bots goes by that list
+   * instead. Bops' own skills are every bot's whatever this says. Set in Who has what, in Skills, and in
+   * the bot's own Skills; sent to orgo-web as bops_bots.skill_labels where it takes it (bops-sync.ts).
+   */
+  skillLabels?: string[];
 };
 
 export const MAX_PERSONA_CHARS = 1500;
@@ -175,6 +183,15 @@ export type Workspace = {
   /** Scripts someone approved to run in this workspace, by the content's sha256. */
   approvals?: ScriptApproval[];
   /**
+   * What the owner wrote about its skills' labels (lib/skill-labels.ts SkillLabelInfo): orgo-web's
+   * skill_labels as last read, or as changed here. `skillLabelInfoUnsent`: changed here and not taken by
+   * Orgo yet (the next skills sync sends it). Optional: a label with no row works the same.
+   */
+  skillLabelInfo?: SkillLabelInfo[];
+  skillLabelInfoUnsent?: boolean;
+  /** Skills → Suggest labels with AI turned off: a new skill's label comes only from its words (unset: on). */
+  skillLabelsAIOff?: boolean;
+  /**
    * Tags this workspace sorts mail and messages with besides the defaults (lib/routine-catalog.ts
    * DEFAULT_TAGS: Customer, Outage, Bug, Office, FYI). Proposed by a bot from a sample of recent mail
    * or messages when a Gmail, Slack or Discord starter routine is turned on
@@ -233,8 +250,15 @@ export type SkillRef = {
   name: string;
   /** What it does and when to use it: all a bot sees until it reads it (read_skill). */
   description: string;
-  /** The label it's listed under (lib/skill-labels.ts); unset is Other. Kept in its SKILL.md, so it syncs with Orgo. */
+  /** The label it's listed under (lib/skill-labels.ts); unset is Unsorted. Kept in its SKILL.md, so it syncs with Orgo. */
   label?: string;
+  /**
+   * Who chose its label: the owner here ("user"), the skill itself (its SKILL.md, a bot's create_skill, Orgo),
+   * or Bops ("auto": from its words or a small model, lib/server/workspace-skills.ts suggestLabels), a
+   * suggestion shown with Confirm and Change that stays out of its SKILL.md and Orgo until it's confirmed,
+   * changed or published. Unset with a label: one kept from before this, as chosen.
+   */
+  labelBy?: "user" | "skill" | "auto";
   /** draft: its bots don't see it yet; published: they do, at `version`. */
   status: "draft" | "published";
   /** The version its bots read (published), and every version kept, newest last. */
@@ -258,7 +282,7 @@ export type SkillRef = {
   /** The version Orgo had when they last agreed ("" for none), so a sync that reads only what changed since (?since=) knows Orgo's copy of one that didn't. */
   remoteVersion?: string;
   /**
-   * The label in Orgo's SKILL.md when they last agreed (sent or brought here). A move here reaches Orgo only
+   * The label in Orgo's SKILL.md when they last agreed (sent or brought here: Unsorted for none, and for a suggestion not sent). A move here reaches Orgo only
    * with the next version (orgo-web's PATCH doesn't take a label), so a pull that brings this same one back
    * keeps the label here; one Orgo changed comes here.
    */
@@ -544,8 +568,10 @@ export type Message = {
   /**
    * Posted by a routine's run in the chat (Routine.run "chat"), or a reminder: which routine. `manual`:
    * a run someone asked for (Run now), so a turn in Slack or by text that asked for it sends it back there.
+   * `at`: when that run began (its RoutineRun.at), so its report goes with that run (lib/routine-reports.ts);
+   * unset on what was posted before Bops kept it.
    */
-  routine?: { id: string; manual?: true };
+  routine?: { id: string; manual?: true; at?: number };
   /**
    * The user asked to keep this from someone ("between us"): never read into the shared memory or a
    * procedure's draft. Someone the owner gave its bot still sees it in a shared workspace (cloud/ws-slice.ts).
@@ -553,6 +579,17 @@ export type Message = {
   secret?: true;
   /** An inline reply (like iMessage's): the message it starts from. Replies to a reply join the same one. */
   replyTo?: string;
+  /**
+   * Said by someone the owner gave Write on this chat's bots, from their own Bops (cloud/members.ts act), not by
+   * the owner: `ref` is their key for it, so a retry isn't added twice and their window swaps its own copy for this one.
+   */
+  member?: MemberSaid;
+  /**
+   * In the window only, never synced: one the viewer of a shared workspace sent that the owner's Bops hasn't
+   * written yet (lib/server/shared-core.ts viewState makes it), and how it stands: on its way, waiting for the
+   * owner's Bops to open, or not sent (`error`). `key` sends it again as the same act.
+   */
+  memberSend?: MemberSend;
   /** Tapbacks on this message, the user's and the bots'. One each. */
   reactions?: Reaction[];
   /** Replies the bot offered, shown as buttons the user can tap to answer. */
@@ -605,6 +642,102 @@ export type Message = {
    * workspace shows someone only the lines of bots they were given (cloud/ws-slice.ts).
    */
   held?: { botId: BotId; text: string }[];
+  /**
+   * Set on a bot's message: replies it wrote for the user to send (chat.ts draft_reply), each a card under the
+   * message with who and where it goes, the words the user can change, and Send (lib/server/reply-drafts.ts).
+   * Nothing goes out until the user presses Send.
+   */
+  drafts?: ReplyDraft[];
+  /**
+   * Set on a bot's message: changes it proposed to its workspace's skills (chat.ts propose_skill_change), each a
+   * card under the message with the change as a diff, who proposed it, where, and whose words the turn read.
+   * Nothing changes until the owner presses Accept in the window (lib/server/skill-proposals.ts).
+   */
+  skillProposals?: SkillProposal[];
+};
+
+/**
+ * A reply a bot wrote for the user, to an email, a Slack message or a Discord message it read with the user's
+ * own account (use_app) in the same turn: it goes back in that thread or channel, from that account, when the
+ * user presses Send. Its thread, channel and recipient are ones that turn read (lib/server/reply-drafts.ts), never
+ * the bot's own words, which an email it read could have put there.
+ */
+export type ReplyDraft = {
+  id: string;
+  /** Where it goes: a Gmail thread, a Slack channel or thread, or a Discord channel (through a Discord bot account). */
+  app: "gmail" | "slack" | "discord";
+  /** The user's connected account it was read with, and goes out from (AppAccount.id). */
+  accountId: string;
+  /** Gmail: the thread it answers. */
+  threadId?: string;
+  /** Gmail: the address it goes to. */
+  to?: string;
+  /** Gmail: the thread's subject. */
+  subject?: string;
+  /** Slack and Discord: the channel (or direct message) it goes to, by its id there. */
+  channel?: string;
+  /** Slack: the thread it goes in (its first message's ts). */
+  threadTs?: string;
+  /** Discord: the message it answers. */
+  messageId?: string;
+  /** Who it's for, in a few words ("Kevin Example"). */
+  toName: string;
+  /** Slack and Discord: the channel's name ("#support"), when what was read named it. */
+  where?: string;
+  /** The words the bot wrote. */
+  text: string;
+  /** Being sent since then: another Send waits for it (lib/reply-drafts.ts SEND_STALE_MS). */
+  sending?: number;
+  /** Sent: when, and the words that went (the user's, as they left them). */
+  sent?: { at: number; text: string };
+  /** Why the last Send didn't go. */
+  error?: string;
+};
+
+/**
+ * A change a bot proposed to one of its workspace's skills (chat.ts propose_skill_change, lib/server/skill-proposals.ts):
+ * one file of it, as edits (each `old` once in it) or a whole new text, and why. Made in any turn, a routine's run
+ * and one that read a page, an email or an app included, because it changes nothing: only the owner's Accept, in
+ * the window, makes it the skill's next version, through the same checks as any save (secrets, caps) and a publish.
+ */
+export type SkillProposal = {
+  id: string;
+  /** The workspace whose skill it is. */
+  ws: string;
+  kind: SkillKind;
+  slug: string;
+  /** The skill's name when it was proposed. */
+  name: string;
+  /** "SKILL.md" (its text as read_skill shows it, without the frontmatter), or a path inside it ("references/x.md"). */
+  file: string;
+  edits?: { old: string; new: string }[];
+  /** The file's whole new text (a new file, or one replaced). */
+  content?: string;
+  /** content for a file the skill already had: the whole of it replaced. */
+  replaces?: true;
+  /** Why, in the bot's words. */
+  summary: string;
+  /** The version it was made against ("" for a skill never published), and that file's sha256 then (unset: a new file, or not known where it was made). */
+  base: string;
+  baseSha?: string;
+  /** Made on a computer's runner, where the skill's files weren't: the edits are checked when it's accepted. */
+  unchecked?: true;
+  /** Who proposed it, and where: its chat, and the routine whose run it was. */
+  botId: BotId;
+  chatId: string;
+  routineId?: string;
+  /** Whose words the turn read from outside Bops (an email's sender, a page's site, an app account), and who started it when that wasn't the owner. */
+  read?: string[];
+  at: number;
+  /**
+   * This Mac's mark (lib/server/skill-proposals.ts sealProposals): an HMAC over the rest with a key only that Mac has,
+   * set where its own turn made it. A runner's has none; one without it is shown on what the skill is now before Accept.
+   */
+  seal?: string;
+  /** Accepted (and the version it made) or rejected, by the owner. */
+  status?: "accepted" | "rejected";
+  doneAt?: number;
+  version?: string;
 };
 
 /**
@@ -696,7 +829,16 @@ export type ThreadReply = {
    * thread shows who it came from.
    */
   from?: string;
+  /** A member's words to the task, from their own Bops (someone the owner gave Write on its bot): instructions, not information like `from`. */
+  member?: MemberSaid;
+  /** In the window only, never synced: a reply the viewer sent that the owner's Bops hasn't written yet (Message.memberSend). */
+  memberSend?: MemberSend;
 };
+
+/** Who a member is on what they said (MemberWho), and their key for it (cloud/protocol.ts MemberActBody). */
+export type MemberSaid = MemberWho & { ref?: string };
+/** How one of the viewer's own acts in a shared workspace stands, until the owner's Bops has written it (Message.memberSend). */
+export type MemberSend = { state: "sending" | "waiting" | "failed"; error?: string; key: string };
 
 /** A session is a long-running task on one screen of a bot's computer, shown as a thread. */
 export type Session = {
@@ -714,6 +856,8 @@ export type Session = {
    * a stranger's words, or a page it opens, can't have it read the user's customers out.
    */
   fromOutside?: true;
+  /** Started on a member's turn (someone the owner gave Write on its bot, from their own Bops): shown as Asked by them. */
+  member?: MemberWho;
   /**
    * Started for a message the user kept "between us" (Message.secret): kept between us too, and so is
    * what's said about it in a chat, its result and notes (store.ts addMessage), so none of that goes into
@@ -756,8 +900,13 @@ export type Session = {
    * The app on the web it works on (work_on_app, lib/server/hosted-apps.ts), by workspace and Ingot repo
    * name: as it starts, the app's working folder is made ready on its computer (/workspace/apps/<name>),
    * and a brain's thread gets Ingot's MCP tools.
+   * `deployAfter`: the user asked for it to go live too (work_on_app's deploy), so once the task ends done
+   * with a new commit, Bops deploys the app itself and says how it went in the chat (hosted-apps.ts
+   * deployAfterTask). It's taken off as that deploy goes, so one ask deploys it once at most. `from`: the
+   * app's newest commit as the task first started with that ask (null: nothing committed yet), or the one
+   * Bops then deployed, which a new commit is told from; unset when Ingot couldn't say.
    */
-  app?: { wsId: string; name: string };
+  app?: { wsId: string; name: string; deployAfter?: true; from?: string | null };
   host: Host;
   status: SessionStatus;
   /** X display number of the screen this session holds (99-102), while it holds one. */
@@ -1129,6 +1278,11 @@ export type Owner = {
   timeZone?: string;
 };
 
+/** How long chats and calls are kept (AppState.privacy): a year, 90 or 30 days, or (null) until the user deletes them. */
+export type KeepDays = 30 | 90 | 365 | null;
+/** How long a copy of what the user deleted stays on the Mac it was deleted on (AppState.privacy): 0 is gone at once. */
+export type DeletedDays = 0 | 7 | 30;
+
 export type AppState = {
   /** Who the bots work for. Empty until set in Settings. */
   owner?: Owner;
@@ -1225,6 +1379,17 @@ export type AppState = {
    */
   analyticsOff?: boolean;
   /**
+   * Settings → Your data (lib/privacy.ts, lib/server/privacy.ts): how long chats and calls are kept, and what
+   * a delete leaves behind. Shared by every Mac of the user's, like any setting (each field merges on its
+   * own: state-merge.ts). `keepDays`: chat messages older than this many days are deleted, from Bops Cloud
+   * and every Mac, by an hourly sweep on the Mac, with this Mac's call notes, router notes, last screens and
+   * the images and pages no kept message refers to; unset or null, they're kept until the user deletes them.
+   * `deletedDays`: a message, thread or group chat the user deletes still goes from the chat and from Bops
+   * Cloud at once, but a copy stays on the Mac it was deleted on (and only there) this many days, under
+   * Recently deleted, to restore; unset or 0, it's gone at once, its images on this Mac too.
+   */
+  privacy?: { keepDays?: KeepDays; deletedDays?: DeletedDays };
+  /**
    * The user's AI credit ran out: Bops Cloud refused a call that would spend it (402 ai_credit_empty).
    * The bots stop asking the cloud for AI work and the chat shows it with Upgrade, until a read of
    * the plan (GET /api/plan, /api/account) shows credit again. Unset otherwise.
@@ -1282,8 +1447,9 @@ export type AppState = {
    */
   liveMoods?: Record<BotId, { mood: "thinking" | "writing" | "speaking" | "working"; chatId?: string }>;
   /**
-   * The workspace shared with the user that's open now, read only (lib/shared.ts, lib/server/shared.ts):
-   * its bots, chats, threads, routines and watches are the owner's, in place of the user's own. Filled
+   * The workspace shared with the user that's open now (lib/shared.ts, lib/server/shared.ts): watched, and
+   * acted in for the bots the owner gave them Write on. Its bots, chats, threads, routines and watches are
+   * the owner's, in place of the user's own. Filled
    * in by /api/state for the app; never stored or synced.
    */
   shared?: SharedOpen;
@@ -1351,7 +1517,7 @@ function skillsOnMac(s: Pick<AppState, "bots" | "workspaces">, botId: string): b
   const b = s.bots?.find((x) => x.id === botId);
   if (!b) return false;
   const w = s.workspaces?.find((x) => x.id === workspaceOf(b));
-  return [...(w?.skills ?? []), ...(w?.apps ?? [])].some((x) => x.status === "published" && (!x.botIds?.length || x.botIds.includes(botId)));
+  return [...(w?.skills ?? []), ...(w?.apps ?? [])].some((x) => x.status === "published" && botHasSkill(x, b));
 }
 
 /**
@@ -1678,11 +1844,14 @@ export type AppApproval = {
   at: number;
   resume?: AskResume;
   reply?: AskAnswer;
+  /** In the window only, never synced: the viewer's own answer to it in a shared workspace, on its way or not gone (Message.memberSend). */
+  memberSend?: MemberSend;
 };
 
 /** How the user answers a request (OpenCode's reply, Codex's ReviewDecision approved / approved_for_session / denied). */
 export type AskReply = "once" | "always" | "reject";
-export type AskAnswer = { reply: AskReply; message?: string; reason?: "stopped"; by?: string; at: number };
+/** `member`: answered by a member with Write, from their own Bops (the Mac that took it is `by`). */
+export type AskAnswer = { reply: AskReply; message?: string; reason?: "stopped"; by?: string; at: number; member?: MemberWho };
 /** The tool call a run paused at, as the model made it: its name and its arguments (JSON). */
 export type AskCall = { name: string; arguments: string };
 
@@ -1948,6 +2117,19 @@ export const routineSent = (s: SentBy) => s.sentVia === "routine" && !s.sentViaB
 export const sentByBot = (s: SentBy): BotId | undefined => (ownerSent(s) || routineSent(s) ? undefined : s.sentVia);
 
 export const live = (s: Session) => s.status === "queued" || s.status === "starting" || s.status === "running";
+
+/**
+ * Whether a thread is someone else's work as far as what's the owner's own goes: one someone outside Bops started
+ * (Session.fromOutside: an email, a text or a call to a bot), one a member with Write started (Session.member), one a
+ * member has told something (ThreadReply.member: their words are instructions there too), or a part of one of those
+ * (split_task: Session.partOf), whether or not the part was marked so. It gets nothing that's the owner's alone,
+ * whatever its bot may use: none of their saved logins (sign_in_from_vault, the screen's own sign in), Connected apps,
+ * API keys, CRM or memory of facts. `find` looks a thread up by id (the store's session).
+ */
+export function othersThread(s: Session | undefined, find: (id: string) => Session | undefined): boolean {
+  const theirs = (x: Session | undefined) => !!x && (!!x.fromOutside || !!x.member || (x.replies ?? []).some((r) => r.role === "user" && !!r.member));
+  return theirs(s) || (!!s?.partOf && theirs(find(s.partOf)));
+}
 
 /**
  * When the Bops that runs thread `s` (Session.by: a Mac, a computer's runner) last showed a sign of work (a

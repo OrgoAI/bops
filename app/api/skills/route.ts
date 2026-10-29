@@ -1,23 +1,33 @@
 import { chatThreads, draftSkill, saveSkillDraft } from "@/lib/server/procedures";
 import { notReady } from "@/lib/server/ready";
 import { bot, chat, getState } from "@/lib/server/store";
+import { sharedOpen } from "@/lib/server/shared";
+import { acceptProposal, proposalDiff, rejectProposal } from "@/lib/server/skill-proposals";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 import {
   approveScript,
   createSkill,
   deleteSkill,
   importFolder,
+  findRef,
   publishSkill,
   refsOf,
+  renameLabel,
   rollbackSkill,
+  setBotLabel,
+  setBotLabels,
+  setLabelAbout,
+  setLabelSuggest,
   setSkillBot,
   skillDetail,
   skillFile,
   SkillError,
   skillsRoutesSeen,
   syncSkills,
+  updateFromFolder,
   updateSkill,
   workspaceById,
+  workspaceLabels,
 } from "@/lib/server/workspace-skills";
 import { MAIN_WORKSPACE, type SkillKind, type SkillRef } from "@/lib/types";
 
@@ -28,6 +38,9 @@ export const dynamic = "force-dynamic";
  * rolled back, deleted, given to bots, imported from a folder on this Mac, and drafted from a chat ("Save as
  * skill"). They change how the bots work, so like a bot's other settings only from the Bops window
  * (ui-token.ts): a page a bot's Chrome reached this server with mustn't teach a bot steps or approve a script.
+ * Which labels each bot has (Who has what), a label's name and about line, Suggest labels with AI, and a bot's proposed change
+ * (skill-proposals.ts: accept, reject, or its diff on what the skill is now) are the owner's too: never while a
+ * workspace shared with the user is open.
  */
 const notFromWindow = (request: Request) => (fromBopsWindow(request) ? null : Response.json({ error: "Skills can only be changed in the Bops app." }, { status: 403 }));
 
@@ -54,7 +67,7 @@ export async function GET(request: Request) {
   if (!workspaceById(wsId)) return Response.json({ error: "That workspace is gone." }, { status: 404 });
   const sync = url.searchParams.has("sync") ? await syncSkills(wsId).catch(() => null) : null;
   const project = workspaceById(wsId)?.orgoProjectId;
-  return Response.json({ skills: refsOf(wsId, "skill"), apps: refsOf(wsId, "app"), sync, orgo: !!project && skillsRoutesSeen(project) === true });
+  return Response.json({ skills: refsOf(wsId, "skill"), apps: refsOf(wsId, "app"), labels: workspaceLabels(wsId), labelInfo: workspaceById(wsId)?.skillLabelInfo ?? [], sync, orgo: !!project && skillsRoutesSeen(project) === true });
 }
 
 /** `{action, ...}`: what to do to a skill of the current workspace (`ws` to name another). */
@@ -65,6 +78,8 @@ export async function POST(request: Request) {
   const wsId = str(b.ws) ?? getState().workspace ?? MAIN_WORKSPACE;
   const kind = kindOf(b.kind);
   const slug = str(b.slug) ?? "";
+  const ownerOnly = new Set(["bot-label", "bot-labels", "label-rename", "label-about", "label-suggest", "proposal"]);
+  if (ownerOnly.has(String(b.action)) && sharedOpen()) return Response.json({ error: "In a shared workspace, only its owner changes this." }, { status: 403 });
   try {
     switch (b.action) {
       case "detail":
@@ -95,7 +110,51 @@ export async function POST(request: Request) {
       case "import": {
         const path = str(b.path);
         if (!path || !path.startsWith("/")) return Response.json({ error: "Pick a folder." }, { status: 400 });
+        // With an existing skill's slug: the folder is its next version (Update from folder), published at once with `publish`.
+        if (slug) {
+          if (!findRef(wsId, kind, slug)) return Response.json({ error: `That ${kind} was deleted.` }, { status: 404 });
+          return Response.json(updateFromFolder(wsId, path, kind, slug, { publish: b.publish === true }));
+        }
         return Response.json(importFolder(wsId, path, kind));
+      }
+      case "bot-label": {
+        const botId = str(b.botId);
+        const label = str(b.label);
+        if (!botId || !label || typeof b.on !== "boolean") return Response.json({ error: "Which bot, which label, and on or off?" }, { status: 400 });
+        return Response.json({ skillLabels: setBotLabel(wsId, botId, label, b.on) ?? null });
+      }
+      case "bot-labels": {
+        const botId = str(b.botId);
+        if (!botId || !(b.labels === null || Array.isArray(b.labels))) return Response.json({ error: "Which bot, and which labels (or null for every one)?" }, { status: 400 });
+        const labels = Array.isArray(b.labels) ? b.labels.filter((x): x is string => typeof x === "string").slice(0, 200) : null;
+        return Response.json({ skillLabels: setBotLabels(wsId, botId, labels) ?? null });
+      }
+      case "label-rename": {
+        const from = str(b.from);
+        const to = str(b.to);
+        if (!from || !to?.trim()) return Response.json({ error: "Which label, and its new name?" }, { status: 400 });
+        return Response.json({ moved: renameLabel(wsId, from, to), labels: workspaceLabels(wsId) });
+      }
+      case "label-about": {
+        const label = str(b.label);
+        if (!label || typeof b.about !== "string") return Response.json({ error: "Which label, and what it's for?" }, { status: 400 });
+        return Response.json({ labelInfo: setLabelAbout(wsId, label, b.about) });
+      }
+      case "label-suggest": {
+        if (typeof b.on !== "boolean") return Response.json({ error: "On or off?" }, { status: 400 });
+        return Response.json({ on: setLabelSuggest(wsId, b.on) });
+      }
+      case "proposal": {
+        const messageId = str(b.messageId);
+        const proposalId = str(b.proposalId);
+        if (!messageId || !proposalId) return Response.json({ error: "Which proposal?" }, { status: 400 });
+        if (b.do === "diff") {
+          const d = proposalDiff(messageId, proposalId);
+          return d.ok ? Response.json(d) : Response.json({ error: d.error }, { status: d.status });
+        }
+        const r = b.do === "accept" ? acceptProposal(messageId, proposalId, str(b.seen)) : b.do === "reject" ? rejectProposal(messageId, proposalId) : null;
+        if (!r) return Response.json({ error: "Accept or reject?" }, { status: 400 });
+        return r.ok ? Response.json(r) : Response.json({ error: r.error, ...(r.problems ? { problems: r.problems } : {}), ...(r.stale ? { stale: r.stale } : {}) }, { status: r.status });
       }
       case "draft": {
         const botId = str(b.botId);

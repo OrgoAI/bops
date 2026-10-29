@@ -1,5 +1,6 @@
 // Tests for apps' work across a sign-in (lib/server/hosted-apps.ts, lib/server/ingot.ts): work on an app an
-// @orgo.ai account began (a task's set-up on its computer, a deploy, a DNS change) stops once another account
+// @orgo.ai account began (a task's set-up on its computer, a deploy, a DNS change, Add app, a domain bought, a
+// variable or a port changed, a rollback) stops once another account
 // signs in on this Mac meanwhile (store.ts sameState): none of it goes on with that account's Orgo key, to its
 // Ingot workspace or its Orgo project, or into its state, whoever they are. Without a sign-in it goes on as before.
 //
@@ -60,7 +61,11 @@ registerHooks({
     const name = url.match(/\/lib\/server\/([a-z-]+)\.ts$/)?.[1];
     if (!name || !STAND_INS.has(name)) return next(url, context);
     const names = [...readFileSync(new URL(url), "utf8").matchAll(/^export (?:async )?(?:function\*? |const |let |class )([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
-    return { format: "module", shortCircuit: true, source: names.map((n) => `export const ${n} = function () { return Promise.resolve(); };`).join("\n") };
+    return {
+      format: "module",
+      shortCircuit: true,
+      source: names.map((n) => (n === "startSession" ? "export const startSession = (...a) => globalThis.__startSession(...a);" : `export const ${n} = function () { return Promise.resolve(); };`)).join("\n"),
+    };
   },
 });
 const emitWarning = process.emitWarning.bind(process);
@@ -80,7 +85,10 @@ const KEY_B = "sk_orgo_test_bob";
 const PA = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
 const PB = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
 const ZONE = "cccccccc-3333-4333-8333-cccccccccccc";
+const ZONE2 = "dddddddd-4444-4444-8444-dddddddddddd";
 const TOKEN_SUM = sha("ingot_test_token\n");
+/** The newest commit of Alex's app todo in Ingot, newer than the one its task started from. */
+const TODO_HEAD = "d".repeat(64);
 const alex = { id: "u_alex", email: "alex@orgo.ai", name: "Alex" };
 const bob = { id: "u_bob", email: "bob@example.com", name: "Bob" };
 const who = (auth) => (auth === `Bearer ${KEY_A}` ? "alex" : auth === `Bearer ${KEY_B}` ? "bob" : String(auth));
@@ -113,7 +121,15 @@ globalThis.fetch = async (input, init) => {
     }
     if (url.pathname === "/api/computers/c_a/deploy-projects" && req.method === "GET") return json({ projects: [] });
     if (url.pathname === "/api/computers/c_a/deploy-projects" && req.method === "POST") return json({ id: "dp_new", name: body.name, port: body.port, source: "ingot", ingot_repo: body.repo });
-    if (url.pathname === "/api/computers/c_a/deploy-projects/dp_live") return json({ id: "dp_live", name: "shop", port: 3000, url: "https://shop.orgo.dev", deployments: [] });
+    if (url.pathname === "/api/computers/c_a/deploy-projects/dp_new/deployments" && req.method === "POST") return json({ id: "dep_1", project_id: "dp_new", state: "queued", created_at: new Date().toISOString() }, 202);
+    if (url.pathname === "/api/computers/c_a/deploy-projects/dp_live")
+      return json({ id: "dp_live", name: "shop", port: req.method === "PATCH" ? (body.port ?? 3000) : 3000, url: "https://shop.orgo.dev", deployments: [{ id: "dep_old", project_id: "dp_live", state: "succeeded", can_rollback: true, created_at: new Date().toISOString() }] });
+    if (url.pathname === "/api/computers/c_a/deploy-projects/dp_live/env" && req.method === "PATCH") return json({ env_keys: Object.keys(body.env) });
+    if (url.pathname === "/api/computers/c_a/deployments/dep_old/rollback") return json({ id: "dep_back", project_id: "dp_live", state: "queued", created_at: new Date().toISOString() }, 202);
+    if (url.pathname === `/api/projects/${PA}/domains` && req.method === "POST") return json({ id: ZONE2, domain: body.domain, status: "active" }, 201);
+    if (url.pathname === `/api/projects/${PA}/domains` && req.method === "GET") return json({ registrar: true, can_buy: true, domains: [{ id: ZONE, domain: "acme.example", status: "active", pointed: [] }] });
+    if (url.pathname === "/api/computers/c_a/domains" && req.method === "POST") return json({ id: "cd_new", domain: "guest.example", status: "pending", target_port: 3000, managed: true }, 201);
+    if (/^\/api\/computers\/c_a\/domains\/cd_1/.test(url.pathname)) return json({ id: "cd_1", status: "active" });
     if (url.pathname === "/api/computers/c_a/domains")
       return json({ domains: [{ id: "cd_1", domain: "shop.acme.example", status: "active", cert_status: "issued", target_port: 3000, managed: true }], owned_domains: [{ id: ZONE, domain: "acme.example" }] });
     if (url.pathname.startsWith(`/api/projects/${PA}/domains/${ZONE}/dns`) && as === "alex") return json({ record: { id: "r1" }, records: [] });
@@ -122,6 +138,8 @@ globalThis.fetch = async (input, init) => {
   if (url.origin === INGOT) {
     if (/\/tokens$/.test(url.pathname) && req.method === "GET") return json({ tokens: [{ id: 7, revoked_at: null, expires_at: null }] });
     if (/\/repos$/.test(url.pathname) && req.method === "POST") return json({ repo: { name: body?.name } }, 201);
+    if (url.pathname === `/api/v1/w/${PA}/repos` && req.method === "GET") return json({ repos: [] });
+    if (url.pathname === `/api/v1/w/${PA}/repos/todo` && req.method === "GET") return json({ repo: { name: "todo" }, refs: [{ name: "main", target: TODO_HEAD }] });
     return json({ error: "Not found" }, 404);
   }
   throw new TypeError(`fetch failed (the test is offline: ${url.host})`);
@@ -244,6 +262,40 @@ await check("Bob signs in while a first deploy reads the computer's projects: no
   bobUntouched();
 });
 
+/* ---------------- A deploy once a task on the app has committed (work_on_app's deploy) ---------------- */
+
+/** The task on todo, done, asked to put it live after, started from an older commit. */
+const doneAskingDeploy = () =>
+  S.update((s) => {
+    Object.assign(s.sessions[0], { status: "done", app: { wsId: "ws_main", name: "todo", deployAfter: true, from: "e".repeat(64) } });
+  });
+const deploySaid = (st) => st.messages.filter((m) => m.sessionIds?.includes("ses_app"));
+
+await check("a task's deploy once it committed, with no sign-in meanwhile: deployed on Alex's computer with his key, said in his chat", async () => {
+  await asAlex();
+  doneAskingDeploy();
+  const from = calls.length;
+  await H.deployAfterTask("ses_app");
+  assert.ok(calls.slice(from).some((c) => c.as === "alex" && c.what === "POST /api/computers/c_a/deploy-projects/dp_new/deployments"));
+  assert.deepEqual(bobsCalls(from), []);
+  assert.match(deploySaid(S.getState()).at(-1)?.text ?? "", /^Deploying the newest commit of todo/);
+  assert.equal(S.getState().sessions[0].app.deployAfter, undefined);
+});
+
+await check("Bob signs in while a task's deploy reads the app's newest commit: nothing deployed, nothing said, nothing in his state", async () => {
+  await asAlex();
+  doneAskingDeploy();
+  bobSignsInOn(`GET /api/v1/w/${PA}/repos/todo`);
+  const from = calls.length;
+  await H.deployAfterTask("ses_app");
+  assert.equal(on.size, 0, "Bob signed in as it read it");
+  assert.deepEqual(bobsCalls(from), [], "no call with Bob's key");
+  assert.ok(!calls.slice(from).some((c) => c.what.includes("deploy-projects")), "nothing deployed");
+  assert.deepEqual(deploySaid(S.getState()), [], "nothing said in Bob's chats");
+  assert.ok(!JSON.stringify(S.getState().sessions).includes("todo"), "no task of Alex's in Bob's state");
+  bobUntouched();
+});
+
 /* ---------------- A DNS change ---------------- */
 
 await check("a DNS record added, with no sign-in meanwhile: to Alex's zone, with his key", async () => {
@@ -263,6 +315,105 @@ await check("Bob signs in while a DNS change reads the app's domains: no record 
   assert.equal(got.error?.message, SWAPPED);
   assert.deepEqual(bobsCalls(from), []);
   assert.ok(!calls.slice(from).some((c) => c.what.includes("/dns")), "no zone read or written");
+  bobUntouched();
+});
+
+/* ---------------- Add app, settings, variables, a rollback, a domain bought ---------------- */
+
+/** Tasks Add app started (sessions.ts stand-in). */
+const startedTasks = [];
+globalThis.__startSession = (o) => {
+  startedTasks.push(o);
+  return { id: `ses_new_${startedTasks.length}`, chatId: o.chatId };
+};
+const writesBy = (from, as) => calls.slice(from).filter((c) => c.as === as && !c.what.startsWith("GET "));
+
+await check("Add app, with no sign-in meanwhile: the name checked in Alex's Ingot, his main bot's task started", async () => {
+  await asAlex();
+  const from = calls.length;
+  const got = await H.addApp("ws_main", { name: "guest-book", what: "A page for notes.", deploy: true });
+  assert.equal(got.name, "guest-book");
+  assert.equal(startedTasks.at(-1).app.name, "guest-book");
+  assert.ok(calls.slice(from).some((c) => c.as === "alex" && c.what === `GET /api/v1/w/${PA}/repos`));
+  assert.deepEqual(bobsCalls(from), []);
+});
+
+await check("Bob signs in while Add app checks the name in Ingot: no task, nothing kept or said, nothing with his key", async () => {
+  await asAlex();
+  bobSignsInOn(`GET /api/v1/w/${PA}/repos`);
+  const from = calls.length;
+  const n = startedTasks.length;
+  const got = await fails(H.addApp("ws_main", { name: "guest-book", what: "A page for notes.", deploy: true }));
+  assert.equal(on.size, 0, "Bob signed in as it looked");
+  assert.equal(got.error?.message, SWAPPED);
+  assert.equal(startedTasks.length, n, "no task");
+  assert.deepEqual(bobsCalls(from), []);
+  assert.ok(!S.getState().messages.some((m) => /guest-book/.test(m.text)), "nothing said");
+  bobUntouched();
+});
+
+await check("A domain bought, with no sign-in meanwhile: bought in Alex's Orgo workspace with his key, then pointed at his app", async () => {
+  await asAlex();
+  const from = calls.length;
+  const got = await H.buyDomain("ws_main", "shop", { domain: "guest.example", registrant: { first_name: "Ava" }, price: 1200 });
+  assert.equal(got.bought, "guest.example");
+  assert.deepEqual(
+    writesBy(from, "alex").map((c) => c.what),
+    [`POST /api/projects/${PA}/domains`, "POST /api/computers/c_a/domains"],
+  );
+  assert.deepEqual(bobsCalls(from), []);
+});
+
+await check("Bob signs in while a buy reads the app's domains: nothing bought, nothing with his key", async () => {
+  await asAlex();
+  bobSignsInOn("GET /api/computers/c_a/domains");
+  const from = calls.length;
+  const got = await fails(H.buyDomain("ws_main", "shop", { domain: "guest.example", registrant: { first_name: "Ava" }, price: 1200 }));
+  assert.equal(got.error?.message, SWAPPED);
+  assert.ok(!calls.slice(from).some((c) => c.what === `POST /api/projects/${PA}/domains`), "no buy");
+  assert.deepEqual(bobsCalls(from), []);
+  bobUntouched();
+});
+
+await check("Bob signs in while the buy goes through: it's Alex's (bought with his key), and nothing more goes: not pointed anywhere, nothing with Bob's key or in his state", async () => {
+  await asAlex();
+  bobSignsInOn(`POST /api/projects/${PA}/domains`);
+  const from = calls.length;
+  const got = await fails(H.buyDomain("ws_main", "shop", { domain: "guest.example", registrant: { first_name: "Ava" }, price: 1200 }));
+  assert.equal(on.size, 0);
+  assert.equal(got.error?.message, SWAPPED);
+  assert.deepEqual(writesBy(from, "alex").map((c) => c.what), [`POST /api/projects/${PA}/domains`], "the buy alone");
+  assert.ok(!calls.slice(from).some((c) => c.what === "POST /api/computers/c_a/domains"), "not pointed anywhere");
+  assert.deepEqual(bobsCalls(from), []);
+  bobUntouched();
+});
+
+await check("Bob signs in while a variable change reads the app's project: the values go nowhere; a port change: no domain moved; a rollback: none queued", async () => {
+  await asAlex();
+  bobSignsInOn("GET /api/computers/c_a/deploy-projects/dp_live");
+  let from = calls.length;
+  const env = await fails(H.changeEnv("ws_main", "shop", { API_TOKEN: "made-up-secret-value-7d3f" }));
+  assert.equal(env.error?.message, SWAPPED);
+  assert.ok(!calls.slice(from).some((c) => c.what.includes("/env")), "no variable sent");
+  assert.deepEqual(bobsCalls(from), []);
+  bobUntouched();
+
+  await asAlex();
+  bobSignsInOn("PATCH /api/computers/c_a/deploy-projects/dp_live");
+  from = calls.length;
+  const port = await fails(H.changeSettings("ws_main", "shop", { port: 4100 }));
+  assert.equal(port.error?.message, SWAPPED);
+  assert.ok(!calls.slice(from).some((c) => c.what.startsWith("PATCH /api/computers/c_a/domains/")), "no domain moved");
+  assert.deepEqual(bobsCalls(from), []);
+  bobUntouched();
+
+  await asAlex();
+  bobSignsInOn("GET /api/computers/c_a/deploy-projects/dp_live");
+  from = calls.length;
+  const back = await fails(H.rollbackApp("ws_main", "shop", "dep_old"));
+  assert.equal(back.error?.message, SWAPPED);
+  assert.ok(!calls.slice(from).some((c) => c.what.includes("/rollback")), "no rollback");
+  assert.deepEqual(bobsCalls(from), []);
   bobUntouched();
 });
 

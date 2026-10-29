@@ -13,7 +13,19 @@
 // where focus goes as a form or a question closes, and the app's own Esc kept out; what the window asks the
 // server for (lib/hosted-apps.ts routes, answered here by a stubbed fetch); and the wiring: the tab is one
 // you read, named as its repo is, it lights the Apps footer button, the list sits above the made apps on
-// the Apps page, and "Work on it" asks the app's bot.
+// the Apps page, and "Work on it" asks the app's bot. Then app-settings.tsx: Add app (its form, a name as an Ingot
+// repo's, Put it live when it's ready, a name taken said, the task opened); the page in order (Address, Domains,
+// Settings, Deploys, History); its variables by name with values hidden, added (hidden as typed unless Show, gone from
+// the page once saved) and removed; its settings saved with only what changed; Roll back; a bought domain's renewal and
+// Auto-renew; Add a domain: buying (a search priced for its term and after, who it's registered to filled from what
+// Orgo has, the exact charge on a last step, nothing bought before Buy, Buy sending the price seen, a new price shown
+// to buy at, credits that don't cover it), a domain the user owns (its records to copy, Check again), one removed.
+// Then an app with more sites (how many on its line; a list of them on its tab, one line each with its state, its
+// domains and how each is doing, or its orgo.dev address while it has none, and its own Deploy this site, a line pressed
+// picking it, the domains the picked one's section reads put on its line; the picked one's sections, Deploy all, its history Live on the sites that serve it, every call naming the site),
+// its health check path, its settings and variables before its first deploy, one whose computer is gone, and its end:
+// Add a site, Remove one, Remove app (asked once more, of only what's on the web, its code kept unless ticked, what
+// Orgo kept said once it's gone, waiting while a deploy is sent); nothing typed for one site follows to another.
 //
 // The .tsx files are compiled with the TypeScript in node_modules as they load, and rendered to HTML.
 // Usage: node scripts/test-hosted-apps-ui.mjs   (not with --conditions=react-server: these are client components)
@@ -23,7 +35,8 @@ import { registerHooks } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 
-const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+// (As a path, not a URL's: a folder with a space in its name would be %20, then %2520 once made a URL again.)
+const root = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
 
 registerHooks({
   resolve(specifier, context, next) {
@@ -172,7 +185,9 @@ await test("the list where hosting isn't open: every Deploy greyed, with why", (
 
 await test("the list with none, before it's read, and when it couldn't be", () => {
   const none = list({ enabled: true, apps: [] });
-  assert.ok(none.includes("Ask a bot to make a website."), "one quiet line saying a bot can make one");
+  assert.ok(none.includes("Ask a bot to make a website, or add one here."), "one quiet line saying a bot can make one, or it can be added here");
+  assert.match(none, /data-no-apps[^]*data-add-app="true"[^>]*>.*Add app<\/button>/, "Add app beside it");
+  assert.equal(none.match(/data-add-app="true"/g).length, 1, "once: not in the title too while there are none");
   assert.ok(!none.includes("data-hosted-app="));
   assert.equal(list({ enabled: false, why: "Hosting apps on the web isn't open to your Orgo account yet.", apps: [] }), "", "nothing at all where none can go on the web");
   const reading = list(null);
@@ -275,7 +290,8 @@ await test("the tab's history a page at a time", () => {
   const paged = { ...HISTORY, next: id("a1") };
   const more = tab(shopApp(), { history: paged, older: { reading: false, failed: false, go } });
   assert.match(more, /data-older="true"[^>]*>Show older</, "Show older under the newest page while there are older ones");
-  assert.ok(more.indexOf("data-older") > more.indexOf(`data-commit="${id("a1")}"`) && more.indexOf("data-older") < more.indexOf("data-deploy-log"), "under the last line");
+  assert.ok(more.indexOf("data-older") > more.indexOf(`data-commit="${id("a1")}"`), "under the last line");
+  assert.ok(more.indexOf("data-deploy-log") > more.indexOf("data-deploys") && more.indexOf("data-deploy-log") < more.indexOf(">History<"), "the newest deploy's log in Deploys, above the history");
   assert.match(tab(shopApp(), { history: paged, older: { reading: true, failed: false, go } }), /data-older="true" disabled=""[^>]*>Reading…</, "while they're read");
   assert.match(tab(shopApp(), { history: paged, older: { reading: false, failed: true, go } }), />Couldn&#x27;t read older ones. Try again</, "when they couldn't be");
   assert.ok(!tab(shopApp(), { older: { reading: false, failed: false, go } }).includes("data-older"), "none when there are no older ones");
@@ -364,12 +380,18 @@ const between = (html, mark, end = ">History<") => {
 };
 const recordOf = (html, id) => between(html, `data-record="${id.padEnd(16, "0")}"`, "data-record=") ?? "";
 
-await test("the tab's domains: its address, each domain with how it's doing, a bought one's records with Orgo's locked and the rest to change, Add record", () => {
+await test("the tab's address, then its domains: each with how it's doing, Check again and Remove, a bought one's records with Orgo's locked and the rest to change, Add record, Add a domain", () => {
   const html = withDomains(DOMAINS);
   const part = between(html, "data-domains");
   assert.ok(part && html.indexOf("data-domains") < html.indexOf(">History<"), "above the history");
   assert.ok(part.includes(">Domains<"), "titled");
-  assert.match(between(part, "data-address", "data-domain="), /href="https:\/\/calm-fox-1a2b\.orgo\.dev"[^>]*>calm-fox-1a2b\.orgo\.dev<\/a>.*>Its address on Orgo</, "its address on orgo.dev first");
+  const address = between(html, "data-address-section", "data-domains");
+  assert.ok(address.includes(">Address<"), "its address, in a section of its own above them");
+  assert.match(address, /href="https:\/\/calm-fox-1a2b\.orgo\.dev"[^>]*>calm-fox-1a2b\.orgo\.dev<\/a>.*aria-label="Copy link".*data-tip="Orgo names it after the app\. It can&#x27;t be renamed\."[^>]*>Its address on Orgo</, "on orgo.dev, to open and copy, and why it keeps its name");
+  assert.ok(!part.includes("data-address"), "not again in its domains");
+  assert.match(part, /data-add-domain="true"[^>]*>.*Add a domain<\/button>/, "Add a domain under its domains");
+  assert.ok(part.indexOf("data-add-domain") < part.indexOf("data-zone="), "above the DNS records");
+  for (const d of DOMAINS.domains) assert.match(between(part, `data-domain="${d.domain}"`, "data-domain=") ?? "", new RegExp(`opacity-0[^"]*group-hover:opacity-100[^>]*><button aria-label="Remove ${d.domain.replaceAll(".", "\\.")}"`), `${d.domain} can be removed, from its line`);
 
   const apex = between(part, 'data-domain="acme.example"', "data-domain=");
   assert.match(apex, /data-status="active"/);
@@ -380,9 +402,17 @@ await test("the tab's domains: its address, each domain with how it's doing, a b
   const mine = between(part, 'data-domain="recipes.example.com"', "data-zone=");
   assert.match(mine, /data-status="pending"[^>]*>.*animate-pulse/, "one that waits pulses");
   assert.ok(mine.includes(">Waiting for its DNS<") && !mine.includes("<a "), "and isn't a link yet");
-  assert.ok(text(mine).includes("Set these at Cloudflare:"), "the records to set, where its DNS is kept");
+  assert.ok(mine.includes(">DNS at Cloudflare<") && !apex.includes("DNS at"), "who keeps its DNS, on its line");
+  const outside = between(mine, "data-outside-dns", "data-zone=");
+  assert.match(mine, /data-publish="recipes\.example\.com" data-outside-dns="true" class="[^"]*bg-\[color:var\(--c-f6f6f4\)\]/, "its DNS greyed out under it");
+  assert.ok(text(outside).includes("Orgo can't set these. Add them at Cloudflare, then Verify."), "the records to set, where its DNS is kept");
+  assert.ok(!apex.includes("data-outside-dns"), "not on one bought through Orgo");
   assert.ok(mine.includes(">_orgo-verify.recipes<") && mine.includes(">tok-mine<") && mine.includes(">Found<"));
   assert.ok(mine.includes(">edge.orgo.dev<") && mine.includes(">Not there yet<"));
+  assert.ok(mine.includes('aria-label="Copy the TXT value"') && mine.includes('aria-label="Copy the CNAME value"'), "each value to copy");
+  assert.match(outside, /data-verify="true"[^>]*>Verify</, "and Verify");
+  assert.ok(!mine.includes("data-check"), "in place of Check again");
+  assert.ok(!apex.includes("data-check") && !apex.includes("data-verify"), "neither on a bought one that's live");
 
   const zone = between(part, 'data-zone="acme.example"');
   assert.ok(text(zone).includes("DNS records for  acme.example"), "its zone's records, named");
@@ -410,14 +440,18 @@ await test("the tab's domains: its address, each domain with how it's doing, a b
 await test("the tab's domains with none, while they're read, when they couldn't be, and a zone that doesn't answer or couldn't be read", () => {
   const none = between(withDomains({ url: DOMAINS.url, domains: [], zones: [] }), "data-domains");
   assert.match(none, /data-no-domains="true" class="flex h-8 items-center [^"]*">It has no domain of its own yet\.</, "one plain line");
-  assert.ok(none.includes("calm-fox-1a2b.orgo.dev") && !none.includes("data-zone"), "under its address, and nothing else");
+  assert.ok(none.includes("data-add-domain") && !none.includes("data-zone"), "Add a domain under it, and nothing else");
 
-  const never = between(renderToStaticMarkup(h(H.HostedAppView, { ws: "ws_main", answer: { enabled: true }, app: app("draft", { head: null, hosting: null }), history: HISTORY, onChanged: noop })), "data-domains");
-  assert.ok(never.includes("It has no domain of its own yet.") && !never.includes("Reading them") && !never.includes("data-address"), "never deployed: no address, nothing to read");
+  const neverPage = renderToStaticMarkup(h(H.HostedAppView, { ws: "ws_main", answer: { enabled: true }, app: app("draft", { head: null, hosting: null }), history: HISTORY, onChanged: noop }));
+  const never = between(neverPage, "data-domains");
+  assert.ok(never.includes("It has no domain of its own yet.") && !never.includes("Reading them") && !never.includes("data-add-domain"), "never deployed: nothing to read, and nothing to point a domain at");
+  assert.ok(!neverPage.includes("data-address") && !neverPage.includes("data-settings") && !neverPage.includes("data-deploys"), "nor an address, settings or deploys: no empty sections");
 
-  const reading = between(withDomains(null), "data-domains");
+  const readingPage = withDomains(null);
+  const reading = between(readingPage, "data-domains");
   assert.match(reading, /class="flex h-8 items-center [^"]*">Reading them…</, "one line the height of a domain's while they're read");
-  assert.ok(reading.includes("data-address") && reading.includes("shop.orgo.dev"), "its address at once, from the list");
+  assert.ok(readingPage.includes("data-address") && between(readingPage, "data-address-section", "data-domains").includes("shop.orgo.dev"), "its address at once, from the list");
+  assert.ok(!reading.includes("data-add-domain"), "Add a domain once they're read");
   assert.ok(!reading.includes("It has no domain"));
   assert.ok(between(withDomains(null, { domainsFailed: "Sign in with Orgo to put apps on the web." }), "data-domains").includes(">Sign in with Orgo to put apps on the web.<"), "why they couldn't be read");
 
@@ -664,6 +698,32 @@ const type = (el, value) =>
     el.dispatchEvent(new win.Event("input", { bubbles: true }));
     await settle();
   });
+/** The setter React's own tracker doesn't see, for `prop` of `el` (from its prototype chain). */
+const setterOf = (el, prop) => {
+  for (let p = Object.getPrototypeOf(el); p; p = Object.getPrototypeOf(p)) {
+    const d = Object.getOwnPropertyDescriptor(p, prop);
+    if (d?.set) return d.set;
+  }
+  return null;
+};
+const typeArea = (el, value) =>
+  act(async () => {
+    el.focus();
+    const set = setterOf(el, "value");
+    if (set) set.call(el, value);
+    else el.textContent = value;
+    el.dispatchEvent(new win.Event("input", { bubbles: true }));
+    await settle();
+  });
+const toggle = (el) =>
+  act(async () => {
+    // (linkedom keeps no checked of its own: React's is the element's, and its tracker isn't there to fool.)
+    const set = setterOf(el, "checked");
+    if (set) set.call(el, !el.checked);
+    else el.checked = !el.checked;
+    el.dispatchEvent(new win.Event("click", { bubbles: true }));
+    await settle();
+  });
 const submit = (form) =>
   act(async () => {
     form.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
@@ -821,6 +881,887 @@ await test("a form closed: Esc or Cancel back where it was asked, kept from the 
   } finally {
     await t.done();
   }
+});
+
+/* ---------------- Add app, its address, settings, variables, deploys, and adding a domain ---------------- */
+
+const SETTINGS = {
+  url: "https://calm-fox-1a2b.orgo.dev",
+  settings: { port: 3000, install: null, build: "npm run build", start: null },
+  env: ["API_TOKEN", "MODE"],
+  deploys: [
+    { id: "dep_3", state: "succeeded", at: id("c3"), rollback: false, when: min(5), error: null, live: true, canRollback: false },
+    { id: "dep_2", state: "failed", at: id("b2"), rollback: false, when: min(60), error: "The build failed. The log says why.", live: false, canRollback: false },
+    { id: "dep_1", state: "succeeded", at: id("a1"), rollback: false, when: min(900), error: null, live: false, canRollback: true },
+  ],
+};
+const RENEWS = { on: true, cents: 1400, years: 1, payer: "you", state: "scheduled", error: null, expires: Date.parse("2027-10-21T12:00:00Z") };
+const withAll = (extra = {}) => renderToStaticMarkup(h(H.HostedAppView, { ws: "ws_main", answer: { enabled: true }, app: shopApp(), history: HISTORY, onChanged: noop, domains: DOMAINS, settings: SETTINGS, ...extra }));
+
+await test("one page, in order: Address, Domains, Settings (port, commands, variables), Deploys (the newest's log under them), then History", () => {
+  const html = withAll();
+  const at = ["data-address-section", "data-domains", "data-settings", "data-env", "data-deploys", "data-deploy-log", ">History<"].map((m) => html.indexOf(m));
+  assert.ok(at.every((x) => x > 0), "each there");
+  assert.deepEqual(at, [...at].sort((a, b) => a - b), "in that order");
+  const settings = between(html, "data-settings", "data-env");
+  assert.match(settings, /aria-label="Port"[^>]*value="3000"/, "its port");
+  assert.match(settings, /aria-label="Build command"[^>]*value="npm run build"/);
+  assert.match(settings, /aria-label="Start command"[^>]*placeholder="Orgo finds it"[^>]*value=""/, "an empty one is Orgo's to find");
+  assert.match(settings, /<button type="submit" disabled=""[^>]*>Save</, "Save once something changed");
+  const env = between(html, "data-env", "data-deploys");
+  assert.deepEqual([...env.matchAll(/data-env-name="([^"]+)"/g)].map((m) => m[1]), ["API_TOKEN", "MODE"], "its variables by name");
+  assert.match(env, /data-tip="Orgo keeps its value secret and never shows it again\. Change it to type a new one\."[^>]*>••••••••</, "values hidden: Orgo never gives one back");
+  assert.ok(env.includes('aria-label="Change API_TOKEN"') && env.includes('aria-label="Remove API_TOKEN"') && env.includes(">Add variable<"));
+  const deploys = between(html, "data-deploys", ">History<");
+  assert.deepEqual([...deploys.matchAll(/data-deploy="([^"]+)"/g)].map((m) => m[1]), ["dep_3", "dep_2", "dep_1"]);
+  const live = between(deploys, 'data-deploy="dep_3"', "data-deploy=");
+  assert.ok(live.includes("bg-[#2BB673]") && (live.match(/>Live</g) ?? []).length === 1, "the live one says so, once, with the green dot");
+  const was = between(deploys, 'data-deploy="dep_1"', "data-deploy-log");
+  assert.ok(was.includes(">Was live<") && !was.includes(">Live<") && !was.includes("bg-[#2BB673]"), "an earlier one that went live and was replaced: Was live, grey, never Live");
+  assert.equal((deploys.match(/>Live</g) ?? []).length, 1, "only one deploy is Live");
+  assert.ok(between(deploys, 'data-deploy="dep_2"', "data-deploy=").includes("Failed: The build failed. The log says why."), "a failed one, and why");
+  assert.ok(!between(deploys, 'data-deploy="dep_2"', "data-deploy=").includes("Roll back"), "never put back");
+  assert.match(between(deploys, 'data-deploy="dep_1"', "data-deploy-log"), /opacity-0[^"]*group-hover:opacity-100.*>Roll back<\/button>/, "an earlier one that went live: Roll back, as its line is pointed at");
+  assert.ok(!NO_DASHES.test(text(html)), "no dashes");
+});
+
+await test("a bought domain's renewal under its records' title: when, how much, whose credits, and Auto-renew; off, what turning it on costs and who pays; a teammate's; why the last try failed", () => {
+  const zoneWith = (renewal) => between(withAll({ domains: { ...DOMAINS, zones: [{ ...DOMAINS.zones[0], renewal }] } }), 'data-renewal="acme.example"', "data-record=");
+  const on = zoneWith(RENEWS);
+  assert.ok(text(on).includes("Renews Oct 21, 2027 for $14.00, from your Orgo credits."), text(on));
+  assert.match(on, /role="switch" aria-checked="true" aria-label="Auto-renew"/);
+  const off = zoneWith({ ...RENEWS, on: false, payer: null, state: "off" });
+  assert.ok(text(off).includes("Expires Oct 21, 2027. Auto-renew pays $14.00 a year from your Orgo credits."), text(off));
+  assert.match(off, /aria-checked="false"/);
+  assert.ok(text(zoneWith({ ...RENEWS, payer: "member" })).includes("from a teammate's Orgo credits"));
+  assert.ok(text(zoneWith({ ...RENEWS, state: "retrying", error: "The last try to renew it found too few credits. Add credits, or pay from yours." })).includes("found too few credits"));
+  assert.ok(!withAll().includes("data-renewal"), "nothing when Orgo doesn't say");
+});
+
+const ADDED = { name: "guest-book", botId: "nova", chatId: "bot:nova", sessionId: "ses_9" };
+
+await test("Add app: its form under On the web (name as an Ingot repo's, as typed; what it should be; Put it live when it's ready, on), Start only once both are there; sent as typed, the task opened; a name taken said, the form kept", async () => {
+  const opened = [];
+  let answer = { body: ADDED };
+  routes = { "/api/hosted-apps": () => answer };
+  const m = await mount(h(H.HostedAppsList, { ws: "ws_add", answer: { enabled: true, apps: APPS }, onChanged: noop, builder: "Nova", onStarted: (a) => opened.push(a) }));
+  try {
+    assert.ok(!m.box.querySelector("[data-add-app-form]"), "no form until it's asked for");
+    await click(m.box.querySelector("[data-add-app]"));
+    const form = m.box.querySelector("[data-add-app-form]");
+    assert.ok(form && !m.box.querySelector("[data-add-app]"), "the form, in Add app's place");
+    assert.equal(doc.activeElement.getAttribute("aria-label"), "Name", "its name, to start");
+    assert.ok(form.textContent.includes("Nova builds it on its computer."));
+    const start = button(form, "Start");
+    await type(form.querySelector('input[aria-label="Name"]'), "Guest Book");
+    assert.equal(form.querySelector('input[aria-label="Name"]').value, "guest-book", "typed as a repo's name");
+    assert.equal(start.disabled, true, "not without what it should be");
+    await type(form.querySelector('input[aria-label="Name"]'), "guest--");
+    assert.ok(form.textContent.includes("Lowercase letters, numbers and single hyphens, like recipe-box."), "a name that can't be one, said as it's typed");
+    await type(form.querySelector('input[aria-label="Name"]'), "guest-book");
+    await typeArea(form.querySelector('textarea[aria-label="What it should be"]'), "A page where visitors leave a note.");
+    assert.equal(form.querySelector('input[type="checkbox"]').checked, true, "put live when it's ready, to start");
+    assert.equal(start.disabled, false);
+    const n = calls.length;
+    await submit(form);
+    assert.deepEqual(calls.slice(n).map((c) => [c.method, c.url, c.body]), [["POST", "/api/hosted-apps", { ws: "ws_add", name: "guest-book", what: "A page where visitors leave a note.", deploy: true }]]);
+    assert.deepEqual(opened, [ADDED], "the task opened");
+    assert.ok(!m.box.querySelector("[data-add-app-form]"), "and the form closed");
+
+    await click(m.box.querySelector("[data-add-app]"));
+    const again = m.box.querySelector("[data-add-app-form]");
+    await type(again.querySelector('input[aria-label="Name"]'), "recipe-box");
+    await typeArea(again.querySelector("textarea"), "Recipes.");
+    await toggle(again.querySelector('input[type="checkbox"]'));
+    answer = { status: 409, body: { error: "There's an app called recipe-box in this workspace already. Pick another name.", field: "name" } };
+    await submit(again);
+    assert.equal(calls.at(-1).body.deploy, false, "not put live when unticked");
+    assert.equal(again.querySelector('[role="alert"]')?.textContent, "There's an app called recipe-box in this workspace already. Pick another name.");
+    assert.equal(again.querySelector('input[aria-label="Name"]').getAttribute("aria-invalid"), "true", "its name ringed");
+    assert.equal(opened.length, 1, "nothing opened");
+    const esc = await press("Escape", again.querySelector('input[aria-label="Name"]'));
+    assert.equal(esc.heard, false, "Esc closes the form, and the app's Esc doesn't hear it");
+    assert.ok(!m.box.querySelector("[data-add-app-form]"));
+  } finally {
+    await m.done();
+  }
+});
+
+const AVA = { first_name: "Ava", last_name: "Lin", email: "ava@orgo.ai", phone: "+1.4155550100", address1: "1 Example Way", city: "Springfield", state: "CA", postal_code: "94000", country: "US" };
+const OFFERS = {
+  results: [
+    { domain: "guest.example", status: "available", price: 1200, renewal: 1400, years: 1 },
+    { domain: "guest.invalid", status: "taken", price: null, renewal: null, years: null },
+    { domain: "guest.test", status: "available", price: 14000, renewal: 7000, years: 2 },
+  ],
+  next: null,
+};
+const GUEST = { id: "cd_guest", domain: "guest.example", status: "pending", cert: "pending", managed: true, zone: "8e8e8e8e-1111-4222-8333-444455556666", publish: [] };
+/** An app's tab, read from these routes (its domains and settings as `extra` says). */
+async function settingsTab(extra = {}) {
+  routes = {
+    "/api/hosted-apps": { body: { enabled: true, apps: [shopApp()] } },
+    "/api/hosted-apps/shop/commits": { body: HISTORY },
+    "/api/hosted-apps/shop/dns": { body: DOMAINS },
+    "/api/hosted-apps/shop/settings": { body: SETTINGS },
+    ...extra,
+  };
+  const m = await mount(h(H.HostedAppTab, { ws: `ws_set${++tabs}`, name: "shop", state: { workspaces: [], bots: [], chats: [], account: { user: { id: "u", email: "ava@orgo.ai" } } } }));
+  await act(settle);
+  return m;
+}
+const posts = (from, path) => calls.slice(from).filter((c) => c.method !== "GET" && c.url === path);
+
+await test("Get a new domain: a search, a name picked with its price for its term and after, who it's registered to (filled from what Orgo has of the last one), then the exact charge in Orgo credits and what it renews for, and Buy, which sends that price; nothing bought before Buy; a new price shown to buy at again; once bought, it's checked until it's live", async () => {
+  const buys = [];
+  const t = await settingsTab({
+    "/api/hosted-apps/shop/domains": (url, init) => {
+      if ((init.method ?? "GET") === "GET") return { body: { buy: { open: true }, owned: [{ id: "9f9f9f9f-1111-4222-8333-444455556666", domain: "spare.example" }], contact: AVA } };
+      const b = JSON.parse(init.body);
+      buys.push(b);
+      if (buys.length === 1) return { status: 409, body: { error: "The price of guest.example is $13.00 now. Check it, then buy it.", code: "PRICE_CHANGED", price: 1300, renewal: 1500, years: 1 } };
+      return { body: { domains: { ...DOMAINS, domains: [...DOMAINS.domains, GUEST] }, domain: GUEST, bought: "guest.example" } };
+    },
+    "/api/hosted-apps/shop/domains/search": { body: OFFERS },
+  });
+  try {
+    const n = calls.length;
+    await click(t.box.querySelector("[data-add-domain]"));
+    await act(settle);
+    const panel = () => t.box.querySelector("[data-add-domain-panel]");
+    assert.ok(panel(), "its panel");
+    assert.ok(panel().querySelector('[data-owned-domain="spare.example"]'), "the workspace's domain not in use, to use as it is");
+    assert.equal(panel().querySelector('[role="tab"][aria-selected="true"]').textContent, "Get a new domain");
+    await type(panel().querySelector('input[aria-label="Search for a domain"]'), "guest");
+    await submit(panel().querySelector("[data-domain-search]"));
+    assert.ok(calls.some((c) => c.url.startsWith("/api/hosted-apps/shop/domains/search?ws=") && c.url.includes("&q=guest&page=0")));
+    const offer = (d) => panel().querySelector(`[data-offer="${d}"]`);
+    assert.ok(offer("guest.example").textContent.includes("$12.00 a year, then $14.00 a year") && button(offer("guest.example"), "Pick"));
+    assert.ok(offer("guest.invalid").textContent.includes("Taken") && !button(offer("guest.invalid"), "Pick"), "a taken one can't be picked");
+    assert.ok(offer("guest.test").textContent.includes("$140.00 for 2 years, then $70.00 a year"), "a longer term said");
+    await click(button(offer("guest.example"), "Pick"));
+    const who = panel().querySelector('[data-registrant="guest.example"]');
+    assert.ok(who, "who it's registered to");
+    for (const [k, v] of Object.entries(AVA)) assert.equal(who.querySelector(`input[aria-label="${["First name", "Last name", "Email", "Phone", "Address", "City", "State or region", "Postal code", "Country"][Object.keys(AVA).indexOf(k)]}"]`).value, v, `${k} filled from Orgo`);
+    await submit(who);
+    const sure = panel().querySelector('[data-confirm="guest.example"]');
+    assert.equal(sure.querySelector("span").textContent, "Buy guest.example for $12.00 from your Orgo credits, for a year. Then it renews for $14.00 a year from your credits, with auto-renew on. You can turn that off here.");
+    assert.equal(posts(n, "/api/hosted-apps/shop/domains").length, 0, "nothing bought yet: the search, the pick and the form send nothing");
+    await click(button(sure, "Buy for $12.00"));
+    const { ws, ...first } = buys[0];
+    assert.match(ws, /^ws_set\d+$/, "its workspace");
+    assert.deepEqual(first, { action: "buy", domain: "guest.example", registrant: AVA, price: 1200 }, "the price seen, and who it's registered to");
+    const again = panel().querySelector('[data-confirm="guest.example"]');
+    assert.ok(again.textContent.includes("for $13.00") && button(again, "Buy for $13.00"), "the new price, to buy at");
+    assert.equal(again.querySelector('[role="alert"]').textContent, "The price of guest.example is $13.00 now. Check it, then buy it.");
+    await click(button(again, "Buy for $13.00"));
+    assert.equal(buys[1].price, 1300, "at the new price, once pressed again");
+    assert.equal(buys.length, 2, "one buy per press");
+    assert.ok(!panel(), "closed once it's bought");
+    const line = t.box.querySelector('[data-domain="guest.example"]');
+    assert.ok(line && line.textContent.includes("Checking its DNS…"), "its line, checked until it's live");
+  } finally {
+    await t.done();
+  }
+});
+
+await test("A buy the credits don't cover: said on the last step, with how much; buying not open here: why, and Use a domain I own instead", async () => {
+  const t = await settingsTab({
+    "/api/hosted-apps/shop/domains": (url, init) =>
+      (init.method ?? "GET") === "GET"
+        ? { body: { buy: { open: true }, owned: [], contact: null } }
+        : { status: 402, body: { error: "guest.example costs $12.00 and your Orgo credits cover $3.50. Add $8.50 or more in credits, then buy it.", code: "INSUFFICIENT_CREDITS", price: 1200, available: 350 } },
+    "/api/hosted-apps/shop/domains/search": { body: OFFERS },
+  });
+  try {
+    await click(t.box.querySelector("[data-add-domain]"));
+    await act(settle);
+    const panel = () => t.box.querySelector("[data-add-domain-panel]");
+    await type(panel().querySelector('input[aria-label="Search for a domain"]'), "guest");
+    await submit(panel().querySelector("[data-domain-search]"));
+    await click(button(panel().querySelector('[data-offer="guest.example"]'), "Pick"));
+    const who = panel().querySelector("[data-registrant]");
+    assert.equal(who.querySelector('input[aria-label="Email"]').value, "ava@orgo.ai", "nothing from Orgo: the account's email, and nothing guessed");
+    assert.equal(who.querySelector('input[aria-label="First name"]').value, "");
+    assert.equal(button(who, "Continue").disabled, true, "not until what the registry needs is there");
+    for (const [label, v] of [["First name", "Ava"], ["Last name", "Lin"], ["Phone", "+1 415 555 0100"], ["Address", "1 Example Way"], ["City", "Springfield"], ["State or region", "CA"], ["Postal code", "94000"], ["Country", "us"]]) await type(who.querySelector(`input[aria-label="${label}"]`), v);
+    assert.equal(who.querySelector('input[aria-label="Country"]').value, "US");
+    await submit(who);
+    await click(button(panel(), "Buy for $12.00"));
+    assert.equal(panel().querySelector('[role="alert"]').textContent, "guest.example costs $12.00 and your Orgo credits cover $3.50. Add $8.50 or more in credits, then buy it.");
+    assert.ok(button(panel(), "Buy for $12.00"), "still there, to buy once there are credits");
+  } finally {
+    await t.done();
+  }
+  const closed = await settingsTab({ "/api/hosted-apps/shop/domains": { body: { buy: { open: false, why: "Buying domains isn't open to your Orgo account yet." }, owned: [], contact: null } } });
+  try {
+    await click(closed.box.querySelector("[data-add-domain]"));
+    await act(settle);
+    const panel = closed.box.querySelector("[data-add-domain-panel]");
+    assert.equal(panel.querySelector('[role="tab"][aria-selected="true"]').textContent, "Use a domain I own", "the way that works here");
+    await click(button(panel, "Get a new domain"));
+    assert.ok(panel.textContent.includes("Buying domains isn't open to your Orgo account yet."));
+    assert.ok(!panel.querySelector("[data-domain-search]"), "no search to buy from");
+  } finally {
+    await closed.done();
+  }
+});
+
+await test("one bought elsewhere that's live: its DNS still greyed out under it, only what routes it there, and Verify; one Orgo can't tell the keeper of says outside Orgo", () => {
+  const live = { id: "cd_live", domain: "www.example.net", status: "active", cert: "issued", managed: false, zone: null, where: "Cloudflare", publish: [{ type: "CNAME", name: "www", value: "edge.orgo.dev" }] };
+  const unknown = { ...live, id: "cd_unknown", domain: "app.example.net", where: null };
+  const part = between(withDomains({ ...DOMAINS, domains: [live, unknown] }), "data-domains");
+  const one = between(part, 'data-domain="www.example.net"', 'data-domain="app.example.net"');
+  assert.match(one, /<a href="https:\/\/www\.example\.net"/, "a link, as it's live");
+  assert.ok(one.includes(">DNS at Cloudflare<"));
+  assert.ok(text(between(one, "data-outside-dns")).includes("Orgo doesn't change its DNS. This is what's set at Cloudflare."));
+  assert.ok(one.includes(">edge.orgo.dev<") && one.includes('aria-label="Copy the CNAME value"') && !one.includes(">TXT<"));
+  assert.match(one, /data-verify="true"[^>]*>Verify</);
+  const other = between(part, 'data-domain="app.example.net"');
+  assert.ok(other.includes(">DNS outside Orgo<") && text(other).includes("Orgo doesn't change its DNS. This is what's set where its DNS is kept."));
+});
+
+const MINE = { id: "cd_new", domain: "shop.example.org", status: "pending", cert: "pending", managed: false, zone: null, where: "Cloudflare", publish: [{ type: "TXT", name: "_orgo-verify.shop", value: "tok-new", found: "ok" }, { type: "CNAME", name: "shop", value: "edge.orgo.dev", found: "missing" }] };
+
+await test("Use a domain I own: typed and connected, its DNS greyed out under its line: the records to set where it's kept, each value to copy, and Verify, which says why while they aren't there", async () => {
+  const t = await settingsTab({
+    "/api/hosted-apps/shop/domains": (url, init) => ((init.method ?? "GET") === "GET" ? { body: { buy: { open: true }, owned: [], contact: null } } : { body: { domains: { ...DOMAINS, domains: [...DOMAINS.domains, MINE] }, domain: MINE } }),
+    "/api/hosted-apps/shop/domains/cd_new": { body: { domain: { ...MINE, status: "verifying" }, said: "The records aren't there yet. New ones can take a few minutes to show up." } },
+  });
+  try {
+    await click(t.box.querySelector("[data-add-domain]"));
+    await act(settle);
+    const panel = t.box.querySelector("[data-add-domain-panel]");
+    await click(button(panel, "Use a domain I own"));
+    await type(panel.querySelector('input[aria-label="Your domain"]'), "shop.example.org");
+    const n = calls.length;
+    await submit(panel.querySelector("[data-own-domain]"));
+    assert.deepEqual(posts(n, "/api/hosted-apps/shop/domains").map(({ body: { ws, ...b } }) => (void ws, b)), [{ action: "connect", domain: "shop.example.org" }]);
+    assert.ok(!t.box.querySelector("[data-add-domain-panel]"), "closed");
+    const line = () => t.box.querySelector('[data-domain="shop.example.org"]');
+    const records = t.box.querySelector('[data-publish="shop.example.org"]');
+    assert.ok(records.textContent.includes("Orgo can't set these. Add them at Cloudflare, then Verify."));
+    assert.ok(button(records, "Copy the TXT value") && button(records, "Copy the CNAME value"), "each value to copy");
+    assert.ok(!button(line(), "Check again"), "no Check again on its line");
+    await click(button(records, "Verify"));
+    assert.deepEqual([calls.at(-1).method, calls.at(-1).url], ["POST", "/api/hosted-apps/shop/domains/cd_new"], "checked once more");
+    assert.ok(t.box.textContent.includes("The records aren't there yet. New ones can take a few minutes to show up."), "why, under its line");
+    assert.equal(line().getAttribute("data-status"), "verifying");
+  } finally {
+    await t.done();
+  }
+});
+
+await test("Its variables: Add variable (the name as a shell's, the value hidden as it's typed unless Show), saved to Orgo and gone from the page; Remove asked once more, sent as null", async () => {
+  const sent = [];
+  const t = await settingsTab({
+    "/api/hosted-apps/shop/env": (url, init) => {
+      const b = JSON.parse(init.body);
+      sent.push(b);
+      return { body: { env: b.env.MODE === null ? ["API_TOKEN"] : ["API_TOKEN", "MODE", "WEBHOOK_SECRET"] } };
+    },
+  });
+  const VALUE = "made-up-secret-value-7d3f";
+  try {
+    const env = () => t.box.querySelector("[data-env]");
+    await click(button(env(), "Add variable"));
+    const form = env().querySelector('[data-env-form="new"]');
+    await type(form.querySelector('input[aria-label="Name"]'), "webhook secret");
+    assert.equal(form.querySelector('input[aria-label="Name"]').value, "WEBHOOK_SECRET");
+    const value = form.querySelector('input[aria-label="Value"]');
+    assert.equal(value.getAttribute("type"), "password", "hidden as it's typed");
+    await type(value, VALUE);
+    await click(button(form, "Show"));
+    assert.equal(form.querySelector('input[aria-label="Value"]').getAttribute("type"), "text", "Show shows it");
+    await submit(form);
+    assert.deepEqual(sent[0].env, { WEBHOOK_SECRET: VALUE });
+    assert.deepEqual([...env().querySelectorAll("[data-env-name]")].map((x) => x.getAttribute("data-env-name")), ["API_TOKEN", "MODE", "WEBHOOK_SECRET"]);
+    assert.ok(!t.box.innerHTML.includes(VALUE), "the value is gone from the page once it's saved");
+    assert.ok(env().textContent.includes("Saved. Variables apply from its next deploy."));
+    await click(button(env(), "Remove MODE"));
+    await click(button(env(), "Remove"));
+    assert.deepEqual(sent[1].env, { MODE: null });
+    assert.deepEqual([...env().querySelectorAll("[data-env-name]")].map((x) => x.getAttribute("data-env-name")), ["API_TOKEN"]);
+  } finally {
+    await t.done();
+  }
+});
+
+await test("Its settings saved: only what changed; Roll back puts an earlier deploy back; a domain removed after asking once more; Auto-renew turned off", async () => {
+  let saved = null;
+  const t = await settingsTab({
+    "/api/hosted-apps/shop/dns": { body: { ...DOMAINS, zones: [{ ...DOMAINS.zones[0], renewal: RENEWS }] } },
+    "/api/hosted-apps/shop/settings": (url, init) => {
+      if ((init.method ?? "GET") === "GET") return { body: SETTINGS };
+      saved = JSON.parse(init.body);
+      return { body: { ...SETTINGS, settings: { ...SETTINGS.settings, port: 3100 } } };
+    },
+    "/api/hosted-apps/shop": { body: { app: shopApp({ live: live("queued", id("a1")) }) } },
+    "/api/hosted-apps/shop/domains/cd_apex": { body: { ...DOMAINS, domains: DOMAINS.domains.slice(1) } },
+    "/api/hosted-apps/shop/domains": { body: { renewal: { ...RENEWS, on: false, payer: null, state: "off" } } },
+  });
+  try {
+    const form = t.box.querySelector("[data-settings-form]");
+    await type(form.querySelector('input[aria-label="Port"]'), "3100");
+    await submit(form);
+    assert.deepEqual(Object.keys(saved).sort(), ["port", "ws"], "only the port");
+    assert.equal(saved.port, "3100");
+    assert.ok(form.textContent.includes("Saved. It's being built again for the new port."));
+
+    const n = calls.length;
+    await click(button(t.box.querySelector('[data-deploy="dep_1"]'), "Roll back"));
+    assert.deepEqual(posts(n, "/api/hosted-apps/shop").map((c) => [c.body.action, c.body.deployment]), [["rollback", "dep_1"]]);
+
+    await click(button(t.box.querySelector('[data-domain="acme.example"]'), "Remove acme.example"));
+    assert.ok(t.box.textContent.includes("Remove acme.example from this app? The domain stays yours."), "asked once more");
+    await click([...t.box.querySelectorAll("button")].find((b) => b.textContent === "Remove"));
+    assert.equal(calls.at(-1).method, "DELETE");
+    assert.ok(!t.box.querySelector('[data-domain="acme.example"]'), "gone");
+  } finally {
+    await t.done();
+  }
+  const r = await settingsTab({
+    "/api/hosted-apps/shop/dns": { body: { ...DOMAINS, zones: [{ ...DOMAINS.zones[0], renewal: RENEWS }] } },
+    "/api/hosted-apps/shop/domains": { body: { renewal: { ...RENEWS, on: false, payer: null, state: "off" } } },
+  });
+  try {
+    const sw = r.box.querySelector('[role="switch"]');
+    assert.equal(sw.getAttribute("aria-checked"), "true");
+    await click(sw);
+    assert.deepEqual([calls.at(-1).method, calls.at(-1).body.zone, calls.at(-1).body.autoRenew], ["PATCH", ZONE, false]);
+    assert.equal(r.box.querySelector('[role="switch"]').getAttribute("aria-checked"), "false");
+    assert.ok(r.box.textContent.includes("Expires Oct 21, 2027. Auto-renew pays $14.00 a year from your Orgo credits."));
+  } finally {
+    await r.done();
+  }
+});
+
+/* ---------------- One app, several sites; its end: Add a site, Remove one, Remove app ---------------- */
+
+const A = await import(pathToFileURL(`${root}/components/app/app-settings.tsx`).href);
+const SUITE_SITES = [
+  { name: "suite", projectId: "p_suite", url: "https://suite.orgo.dev", serving: id("c3"), live: live("succeeded", id("c3"), { url: "https://suite.orgo.dev" }) },
+  { name: "suite-admin", projectId: "p_admin", url: "https://suite-admin.orgo.dev", serving: id("b2"), live: live("failed", id("d4"), { error: "npm run build exited with 1", url: "https://suite-admin.orgo.dev" }) },
+  { name: "suite-till", projectId: null, url: null, serving: null, live: null },
+];
+const suiteApp = (extra = {}) => app("suite", { serving: id("c3"), live: SUITE_SITES[0].live, sites: SUITE_SITES, ...extra });
+const suiteTab = (extra = {}) => renderToStaticMarkup(h(H.HostedAppView, { ws: "ws_main", answer: { enabled: true }, app: suiteApp(), history: HISTORY, onChanged: noop, ...extra }));
+
+await test("the list: an app with more sites says how many (their names in the tooltip), Deploy waits while any of them deploys; one whose computer is gone needs a new home", () => {
+  const html = list({ enabled: true, apps: [suiteApp(), app("gone", { hosting: { botId: "nova", computerId: "c9", lost: 1 } })] });
+  const row = rowOf(html, "suite");
+  assert.match(row, /data-site-count="true" data-tip="suite, suite-admin, suite-till"[^>]*>3 sites</);
+  assert.deepEqual(deployIn(row), { tip: null, disabled: false });
+  const busy = rowOf(list({ enabled: true, apps: [suiteApp({ sites: [SUITE_SITES[0], { ...SUITE_SITES[2], live: live("running", id("e5")) }] })] }), "suite");
+  assert.deepEqual(deployIn(busy), { tip: "A deploy is running. Wait for it to finish.", disabled: true }, "one of its sites deploys");
+  const gone = rowOf(html, "gone");
+  assert.ok(gone.includes(">Needs a new home<") && !gone.includes("<a ") && !gone.includes("Not deployed yet"), "no address, and why");
+  assert.ok(!rowOf(list({ enabled: true, apps: APPS }), SHOP).includes("data-site-count"), "nothing for an app with one site");
+  assert.ok(!NO_DASHES.test(text(html)));
+});
+
+await test("the tab of an app with more sites: a list of them with their states, its own picked first, Deploy this site; the title's Deploy all; the sections are the picked site's; its history marks each changeset Live on the sites that serve it", () => {
+  const html = suiteTab();
+  const row = between(html, "data-sites", "data-address-section");
+  assert.deepEqual([...row.matchAll(/data-site="([^"]+)"/g)].map((m) => m[1]), ["suite", "suite-admin", "suite-till"]);
+  assert.match(row, /data-site="suite" aria-pressed="true"/, "its own picked");
+  assert.match(row, /data-site="suite-admin" aria-pressed="false"[^]*?bg-\[#B42318\]/, "each with its state's dot");
+  assert.deepEqual(deployIn(row, "Deploy this site"), { tip: null, disabled: false });
+  assert.deepEqual(deployIn(header(html), "Deploy all"), { tip: null, disabled: false }, "the title deploys them all");
+  assert.ok(!header(html).includes(">Deploy<"));
+  assert.ok(html.indexOf("data-sites") < html.indexOf("data-address-section"), "first, above its address");
+  assert.ok(between(html, "data-address-section", "data-domains").includes("suite.orgo.dev"));
+  assert.match(commitOf(html, id("c3")), /title="Live on suite"[^>]*>.*>Live on suite</, "served by one of three");
+  assert.match(commitOf(html, id("b2")), />Live on suite-admin</);
+  assert.ok(!commitOf(html, id("e5")).includes("data-live"));
+
+  const admin = suiteTab({ site: "suite-admin", onSite: noop });
+  assert.match(between(admin, "data-sites", "data-address-section"), /data-site="suite-admin" aria-pressed="true"/);
+  assert.ok(between(admin, "data-address-section", "data-domains").includes("suite-admin.orgo.dev"), "its address");
+  assert.ok(admin.includes("The last deploy failed: npm run build exited with 1"), "its deploy failed, not the app's own");
+  const till = suiteTab({ site: "suite-till", onSite: noop });
+  assert.ok(!till.includes("data-address-section") && !till.includes("data-deploys"), "never deployed: no address, no deploys");
+  assert.ok(!NO_DASHES.test(text(html + admin)));
+  assert.ok(!tab(shopApp()).includes("data-sites"), "no row for an app with one site");
+});
+
+/** The suite's sites with their domains, as the list reads them: its own with two live and two old ones waiting, one with one, one never made. */
+const SITE_DOMAINS = [
+  [
+    { domain: "front.suite.example", status: "active" },
+    { domain: "agent.suite.example", status: "active" },
+    { domain: "old.suite.example", status: "pending" },
+    { domain: "older.suite.example", status: "verifying" },
+  ],
+  [],
+  undefined,
+];
+const withSiteDomains = (all = SITE_DOMAINS) => SUITE_SITES.map((x, i) => (all[i] ? { ...x, domains: all[i] } : x));
+/** One site's line in the Sites list, by its name (it holds no div of its own, so it ends at the first one closed). */
+const lineOf = (html, site) => between(html, `data-site-line="${site}"`, "</div>") ?? "";
+
+await test("the Sites list: one line a site, its state, name and domains (each with how it's doing: live, or waiting for its DNS), its address on orgo.dev while it has none, else not on the web yet, and Deploy this site at its end; an app with one site as it was", () => {
+  const html = suiteTab({ app: suiteApp({ sites: withSiteDomains() }) });
+  const own = lineOf(html, "suite");
+  assert.deepEqual([...own.matchAll(/data-site-domain="([^"]+)" data-domain-state="([^"]+)" data-tip="([^"]+)"/g)].map((m) => m.slice(1)), [
+    ["front.suite.example", "active", "Live"],
+    ["agent.suite.example", "active", "Live"],
+    ["old.suite.example", "pending", "Waiting for its DNS"],
+    ["older.suite.example", "verifying", "Checking its DNS"],
+  ]);
+  assert.match(own, /aria-label="Live" class="[^"]*bg-\[#2BB673\]/, "a live one's dot");
+  assert.match(own, /aria-label="Waiting for its DNS" class="[^"]*animate-pulse/, "one waiting for its DNS");
+  assert.ok(!own.includes("data-site-address"), "its domains, not its address");
+  assert.ok(own.indexOf(">suite<") < own.indexOf("front.suite.example"), "its name, then its domains");
+  assert.ok(own.indexOf("bg-[#2BB673]") < own.indexOf(">suite<"), "its state first");
+  assert.deepEqual(deployIn(own, "Deploy this site"), { tip: null, disabled: false }, "Deploy this site at its end");
+  assert.ok(own.lastIndexOf("Deploy this site") > own.lastIndexOf("older.suite.example"));
+  const admin = lineOf(html, "suite-admin");
+  assert.match(admin, /data-site-address="true"[^>]*>suite-admin\.orgo\.dev</, "none: its orgo.dev address");
+  assert.ok(!admin.includes("data-site-domain"));
+  assert.match(admin, /bg-\[#B42318\]/, "its own state");
+  assert.deepEqual(deployIn(admin, "Deploy this site"), { tip: null, disabled: false });
+  const till = lineOf(html, "suite-till");
+  assert.ok(text(till).includes("Not on the web yet") && !till.includes("data-site-address"), "never made: not on the web yet");
+  assert.deepEqual(deployIn(lineOf(suiteTab({ app: suiteApp({ sites: [SUITE_SITES[0], { ...SUITE_SITES[1], live: live("running", id("e5")) }, SUITE_SITES[2]] }) }), "suite-admin"), "Deploy this site"), { tip: "A deploy is running. Wait for it to finish.", disabled: true }, "a line's own Deploy waits for its own deploy");
+  assert.match(lineOf(html, "suite"), /data-site="suite" aria-pressed="true"/, "the line is the press that picks it");
+  assert.match(lineOf(suiteTab({ app: suiteApp({ sites: withSiteDomains() }), site: "suite-admin", onSite: noop }), "suite-admin"), /data-site="suite-admin" aria-pressed="true"/);
+  // Its domains not read (Orgo didn't say): its address, as one with none.
+  assert.match(lineOf(suiteTab(), "suite"), /data-site-address="true"[^>]*>suite\.orgo\.dev</);
+  // In a narrow panel: its domains wrap under its name, each name cut short rather than past the panel's edge.
+  assert.match(own, /^data-site-line="suite" class="relative flex min-w-0 /);
+  assert.match(own, /<span class="flex min-w-0 flex-1 flex-wrap items-center[^"]*">/, "its name and domains wrap");
+  assert.match(own, /class="max-w-full truncate[^"]*">suite</, "a long name cut short");
+  const shown = [...own.matchAll(/data-site-domain="([^"]+)"[^>]*class="([^"]*)"><span role="img"[^>]*><\/span><span class="([^"]*)">/g)];
+  assert.equal(shown.length, 4);
+  for (const [, d, box, words] of shown) assert.ok(box.includes("min-w-0") && box.includes("max-w-full") && words.includes("truncate"), d);
+  // Pressed anywhere on its line (its padding too), it's picked; Deploy this site sits above that.
+  assert.match(own, /<button data-site="suite" aria-pressed="true" class="[^"]*after:absolute after:inset-0/);
+  assert.match(own, /<span class="relative flex shrink-0"><span[^>]*><button[^>]*>Deploy this site<\/button><\/span><\/span>$/);
+  // Its computer gone: the title says it needs a new home, and no line that it isn't on the web yet.
+  const gone = suiteTab({ app: suiteApp({ hosting: { botId: "nova", computerId: "c9", lost: 1 }, live: null, serving: null, sites: SUITE_SITES.map((x) => ({ ...x, projectId: null, url: null, live: null, serving: null })) }) });
+  assert.ok(header(gone).includes(">Needs a new home<"));
+  for (const x of SUITE_SITES) {
+    const l = lineOf(gone, x.name);
+    assert.ok(l.includes(`>${x.name}<`) && !text(l).includes("Not on the web yet") && !l.includes("data-site-address") && !l.includes("data-site-domain"), x.name);
+  }
+  assert.ok(!NO_DASHES.test(text(html + gone)));
+  const one = tab(shopApp());
+  assert.ok(!one.includes("data-sites") && !one.includes("data-site-line") && !one.includes("data-site-domain"), "an app with one site: no Sites list");
+  assert.ok(!one.includes("Deploy this site") && deployIn(header(one)), "its title's Deploy, as ever");
+});
+
+await test("one site's domains as its tab read them go on its line (a domain added, removed or gone live), the list as it was when they're what it says, and an app with one site untouched", () => {
+  const answer = { enabled: true, apps: [suiteApp({ sites: withSiteDomains() }), shopApp()] };
+  const now = H.withSiteDomains(answer, "suite", "suite-admin", [{ domain: "admin.suite.example", status: "pending" }]);
+  assert.deepEqual(now.apps[0].sites.map((x) => x.domains), [SITE_DOMAINS[0], [{ domain: "admin.suite.example", status: "pending" }], undefined]);
+  assert.equal(now.apps[1], answer.apps[1], "the other apps as they were");
+  assert.equal(H.withSiteDomains(answer, "suite", "suite", SITE_DOMAINS[0]), answer, "what it says already: as it was");
+  assert.equal(H.withSiteDomains(answer, "shop", "shop", [{ domain: "shop.example.com", status: "active" }]), answer, "one site: no list to change");
+  assert.equal(H.withSiteDomains(answer, "suite", "nope", []), answer);
+  // A read of the list that didn't get them (Orgo's list not read): each site's kept from the one before, while it's the same project.
+  const unsaid = { enabled: true, apps: [suiteApp(), shopApp()] };
+  const kept = H.withKeptDomains(unsaid, answer);
+  assert.deepEqual(kept.apps[0].sites.map((x) => x.domains), [SITE_DOMAINS[0], [], undefined]);
+  assert.equal(kept.apps[1], unsaid.apps[1], "one site: as read");
+  assert.equal(H.withKeptDomains(answer, unsaid), answer, "a read that says them: as read");
+  assert.equal(H.withKeptDomains(unsaid, undefined), unsaid);
+  const remade = { enabled: true, apps: [suiteApp({ sites: SUITE_SITES.map((x) => ({ ...x, projectId: x.projectId && `${x.projectId}_new` })) })] };
+  assert.equal(H.withKeptDomains(remade, answer), remade, "a site's project made again: none kept");
+  assert.deepEqual(H.siteDomainsOf({ url: null, zones: [], domains: [{ id: "cd_1", domain: "a.example.com", status: "active", cert: "issued", managed: false, zone: null, publish: [] }] }), [{ domain: "a.example.com", status: "active" }]);
+});
+
+await test("its end, under the history: Add a site, Remove the site picked (not its own), Remove app; an app whose computer is gone says it needs a new home", () => {
+  const end = between(suiteTab({ site: "suite-admin", onSite: noop }), "data-app-end", "</body>");
+  assert.ok(end.includes(">Add a site<") && end.includes(">Remove suite-admin<") && end.includes(">Remove app<"));
+  const own = between(suiteTab(), "data-app-end", "</body>");
+  assert.ok(!own.includes(">Remove suite<"), "its own site goes only with the app");
+  const one = tab(shopApp());
+  assert.ok(one.indexOf("data-app-end") > one.indexOf(">History<"), "at the end");
+  const full = between(suiteTab({ app: suiteApp({ sites: [...SUITE_SITES, { ...SUITE_SITES[2], name: "suite-d" }, { ...SUITE_SITES[2], name: "suite-e" }] }) }), "data-app-end", "</body>");
+  assert.match(full, /data-tip="An app can have 5 sites at most\."[^>]*><button data-add-site="true" disabled=""/, "five is all");
+  const gone = tab(app("gone", { hosting: { botId: "nova", computerId: "c9", lost: 1 } }));
+  assert.ok(header(gone).includes(">Needs a new home<"));
+  assert.ok(gone.includes("Its computer is gone, and its site went with it. Deploy puts it on the web again, or ask a bot to work on it."), "one site: its site");
+  assert.deepEqual(deployIn(header(gone)), { tip: null, disabled: false }, "Deploy gives it a home");
+  const many = suiteTab({ app: suiteApp({ hosting: { botId: "nova", computerId: "c9", lost: 1 }, sites: SUITE_SITES.map((x) => ({ ...x, projectId: null, url: null, live: null, serving: null })) }) });
+  assert.ok(many.includes("Its computer is gone, and its sites went with it."), "more: its sites");
+});
+
+await test("settings and variables before its first deploy: there to set, empty (its port the next free one), where deploying is open; none for one whose computer is gone, nor where deploying isn't open; Settings have its health check path", () => {
+  const NONE = { url: null, settings: null, env: [], deploys: [] };
+  const view = (a, answer = { enabled: true }) => renderToStaticMarkup(h(H.HostedAppView, { ws: "ws_main", answer, app: a, history: HISTORY, onChanged: noop, settings: NONE }));
+  const never = view(app("draft", { hosting: { botId: "nova", computerId: "c1" } }));
+  const first = between(never, "data-settings", ">History<");
+  assert.match(never, /data-settings="true" data-first="true"/);
+  assert.ok(first.includes(">Settings<") && text(first).includes("Set them now and its first deploy has them. Orgo finds what's left empty, and keeps the variables' values secret."));
+  assert.match(first, /aria-label="Port"[^>]*placeholder="Next free"[^>]*value=""/, "its port the next free one");
+  assert.match(first, /aria-label="Start command"[^>]*value=""/);
+  assert.ok(first.includes(">Variables<") && first.includes(">Add variable<"));
+  assert.ok(!never.includes("data-deploys"));
+  assert.ok(!view(app("gone", { hosting: { botId: "nova", computerId: "c9", lost: 1 } })).includes("data-settings"), "its computer gone: nowhere to keep them");
+  const closed = view(app("draft", { hosting: { botId: "nova", computerId: "c1" } }), { enabled: false, why: "Hosting isn't open to your account yet." });
+  assert.ok(!closed.includes("data-settings"), "deploying not open: nothing to type a secret into");
+  assert.ok(!NO_DASHES.test(text(never)));
+  const settings = between(withAll({ settings: { ...SETTINGS, settings: { ...SETTINGS.settings, health: "/healthz" } } }), "data-settings", "data-env");
+  assert.match(settings, /aria-label="Health check path"[^>]*placeholder="\/"[^>]*value="\/healthz"/);
+  assert.match(between(withAll(), "data-settings", "data-env"), /aria-label="Health check path"[^>]*value=""/, "Orgo's own, empty");
+});
+
+await test("the calls of a site: its log, domains and settings read with it; the window's appsStamp follows its sites and its computer gone (an app with one site's as it was)", async () => {
+  routes = { "/api/hosted-apps/shop/logs": { body: { state: "running", log: "x", next: 1, more: false } }, "/api/hosted-apps/shop/dns": { body: DOMAINS }, "/api/hosted-apps/shop/settings": { body: SETTINGS } };
+  const n = calls.length;
+  await H.readLog("ws_main", "shop", null, "shop-admin");
+  await H.readDomains("ws_main", "shop", "shop-admin");
+  await A.readSettings("ws_main", "shop", "shop-admin");
+  await H.readLog("ws_main", "shop", null);
+  assert.deepEqual(calls.slice(n).map((c) => c.url), [
+    "/api/hosted-apps/shop/logs?ws=ws_main&site=shop-admin",
+    "/api/hosted-apps/shop/dns?ws=ws_main&site=shop-admin",
+    "/api/hosted-apps/shop/settings?ws=ws_main&site=shop-admin",
+    "/api/hosted-apps/shop/logs?ws=ws_main",
+  ]);
+  const stamp = (hostedApps) => H.appsStamp({ workspaces: [{ id: "ws_main", hostedApps }] }, "ws_main");
+  const was = stamp({ shop: hosting("shop") });
+  assert.notEqual(stamp({ shop: { ...hosting("shop"), sites: [{ name: "shop-admin" }] } }), was, "a site added");
+  assert.notEqual(stamp({ shop: { ...hosting("shop"), sites: [{ name: "shop-admin", projectId: "p" }] } }), stamp({ shop: { ...hosting("shop"), sites: [{ name: "shop-admin" }] } }), "its project made");
+  assert.notEqual(stamp({ shop: { ...hosting("shop"), lost: 5 } }), was, "its computer gone");
+  assert.equal(stamp({ shop: { ...hosting("shop"), sites: [] } }), was);
+});
+
+await test("a site picked, clicked: its settings (health too) and variables saved with it, its rollback and Deploy this site name it; Deploy all names none", async () => {
+  routes = {
+    "/api/hosted-apps": { body: { enabled: true, apps: [suiteApp()] } },
+    "/api/hosted-apps/suite/commits": { body: HISTORY },
+    "/api/hosted-apps/suite/dns": { body: { url: "https://suite-admin.orgo.dev", domains: [], zones: [] } },
+    "/api/hosted-apps/suite/settings": (url, init) => ((init.method ?? "GET") === "GET" ? { body: SETTINGS } : { body: SETTINGS }),
+    "/api/hosted-apps/suite/env": { body: { env: ["API_TOKEN", "MODE", "NEW_ONE"] } },
+    "/api/hosted-apps/suite": { body: { app: suiteApp() } },
+  };
+  const ws = `ws_site${++tabs}`;
+  const m = await mount(h(H.HostedAppTab, { ws, name: "suite", state: { workspaces: [], bots: [], chats: [] } }));
+  await act(settle);
+  try {
+    let n = calls.length;
+    await click(m.box.querySelector('[data-site="suite-admin"]'));
+    await act(settle);
+    assert.equal(m.box.querySelector('[data-site="suite-admin"]').getAttribute("aria-pressed"), "true");
+    assert.ok(
+      calls.slice(n).some((c) => c.url.startsWith("/api/hosted-apps/suite/settings?") && c.url.endsWith("&site=suite-admin")) && calls.slice(n).some((c) => c.url.startsWith("/api/hosted-apps/suite/dns?") && c.url.endsWith("&site=suite-admin")),
+      "its settings and domains read",
+    );
+    const form = m.box.querySelector("[data-settings-form]");
+    await type(form.querySelector('input[aria-label="Health check path"]'), "/healthz");
+    n = calls.length;
+    await submit(form);
+    assert.deepEqual(posts(n, "/api/hosted-apps/suite/settings").map((c) => c.body), [{ ws, site: "suite-admin", health: "/healthz" }], "only what changed, with the site");
+    await click(m.box.querySelector("[data-add-env]"));
+    const env = m.box.querySelector('[data-env-form="new"]');
+    await type(env.querySelector('input[aria-label="Name"]'), "NEW_ONE");
+    await type(env.querySelector('input[aria-label="Value"]'), "made-up-value");
+    n = calls.length;
+    await submit(env);
+    assert.deepEqual(posts(n, "/api/hosted-apps/suite/env").map((c) => [c.body.site, c.body.env]), [["suite-admin", { NEW_ONE: "made-up-value" }]]);
+    n = calls.length;
+    await click(button(m.box.querySelector('[data-deploy="dep_1"]'), "Roll back"));
+    assert.deepEqual(posts(n, "/api/hosted-apps/suite").map((c) => [c.body.action, c.body.deployment, c.body.site]), [["rollback", "dep_1", "suite-admin"]]);
+    n = calls.length;
+    await click(button(m.box.querySelector('[data-site-line="suite-admin"]'), "Deploy this site"));
+    assert.deepEqual(posts(n, "/api/hosted-apps/suite").map((c) => [c.body.action, c.body.site]), [["deploy", "suite-admin"]]);
+    n = calls.length;
+    await click(button(m.box.querySelector("[data-hosted-tab]"), "Deploy all"));
+    assert.deepEqual(posts(n, "/api/hosted-apps/suite").map((c) => [c.body.action, c.body.site]), [["deploy", undefined]]);
+  } finally {
+    await m.done();
+  }
+});
+
+await test("a site's line, clicked: it's picked (its sections read with it), the domains its Domains section reads go on its line, and its own Deploy this site deploys it alone; the others' lines stay as the list read them", async () => {
+  routes = {
+    "/api/hosted-apps": { body: { enabled: true, apps: [suiteApp({ sites: withSiteDomains() })] } },
+    "/api/hosted-apps/suite/commits": { body: HISTORY },
+    "/api/hosted-apps/suite/dns": (url) =>
+      url.includes("site=suite-admin")
+        ? { body: { url: "https://suite-admin.orgo.dev", domains: [{ id: "cd_admin", domain: "admin.suite.example", status: "pending", cert: "pending", managed: false, zone: null, publish: [] }], zones: [] } }
+        : { body: { url: "https://suite.orgo.dev", domains: SITE_DOMAINS[0].map((d, i) => ({ id: `cd_${i}`, ...d, cert: "pending", managed: false, zone: null, publish: [] })), zones: [] } },
+    "/api/hosted-apps/suite/settings": { body: SETTINGS },
+    "/api/hosted-apps/suite": { body: { app: suiteApp() } },
+  };
+  const ws = `ws_lines${++tabs}`;
+  const m = await mount(h(H.HostedAppTab, { ws, name: "suite", state: { workspaces: [], bots: [], chats: [] } }));
+  await act(settle);
+  try {
+    const line = (site) => m.box.querySelector(`[data-site-line="${site}"]`);
+    const named = (site) => [...line(site).querySelectorAll("[data-site-domain]")].map((d) => [d.getAttribute("data-site-domain"), d.getAttribute("data-domain-state")]);
+    assert.deepEqual(named("suite"), SITE_DOMAINS[0].map((d) => [d.domain, d.status]), "every site's at once, as the list read them");
+    assert.ok(line("suite-admin").textContent.includes("suite-admin.orgo.dev"), "none yet: its address");
+    let n = calls.length;
+    await click(line("suite-admin").querySelector("[data-site]"));
+    await act(settle);
+    assert.equal(line("suite-admin").querySelector("[data-site]").getAttribute("aria-pressed"), "true", "picked");
+    assert.equal(line("suite").querySelector("[data-site]").getAttribute("aria-pressed"), "false");
+    assert.ok(calls.slice(n).some((c) => c.url.startsWith("/api/hosted-apps/suite/dns?") && c.url.endsWith("&site=suite-admin")), "its domains read");
+    assert.deepEqual(named("suite-admin"), [["admin.suite.example", "pending"]], "the domain its Domains section read, on its line");
+    assert.ok(!line("suite-admin").textContent.includes("suite-admin.orgo.dev"), "its domain in place of its address");
+    assert.deepEqual(named("suite"), SITE_DOMAINS[0].map((d) => [d.domain, d.status]), "the others as they were");
+    n = calls.length;
+    await click(button(line("suite-till"), "Deploy this site"));
+    assert.deepEqual(posts(n, "/api/hosted-apps/suite").map((c) => [c.body.action, c.body.site]), [["deploy", "suite-till"]], "a line's own Deploy this site, whichever is picked");
+    assert.equal(line("suite-admin").querySelector("[data-site]").getAttribute("aria-pressed"), "true", "pressing Deploy picks nothing");
+  } finally {
+    await m.done();
+  }
+});
+
+await test("a site's line as its domains change, clicked: another site picked reads the list again (one that couldn't get the domains leaves each line as it was, never its address in their place); one checked and gone live, then one removed, on the picked one's line at once; a read of the list begun before the change and landing after it never puts the old ones back", async () => {
+  const ADMIN = { id: "cd_admin", domain: "admin.suite.example", status: "pending", cert: "pending", managed: true, zone: null, publish: [] };
+  const listed = (sites) => ({ body: { enabled: true, apps: [suiteApp({ sites })] } });
+  // Its own last site deploying, as its Deploy this site answers: the list is read again from then on.
+  const going = [SUITE_SITES[0], SUITE_SITES[1], { ...SUITE_SITES[2], live: live("queued", id("e5")) }];
+  routes = {
+    "/api/hosted-apps": listed(withSiteDomains()),
+    "/api/hosted-apps/suite/commits": { body: HISTORY },
+    "/api/hosted-apps/suite/dns": (url) =>
+      url.includes("site=suite-admin")
+        ? { body: { url: "https://suite-admin.orgo.dev", domains: [ADMIN], zones: [] } }
+        : { body: { url: "https://suite.orgo.dev", domains: SITE_DOMAINS[0].map((d, i) => ({ id: `cd_${i}`, ...d, cert: "pending", managed: false, zone: null, publish: [] })), zones: [] } },
+    "/api/hosted-apps/suite/settings": { body: SETTINGS },
+    "/api/hosted-apps/suite/domains/cd_admin": (url, init) =>
+      init.method === "DELETE" ? { body: { url: "https://suite-admin.orgo.dev", domains: [], zones: [] } } : { body: { domain: { ...ADMIN, status: "active", cert: "issued" }, said: null } },
+    "/api/hosted-apps/suite": { body: { app: suiteApp({ sites: going }) } },
+  };
+  const ws = `ws_changes${++tabs}`;
+  const m = await mount(h(H.HostedAppTab, { ws, name: "suite", state: { workspaces: [], bots: [], chats: [] } }));
+  await act(settle);
+  try {
+    const line = (site) => m.box.querySelector(`[data-site-line="${site}"]`);
+    const named = (site) => [...line(site).querySelectorAll("[data-site-domain]")].map((d) => [d.getAttribute("data-site-domain"), d.getAttribute("data-domain-state")]);
+    const OWN = SITE_DOMAINS[0].map((d) => [d.domain, d.status]);
+    const lists = (from) => calls.slice(from).filter((c) => c.url.startsWith("/api/hosted-apps?")).length;
+    assert.deepEqual(named("suite"), OWN);
+
+    // Another site picked: the list read again, this time without the domains (Orgo's list of them not read).
+    routes["/api/hosted-apps"] = listed(SUITE_SITES);
+    let n = calls.length;
+    await click(line("suite-admin").querySelector("[data-site]"));
+    await act(settle);
+    assert.equal(lists(n), 1, "the list read again");
+    assert.deepEqual(named("suite"), OWN, "what its line said, kept");
+    assert.ok(!line("suite").textContent.includes("suite.orgo.dev"), "never its address in their place");
+    assert.deepEqual(named("suite-admin"), [["admin.suite.example", "pending"]], "the one picked: as its Domains section has them");
+
+    // Checked, and gone live: on its line at once.
+    await click(button(m.box.querySelector('[data-domain="admin.suite.example"]'), "Check again"));
+    assert.equal(calls.at(-1).method, "POST");
+    assert.deepEqual(named("suite-admin"), [["admin.suite.example", "active"]], "gone live");
+
+    // A read of the list begun before it's removed (its deploy running), landing after with it still there.
+    const held = later(listed(going.map((x, i) => (i === 1 ? { ...x, domains: [{ domain: "admin.suite.example", status: "pending" }] } : i === 0 ? { ...x, domains: SITE_DOMAINS[0] } : x))));
+    routes["/api/hosted-apps"] = held.route;
+    n = calls.length;
+    await click(button(line("suite-till"), "Deploy this site"));
+    assert.equal(lists(n), 1, "read again as its deploy runs");
+    await click(button(m.box.querySelector('[data-domain="admin.suite.example"]'), "Remove admin.suite.example"));
+    await click([...m.box.querySelectorAll("button")].find((b) => b.textContent === "Remove"));
+    assert.equal(calls.at(-1).method, "DELETE");
+    assert.deepEqual(named("suite-admin"), [], "gone from its line at once");
+    assert.ok(line("suite-admin").textContent.includes("suite-admin.orgo.dev"), "its address again");
+    routes["/api/hosted-apps"] = listed(going);
+    n = calls.length;
+    await act(async () => {
+      held.release();
+      await settle();
+    });
+    assert.equal(lists(n), 0, "nothing read since");
+    assert.deepEqual(named("suite-admin"), [], "the older read never puts it back");
+    assert.ok(line("suite-admin").textContent.includes("suite-admin.orgo.dev"));
+    assert.equal(m.box.querySelectorAll('[data-domain="admin.suite.example"]').length, 0, "as its Domains section says");
+    assert.deepEqual(named("suite"), OWN, "the others as that read says");
+  } finally {
+    await m.done();
+  }
+});
+
+await test("Add a site, clicked: its name as its address takes it (as typed), Add sends it and picks it; Esc closes the form and only it; Remove app asked once more, its code kept unless ticked; Remove the picked site", async () => {
+  const changed = [];
+  const picked = [];
+  let removed = 0;
+  routes = {
+    "/api/hosted-apps/suite": (url, init) => (init.method === "DELETE" ? { body: { removed: "suite", repo: JSON.parse(init.body).repo } } : { body: { app: suiteApp() } }),
+  };
+  const el = (site) => h(A.AppEnd, { ws: "ws_end", app: suiteApp(), site, onChanged: (a) => changed.push(a.name), onRemoved: () => removed++, onPicked: (x) => picked.push(x) });
+  const m = await mount(el(undefined));
+  try {
+    await click(m.box.querySelector("[data-add-site]"));
+    const form = m.box.querySelector("[data-add-site-form]");
+    assert.ok(form && form.textContent.includes("Another site from the same code, on the same computer, with its own address, port and variables."));
+    assert.equal(doc.activeElement.getAttribute("aria-label"), "Site name");
+    await type(form.querySelector('input[aria-label="Site name"]'), "Suite Admin");
+    assert.equal(form.querySelector('input[aria-label="Site name"]').value, "suite-admin");
+    assert.ok(form.textContent.includes("It has a site by that name."), "one it has, said as it's typed");
+    assert.equal(button(form, "Add").disabled, true);
+    await type(form.querySelector('input[aria-label="Site name"]'), "suite-pos");
+    assert.ok(form.textContent.includes("Its address is suite-pos.orgo.dev once it's live, if no one has it."));
+    const n = calls.length;
+    await submit(form);
+    assert.deepEqual(posts(n, "/api/hosted-apps/suite").map((c) => c.body), [{ ws: "ws_end", action: "addSite", site: "suite-pos" }]);
+    assert.deepEqual([changed, picked], [["suite"], ["suite-pos"]], "the app as it is now, the new one picked");
+    assert.ok(!m.box.querySelector("[data-add-site-form]") && m.box.textContent.includes("Added suite-pos."));
+    await click(m.box.querySelector("[data-add-site]"));
+    assert.deepEqual(await press("Escape", m.box.querySelector('input[aria-label="Site name"]')), { heard: false }, "the app's own Esc kept out");
+    assert.ok(!m.box.querySelector("[data-add-site-form]"), "closed");
+
+    await click(m.box.querySelector("[data-remove-app]"));
+    assert.ok(m.box.textContent.includes("Remove suite? Its 2 sites and their domains come off the web, and it leaves this workspace."), "asked once more, of the sites on the web (suite-till never was)");
+    const tick0 = m.box.querySelector('input[type="checkbox"]');
+    assert.equal(tick0.getAttribute("class"), "size-3.5 accent-[color:var(--c-0a0a0a)]", "as every checkbox here");
+    const tick = m.box.querySelector('input[type="checkbox"]');
+    assert.equal(tick.checked, false, "its code kept, to start");
+    assert.ok(m.box.textContent.includes("Delete its code in Ingot too, with all its history. This can't be undone."));
+    let k = calls.length;
+    await click(button(m.box, "Remove"));
+    assert.deepEqual(calls.slice(k).map((c) => [c.method, c.url, c.body]), [["DELETE", "/api/hosted-apps/suite", { ws: "ws_end", repo: false }]]);
+    assert.equal(removed, 1);
+    await click(m.box.querySelector("[data-remove-app]"));
+    await toggle(m.box.querySelector('input[type="checkbox"]'));
+    k = calls.length;
+    await click(button(m.box, "Remove"));
+    assert.deepEqual(calls.slice(k).map((c) => c.body), [{ ws: "ws_end", repo: true }], "ticked: its code too");
+  } finally {
+    await m.done();
+  }
+  const s = await mount(el("suite-admin"));
+  try {
+    await click(s.box.querySelector("[data-remove-site]"));
+    assert.ok(s.box.textContent.includes("Remove suite-admin? It comes off the web with its domains. The code stays the app's."));
+    const n = calls.length;
+    await click(button(s.box, "Remove"));
+    assert.deepEqual(posts(n, "/api/hosted-apps/suite").map((c) => c.body), [{ ws: "ws_end", action: "removeSite", site: "suite-admin" }]);
+    assert.equal(picked.at(-1), "suite", "its own picked again");
+    assert.ok(!NO_DASHES.test(s.box.textContent));
+  } finally {
+    await s.done();
+  }
+});
+
+await test("another site picked: nothing typed for the one before follows it (its settings, a variable being typed), so nothing is sent for the wrong site", async () => {
+  const own = { ...SETTINGS, settings: { port: 3000, install: null, build: "npm run build", start: "npm start" } };
+  const admin = { ...SETTINGS, settings: { port: 3001, install: null, build: "npm run build:admin", start: "npm run admin" } };
+  routes = {
+    "/api/hosted-apps": { body: { enabled: true, apps: [suiteApp()] } },
+    "/api/hosted-apps/suite/commits": { body: HISTORY },
+    "/api/hosted-apps/suite/dns": { body: { url: null, domains: [], zones: [] } },
+    "/api/hosted-apps/suite/settings": (url, init) => ((init.method ?? "GET") === "GET" ? { body: url.includes("site=suite-admin") ? admin : own } : { body: admin }),
+    "/api/hosted-apps/suite/env": { body: { env: ["API_TOKEN", "MODE"] } },
+  };
+  const m = await mount(h(H.HostedAppTab, { ws: `ws_carry${++tabs}`, name: "suite", state: { workspaces: [], bots: [], chats: [] } }));
+  await act(settle);
+  try {
+    const val = (label) => m.box.querySelector(`[data-settings-form] input[aria-label="${label}"]`)?.value;
+    // Each read once first, as a window that went back and forth has them.
+    await click(m.box.querySelector('[data-site="suite-admin"]'));
+    await act(settle);
+    await click(m.box.querySelector('[data-site="suite"]'));
+    await act(settle);
+    await type(m.box.querySelector('[data-settings-form] input[aria-label="Port"]'), "4000");
+    await click(m.box.querySelector("[data-add-env]"));
+    const env = m.box.querySelector('[data-env-form="new"]');
+    await type(env.querySelector('input[aria-label="Name"]'), "OWN_SECRET");
+    await type(env.querySelector('input[aria-label="Value"]'), "made-up-own-value");
+    await click(m.box.querySelector('[data-site="suite-admin"]'));
+    await act(settle);
+    assert.deepEqual([val("Port"), val("Start command"), val("Build command")], ["3001", "npm run admin", "npm run build:admin"], "its own settings");
+    assert.equal(button(m.box.querySelector("[data-settings-form]"), "Save").disabled, true, "nothing changed on it");
+    assert.ok(!m.box.querySelector('[data-env-form="new"]'), "the variable typed for suite isn't open here");
+    const n = calls.length;
+    await submit(m.box.querySelector("[data-settings-form]"));
+    assert.deepEqual(calls.slice(n).filter((c) => c.method !== "GET"), [], "nothing sent");
+    await click(m.box.querySelector('[data-site="suite"]'));
+    await act(settle);
+    assert.equal(val("Port"), "3000", "back on suite: as it's saved");
+  } finally {
+    await m.done();
+  }
+});
+
+await test("settings before a site's first deploy, clicked: only what's typed is sent, with the site; the form is then as Orgo saved it (its port the one Orgo gave)", async () => {
+  const made = { url: null, settings: { port: 3002, install: null, build: null, start: "npm run till" }, env: [], deploys: [] };
+  routes = {
+    "/api/hosted-apps": { body: { enabled: true, apps: [suiteApp()] } },
+    "/api/hosted-apps/suite/commits": { body: HISTORY },
+    "/api/hosted-apps/suite/dns": { body: { url: null, domains: [], zones: [] } },
+    "/api/hosted-apps/suite/settings": (url, init) => ((init.method ?? "GET") === "GET" ? { body: { url: null, settings: null, env: [], deploys: [] } } : { body: made }),
+  };
+  const ws = `ws_first${++tabs}`;
+  const m = await mount(h(H.HostedAppTab, { ws, name: "suite", state: { workspaces: [], bots: [], chats: [] } }));
+  await act(settle);
+  try {
+    await click(m.box.querySelector('[data-site="suite-till"]'));
+    await act(settle);
+    const form = m.box.querySelector("[data-settings-form]");
+    assert.ok(m.box.querySelector('[data-settings][data-first="true"]'), "there before its first deploy");
+    await type(form.querySelector('input[aria-label="Start command"]'), "npm run till");
+    const n = calls.length;
+    await submit(form);
+    assert.deepEqual(posts(n, "/api/hosted-apps/suite/settings").map((c) => c.body), [{ ws, site: "suite-till", start: "npm run till" }]);
+    assert.ok(m.box.textContent.includes("Saved. Its first deploy has them."));
+    const f = m.box.querySelector("[data-settings-form]");
+    assert.deepEqual([f.querySelector('input[aria-label="Port"]').value, f.querySelector('input[aria-label="Start command"]').value, button(f, "Save").disabled], ["3002", "npm run till", true], "as saved, nothing left to save");
+  } finally {
+    await m.done();
+  }
+});
+
+await test("Remove app: the domains Orgo kept on its computer said where the tab was, once it's gone; one never deployed only leaves the workspace; a site name refused is ringed; Remove waits while a deploy of it is being sent; history's Deploy this one deploys to all its sites, said", async () => {
+  const SAID = "x.example.com is still on its computer: Orgo turned it off, so only Orgo support can remove it.";
+  const deploying = later({ body: { app: suiteApp() } });
+  routes = {
+    "/api/hosted-apps": { body: { enabled: true, apps: [suiteApp()] } },
+    "/api/hosted-apps/suite/commits": { body: HISTORY },
+    "/api/hosted-apps/suite/dns": { body: { url: null, domains: [], zones: [] } },
+    "/api/hosted-apps/suite/settings": { body: SETTINGS },
+    "/api/hosted-apps/suite": (url, init) =>
+      init.method === "DELETE"
+        ? { body: { removed: "suite", repo: false, said: SAID } }
+        : JSON.parse(init.body).action === "addSite"
+          ? { status: 409, body: { error: "suite has a site called suite-pos already. Pick another name.", field: "site" } }
+          : deploying.route(),
+  };
+  const m = await mount(h(H.HostedAppTab, { ws: `ws_gone${++tabs}`, name: "suite", state: { workspaces: [], bots: [], chats: [] } }));
+  await act(settle);
+  try {
+    // A name the server refuses: said, the box ringed.
+    await click(m.box.querySelector("[data-add-site]"));
+    await type(m.box.querySelector('input[aria-label="Site name"]'), "suite-pos");
+    await submit(m.box.querySelector("[data-add-site-form]"));
+    assert.equal(m.box.querySelector('input[aria-label="Site name"]').getAttribute("aria-invalid"), "true");
+    assert.ok(m.box.textContent.includes("suite has a site called suite-pos already. Pick another name."));
+    await press("Escape", m.box.querySelector('input[aria-label="Site name"]'));
+    // A deploy being sent: Remove app waits for it.
+    await click(button(m.box.querySelector("[data-hosted-tab]"), "Deploy all"));
+    assert.equal(m.box.querySelector("[data-remove-app]").disabled, true);
+    assert.equal(m.box.querySelector("[data-remove-app]").parentElement.getAttribute("data-tip"), "A deploy is being sent. Wait for it.");
+    await act(async () => {
+      deploying.release();
+      await settle();
+    });
+    assert.equal(m.box.querySelector("[data-remove-app]").disabled, false, "sent: it can go");
+    await click(m.box.querySelector("[data-remove-app]"));
+    await click(button(m.box.querySelector("[data-app-end]"), "Remove"));
+    const gone = m.box.querySelector("[data-app-gone]");
+    assert.ok(gone && gone.textContent.includes("Removed suite.") && gone.textContent.includes(SAID), "what Orgo kept, said");
+  } finally {
+    await m.done();
+  }
+  const d = await mount(h(A.AppEnd, { ws: "ws_end", app: app("draft", { hosting: { botId: "nova", computerId: "c1" } }), onChanged: noop, onRemoved: noop, onPicked: noop }));
+  try {
+    await click(d.box.querySelector("[data-remove-app]"));
+    assert.ok(d.box.textContent.includes("Remove draft? It leaves this workspace."), "never on the web: nothing comes off it");
+  } finally {
+    await d.done();
+  }
+  assert.deepEqual(deployIn(commitOf(suiteTab(), id("e5")), "Deploy this one to all"), { tip: null, disabled: false }, "an app with sites: to all of them");
+  assert.ok(deployIn(commitOf(tab(shopApp()), id("e5")), "Deploy this one"), "one site: as it was");
 });
 
 console.log(`\n${passed} passed`);

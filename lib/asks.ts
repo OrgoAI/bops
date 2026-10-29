@@ -22,16 +22,19 @@ export function needsYou(s: Session) {
   if (!BRAINS_ON && s.brainRun?.waits && !live(s)) return false;
   if (live(s)) return !!s.blocker;
   if (s.status === "done") return !!s.blocker || (s.waitingOnYou ?? (s.answer ?? "").trim().endsWith("?"));
-  // Stopped by them (said as the owner's in a shared workspace: lib/shared.ts ownerVoice), or paused: nothing to ask.
-  return s.status === "failed" && !!s.error && !/stopped by (you|the owner)|paused/i.test(s.error);
+  // Stopped by them (said as the owner's in a shared workspace: lib/shared.ts ownerVoice), or by a member with Write
+  // ("Stopped by Sam", "Dismissed by Sam": member-acts.ts), or paused: nothing to ask.
+  return s.status === "failed" && !!s.error && !/stopped by (you|the owner)|^(stopped|dismissed) by \S|paused/i.test(s.error);
 }
 
 /**
  * The owner replied in the thread after the bot last said something there: what it asked them is answered. Their own
- * reply only, never what a bot passed on from someone else (`from`: a computer's runner may add one).
+ * reply only, never what a bot passed on from someone else (`from`: a computer's runner may add one). In a shared
+ * workspace, never the viewer's own reply still on its way (ThreadReply.memberSend): it answers once the owner's Bops
+ * has it, and one that didn't go answers nothing, so the card stays (saying how it stands: NeedsYouCard).
  */
 export function repliedSince(s: Session) {
-  const lastUser = [...s.replies].reverse().find((r) => r.role === "user" && !r.from);
+  const lastUser = [...s.replies].reverse().find((r) => r.role === "user" && !r.from && !r.memberSend);
   const lastBot = [...s.replies].reverse().find((r) => r.role === "bot");
   return !!lastUser && (!lastBot || lastUser.at > lastBot.at);
 }

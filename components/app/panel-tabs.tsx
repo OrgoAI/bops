@@ -197,7 +197,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
       onAuxClick={(e) => e.button === 1 && closable && onClose()}
       title={t.kind === "web" ? t.url : label}
       // Clipped, so what's in a tab stays inside it while it opens up.
-      className={`group/tab flex h-[30px] min-w-0 max-w-[220px] shrink cursor-default items-center gap-1.5 overflow-hidden rounded-[10px] pl-2.5 ${closable ? "pr-1" : "pr-3"} text-[13px] leading-4 transition-[background-color,box-shadow,color] duration-150 ease-out motion-reduce:transition-none [-webkit-app-region:no-drag] ${
+      className={`group/tab flex h-[30px] min-w-0 max-w-[220px] shrink cursor-pointer items-center gap-1.5 overflow-hidden rounded-[10px] pl-2.5 ${closable ? "pr-1" : "pr-3"} text-[13px] leading-4 transition-[background-color,box-shadow,color] duration-150 ease-out motion-reduce:transition-none [-webkit-app-region:no-drag] ${
         opening ? "motion-tab-in" : ""
       } ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F,0_2px_6px_-3px_#00000026]" : "text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-eeeeec)]"}`}
     >

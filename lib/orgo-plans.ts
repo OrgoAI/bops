@@ -4,7 +4,8 @@
  *
  * Where the Bops plan decides (Bops Cloud holds plans to what they include, and Orgo counts Bops
  * computers: OrgoPlan.bops), a bot's own computer is a Bops computer too: Max includes up to 3, the free
- * one included, and Free and Pro the free one only (lib/plan-includes.ts). Elsewhere (self-hosted, or an
+ * one included, and Free and Pro the free one only (lib/plan-includes.ts). Once Max's are all taken, one
+ * comes from the Orgo plan instead, when it has room (ownOnOrgoPlan). Elsewhere (self-hosted, or an
  * older Orgo), any more come out of the Orgo plan: Hacker includes 1 computer, Startup 4, Scale 16, and
  * Free none. Shared by the server (lib/server/plan.ts reads the user's plan from Orgo) and the app, so
  * both say the same thing in the same words.
@@ -41,7 +42,8 @@ export type OrgoPlan = {
    * The Bops plan's computers, when the Bops plan decides them (Bops Cloud's plan limits are on, and
    * Orgo counts them: compute-limits' bops_computers_limit): the plan, how many Bops computers it
    * includes (the free one included), and Max's others besides the free one. Then a bot's own computer
-   * is one more of these, made fresh from the Bops template, never one on the Orgo plan.
+   * is one more of these, made fresh from the Bops template; on Max, once they're all taken, one on the
+   * Orgo plan, fresh from the template too (ownOnOrgoPlan).
    */
   bops?: { tier: BopsTier; limit: number; extras: string[] };
 };
@@ -143,10 +145,30 @@ export function planShort(plan: OrgoPlan | null | undefined, more = 1, ram?: num
 }
 
 /**
- * Computers the user's bots have on their Orgo plan, each counted once: the free Bops computer isn't
- * (Orgo doesn't count it in use either). The rest of those in use are elsewhere in their Orgo account.
+ * Computers the user's bots have on their Orgo plan, each counted once: the Bops plan's aren't (the free
+ * one and Max's others, by `plan`; Orgo doesn't count them in use either). The rest of those in use are
+ * elsewhere in their Orgo account.
  */
-export const bopsComputers = (bots: Pick<Bot, "computerId" | "freeComputer">[]) => new Set(bots.flatMap((b) => (b.computerId && !b.freeComputer ? [b.computerId] : []))).size;
+export const bopsComputers = (bots: Pick<Bot, "computerId" | "freeComputer">[], plan?: OrgoPlan | null) => {
+  const offPlan = new Set([plan?.freeComputerId, ...(plan?.bops?.extras ?? [])].filter((x): x is string => !!x));
+  return new Set(bots.flatMap((b) => (b.computerId && !b.freeComputer && !offPlan.has(b.computerId) ? [b.computerId] : []))).size;
+};
+
+/**
+ * Whether a bot's own computer comes from the Orgo plan though the Bops plan decides: on Max, once its
+ * Bops computers are all taken, while the Orgo plan has room for one more at computerRam's size (fresh
+ * from the Bops template: a copy of a Bops computer can't be made, as it's on a Bops host). Free and Pro
+ * don't: they're shown Max.
+ */
+export const ownOnOrgoPlan = (plan: OrgoPlan | null | undefined) =>
+  plan?.bops?.tier === "max_bops" && !!bopsComputerShort(plan, 1) && !planShort(plan, 1, computerRam(plan));
+
+/**
+ * Whether a bot's own computer is a Bops one (the free one or one of Max's): the one it has, or, before
+ * it has one, the one it would get. False where the Bops plan doesn't decide.
+ */
+export const ownIsBops = (plan: OrgoPlan | null | undefined, b: Pick<Bot, "computerId">) =>
+  !!plan?.bops && (b.computerId ? b.computerId === plan.freeComputerId || plan.bops.extras.includes(b.computerId) : !bopsComputerShort(plan, 1));
 
 /**
  * The smallest plan Orgo sells with more computers than this one (more memory comes with them). None
@@ -219,7 +241,7 @@ export function planFix(short: PlanShort, plan: OrgoPlan | null | undefined): { 
 export function mainComputerShort(plan: OrgoPlan | null | undefined, bots: Bot[], workspaceId: string) {
   if (plan?.freeComputerId !== undefined) return null;
   const short = planShort(plan, 1, computerRam(plan));
-  return short ? { short, text: planShortText(short, plan, { bops: bopsComputers(bots), main: mainBot(bots, workspaceId)?.name }) } : null;
+  return short ? { short, text: planShortText(short, plan, { bops: bopsComputers(bots, plan), main: mainBot(bots, workspaceId)?.name }) } : null;
 }
 
 /**
@@ -230,7 +252,7 @@ export function mainOwnShort(plan: OrgoPlan | null | undefined, bots: Bot[], mai
   const bops = bopsComputerShort(plan, 1);
   if (bops !== undefined) return bops;
   const short = planShort(plan, 1, computerRam(plan));
-  return short ? { short, text: planShortText(short, plan, { bops: bopsComputers(bots), main: main.name }) } : null;
+  return short ? { short, text: planShortText(short, plan, { bops: bopsComputers(bots, plan), main: main.name }) } : null;
 }
 
 /**
@@ -242,15 +264,15 @@ export function mainOwnShort(plan: OrgoPlan | null | undefined, bots: Bot[], mai
 export function ownComputerShort(plan: OrgoPlan | null | undefined, bots: Bot[], workspaceId: string) {
   const ws = mainBot(bots, workspaceId);
   const main = ws && workBot(ws, bots);
-  // A Bops computer of its own, and the main bot's first when it has none.
+  // A Bops computer of its own, and the main bot's first when it has none; on Max with them all taken, one on the Orgo plan.
   const bops = bopsComputerShort(plan, main?.computerId ? 1 : 2);
-  if (bops !== undefined) return bops;
+  if (bops !== undefined) return bops && main?.computerId && ownOnOrgoPlan(plan) ? null : bops;
   const short = main?.computerId
     ? planShort(plan, 1, main.computerRam ?? (main.freeComputer ? FREE_COMPUTER_RAM : undefined))
     : freeComputerOpen(plan)
       ? planShort(plan, 1, FREE_COMPUTER_RAM)
       : planShort(plan, 2, computerRam(plan));
-  return short ? { short, text: planShortText(short, plan, { bops: bopsComputers(bots), main: main?.name }) } : null;
+  return short ? { short, text: planShortText(short, plan, { bops: bopsComputers(bots, plan), main: main?.name }) } : null;
 }
 
 /**

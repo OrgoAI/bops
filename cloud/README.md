@@ -183,11 +183,14 @@ Webhooks are public and proven by the provider's signature instead.
 | 1 | `GET /v1/mail/handle`, `GET /v1/mail/handles`, `POST /v1/mail/handle` | Mac | each workspace's part of its bots' addresses (see "Mail handles") |
 | 1 | `POST /v1/internal/plan-changed` | orgo-web | a user's Bops plan changed (signed; see "Plans") |
 | 1 | `GET /v1/internal/ops/handles` | orgo-web | each user's bot number and email, for the staff page /ops/bops (signed; see "Plans") |
+| 1 | `POST /v1/internal/delete-user` | orgo-web | a user deleted their Orgo account: everything the cloud holds for them goes, here and at the providers (signed; see "Deleting a user") |
+| 1 | `POST /v1/internal/undelete-user` | orgo-web (not yet) | a deletion staff cancelled after the cloud's step ran: the user may sign in again (signed with the route; see "Deleting a user") |
 | 1 | `GET /v1/usage?from=&to=&tz=` | Mac | the user's metered use in a range, by kind, day and bot (`CloudUsage`; see "What's counted") |
 | 3 | `PUT /v1/slack/links` | Mac | where the user's bots are in Slack, for routing the Slack app's events |
 | 3 | `GET /v1/connect` (WebSocket) | Mac | the tunnel |
 | 1 | `GET /v1/live?ws=` (Server-Sent Events), `POST /v1/live` | Mac, iPhone | what each bot of a workspace is doing right now, to every device of the user's (see "Live") |
-| 1 | `GET /v1/live?project=`, `GET /v1/ws/<project>/state` | Mac | a workspace shared with the user, read only (see "Shared workspaces") |
+| 1 | `GET /v1/live?project=`, `GET /v1/ws/<project>/state` | Mac | a workspace shared with the user, watched (see "Shared workspaces") |
+| 1 | `POST /v1/ws/<project>/act` | Mac | something a member with Write does there, queued for the owner's Mac (see "Shared workspaces") |
 | 1 | `POST /v1/internal/members-changed` | orgo-web | someone's access to a project changed (signed; see "Shared workspaces") |
 | 3,4 | `POST /hooks/agentphone` | AgentPhone | texts and call turns for any user's number |
 | 3,4 | `POST /hooks/openai` | OpenAI | incoming GPT-Live calls over a SIP trunk (dormant) |
@@ -478,6 +481,86 @@ at most once a minute):
   and the app holds each plan to its emails (`lib/server/mail.ts`: the Mac makes inboxes in its own
   AgentMail pod) and shows why instead of "Get a number" or "Get an email".
 
+### Deleting a user
+
+orgo-web's account deletion (`lib/account-deletion/job.ts`, its `bops_cloud` step) sends
+`POST /v1/internal/delete-user {userId}` (`delete-user.ts`), signed as the plan notices are
+(`BOPS_CLOUD_PLAN_SECRET`; 404 unset, 401 unsigned, signed wrong or more than 5 minutes off). The body
+is exactly `{userId}`, a lowercase UUID, and nothing else (else 400): what's signed doesn't name the
+route, so a plan notice `{userId, tier, at}` or a member notice `{projectId, userId}` seen on the way
+would otherwise delete that user if it were sent here within its 5 minutes. Signing the route too, as
+`ops/handles` and `undelete-user` do, needs orgo-web's caller to change first (a follow-up). A 2xx is
+done for orgo-web; anything else stays pending there and is sent again every 6 hours, and it waits 60
+seconds. So the route is idempotent and answers 200 `{deleted: {table: n}, kept: {table: n}, providers:
+{provider: {what: n}}}` only once nothing is left that a retry could still delete: 502 with the same and
+the provider's `error` when one failed (the retry finishes it), 503 `pending` when it's still going after
+45 seconds (it goes on; a call meanwhile waits for the same run). A user the cloud never heard of is 200
+with zeros.
+
+- **Nothing of theirs is written again.** The user goes into `bops.deleted_users` first: every sign-in
+  of theirs is 401 `account_deleted` (`auth.ts`, which asks the table at most once a minute per user, so
+  a restart changes nothing; 503 when Postgres can't be asked), a state or message write is refused
+  under the state row's lock (`state.ts lockUser`, the cloud's own answer to a phone message too),
+  nothing makes their state row again (`db.ts ensureUserRow`: a session, a plan, a handle, a waiting
+  event), and nothing of theirs is counted or paid for (`usage.ts`), recorded as theirs (`db.ts
+  ownObject`) or held for a code (`verify.ts`). A plan notice for them (the Stripe cancel that came with
+  the deletion) is answered `{ok: true, applied: false}` and ignored. Their Mac's tunnel and their
+  sockets here (a task's Responses socket, a call's sideband) close (4001, so the app tries again and is
+  refused), every live stream of theirs ends, members' too, and the turn guard stops watching their
+  sessions. First of all it leans on orgo-web, which deleted their Orgo keys when they asked to be
+  deleted, well before the job calls: the tombstone covers what Orgo still vouches for meanwhile (a bot
+  computer's identity token, until the job deletes the computer) and the cloud's own work under way.
+- **How long:** while the delete runs and 3 days after the last delete-user call for them
+  (`DELETED_KEEP_DAYS`; each call, a retry too, starts the days again), then the hourly sweep takes it
+  and they're a user the cloud never heard of, unless `undelete-user` lifts it first. 3 days because
+  that's the longest of what can still come for them once it answered: orgo-web's next step deletes
+  their computers right after (one held by a wake or a migration is tried again for 24 hours), Orgo
+  vouches for a bot computer's identity token until then, and Stripe sends the webhook of the cancel
+  that came with the deletion again for up to 3 days, so its plan notice is in by then. Longer would
+  only keep a user staff restored turned down. Not covered: a computer orgo-web leaves to staff (a
+  device, a pool Mac, a dedicated computer) that's still on after the 3 days is let in again, as a new
+  user; deleting it is what ends that. It's the Orgo user id alone, which nobody else is ever given.
+- **At once** (one transaction, under the user's plan lock, so a number being bought for their plan is
+  recorded first and none is bought after): `chat_messages`, `app_state_backups`, `owner_phones`,
+  `owner_emails`, `cloud_pending`, `slack_links`, `plans`, `notice_dismissals`, `cloud_usage` (the AI
+  credit ledger is orgo-web's to delete), the `cloud_limits` that name them, `cloud_agents` (a text to a
+  number not given back yet is then refused, never kept), their `cloud_objects` no provider deletes
+  (agent sessions and turns, live calls, Composio sessions, a code's hold), and lines and inboxes already
+  given back. `app_state` is emptied, `cloud_accounts` loses the email, the pod key and the app versions,
+  and each line its owner's number: only the provider ids stay, until the providers are done.
+- **Their calls under way end first.** A call of theirs here that got in before the tombstone and may
+  make something a provider step deletes (`proxy.ts callsEnded`: any call to AgentPhone, AgentMail,
+  Honcho or Composio, and `POST /v1/responses`, whose stored response is recorded only once its whole
+  answer is in) is waited for, at most 30 seconds, so what it made is recorded or listed by the time the
+  providers are asked. None starts now: one signed in just before the tombstone and only at the proxy
+  after it is refused. They're waited for, not ended, as one ended part way can still be made at the
+  provider with nothing here hearing its id. One still going after that goes on and its record is kept
+  when it's done: its provider's `error` says so, it's 502, and the retry deletes what it made. A task's
+  event stream (it can last as long as the task) makes nothing a delete deletes and isn't waited for.
+- **At the providers**, all at once with the cloud's keys, each deleting there first and its record here
+  after (a 404 counts as done): AgentPhone, every number in their sub-account given back (the recorded
+  ones and the ones it lists; the sub-account and its agents stay, as nothing deletes them); AgentMail,
+  every inbox in their pod, then the pod (found by client id when the account row has none); Honcho,
+  every workspace under their prefix; OpenAI, every stored response the cloud saw made for them
+  (`DELETE /v1/responses/{id}`); Composio, every connected account the cloud saw made for them.
+- **Last**, once every provider is done: the lines, routing rows, inboxes and objects the providers
+  needed, `cloud_accounts`, then `app_state`. If anything recorded a response, a number, an inbox or a
+  connected account the providers didn't see while they ran (what the wait above doesn't cover: the last
+  answer on a task's Responses socket as it closed, the cloud's own work), that record stays and it's
+  502 (that provider's `error` says so), so the retry deletes it there too. Each
+  transaction is tried again when Postgres stops it for a deadlock (the hourly sweep of removed messages
+  takes the same rows the other way round).
+- **Kept, nobody's:** their `mail_handles`, retired with `user_id` NULL (`0014_deleted_users.sql`), so a
+  handle is never claimed again and mail to their old addresses never reaches whoever would take it
+  next; and a Composio sign-in setup made through the cloud (`cloud_objects` kind `auth_config`,
+  `user_id` ''), which every user may use and holds no one's secret.
+- **Undone:** `POST /v1/internal/undelete-user {userId}` (the same body), signed with the same secret
+  over `"{timestamp}.POST /v1/internal/undelete-user.{raw body}"`, so a signature for one route is never
+  good for the other, takes the user out of `bops.deleted_users` at once: 200 `{ok: true, lifted}`, 409
+  while a delete of theirs still runs. It's for a deletion staff cancel in orgo-web after its
+  `bops_cloud` step ran: nothing deleted comes back, but they can sign in and use Bops again. orgo-web
+  doesn't call it yet, so until it does, a user restored that way stays turned down here for those 3 days.
+
 ### Mail handles
 
 Each workspace's part of its bots' addresses (`tiger` in `boppy@tiger.bops.bot`), claimed once across
@@ -721,18 +804,19 @@ send. Streams are counted by who opened them, so members can't use up the owner'
 
 ### Shared workspaces
 
-Someone the owner added to a Bops workspace's Orgo project watches it from their own Bops, read only
+Someone the owner added to a Bops workspace's Orgo project watches it from their own Bops
 (`members.ts`, `ws-slice.ts`; `WsAccess` and `SharedWsState` in `protocol.ts`). The owner picks, per
-person and per bot, None, Read or Write (`member-access.ts`, kept on the workspace as `memberAccess`;
-Write reads as Read until people can act in a shared workspace). For each bot they were given they see
+person and per bot, None, Read or Write (`member-access.ts`, kept on the workspace as `memberAccess`):
+Read watches, Write also acts (below), whatever their Orgo role. For each bot they were given they see
 everything of it: all its chats, the owner's own messages there included, its threads with their notes
 and results, its routines, its watched screens, what Needs you and its moods as they happen. A group
 chat only when they were given every bot in it. Of a bot set to None, nothing. A message the owner
 kept "between us" is no different here: that mark only keeps things out of the shared memory, so what
 the owner wants kept from someone stays with a bot that person wasn't given. Never the owner's vault or
 logins, keys or key names, Macs, usage, channels, connected accounts or settings, who else is in it or
-what they may see, or anything of another workspace. Nobody but the owner changes anything: a member's
-publish only goes into their own account, and nothing here writes.
+what they may see, or anything of another workspace. A member's publish only goes into their own
+account, and Bops Cloud never edits the owner's state for them: what a Write member does is carried out
+by the owner's own Mac.
 
 - Who may is orgo-web's to say, with the caller's own Orgo key: `GET /api/projects/<id>/bops-role`
   answers `{ role: owner | admin | member, ownerUserId, bopsWsId, name }`, else 404. Kept a minute per
@@ -749,7 +833,17 @@ publish only goes into their own account, and nothing here writes.
 - `POST /v1/internal/members-changed { projectId, userId }`, from orgo-web after a member is removed,
   leaves, has their role changed, or the project changes hands: signed as the plan notices are
   (`BOPS_CLOUD_PLAN_SECRET`, see "Plans"; 404 unset, 401 signed wrong). What was kept for them goes and
-  their streams of it end (reconnecting asks orgo-web afresh); 204.
+  their streams of it end (reconnecting asks orgo-web afresh), and what they did that still waits for
+  the owner's Mac is dropped; 204.
+- `POST /v1/ws/<id>/act { key, act }` (`MemberAct`), from a member with Write: say something in a chat
+  (every bot in it at Write), reply in a thread, answer an ask, stop threads, or say there's nothing to
+  add. 30 a minute (429 `slow_down`). orgo-web is asked afresh each time; the owner is refused
+  (`own_workspace`), and so is anything not in the caller's own view (404) or of a bot at Read
+  (403 `member_read_only`), worked out from the owner's state. An ask already answered or a thread
+  already over is 409 `not_waiting`. Then it waits for the owner's Mac as a `member` event
+  (`bops.cloud_pending`, dedupe `member:<user>:<key>`, ten minutes at most), and answers 202
+  `{ ok, macOn }`. The Mac checks it again against its own state and does it as the owner's taps would,
+  with the member named (`lib/server/member-acts.ts`). Runners never act for a member.
 
 ## The app's state
 
@@ -766,7 +860,8 @@ user's other Macs hear of it, then swept hourly), and the rest is one blob in `a
 - `GET /v1/messages?after=<seq>&limit=<n>`: what changed after a seq, oldest first (`after=0`: the
   live ones), `{ messages: [{ id, seq, json }], seq, more }`. `POST /v1/messages`
   `{ upsert, remove }` in one transaction, `{ seq }`. 256 KB a message, 20 MB a batch.
-- `POST /v1/state/backups`: a copy of the whole state, messages in, before "Start over".
+- `POST /v1/state/backups`: a copy of the whole state, messages in, before "Start over". Kept 30 days,
+  and only the newest 5 per user (`BACKUP_KEEP_DAYS`, `BACKUPS_PER_USER`; swept hourly).
 
 Every call names its user (`X-Bops-User`, which must be the key's: else 409 `wrong_user`), the
 protocol (`X-Bops-Protocol: 2`) and the Mac (`X-Bops-Device`). After a write the user's connected Mac
@@ -937,7 +1032,17 @@ blobs), `app_state.protocol` and `app_state.writer` (see "The app's state"). `00
 `cloud_accounts.ios_version` and `ios_seen_at` and `app_policy.ios_block_below` (see "Which app"),
 `chat_messages_answers`, the index that finds the cloud's answer to a message from the phone, and
 `app_state.swept_seq`, each user's highest seq of removed messages swept for good (see "The main
-bot's chat from the phone").
+bot's chat from the phone"). `0014_deleted_users.sql`: `deleted_users` (who was deleted lately) and
+`mail_handles.user_id` nullable, a deleted user's handles kept nobody's (see "Deleting a user").
+
+What's kept, and for how long: a user's rows as long as they use Bops, all of them deleted when they
+delete their Orgo account (see "Deleting a user"), but for their mail handles, kept for good and
+nobody's. Within that: a removed message's row 30 days (`REMOVED_KEEP_DAYS`), a copy before Start
+over 30 days and the newest 5 (`BACKUP_KEEP_DAYS`, `BACKUPS_PER_USER`), an event for the Mac until
+it's taken (texts and calls), a day (Slack), and a week once delivered, a plan's paused number and
+inbox 30 days before they're given back, a code's hold 10 minutes and rate counts a few hours, and a
+deleted user's tombstone 3 days after the last delete (`DELETED_KEEP_DAYS`), or until it's undone. The hourly sweeps
+(`state.ts startStateSweeps`, `plans.ts`, `tunnel.ts`, `verify.ts`) do the rest.
 
 ## Code layout
 
@@ -951,6 +1056,7 @@ bot's chat from the phone").
 | `pricing.ts`, `credit.ts` | what each use costs, and the AI credit it's paid from (the gate) |
 | `plans.ts`, `provision.ts`, `handles.ts` | each user's plan and what it brings the main bot (a number, an inbox), and each workspace's mail handle |
 | `ops.ts` | each user's bot number and email for Orgo's staff page (signed, read only) |
+| `delete-user.ts` | a user who deleted their Orgo account: everything of theirs deleted, here and at the providers, and the tombstone's undo (signed) |
 | `tunnel.ts`, `hooks.ts`, `slack.ts`, `state.ts` | 3: the tunnel, webhooks, Slack, state |
 | `live.ts` | what each bot is doing right now, streamed to the user's devices (in memory only) |
 | `lines.ts`, `voice.ts`, `calls.ts` | 4: who owns each line, a call's turns answered here, GPT-Live calls (dormant) |

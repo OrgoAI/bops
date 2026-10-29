@@ -1,6 +1,7 @@
 import "server-only";
 import { botChatId, isScreenWatch, live, sharesComputer, workspaceOf, type Bot } from "@/lib/types";
 import { bot, getState, update } from "./store";
+import { botsNamedInDeleted } from "./deleted";
 import { ensureInbox } from "./mail";
 import { noMainComputer, noOwnComputer } from "./plan";
 import { trackServerEvent } from "./analytics";
@@ -54,13 +55,14 @@ export function freeBotId(name: string) {
 /**
  * The bot ids what's kept still names: a deleted bot's lines in a group chat that stayed (remove.ts
  * deleteBot), the note it left handing work on, what it answered a teammate, its tapbacks, a digest line
- * from its watch, a thread it handed over. A new bot never gets one, so none of that ever reads as the new
- * bot's: in the chat, nor in a shared workspace, which shows someone a bot's messages by its id
- * (cloud/ws-slice.ts), never what a bot they weren't given said.
+ * from its watch, a thread it handed over, and whatever a copy in Recently deleted on this Mac names (its
+ * lines and its thread come back with Restore: deleted.ts botsNamedInDeleted). A new bot never gets one, so
+ * none of that ever reads as the new bot's: in the chat, nor in a shared workspace, which shows someone a
+ * bot's messages by its id (cloud/ws-slice.ts), never what a bot they weren't given said.
  */
 function namedInHistory(): Set<string> {
   const s = getState();
-  const out = new Set<string>();
+  const out = botsNamedInDeleted();
   for (const m of s.messages) {
     if (m.botId) out.add(m.botId);
     if (m.from) out.add(m.from);

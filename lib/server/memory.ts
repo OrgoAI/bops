@@ -155,8 +155,15 @@ function bankFor(b: Binding) {
  */
 export const OWNER_WHO = "the owner";
 
-/** The user is OWNER_WHO here; in a bank they're the binding's peer. Bots are bops-<id>. */
-const peerId = (b: Binding, who: string) => (who === OWNER_WHO ? b.peer : `bops-${clean(who)}`);
+/**
+ * A member the owner gave Write on a bot (lib/member-access.ts MemberWho), as a save into memory names them: a peer
+ * of their own, never the owner's, and never one Honcho learns about (only the owner is observed: peer), so nothing
+ * they say about themselves becomes a fact about the owner. Never a bot's id: those have no colon.
+ */
+export const memberWho = (m: { userId: string }) => `member:${m.userId}`;
+
+/** The user is OWNER_WHO here; in a bank they're the binding's peer. Bots are bops-<id>, members bops-member-<their Orgo id>. */
+const peerId = (b: Binding, who: string) => (who === OWNER_WHO ? b.peer : who.startsWith("member:") ? `bops-member-${clean(who.slice(7))}` : `bops-${clean(who)}`);
 
 /** The Honcho peer a save into `ws`'s bank writes `who` as (the owner's: the bank's own peer). */
 export const memoryPeerOf = (ws: string, who: string) => peerId(bindingOf(ws), who);
@@ -432,7 +439,7 @@ function markSecret(messageId: string) {
  * vegetarian now") is saved as a fact without their having to say "remember" (a small model writes
  * it; learn() checks it against what's known). Fire and forget.
  */
-export function rememberMessage(ws: string, chatId: string, messageId: string, said: string, metadata: Record<string, unknown> = {}) {
+export function rememberMessage(ws: string, chatId: string, messageId: string, said: string, metadata: Record<string, unknown> = {}, member?: { userId: string }) {
   if (!said.trim()) return;
   // Marked with memory off too: a procedure's draft reads the chat whether or not there's a memory.
   if (SECRET.test(said)) {
@@ -440,6 +447,12 @@ export function rememberMessage(ws: string, chatId: string, messageId: string, s
     return;
   }
   if (!on()) return;
+  // A member's words (someone the owner gave Write on the bot): into the shared memory as theirs (memberWho), and
+  // nothing more. No fact is drawn from them: what they say about themselves is never a fact about the owner.
+  if (member) {
+    saveToMemory(ws, "chat", chatId, [{ who: memberWho(member), text: said }], metadata);
+    return;
+  }
   // The account whose message this is: a sign-out or another account's sign-in meanwhile, and nothing of it goes into the new one's memory.
   const ours = sameState();
   const epoch = stateEpoch();

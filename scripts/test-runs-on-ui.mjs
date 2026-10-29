@@ -128,7 +128,7 @@ await test("in the Cloud: Cloud picked, and each computer of the workspace's bot
 
 await test("each runner in plain words, never a dash", () => {
   const x = (status, more = {}) => ({ status, version: "1", buildId: "b", by: "d", at: 1, ...more });
-  assert.deepEqual(R.runnerNow(undefined, false), { text: "Not set up yet", dot: "bg-[#C9C9C6]" });
+  assert.deepEqual(R.runnerNow(undefined, false), { text: "Not set up yet", dot: "bg-[color:var(--c-c9c9c6)]" });
   assert.equal(R.runnerNow(x("running"), false).text, "Running");
   assert.equal(R.runnerNow(x("running"), true).text, "Asleep");
   assert.equal(R.runnerNow(x("running"), false, "stopped").text, "Its computer is stopped. Its routines wait until it's back.");

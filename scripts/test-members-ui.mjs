@@ -1,8 +1,8 @@
 // Tests for the People sheet's bot picker (components/app/members.tsx): which bots it offers (the open
 // workspace's, its main bot first, none while a workspace shared with the user is open), how a level picked
 // on a row changes someone's access (lib/member-access.ts), and the picker rendered: a row for every bot at
-// once, new ones too, then one row per bot with its mascot, each None, Read or Write, Write saying it works
-// as Read for now. Then the sheet rendered into a DOM (linkedom) and clicked, against a fake Bops: the owner
+// once, new ones too, then one row per bot with its mascot, each None, Read or Write, Write saying what it
+// lets them do (chat with the bot, have it work, answer it, stop it; never the owner's logins, keys or Macs). Then the sheet rendered into a DOM (linkedom) and clicked, against a fake Bops: the owner
 // says Every bot, each person and invite says which bots they see and that View only is about the
 // computers; an invite goes out with every bot there now to read unless bots were chosen, and the form
 // starts over after; a person's bots save at once, one change at a time with the newest last, and go back
@@ -128,12 +128,12 @@ await test("the picker: Every bot first, then each bot with its mascot, one line
     ["Every bot, new ones too: [None] Read Write", "Boppy: None [Read] Write (mascot)", "Sam: None Read [Write] (mascot)"],
   );
   for (const r of rows) assert.deepEqual(r.tips.slice(-3), [M.ACCESS_TIPS.none, M.ACCESS_TIPS.read, M.ACCESS_TIPS.write], `${r.name}: each level says what it does`);
-  assert.match(M.ACCESS_TIPS.write, /^Works as Read for now\. Once people can act in a shared workspace, they can chat with it and run it too\.$/);
+  assert.equal(M.ACCESS_TIPS.write, "Can chat with this bot, have it do work, answer what it asks and stop it. Never your logins, keys or Macs.");
   // Under the rows, what each level means, said plainly once.
   const levels = html.match(/<ul data-access-levels[^>]*>([\s\S]*?)<\/ul>/)?.[1] ?? "";
   assert.deepEqual(
     [...levels.matchAll(/<li>([\s\S]*?)<\/li>/g)].map(([, li]) => li.replace(/<[^>]+>/g, "").replace(/&#x27;/g, "'")),
-    ["None: can't see this bot in Bops. On orgo.ai they still see its computer.", "Read: sees everything this bot does, including your chats with it.", "Write: works as Read for now. Once people can act in a shared workspace, they can chat with it and run it too."],
+    ["None: can't see this bot in Bops. On orgo.ai they still see its computer.", "Read: sees everything this bot does, including your chats with it.", "Write: can chat with this bot, have it do work, answer what it asks and stop it. Never your logins, keys or Macs."],
   );
   assert.equal((html.match(/truncate/g) ?? []).length, 3, "every name is cut short, not wrapped");
   assert.match(html, /aria-label="What they can do with Sam"/);
@@ -403,6 +403,13 @@ await test("with a shared workspace open, no bots are offered or sent", async ()
 await test("no dashes, and the sheet says the bots you pick, never the saved logins or keys", async () => {
   const noDashes = (text) => assert.ok(!/[–—]/.test(text), `no dashes: ${text}`);
   for (const v of [...Object.values(M.ACCESS_TIPS), ...Object.values(M.ROLE_LINES), M.WORDS.sharedOpen, ...Object.values(A.ACCESS_LABELS)]) noDashes(v);
+  // What Write lets a member do, and the line a member reads in place of what they can't (lib/shared.ts readOnlyLine): plain words, Knowledge never Orbit.
+  const { readOnlyLine } = await import(`${root}/lib/shared.ts`);
+  const lines = [readOnlyLine(), readOnlyLine(["boppy"], { boppy: "read" }), readOnlyLine(["boppy", "sam"], { boppy: "write", sam: "read" })];
+  for (const v of [...Object.values(M.ACCESS_TIPS), ...lines]) {
+    noDashes(v);
+    assert.ok(!v.includes(" - ") && !/orbit/i.test(v), v);
+  }
   bops();
   const { box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
   await click(buttonOf(box.querySelector("form"), "Choose bots"));

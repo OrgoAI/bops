@@ -1,12 +1,12 @@
 "use client";
 
 import { screenNo as screenNumber } from "@/lib/screens";
-import { needsYou } from "@/lib/asks";
+import { askKind, needsYou } from "@/lib/asks";
 import { useEffect, useRef, useState } from "react";
-import { live, MAIN_WORKSPACE, WAITING_FOR_OK, workspaceOf, type AppState, type Bot, type Chat, type Logo, type Session } from "@/lib/types";
+import { live, MAIN_WORKSPACE, WAITING_FOR_OK, waitingAsks, waitsForOk, workspaceOf, type AppState, type Bot, type Chat, type Logo, type Session } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { stateArrived } from "./state-arrival";
-import { readOnlyLine } from "@/lib/shared";
+import { answersAsk, readOnlyLine, writesThread } from "@/lib/shared";
 export { botBezel, botOnInk, botWash, DESKTOP_BG } from "@/lib/look";
 
 /* Shared helpers and small pieces used across the app. Values follow the Paper designs. */
@@ -111,10 +111,23 @@ export function chatName(c: Chat, bots: Bot[]) {
 }
 
 /**
- * `owner`: a shared workspace's thread (lib/shared.ts), whose asks wait on its owner, never the viewer. `okWait`: a
- * request of its for the user's OK is unanswered (lib/types.ts waitsForOk).
+ * In a workspace shared with the user, whether what thread `s` waits on is theirs to answer too (with Write on its
+ * bot): an answer or an OK they may give (lib/shared.ts writesThread, answersAsk), never a sign in at the owner's
+ * screen, where it runs, an OK on the owner's phone or a brain's sign in. False in the user's own workspace.
  */
-export function StatusIcon({ session: s, size = 13, dark, owner, okWait }: { session: Session; size?: number; dark?: boolean; owner?: boolean; okWait?: boolean }) {
+export function memberAnswers(state: AppState, s: Session): boolean {
+  if (!state.shared || !writesThread(state, s) || s.blocker || (s.askWhere && live(s))) return false;
+  const kind = askKind(s);
+  if (kind === "elsewhere" || kind === "brain") return false;
+  return !waitsForOk(s, state) || waitingAsks(state, s.id).some((a) => answersAsk(state, a));
+}
+
+/**
+ * `owner`: a shared workspace's thread (lib/shared.ts), whose asks wait on its owner, never the viewer. `member`: one
+ * whose asks a member with Write answers too (memberAnswers): said as waiting on anyone, not on the owner or on them.
+ * `okWait`: a request of its for the user's OK is unanswered (lib/types.ts waitsForOk).
+ */
+export function StatusIcon({ session: s, size = 13, dark, owner, member, okWait }: { session: Session; size?: number; dark?: boolean; owner?: boolean; member?: boolean; okWait?: boolean }) {
   // Each state says what it means on hover (the tooltip layer reads data-tip).
   // Waiting on the user (where it runs, or their OK: lib/server/permission.ts) shows as needing them, not working.
   const waits = (live(s) && needsYou(s) && !!s.askWhere) || (live(s) && !!okWait);
@@ -126,13 +139,17 @@ export function StatusIcon({ session: s, size = 13, dark, owner, okWait }: { ses
       : waits
         ? owner
           ? "Waiting for the owner's OK"
-          : WAITING_FOR_OK
+          : member
+            ? "Waiting for an OK"
+            : WAITING_FOR_OK
         : live(s)
           ? "Working on it"
           : needsYou(s)
             ? owner
               ? "Needs the owner"
-              : "Needs you"
+              : member
+                ? "Needs an answer"
+                : "Needs you"
             : s.status === "done"
               ? "Done"
               : `Didn't finish${s.error ? `: ${s.error.slice(0, 80)}` : ""}`;
@@ -259,14 +276,15 @@ export function BrandTile({ item, size }: { item: { name: string; color: string;
 
 /** The workspace the user is looking at, and its team (the main bot first). */
 /**
- * The one line in place of what would change something, while a workspace shared with the user is open
- * (AppState.shared): "View only" for a member, and for an admin that chatting there is coming.
+ * The one line in place of what the viewer can't do, while a workspace shared with the user is open
+ * (AppState.shared), for these bots (lib/shared.ts readOnlyLine): a bot at Read, a group with one, or (no
+ * bots) what's only ever the owner's to change there.
  */
-export function ReadOnlyLine({ state, className = "" }: { state: AppState; className?: string }) {
+export function ReadOnlyLine({ state, botIds = [], className = "" }: { state: AppState; botIds?: readonly string[]; className?: string }) {
   if (!state.shared) return null;
   return (
     <div data-read-only className={`rounded-[14px] bg-[#F7F7F5] px-3.5 py-2.5 text-center text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)] ${className}`}>
-      {readOnlyLine(state.shared.role)}
+      {readOnlyLine(botIds, state.shared.levels)}
     </div>
   );
 }

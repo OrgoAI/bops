@@ -1,7 +1,7 @@
 // Tests for skills under labels (lib/skill-labels.ts, lib/server/workspace-skills.ts, lib/server/skill-bundle.ts):
 // a skill's label kept in its SKILL.md as metadata.label (written on create, a move and publish, read on an
 // import and a pull, so it syncs with Orgo unchanged, as orgo-web's YAML reads and writes it), a bot's labels
-// (Bops' own first, then its workspace's by how many skills, Other last), the layered list in its prompts
+// (Bops' own first, then its workspace's by how many skills, Unsorted last), the layered list in its prompts
 // (few skills: listed under their labels; many: one line per label), read_skill by label and by name (the
 // workspace's and Bops' own), create and update with a label (one already in use spelled as it is), labels
 // from a skill's own words for one without (plain rules, once), and INDEX.md on a computer, by label, which a
@@ -216,7 +216,7 @@ await check("orgo-web's YAML (js-yaml) reads the label Bops writes, and Bops rea
 
 /* ---------------- Labels from a skill's own words ---------------- */
 
-await check("A skill without a label gets one from its name and description, by plain rules; none fits: Other", async () => {
+await check("A skill without a label gets one from its name and description, by plain rules; none fits: Unsorted", async () => {
   const cases = [
     ["Inbox sweep", "Sort the Gmail inbox each morning", "Email"],
     ["Book a meeting", "Find a time on the calendar", "Calendar"],
@@ -230,10 +230,10 @@ await check("A skill without a label gets one from its name and description, by 
     ["Ship the website", "Deploy the site after a commit", L.APPS_LABEL],
     ["Fix the merge conflict", "In the GitHub repo", L.APPS_LABEL],
     // Bops' own label only for words that mean source control or deploying: a site, an app or a code alone isn't one.
-    ["Parking pass", 'When asked "a parking pass for X": book it on the garage site', L.OTHER],
-    ["Discount code", "Find a discount code for the Uber app", L.OTHER],
+    ["Parking pass", 'When asked "a parking pass for X": book it on the garage site', L.UNSORTED],
+    ["Discount code", "Find a discount code for the Uber app", L.UNSORTED],
     ["Bank branch", "Find the nearest branch and its hours", "Finance"],
-    ["Water the plants", "Every Monday", L.OTHER],
+    ["Water the plants", "Every Monday", L.UNSORTED],
     // A tie goes to the first rule; a word in the name counts twice.
     ["Email the invoice", "", "Email"],
     ["Expenses", "Read the email with the receipts", "Finance"],
@@ -264,7 +264,7 @@ await check("A new skill: a label given is kept in its SKILL.md and the state, o
   const weekly = make("ws_small", { name: "Weekly invoice summary", description: "When asked for the week's invoices" });
   assert.equal(weekly.label, "Finance", "from its words");
   assert.doesNotMatch(skillMd("ws_small", "weekly-invoice-summary"), /metadata/, "its folder as written: the label waits in the state");
-  assert.match(versionMd("ws_small", "weekly-invoice-summary", "0.1.0"), /\nmetadata: \{label: Finance\}\n/, "and goes into its SKILL.md once published");
+  assert.match(versionMd("ws_small", "weekly-invoice-summary", "0.1.0"), /\nmetadata: \{label: Finance, version: "0\.1\.0"\}\n/, "and goes into its SKILL.md once published (with its version, as the Agent Skills spec keeps both: in metadata)");
   make("ws_small", { name: "Water the plants", description: "Every Monday, a reminder" });
   const news = make("ws_small", { name: "Newsletter draft", description: "Writes the Friday newsletter", label: "  email " });
   assert.equal(news.label, "Email", "the workspace's spelling");
@@ -295,16 +295,16 @@ await check("A folder imported with a label in its SKILL.md keeps it", async () 
 
 const APPS_ABOUT = "Building, versioning and deploying apps with Ingot: read one before you change an app.";
 
-await check("A bot's labels: Bops' own first (only one with a skill), then its workspace's by how many, Other last", async () => {
+await check("A bot's labels: Bops' own first (only one with a skill), then its workspace's by how many, Unsorted last", async () => {
   assert.deepEqual(W.skillGroups("sam"), [
     { label: L.APPS_LABEL, about: APPS_ABOUT, builtin: true, count: 3, slugs: ["bops-work-on-an-app", "bops-deploy-an-app", "deploy-checklist"] },
     { label: "Email", about: "Inbox sweep, Newsletter draft", builtin: false, count: 2, slugs: ["inbox-sweep", "newsletter-draft"] },
     { label: "Finance", about: "Weekly invoice summary", builtin: false, count: 1, slugs: ["weekly-invoice-summary"] },
-    { label: "Other", about: "Water the plants", builtin: false, count: 1, slugs: ["water-the-plants"] },
+    { label: "Unsorted", about: "Water the plants", builtin: false, count: 1, slugs: ["water-the-plants"] },
   ]);
   assert.deepEqual(
     W.skillGroups("pip").map((g) => [g.label, g.count]),
-    [[L.APPS_LABEL, 3], ["Email", 2], ["Finance", 1], ["Research", 1], ["Other", 1]],
+    [[L.APPS_LABEL, 3], ["Email", 2], ["Finance", 1], ["Research", 1], ["Unsorted", 1]],
     "Pip's own skill too",
   );
   assert.deepEqual(W.skillGroups("nol"), [{ label: L.APPS_LABEL, about: APPS_ABOUT, builtin: true, count: 2, slugs: ["bops-work-on-an-app", "bops-deploy-an-app"] }], "a bot with none of its own has Bops'");
@@ -325,7 +325,7 @@ await check("The list in its prompts, a few skills: under their labels, Bops' la
       "- Newsletter draft: Writes the Friday newsletter",
       "Finance (1):",
       "- Weekly invoice summary: When asked for the week's invoices",
-      "Other (1):",
+      "Unsorted (1):",
       "- Water the plants: Every Monday, a reminder",
     ].join("\n"),
   );
@@ -382,7 +382,7 @@ await check("read_skill's tool: strict, every property required, label and name 
   hear(t.description, ...Object.values(t.parameters.properties).map((p) => p.description));
 });
 
-const LABELS_SAID = "Your labels: Apps and source control (3), Email (2), Finance (1), Other (1). Open one with read_skill and label to see its skills.";
+const LABELS_SAID = "Your labels: Apps and source control (3), Email (2), Finance (1), Unsorted (1). Open one with read_skill and label to see its skills.";
 
 await check("read_skill by label: its skills one line each, Bops' own included; a label as the name; one there isn't", async () => {
   assert.equal(
@@ -441,11 +441,11 @@ await check("update with a label: moved at once (a bot's draft edit too), in its
   assert.match(skillMd("ws_small", "refund-check"), /^---\nname: refund-check\ndescription: Checks a refund twice\nmetadata: \{label: Support\}\n---\n/);
   const pub = W.publishSkill("ws_small", "skill", "refund-check");
   assert.deepEqual([pub.label, pub.description, pub.version], ["Support", "Checks a refund twice", "0.1.1"]);
-  assert.match(versionMd("ws_small", "refund-check", "0.1.1"), /\nmetadata: \{label: Support\}\n/);
+  assert.match(versionMd("ws_small", "refund-check", "0.1.1"), /\nmetadata: \{label: Support, version: "0\.1\.1"\}\n/);
   // Only moved, on a published skill: the folder's SKILL.md says so, and the next version carries it.
   W.updateSkill("ws_small", "skill", "refund-check", { label: "Finance" });
   assert.match(skillMd("ws_small", "refund-check"), /\nmetadata: \{label: Finance\}\n/);
-  assert.match(versionMd("ws_small", "refund-check", W.publishSkill("ws_small", "skill", "refund-check").version), /\nmetadata: \{label: Finance\}\n/);
+  assert.match(versionMd("ws_small", "refund-check", W.publishSkill("ws_small", "skill", "refund-check").version), /\nmetadata: \{label: Finance, version: "0\.1\.2"\}\n/);
   for (const slug of ["lead-follow-up", "refund-check"]) await W.deleteSkill("ws_small", "skill", slug);
 });
 
@@ -560,7 +560,7 @@ await check("On a computer: Bops' own skills beside the workspace's, and INDEX.m
       "- Pip's own: Looks things up",
       `  Folder: ${K}/pip-s-own/`,
       "",
-      "## Other (1)",
+      "## Unsorted (1)",
       "",
       "- Water the plants: Every Monday, a reminder",
       `  Folder: ${K}/water-the-plants/`,
@@ -571,8 +571,8 @@ await check("On a computer: Bops' own skills beside the workspace's, and INDEX.m
   hear(c.text(`${K}/INDEX.md`));
   assert.equal(c.text(`${K}/bops-work-on-an-app/SKILL.md`), "---\nname: bops-work-on-an-app\ndescription: \"Read before you change an app: ingot status, diff and commit.\"\nmetadata: {label: Apps and source control}\n---\n\n# Work on an app with Ingot\n\n1. ingot clone <name>\n2. ingot commit -m <message>\n");
   assert.equal(c.text(`${K}/bops-work-on-an-app/examples/notes.md`), "Notes on apps.\n");
-  assert.match(c.text(`${K}/inbox-sweep/SKILL.md`), /\nmetadata: \{label: Email\}\n/);
-  assert.match(c.text(`${K}/weekly-invoice-summary/SKILL.md`), /\nmetadata: \{label: Finance\}\n/, "a published one carries its label");
+  assert.match(c.text(`${K}/inbox-sweep/SKILL.md`), /\nmetadata: \{label: Email, version: "0\.1\.0"\}\n/);
+  assert.match(c.text(`${K}/weekly-invoice-summary/SKILL.md`), /\nmetadata: \{label: Finance, version: "0\.1\.0"\}\n/, "a published one carries its label");
   // Nothing changed: not copied again. A bot with none of its own: Bops' own and the index all the same.
   const n = c.calls.length;
   await W.copySkillsToComputer("sam", "c_sam", c.bash);
@@ -607,7 +607,7 @@ await check("A brain thread's brief: INDEX.md first, then the label that fits, t
       `- Apps and source control (3): Deploy checklist, and Bops' own: ${APPS_ABOUT}`,
       "- Email (2): Inbox sweep, Newsletter draft",
       "- Finance (1): Weekly invoice summary",
-      "- Other (1): Water the plants",
+      "- Unsorted (1): Water the plants",
     ].join("\n"),
   );
   assert.equal(W.skillsIndexNote("nobody"), "");
@@ -624,7 +624,7 @@ await check("Someone apps aren't open to (lib/apps-access.ts): Bops' own skills 
       { label: "Email", about: "Inbox sweep, Newsletter draft", builtin: false, count: 2, slugs: ["inbox-sweep", "newsletter-draft"] },
       { label: L.APPS_LABEL, about: "Deploy checklist", builtin: false, count: 1, slugs: ["deploy-checklist"] },
       { label: "Finance", about: "Weekly invoice summary", builtin: false, count: 1, slugs: ["weekly-invoice-summary"] },
-      { label: "Other", about: "Water the plants", builtin: false, count: 1, slugs: ["water-the-plants"] },
+      { label: "Unsorted", about: "Water the plants", builtin: false, count: 1, slugs: ["water-the-plants"] },
     ]);
     assert.deepEqual(W.skillGroups("nol"), [], "a bot with none of its own has none");
     assert.match(hear(W.readSkill("sam", "bops-deploy-an-app")), /^No skill called "bops-deploy-an-app"\./);
@@ -638,10 +638,10 @@ await check("Someone apps aren't open to (lib/apps-access.ts): Bops' own skills 
     assert.equal(c.text(`${K}/bops-deploy-an-app/SKILL.md`), undefined);
     assert.ok(!hear(c.text(`${K}/INDEX.md`) ?? "").includes("bops-"), "nor are they in INDEX.md");
     // One nobody gave a label (from before labels): deploy and git words don't put it under Bops' own label for apps.
-    assert.equal(W.guessLabel("Ship the website", "Deploy the site after a commit"), L.OTHER);
+    assert.equal(W.guessLabel("Ship the website", "Deploy the site after a commit"), L.UNSORTED);
     assert.equal(W.guessLabel("Fix the merge conflict", "In the GitHub repo, then email the team"), "Email", "its other words decide");
     S.update((s) => s.workspaces.find((w) => w.id === "ws_old").skills.push({ slug: "old-deploy", kind: "skill", name: "Deploy the website", description: "push to GitHub, deploy on Vercel", status: "published", version: "0.1.0", botIds: [], source: "bops", createdAt: 3, updatedAt: 7 }));
-    assert.equal(W.refsOf("ws_old", "skill").find((r) => r.slug === "old-deploy").label, L.OTHER);
+    assert.equal(W.refsOf("ws_old", "skill").find((r) => r.slug === "old-deploy").label, undefined, "Unsorted: no label kept");
     assert.equal(W.knownLabel("ws_old", "apps and source control"), "apps and source control", "nor spelled as Bops' own");
   } finally {
     S.update((s) => {
