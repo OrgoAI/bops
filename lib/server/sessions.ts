@@ -47,7 +47,7 @@ import { RUNNER_SCRUB, runnerFailed, runnerUpFor } from "./runner";
 import { addMessage, bot, getState, id, leftBehind, ownerLine, ownerName, ownSession, patchSession, pullState, sameState, session, startLanded, stateDevice, stateEpoch, stateReady, update, watchArrivals } from "./store";
 import { recordTokens, usageTags } from "./usage";
 import { computerToolOn, computerTurn, PAGE_RUNNER } from "./computer-task";
-import { ASKS_AGAIN, LIGHT, logRoute, routeTask, speedFor, taskConfig } from "./routing";
+import { ASKS_AGAIN, LIGHT, logRoute, routeTask, runnerFor, runnerMode, speedFor, taskConfig } from "./routing";
 import { HOLD_MS, holdsScreen, screenLabel, screenMap, screenNo } from "@/lib/screens";
 import { appsOpen } from "@/lib/apps-access";
 import { builtinSkills } from "@/lib/builtin-skills";
@@ -1991,9 +1991,18 @@ function waitingOn(sessionId: string, calls: number): boolean {
 }
 
 /** A new task's route, next to what the router would have picked, for the comparison (routing.ts logRoute). */
-function logTaskRoute(sessionId: string) {
+function logTaskRoute(sessionId: string, runner?: "agents" | "computer") {
   const s = session(sessionId);
-  if (s?.route) logRoute({ kind: "task", id: s.id, botId: s.botId, goal: s.goal.slice(0, 400), ran: { model: s.route.model, effort: s.route.effort, by: s.route.by }, router: s.route.router });
+  if (s?.route)
+    logRoute({
+      kind: "task",
+      id: s.id,
+      botId: s.botId,
+      goal: s.goal.slice(0, 400),
+      ran: { model: s.route.model, effort: s.route.effort, by: s.route.by, ...(runner ? { runner } : {}) },
+      router: s.route.router,
+      ...(s.route.runner ? { runner: s.route.runner } : {}),
+    });
 }
 
 /**
@@ -2448,8 +2457,8 @@ async function computerToolTurns(sessionId: string, at: { computerId: string; di
   if (!at.resuming && !s.route) {
     const route = await routeTask(b.effort, s.goal, b.id);
     patchSession(sessionId, { runner: "computer", effort: route.effort, route });
-    logTaskRoute(sessionId);
-  }
+    logTaskRoute(sessionId, "computer");
+  } else if (!s.runner) patchSession(sessionId, { runner: "computer" });
   // Its skills and apps on its computer (capabilities/skills), for the scripts they bring.
   if (!at.resuming) await copySkillsToComputer(b.id, at.computerId, orgo.bash).catch((e: Error) => console.warn(`[skills] ${sessionId}: ${e.message}`));
   // What this turn runs on: the route (a tier up for each bump), or for a thread from before routes, the old rule.
@@ -2755,9 +2764,18 @@ async function run(sessionId: string) {
     patchSession(sessionId, (x) => {
       if (x.brainRun) delete x.brainRun.waits;
     });
-  // A cloud thread on the Responses API's computer tool (computer-task.ts): every new one (unless
-  // BOPS_COMPUTER_TOOL=0), and one that started on it. A thread that started on an Agents API session stays on that.
-  const onComputerTool = !mac && !brain && (s.runner === "computer" || (!s.agentSessionId && computerToolOn()));
+  // A cloud thread's runner, before its first turn (routing.ts runnerFor): its route asked for first when it
+  // has none (Jev reads the goal), or the one it came with (a benchmark's forced route; one picked up again).
+  if (!mac && !brain && !s.agentSessionId && !s.runner) {
+    const route = s.route ?? (await routeTask(b.effort, s.goal, b.id, { runner: runnerMode() !== "off" }));
+    const runner = runnerFor(s, route, computerToolOn());
+    patchSession(sessionId, { ...(s.route ? {} : { effort: route.effort, route }), ...(runner === "computer" ? { runner } : {}) });
+    if (!s.route) logTaskRoute(sessionId, runner);
+  }
+  // A cloud thread on the Responses API's computer tool (computer-task.ts), or one that started on it. A thread
+  // that started on an Agents API session stays on that.
+  const now = session(sessionId)!;
+  const onComputerTool = !mac && !brain && now.runner === "computer";
   // Until its cleanup is done (a thread moved to the Mac waits for that: waitsForCloud).
   runs.add(sessionId);
   // On its brain: stopped if the brain goes, or its bot goes off it, meanwhile (brainLeft).
@@ -2876,10 +2894,12 @@ async function run(sessionId: string) {
     } else if (onComputerTool) turn = await computerToolTurns(sessionId, { computerId, display, sharedWith: c.id !== b.id ? c.name : undefined, resuming });
     else {
       if (!resuming) {
-        const route = s.route ?? (await routeTask(b.effort, s.goal, b.id));
-        if (!s.route) {
+        // Usually asked already, as the thread started (run); a Mac thread asks here.
+        const had = session(sessionId)!.route;
+        const route = had ?? (await routeTask(b.effort, s.goal, b.id));
+        if (!had) {
           patchSession(sessionId, { effort: route.effort, route });
-          logTaskRoute(sessionId);
+          logTaskRoute(sessionId, "agents");
         }
         // What's known about the user that bears on this task (long-term memory): not on someone else's work.
         const memory = outside ? "" : await memoryBlock(wsOf(s.botId), s.goal, 3000);

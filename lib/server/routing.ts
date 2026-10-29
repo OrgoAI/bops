@@ -21,6 +21,11 @@ import type { Effort, RouteTier, TaskEffort, TaskRoute } from "@/lib/types";
  *
  * Jobs with a fixed shape (memory, reply suggestions, watch labels) take LIGHT: Luna, which OpenAI
  * makes for focused, high-volume work.
+ *
+ * What a new cloud task runs on is a judgment too, asked in the same call (RUNNER_QUESTIONS): the
+ * computer tool (computer-task.ts: faster and cheaper on screen work; it has a shell and parts side by
+ * side too) or an Agents API session (Codex's own coding tools, for building and code). In shadow until
+ * the coding comparison runs (BOPS_TASK_RUNNER).
  */
 
 export type { TaskEffort, TaskRoute };
@@ -37,6 +42,16 @@ export const LIGHT = () => setting("gpt-6-luna", "BOPS_LIGHT_MODEL");
 /** Off (the old rule, nothing more asked), shadow (asked and logged, the old rule runs) or on. */
 export const routerMode = (): "off" | "shadow" | "on" => {
   const m = setting("shadow", "BOPS_ROUTER");
+  return m === "off" || m === "on" ? m : "shadow";
+};
+
+/**
+ * Which runner a new cloud task gets: off (the computer tool, nothing asked), shadow (asked and logged,
+ * the computer tool runs: the default) or on (the pick runs). BOPS_COMPUTER_TOOL=0 still puts every one
+ * on an Agents API session.
+ */
+export const runnerMode = (): "off" | "shadow" | "on" => {
+  const m = setting("shadow", "BOPS_TASK_RUNNER");
   return m === "off" || m === "on" ? m : "shadow";
 };
 
@@ -125,6 +140,76 @@ const QUESTIONS = {
   },
 };
 
+/**
+ * What Jev is asked about a new cloud task's runner: three narrow questions, combined in code (runnerFrom),
+ * as Typesafe advises over one broad one. Each is a yes or no, with what each side means spelled out.
+ */
+export const RUNNER_QUESTIONS = {
+  code: {
+    type: "noul" as const,
+    instructions: "Does `task` ask to write, edit, fix, run or review code, scripts or files in a software project?",
+    criteria: {
+      true: "Yes: writing or changing code or a website's files, running scripts or terminal commands, cloning or inspecting a repository, installing developer tools, checking a code change or a deployment.",
+      false: "No: using websites or apps by clicking and typing, searching or reading the web, filling forms, sending messages or email, or writing prose such as a draft, summary or checklist.",
+    },
+  },
+  build: {
+    type: "noul" as const,
+    instructions: "Does `task` ask to build, change or deploy an app, website, tool or interactive page?",
+    criteria: {
+      true: "Yes: make or change a web page, app, game, dashboard, extension or script-based tool, or put one live.",
+      false: "No: only opening or using existing websites and apps, or researching or writing about them.",
+    },
+  },
+  parts: {
+    type: "noul" as const,
+    instructions: "Does `task` ask for several separate jobs that could be done at the same time, each on its own screen?",
+    criteria: {
+      true: "Yes: two or more independent pieces of work, such as a different thing on each of several screens, or several unrelated topics to research side by side.",
+      false: "No: one job, or steps that must happen one after another.",
+    },
+  },
+};
+
+/**
+ * How sure Jev must be (jev-1.14.0) for a task to go to an Agents API session. On 192 labeled goals (172 of
+ * the user's threads, 20 made-up building and code jobs; scripts/jev-runner-check.mjs, 2026-10-28): 25 of the
+ * 28 workbench ones, and 0 or 1 of the 164 screen ones (setting up Stripe's test mode in a browser reads as
+ * code at 0.79 to 0.80). Misses read as code at 0.5 to 0.6: checking a release, finding a dev project, saving
+ * a spreadsheet file. Separate jobs need more: a single search with several criteria reads as parts up to
+ * 0.89, real splits at 0.96 and up.
+ */
+export const RUNNER_AT = { code: 0.8, build: 0.8, parts: 0.95 };
+
+export type RunnerPick = { pick: "agents" | "computer"; why: string };
+
+/**
+ * The runner Jev's answers point to: an Agents API session for code, building, or separate jobs at once;
+ * else the computer tool. `at`: other cutoffs (scripts/jev-runner-check.mjs tries some).
+ */
+export function runnerFrom(a: Partial<Record<keyof typeof RUNNER_QUESTIONS, Answer>> | null, at: typeof RUNNER_AT = RUNNER_AT): RunnerPick | null {
+  if (!a) return null;
+  const p = { code: yes(a.code), build: yes(a.build), parts: yes(a.parts) };
+  if (p.code === undefined && p.build === undefined && p.parts === undefined) return null;
+  const said = (Object.keys(p) as (keyof typeof p)[]).map((k) => `${k} ${Math.round((p[k] ?? 0) * 100)}%`).join(", ");
+  const hit = (Object.keys(at) as (keyof typeof at)[]).filter((k) => (p[k] ?? 0) >= at[k]);
+  return { pick: hit.length ? "agents" : "computer", why: hit.length ? `${hit.join(", ")} (${said})` : `screen work (${said})` };
+}
+
+/**
+ * What a new cloud thread runs on. `computerTool` false (BOPS_COMPUTER_TOOL=0): an Agents API session,
+ * every one. Otherwise the computer tool, unless BOPS_TASK_RUNNER=on and the thread is work on one of the
+ * workspace's apps (work_on_app: `app`) or Jev read its goal as code, building, or separate jobs at once.
+ * In shadow (the default), the computer tool runs and the pick is only logged. A benchmark's forced route
+ * with a runner (POST /api/sessions) runs on that one, whatever the mode.
+ */
+export function runnerFor(s: { app?: unknown }, route: Pick<TaskRoute, "runner" | "by">, computerTool: boolean): "agents" | "computer" {
+  if (route.by === "forced" && route.runner) return route.runner.pick;
+  if (!computerTool) return "agents";
+  if (runnerMode() !== "on") return "computer";
+  return s.app || route.runner?.pick === "agents" ? "agents" : "computer";
+}
+
 /** The router's pick from Jev's answers: the most likely difficulty, a tier up when a mistake would be costly. */
 export function tierFrom(a: { difficulty?: Answer; stakes?: Answer; long?: Answer } | null): { tier: Tier; long: boolean; why: string } | null {
   const d = chose(a?.difficulty);
@@ -138,33 +223,36 @@ export function tierFrom(a: { difficulty?: Answer; stakes?: Answer; long?: Answe
 /**
  * What a new task runs on. A bot set to low, medium or high: that (high is Astra, as it always was).
  * Otherwise one Jev call: the old question (hard?) and the router's. The old rule runs unless
- * BOPS_ROUTER=on. Without Jev: the old rule's no-answer, medium on Sol.
+ * BOPS_ROUTER=on. Without Jev: the old rule's no-answer, medium on Sol. `runner`: a new cloud task's
+ * runner questions too, in the same call (RUNNER_QUESTIONS; asked for a bot set to an effort as well),
+ * and their pick in `runner` (none without Jev).
  */
-export async function routeTask(pref: Effort | undefined, goal: string, botId?: string, opts: { mode?: "off" | "shadow" | "on" } = {}): Promise<TaskRoute> {
-  if (pref && pref !== "auto") return { by: "setting", model: pref === "high" ? ASTRA() : SOL(), effort: pref };
+export async function routeTask(pref: Effort | undefined, goal: string, botId?: string, opts: { mode?: "off" | "shadow" | "on"; runner?: boolean } = {}): Promise<TaskRoute> {
+  const set = !!pref && pref !== "auto";
   const mode = opts.mode ?? routerMode();
-  const a = await decide(
-    { task: goal },
-    {
-      hard: {
-        type: "noul",
-        instructions: "Is `task` hard: many steps, research across several sources, comparing or judging, or careful form-filling where mistakes matter?",
-        criteria: { true: "Hard: worth thinking it through carefully", false: "Simple: a quick lookup or a few clicks" },
-      },
-      ...(mode === "off" ? {} : QUESTIONS),
-    },
-    { botId },
-  );
+  if (set && !opts.runner) return { by: "setting", model: pref === "high" ? ASTRA() : SOL(), effort: pref };
+  const a = await decide({ task: goal }, { ...(set ? {} : HARD), ...(set || mode === "off" ? {} : QUESTIONS), ...(opts.runner ? RUNNER_QUESTIONS : {}) }, { botId });
+  const runner = opts.runner ? runnerFrom(a) : null;
+  const pick = runner ? { runner } : {};
+  if (set) return { by: "setting", model: pref === "high" ? ASTRA() : SOL(), effort: pref, ...pick };
   // Jev is conservative here: a multi-source research task scores about 0.4, a one-page lookup about 0.03.
   const hard = (yes(a?.hard) ?? 0) >= 0.3;
-  const rule: TaskRoute = { by: "rule", model: hard ? ASTRA() : SOL(), effort: hard ? "high" : "medium" };
+  const rule: TaskRoute = { by: "rule", model: hard ? ASTRA() : SOL(), effort: hard ? "high" : "medium", ...pick };
   const picked = mode === "off" ? null : tierFrom(a);
   if (!picked) return rule;
   const router = { ...configFor(picked.tier, { long: picked.long }), tier: picked.tier, why: picked.why };
   // A task loops through many model calls: pro mode would pay its extra work on every one of them.
   delete router.mode;
-  return mode === "on" ? { by: "router", model: router.model, effort: router.effort, tier: router.tier, long: picked.long, router } : { ...rule, router };
+  return mode === "on" ? { by: "router", model: router.model, effort: router.effort, tier: router.tier, long: picked.long, router, ...pick } : { ...rule, router };
 }
+
+const HARD = {
+  hard: {
+    type: "noul" as const,
+    instructions: "Is `task` hard: many steps, research across several sources, comparing or judging, or careful form-filling where mistakes matter?",
+    criteria: { true: "Hard: worth thinking it through carefully", false: "Simple: a quick lookup or a few clicks" },
+  },
+};
 
 /** The configuration for a task's next turn: a tier up for each bump, when the router chose it. */
 export function taskConfig(r: TaskRoute | undefined): Config | undefined {

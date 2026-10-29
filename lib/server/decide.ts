@@ -1,6 +1,7 @@
 import "server-only";
 import { appHeaders } from "./app-version";
 import { cloudProxy, cloudSession } from "./cloud";
+import { setting } from "./models";
 import { stateEpoch } from "./store";
 import { recordDecide, usageTags } from "./usage";
 
@@ -13,7 +14,12 @@ import { recordDecide, usageTags } from "./usage";
  * on TYPESAFE_API_KEY. Each call is counted as a quick check (usage.ts recordDecide), at the tokens
  * Typesafe says it read, for the bot it's about when the caller says (`opts.botId`); through the
  * cloud, the cloud counts and prices it too (what AI credit pays).
+ *
+ * A version, not jev-latest: the thresholds Bops reads answers by (routing.ts) were set against one, and
+ * the alias moves when Typesafe ships (to 1.14 on 2026-10-14). Moving on is a change here, after
+ * scripts/jev-runner-check.mjs (and the router's grid) say the thresholds still hold. BOPS_JEV_MODEL overrides.
  */
+export const JEV_MODEL = () => setting("jev-1.14.0", "BOPS_JEV_MODEL");
 
 type Text = string | Record<string, unknown> | unknown[];
 export type Question =
@@ -31,7 +37,7 @@ export async function decide<K extends string>(state: Text, questions: Partial<R
   const via = cloudProxy("typesafe");
   const key = via ? via.key : process.env.TYPESAFE_API_KEY;
   if (!key || (via && !(await cloudSession().catch(() => null))?.typesafe)) return null;
-  const body = JSON.stringify({ model: "jev-latest", state, questions });
+  const body = JSON.stringify({ model: JEV_MODEL(), state, questions });
   // Counted for the user whose state this was asked for (the ledger is in their state).
   const epoch = stateEpoch();
   try {
@@ -45,7 +51,7 @@ export async function decide<K extends string>(state: Text, questions: Partial<R
     const answer = (await res.json()) as { answers: Partial<Record<K, Answer>>; model?: string; usage?: { input_tokens?: number } | null };
     // What Typesafe read (about 4 bytes a token when it doesn't say), as the cloud counts it.
     const said = answer.usage?.input_tokens;
-    recordDecide(answer.model ?? "jev-latest", typeof said === "number" && Number.isFinite(said) && said >= 0 ? said : Math.ceil(Buffer.byteLength(body) / 4), opts.botId, epoch);
+    recordDecide(answer.model ?? JEV_MODEL(), typeof said === "number" && Number.isFinite(said) && said >= 0 ? said : Math.ceil(Buffer.byteLength(body) / 4), opts.botId, epoch);
     return answer.answers;
   } catch (e) {
     console.warn("[decide]", (e as Error).message);

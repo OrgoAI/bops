@@ -169,6 +169,68 @@ assert.equal(R.tierFrom({ difficulty: { type: "choice", choice: "huge", confiden
 
 /* ---------------- A task's route ---------------- */
 
+// Jev is asked by version (decide.ts JEV_MODEL), not jev-latest: the thresholds were set against one.
+jevAsked.length = 0;
+jevAnswers = jev({ difficulty: "quick" });
+await R.routeTask(undefined, "Anything");
+assert.equal(jevAsked[0].model, "jev-1.14.0");
+process.env.BOPS_JEV_MODEL = "jev-1.13.0";
+await R.routeTask(undefined, "Anything");
+assert.equal(jevAsked[1].model, "jev-1.13.0", "BOPS_JEV_MODEL overrides");
+delete process.env.BOPS_JEV_MODEL;
+
+// The runner: three yes-or-no questions combined in code. Code or building at 0.8, separate jobs only at 0.95
+// (a single search with several criteria reads as parts up to 0.89 on jev-1.14).
+const noul = (n) => ({ type: "noul", noul: n });
+const run3 = (code, build, parts) => R.runnerFrom({ code: noul(code), build: noul(build), parts: noul(parts) });
+assert.equal(run3(0.97, 0.1, 0.1).pick, "agents");
+assert.equal(run3(0.1, 0.85, 0.1).pick, "agents");
+assert.equal(run3(0.1, 0.1, 0.96).pick, "agents");
+assert.equal(run3(0.79, 0.79, 0.94).pick, "computer", "under every cutoff");
+assert.equal(run3(0.02, 0.02, 0.89).pick, "computer", "parts at 0.89: the Petfinder search, not a split");
+assert.equal(run3(0.97, 0.9, 0.1).why, "code, build (code 97%, build 90%, parts 10%)");
+assert.equal(run3(0.1, 0.2, 0.3).why, "screen work (code 10%, build 20%, parts 30%)");
+assert.equal(R.runnerFrom(null), null, "no Jev: no pick");
+assert.equal(R.runnerFrom({}), null);
+assert.deepEqual(R.RUNNER_AT, { code: 0.8, build: 0.8, parts: 0.95 });
+
+// Asked with the effort's questions, in the one call a new cloud task makes; a bot set to an effort gets only the runner's.
+jevAsked.length = 0;
+jevAnswers = (q) => ({ ...jev({ difficulty: "standard", hard: 0.1 })(), ...(q.code ? { code: noul(0.95), build: noul(0.9), parts: noul(0.05) } : {}) });
+let rt = await R.routeTask("auto", "Add a dark mode toggle to the Orgo CRM app", "boppy", { runner: true });
+assert.equal(jevAsked.length, 1, "one call");
+assert.deepEqual(Object.keys(jevAsked[0].questions).sort(), ["build", "code", "difficulty", "hard", "long", "parts", "stakes"]);
+assert.deepEqual(rt.runner, { pick: "agents", why: "code, build (code 95%, build 90%, parts 5%)" });
+assert.deepEqual([rt.by, rt.model, rt.effort], ["rule", "gpt-6.1-sol", "medium"], "the effort's route as before");
+rt = await R.routeTask("high", "Add a dark mode toggle", "boppy", { runner: true });
+assert.deepEqual(Object.keys(jevAsked[1].questions).sort(), ["build", "code", "parts"], "a bot's own effort: only the runner's");
+assert.deepEqual([rt.by, rt.model, rt.effort, rt.runner.pick], ["setting", "gpt-6-astra", "high", "agents"]);
+jevAnswers = () => ({});
+rt = await R.routeTask("auto", "Anything", "boppy", { runner: true });
+assert.equal(rt.runner, undefined, "Jev didn't answer: no pick");
+assert.equal((await R.routeTask(undefined, "Anything")).runner, undefined, "not asked: none");
+
+// What runs: shadow (the default) keeps the computer tool; on, the pick, and app work always on Agents; BOPS_COMPUTER_TOOL=0, Agents.
+const agents = { runner: { pick: "agents", why: "" } };
+const screen = { runner: { pick: "computer", why: "" } };
+assert.equal(R.runnerMode(), "shadow");
+assert.equal(R.runnerFor({}, agents, true), "computer", "shadow: only logged");
+assert.equal(R.runnerFor({ app: { name: "crm" } }, screen, true), "computer");
+assert.equal(R.runnerFor({}, screen, false), "agents", "BOPS_COMPUTER_TOOL=0");
+process.env.BOPS_TASK_RUNNER = "on";
+assert.equal(R.runnerFor({}, agents, true), "agents");
+assert.equal(R.runnerFor({}, screen, true), "computer");
+assert.equal(R.runnerFor({}, {}, true), "computer", "no pick: the computer tool");
+assert.equal(R.runnerFor({ app: { name: "crm" } }, screen, true), "agents", "work on an app: Agents, whatever Jev read");
+process.env.BOPS_TASK_RUNNER = "off";
+assert.equal(R.runnerMode(), "off");
+assert.equal(R.runnerFor({}, agents, true), "computer");
+// A benchmark's forced route: its runner, whatever the mode; none named, the usual rule (the computer tool here).
+assert.equal(R.runnerFor({}, { by: "forced", ...agents }, true), "agents", "forced to Agents, even with the mode off");
+assert.equal(R.runnerFor({}, { by: "forced", ...screen }, false), "computer", "forced to the computer tool, even with BOPS_COMPUTER_TOOL=0");
+assert.equal(R.runnerFor({}, { by: "forced" }, true), "computer", "a forced model alone: the computer tool, as before");
+delete process.env.BOPS_TASK_RUNNER;
+
 // A bot set to low, medium or high: that, and Jev isn't asked. High is Astra, as it always was.
 jevAsked.length = 0;
 assert.deepEqual(await R.routeTask("high", "Anything"), { by: "setting", model: "gpt-6-astra", effort: "high" });

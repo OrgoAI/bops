@@ -29,7 +29,8 @@ import { othersThread, type AppApproval, type Session } from "@/lib/types";
  * Pages by their elements, and the screen where that's quicker: page_script runs a short Playwright script
  * on the screen's own Chrome (vm/page-script.cjs, over CDP on the computer), the code-execution way OpenAI
  * recommends for GPT-6 Astra, and its answer comes with the screen when the model should look (pageLook).
- * What it doesn't have (the Agents API thread does): the browser tools as MCP, and helpers.
+ * Parts side by side, each on a screen of its own: split_task and check_parts (PART_TOOLS). What it doesn't
+ * have (the Agents API thread does): the browser tools as MCP, and Codex's own coding tools.
  */
 
 export const computerToolOn = () => process.env.BOPS_COMPUTER_TOOL !== "0";
