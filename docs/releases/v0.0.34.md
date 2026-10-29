@@ -1,0 +1,3 @@
+- Bots sharing a computer show together in the sidebar, named by you.
+- Each bot can show the site it works on under its name.
+- Bots can launch your app locally, or share a preview link.
