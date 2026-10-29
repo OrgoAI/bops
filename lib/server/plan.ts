@@ -577,6 +577,9 @@ export async function noMainComputer(main: Bot) {
  * memory, so its runner would go on as the main computer's (its threads driving that computer) until
  * that command; a clone starts its runner afresh, which finds it's a copy before it reads anything
  * (runner-start.ts).
+ * The main computer's host full (the fork short of memory) and the clone turned down too: a fresh computer
+ * from the Bops template on the plan instead, as big as the plan gives a new one. It starts without the main
+ * computer's files and sign-ins, which a bot of its own doesn't need to start work.
  */
 export async function makeOwnComputer(b: Bot, main: Bot, name: string, epoch = stateEpoch()) {
   const from = main.computerId;
@@ -595,9 +598,14 @@ export async function makeOwnComputer(b: Bot, main: Bot, name: string, epoch = s
     try {
       sameUser(epoch);
       const clone = (forkErr?: Error) =>
-        orgo.clone(from, name, workspaceOf(b)).catch((cloneErr: Error) => {
+        orgo.clone(from, name, workspaceOf(b)).catch(async (cloneErr: Error) => {
           if (planRefusal(cloneErr) || !forkErr) throw cloneErr;
-          throw new Error(/insufficient memory/i.test(forkErr.message) ? "the cloud server it has to share with the main bot's computer is full right now" : `${forkErr.message}; ${cloneErr.message}`);
+          if (!/insufficient memory/i.test(forkErr.message)) throw new Error(`${forkErr.message}; ${cloneErr.message}`);
+          sameUser(epoch);
+          return orgo.create(name, { ram: computerRam(plan), wsId: workspaceOf(b) }).catch((freshErr: Error) => {
+            if (planRefusal(freshErr)) throw freshErr;
+            throw new Error("the cloud server it has to share with the main bot's computer is full right now");
+          });
         });
       if (getState().runners?.[from] || getState().runners?.[from.toLowerCase()]) return await clone();
       return await orgo.fork(from, workspaceOf(b)).catch((forkErr: Error) => {
