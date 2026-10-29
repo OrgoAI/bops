@@ -188,15 +188,15 @@ await test("on top the toggle and Search; tooltips open to the right", () => {
   assert.match(tip, /data-tip-side\]"\)\?\.getAttribute\("data-tip-side"\) === "right"/);
 });
 
-await test("only the page that's really open is filled in: nothing open, nothing (Logins stays the row's resting pill)", () => {
+await test("only the page that's really open is filled in: nothing open, nothing (the row rests on you)", () => {
   assert.equal(openFooterPage({}), null);
   assert.equal(openFooterPage({ tab: "bot" }), null);
   assert.equal(openFooterPage({ tab: "vault" }), "vault");
   assert.equal(openFooterPage({ tab: "autopilot" }), "routines");
-  assert.equal(footerPageOf({ tab: "bot" }), "vault", "the row's pill still rests on Logins");
+  assert.equal(footerPageOf({ tab: "bot" }), "vault", "Logins is still the page the row would mark");
   const pressed = (html) => [...html.matchAll(/aria-label="([^"]+)" aria-pressed="true"/g)].map((m) => m[1]);
   assert.deepEqual(pressed(render(world(), { footer: null })), []);
-  assert.deepEqual(pressed(render(world(), { footer: "vault" })), ["Logins"]);
+  assert.deepEqual(pressed(render(world(), { footer: "vault" })), ["Connect apps"]);
 });
 
 await test("the footer's pages in a column, every one round, you last", () => {
@@ -205,7 +205,7 @@ await test("the footer's pages in a column, every one round, you last", () => {
   assert.match(html, /data-footer-column="true" class="flex flex-col items-center gap-2 [^"]*\[&amp;&gt;\[data-footer-key\]\]:w-9/, "each slot a 36px circle, your initials too");
   assert.doesNotMatch(column, /max-w-\[160px\] translate-x-0 opacity-100/, "no pill");
   const slots = [...column.matchAll(/data-footer-slot="([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(slots.slice(0, 3), ["People", "Logins", "Routines"]);
+  assert.deepEqual(slots.slice(0, 3), ["People", "Connect apps", "Routines"]);
   assert.ok(column.indexOf("Tess Ito") > column.lastIndexOf("data-footer-slot=\"Routines\""), "you after the pages");
 });
 

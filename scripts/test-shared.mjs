@@ -975,7 +975,8 @@ await check("Bops' own lines in the owner's voice read as the owner's in a share
 
 await check("the rest of what Bops says in the owner's voice reads as theirs: an owner's call's card, a routine's last run, a thread's steps, a credit stop; a thread the owner stopped asks nothing; the page and tips name the owner's bots", async () => {
   const { ComputerView } = await import(pathToFileURL(`${root}/components/app/computer.tsx`).href);
-  const { KnowledgeButton } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
+  const { YouMenu } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
+  const menuOf = (st) => renderToStaticMarkup(h(YouMenu, { state: st, opened: true, onAccount: noop, onSettings: noop, onSetup: noop, pages: { onMembers: noop, onOpenAutopilot: noop, onOpenMemory: noop, onApps: noop } }));
   const { needsYou } = await import(`${root}/lib/asks.ts`);
   const c = cloudState();
   const t = c.state.sessions[0];
@@ -1014,7 +1015,7 @@ await check("the rest of what Bops says in the owner's voice reads as theirs: an
   assert.match(text(page), /Stopped by the owner/);
   assert.ok(!/Needs you|needs you/.test(page), "not in a label either");
   // The Knowledge button's tip, and a computer's Follow tip.
-  assert.match(renderToStaticMarkup(h(KnowledgeButton, { state, expanded: false, pressed: false, onOpen: noop })), /Knowledge: what the owner&#x27;s bots know/);
+  assert.match(menuOf(state), /title="What the owner&#x27;s bots know"/);
   // The bot's computer, with the viewer's own app on their Mac: the owner's, shown by nothing here (a screen read by its id is the viewer's own bot's).
   const view = renderToStaticMarkup(h(ComputerView, { state: { ...state, host: "mac" }, bot: state.bots[0], display: 100, onDisplay: noop, follow: { on: true, auto: noop, resume: noop }, mode: "panel" }));
   assert.match(text(view), /Dana's Boppy works on the owner's computer\./);
@@ -1022,7 +1023,7 @@ await check("the rest of what Bops says in the owner's voice reads as theirs: an
   // The user's own: as always.
   const mine = { ...state, shared: undefined };
   assert.match(text(renderToStaticMarkup(h(AutopilotPage, { state: mine, onBot: noop, onOpenWatch: noop, onOpenSkills: noop, onAsk: noop, onClose: noop }))), /What your bots do on their own/);
-  assert.match(renderToStaticMarkup(h(KnowledgeButton, { state: mine, expanded: false, pressed: false, onOpen: noop })), /what your bots know, learned as you chat/);
+  assert.match(menuOf(mine), /What your bots know, learned as you chat/);
   assert.match(renderToStaticMarkup(h(ComputerView, { state: { ...mine, host: "mac" }, bot: mine.bots[0], display: 100, onDisplay: noop, follow: { on: true, auto: noop, resume: noop }, mode: "panel" })), /cuts to one that needs you/);
 });
 

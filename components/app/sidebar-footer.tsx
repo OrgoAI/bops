@@ -3,29 +3,21 @@
 import { useCallback, useEffect, useRef, useState, type FocusEvent, type PointerEvent, type ReactNode } from "react";
 
 /*
- * The sidebar's footer (sidebar.tsx): your account (the initials), then People, Logins, Routines,
- * Knowledge and Apps. One of them is a pill with its label, the others round buttons. At rest it's the
- * one whose page is open on the right (People's sheet, Logins, Routines, Knowledge, the Apps home or
- * an app a bot made), else Logins.
- * Pointing at another (or tabbing to it) grows that one into the pill as the one before shrinks back to a
- * circle, in one motion; moving along the row glides the pill from button to button, and leaving the row
- * settles it back on the resting one. Each is a slot 36px wide that takes the row's free space by
- * flex-grow (1 for the pill, 0 for the rest), so as one grows the other gives up the same space and the
- * row never gets wider or wraps (globals.css .motion-footer-*; with reduced motion, the swap is instant).
- * Six of them (36px, 4px apart) leave the pill 119px in the sidebar's 340px (less its 10px sides and
- * 1px border), room for Knowledge and its icon, or Logins and three apps' logos.
- * Where nothing can hover (a touch screen), only the open page is the pill.
+ * The sidebar's footer (sidebar.tsx): you (your initials and name; People, Routines, Knowledge and Apps
+ * are in your menu), then Connect apps (your logins). At rest you are the pill, with your name, and
+ * Connect apps is a round button; pointing at it (or tabbing to it) grows it into the pill, with the apps
+ * you've connected, as you shrink to your initials, in one motion, and leaving the row settles it back.
+ * Each is a slot 36px wide that takes the row's free space by flex-grow (1 for the pill, 0 for the other),
+ * so as one grows the other gives up the same space and the row never gets wider or wraps (globals.css
+ * .motion-footer-*; with reduced motion, the swap is instant). Where nothing can hover (a touch screen),
+ * you stay the pill.
+ * The other buttons here (People, Routines, Knowledge, Apps) are the round ones those pages still use.
  */
 
-/** The footer's pages: the one that's the pill at rest ("vault" is Logins; "apps", the apps the bots made). */
+/** The pages the footer and your menu open: the one open on the right ("vault" is Logins; "apps", the apps the bots made). */
 export type FooterPage = "people" | "vault" | "routines" | "knowledge" | "apps";
 /** Every button in the footer: its pages and your account. */
 export type FooterKey = FooterPage | "you";
-
-/** Which button is the pill: the one pointed at (or tabbed to), else the resting one (the open page). */
-export function footerPillOf({ rest, hover }: { rest: FooterPage; hover?: FooterKey | null }): FooterKey {
-  return hover ?? rest;
-}
 
 /** How long the pill waits once the pointer leaves the row before it settles back, so it never blinks. */
 export const FOOTER_LEAVE_MS = 80;
@@ -155,7 +147,8 @@ export function FooterButton({
   expanded: boolean;
   pressed?: boolean;
   label: string;
-  tip: string;
+  /** None: pointing at it grows it into the pill, which says what it is (Connect apps). */
+  tip?: string;
   ariaLabel?: string;
   icon?: ReactNode;
   trail?: ReactNode;

@@ -80,6 +80,17 @@ export function useMembersCount(state: AppState) {
   return user && count?.user === user ? count.n : null;
 }
 
+/** People's icon: two people. */
+export function PeopleIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden className="shrink-0">
+      <circle cx="6" cy="5.6" r="2.4" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />
+      <path d="M1.8 13.2c.6-2.3 2.2-3.5 4.2-3.5s3.6 1.2 4.2 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
+      <path d="M10.4 3.5a2.4 2.4 0 010 4.4M12 9.9c1.2.4 2 1.5 2.3 3.3" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /**
  * The People button, beside the user's initials: two people, and a grey count of who has access besides
  * the user (guests too, invites not). Grey, not highlighter: nothing here needs the user. The pill, with
@@ -96,13 +107,7 @@ export function MembersButton({ state, expanded = false, pressed = expanded, onC
       tip="People: who sees your bots"
       ariaLabel={count ? `People, ${count} with access` : "People"}
       onClick={onClick}
-      icon={
-        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
-          <circle cx="6" cy="5.6" r="2.4" fill="none" stroke="#0A0A0A" strokeWidth="1.4" />
-          <path d="M1.8 13.2c.6-2.3 2.2-3.5 4.2-3.5s3.6 1.2 4.2 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
-          <path d="M10.4 3.5a2.4 2.4 0 010 4.4M12 9.9c1.2.4 2 1.5 2.3 3.3" fill="none" stroke="#0A0A0A" strokeWidth="1.4" strokeLinecap="round" />
-        </svg>
-      }
+      icon={<PeopleIcon />}
       badge={
         count ? (
           <span className="pointer-events-none absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[color:var(--c-eeeeec)] px-1 text-[11px] font-semibold leading-none tabular-nums text-[color:var(--c-3a3a38)] shadow-[0_0_0_2px_var(--c-f9f9f8)]">

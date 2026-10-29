@@ -299,17 +299,24 @@ function useFresh(id: string) {
 /* ---------------- The sidebar ---------------- */
 
 /**
+ * How many monitors have news, and where Routines opens: on monitors while one has news (at the first
+ * with news, which the list puts first, as a monitor's own row opens it), else on the first section with
+ * something in it. For Routines in the account menu (sidebar.tsx) and its round button.
+ */
+export function routinesEntry(state: AppState): { news: number; open: AutopilotOpen } {
+  const lists = autopilotOf(state);
+  const news = lists.monitors.filter((w) => w.alert).length;
+  const section: AutopilotSection = news ? "monitors" : (SECTIONS.find((s) => lists[s.id].length)?.id ?? "schedules");
+  return { news, open: { section, focus: news ? lists.monitors.find((w) => w.alert)?.id : undefined } };
+}
+
+/**
  * Routines in the sidebar's footer, beside Knowledge: a round button that opens the page (one tab per
  * workspace), with how many monitors have news on it while some do (it pops in when news comes). The
  * pill, with its name, while the page is open (sidebar-footer.tsx).
  */
 export function AutopilotButton({ state, expanded = false, pressed = expanded, onOpen }: { state: AppState; expanded?: boolean; pressed?: boolean; onOpen: (open: AutopilotOpen) => void }) {
-  const lists = autopilotOf(state);
-  const news = lists.monitors.filter((w) => w.alert).length;
-  // The page opens on monitors while one has news, else on the first section with something in it.
-  const section: AutopilotSection = news ? "monitors" : (SECTIONS.find((s) => lists[s.id].length)?.id ?? "schedules");
-  // At the monitor with news (the list puts them first), as a monitor's own row opens it.
-  const fresh = news ? lists.monitors.find((w) => w.alert) : undefined;
+  const { news, open } = routinesEntry(state);
   return (
     <FooterButton
       name="routines"
@@ -318,7 +325,7 @@ export function AutopilotButton({ state, expanded = false, pressed = expanded, o
       label={GROUP_NAME}
       tip={news ? `${GROUP_NAME}: ${news === 1 ? "a monitor has" : `${news} monitors have`} news` : `${GROUP_NAME}: what ${your(state)} bots do on their own`}
       ariaLabel={news ? `${GROUP_NAME}, ${news} with news` : GROUP_NAME}
-      onClick={() => onOpen({ section, focus: fresh?.id })}
+      onClick={() => onOpen(open)}
       icon={<AutopilotIcon size={16} />}
       badge={
         news > 0 && (
