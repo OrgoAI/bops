@@ -366,9 +366,11 @@ test("orgo-web's notice that a member is out drops what they did that still wait
   delete roles[`${other} ${ACT_PROJECT}`];
 });
 
-test("Your Apps: a member of Orgo's team given it reads the apps as allowed, acts at Write, and is refused at Read", async () => {
+test("Your Apps: in a workspace of Orgo's team, a member given it reads the apps as allowed, acts at Write, and is refused at Read; in one whose owner isn't Orgo's team, they're never shown", async () => {
   roles[`${teamMember} ${APPS_PROJECT}`] = { role: "member", ownerUserId: appsOwner, bopsWsId: "ws_apps", name: "Apps" };
-  const state = (level: string) => ({
+  // Apps go by the owner's own email, in their state (ws-slice.ts ownerAppsOpen): a made-up @orgo.ai one, or another.
+  const state = (level: string, owner = "owner@orgo.ai") => ({
+    account: { user: { id: appsOwner, email: owner } },
     workspaces: [
       {
         id: "ws_apps",
@@ -387,8 +389,8 @@ test("Your Apps: a member of Orgo's team given it reads the apps as allowed, act
     bots: [{ id: "max", name: "Max", workspaceId: "ws_apps" }],
     chats: [{ id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_apps" }],
   });
-  const put = async (level: string, base: number) => {
-    const r = await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: headers(appsOwner), body: JSON.stringify({ base, state: state(level) }) });
+  const put = async (level: string, base: number, owner?: string) => {
+    const r = await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: headers(appsOwner), body: JSON.stringify({ base, state: state(level, owner) }) });
     assert.equal(r.status, 200);
     return ((await r.json()) as { version: number }).version;
   };
@@ -399,18 +401,24 @@ test("Your Apps: a member of Orgo's team given it reads the apps as allowed, act
   assert.deepEqual(body.state.apps?.list.map((a) => [a.name, a.botId, a.url]), [["shop", "max", "https://shop.orgo.dev"]]);
   assert.equal(body.state.apps?.list[0].settings, undefined);
   assert.equal(body.state.apps?.owned, undefined);
-  for (const hidden of ["comp-1", "proj-1", "tok-1", "memberAccess", "appsForMembers"]) assert.ok(!JSON.stringify(body).includes(hidden), `"${hidden}" isn't shown`);
+  for (const hidden of ["comp-1", "proj-1", "tok-1", "memberAccess", "appsForMembers", "owner@orgo.ai"]) assert.ok(!JSON.stringify(body).includes(hidden), `"${hidden}" isn't shown`);
   const go = (key: string) =>
     fetch(`${cloud.url}/v1/ws/${APPS_PROJECT}/act`, { method: "POST", headers: { Authorization: `Bearer ${keyOf(teamMember)}`, "content-type": "application/json" }, body: JSON.stringify({ key, act: { act: "deploy", app: "shop" } }) }).then(
       async (r) => ({ status: r.status, json: (await r.json()) as Record<string, unknown> }),
     );
   const read = await go("edge_apps_001");
   assert.deepEqual([read.status, read.json.code], [403, "member_apps_read_only"]);
-  await put("write", v);
+  const v2 = await put("write", v);
   const w = (await (await fetch(`${cloud.url}/v1/ws/${APPS_PROJECT}/state`, { headers: { Authorization: `Bearer ${keyOf(teamMember)}` } })).json()) as SharedWsState;
   assert.deepEqual(w.state.apps?.owned, [{ id: "zone-1", domain: "acme.example" }]);
   assert.deepEqual(w.state.apps?.list[0].settings, { shop: { port: 3000, install: null, build: null, start: "npm start" } });
   assert.equal((await go("edge_apps_002")).status, 202);
   const rows = await pending(appsOwner);
   assert.deepEqual(rows.map((r) => (r.payload as MemberActPayload).act), [{ act: "deploy", app: "shop" }], "queued for the owner's Mac, as theirs");
+  // The same at Write in a workspace whose owner isn't Orgo's team: no apps, and no such app to act on, for an @orgo.ai member too.
+  await put("write", v2, "owner@example.com");
+  const other = (await (await fetch(`${cloud.url}/v1/ws/${APPS_PROJECT}/state`, { headers: { Authorization: `Bearer ${keyOf(teamMember)}` } })).json()) as SharedWsState;
+  assert.equal(other.state.apps, undefined);
+  assert.equal((await go("edge_apps_003")).status, 404);
+  assert.equal((await pending(appsOwner)).length, 1, "nothing more queued");
 });
