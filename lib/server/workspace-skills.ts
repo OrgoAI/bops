@@ -1664,8 +1664,13 @@ export function writeSkillFiles(botId: string, dir: string): void {
 }
 
 const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-/** Bytes per piece of a file copied to a computer (its base64 stays well under a bash call's size). */
-const PIECE = 96 * 1024;
+/**
+ * Bytes per piece of a file copied to a computer. Linux takes no single argument over 128 KB
+ * (MAX_ARG_STRLEN), and each call's commands reach the computer's bash as one: a piece (48 KB, 64 KB
+ * as base64) and a call (CALL_MAX) stay well under it.
+ */
+const PIECE = 48 * 1024;
+const CALL_MAX = 100_000;
 
 /**
  * The bot's skills and apps copied to its Orgo computer, fresh: /workspace/capabilities/skills/<slug>/
@@ -1711,7 +1716,7 @@ export async function copySkillsToComputer(botId: string, computerId: string, ba
   const chunks: string[][] = [[]];
   let size = 0;
   for (const l of lines) {
-    if (size + l.length > 200_000 && chunks[chunks.length - 1].length) {
+    if (size + l.length > CALL_MAX && chunks[chunks.length - 1].length) {
       chunks.push([]);
       size = 0;
     }
