@@ -1,0 +1,5 @@
+- An org chart shows who answers to whom on your team.
+- Each bot has a settings page for its email, phone and voice.
+- Hear each voice and pick one for your bot's calls.
+- Bots' screens look like a normal computer, with one bar on top.
+- Delete one message, several at once, or a whole chat.
