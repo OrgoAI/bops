@@ -48,6 +48,7 @@ import { ownerPhone, textingLine, textOwner } from "./phone";
 import { pingIfWorthIt } from "./attention";
 import { recordTokens, usageTags } from "./usage";
 import { LIGHT, logRoute, routeChat, speedFor, tierParam, withSpeed, type Config } from "./routing";
+import { BRAND } from "@/lib/brand";
 
 /**
  * Chat engine. Every bot answers in its own chat, like texting a person: it replies, looks things up
@@ -235,7 +236,7 @@ const WHERE = {
 function persona(b: Bot, others: Bot[]) {
   const owner = ownerName();
   return [
-    `You are ${b.name}, ${b.isMain ? `${owner}'s chief of staff` : `the ${b.role} bot`} in Bops. ${ownerLine()}`,
+    `You are ${b.name}, ${b.isMain ? `${owner}'s chief of staff` : `the ${b.role} bot`} in ${BRAND.name}. ${ownerLine()}`,
     // What the user wrote on its profile (How I work): their preferences, never Bops' rules.
     howIWork(owner, b.persona?.slice(0, MAX_PERSONA_CHARS)),
     // The one style rule for the chat (WRITING is the standard under it).

@@ -132,7 +132,7 @@ export function TabBar({
           onClick={onNew}
           title="New tab"
           aria-label="New tab"
-          className="flex size-7 shrink-0 items-center justify-center rounded-lg text-[#6B6B6B] hover:bg-[#EEEEEC] hover:text-ink [-webkit-app-region:no-drag]"
+          className="flex size-7 shrink-0 items-center justify-center rounded-lg text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-eeeeec)] hover:text-ink [-webkit-app-region:no-drag]"
         >
           <svg width="13" height="13" viewBox="0 0 14 14">
             <path d="M7 2v10M2 7h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -199,7 +199,7 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
       // Clipped, so what's in a tab stays inside it while it opens up.
       className={`group/tab flex h-[30px] min-w-0 max-w-[220px] shrink cursor-pointer items-center gap-1.5 overflow-hidden rounded-[10px] pl-2.5 ${closable ? "pr-1" : "pr-3"} text-[13px] leading-4 transition-[background-color,box-shadow,color] duration-150 ease-out motion-reduce:transition-none [-webkit-app-region:no-drag] ${
         opening ? "motion-tab-in" : ""
-      } ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F,0_2px_6px_-3px_#00000026]" : "text-[#6B6B6B] hover:bg-[#EEEEEC]"}`}
+      } ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F,0_2px_6px_-3px_#00000026]" : "text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-eeeeec)]"}`}
     >
       {t.kind === "computer" ? (
         <MonitorIcon size={14} color={on ? "#0A0A0A" : "#6B6B6B"} />
@@ -226,9 +226,9 @@ function Tab({ state, tab: t, on, closable, onPick, onClose }: { state: AppState
       )}
       <span className={`truncate ${on ? "font-medium" : ""}`}>{label}</span>
       {needsYou ? (
-        <span className="size-[7px] shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" title="Needs you" />
+        <span className="size-[7px] shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" title="Needs you" />
       ) : t.kind === "made-app" && state.madeApps?.find((a) => a.id === t.appId)?.building ? (
-        <span className="size-[7px] shrink-0 animate-pulse rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" title="Building" />
+        <span className="size-[7px] shrink-0 animate-pulse rounded-full bg-highlighter shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" title="Building" />
       ) : working ? (
         <span className="size-[6px] shrink-0 animate-pulse rounded-full bg-[#2BB673]" title="Working" />
       ) : null}
@@ -312,10 +312,10 @@ export function WebTab({ url, hidden, user, onPage }: { url: string; hidden: boo
     };
   }, [view, native]);
 
-  const button = "flex size-7 items-center justify-center rounded-lg text-[#3A3A38] hover:bg-[#F2F2F0] disabled:opacity-30";
+  const button = "flex size-7 items-center justify-center rounded-lg text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)] disabled:opacity-30";
   return (
     <div className={`min-h-0 flex-1 flex-col ${hidden ? "hidden" : "flex"}`}>
-      <div className="flex h-10 shrink-0 items-center gap-1 border-b border-[#F0F0EE] px-2.5">
+      <div className="flex h-10 shrink-0 items-center gap-1 border-b border-[color:var(--c-f0f0ee)] px-2.5">
         {native && (
           <>
             <button className={button} aria-label="Back" onClick={() => view?.goBack()}>
@@ -355,10 +355,10 @@ export function WebTab({ url, hidden, user, onPage }: { url: string; hidden: boo
             }}
             spellCheck={false}
             aria-label="Address"
-            className="min-w-0 flex-1 truncate rounded-full bg-[#F2F2F0] px-3 py-1 font-mono text-[11.5px] leading-4 text-[#6B6B6B] outline-none focus:bg-white focus:text-ink focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+            className="min-w-0 flex-1 truncate rounded-full bg-[color:var(--c-f2f2f0)] px-3 py-1 font-mono text-[11.5px] leading-4 text-[color:var(--c-6b6b6b)] outline-none focus:bg-white focus:text-ink focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
           />
         </form>
-        <button onClick={() => window.open(at, "_blank")} className="shrink-0 rounded-full px-2.5 py-1 text-[12px] font-medium text-[#3A3A38] hover:bg-[#F2F2F0]">
+        <button onClick={() => window.open(at, "_blank")} className="shrink-0 rounded-full px-2.5 py-1 text-[12px] font-medium text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)]">
           Open in browser
         </button>
       </div>
@@ -410,9 +410,9 @@ export function NewTab({
         }}
         className="flex w-full max-w-[520px] flex-col gap-1.5"
       >
-        <div className="flex items-center gap-2.5 rounded-full bg-white px-4 shadow-[0_0_0_1px_#E2E2DF,0_8px_24px_-14px_#00000040] focus-within:shadow-[0_0_0_1.5px_#0A0A0A,0_8px_24px_-14px_#00000040]">
+        <div className="flex items-center gap-2.5 rounded-full bg-white px-4 shadow-[0_0_0_1px_var(--c-e2e2df),0_8px_24px_-14px_#00000040] focus-within:shadow-[0_0_0_1.5px_var(--c-0a0a0a),0_8px_24px_-14px_#00000040]">
           {/* A magnifier for a search, a globe once it reads as an address. */}
-          <span className="flex size-5 shrink-0 items-center justify-center text-[#9A9A98]">
+          <span className="flex size-5 shrink-0 items-center justify-center text-[color:var(--c-9a9a98)]">
             {typed && site ? (
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
                 <circle cx="8" cy="8" r="6" />
@@ -431,17 +431,17 @@ export function NewTab({
             onChange={(e) => setAddress(e.target.value)}
             placeholder="Search Google or type a URL"
             spellCheck={false}
-            className="min-w-0 flex-1 bg-transparent py-3 text-[15px] leading-5 outline-none placeholder:text-[#9A9A98]"
+            className="min-w-0 flex-1 bg-transparent py-3 text-[15px] leading-5 outline-none placeholder:text-[color:var(--c-9a9a98)]"
           />
         </div>
         {/* What Enter will do, before you press it. */}
         {typed && (
-          <button type="submit" className="flex items-center gap-2.5 rounded-[14px] px-4 py-2 text-left text-[13.5px] leading-5 hover:bg-[#F7F7F6]">
+          <button type="submit" className="flex items-center gap-2.5 rounded-[14px] px-4 py-2 text-left text-[13.5px] leading-5 hover:bg-[color:var(--c-f7f7f6)]">
             <span className="flex size-5 shrink-0 items-center justify-center">
               {/* eslint-disable-next-line @next/next/no-img-element -- a site's own icon, any domain */}
               <img src={`https://www.google.com/s2/favicons?sz=32&domain=${encodeURIComponent(site ?? "google.com")}`} alt="" width={16} height={16} className="rounded-[3px]" />
             </span>
-            <span className="min-w-0 flex-1 truncate text-[#6B6B6B]">
+            <span className="min-w-0 flex-1 truncate text-[color:var(--c-6b6b6b)]">
               {site ? (
                 <>
                   Go to <span className="font-medium text-ink">{site}</span>
@@ -452,63 +452,63 @@ export function NewTab({
                 </>
               )}
             </span>
-            <kbd className="shrink-0 rounded-[6px] bg-[#F2F2F0] px-1.5 py-0.5 font-sans text-[11.5px] leading-4 text-[#6B6B6B]">↵</kbd>
+            <kbd className="shrink-0 rounded-[6px] bg-[color:var(--c-f2f2f0)] px-1.5 py-0.5 font-sans text-[11.5px] leading-4 text-[color:var(--c-6b6b6b)]">↵</kbd>
           </button>
         )}
       </form>
       <div className="flex w-full max-w-[520px] flex-col gap-2">
         {onApps && (
-          <button onClick={onApps} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_#ECECEA] hover:bg-[#FCFCFB]">
+          <button onClick={onApps} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_var(--c-ececea)] hover:bg-[color:var(--c-fcfcfb)]">
             <span className="flex size-7 items-center justify-center rounded-full bg-ink text-highlighter">
               <AppsIcon size={13} />
             </span>
             <span className="flex flex-col">
               <span className="text-[14px] font-medium leading-[18px]">Apps</span>
-              <span className="text-[12px] leading-4 text-[#6B6B6B]">Tools your bots made for you</span>
+              <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">Tools your bots made for you</span>
             </span>
           </button>
         )}
-        <button onClick={onVault} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_#ECECEA] hover:bg-[#FCFCFB]">
+        <button onClick={onVault} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_var(--c-ececea)] hover:bg-[color:var(--c-fcfcfb)]">
           <span className="flex size-7 items-center justify-center rounded-full bg-ink text-highlighter">
             <KeyIcon />
           </span>
           <span className="flex flex-col">
             <span className="text-[14px] font-medium leading-[18px]">Logins</span>
-            <span className="text-[12px] leading-4 text-[#6B6B6B]">
+            <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
               Your accounts and logins, and which bots can use them
             </span>
           </span>
         </button>
         {onKnowledge && (
-          <button onClick={onKnowledge} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_#ECECEA] hover:bg-[#FCFCFB]">
+          <button onClick={onKnowledge} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_var(--c-ececea)] hover:bg-[color:var(--c-fcfcfb)]">
             <span className="flex size-7 items-center justify-center rounded-full bg-ink text-highlighter">
               <KnowledgeIcon size={14} />
             </span>
             <span className="flex flex-col">
               <span className="text-[14px] font-medium leading-[18px]">Knowledge</span>
-              <span className="text-[12px] leading-4 text-[#6B6B6B]">What your bots know: people, plans, promises and more</span>
+              <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">What your bots know: people, plans, promises and more</span>
             </span>
           </button>
         )}
-        <button onClick={onMac} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_#ECECEA] hover:bg-[#FCFCFB]">
+        <button onClick={onMac} className="mb-2 flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-left shadow-[0_0_0_1px_var(--c-ececea)] hover:bg-[color:var(--c-fcfcfb)]">
           <span className="flex size-7 items-center justify-center rounded-full bg-ink text-highlighter">
             <MacIcon />
           </span>
           <span className="flex flex-col">
             <span className="text-[14px] font-medium leading-[18px]">Your Mac</span>
-            <span className="text-[12px] leading-4 text-[#6B6B6B]">{state.mac?.ready ? "Where bots work when a task needs your Mac" : (state.mac?.reason ?? "Checking…")}</span>
+            <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{state.mac?.ready ? "Where bots work when a task needs your Mac" : (state.mac?.reason ?? "Checking…")}</span>
           </span>
         </button>
-        <span className="px-1 text-[12px] font-medium leading-4 text-[#9A9A98]">Your bots</span>
+        <span className="px-1 text-[12px] font-medium leading-4 text-[color:var(--c-9a9a98)]">Your bots</span>
         <div className="grid grid-cols-2 gap-2">
           {teamOf(state).map((b) => (
-            <div key={b.id} className="flex items-center gap-2.5 rounded-2xl px-3 py-2.5 shadow-[0_0_0_1px_#ECECEA]">
+            <div key={b.id} className="flex items-center gap-2.5 rounded-2xl px-3 py-2.5 shadow-[0_0_0_1px_var(--c-ececea)]">
               <Mascot botId={b.id} color={b.color} size={28} />
               <span className="min-w-0 flex-1 truncate text-[14px] font-medium leading-[18px]">{b.name}</span>
-              <button onClick={() => onComputer(b.id)} title={`${b.name}'s computer`} className="flex size-7 items-center justify-center rounded-lg hover:bg-[#F2F2F0]">
+              <button onClick={() => onComputer(b.id)} title={`${b.name}'s computer`} className="flex size-7 items-center justify-center rounded-lg hover:bg-[color:var(--c-f2f2f0)]">
                 <MonitorIcon size={14} color="#3A3A38" />
               </button>
-              <button onClick={() => onProfile(b.id)} className="rounded-full px-2 py-1 text-[12px] font-medium text-[#3A3A38] hover:bg-[#F2F2F0]">
+              <button onClick={() => onProfile(b.id)} className="rounded-full px-2 py-1 text-[12px] font-medium text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)]">
                 Profile
               </button>
             </div>

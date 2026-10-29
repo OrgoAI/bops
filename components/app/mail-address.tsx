@@ -5,6 +5,7 @@ import type { MailHandleCheck } from "@/cloud/protocol";
 import { MAIN_WORKSPACE, workspaceOf, type AppState } from "@/lib/types";
 import { Spinner } from "./mascot";
 import { currentWorkspace, post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * "Pick your Bops address": a workspace's part of its bots' addresses (tiger in boppy@tiger.bops.bot),
@@ -33,7 +34,7 @@ const tidy = (s: string) =>
 
 async function ask(workspaceId: string, tried: string): Promise<Check | { error: string }> {
   const r = await fetch(`/api/mail/handle?${new URLSearchParams({ workspace: workspaceId, try: tried })}`, { cache: "no-store" }).catch(() => null);
-  if (!r) return { error: "Couldn't reach Bops." };
+  if (!r) return { error: `Couldn't reach ${BRAND.name}.` };
   const j = (await r.json().catch(() => ({}))) as Check & { error?: string };
   return r.ok ? j : { error: j.error ?? "Couldn't check that right now." };
 }
@@ -126,12 +127,12 @@ export function AddressSheet({ workspaceId, workspaceName, mode, still = false, 
   };
 
   const bot = check?.bot ?? "Boppy";
-  const title = mode === "pick" ? "Pick your Bops address" : mode === "offer" ? "Your Bops address" : "Change your Bops address";
+  const title = mode === "pick" ? `Pick your ${BRAND.name} address` : mode === "offer" ? `Your ${BRAND.name} address` : `Change your ${BRAND.name} address`;
   const intro =
     mode === "pick"
       ? `Your bots get email at this address. Anyone can write to ${bot} here.`
       : mode === "offer"
-        ? `Bops picked ${current ?? "this"}.bops.bot for you. Keep it, or change your address now.`
+        ? `${BRAND.name} picked ${current ?? "this"}.bops.bot for you. Keep it, or change your address now.`
         : `${bot}'s main address moves to the new one. Mail to the old addresses still arrives.`;
   const note = !value
     ? null
@@ -155,15 +156,15 @@ export function AddressSheet({ workspaceId, workspaceName, mode, still = false, 
           <span id="mail-address-title" className="text-[18px] font-semibold leading-[22px]">
             {title}
           </span>
-          <span className="text-[13px] leading-[18px] text-[#6B6B6B]">
+          <span className="text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)]">
             {intro}
-            {workspaceName && workspaceId !== MAIN_WORKSPACE ? <span className="text-[#9A9A98]"> For {workspaceName}.</span> : null}
+            {workspaceName && workspaceId !== MAIN_WORKSPACE ? <span className="text-[color:var(--c-9a9a98)]"> For {workspaceName}.</span> : null}
           </span>
         </div>
 
         <div className="flex flex-col gap-2">
           {/* The handle, inline in its address: [ tiger ].bops.bot */}
-          <label className="flex h-11 cursor-text items-center rounded-full bg-[#F7F7F6] pl-4 pr-4 font-mono text-[14px] shadow-[0_0_0_1px_#E6E6E3] focus-within:bg-white focus-within:shadow-[0_0_0_1.5px_#0A0A0A]">
+          <label className="flex h-11 cursor-text items-center rounded-full bg-[color:var(--c-f7f7f6)] pl-4 pr-4 font-mono text-[14px] shadow-[0_0_0_1px_var(--c-e6e6e3)] focus-within:bg-white focus-within:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]">
             <input
               ref={input}
               value={value}
@@ -176,11 +177,11 @@ export function AddressSheet({ workspaceId, workspaceName, mode, still = false, 
               style={{ width: `calc(${Math.max(value.length, 3)}ch + 2px)` }}
               className="min-w-0 bg-transparent font-medium text-ink outline-none"
             />
-            <span className="select-none text-[#9A9A98]">.bops.bot</span>
+            <span className="select-none text-[color:var(--c-9a9a98)]">.bops.bot</span>
             <span className="ml-auto flex items-center pl-2">{value && !fresh && !error ? <Spinner size={12} color="#9A9A98" /> : null}</span>
           </label>
           <div className="flex min-h-[18px] flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1 text-[12.5px] leading-[18px]">
-            <span className="min-w-0 truncate text-[#3A3A38]">
+            <span className="min-w-0 truncate text-[color:var(--c-3a3a38)]">
               {usable ? (
                 <span className="select-all font-mono">{check.address}</span>
               ) : check && fresh && check.status !== "available" && check.suggestion && check.suggestion !== value ? (
@@ -193,13 +194,13 @@ export function AddressSheet({ workspaceId, workspaceName, mode, still = false, 
               ) : null}
             </span>
             {note && (
-              <span className={`flex shrink-0 items-center gap-1.5 ${note.tone === "bad" ? "text-[#B42318]" : note.tone === "good" ? "text-[#1F7A4D]" : "text-[#9A9A98]"}`}>
+              <span className={`flex shrink-0 items-center gap-1.5 ${note.tone === "bad" ? "text-[#B42318]" : note.tone === "good" ? "text-[#1F7A4D]" : "text-[color:var(--c-9a9a98)]"}`}>
                 {note.tone === "good" && <span className="size-[7px] rounded-full bg-[#2BB673]" />}
                 {note.text}
               </span>
             )}
           </div>
-          <span className="px-1 text-[12px] leading-4 text-[#9A9A98]">
+          <span className="px-1 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
             Letters, numbers and dashes, 3 to 30 characters.
             {mode !== "pick" && changesLeft !== undefined ? ` ${changesLeft === 0 ? "It can't be changed again." : `You can change it ${changesLeft} more time${changesLeft === 1 ? "" : "s"}.`}` : ""}
           </span>
@@ -212,7 +213,7 @@ export function AddressSheet({ workspaceId, workspaceName, mode, still = false, 
         )}
 
         <div className="flex items-center justify-between gap-3 pt-1">
-          <button onClick={() => void later()} disabled={!!busy} className="text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink disabled:opacity-50">
+          <button onClick={() => void later()} disabled={!!busy} className="text-[12.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink disabled:opacity-50">
             {mode === "pick" ? (busy === "later" ? "Saving" : "Choose later") : mode === "offer" ? `Keep ${current ?? "it"}` : "Cancel"}
           </button>
           <button
@@ -261,21 +262,21 @@ export function EmailAddresses({ state }: { state: AppState }) {
     <div className="flex flex-col gap-2 px-[22px] pt-4">
       <div className="flex flex-col gap-0.5">
         <span className="text-[13px] font-semibold">Email</span>
-        <span className="text-[12px] leading-4 text-[#6B6B6B]">Your bots&apos; addresses. Each workspace has its own part, yours alone.</span>
+        <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">Your bots&apos; addresses. Each workspace has its own part, yours alone.</span>
       </div>
-      <div className="flex flex-col rounded-[14px] px-3.5 shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex flex-col rounded-[14px] px-3.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
         {rows.map((w) => {
           const main = state.bots.find((b) => b.isMain && workspaceOf(b) === w.id);
           const onHandle = main?.email?.endsWith(`@${w.mailSlug}.bops.bot`) ? main.email : null;
           return (
-            <div key={w.id} className="flex items-center gap-3 border-b border-[#F0F0EE] py-2.5 last:border-0">
+            <div key={w.id} className="flex items-center gap-3 border-b border-[color:var(--c-f0f0ee)] py-2.5 last:border-0">
               <span className="w-[120px] shrink-0 truncate text-[13px] font-medium">{w.name}</span>
-              <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-[#3A3A38]">
-                {w.mailClaimed && w.mailSlug ? (onHandle ?? `${w.mailSlug}.bops.bot`) : <span className="font-sans text-[#9A9A98]">No address yet</span>}
+              <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-[color:var(--c-3a3a38)]">
+                {w.mailClaimed && w.mailSlug ? (onHandle ?? `${w.mailSlug}.bops.bot`) : <span className="font-sans text-[color:var(--c-9a9a98)]">No address yet</span>}
               </span>
               <button
                 onClick={() => setOpen({ id: w.id, name: w.name, mode: w.mailClaimed ? "change" : "pick" })}
-                className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]"
+                className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]"
               >
                 {w.mailClaimed ? "Change" : "Pick your address"}
               </button>

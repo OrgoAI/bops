@@ -10,6 +10,7 @@ import { botSkills, skillsIn, workspaceLabelsOf } from "./skills";
 import { post } from "./ui";
 import { undash } from "./side-group";
 import { you, yourMac } from "@/lib/shared";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Skills: what a bot can do, on one screen of its profile (bot-panel.tsx). Its workspace's skills and apps
@@ -79,11 +80,11 @@ export function BotSkills({
               <AppLogo app={x.app} name={x.appName} size={22} />
               <div className="flex min-w-0 flex-1 flex-col">
                 <span className="truncate text-[14px] leading-[18px]">{x.appName}</span>
-                {x.accounts.length > 1 && <span className="truncate text-[12px] leading-4 text-[#9A9A98]">{x.accounts.map((a) => accountTitle(a.account)).join(", ")}</span>}
+                {x.accounts.length > 1 && <span className="truncate text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{x.accounts.map((a) => accountTitle(a.account)).join(", ")}</span>}
               </div>
               <span className="flex shrink-0 flex-wrap justify-end gap-1">
                 {[...new Set(x.accounts.map((a) => levelWords(a.level, b)))].map((w) => (
-                  <span key={w} className="rounded-full bg-black/[0.05] px-2 py-0.5 text-[11.5px] leading-4 text-[#3A3A38]">
+                  <span key={w} className="rounded-full bg-black/[0.05] px-2 py-0.5 text-[11.5px] leading-4 text-[color:var(--c-3a3a38)]">
                     {w}
                   </span>
                 ))}
@@ -100,7 +101,7 @@ export function BotSkills({
         <span className="text-[13px] font-semibold leading-4">Built in</span>
         <span className="flex flex-wrap gap-1.5">
           {builtIn(state, b).map((x) => (
-            <span key={x} className="rounded-full bg-black/[0.05] px-2.5 py-1 text-[12px] leading-4 text-[#3A3A38]">
+            <span key={x} className="rounded-full bg-black/[0.05] px-2.5 py-1 text-[12px] leading-4 text-[color:var(--c-3a3a38)]">
               {x}
             </span>
           ))}
@@ -108,7 +109,7 @@ export function BotSkills({
       </div>
 
       {missing.length > 0 && (
-        <span className="flex flex-wrap justify-center gap-x-3 gap-y-1 px-2 text-[12px] leading-4 text-[#9A9A98]">
+        <span className="flex flex-wrap justify-center gap-x-3 gap-y-1 px-2 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
           {missing.map((m) => (
             <button key={m.label} onClick={m.onClick} className="hover:text-ink">
               {m.label}
@@ -152,7 +153,7 @@ function Group({ title, count, action, children }: { title: string; count: numbe
       <div className="flex items-center justify-between px-4 pb-1 pt-[11px]">
         <span className="flex items-center gap-1.5 text-[13px] font-semibold leading-4">
           {title}
-          <span className="font-normal tabular-nums text-[#9A9A98]">{count}</span>
+          <span className="font-normal tabular-nums text-[color:var(--c-9a9a98)]">{count}</span>
         </span>
         {action && (
           <button onClick={action.onClick} className="text-[12px] font-medium leading-4 text-ink">
@@ -169,8 +170,8 @@ function Group({ title, count, action, children }: { title: string; count: numbe
 function Row({ title, line, dim, last, onClick }: { title: string; line?: string; dim?: boolean; last: boolean; onClick: () => void }) {
   return (
     <button onClick={onClick} className={`flex w-full flex-col px-4 py-[9px] text-left hover:bg-white/50 ${last ? "rounded-b-2xl pb-3" : "border-b border-black/[0.05]"}`}>
-      <span className={`truncate text-[14px] leading-[18px] ${dim ? "text-[#9A9A98]" : "text-ink"}`}>{title}</span>
-      {line && <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">{line}</span>}
+      <span className={`truncate text-[14px] leading-[18px] ${dim ? "text-[color:var(--c-9a9a98)]" : "text-ink"}`}>{title}</span>
+      {line && <span className="truncate text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{line}</span>}
     </button>
   );
 }
@@ -194,12 +195,12 @@ function LabelChecklist({ state, bot: b }: { state: AppState; bot: Bot }) {
       const res = await post("/api/skills", { ws, botId: b.id, ...body });
       if (!res.ok) setError(((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? "That didn't work. Try again.");
     } catch {
-      setError("Couldn't reach Bops. Try again.");
+      setError(`Couldn't reach ${BRAND.name}. Try again.`);
     }
     setBusy(false);
   };
   const every = !b.skillLabels;
-  const box = (on: boolean) => `flex size-4 shrink-0 items-center justify-center rounded-[4px] ${on ? "bg-ink text-white" : "bg-white shadow-[0_0_0_1px_#D6D6D3]"}`;
+  const box = (on: boolean) => `flex size-4 shrink-0 items-center justify-center rounded-[4px] ${on ? "bg-ink text-white" : "bg-white shadow-[0_0_0_1px_var(--c-d6d6d3)]"}`;
   const tick = (
     <svg width="9" height="9" viewBox="0 0 12 12" aria-hidden>
       <path d="M2.5 6.5l2.5 2.5 4.5-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -219,7 +220,7 @@ function LabelChecklist({ state, bot: b }: { state: AppState; bot: Bot }) {
             <button key={l} type="button" role="checkbox" aria-checked={on} disabled={busy} onClick={() => void send({ action: "bot-label", label: l, on: !on })} className="flex items-center gap-2 py-1 pl-4 text-left text-[13px] leading-4 disabled:opacity-50">
               <span className={box(on)}>{on && tick}</span>
               <span className="min-w-0 flex-1 truncate">{l}</span>
-              <span className="tabular-nums text-[12px] text-[#9A9A98]">{n}</span>
+              <span className="tabular-nums text-[12px] text-[color:var(--c-9a9a98)]">{n}</span>
             </button>
           );
         })}

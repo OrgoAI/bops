@@ -5,6 +5,7 @@ import { linksFor } from "./channels";
 import { mailOn } from "./mail";
 import { lineOf } from "./phone";
 import { getState, ownerName } from "./store";
+import { BRAND } from "@/lib/brand";
 
 /**
  * What a bot is told about what it can use and where it's reached, the same in each of its own
@@ -46,7 +47,7 @@ export function appsNote(b: Bot, mode: Mode, opts: { tools?: boolean } = {}) {
   const list = appList(b);
   const missing = notMine(b);
   const ask = missing.length
-    ? `Through Bops, ${owner} also has ${listed(missing)} connected, which you can't use yet. When they ask what you can use, or a job needs one of these, tell them they can give you access in Logins (on your profile): it's faster and more reliable than doing it on a computer.`
+    ? `Through ${BRAND.name}, ${owner} also has ${listed(missing)} connected, which you can't use yet. When they ask what you can use, or a job needs one of these, tell them they can give you access in Logins (on your profile): it's faster and more reliable than doing it on a computer.`
     : "";
   if (!list) {
     if (mode !== "chat") return ask;
@@ -110,12 +111,12 @@ export function placesNote(b: Bot, mode: Mode) {
     ...channels.map((l) => channelPlace(l, owner)),
   ];
   // iMessage lines can't take calls (they can't be trunked to the voice model); other numbers can.
-  const calls = `on a call in the Bops app${line && line.type !== "imessage" ? ` or to ${line.phone}` : ""}`;
+  const calls = `on a call in the ${BRAND.name} app${line && line.type !== "imessage" ? ` or to ${line.phone}` : ""}`;
   if (mode === "task")
-    return `Besides Bops, ${owner} reaches you ${[calls, ...elsewhere].join("; ")}. When this task was asked from one of those places, your final answer goes back there on its own: don't send it there yourself.`;
-  if (mode === "call") return `Besides calls, ${owner} reaches you ${["in Bops", ...elsewhere].join("; ")}.`;
+    return `Besides ${BRAND.name}, ${owner} reaches you ${[calls, ...elsewhere].join("; ")}. When this task was asked from one of those places, your final answer goes back there on its own: don't send it there yourself.`;
+  if (mode === "call") return `Besides calls, ${owner} reaches you ${[`in ${BRAND.name}`, ...elsewhere].join("; ")}.`;
   return [
-    `Where ${owner} reaches you: here in Bops; ${[calls, ...elsewhere].join("; ")}.`,
+    `Where ${owner} reaches you: here in ${BRAND.name}; ${[calls, ...elsewhere].join("; ")}.`,
     channels.length
       ? `A message marked ${listed([...new Set(channels.map((l) => `[in ${KIND_NAME[l.kind]}]`))], "or")} is ${owner} writing to you there (only the account they paired counts as them; nobody else's messages reach you). Answer it like a text: your reply goes back there on its own, and so does the result of any task you start or hand off for it. Keep those replies short and plain, no tables. In a group or channel you answer only when mentioned or replied to.`
       : "",

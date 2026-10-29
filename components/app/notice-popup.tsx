@@ -77,12 +77,12 @@ export function NoticePopup() {
       <span id="notice-title" className="text-[15px] font-semibold leading-5">
         {n.title}
       </span>
-      <span id="notice-body" className="whitespace-pre-line pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
+      <span id="notice-body" className="whitespace-pre-line pt-1 text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)]">
         {n.body}
       </span>
       <div className="flex items-center justify-end gap-2 pt-5">
         {link && (
-          <button onClick={() => window.open(link.url, "_blank")} className={`${pill} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          <button onClick={() => window.open(link.url, "_blank")} className={`${pill} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
             {link.label}
           </button>
         )}

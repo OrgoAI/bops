@@ -90,22 +90,22 @@ export function LineLink({ phone, className = "" }: { phone: string; className?:
   return (
     <div className={`flex flex-col gap-1.5 text-[12px] leading-4 ${className}`}>
       {line.owner ? (
-        <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[#3A3A38]">
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[color:var(--c-3a3a38)]">
           <span>
             Linked to <span className="font-medium text-ink">{line.owner.pretty}</span>
           </span>
           {!confirming && (
-            <button disabled={busy} onClick={() => setConfirming(true)} className="text-[#9A9A98] hover:text-[#B42318] disabled:opacity-40">
+            <button disabled={busy} onClick={() => setConfirming(true)} className="text-[color:var(--c-9a9a98)] hover:text-[#B42318] disabled:opacity-40">
               Remove
             </button>
           )}
         </span>
       ) : open ? (
-        <span role="status" className="text-[#3A3A38]">
+        <span role="status" className="text-[color:var(--c-3a3a38)]">
           Call or text <span className="font-medium text-ink">{line.pretty}</span> from your phone {minutesLeft(line.claimUntil!, now)} to make it yours.
         </span>
       ) : (
-        <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[#6B6B6B]">
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[color:var(--c-6b6b6b)]">
           <span>Not linked to your phone yet.</span>
           <button disabled={busy} onClick={() => void act("open")} className={quiet}>
             {busy ? "One moment…" : "Link my phone"}
@@ -113,7 +113,7 @@ export function LineLink({ phone, className = "" }: { phone: string; className?:
         </span>
       )}
       {confirming && line.owner && (
-        <span className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[10px] bg-[#F7F7F6] px-2.5 py-2 text-[#3A3A38]">
+        <span className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[10px] bg-[color:var(--c-f7f7f6)] px-2.5 py-2 text-[color:var(--c-3a3a38)]">
           <span>{`Unlink ${line.owner.pretty}? Calls and texts from it won't count as you anymore, and the next phone to call or text ${line.pretty} in 15 minutes becomes yours.`}</span>
           <span className="flex items-center gap-3">
             <button disabled={busy} onClick={() => void act("unlink")} className="font-medium text-[#B42318] disabled:opacity-40">

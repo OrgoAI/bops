@@ -82,12 +82,12 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
         <div className="flex items-start gap-3">
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-[22px] font-bold leading-7 tracking-[-0.02em]">Logins</span>
-            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
+            <span className="text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)]">
               {services.length ? `${services.length} connected. ` : ""}Each bot gets only the access you give it; passwords stay in your Mac&apos;s Keychain and no AI sees them.
             </span>
           </div>
           <div className="relative shrink-0">
-            <button onClick={() => setAdding(!adding)} aria-expanded={adding} className="mt-0.5 flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[#2A2A28]">
+            <button onClick={() => setAdding(!adding)} aria-expanded={adding} className="mt-0.5 flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[color:var(--c-2a2a28)]">
               <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
                 <path d="M5 1v8M1 5h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
               </svg>
@@ -97,13 +97,13 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
               <>
                 <div className="fixed inset-0 z-30" onClick={() => setAdding(false)} />
                 <div className="absolute right-0 top-[calc(100%+6px)] z-40 flex w-[220px] flex-col rounded-xl bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040]">
-                  <button onClick={() => (setAdding(false), setPicking({}))} className="flex flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left hover:bg-[#F2F2F0]">
+                  <button onClick={() => (setAdding(false), setPicking({}))} className="flex flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left hover:bg-[color:var(--c-f2f2f0)]">
                     <span className="text-[13px] font-medium leading-4">An app</span>
-                    <span className="text-[12px] leading-4 text-[#6B6B6B]">Gmail, Slack, GitHub, an MCP server…</span>
+                    <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">Gmail, Slack, GitHub, an MCP server…</span>
                   </button>
-                  <button onClick={() => (setAdding(false), setEditing("new"))} className="flex flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left hover:bg-[#F2F2F0]">
+                  <button onClick={() => (setAdding(false), setEditing("new"))} className="flex flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left hover:bg-[color:var(--c-f2f2f0)]">
                     <span className="text-[13px] font-medium leading-4">A website login</span>
-                    <span className="text-[12px] leading-4 text-[#6B6B6B]">For sites bots sign in to on a screen</span>
+                    <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">For sites bots sign in to on a screen</span>
                   </button>
                 </div>
               </>
@@ -113,13 +113,13 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
         </div>
 
         {first && (
-          <div className="flex items-center gap-3 rounded-2xl bg-[#FBFFE0] px-3.5 py-3 shadow-[0_0_0_1px_#E6F57A]">
-            <span className="size-2 shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" />
+          <div className="flex items-center gap-3 rounded-2xl bg-[color:var(--c-fbffe0)] px-3.5 py-3 shadow-[0_0_0_1px_var(--c-e6f57a)]">
+            <span className="size-2 shrink-0 rounded-full bg-highlighter shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" />
             <span className="min-w-0 flex-1 text-[13.5px] leading-[19px]">
               Signed out of {first.appName}
               {first.label || first.name ? ` (${first.label ?? first.name})` : ""}. Bots can&apos;t use it until you sign in again.
               {needing.length > 1 && (
-                <button onClick={() => setOnly("attention")} className="ml-1.5 font-medium underline decoration-[#0A0A0A33] underline-offset-2">
+                <button onClick={() => setOnly("attention")} className="ml-1.5 font-medium underline decoration-[var(--c-0a0a0a)33] underline-offset-2">
                   {needing.length - 1} more
                 </button>
               )}
@@ -135,7 +135,7 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
 
         {services.length > 0 && (
           <div className="flex items-center gap-2">
-            <label className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-full bg-[#F7F7F6] px-3.5 text-[#9A9A98] focus-within:bg-white focus-within:shadow-[0_0_0_1.5px_#0A0A0A]">
+            <label className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-full bg-[color:var(--c-f7f7f6)] px-3.5 text-[color:var(--c-9a9a98)] focus-within:bg-white focus-within:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]">
               <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden>
                 <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
                 <path d="M10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -146,17 +146,17 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
                 onKeyDown={(e) => e.key === "Escape" && q && (e.preventDefault(), setQ(""))}
                 placeholder="Search logins"
                 aria-label="Search logins"
-                className="min-w-0 flex-1 bg-transparent text-[13.5px] leading-5 text-ink outline-none placeholder:text-[#9A9A98]"
+                className="min-w-0 flex-1 bg-transparent text-[13.5px] leading-5 text-ink outline-none placeholder:text-[color:var(--c-9a9a98)]"
               />
             </label>
-            <button onClick={() => setOnly("all")} aria-pressed={only === "all"} className={`h-8 shrink-0 rounded-full px-3 text-[12.5px] font-medium ${only === "all" ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}>
+            <button onClick={() => setOnly("all")} aria-pressed={only === "all"} className={`h-8 shrink-0 rounded-full px-3 text-[12.5px] font-medium ${only === "all" ? "bg-ink text-white" : "bg-[color:var(--c-f2f2f0)] text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-eaeae7)]"}`}>
               All
             </button>
             {needing.length > 0 && (
               <button
                 onClick={() => setOnly("attention")}
                 aria-pressed={only === "attention"}
-                className={`h-8 shrink-0 rounded-full px-3 text-[12.5px] font-medium ${only === "attention" ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}
+                className={`h-8 shrink-0 rounded-full px-3 text-[12.5px] font-medium ${only === "attention" ? "bg-ink text-white" : "bg-[color:var(--c-f2f2f0)] text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-eaeae7)]"}`}
               >
                 Needs attention {needing.length}
               </button>
@@ -167,9 +167,9 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
         {!services.length ? (
           editing !== "new" && <QuickStart onPick={(app) => setPicking({ app })} />
         ) : !hits.length ? (
-          <div className="py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">Nothing matches &ldquo;{q.trim()}&rdquo;.</div>
+          <div className="py-10 text-center text-[13.5px] leading-5 text-[color:var(--c-6b6b6b)]">Nothing matches &ldquo;{q.trim()}&rdquo;.</div>
         ) : (
-          <div className="flex flex-col overflow-hidden rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
+          <div className="flex flex-col overflow-hidden rounded-2xl shadow-[0_0_0_1px_var(--c-ececea)]">
             {shown.map((s, i) => (
               <ServiceRow
                 key={s.key}
@@ -188,7 +188,7 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
               />
             ))}
             {rest.length > 0 && (
-              <button onClick={() => setShowRest(true)} className="flex items-center gap-3 px-3.5 py-3 text-left hover:bg-[#FCFCFB]">
+              <button onClick={() => setShowRest(true)} className="flex items-center gap-3 px-3.5 py-3 text-left hover:bg-[color:var(--c-fcfcfb)]">
                 <span className="flex shrink-0">
                   {rest.slice(0, 5).map((s, i) => (
                     <span key={s.key} className={`flex rounded-[7px] bg-white shadow-[0_0_0_2px_#FFFFFF] ${i ? "-ml-1.5" : ""}`}>
@@ -200,9 +200,9 @@ export function VaultTab({ state, keysFor, onOpenWatch, onClose }: { state: AppS
                   <span className="text-[13.5px] font-medium leading-[18px]">
                     {rest.length} more, not used lately
                   </span>
-                  <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">{rest.map((s) => s.name).join(", ")}</span>
+                  <span className="truncate text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{rest.map((s) => s.name).join(", ")}</span>
                 </span>
-                <span className="shrink-0 rounded-full px-2.5 py-1 text-[12px] font-medium text-[#3A3A38] shadow-[0_0_0_1px_#E2E2DF]">Show</span>
+                <span className="shrink-0 rounded-full px-2.5 py-1 text-[12px] font-medium text-[color:var(--c-3a3a38)] shadow-[0_0_0_1px_var(--c-e2e2df)]">Show</span>
               </button>
             )}
           </div>
@@ -234,7 +234,7 @@ function ServiceLogo({ service: s, size }: { service: Service; size: number }) {
   const a = s.accounts.find((x) => !isMcp(x)) ?? s.accounts[0];
   if (a) return <AppLogo app={a.app} name={a.appName} size={size} />;
   return (
-    <span style={{ width: size, height: size }} className="flex shrink-0 items-center justify-center rounded-[7px] bg-[#F2F2F0] text-[12px] font-semibold uppercase text-[#3A3A38]">
+    <span style={{ width: size, height: size }} className="flex shrink-0 items-center justify-center rounded-[7px] bg-[color:var(--c-f2f2f0)] text-[12px] font-semibold uppercase text-[color:var(--c-3a3a38)]">
       {s.name[0]}
     </span>
   );
@@ -294,21 +294,21 @@ function ServiceRow({
   // What bots run from it on their own (its routines, on the row's line and inside).
   const runs = byApp.reduce((n, accounts) => n + routinesOfApp(state, accounts[0].app), 0);
   return (
-    <div className={last ? "" : "border-b border-[#F0F0EE]"}>
+    <div className={last ? "" : "border-b border-[color:var(--c-f0f0ee)]"}>
       {/* Where focus goes when the last of its routines is deleted (autopilot.tsx, focusAfterRemove). */}
-      <button data-list-heading onClick={onToggle} aria-expanded={open} className="flex h-[52px] w-full items-center gap-3 px-3.5 text-left hover:bg-[#FCFCFB]">
+      <button data-list-heading onClick={onToggle} aria-expanded={open} className="flex h-[52px] w-full items-center gap-3 px-3.5 text-left hover:bg-[color:var(--c-fcfcfb)]">
         <span ref={iconRef} className="flex shrink-0">
           <ServiceLogo service={s} size={26} />
         </span>
         <span className="w-[120px] shrink-0 truncate text-[14px] font-medium leading-[18px]">{s.name}</span>
-        <span className={`min-w-0 flex-1 truncate text-[12.5px] leading-4 ${out.length ? "text-[#B54708]" : "text-[#6B6B6B]"}`}>
+        <span className={`min-w-0 flex-1 truncate text-[12.5px] leading-4 ${out.length ? "text-[#B54708]" : "text-[color:var(--c-6b6b6b)]"}`}>
           {line}
-          {runs > 0 && <span className="text-[#9A9A98]">{line ? " · " : ""}{routineCount(runs)}</span>}
+          {runs > 0 && <span className="text-[color:var(--c-9a9a98)]">{line ? " · " : ""}{routineCount(runs)}</span>}
         </span>
         {!everyone &&
           (users.length ? (
             <span className="flex shrink-0 items-center gap-1" title={`Only ${users.map((b) => b.name).join(", ")}`}>
-              <span className="text-[11.5px] leading-4 text-[#9A9A98]">only</span>
+              <span className="text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">only</span>
               <span className="flex -space-x-1.5">
                 {users.slice(0, 3).map((b) => (
                   <span key={b.id} className="rounded-full bg-white p-px">
@@ -318,11 +318,11 @@ function ServiceRow({
               </span>
             </span>
           ) : (
-            <span className="shrink-0 text-[11.5px] leading-4 text-[#9A9A98]">No bots yet</span>
+            <span className="shrink-0 text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">No bots yet</span>
           ))}
         <span className="flex w-[100px] shrink-0 justify-end gap-1">
           {kinds.map((k) => (
-            <span key={k} className="w-[46px] shrink-0 rounded-[5px] bg-[#F2F2F0] py-px text-center text-[10.5px] font-medium leading-[15px] text-[#3A3A38]">
+            <span key={k} className="w-[46px] shrink-0 rounded-[5px] bg-[color:var(--c-f2f2f0)] py-px text-center text-[10.5px] font-medium leading-[15px] text-[color:var(--c-3a3a38)]">
               {k}
             </span>
           ))}
@@ -336,7 +336,7 @@ function ServiceRow({
           {byApp.map((accounts) => (
             <div key={accounts[0].app} className="flex flex-col gap-2">
               {byApp.length + (s.logins.length ? 1 : 0) > 1 && (
-                <span className="flex items-center gap-2 px-2 text-[12px] font-medium leading-4 text-[#9A9A98]">
+                <span className="flex items-center gap-2 px-2 text-[12px] font-medium leading-4 text-[color:var(--c-9a9a98)]">
                   <AppLogo app={accounts[0].app} name={accounts[0].appName} size={16} />
                   {accounts[0].appName}
                 </span>
@@ -347,14 +347,14 @@ function ServiceRow({
               <AppRoutines state={state} app={accounts[0].app} onOpenWatch={onOpenWatch} />
               <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
                 {!accounts[0].id.startsWith("open:") && (
-                  <button onClick={() => onPick({ app: accounts[0].app })} className="rounded-full px-2 py-1 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0]">
+                  <button onClick={() => onPick({ app: accounts[0].app })} className="rounded-full px-2 py-1 text-[12.5px] font-medium leading-4 text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)]">
                     + Add another {accounts[0].appName} account
                   </button>
                 )}
                 {hasTemplates(accounts[0].app) && accounts.some((a) => a.status === "active") && (
                   <button
                     onClick={() => onRoutines(accounts[0].app)}
-                    className="rounded-full bg-[#F2F2F0] px-2.5 py-1 text-[12px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-[#EAEAE7] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+                    className="rounded-full bg-[color:var(--c-f2f2f0)] px-2.5 py-1 text-[12px] font-medium leading-4 text-[color:var(--c-3a3a38)] outline-none hover:bg-[color:var(--c-eaeae7)] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
                   >
                     Add routines
                   </button>
@@ -364,8 +364,8 @@ function ServiceRow({
           ))}
           {s.logins.length > 0 && (
             <div className="flex flex-col gap-1.5">
-              {byApp.length > 0 && <span className="px-2 text-[12px] font-medium leading-4 text-[#9A9A98]">Website login</span>}
-              <div className="flex flex-col rounded-xl shadow-[0_0_0_1px_#F0F0EE]">
+              {byApp.length > 0 && <span className="px-2 text-[12px] font-medium leading-4 text-[color:var(--c-9a9a98)]">Website login</span>}
+              <div className="flex flex-col rounded-xl shadow-[0_0_0_1px_var(--c-f0f0ee)]">
                 {s.logins.map((l, i) =>
                   editing === l.id ? (
                     <div key={l.id} className="p-3">
@@ -386,7 +386,7 @@ function ServiceRow({
 
 function SiteTile({ site }: { site: string }) {
   return (
-    <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-[#F2F2F0] text-[14px] font-semibold uppercase text-[#3A3A38]">{site.replace(/^www\./, "")[0]}</span>
+    <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-[color:var(--c-f2f2f0)] text-[14px] font-semibold uppercase text-[color:var(--c-3a3a38)]">{site.replace(/^www\./, "")[0]}</span>
   );
 }
 
@@ -394,7 +394,7 @@ function LoginRow({ state, login: l, last, onEdit }: { state: AppState; login: V
   const [sure, setSure] = useState(false);
   const who = l.bots === "all" ? teamOf(state) : teamOf(state).filter((b) => (l.bots as BotId[]).includes(b.id));
   return (
-    <div className={`group flex items-center gap-3 px-3.5 py-3 ${last ? "" : "border-b border-[#F0F0EE]"}`}>
+    <div className={`group flex items-center gap-3 px-3.5 py-3 ${last ? "" : "border-b border-[color:var(--c-f0f0ee)]"}`}>
       <SiteTile site={l.site} />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex items-center gap-1.5">
@@ -402,7 +402,7 @@ function LoginRow({ state, login: l, last, onEdit }: { state: AppState; login: V
           {l.hasTotp && <Badge>2FA codes</Badge>}
           {l.auto && <Badge>Auto sign-in</Badge>}
         </span>
-        <span className="truncate text-[12.5px] leading-4 text-[#6B6B6B]">
+        <span className="truncate text-[12.5px] leading-4 text-[color:var(--c-6b6b6b)]">
           {l.username}
           {l.usedAt ? ` · used ${ago(l.usedAt) === "now" ? "just now" : `${ago(l.usedAt)} ago`}` : " · not used yet"}
         </span>
@@ -419,13 +419,13 @@ function LoginRow({ state, login: l, last, onEdit }: { state: AppState; login: V
           <button onClick={() => void post("/api/vault", { id: l.id }, "DELETE")} className="rounded-full bg-[#B42318] px-2.5 py-1 text-[12px] font-semibold text-white">
             Delete
           </button>
-          <button onClick={() => setSure(false)} className="rounded-full px-2 py-1 text-[12px] text-[#6B6B6B]">
+          <button onClick={() => setSure(false)} className="rounded-full px-2 py-1 text-[12px] text-[color:var(--c-6b6b6b)]">
             Keep
           </button>
         </span>
       ) : (
         <span className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-          <button onClick={onEdit} className="rounded-full px-2.5 py-1 text-[12px] font-medium text-[#3A3A38] hover:bg-[#F2F2F0]">
+          <button onClick={onEdit} className="rounded-full px-2.5 py-1 text-[12px] font-medium text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)]">
             Edit
           </button>
           <button onClick={() => setSure(true)} className="rounded-full px-2.5 py-1 text-[12px] font-medium text-[#B42318] hover:bg-[#FEF3F2]">
@@ -438,7 +438,7 @@ function LoginRow({ state, login: l, last, onEdit }: { state: AppState; login: V
 }
 
 export function Badge({ children }: { children: React.ReactNode }) {
-  return <span className="shrink-0 rounded-full bg-[#F2F2F0] px-1.5 py-px text-[10.5px] font-medium leading-[14px] text-[#3A3A38]">{children}</span>;
+  return <span className="shrink-0 rounded-full bg-[color:var(--c-f2f2f0)] px-1.5 py-px text-[10.5px] font-medium leading-[14px] text-[color:var(--c-3a3a38)]">{children}</span>;
 }
 
 /** Add a login, or change one. Secrets are write-only: an existing one shows as dots and can only be replaced. */
@@ -451,7 +451,7 @@ function LoginForm({ state, login, onDone }: { state: AppState; login?: VaultLog
   const [auto, setAuto] = useState(login?.auto ?? false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const field = "w-full rounded-xl bg-[#F7F7F6] px-3 py-2 text-[13.5px] leading-[18px] outline-none placeholder:text-[#9A9A98] focus:bg-white focus:shadow-[0_0_0_1.5px_#0A0A0A]";
+  const field = "w-full rounded-xl bg-[color:var(--c-f7f7f6)] px-3 py-2 text-[13.5px] leading-[18px] outline-none placeholder:text-[color:var(--c-9a9a98)] focus:bg-white focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]";
   const toggleBot = (id: string) => {
     const now = bots === "all" ? state.bots.map((b) => b.id) : bots;
     const next = now.includes(id) ? now.filter((x) => x !== id) : [...now, id];
@@ -486,23 +486,23 @@ function LoginForm({ state, login, onDone }: { state: AppState; login?: VaultLog
         e.preventDefault();
         onDone();
       }}
-      className="motion-rise-in flex flex-col gap-3 rounded-2xl bg-white p-4 shadow-[0_0_0_1px_#ECECEA,0_10px_30px_-18px_#00000040]"
+      className="motion-rise-in flex flex-col gap-3 rounded-2xl bg-white p-4 shadow-[0_0_0_1px_var(--c-ececea),0_10px_30px_-18px_#00000040]"
     >
       <div className="grid grid-cols-2 gap-2.5">
         <label className="flex flex-col gap-1">
-          <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">Site</span>
+          <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Site</span>
           <input value={site} onChange={(e) => setSite(e.target.value)} placeholder="x.com" autoFocus={!login} className={field} />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">Email or username</span>
+          <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Email or username</span>
           <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" className={field} />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">Password</span>
+          <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Password</span>
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" placeholder={login?.hasPassword ? "•••••••• (unchanged)" : ""} className={field} />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">2FA setup key · optional</span>
+          <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">2FA setup key · optional</span>
           <input
             type="password"
             value={totp}
@@ -515,14 +515,14 @@ function LoginForm({ state, login, onDone }: { state: AppState; login?: VaultLog
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">Who can use it</span>
+        <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Who can use it</span>
         <div className="flex flex-wrap gap-1.5">
           {teamOf(state).map((b) => (
             <button
               type="button"
               key={b.id}
               onClick={() => toggleBot(b.id)}
-              className={`flex items-center gap-1.5 rounded-full py-1 pl-1 pr-2.5 text-[12.5px] leading-4 ${on(b.id) ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#6B6B6B]"}`}
+              className={`flex items-center gap-1.5 rounded-full py-1 pl-1 pr-2.5 text-[12.5px] leading-4 ${on(b.id) ? "bg-ink text-white" : "bg-[color:var(--c-f2f2f0)] text-[color:var(--c-6b6b6b)]"}`}
             >
               <Mascot botId={b.id} color={b.color} size={18} antenna={false} />
               {b.name}
@@ -532,9 +532,9 @@ function LoginForm({ state, login, onDone }: { state: AppState; login?: VaultLog
       </div>
 
       <label className="flex items-center gap-2.5 text-[13px] leading-[18px]">
-        <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} className="size-4 accent-[#0A0A0A]" />
+        <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} className="size-4 accent-[color:var(--c-0a0a0a)]" />
         <span>
-          Sign in automatically <span className="text-[#6B6B6B]">· otherwise you get a one-tap &ldquo;Sign in as&rdquo; when a bot asks</span>
+          Sign in automatically <span className="text-[color:var(--c-6b6b6b)]">· otherwise you get a one-tap &ldquo;Sign in as&rdquo; when a bot asks</span>
         </span>
       </label>
 
@@ -543,11 +543,11 @@ function LoginForm({ state, login, onDone }: { state: AppState; login?: VaultLog
         <button disabled={busy || !site.trim() || !username.trim() || (!login && !password)} className="rounded-full bg-ink px-4 py-2 text-[13px] font-semibold leading-4 text-white disabled:opacity-40">
           {busy ? "Saving…" : login ? "Save" : "Save login"}
         </button>
-        <button type="button" onClick={onDone} className="rounded-full px-3.5 py-2 text-[13px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0]">
+        <button type="button" onClick={onDone} className="rounded-full px-3.5 py-2 text-[13px] font-medium leading-4 text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)]">
           Cancel
         </button>
         <span className="flex-1" />
-        <span className="text-[11.5px] leading-4 text-[#9A9A98]">Stored in your Mac&apos;s Keychain</span>
+        <span className="text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">Stored in your Mac&apos;s Keychain</span>
       </div>
     </form>
   );

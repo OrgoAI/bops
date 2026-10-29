@@ -32,7 +32,8 @@ const MAX_WAITING = 8;
 /** The session the hidden windows use: no "persist:" prefix, so it lives in memory only. */
 const PARTITION = "bops-render";
 /** Ports no rendered page may reach, whatever the server allows for tests: Bops itself, the relay, DevTools. */
-const neverPort = (port) => port === 3210 || port === 8897 || (port >= 9200 && port <= 9399);
+// Bops itself, on 3210 or a partner build's own port (desktop/brand.cjs).
+const neverPort = (port) => port === 3210 || port === require("./brand.cjs").port || port === 8897 || (port >= 9200 && port <= 9399);
 /** Addresses a page may ask for at all (the guard checks where they lead). data: and blob: never leave the page. */
 const SCHEMES = new Set(["http:", "https:", "ws:", "wss:", "data:", "blob:", "about:"]);
 

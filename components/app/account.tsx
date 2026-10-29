@@ -34,6 +34,7 @@ import type { AppState } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
 import { signOutOfOrgo as signOutAsking } from "./sign-in";
 import { refreshState } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * The account: who you are on Orgo, your Bops plan (Free, Pro or Max; an Orgo plan doesn't change it,
@@ -107,16 +108,16 @@ export function Account({ state, onClose, onThisMac }: { state: AppState; onClos
   return (
     <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} className="motion-dialog-in flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
-        <div className="flex items-center gap-3.5 border-b border-[#F0F0EE] px-[22px] py-[18px]">
+        <div className="flex items-center gap-3.5 border-b border-[color:var(--c-f0f0ee)] px-[22px] py-[18px]">
           <span className="flex size-12 shrink-0 items-center justify-center rounded-full bg-ink text-[16px] font-semibold tracking-[0.02em] text-highlighter">{initialsOf(state)}</span>
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
             <span className="truncate text-[18px] font-semibold leading-[22px]">{name}</span>
-            <span className="truncate text-[13px] leading-[17px] text-[#6B6B6B]">
+            <span className="truncate text-[13px] leading-[17px] text-[color:var(--c-6b6b6b)]">
               {user ? (user.email ?? "Signed in with Orgo") : "Not signed in"}
-              {user && info?.signedInAt ? <span className="text-[#9A9A98]"> · on this Mac since {day(info.signedInAt)}</span> : null}
+              {user && info?.signedInAt ? <span className="text-[color:var(--c-9a9a98)]"> · on this Mac since {day(info.signedInAt)}</span> : null}
             </span>
           </div>
-          <button onClick={onClose} aria-label="Close" className="flex size-8 shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3]">
+          <button onClick={onClose} aria-label="Close" className="flex size-8 shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_var(--c-e6e6e3)]">
             <svg width="12" height="12" viewBox="0 0 12 12">
               <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
             </svg>
@@ -128,17 +129,17 @@ export function Account({ state, onClose, onThisMac }: { state: AppState; onClos
         {info ? (
           <Usage info={info} />
         ) : failed && !loading ? (
-          <Section title="Bops usage">
+          <Section title={`${BRAND.name} usage`}>
             <LoadFailed onRetry={load} />
           </Section>
         ) : (
-          <Placeholder title="Bops usage" />
+          <Placeholder title={`${BRAND.name} usage`} />
         )}
         {info && <Reach info={info} />}
 
         <div className="flex items-center justify-between gap-3 px-[22px] pb-5 pt-5">
-          <span className="text-[12px] leading-4 text-[#9A9A98]">
-            Your Bops computer is free. AI credit pays for what your bots do, at cost.
+          <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
+            Your {BRAND.name} computer is free. AI credit pays for what your bots do, at cost.
             {onThisMac && (
               <>
                 {" "}
@@ -149,7 +150,7 @@ export function Account({ state, onClose, onThisMac }: { state: AppState; onClos
             )}
           </span>
           {user && (
-            <button onClick={() => void signOut()} className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:text-[#B42318]">
+            <button onClick={() => void signOut()} className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[color:var(--c-3a3a38)] shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:text-[#B42318]">
               Sign out
             </button>
           )}
@@ -174,7 +175,7 @@ export function Section({ title, aside, children }: { title: string; aside?: Rea
 export function Placeholder({ title }: { title: string }) {
   return (
     <Section title={title}>
-      <div className="flex h-[92px] items-center justify-center rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex h-[92px] items-center justify-center rounded-[14px] shadow-[0_0_0_1px_var(--c-e6e6e3)]">
         <Spinner size={16} color="#9A9A98" />
       </div>
     </Section>
@@ -244,31 +245,31 @@ function YourPlan({ plan, known, onPlan, userId }: { plan: BopsPlan | null | und
           const mine = current === p.tier;
           const a = action(p.tier);
           return (
-            <div key={p.tier} className={`flex flex-col gap-3 rounded-[14px] p-4 ${mine ? "shadow-[0_0_0_1.5px_#0A0A0A]" : "shadow-[0_0_0_1px_#E6E6E3]"}`}>
+            <div key={p.tier} className={`flex flex-col gap-3 rounded-[14px] p-4 ${mine ? "shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" : "shadow-[0_0_0_1px_var(--c-e6e6e3)]"}`}>
               <div className="flex flex-col gap-1">
                 <span className="flex min-h-5 items-center justify-between gap-2">
                   <span className="text-[13px] font-semibold leading-5">{p.name}</span>
-                  {mine && <span className="rounded-full bg-[#F2F2F0] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#3A3A38]">Current</span>}
+                  {mine && <span className="rounded-full bg-[color:var(--c-f2f2f0)] px-2 py-0.5 text-[11px] font-medium leading-4 text-[color:var(--c-3a3a38)]">Current</span>}
                 </span>
                 <span className="flex items-baseline gap-0.5">
                   <span className="text-[24px] font-semibold leading-7 tracking-[-0.02em] tabular-nums">{p.price}</span>
-                  {p.per && <span className="text-[12.5px] text-[#6B6B6B]">{p.per}</span>}
+                  {p.per && <span className="text-[12.5px] text-[color:var(--c-6b6b6b)]">{p.per}</span>}
                 </span>
               </div>
               {/* How many computers the plan includes, before anything else it does (paper, not highlighter: yellow only marks what needs you). */}
-              <div className="flex items-start gap-2 rounded-[10px] bg-[#F7F7F6] px-2.5 py-2">
+              <div className="flex items-start gap-2 rounded-[10px] bg-[color:var(--c-f7f7f6)] px-2.5 py-2">
                 <svg width="16" height="16" viewBox="0 0 20 20" className="mt-px shrink-0" aria-hidden>
                   <rect x="2" y="3" width="16" height="11" rx="2" fill="none" stroke="#0A0A0A" strokeWidth="1.6" />
                   <path d="M7 17.5h6M10 14v3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
                 </svg>
                 <span className="flex min-w-0 flex-col gap-0.5">
                   <span className="text-[13px] font-semibold leading-[18px] text-ink">{p.computers.title}</span>
-                  <span className="text-[12px] leading-4 text-[#3A3A38]">{p.computers.detail}</span>
+                  <span className="text-[12px] leading-4 text-[color:var(--c-3a3a38)]">{p.computers.detail}</span>
                 </span>
               </div>
               <ul className="flex flex-1 flex-col gap-1">
                 {p.lines.map((line) => (
-                  <li key={line.text} className={`flex items-start gap-1.5 text-[12.5px] leading-[18px] ${line.no ? "text-[#8A8A88]" : "text-[#3A3A38]"}`}>
+                  <li key={line.text} className={`flex items-start gap-1.5 text-[12.5px] leading-[18px] ${line.no ? "text-[color:var(--c-8a8a88)]" : "text-[color:var(--c-3a3a38)]"}`}>
                     {/* A check for what the plan includes, a dash for what it doesn't. */}
                     <svg width="12" height="12" viewBox="0 0 12 12" className="mt-[3px] shrink-0" aria-hidden>
                       {line.no ? (
@@ -286,11 +287,11 @@ function YourPlan({ plan, known, onPlan, userId }: { plan: BopsPlan | null | und
                   <button
                     disabled={!!busy}
                     onClick={() => void open(a.what)}
-                    className={`${pill} w-full ${a.primary ? "bg-ink text-white" : "bg-[#F2F2F0] hover:bg-[#EAEAE7]"}`}
+                    className={`${pill} w-full ${a.primary ? "bg-ink text-white" : "bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]"}`}
                   >
                     {busy === a.what ? "Opening…" : a.label}
                   </button>
-                  {said?.what === a.what && <span className={`text-center text-[12px] leading-4 ${said.soon ? "text-[#6B6B6B]" : "text-[#B42318]"}`}>{said.text}</span>}
+                  {said?.what === a.what && <span className={`text-center text-[12px] leading-4 ${said.soon ? "text-[color:var(--c-6b6b6b)]" : "text-[#B42318]"}`}>{said.text}</span>}
                 </div>
               )}
             </div>
@@ -310,11 +311,11 @@ function ComputerTime({ plan }: { plan: BopsPlan }) {
   if (!plan.computerTime) return null;
   const w = freeHoursWords(plan.computerTime);
   return (
-    <div className="flex items-center gap-4 rounded-[14px] p-4 shadow-[0_0_0_1px_#E6E6E3]">
-      <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#6B6B6B]">{w.note}</span>
+    <div className="flex items-center gap-4 rounded-[14px] p-4 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
+      <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">{w.note}</span>
       <div className="flex shrink-0 flex-col items-end gap-1">
         <span className="text-[24px] font-semibold leading-7 tracking-[-0.02em] tabular-nums">{w.amount}</span>
-        <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">{w.label}</span>
+        <span className="text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">{w.label}</span>
       </div>
     </div>
   );
@@ -352,18 +353,18 @@ function Balance({ plan, onPlan, userId }: { plan: BopsPlan; onPlan: (plan: Bops
               .join(" ");
   if (!c && !line && !canAdd) return null;
   return (
-    <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
+    <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_var(--c-e6e6e3)]">
       <div className="flex items-center gap-4 p-4">
-        <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#6B6B6B]">{line}</span>
+        <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">{line}</span>
         {c && (
           <div className="flex shrink-0 flex-col items-end gap-1" data-tip="AI credit pays for what your bots do, at what it costs Orgo">
             <span className="text-[24px] font-semibold leading-7 tracking-[-0.02em] tabular-nums">{credit(c.leftMicros)}</span>
-            <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">AI credit left</span>
+            <span className="text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">AI credit left</span>
           </div>
         )}
       </div>
       {c && c.leftMicros <= 0 && (
-        <span className="border-t border-[#F0F0EE] px-4 py-3 text-[12.5px] leading-[18px] text-[#3A3A38]">
+        <span className="border-t border-[color:var(--c-f0f0ee)] px-4 py-3 text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">
           You&apos;re out of AI credit, so your bots are paused.
           {canAdd ? " Add credit below to keep them going." : paid ? " It comes back when your plan renews, or upgrade for more." : " Upgrade to keep them going."}
         </span>
@@ -625,7 +626,7 @@ function AddCredit({ plan, topUp, onPlan, userId }: { plan: BopsPlan; topUp: Top
     setPurchase(afterCancel);
   };
 
-  if (note?.kind === "off") return <span className="border-t border-[#F0F0EE] px-4 py-3 text-[12.5px] leading-[18px] text-[#6B6B6B]">Adding credit opens soon.</span>;
+  if (note?.kind === "off") return <span className="border-t border-[color:var(--c-f0f0ee)] px-4 py-3 text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">Adding credit opens soon.</span>;
 
   // Credit the balance shows is in, however it was paid.
   const shown: Note | null = note && (note.kind === "pending" || note.kind === "checkout") && creditLanded(note.from, left) ? { kind: "added", cents: note.cents } : note;
@@ -646,9 +647,9 @@ function AddCredit({ plan, topUp, onPlan, userId }: { plan: BopsPlan; topUp: Top
                 : { text: pendingText ?? "Charged once, not monthly.", tone: "muted" };
   const chip = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 tabular-nums disabled:opacity-50";
   return (
-    <div className="flex flex-col gap-2 border-t border-[#F0F0EE] px-4 py-3">
+    <div className="flex flex-col gap-2 border-t border-[color:var(--c-f0f0ee)] px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="mr-1 text-[12.5px] font-medium leading-4 text-[#3A3A38]">Add AI credit</span>
+        <span className="mr-1 text-[12.5px] font-medium leading-4 text-[color:var(--c-3a3a38)]">Add AI credit</span>
         {TOPUP_PRESETS.map((p) => (
           <button
             key={p}
@@ -656,15 +657,15 @@ function AddCredit({ plan, topUp, onPlan, userId }: { plan: BopsPlan; topUp: Top
             aria-pressed={choice === p}
             disabled={busy}
             onClick={() => pick(p)}
-            className={`${chip} ${choice === p ? "bg-white shadow-[0_0_0_1.5px_#0A0A0A]" : "shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]"}`}
+            className={`${chip} ${choice === p ? "bg-white shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" : "shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]"}`}
           >
             {dollars(p)}
           </button>
         ))}
         <label
-          className={`flex h-7 w-[92px] cursor-text items-center gap-0.5 rounded-full px-3 text-[12.5px] font-medium leading-4 ${choice === "other" ? "bg-white shadow-[0_0_0_1.5px_#0A0A0A]" : "bg-[#F7F7F6] shadow-[0_0_0_1px_#E6E6E3]"}`}
+          className={`flex h-7 w-[92px] cursor-text items-center gap-0.5 rounded-full px-3 text-[12.5px] font-medium leading-4 ${choice === "other" ? "bg-white shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" : "bg-[color:var(--c-f7f7f6)] shadow-[0_0_0_1px_var(--c-e6e6e3)]"}`}
         >
-          <span className={choice === "other" && other ? "text-ink" : "text-[#9A9A98]"}>$</span>
+          <span className={choice === "other" && other ? "text-ink" : "text-[color:var(--c-9a9a98)]"}>$</span>
           <input
             value={other}
             disabled={busy}
@@ -680,7 +681,7 @@ function AddCredit({ plan, topUp, onPlan, userId }: { plan: BopsPlan; topUp: Top
             inputMode="numeric"
             autoComplete="off"
             aria-label="Other amount, in whole dollars"
-            className="w-full min-w-0 bg-transparent tabular-nums text-ink outline-none placeholder:font-normal placeholder:text-[#9A9A98]"
+            className="w-full min-w-0 bg-transparent tabular-nums text-ink outline-none placeholder:font-normal placeholder:text-[color:var(--c-9a9a98)]"
           />
         </label>
         <span className="flex-1" />
@@ -693,7 +694,7 @@ function AddCredit({ plan, topUp, onPlan, userId }: { plan: BopsPlan; topUp: Top
           {opening && !open ? "Opening…" : resumable ? "Try again" : "Add credit"}
         </button>
       </div>
-      <span className={`flex items-center gap-1.5 text-[12px] leading-4 ${say.tone === "bad" ? "text-[#B42318]" : say.tone === "good" ? "text-[#1F7A4D]" : "text-[#9A9A98]"}`}>
+      <span className={`flex items-center gap-1.5 text-[12px] leading-4 ${say.tone === "bad" ? "text-[#B42318]" : say.tone === "good" ? "text-[#1F7A4D]" : "text-[color:var(--c-9a9a98)]"}`}>
         {say.tone === "good" && <span className="size-[7px] shrink-0 rounded-full bg-[#2BB673]" />}
         {say.text}
       </span>
@@ -750,7 +751,7 @@ function ConfirmCredit({
         <span id="add-credit-title" className="text-[15px] font-semibold leading-5">
           {copy.title}
         </span>
-        <span id="add-credit-line" className="pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
+        <span id="add-credit-line" className="pt-1 text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)]">
           {copy.line}
         </span>
         {warning && (
@@ -760,11 +761,11 @@ function ConfirmCredit({
         )}
         <div className="flex items-center justify-end gap-2 pt-5">
           {copy.otherWay && (
-            <button disabled={busy} onClick={onOtherWay} className="mr-auto text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink disabled:opacity-50">
+            <button disabled={busy} onClick={onOtherWay} className="mr-auto text-[12.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink disabled:opacity-50">
               Pay another way
             </button>
           )}
-          <button disabled={busy} onClick={onCancel} className={`${pill} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          <button disabled={busy} onClick={onCancel} className={`${pill} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
             Cancel
           </button>
           <button autoFocus disabled={busy} onClick={onPay} className={`${pill} flex min-w-[76px] items-center justify-center bg-ink text-white`}>
@@ -781,7 +782,7 @@ export function LoadFailed({ onRetry, text = "Couldn't load your account." }: { 
   return (
     <Notice
       action={
-        <button onClick={onRetry} className="rounded-full bg-[#F2F2F0] px-3 py-1.5 text-[12.5px] font-medium leading-4 hover:bg-[#EAEAE7]">
+        <button onClick={onRetry} className="rounded-full bg-[color:var(--c-f2f2f0)] px-3 py-1.5 text-[12.5px] font-medium leading-4 hover:bg-[color:var(--c-eaeae7)]">
           Try again
         </button>
       }
@@ -793,8 +794,8 @@ export function LoadFailed({ onRetry, text = "Couldn't load your account." }: { 
 
 export function Notice({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-3 rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]">
-      <span className="flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">{children}</span>
+    <div className="flex items-center gap-3 rounded-[14px] p-3.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
+      <span className="flex-1 text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">{children}</span>
       {action}
     </div>
   );
@@ -838,12 +839,12 @@ function Usage({ info }: { info: AccountInfo }) {
   const month = (ts: number) => new Date(ts).toLocaleDateString(undefined, { month: "long" });
   const empty = !t.tokens && !t.callMinutes && !t.computersCreated && !t.phoneNumbers && !t.inboxes && !t.spend?.costMicros;
   const tabs = (
-    <div className="flex rounded-full bg-[#F2F2F0] p-0.5">
+    <div className="flex rounded-full bg-[color:var(--c-f2f2f0)] p-0.5">
       {[false, true].map((l) => (
         <button
           key={String(l)}
           onClick={() => setLast(l)}
-          className={`rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 ${last === l ? "bg-white text-ink shadow-[0_0_0_1px_#E6E6E3]" : "text-[#6B6B6B] hover:text-ink"}`}
+          className={`rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 ${last === l ? "bg-white text-ink shadow-[0_0_0_1px_var(--c-e6e6e3)]" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}
         >
           {month(l ? info.usage.lastMonthStart : info.usage.monthStart)}
         </button>
@@ -858,25 +859,25 @@ function Usage({ info }: { info: AccountInfo }) {
     ["Inboxes", t.inboxes, "added"],
   ];
   return (
-    <Section title="Bops usage" aside={tabs}>
+    <Section title={`${BRAND.name} usage`} aside={tabs}>
       <div className="grid grid-cols-5 gap-2">
         {tiles.map(([label, n, unit]) => (
-          <div key={label} className="flex flex-col gap-1 rounded-[14px] px-3.5 py-3 shadow-[0_0_0_1px_#E6E6E3]">
-            <span className="text-[12px] leading-4 text-[#6B6B6B]">{label}</span>
-            <span className={`text-[20px] font-semibold leading-6 tracking-[-0.01em] tabular-nums ${n ? "text-ink" : "text-[#C9C9C6]"}`}>{compact(n)}</span>
-            <span className="truncate text-[11.5px] leading-[14px] text-[#9A9A98]">{unit}</span>
+          <div key={label} className="flex flex-col gap-1 rounded-[14px] px-3.5 py-3 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
+            <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{label}</span>
+            <span className={`text-[20px] font-semibold leading-6 tracking-[-0.01em] tabular-nums ${n ? "text-ink" : "text-[color:var(--c-c9c9c6)]"}`}>{compact(n)}</span>
+            <span className="truncate text-[11.5px] leading-[14px] text-[color:var(--c-9a9a98)]">{unit}</span>
           </div>
         ))}
       </div>
       {empty ? (
-        <div className="rounded-[14px] px-4 py-5 text-center text-[12.5px] leading-[18px] text-[#9A9A98] shadow-[0_0_0_1px_#E6E6E3]">
+        <div className="rounded-[14px] px-4 py-5 text-center text-[12.5px] leading-[18px] text-[color:var(--c-9a9a98)] shadow-[0_0_0_1px_var(--c-e6e6e3)]">
           {last ? `Nothing in ${month(start)}.` : "Nothing yet this month. It adds up here as your bots work."}
         </div>
       ) : (
-        <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
+        <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_var(--c-e6e6e3)]">
           {t.spend && t.spend.parts.length > 0 && <Spend spend={t.spend} />}
           {t.tokens > 0 && <Days totals={t} start={start} current={!last} />}
-          <div className={`grid grid-cols-2 ${t.tokens > 0 ? "border-t border-[#F0F0EE]" : ""}`}>
+          <div className={`grid grid-cols-2 ${t.tokens > 0 ? "border-t border-[color:var(--c-f0f0ee)]" : ""}`}>
             <BySource totals={t} />
             <ByBot totals={t} />
           </div>
@@ -893,11 +894,11 @@ function Usage({ info }: { info: AccountInfo }) {
 function Spend({ spend }: { spend: NonNullable<UsageTotals["spend"]> }) {
   const top = Math.max(...spend.parts.map((p) => p.costMicros), 1);
   return (
-    <div className="flex flex-col gap-2.5 border-b border-[#F0F0EE] px-4 pb-3.5 pt-3.5">
-      <span className="flex items-baseline justify-between gap-3 text-[12px] leading-4 text-[#6B6B6B]">
+    <div className="flex flex-col gap-2.5 border-b border-[color:var(--c-f0f0ee)] px-4 pb-3.5 pt-3.5">
+      <span className="flex items-baseline justify-between gap-3 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
         <span>
           {spend.charged ? "AI credit used" : "What it cost"}
-          {!spend.charged && <span className="text-[#9A9A98]"> · not taken from your AI credit yet</span>}
+          {!spend.charged && <span className="text-[color:var(--c-9a9a98)]"> · not taken from your AI credit yet</span>}
         </span>
         <span className="text-[13px] font-semibold tabular-nums text-ink">{spent(spend.costMicros)}</span>
       </span>
@@ -918,21 +919,21 @@ function Days({ totals: t, start, current }: { totals: UsageTotals; start: numbe
   const date = (i: number) => new Date(s.getFullYear(), s.getMonth(), i + 1).getTime();
   return (
     <div className="flex flex-col gap-1.5 px-4 pb-3 pt-3.5">
-      <span className="text-[12px] leading-4 text-[#6B6B6B]">Model use by day</span>
+      <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">Model use by day</span>
       <div className="flex h-[64px] items-end gap-[2px]">
         {t.tokensByDay.map((n, i) => {
           const future = current && i > today;
           return (
             <div key={i} data-tip={future ? undefined : `${day(date(i))}: ${n ? `${compact(n)} tokens` : "none"}`} className="flex h-full flex-1 items-end">
               <div
-                className={`w-full rounded-t-[3px] ${future ? "h-px bg-[#ECECEA]" : i === today ? "bg-ink" : n ? "bg-[#BDBDBA] hover:bg-[#6B6B6B]" : "h-px bg-[#E2E2DF]"}`}
+                className={`w-full rounded-t-[3px] ${future ? "h-px bg-[color:var(--c-ececea)]" : i === today ? "bg-ink" : n ? "bg-[#BDBDBA] hover:bg-[color:var(--c-6b6b6b)]" : "h-px bg-[color:var(--c-e2e2df)]"}`}
                 style={n && !future ? { height: `${Math.max(6, (n / max) * 100)}%` } : undefined}
               />
             </div>
           );
         })}
       </div>
-      <div className="flex justify-between text-[11px] leading-[14px] text-[#9A9A98] tabular-nums">
+      <div className="flex justify-between text-[11px] leading-[14px] text-[color:var(--c-9a9a98)] tabular-nums">
         <span>{day(date(0))}</span>
         <span>{day(date(t.tokensByDay.length - 1))}</span>
       </div>
@@ -946,10 +947,10 @@ function Share({ label, value, share, lead }: { label: string; value: string; sh
     <div className="flex flex-col gap-1">
       <span className="flex items-center gap-2 text-[12.5px] leading-4">
         {lead}
-        <span className="min-w-0 flex-1 truncate text-[#3A3A38]">{label}</span>
+        <span className="min-w-0 flex-1 truncate text-[color:var(--c-3a3a38)]">{label}</span>
         <span className="shrink-0 tabular-nums text-ink">{value}</span>
       </span>
-      <span className="h-[3px] overflow-hidden rounded-full bg-[#F0F0EE]">
+      <span className="h-[3px] overflow-hidden rounded-full bg-[color:var(--c-f0f0ee)]">
         <span className="block h-full rounded-full bg-ink" style={{ width: `${Math.round(share * 100)}%` }} />
       </span>
     </div>
@@ -959,12 +960,12 @@ function Share({ label, value, share, lead }: { label: string; value: string; sh
 function BySource({ totals: t }: { totals: UsageTotals }) {
   const rows = SOURCES.map((s) => ({ ...s, n: t.tokensBySource[s.id] ?? 0 })).filter((s) => s.n > 0);
   return (
-    <div className="flex flex-col gap-2.5 border-r border-[#F0F0EE] px-4 py-3.5">
-      <span className="text-[12px] leading-4 text-[#6B6B6B]">Model use by kind of work</span>
+    <div className="flex flex-col gap-2.5 border-r border-[color:var(--c-f0f0ee)] px-4 py-3.5">
+      <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">Model use by kind of work</span>
       {rows.length ? (
         rows.map((s) => <Share key={s.id} label={s.label} value={compact(s.n)} share={s.n / t.tokens} />)
       ) : (
-        <span className="text-[12.5px] text-[#9A9A98]">None this month</span>
+        <span className="text-[12.5px] text-[color:var(--c-9a9a98)]">None this month</span>
       )}
     </div>
   );
@@ -974,13 +975,13 @@ function ByBot({ totals: t }: { totals: UsageTotals }) {
   const top = Math.max(...t.byBot.map((b) => b.tokens), 1);
   return (
     <div className="flex flex-col gap-2.5 px-4 py-3.5">
-      <span className="text-[12px] leading-4 text-[#6B6B6B]">By bot</span>
+      <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">By bot</span>
       {t.byBot.length ? (
         t.byBot.slice(0, 6).map((b) => (
           <Share
             key={b.botId}
             label={b.name}
-            lead={b.color ? <Mascot botId={b.botId} color={b.color} size={16} /> : <span className="size-4 rounded-full bg-[#E6E6E3]" />}
+            lead={b.color ? <Mascot botId={b.botId} color={b.color} size={16} /> : <span className="size-4 rounded-full bg-[color:var(--c-e6e6e3)]" />}
             value={
               [b.tokens && `${compact(b.tokens)} tokens`, b.callMinutes && `${hours(b.callMinutes)} min`].filter(Boolean).join(", ") ||
               `${b.computers} computer${b.computers === 1 ? "" : "s"}`
@@ -989,7 +990,7 @@ function ByBot({ totals: t }: { totals: UsageTotals }) {
           />
         ))
       ) : (
-        <span className="text-[12.5px] text-[#9A9A98]">Nothing by a single bot</span>
+        <span className="text-[12.5px] text-[color:var(--c-9a9a98)]">Nothing by a single bot</span>
       )}
     </div>
   );
@@ -1004,28 +1005,28 @@ function Reach({ info }: { info: AccountInfo }) {
     <Section title="Your bots' inboxes and numbers">
       {groups.length ? (
         groups.map((w) => (
-          <div key={w.id} className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
+          <div key={w.id} className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_var(--c-e6e6e3)]">
             {(info.reach.length > 1 || w.line) && (
-              <div className="flex items-center gap-2 border-b border-[#F0F0EE] px-3.5 py-2.5">
+              <div className="flex items-center gap-2 border-b border-[color:var(--c-f0f0ee)] px-3.5 py-2.5">
                 <span className="text-[13px] font-medium">{w.name}</span>
                 <span className="flex-1" />
                 {w.line ? (
-                  <span className="flex items-center gap-1.5 text-[12.5px] text-[#3A3A38]">
-                    <span className="text-[#9A9A98]">Text or call {w.line.main ?? "the main bot"} at</span>
+                  <span className="flex items-center gap-1.5 text-[12.5px] text-[color:var(--c-3a3a38)]">
+                    <span className="text-[color:var(--c-9a9a98)]">Text or call {w.line.main ?? "the main bot"} at</span>
                     <Copy text={w.line.phone} />
                   </span>
                 ) : (
-                  <span className="text-[12.5px] text-[#9A9A98]">No number yet</span>
+                  <span className="text-[12.5px] text-[color:var(--c-9a9a98)]">No number yet</span>
                 )}
               </div>
             )}
             {w.bots
               .filter((b) => b.email || b.phone)
               .map((b) => (
-                <div key={b.id} className="flex items-center gap-2.5 border-b border-[#F0F0EE] px-3.5 py-2 last:border-0">
+                <div key={b.id} className="flex items-center gap-2.5 border-b border-[color:var(--c-f0f0ee)] px-3.5 py-2 last:border-0">
                   <Mascot botId={b.id} color={b.color} size={20} />
                   <span className="w-[130px] truncate text-[13px] font-medium">{b.name}</span>
-                  <span className="min-w-0 flex-1">{b.email ? <Copy text={b.email} /> : <span className="text-[12.5px] text-[#9A9A98]">No inbox yet</span>}</span>
+                  <span className="min-w-0 flex-1">{b.email ? <Copy text={b.email} /> : <span className="text-[12.5px] text-[color:var(--c-9a9a98)]">No inbox yet</span>}</span>
                   {b.phone && <Copy text={b.phone} />}
                 </div>
               ))}

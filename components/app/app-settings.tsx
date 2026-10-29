@@ -97,14 +97,14 @@ export const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 export const priceFor = (cents: number, years: number | null) => (years && years > 1 ? `${money(cents)} for ${years} years` : `${money(cents)} a year`);
 const day = (ms: number) => new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 
-const HEAD = "pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]";
-const HINT = "text-[12px] leading-4 text-[#9A9A98]";
+const HEAD = "pb-1 text-[12px] font-semibold leading-4 text-[color:var(--c-6b6b6b)]";
+const HINT = "text-[12px] leading-4 text-[color:var(--c-9a9a98)]";
 const ALERT = "min-w-0 text-[12px] leading-4 text-[#B42318]";
-const BOX = "flex flex-col gap-2 rounded-[12px] bg-[#FCFCFB] p-2.5 shadow-[0_0_0_1px_#ECECEA]";
+const BOX = "flex flex-col gap-2 rounded-[12px] bg-[color:var(--c-fcfcfb)] p-2.5 shadow-[0_0_0_1px_var(--c-ececea)]";
 const field = (wrong: boolean, extra = "") =>
-  `h-8 min-w-0 rounded-full bg-[#F7F7F6] px-3 text-[12px] outline-none ${wrong ? "shadow-[0_0_0_1.5px_#B42318]" : "shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]"} ${extra}`;
+  `h-8 min-w-0 rounded-full bg-[color:var(--c-f7f7f6)] px-3 text-[12px] outline-none ${wrong ? "shadow-[0_0_0_1.5px_#B42318]" : "shadow-[0_0_0_1px_var(--c-e6e6e3)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"} ${extra}`;
 const dark = () => `${PILL} bg-ink text-white disabled:opacity-40`;
-const light = () => `${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`;
+const light = () => `${PILL} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`;
 /** Esc closes what it's on, and only that (the app's Esc would close the panel), never while it saves. */
 const escCloses = (busy: boolean, close: () => void) => (e: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
   if (e.key !== "Escape") return;
@@ -169,10 +169,10 @@ export function AddAppForm({ ws, builder, onStarted, onCancel }: { ws: string; b
         }}
         rows={3}
         placeholder="What it should be, like a page for our recipes with a search box"
-        className={`min-h-[64px] w-full resize-y rounded-[10px] bg-[#F7F7F6] px-3 py-2 text-[12.5px] leading-[18px] outline-none ${error?.field === "what" ? "shadow-[0_0_0_1.5px_#B42318]" : "shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]"}`}
+        className={`min-h-[64px] w-full resize-y rounded-[10px] bg-[color:var(--c-f7f7f6)] px-3 py-2 text-[12.5px] leading-[18px] outline-none ${error?.field === "what" ? "shadow-[0_0_0_1.5px_#B42318]" : "shadow-[0_0_0_1px_var(--c-e6e6e3)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"}`}
       />
       <label className="flex items-center gap-2 text-[12.5px] leading-4 text-ink">
-        <input type="checkbox" aria-label="Put it live when it's ready" checked={deploy} onChange={(e) => setDeploy(e.target.checked)} className="size-3.5 accent-[#0A0A0A]" />
+        <input type="checkbox" aria-label="Put it live when it's ready" checked={deploy} onChange={(e) => setDeploy(e.target.checked)} className="size-3.5 accent-[color:var(--c-0a0a0a)]" />
         Put it live when it&apos;s ready
       </label>
       <div className="flex flex-wrap items-center gap-2">
@@ -210,7 +210,7 @@ export function AppAddress({ url }: { url: string | null }) {
         <UrlLink url={url} />
         <CopyLink url={url} />
         <span className="flex-1" />
-        <span data-tip="Orgo names it after the app. It can't be renamed." className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">
+        <span data-tip="Orgo names it after the app. It can't be renamed." className="shrink-0 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
           Its address on Orgo
         </span>
       </div>
@@ -253,7 +253,7 @@ export function RenewalLine({ ws, name, zone, onRenewal }: { ws: string; name: s
   return (
     <div data-renewal={zone.domain} className="flex flex-col gap-0.5">
       <div className="flex min-h-7 items-center gap-2">
-        <span className="min-w-0 flex-1 text-[12px] leading-4 text-[#6B6B6B]">{words}</span>
+        <span className="min-w-0 flex-1 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{words}</span>
         {r.state !== "expired" && (
           <button
             role="switch"
@@ -264,7 +264,7 @@ export function RenewalLine({ ws, name, zone, onRenewal }: { ws: string; name: s
             onClick={flip}
             className="flex shrink-0 items-center gap-1.5 rounded-full px-1.5 py-0.5 text-[12px] leading-4 text-ink hover:bg-black/[0.04] disabled:opacity-50"
           >
-            <span className={`relative h-4 w-7 rounded-full transition-colors ${r.on ? "bg-ink" : "bg-[#D9D9D6]"}`}>
+            <span className={`relative h-4 w-7 rounded-full transition-colors ${r.on ? "bg-ink" : "bg-[color:var(--c-d9d9d6)]"}`}>
               <span className={`absolute top-0.5 size-3 rounded-full bg-white transition-all ${r.on ? "left-3.5" : "left-0.5"}`} />
             </span>
             Auto-renew
@@ -401,7 +401,7 @@ export function AddDomain({
         setMode(m);
         setError(null);
       }}
-      className={`${PILL} ${shown === m ? "bg-ink text-white" : "text-[#3A3A38] hover:bg-[#F2F2F0]"}`}
+      className={`${PILL} ${shown === m ? "bg-ink text-white" : "text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)]"}`}
     >
       {label}
     </button>
@@ -541,13 +541,13 @@ export function AddDomain({
               const can = o.status === "available" && o.price !== null;
               return (
                 <div key={o.domain} data-offer={o.domain} className="flex min-h-8 min-w-0 items-center gap-2 rounded-lg px-1 py-1">
-                  <span title={o.domain} className={`min-w-[72px] flex-1 truncate font-mono text-[12px] leading-4 ${can ? "text-ink" : "text-[#9A9A98]"}`}>
+                  <span title={o.domain} className={`min-w-[72px] flex-1 truncate font-mono text-[12px] leading-4 ${can ? "text-ink" : "text-[color:var(--c-9a9a98)]"}`}>
                     {o.domain}
                   </span>
                   {/* Wraps under itself in a narrow panel, never past its edge. */}
-                  <span className={`max-w-[60%] text-right text-[12px] leading-4 ${can ? "text-[#3A3A38]" : "text-[#9A9A98]"}`}>{offerWords(o)}</span>
+                  <span className={`max-w-[60%] text-right text-[12px] leading-4 ${can ? "text-[color:var(--c-3a3a38)]" : "text-[color:var(--c-9a9a98)]"}`}>{offerWords(o)}</span>
                   {can && (
-                    <button onClick={() => pick(o)} disabled={busy} className={`${PILL} shrink-0 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-white`}>
+                    <button onClick={() => pick(o)} disabled={busy} className={`${PILL} shrink-0 text-ink shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-white`}>
                       Pick
                     </button>
                   )}
@@ -556,7 +556,7 @@ export function AddDomain({
             })}
             {found.partial && <span className={HINT}>Some endings didn&apos;t answer just now.</span>}
             {found.next !== null && (
-              <button onClick={() => search(found.next ?? 0)} disabled={busy} className="mt-0.5 h-7 self-start rounded-lg px-1 text-[12px] leading-4 text-[#6B6B6B] hover:text-ink disabled:text-[#9A9A98]">
+              <button onClick={() => search(found.next ?? 0)} disabled={busy} className="mt-0.5 h-7 self-start rounded-lg px-1 text-[12px] leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink disabled:text-[color:var(--c-9a9a98)]">
                 {busy ? "Reading…" : "Show more"}
               </button>
             )}
@@ -569,14 +569,14 @@ export function AddDomain({
     <div data-add-domain-panel onKeyDown={escCloses(busy, onClose)} className={`mt-1 ${BOX}`}>
       {!!options?.owned.length && (
         <div data-owned className="flex flex-col">
-          <span className="text-[12px] leading-[18px] text-[#6B6B6B]">Your domains not in use:</span>
+          <span className="text-[12px] leading-[18px] text-[color:var(--c-6b6b6b)]">Your domains not in use:</span>
           {options.owned.map((o) => (
             <div key={o.id} data-owned-domain={o.domain} className="flex h-8 min-w-0 items-center gap-2">
               <span title={o.domain} className="min-w-0 shrink truncate font-mono text-[12px] leading-4 text-ink">
                 {o.domain}
               </span>
               <span className="flex-1" />
-              <button onClick={() => send({ ws, action: "connect", zone: o.id })} disabled={busy} className={`${PILL} shrink-0 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-white`}>
+              <button onClick={() => send({ ws, action: "connect", zone: o.id })} disabled={busy} className={`${PILL} shrink-0 text-ink shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-white`}>
                 Use
               </button>
             </div>
@@ -587,7 +587,7 @@ export function AddDomain({
         {tab("buy", "Get a new domain")}
         {tab("own", "Use a domain I own")}
         <span className="flex-1" />
-        <button aria-label="Close" disabled={busy} onClick={onClose} className="flex size-6 shrink-0 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink">
+        <button aria-label="Close" disabled={busy} onClick={onClose} className="flex size-6 shrink-0 items-center justify-center rounded-md text-[color:var(--c-6b6b6b)] hover:bg-black/[0.05] hover:text-ink">
           <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
             <path d="M2 2l6 6M8 2L2 8" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
           </svg>
@@ -676,7 +676,7 @@ export function AppSettingsSection({ ws, name, answer, onSaved }: { ws: string; 
         className="flex flex-col gap-1.5"
       >
         <label className="flex min-w-0 items-center gap-2">
-          <span className="w-[64px] shrink-0 text-[12px] leading-4 text-[#6B6B6B]">Port</span>
+          <span className="w-[64px] shrink-0 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">Port</span>
           <input
             aria-label="Port"
             aria-invalid={error?.field === "port" || undefined}
@@ -689,7 +689,7 @@ export function AppSettingsSection({ ws, name, answer, onSaved }: { ws: string; 
         </label>
         {COMMANDS.map((c) => (
           <label key={c.key} className="flex min-w-0 items-center gap-2">
-            <span className="w-[64px] shrink-0 text-[12px] leading-4 text-[#6B6B6B]">{c.label}</span>
+            <span className="w-[64px] shrink-0 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{c.label}</span>
             <input
               aria-label={`${c.label} command`}
               aria-invalid={error?.field === c.key || undefined}
@@ -703,7 +703,7 @@ export function AppSettingsSection({ ws, name, answer, onSaved }: { ws: string; 
           </label>
         ))}
         <label className="flex min-w-0 items-center gap-2">
-          <span data-tip="The path Orgo asks for to check a new release answers before it goes live" className="w-[64px] shrink-0 text-[12px] leading-4 text-[#6B6B6B]">
+          <span data-tip="The path Orgo asks for to check a new release answers before it goes live" className="w-[64px] shrink-0 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
             Health
           </span>
           <input
@@ -763,7 +763,7 @@ function SecretInput({ value, onChange, autoFocus }: { value: string; onChange: 
         autoFocus={autoFocus}
         className={field(false, "min-w-0 flex-1 font-mono")}
       />
-      <button type="button" onClick={() => setShow(!show)} aria-pressed={show} className="shrink-0 rounded-full px-2 py-1 text-[12px] leading-4 text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink">
+      <button type="button" onClick={() => setShow(!show)} aria-pressed={show} className="shrink-0 rounded-full px-2 py-1 text-[12px] leading-4 text-[color:var(--c-6b6b6b)] hover:bg-black/[0.05] hover:text-ink">
         {show ? "Hide" : "Show"}
       </button>
     </span>
@@ -845,7 +845,7 @@ function Variables({ ws, name, names, onSaved, first }: { ws: string; name: stri
   );
   return (
     <div data-env className="mt-3 flex flex-col">
-      <span className="text-[12px] leading-[18px] text-[#6B6B6B]">Variables</span>
+      <span className="text-[12px] leading-[18px] text-[color:var(--c-6b6b6b)]">Variables</span>
       <div className="-mx-2 flex flex-col">
         {names.map((k) =>
           editing === k ? (
@@ -854,11 +854,11 @@ function Variables({ ws, name, names, onSaved, first }: { ws: string; name: stri
             </div>
           ) : (
             <div key={k} className="flex flex-col">
-              <div data-env-name={k} className="group flex h-8 min-w-0 items-center gap-2 rounded-lg px-2 hover:bg-[#F6F6F4]">
+              <div data-env-name={k} className="group flex h-8 min-w-0 items-center gap-2 rounded-lg px-2 hover:bg-[color:var(--c-f6f6f4)]">
                 <span title={k} className="min-w-0 shrink truncate font-mono text-[12px] leading-4 text-ink">
                   {k}
                 </span>
-                <span data-tip="Orgo keeps its value secret and never shows it again. Change it to type a new one." className="shrink-0 font-mono text-[12px] leading-4 text-[#9A9A98]">
+                <span data-tip="Orgo keeps its value secret and never shows it again. Change it to type a new one." className="shrink-0 font-mono text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
                   ••••••••
                 </span>
                 <span className="flex-1" />
@@ -911,7 +911,7 @@ function Variables({ ws, name, names, onSaved, first }: { ws: string; name: stri
             setSaid(null);
           }}
           disabled={busy}
-          className="-mx-2 mt-0.5 flex h-7 items-center gap-1.5 self-start rounded-lg px-2 text-[12px] leading-4 text-[#6B6B6B] hover:bg-[#F6F6F4] hover:text-ink disabled:text-[#9A9A98]"
+          className="-mx-2 mt-0.5 flex h-7 items-center gap-1.5 self-start rounded-lg px-2 text-[12px] leading-4 text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-f6f6f4)] hover:text-ink disabled:text-[color:var(--c-9a9a98)]"
         >
           <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
             <path d="M5 1.5v7M1.5 5h7" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
@@ -940,7 +940,7 @@ const deployWords = (d: AppDeploy) =>
   d.live ? (d.rollback ? "Live, put back" : "Live") : d.state === "succeeded" ? "Was live" : (STATES[d.state]?.word ?? d.state);
 
 /** Its dot: green only for the one live now; one that was live, grey; else its state's. */
-const deployDot = (d: AppDeploy) => (d.live ? "bg-[#2BB673]" : d.state === "succeeded" ? "bg-[#C9C9C6]" : (STATES[d.state]?.dot ?? "bg-[#9A9A98]"));
+const deployDot = (d: AppDeploy) => (d.live ? "bg-[#2BB673]" : d.state === "succeeded" ? "bg-[color:var(--c-c9c9c6)]" : (STATES[d.state]?.dot ?? "bg-[color:var(--c-9a9a98)]"));
 
 /**
  * Its recent deploys, newest first, one line each: the changeset it built, how it went, when; only the one
@@ -968,23 +968,23 @@ export function AppDeploys({ ws, app, deploys, onChanged, log }: { ws: string; a
       {!!deploys.length && (
         <div className="-mx-2 flex flex-col">
           {deploys.map((d) => (
-            <div key={d.id} data-deploy={d.id} data-state={d.state} className="group flex h-8 min-w-0 items-center gap-2 rounded-lg px-2 hover:bg-[#F6F6F4]">
+            <div key={d.id} data-deploy={d.id} data-state={d.state} className="group flex h-8 min-w-0 items-center gap-2 rounded-lg px-2 hover:bg-[color:var(--c-f6f6f4)]">
               <span className={`size-2 shrink-0 rounded-full ${deployDot(d)}`} />
-              <span title={d.at ?? undefined} className="w-[52px] shrink-0 font-mono text-[11.5px] leading-4 text-[#6B6B6B]">
+              <span title={d.at ?? undefined} className="w-[52px] shrink-0 font-mono text-[11.5px] leading-4 text-[color:var(--c-6b6b6b)]">
                 {d.at ? short(d.at) : "·"}
               </span>
-              <span title={d.error ?? undefined} className={`min-w-0 flex-1 truncate text-[12.5px] leading-4 ${d.state === "failed" ? "text-[#B42318]" : d.live ? "font-medium text-ink" : "text-[#6B6B6B]"}`}>
+              <span title={d.error ?? undefined} className={`min-w-0 flex-1 truncate text-[12.5px] leading-4 ${d.state === "failed" ? "text-[#B42318]" : d.live ? "font-medium text-ink" : "text-[color:var(--c-6b6b6b)]"}`}>
                 {deployWords(d)}
                 {d.state === "failed" && d.error ? `: ${d.error}` : ""}
               </span>
-              {d.when ? <span className="w-8 shrink-0 text-right text-[12px] leading-4 text-[#9A9A98]">{ago(d.when)}</span> : null}
+              {d.when ? <span className="w-8 shrink-0 text-right text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{ago(d.when)}</span> : null}
               {!d.live && d.canRollback ? (
                 <span className="flex w-[78px] shrink-0 justify-end opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover:opacity-100 motion-reduce:transition-none">
                   <span data-tip={running ? "A deploy is running. Wait for it to finish." : "Put this one live again, without a build"} className="flex">
                     <button
                       disabled={!!busy || running}
                       onClick={() => back(d)}
-                      className="whitespace-nowrap rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-white disabled:text-[#9A9A98] disabled:shadow-[0_0_0_1px_#ECECEA]"
+                      className="whitespace-nowrap rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-ink shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-white disabled:text-[color:var(--c-9a9a98)] disabled:shadow-[0_0_0_1px_var(--c-ececea)]"
                     >
                       {busy === d.id ? "Rolling back…" : "Roll back"}
                     </button>
@@ -1098,7 +1098,7 @@ export function AppEnd({
   // (Not while a deploy of it is being sent: it would put a site back on the web as it goes.)
   const wait = isSending(app.name) ? "A deploy is being sent. Wait for it." : undefined;
   return (
-    <div data-app-end className="flex flex-col gap-1.5 border-t border-[#F0F0EE] pt-3">
+    <div data-app-end className="flex flex-col gap-1.5 border-t border-[color:var(--c-f0f0ee)] pt-3">
       {open === "add" ? (
         <form
           data-add-site-form
@@ -1109,7 +1109,7 @@ export function AppEnd({
           onKeyDown={escCloses(busy, close)}
           className={BOX}
         >
-          <span className="text-[12.5px] leading-[17px] text-[#3A3A38]">Another site from the same code, on the same computer, with its own address, port and variables.</span>
+          <span className="text-[12.5px] leading-[17px] text-[color:var(--c-3a3a38)]">Another site from the same code, on the same computer, with its own address, port and variables.</span>
           <div className="flex flex-wrap items-center gap-2">
             <input
               aria-label="Site name"
@@ -1176,8 +1176,8 @@ export function AppEnd({
           onConfirm={dropApp}
           onCancel={close}
           extra={
-            <label className="flex items-center gap-2 text-[12px] leading-4 text-[#3A3A38]">
-              <input type="checkbox" checked={repo} disabled={busy} onChange={(e) => setRepo(e.target.checked)} className="size-3.5 accent-[#0A0A0A]" />
+            <label className="flex items-center gap-2 text-[12px] leading-4 text-[color:var(--c-3a3a38)]">
+              <input type="checkbox" checked={repo} disabled={busy} onChange={(e) => setRepo(e.target.checked)} className="size-3.5 accent-[color:var(--c-0a0a0a)]" />
               Delete its code in Ingot too, with all its history. This can&apos;t be undone.
             </label>
           }

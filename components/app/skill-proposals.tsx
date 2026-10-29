@@ -5,6 +5,7 @@ import { proposalLines, proposalStatus, type DiffLine } from "@/lib/skill-propos
 import type { AppState, Message, SkillProposal } from "@/lib/types";
 import { Spinner } from "./mascot";
 import { clockTime, post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Changes a bot proposed to its workspace's skills (Message.skillProposals, lib/server/skill-proposals.ts), as cards
@@ -35,7 +36,7 @@ export function SkillProposals({ message: m, state, className = "" }: { message:
 function Diff({ lines }: { lines: DiffLine[] }) {
   const shown = lines.slice(0, 400);
   return (
-    <pre data-proposal-diff className="max-h-[280px] overflow-auto rounded-xl bg-[#F7F7F6] py-1.5 font-mono text-[11.5px] leading-4 text-[#3A3A38]">
+    <pre data-proposal-diff className="max-h-[280px] overflow-auto rounded-xl bg-[color:var(--c-f7f7f6)] py-1.5 font-mono text-[11.5px] leading-4 text-[color:var(--c-3a3a38)]">
       {shown.map((l, i) => (
         <div key={i} className={`whitespace-pre-wrap px-3 [overflow-wrap:anywhere] ${l.t === "-" ? "bg-[#FEF3F2] text-[#912018]" : l.t === "+" ? "bg-[#ECFDF3] text-[#05603A]" : ""}`}>
           <span aria-hidden className="select-none pr-1.5 opacity-60">
@@ -44,7 +45,7 @@ function Diff({ lines }: { lines: DiffLine[] }) {
           {l.s || " "}
         </div>
       ))}
-      {lines.length > shown.length && <div className="px-3 text-[#9A9A98]">and {lines.length - shown.length} more lines</div>}
+      {lines.length > shown.length && <div className="px-3 text-[color:var(--c-9a9a98)]">and {lines.length - shown.length} more lines</div>}
     </pre>
   );
 }
@@ -72,15 +73,15 @@ function ProposalCard({ messageId, proposal: p, state, readOnly }: { messageId: 
         if (!json.stale.lines) setError(json.error);
       } else setError(json.error ?? "That didn't work. Try again.");
     } catch {
-      setError("Couldn't reach Bops. Try again.");
+      setError(`Couldn't reach ${BRAND.name}. Try again.`);
     }
     setBusy(null);
   };
 
   if (status !== "open")
     return (
-      <div data-proposal={p.id} data-proposal-status={status} className="flex min-w-0 items-center gap-2 rounded-2xl bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_#E2E2DF]">
-        <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium leading-4 text-[#3A3A38]">
+      <div data-proposal={p.id} data-proposal-status={status} className="flex min-w-0 items-center gap-2 rounded-2xl bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_var(--c-e2e2df)]">
+        <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium leading-4 text-[color:var(--c-3a3a38)]">
           {status === "accepted" ? `Accepted: ${p.name}${p.version ? ` is at v${p.version}` : ""}` : `Rejected the change to ${p.name}`}
           {p.doneAt ? ` · ${clockTime(p.doneAt)}` : ""}
         </span>
@@ -91,17 +92,17 @@ function ProposalCard({ messageId, proposal: p, state, readOnly }: { messageId: 
     <div data-proposal={p.id} data-proposal-status="open" className="flex flex-col gap-2.5 rounded-2xl bg-white p-3.5 shadow-[0_0_0_1px_#0000000F,0_10px_30px_-16px_#00000059]">
       <div className="flex min-w-0 flex-col gap-1">
         <span className="text-[13.5px] font-semibold leading-[18px] [overflow-wrap:anywhere]">Change to the skill {p.name}</span>
-        <span className="flex flex-wrap items-center gap-1 text-[12px] leading-4 text-[#6B6B6B]">
-          <code className="rounded-md bg-[#F7F7F6] px-1.5 py-0.5 text-[11.5px] leading-4 text-[#3A3A38] [overflow-wrap:anywhere]">{p.file}</code>
+        <span className="flex flex-wrap items-center gap-1 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
+          <code className="rounded-md bg-[color:var(--c-f7f7f6)] px-1.5 py-0.5 text-[11.5px] leading-4 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">{p.file}</code>
           <span>
             · {what} · proposed by {by} {where}
           </span>
         </span>
       </div>
-      <p className="text-[13px] leading-[19px] text-[#3A3A38] [overflow-wrap:anywhere]">{p.summary}</p>
+      <p className="text-[13px] leading-[19px] text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">{p.summary}</p>
       {!!p.read?.length && (
         <div data-proposal-read className="flex flex-col gap-0.5 rounded-xl bg-[#FFF8E6] px-3 py-2 text-[12px] leading-4 text-[#7A4D00]">
-          <span className="font-medium">This turn read words from outside Bops. Check the change is yours to make:</span>
+          <span className="font-medium">This turn read words from outside {BRAND.name}. Check the change is yours to make:</span>
           {p.read.map((x) => (
             <span key={x} className="[overflow-wrap:anywhere]">
               {x}
@@ -136,10 +137,10 @@ function ProposalCard({ messageId, proposal: p, state, readOnly }: { messageId: 
               )}
             </button>
           )}
-          <button onClick={() => void act("reject")} disabled={!!busy} className={`${btn} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          <button onClick={() => void act("reject")} disabled={!!busy} className={`${btn} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
             {busy === "reject" ? "Rejecting" : "Reject"}
           </button>
-          <span className="text-[11.5px] leading-4 text-[#9A9A98]">Accept publishes it as the next version.</span>
+          <span className="text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">Accept publishes it as the next version.</span>
         </div>
       )}
     </div>

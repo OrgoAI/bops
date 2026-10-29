@@ -27,6 +27,7 @@ import { Mascot, Spinner } from "./mascot";
 import { usePlan } from "./plan-note";
 import { CloseButton, NeedsYouDot, teamOf } from "./ui";
 import { Badge } from "./vault";
+import { BRAND } from "@/lib/brand";
 
 /*
  * People: who sees the user's bots, from the button at the bottom left of the sidebar. They're the
@@ -104,7 +105,7 @@ export function MembersButton({ state, expanded = false, pressed = expanded, onC
       }
       badge={
         count ? (
-          <span className="pointer-events-none absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[#EEEEEC] px-1 text-[11px] font-semibold leading-none tabular-nums text-[#3A3A38] shadow-[0_0_0_2px_#F9F9F8]">
+          <span className="pointer-events-none absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-[color:var(--c-eeeeec)] px-1 text-[11px] font-semibold leading-none tabular-nums text-[color:var(--c-3a3a38)] shadow-[0_0_0_2px_var(--c-f9f9f8)]">
             {count}
           </span>
         ) : null
@@ -135,7 +136,7 @@ const errorOf = (r: Answer, fallback: string) =>
   r.status === 0 ? WORDS.appUnreachable : typeof r.json.error === "string" && r.json.code !== "UNREACHABLE" && r.json.code !== "ORGO_ERROR" ? r.json.error : fallback;
 
 const pill = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4";
-const quiet = `${pill} shrink-0 bg-[#F2F2F0] hover:bg-[#EAEAE7]`;
+const quiet = `${pill} shrink-0 bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`;
 
 /**
  * The People sheet, over the app like Account and Settings: Esc or a click outside closes it (a dialog
@@ -225,12 +226,12 @@ export function Members({ state, onClose, onUpgrade }: { state: AppState; onClos
         onClick={(e) => e.stopPropagation()}
         className="motion-dialog-in flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
       >
-        <div className="flex items-center justify-between gap-3 border-b border-[#F0F0EE] px-[22px] py-[18px]">
+        <div className="flex items-center justify-between gap-3 border-b border-[color:var(--c-f0f0ee)] px-[22px] py-[18px]">
           <div className="flex flex-col gap-0.5">
             <span id="members-title" className="text-[18px] font-semibold leading-[22px]">
               People
             </span>
-            <span className="text-[13px] leading-[17px] text-[#6B6B6B]">Who sees which of your bots, and their computers.</span>
+            <span className="text-[13px] leading-[17px] text-[color:var(--c-6b6b6b)]">Who sees which of your bots, and their computers.</span>
           </div>
           <CloseButton onClick={onClose} />
         </div>
@@ -287,8 +288,8 @@ export function Members({ state, onClose, onUpgrade }: { state: AppState; onClos
         )}
 
         {read?.state === "ready" ? (
-          <div className="px-[22px] pb-5 pt-5 text-[12px] leading-4 text-[#9A9A98]">
-            People you add sign in with the email you invite. In Bops they see everything of the bots you pick, your chats with them too. On orgo.ai they see every bot&apos;s
+          <div className="px-[22px] pb-5 pt-5 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
+            People you add sign in with the email you invite. In {BRAND.name} they see everything of the bots you pick, your chats with them too. On orgo.ai they see every bot&apos;s
             computer, like an open inbox, and can ask Orgo&apos;s agent to work on it. {read.keysOnComputers ? "Never your saved logins." : "Never your saved logins or keys."}{" "}
             <a href={read.orgoUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:text-ink">
               Open on orgo.ai
@@ -362,7 +363,7 @@ export function BotAccess({ bots, value, onChange, disabled }: { bots: Bot[]; va
   const mixed = bots.some((b) => levelOf(value, b.id) !== value.others);
   return (
     <div data-bot-access className="flex flex-col gap-2">
-      <div className="flex max-h-[250px] flex-col overflow-y-auto rounded-[12px] px-2.5 shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex max-h-[250px] flex-col overflow-y-auto rounded-[12px] px-2.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
         <AccessRow
           icon={<EveryBot />}
           name="Every bot, new ones too"
@@ -384,10 +385,10 @@ export function BotAccess({ bots, value, onChange, disabled }: { bots: Bot[]; va
           />
         ))}
       </div>
-      <ul data-access-levels className="flex flex-col gap-0.5 px-1 text-[12px] leading-4 text-[#6B6B6B]">
+      <ul data-access-levels className="flex flex-col gap-0.5 px-1 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
         {ACCESS_LEVELS.map((level) => (
           <li key={level}>
-            <span className="font-medium text-[#3A3A38]">{ACCESS_LABELS[level]}:</span> {ACCESS_TIPS[level].charAt(0).toLowerCase() + ACCESS_TIPS[level].slice(1)}
+            <span className="font-medium text-[color:var(--c-3a3a38)]">{ACCESS_LABELS[level]}:</span> {ACCESS_TIPS[level].charAt(0).toLowerCase() + ACCESS_TIPS[level].slice(1)}
           </li>
         ))}
       </ul>
@@ -417,7 +418,7 @@ function AccessRow({
 }) {
   const tipId = useId();
   return (
-    <div className="flex h-[30px] shrink-0 items-center gap-2 border-b border-[#F0F0EE] last:border-0">
+    <div className="flex h-[30px] shrink-0 items-center gap-2 border-b border-[color:var(--c-f0f0ee)] last:border-0">
       {icon}
       <span data-tip={tip} className="min-w-0 flex-1 truncate text-[12.5px] leading-4 text-ink">
         {name}
@@ -465,7 +466,7 @@ function LevelPicker({
             disabled={disabled}
             data-tip={ACCESS_TIPS[level]}
             onClick={() => (!on || loose) && onChange(level)}
-            className={`rounded-full px-2 py-0.5 text-[11.5px] leading-4 ${on && !loose ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : on ? "bg-white/60 text-[#3A3A38] hover:text-ink" : "text-[#6B6B6B] hover:text-ink"}`}
+            className={`rounded-full px-2 py-0.5 text-[11.5px] leading-4 ${on && !loose ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : on ? "bg-white/60 text-[color:var(--c-3a3a38)] hover:text-ink" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}
           >
             {ACCESS_LABELS[level]}
           </button>
@@ -487,7 +488,7 @@ function EveryBot() {
 /** "Choose bots" or "Bots": opens the picker under it, and closes it. */
 function BotsToggle({ open, label, onClick }: { open: boolean; label: string; onClick: () => void }) {
   return (
-    <button type="button" aria-expanded={open} onClick={onClick} className="flex shrink-0 items-center gap-0.5 rounded-full text-[12px] font-medium leading-4 text-[#3A3A38] hover:text-ink">
+    <button type="button" aria-expanded={open} onClick={onClick} className="flex shrink-0 items-center gap-0.5 rounded-full text-[12px] font-medium leading-4 text-[color:var(--c-3a3a38)] hover:text-ink">
       {label}
       <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden className={`transition-transform ${open ? "rotate-180" : ""}`}>
         <path d="M2.5 4l2.5 2.5L7.5 4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
@@ -549,7 +550,7 @@ function AddSomeone({ info, state, bots, act, onRetry, onUpgrade }: { info: Read
   // Over the limit (a plan changed after they joined), the block says how many: "4 of 2" would only puzzle.
   const aside = s.limit !== null && s.used > s.limit ? null : peopleAside(s);
   const counter = aside && (
-    <span data-tip="People with access, and invites still waiting" className="text-[12px] tabular-nums text-[#9A9A98]">
+    <span data-tip="People with access, and invites still waiting" className="text-[12px] tabular-nums text-[color:var(--c-9a9a98)]">
       {aside}
     </span>
   );
@@ -573,7 +574,7 @@ function AddSomeone({ info, state, bots, act, onRetry, onUpgrade }: { info: Read
         }
       >
         {short?.text ?? WORDS.upgradeRequired}
-        {short?.note && <span className="block text-[#6B6B6B]">{short.note}</span>}
+        {short?.note && <span className="block text-[color:var(--c-6b6b6b)]">{short.note}</span>}
         {s.plan === "free_bops" && <OrgoPlanLine state={state} />}
       </Notice>
       {line}
@@ -585,7 +586,7 @@ function AddSomeone({ info, state, bots, act, onRetry, onUpgrade }: { info: Read
 function OrgoPlanLine({ state }: { state: AppState }) {
   const tier = usePlan(state)?.plan?.tier;
   if (!tier || tier.toLowerCase() === "free") return null;
-  return <span className="block text-[#6B6B6B]">Your Orgo plan covers your other Orgo workspaces, not your bots&apos; computers.</span>;
+  return <span className="block text-[color:var(--c-6b6b6b)]">Your Orgo plan covers your other Orgo workspaces, not your bots&apos; computers.</span>;
 }
 
 /** What the last invite did (muted, or red for a problem), with the invite's link when the email didn't go out. */
@@ -594,7 +595,7 @@ type Said = { tone: "muted" | "bad"; text: string; link?: string; brief?: true }
 /** The line under the form, or under the plan's block once the invite took the last seat. */
 function SaidLine({ said }: { said: Said }) {
   return (
-    <span role={said.tone === "bad" ? "alert" : "status"} className={`flex flex-wrap items-center gap-x-2 text-[12px] leading-4 ${said.tone === "bad" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
+    <span role={said.tone === "bad" ? "alert" : "status"} className={`flex flex-wrap items-center gap-x-2 text-[12px] leading-4 ${said.tone === "bad" ? "text-[#B42318]" : "text-[color:var(--c-6b6b6b)]"}`}>
       {said.text}
       {said.link && <CopyLink link={said.link} />}
     </span>
@@ -689,7 +690,7 @@ function InviteForm({
           placeholder="name@example.com"
           aria-label="Their email"
           autoComplete="off"
-          className="h-10 min-w-0 flex-1 rounded-full bg-white px-4 text-[14px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+          className="h-10 min-w-0 flex-1 rounded-full bg-white px-4 text-[14px] shadow-[0_0_0_1px_var(--c-e6e6e3)] outline-none placeholder:text-[color:var(--c-9a9a98)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
         />
         {offer !== "not_yet" && <AccessPicker value={role} onChange={setRole} fullAccess={offer} disabled={busy} />}
         <button type="submit" disabled={!email.trim() || busy} className="h-10 shrink-0 rounded-full bg-ink px-4 text-[13px] font-medium text-white disabled:opacity-50">
@@ -697,7 +698,7 @@ function InviteForm({
         </button>
       </div>
       {bots && (
-        <span className="flex min-w-0 items-center gap-2 pt-0.5 text-[12.5px] leading-[18px] text-[#6B6B6B]">
+        <span className="flex min-w-0 items-center gap-2 pt-0.5 text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">
           <span data-access-summary className="truncate">
             {accessSummary(access, ids)}
           </span>
@@ -713,12 +714,12 @@ function InviteForm({
 /** What the picked access means. Full access's is the one warning before it's sent, marked like what needs the user. */
 function RoleLine({ role }: { role: MemberRole }) {
   return role === "admin" ? (
-    <span className="flex items-start gap-1.5 pt-0.5 text-[12.5px] leading-[18px] text-[#3A3A38]">
+    <span className="flex items-start gap-1.5 pt-0.5 text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">
       <NeedsYouDot className="mt-px" />
       {ROLE_LINES.admin}
     </span>
   ) : (
-    <span className="pt-0.5 text-[12.5px] leading-[18px] text-[#6B6B6B]">{ROLE_LINES.viewer}</span>
+    <span className="pt-0.5 text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">{ROLE_LINES.viewer}</span>
   );
 }
 
@@ -730,7 +731,7 @@ function RoleLine({ role }: { role: MemberRole }) {
 function AccessPicker({ value, onChange, fullAccess, disabled }: { value: MemberRole; onChange: (role: MemberRole) => void; fullAccess: FullAccess; disabled?: boolean }) {
   return (
     <div className="flex shrink-0 items-center gap-1.5">
-      <span className="text-[12px] text-[#9A9A98]">Computers</span>
+      <span className="text-[12px] text-[color:var(--c-9a9a98)]">Computers</span>
       <div role="radiogroup" aria-label="What they can do on your bots' computers" className={`flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px] ${disabled ? "opacity-50" : ""}`}>
         {(["viewer", "admin"] as const).map((r) => {
           const on = value === r;
@@ -745,7 +746,7 @@ function AccessPicker({ value, onChange, fullAccess, disabled }: { value: Member
               disabled={disabled}
               data-tip={off ? WORDS.fullAccessOffTip : undefined}
               onClick={() => !on && !off && onChange(r)}
-              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : off ? "cursor-default text-[#C9C9C6]" : "text-[#6B6B6B] hover:text-ink"}`}
+              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : off ? "cursor-default text-[color:var(--c-c9c9c6)]" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}
             >
               {ROLE_NAMES[r]}
             </button>
@@ -761,13 +762,13 @@ function AccessPicker({ value, onChange, fullAccess, disabled }: { value: Member
 /** A person's initials on a circle: the user's in ink and highlighter, as on Account. */
 function Face({ label, you }: { label: string; you?: boolean }) {
   return (
-    <span className={`flex size-9 shrink-0 items-center justify-center rounded-full text-[13px] font-semibold ${you ? "bg-ink text-highlighter" : "bg-[#EEEEEC] text-[#6B6B6B]"}`}>
+    <span className={`flex size-9 shrink-0 items-center justify-center rounded-full text-[13px] font-semibold ${you ? "bg-ink text-highlighter" : "bg-[color:var(--c-eeeeec)] text-[color:var(--c-6b6b6b)]"}`}>
       {initialsFrom(label)}
     </span>
   );
 }
 
-const row = "group flex flex-col border-b border-[#F0F0EE] px-3.5 py-3 last:border-0";
+const row = "group flex flex-col border-b border-[color:var(--c-f0f0ee)] px-3.5 py-3 last:border-0";
 const rowAction = "rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100";
 
 /**
@@ -777,7 +778,7 @@ const rowAction = "rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 op
 function SubLine({ who, children }: { who?: string | null; children?: React.ReactNode }) {
   if (!who && !children) return null;
   return (
-    <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] leading-4 text-[#6B6B6B]">
+    <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] leading-4 text-[color:var(--c-6b6b6b)]">
       {who && <span className="truncate">{who}</span>}
       {who && children && <span aria-hidden>·</span>}
       {children}
@@ -790,7 +791,7 @@ function WhoHasAccess({ info, bots, act }: { info: Ready; bots: Bot[] | null; ac
   const you = info.you;
   return (
     <Section title="Who has access">
-      <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_var(--c-e6e6e3)]">
         <div className={row}>
           <div className="flex items-center gap-3">
             <Face label={you.name} you />
@@ -803,13 +804,13 @@ function WhoHasAccess({ info, bots, act }: { info: Ready; bots: Bot[] | null; ac
                 <span className="shrink-0">Every bot</span>
               </SubLine>
             </div>
-            <span className="shrink-0 text-[12.5px] text-[#9A9A98]">Owner</span>
+            <span className="shrink-0 text-[12.5px] text-[color:var(--c-9a9a98)]">Owner</span>
           </div>
         </div>
         {info.people.map((p) => (
           <PersonRow key={p.id} person={p} bots={bots} fullAccess={info.fullAccess} act={act} />
         ))}
-        {!info.people.length && <div className="px-3.5 py-3 text-[12.5px] leading-4 text-[#9A9A98]">Just you so far.</div>}
+        {!info.people.length && <div className="px-3.5 py-3 text-[12.5px] leading-4 text-[color:var(--c-9a9a98)]">Just you so far.</div>}
       </div>
     </Section>
   );
@@ -921,12 +922,12 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
                 disabled={busy}
                 data-tip={copied ? WORDS.copiedPassword : undefined}
                 onClick={() => void change("viewer")}
-                className={`${rowAction} text-[#3A3A38] hover:bg-[#F2F2F0] disabled:opacity-50`}
+                className={`${rowAction} text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)] disabled:opacity-50`}
               >
                 {busy ? "Changing…" : "Make View only"}
               </button>
             )}
-            <span className="shrink-0 text-[12.5px] text-[#6B6B6B]">{onComputers(p.role)}</span>
+            <span className="shrink-0 text-[12.5px] text-[color:var(--c-6b6b6b)]">{onComputers(p.role)}</span>
           </>
         ) : (
           <AccessPicker value={p.role} fullAccess={fullAccess} disabled={busy} onChange={(role) => (role === "admin" ? setAsking("full") : void change(role))} />
@@ -946,7 +947,7 @@ function PersonRow({ person: p, bots, fullAccess, act }: { person: Person; bots:
         </span>
       )}
       {copied && p.role === "viewer" && (
-        <span role="status" className="pl-12 pt-1.5 text-[12px] leading-4 text-[#6B6B6B]">
+        <span role="status" className="pl-12 pt-1.5 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
           {WORDS.copiedPassword}
         </span>
       )}
@@ -997,13 +998,13 @@ function Invited({ info, bots, act }: { info: Ready; bots: Bot[] | null; act: Ac
       title="Invited"
       aside={
         (free || over) && (
-          <span data-tip={tip} className="text-[12px] text-[#9A9A98]">
+          <span data-tip={tip} className="text-[12px] text-[color:var(--c-9a9a98)]">
             Can&apos;t be accepted right now
           </span>
         )
       }
     >
-      <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
+      <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_var(--c-e6e6e3)]">
         {info.invites.map((i) => (
           <InviteRow key={i.email} invite={i} bots={bots} fullAccess={info.fullAccess} canSend={!!s} act={act} />
         ))}
@@ -1059,12 +1060,12 @@ function InviteRow({ invite: i, bots, fullAccess, canSend, act }: { invite: Invi
   return (
     <div className={row}>
       <div className="flex items-center gap-3">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[#F7F7F6] text-[13px] font-semibold uppercase text-[#9A9A98] shadow-[inset_0_0_0_1px_#E6E6E3]">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[color:var(--c-f7f7f6)] text-[13px] font-semibold uppercase text-[color:var(--c-9a9a98)] shadow-[inset_0_0_0_1px_var(--c-e6e6e3)]">
           {i.email[0]}
         </span>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="truncate text-[14px] font-medium leading-[18px]">{i.email}</span>
-          <span data-access-summary className="truncate text-[12.5px] leading-4 text-[#6B6B6B]">
+          <span data-access-summary className="truncate text-[12.5px] leading-4 text-[color:var(--c-6b6b6b)]">
             {bots && `${accessSummary(i.access, bots.map((b) => b.id))} · `}
             {onComputers(i.role)}
             {i.expiresAt !== null && ` · ${i.expired ? "expired" : "expires"} ${day(i.expiresAt)}`}
@@ -1075,7 +1076,7 @@ function InviteRow({ invite: i, bots, fullAccess, canSend, act }: { invite: Invi
             <button disabled={!!busy} onClick={() => void cancel()} className="rounded-full bg-[#B42318] px-2.5 py-1 text-[12px] font-semibold leading-4 text-white disabled:opacity-50">
               {busy === "cancel" ? "Cancelling…" : "Cancel invite"}
             </button>
-            <button disabled={!!busy} onClick={() => setSure(false)} className="rounded-full px-2 py-1 text-[12px] leading-4 text-[#6B6B6B]">
+            <button disabled={!!busy} onClick={() => setSure(false)} className="rounded-full px-2 py-1 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
               Keep
             </button>
           </span>
@@ -1086,7 +1087,7 @@ function InviteRow({ invite: i, bots, fullAccess, canSend, act }: { invite: Invi
                 disabled={!!busy || resting}
                 data-tip={resting ? "Sent. You can send it again in a minute." : "Sends a new email. The old link stops working."}
                 onClick={() => void resend()}
-                className="rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0] disabled:opacity-50"
+                className="rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)] disabled:opacity-50"
               >
                 {busy === "resend" ? "Sending…" : sent ? "Sent" : i.expired ? "Send again" : "Resend"}
               </button>
@@ -1120,7 +1121,7 @@ function CopyLink({ link, tip }: { link: string; tip?: string }) {
       type="button"
       data-tip={copied ? undefined : tip}
       onClick={() => void navigator.clipboard?.writeText(link).then(() => setCopied(true))}
-      className="rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0]"
+      className="rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)]"
     >
       {copied ? "Copied" : "Copy link"}
     </button>
@@ -1174,7 +1175,7 @@ function Confirm({
         <span id="member-confirm-title" className="text-[15px] font-semibold leading-5">
           {title}
         </span>
-        <span id="member-confirm-line" className="pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
+        <span id="member-confirm-line" className="pt-1 text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)]">
           {line}
         </span>
         {error && (
@@ -1183,7 +1184,7 @@ function Confirm({
           </span>
         )}
         <div className="flex justify-end gap-2 pt-5">
-          <button disabled={busy} onClick={onClose} className={`${button} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          <button disabled={busy} onClick={onClose} className={`${button} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
             Cancel
           </button>
           <button autoFocus disabled={busy} onClick={onConfirm} className={`${button} flex min-w-[76px] items-center justify-center text-white ${danger ? "bg-[#B42318]" : "bg-ink"}`}>

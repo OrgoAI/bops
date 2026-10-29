@@ -89,7 +89,7 @@ export function TooltipLayer() {
   return createPortal(
     <div
       role="tooltip"
-      className="pointer-events-none fixed z-[1000] max-w-[280px] animate-[screen-in_120ms_ease-out] rounded-[8px] bg-[#0A0A0A]/92 px-2 py-1 text-center text-[12px] font-medium leading-4 text-white shadow-[0_6px_16px_-6px_#00000080]"
+      className="pointer-events-none fixed z-[1000] max-w-[280px] animate-[screen-in_120ms_ease-out] rounded-[8px] bg-[color:var(--c-0a0a0a)]/92 px-2 py-1 text-center text-[12px] font-medium leading-4 text-white shadow-[0_6px_16px_-6px_#00000080]"
       style={{ left: tip.x, top: tip.y, transform: tip.side === "right" ? "translate(0, -50%)" : `translate(-50%, ${tip.side === "below" ? "0" : "-100%"})` }}
     >
       {tip.text}

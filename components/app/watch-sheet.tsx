@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { Bot, Watch } from "@/lib/types";
 import { siteOf } from "@/lib/watch-sites";
 import { ago, post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 const when = (t: number) => {
   const a = ago(t);
@@ -89,7 +90,7 @@ export function WatchSheet({
       className={`absolute inset-x-3 bottom-3 z-50 mx-auto flex max-w-[460px] cursor-default flex-col gap-3 rounded-2xl bg-white p-4 shadow-[0_0_0_1px_#0000000F,0_24px_50px_-18px_#00000059] ${sliding ? "motion-sheet-in" : ""}`}
     >
       <div className="flex items-start gap-3">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[#F2F2F0]">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[color:var(--c-f2f2f0)]">
           <svg width="18" height="18" viewBox="0 0 16 16">
             <path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" fill="none" stroke="#0A0A0A" strokeWidth="1.3" strokeLinejoin="round" />
             <circle cx="8" cy="8" r="2" fill="#0A0A0A" />
@@ -97,15 +98,15 @@ export function WatchSheet({
         </span>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="text-[15px] font-semibold leading-5">{watch ? `Watching ${site}` : `Keep an eye on ${site}`}</span>
-          <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">
+          <span className="text-[12.5px] leading-[17px] text-[color:var(--c-6b6b6b)]">
             {watch
               ? watch.readAt
-                ? `Bops last read it ${when(watch.readAt)}. It reads the page whenever it changes.`
-                : "Bops reads the page whenever it changes."
+                ? `${BRAND.name} last read it ${when(watch.readAt)}. It reads the page whenever it changes.`
+                : `${BRAND.name} reads the page whenever it changes.`
               : `${b.name} keeps this screen on ${site} and gives you a heads-up in chat when something needs you. Other work uses the other screens.`}
           </span>
         </div>
-        <button onClick={close} aria-label="Close" className="flex size-7 shrink-0 items-center justify-center rounded-full hover:bg-[#F2F2F0]">
+        <button onClick={close} aria-label="Close" className="flex size-7 shrink-0 items-center justify-center rounded-full hover:bg-[color:var(--c-f2f2f0)]">
           <svg width="10" height="10" viewBox="0 0 12 12">
             <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
           </svg>
@@ -113,15 +114,15 @@ export function WatchSheet({
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <span className="text-[12px] font-medium leading-4 text-[#6B6B6B]">Tell me about</span>
+        <span className="text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Tell me about</span>
         <div className="flex flex-wrap gap-1.5">
           {!suggestion &&
-            [64, 92, 78].map((w) => <span key={w} className="h-6 animate-pulse rounded-full bg-[#F2F2F0]" style={{ width: w }} />)}
+            [64, 92, 78].map((w) => <span key={w} className="h-6 animate-pulse rounded-full bg-[color:var(--c-f2f2f0)]" style={{ width: w }} />)}
           {suggestion?.picks.map((pick) => (
             <button
               key={pick}
               onClick={() => toggle(pick)}
-              className={`rounded-full px-2.5 py-1 text-[12.5px] leading-4 ${has(pick) ? "bg-ink text-white" : "bg-[#F2F2F0] text-ink hover:bg-[#EAEAE7]"}`}
+              className={`rounded-full px-2.5 py-1 text-[12.5px] leading-4 ${has(pick) ? "bg-ink text-white" : "bg-[color:var(--c-f2f2f0)] text-ink hover:bg-[color:var(--c-eaeae7)]"}`}
             >
               {pick}
             </button>
@@ -132,15 +133,15 @@ export function WatchSheet({
           onChange={(e) => setText(e.target.value)}
           rows={2}
           placeholder={`Or in your words, e.g. "${known.lookFor}"`}
-          className="resize-none rounded-xl bg-[#F7F7F6] px-3 py-2 text-[13px] leading-[18px] outline-none placeholder:text-[#9A9A98] focus:bg-white focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+          className="resize-none rounded-xl bg-[color:var(--c-f7f7f6)] px-3 py-2 text-[13px] leading-[18px] outline-none placeholder:text-[color:var(--c-9a9a98)] focus:bg-white focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
         />
       </div>
 
       {watch?.told?.length ? (
         <div className="flex flex-col gap-1">
-          <span className="text-[12px] font-medium leading-4 text-[#6B6B6B]">Recent heads-ups</span>
+          <span className="text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Recent heads-ups</span>
           {[watch.told].flat().slice(-3).reverse().map((t) => (
-            <span key={t} className="truncate text-[12.5px] leading-[17px] text-[#3A3A38]">
+            <span key={t} className="truncate text-[12.5px] leading-[17px] text-[color:var(--c-3a3a38)]">
               {t}
             </span>
           ))}
@@ -157,7 +158,7 @@ export function WatchSheet({
             Stop watching
           </button>
         ) : (
-          <button onClick={close} className="rounded-full px-3.5 py-2 text-[13px] font-medium leading-4 text-[#3A3A38] hover:bg-[#F2F2F0]">
+          <button onClick={close} className="rounded-full px-3.5 py-2 text-[13px] font-medium leading-4 text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)]">
             Not now
           </button>
         )}

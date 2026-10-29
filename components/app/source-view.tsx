@@ -29,6 +29,7 @@ import { OpenLink } from "./panel-tabs";
 import { small } from "./side-group";
 import { clockTime } from "./ui";
 import { readAllowed } from "./view-only";
+import { BRAND } from "@/lib/brand";
 
 /*
  * The email or thread an issue came from, on the issue's page (orbit-issues.tsx IssueView), and a drafted
@@ -57,7 +58,7 @@ function useSource(url: string | null): Source {
   useEffect(() => {
     if (!url) return;
     let on = true;
-    const down: SourceAnswer = { error: "Couldn't reach Bops. Try again.", code: "down" };
+    const down: SourceAnswer = { error: `Couldn't reach ${BRAND.name}. Try again.`, code: "down" };
     void fetch(tick ? `${url}${url.includes("?") ? "&" : "?"}fresh=1` : url, { cache: "no-store" })
       .then(async (r) => (await r.json().catch(() => null)) as SourceAnswer | null)
       .then((j) => on && setGot({ url, answer: j && ("source" in j || "error" in j) ? j : down }))
@@ -90,7 +91,7 @@ export function IssueSource({ issue, ws, onReplied }: { issue: IssueLike; ws: st
   const allowed = readAllowed(url);
   const { answer, reload } = useSource(app && allowed ? url : null);
   if (!app) return null;
-  const label = <span className="px-1 text-[12px] font-medium leading-4 text-[#9A9A98]">{app === "gmail" ? "Email" : "Thread"}</span>;
+  const label = <span className="px-1 text-[12px] font-medium leading-4 text-[color:var(--c-9a9a98)]">{app === "gmail" ? "Email" : "Thread"}</span>;
   if (!allowed)
     return (
       <div data-source="shared" className="flex flex-col gap-2">
@@ -122,7 +123,7 @@ export function IssueSource({ issue, ws, onReplied }: { issue: IssueLike; ws: st
             hint={drafted ? `${drafted.who && drafted.who !== "Bops" ? `${drafted.who} drafted this reply` : "A reply drafted for this issue"}. Change it as you like.` : undefined}
             send={async (text, all, nonce) => {
               const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ws, text, all, nonce }) }).catch(() => null);
-              if (!r) return { error: "Couldn't reach Bops. Try again." };
+              if (!r) return { error: `Couldn't reach ${BRAND.name}. Try again.` };
               const j = ((await r.json().catch(() => null)) ?? {}) as { ok?: boolean; error?: string; sent?: { at: number; to: string }; logged?: boolean };
               if (!r.ok || !j.ok || !j.sent) return { error: j.error ?? "It didn't send." };
               onReplied?.();
@@ -160,30 +161,30 @@ export function DraftSource({ messageId, draftId, app }: { messageId: string; dr
 
 function Reading({ app }: { app: "gmail" | "slack" | "discord" }) {
   return (
-    <div data-reading role="status" className="flex flex-col gap-2.5 rounded-2xl bg-white px-3.5 py-3 shadow-[0_0_0_1px_#ECECEA]">
-      <span className="flex items-center gap-2 text-[12.5px] leading-4 text-[#9A9A98]">
+    <div data-reading role="status" className="flex flex-col gap-2.5 rounded-2xl bg-white px-3.5 py-3 shadow-[0_0_0_1px_var(--c-ececea)]">
+      <span className="flex items-center gap-2 text-[12.5px] leading-4 text-[color:var(--c-9a9a98)]">
         <Spinner size={12} color="#9A9A98" />
         {app === "gmail" ? "Reading the email…" : `Reading the thread in ${SOURCE_NAME[app]}…`}
       </span>
-      <span className="h-2.5 w-2/3 rounded-full bg-[#F2F2F0]" />
-      <span className="h-2.5 w-5/6 rounded-full bg-[#F4F4F2]" />
-      <span className="h-2.5 w-1/2 rounded-full bg-[#F6F6F4]" />
+      <span className="h-2.5 w-2/3 rounded-full bg-[color:var(--c-f2f2f0)]" />
+      <span className="h-2.5 w-5/6 rounded-full bg-[color:var(--c-f4f4f2)]" />
+      <span className="h-2.5 w-1/2 rounded-full bg-[color:var(--c-f6f6f4)]" />
     </div>
   );
 }
 
 function Quiet({ children }: { children: ReactNode }) {
-  return <div className="flex flex-col gap-1.5 rounded-xl bg-[#F7F7F6] px-3 py-2.5 text-[13px] leading-[19px] text-[#6B6B6B] [overflow-wrap:anywhere]">{children}</div>;
+  return <div className="flex flex-col gap-1.5 rounded-xl bg-[color:var(--c-f7f7f6)] px-3 py-2.5 text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)] [overflow-wrap:anywhere]">{children}</div>;
 }
 
 /** The thread, Gmail's or a chat's, with `children` under it (the Reply box). `openLink`: say where to open it there, when the page doesn't already. */
 export function SourceThread({ source, openLink, children }: { source: IssueSource; openLink?: boolean; children?: ReactNode }) {
   return (
-    <div data-thread={source.app} className="flex min-w-0 flex-col overflow-hidden rounded-2xl bg-white shadow-[0_0_0_1px_#ECECEA]">
+    <div data-thread={source.app} className="flex min-w-0 flex-col overflow-hidden rounded-2xl bg-white shadow-[0_0_0_1px_var(--c-ececea)]">
       {source.app === "gmail" ? <MailView thread={source} /> : <ChatView thread={source} />}
       {openLink && source.url && (
-        <div className="border-t border-[#F0F0EE] px-3.5 py-2">
-          <Link href={source.url} className="text-[12.5px] font-medium text-ink underline decoration-[#C9C9C6] underline-offset-[3px] hover:decoration-ink">
+        <div className="border-t border-[color:var(--c-f0f0ee)] px-3.5 py-2">
+          <Link href={source.url} className="text-[12.5px] font-medium text-ink underline decoration-[color:var(--c-c9c9c6)] underline-offset-[3px] hover:decoration-ink">
             {`Open in ${SOURCE_NAME[source.app]}`}
           </Link>
         </div>
@@ -235,7 +236,7 @@ function Spans({ spans }: { spans: Span[] }) {
         ) : s.t === "s" ? (
           <s key={k}>{s.text}</s>
         ) : s.t === "code" ? (
-          <code key={k} className="rounded-[5px] bg-[#F2F2F0] px-1 py-px font-mono text-[12px] text-[#B42318] [overflow-wrap:anywhere]">
+          <code key={k} className="rounded-[5px] bg-[color:var(--c-f2f2f0)] px-1 py-px font-mono text-[12px] text-[#B42318] [overflow-wrap:anywhere]">
             {s.text}
           </code>
         ) : s.t === "mention" ? (
@@ -275,12 +276,12 @@ function Files({ files }: { files: SourceFile[] }) {
   return (
     <div data-files className="flex flex-wrap gap-1.5">
       {files.map((f, k) => (
-        <span key={`${f.name}.${k}`} data-file={f.name} className="flex min-w-0 max-w-full items-center gap-1.5 rounded-xl bg-[#F6F6F4] px-2.5 py-1.5 text-[12px] leading-4 text-[#3A3A38]">
-          <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="shrink-0 text-[#6B6B6B]">
+        <span key={`${f.name}.${k}`} data-file={f.name} className="flex min-w-0 max-w-full items-center gap-1.5 rounded-xl bg-[color:var(--c-f6f6f4)] px-2.5 py-1.5 text-[12px] leading-4 text-[color:var(--c-3a3a38)]">
+          <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="shrink-0 text-[color:var(--c-6b6b6b)]">
             <path d="M10.5 4.5l-5 5a1.4 1.4 0 002 2l5.5-5.5a2.8 2.8 0 00-4-4L3.5 7.5a4.2 4.2 0 006 6l4-4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
           <span className="min-w-0 truncate">{f.name}</span>
-          {fileSize(f.size) && <span className="shrink-0 text-[#9A9A98]">{fileSize(f.size)}</span>}
+          {fileSize(f.size) && <span className="shrink-0 text-[color:var(--c-9a9a98)]">{fileSize(f.size)}</span>}
         </span>
       ))}
     </div>
@@ -322,7 +323,7 @@ function MailView({ thread }: { thread: MailThread }) {
           <span data-subject className="text-[14.5px] font-semibold leading-5 text-ink [overflow-wrap:anywhere]">
             {thread.subject || "(no subject)"}
           </span>
-          <span className="truncate text-[12px] leading-4 text-[#9A9A98]">{[`${ms.length} ${ms.length === 1 ? "message" : "messages"}`, thread.account.title].filter(Boolean).join(" · ")}</span>
+          <span className="truncate text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{[`${ms.length} ${ms.length === 1 ? "message" : "messages"}`, thread.account.title].filter(Boolean).join(" · ")}</span>
         </div>
         {ms.length >= 3 && (
           <button onClick={() => setOpen(all ? new Set() : new Set(ms.map((m) => m.id)))} className={`${small("plain")} shrink-0`}>
@@ -331,11 +332,11 @@ function MailView({ thread }: { thread: MailThread }) {
         )}
       </div>
       {ms.map((m) => (
-        <div key={m.id} className="border-t border-[#F0F0EE]">
+        <div key={m.id} className="border-t border-[color:var(--c-f0f0ee)]">
           {open.has(m.id) ? <MailOpen m={m} onFold={() => toggle(m.id)} /> : <MailFolded m={m} onOpen={() => toggle(m.id)} />}
         </div>
       ))}
-      {thread.more && <div className="border-t border-[#F0F0EE] px-3.5 py-2 text-[12px] leading-4 text-[#9A9A98]">This thread has more. Open it in Gmail for the rest.</div>}
+      {thread.more && <div className="border-t border-[color:var(--c-f0f0ee)] px-3.5 py-2 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">This thread has more. Open it in Gmail for the rest.</div>}
     </>
   );
 }
@@ -345,13 +346,13 @@ function MailFolded({ m, onOpen }: { m: MailMessage; onOpen: () => void }) {
     <button onClick={onOpen} aria-expanded={false} data-mail={m.id} className="flex w-full min-w-0 items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-[#FAFAF9]">
       <Avatar name={m.from.name} email={m.from.email} size={24} />
       <span className="max-w-[40%] shrink-0 truncate text-[13px] font-medium leading-[18px] text-ink">{personName(m.from, "Me")}</span>
-      <span className="min-w-0 flex-1 truncate text-[13px] leading-[18px] text-[#6B6B6B]">{m.snippet}</span>
+      <span className="min-w-0 flex-1 truncate text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)]">{m.snippet}</span>
       {m.files.length > 0 && (
-        <svg width="11" height="11" viewBox="0 0 16 16" aria-label="Has files" className="shrink-0 text-[#9A9A98]">
+        <svg width="11" height="11" viewBox="0 0 16 16" aria-label="Has files" className="shrink-0 text-[color:var(--c-9a9a98)]">
           <path d="M10.5 4.5l-5 5a1.4 1.4 0 002 2l5.5-5.5a2.8 2.8 0 00-4-4L3.5 7.5a4.2 4.2 0 006 6l4-4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       )}
-      <span className="shrink-0 text-[12px] tabular-nums leading-4 text-[#9A9A98]" title={fullWhen(m.at)}>
+      <span className="shrink-0 text-[12px] tabular-nums leading-4 text-[color:var(--c-9a9a98)]" title={fullWhen(m.at)}>
         {shortWhen(m.at)}
       </span>
     </button>
@@ -369,10 +370,10 @@ function MailOpen({ m, onFold }: { m: MailMessage; onFold: () => void }) {
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <button onClick={onFold} aria-expanded title="Fold" className="flex min-w-0 items-baseline gap-1.5 text-left">
             <span className="min-w-0 max-w-full truncate text-[13.5px] font-semibold leading-[18px] text-ink">{personName(m.from, "Me")}</span>
-            {m.from.email && <span className="min-w-0 shrink-[2] truncate text-[12px] leading-4 text-[#9A9A98]">{`<${m.from.email}>`}</span>}
+            {m.from.email && <span className="min-w-0 shrink-[2] truncate text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{`<${m.from.email}>`}</span>}
           </button>
           {to && (
-            <button onClick={() => setDetails(!details)} aria-expanded={details} data-to className="flex max-w-full items-center gap-1 self-start text-left text-[12px] leading-4 text-[#6B6B6B] [overflow-wrap:anywhere] hover:text-ink">
+            <button onClick={() => setDetails(!details)} aria-expanded={details} data-to className="flex max-w-full items-center gap-1 self-start text-left text-[12px] leading-4 text-[color:var(--c-6b6b6b)] [overflow-wrap:anywhere] hover:text-ink">
               {to}
               <svg width="9" height="9" viewBox="0 0 10 10" aria-hidden className={`transition-transform ${details ? "rotate-180" : ""}`}>
                 <path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
@@ -380,12 +381,12 @@ function MailOpen({ m, onFold }: { m: MailMessage; onFold: () => void }) {
             </button>
           )}
         </div>
-        <span className="shrink-0 pt-px text-[12px] tabular-nums leading-4 text-[#9A9A98]" title={fullWhen(m.at)}>
+        <span className="shrink-0 pt-px text-[12px] tabular-nums leading-4 text-[color:var(--c-9a9a98)]" title={fullWhen(m.at)}>
           {shortWhen(m.at)}
         </span>
       </div>
       {details && (
-        <dl data-details className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 rounded-xl bg-[#F6F6F4] px-3 py-2 text-[12px] leading-4">
+        <dl data-details className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 rounded-xl bg-[color:var(--c-f6f6f4)] px-3 py-2 text-[12px] leading-4">
           {(
             [
               ["From", people([m.from])],
@@ -398,24 +399,24 @@ function MailOpen({ m, onFold }: { m: MailMessage; onFold: () => void }) {
             .filter(([, v]) => v)
             .map(([k, v]) => (
               <div key={k} className="contents">
-                <dt className="text-[#9A9A98]">{k}</dt>
-                <dd className="min-w-0 text-[#3A3A38] [overflow-wrap:anywhere]">{v}</dd>
+                <dt className="text-[color:var(--c-9a9a98)]">{k}</dt>
+                <dd className="min-w-0 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">{v}</dd>
               </div>
             ))}
         </dl>
       )}
       {m.body && (
-        <div data-body className="min-w-0 whitespace-pre-wrap text-[13.5px] leading-5 text-[#3A3A38] [overflow-wrap:anywhere]">
+        <div data-body className="min-w-0 whitespace-pre-wrap text-[13.5px] leading-5 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">
           <Spans spans={linkSpans(m.body)} />
         </div>
       )}
       {m.quoted && (
         <>
-          <button onClick={() => setQuoted(!quoted)} aria-expanded={quoted} data-quoted-toggle className="self-start rounded-full bg-[#F2F2F0] px-2.5 py-0.5 text-[12px] font-medium leading-4 text-[#6B6B6B] hover:bg-[#EAEAE7] hover:text-ink">
+          <button onClick={() => setQuoted(!quoted)} aria-expanded={quoted} data-quoted-toggle className="self-start rounded-full bg-[color:var(--c-f2f2f0)] px-2.5 py-0.5 text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-eaeae7)] hover:text-ink">
             {quoted ? "Hide quoted text" : "Show quoted text"}
           </button>
           {quoted && (
-            <div data-quoted className="min-w-0 whitespace-pre-wrap border-l-2 border-[#E6E6E3] pl-3 text-[13px] leading-[19px] text-[#6B6B6B] [overflow-wrap:anywhere]">
+            <div data-quoted className="min-w-0 whitespace-pre-wrap border-l-2 border-[color:var(--c-e6e6e3)] pl-3 text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)] [overflow-wrap:anywhere]">
               <Spans spans={linkSpans(m.quoted)} />
             </div>
           )}
@@ -449,7 +450,7 @@ function ChatView({ thread }: { thread: ChatThread }) {
           <span data-channel className="truncate text-[14.5px] font-semibold leading-5 text-ink">
             {where}
           </span>
-          <span className="truncate text-[12px] leading-4 text-[#9A9A98]">
+          <span className="truncate text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
             {[slack ? `${replies.length} ${replies.length === 1 ? "reply" : "replies"}` : `${ms.length} ${ms.length === 1 ? "message" : "messages"}`, thread.account.title].filter(Boolean).join(" · ")}
           </span>
         </div>
@@ -457,14 +458,14 @@ function ChatView({ thread }: { thread: ChatThread }) {
       <div className="flex min-w-0 flex-col pb-1.5">
         {first && line(first)}
         {first && replies.length > 0 && (
-          <div className="flex items-center gap-2 px-3.5 py-1 text-[11.5px] font-medium leading-4 text-[#9A9A98]">
+          <div className="flex items-center gap-2 px-3.5 py-1 text-[11.5px] font-medium leading-4 text-[color:var(--c-9a9a98)]">
             <span>{`${replies.length} ${replies.length === 1 ? "reply" : "replies"}`}</span>
-            <span className="h-px flex-1 bg-[#F0F0EE]" />
+            <span className="h-px flex-1 bg-[color:var(--c-f0f0ee)]" />
           </div>
         )}
         {fold ? (
           <>
-            <button onClick={() => setAll(true)} data-more className="mx-3.5 my-1 self-start rounded-full bg-[#F2F2F0] px-3 py-1 text-[12px] font-medium leading-4 text-[#3A3A38] hover:bg-[#EAEAE7]">
+            <button onClick={() => setAll(true)} data-more className="mx-3.5 my-1 self-start rounded-full bg-[color:var(--c-f2f2f0)] px-3 py-1 text-[12px] font-medium leading-4 text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-eaeae7)]">
               {`${hidden} more ${hidden === 1 ? "reply" : "replies"}`}
             </button>
             {replies.slice(-NEWEST).map(line)}
@@ -473,7 +474,7 @@ function ChatView({ thread }: { thread: ChatThread }) {
           replies.map(line)
         )}
       </div>
-      {thread.more && <div className="border-t border-[#F0F0EE] px-3.5 py-2 text-[12px] leading-4 text-[#9A9A98]">{`This thread has more. Open it in ${SOURCE_NAME[thread.app]} for the rest.`}</div>}
+      {thread.more && <div className="border-t border-[color:var(--c-f0f0ee)] px-3.5 py-2 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{`This thread has more. Open it in ${SOURCE_NAME[thread.app]} for the rest.`}</div>}
     </>
   );
 }
@@ -486,23 +487,23 @@ function ChatLine({ m, thread }: { m: ChatMessage; thread: ChatThread }) {
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="flex min-w-0 items-baseline gap-1.5">
           <span className="min-w-0 truncate text-[13.5px] font-semibold leading-[18px] text-ink">{m.user.name}</span>
-          {m.user.bot && <span className="shrink-0 rounded bg-[#F2F2F0] px-1 text-[10px] font-semibold uppercase leading-[14px] text-[#6B6B6B]">App</span>}
-          <span className="shrink-0 text-[11.5px] tabular-nums leading-4 text-[#9A9A98]" title={fullWhen(m.at)}>
+          {m.user.bot && <span className="shrink-0 rounded bg-[color:var(--c-f2f2f0)] px-1 text-[10px] font-semibold uppercase leading-[14px] text-[color:var(--c-6b6b6b)]">App</span>}
+          <span className="shrink-0 text-[11.5px] tabular-nums leading-4 text-[color:var(--c-9a9a98)]" title={fullWhen(m.at)}>
             {chatWhen(m.at)}
           </span>
-          {m.edited && <span className="shrink-0 text-[11px] leading-4 text-[#B0B0AD]">(edited)</span>}
+          {m.edited && <span className="shrink-0 text-[11px] leading-4 text-[color:var(--c-b0b0ad)]">(edited)</span>}
         </span>
         {blocks.map((b, k) =>
           b.t === "pre" ? (
-            <pre key={k} className="max-w-full overflow-x-auto rounded-xl bg-[#F6F6F4] px-3 py-2 font-mono text-[12px] leading-[17px] text-[#3A3A38]">
+            <pre key={k} className="max-w-full overflow-x-auto rounded-xl bg-[color:var(--c-f6f6f4)] px-3 py-2 font-mono text-[12px] leading-[17px] text-[color:var(--c-3a3a38)]">
               {b.text}
             </pre>
           ) : b.t === "quote" ? (
-            <div key={k} className="min-w-0 whitespace-pre-wrap border-l-2 border-[#DCDCD8] pl-2.5 text-[13.5px] leading-5 text-[#6B6B6B] [overflow-wrap:anywhere]">
+            <div key={k} className="min-w-0 whitespace-pre-wrap border-l-2 border-[#DCDCD8] pl-2.5 text-[13.5px] leading-5 text-[color:var(--c-6b6b6b)] [overflow-wrap:anywhere]">
               <Spans spans={b.spans} />
             </div>
           ) : (
-            <div key={k} className="min-w-0 whitespace-pre-wrap text-[13.5px] leading-5 text-[#3A3A38] [overflow-wrap:anywhere]">
+            <div key={k} className="min-w-0 whitespace-pre-wrap text-[13.5px] leading-5 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">
               <Spans spans={b.spans} />
             </div>
           ),
@@ -511,9 +512,9 @@ function ChatLine({ m, thread }: { m: ChatMessage; thread: ChatThread }) {
         {m.reactions.length > 0 && (
           <div data-reactions className="flex flex-wrap gap-1">
             {m.reactions.map((r) => (
-              <span key={r.name} title={`:${r.name}:`} className="flex items-center gap-1 rounded-full bg-[#F2F2F0] px-2 py-px text-[11.5px] leading-[18px] text-[#3A3A38]">
+              <span key={r.name} title={`:${r.name}:`} className="flex items-center gap-1 rounded-full bg-[color:var(--c-f2f2f0)] px-2 py-px text-[11.5px] leading-[18px] text-[color:var(--c-3a3a38)]">
                 <span>{emojiOf(r.name)}</span>
-                <span className="tabular-nums text-[#6B6B6B]">{r.count}</span>
+                <span className="tabular-nums text-[color:var(--c-6b6b6b)]">{r.count}</span>
               </span>
             ))}
           </div>
@@ -544,7 +545,7 @@ function ReplyBox({ source, initial, hint, send }: { source: IssueSource; initia
   const [done, setDone] = useState<Sent | null>(null);
   const mail = source.app === "gmail" ? source.reply : undefined;
   if (source.app === "gmail" && !mail)
-    return <div className="border-t border-[#F0F0EE] px-3.5 py-2.5 text-[12.5px] leading-[18px] text-[#6B6B6B]">{"Bops can't tell who to reply to here. Reply in Gmail."}</div>;
+    return <div className="border-t border-[color:var(--c-f0f0ee)] px-3.5 py-2.5 text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">{`${BRAND.name} can't tell who to reply to here. Reply in Gmail.`}</div>;
   const others = mail ? mail.all.to.length + mail.all.cc.length : 0;
   const go = async () => {
     const words = text.trim();
@@ -552,7 +553,7 @@ function ReplyBox({ source, initial, hint, send }: { source: IssueSource; initia
     going.current = true;
     setBusy(true);
     setError(null);
-    const r = await send(words, all && others > 0, nonceOf()).catch(() => ({ error: "Couldn't reach Bops. Try again." }));
+    const r = await send(words, all && others > 0, nonceOf()).catch(() => ({ error: `Couldn't reach ${BRAND.name}. Try again.` }));
     going.current = false;
     setBusy(false);
     if ("error" in r) return setError(r.error);
@@ -562,7 +563,7 @@ function ReplyBox({ source, initial, hint, send }: { source: IssueSource; initia
   const who = (p: Person) => (p.name && p.email ? `${p.name} <${p.email}>` : (p.email ?? p.name ?? ""));
   const where = source.app === "gmail" ? "" : source.channel.dm ? (source.channel.name ? `To ${source.channel.name}` : "In the direct message") : `In #${source.channel.name ?? source.channel.id}`;
   return (
-    <div data-reply className="flex flex-col gap-2 border-t border-[#F0F0EE] bg-[#FCFCFB] px-3.5 py-3">
+    <div data-reply className="flex flex-col gap-2 border-t border-[color:var(--c-f0f0ee)] bg-[color:var(--c-fcfcfb)] px-3.5 py-3">
       {mail ? (
         <div className="flex min-w-0 flex-col gap-1.5">
           {others > 0 && (
@@ -574,19 +575,19 @@ function ReplyBox({ source, initial, hint, send }: { source: IssueSource; initia
                   aria-checked={all === on}
                   onClick={() => setAll(on)}
                   disabled={busy}
-                  className={`rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 ${all === on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}
+                  className={`rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 ${all === on ? "bg-ink text-white" : "bg-[color:var(--c-f2f2f0)] text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-eaeae7)]"}`}
                 >
                   {on ? "Reply all" : "Reply"}
                 </button>
               ))}
             </div>
           )}
-          <span data-reply-to className="flex min-w-0 flex-wrap items-center gap-1 text-[12px] leading-4 text-[#6B6B6B]">
+          <span data-reply-to className="flex min-w-0 flex-wrap items-center gap-1 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
             To
-            <code className="rounded-md bg-[#F2F2F0] px-1.5 py-0.5 text-[11.5px] leading-4 text-[#3A3A38] [overflow-wrap:anywhere]">{who(mail.to)}</code>
+            <code className="rounded-md bg-[color:var(--c-f2f2f0)] px-1.5 py-0.5 text-[11.5px] leading-4 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">{who(mail.to)}</code>
             {all &&
               mail.all.to.map((p) => (
-                <code key={p.email} className="rounded-md bg-[#F2F2F0] px-1.5 py-0.5 text-[11.5px] leading-4 text-[#3A3A38] [overflow-wrap:anywhere]">
+                <code key={p.email} className="rounded-md bg-[color:var(--c-f2f2f0)] px-1.5 py-0.5 text-[11.5px] leading-4 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">
                   {who(p)}
                 </code>
               ))}
@@ -594,7 +595,7 @@ function ReplyBox({ source, initial, hint, send }: { source: IssueSource; initia
               <>
                 <span className="pl-1">Cc</span>
                 {mail.all.cc.map((p) => (
-                  <code key={p.email} className="rounded-md bg-[#F2F2F0] px-1.5 py-0.5 text-[11.5px] leading-4 text-[#3A3A38] [overflow-wrap:anywhere]">
+                  <code key={p.email} className="rounded-md bg-[color:var(--c-f2f2f0)] px-1.5 py-0.5 text-[11.5px] leading-4 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">
                     {who(p)}
                   </code>
                 ))}
@@ -603,11 +604,11 @@ function ReplyBox({ source, initial, hint, send }: { source: IssueSource; initia
           </span>
         </div>
       ) : (
-        <span data-reply-to className="text-[12px] leading-4 text-[#6B6B6B] [overflow-wrap:anywhere]">
+        <span data-reply-to className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)] [overflow-wrap:anywhere]">
           {source.app === "slack" ? `${where}, in its thread` : where}
         </span>
       )}
-      {hint && text === initial && initial && <span className="text-[11.5px] leading-4 text-[#9A9A98]">{hint}</span>}
+      {hint && text === initial && initial && <span className="text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">{hint}</span>}
       <textarea
         value={text}
         onChange={(e) => {
@@ -624,7 +625,7 @@ function ReplyBox({ source, initial, hint, send }: { source: IssueSource; initia
         aria-label={mail ? `Reply to ${personName(mail.to)}` : `Reply in ${SOURCE_NAME[source.app]}`}
         placeholder={mail ? `Reply to ${personName(mail.to)}` : source.app === "slack" ? "Reply in the thread" : "Reply in the channel"}
         rows={Math.min(10, Math.max(3, text.split("\n").length + 1))}
-        className="w-full min-w-0 resize-y rounded-xl bg-white px-3 py-2 text-[13px] leading-[19px] text-ink shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98] focus:shadow-[0_0_0_1.5px_#0A0A0A] disabled:text-[#6B6B6B]"
+        className="w-full min-w-0 resize-y rounded-xl bg-white px-3 py-2 text-[13px] leading-[19px] text-ink shadow-[0_0_0_1px_var(--c-e6e6e3)] outline-none placeholder:text-[color:var(--c-9a9a98)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] disabled:text-[color:var(--c-6b6b6b)]"
       />
       {error && (
         <span role="alert" className="text-[12px] leading-4 text-[#B42318] [overflow-wrap:anywhere]">
@@ -632,12 +633,12 @@ function ReplyBox({ source, initial, hint, send }: { source: IssueSource; initia
         </span>
       )}
       {done && (
-        <span data-sent role="status" className="flex flex-wrap items-center gap-1.5 text-[12px] leading-4 text-[#3A3A38]">
+        <span data-sent role="status" className="flex flex-wrap items-center gap-1.5 text-[12px] leading-4 text-[color:var(--c-3a3a38)]">
           <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden className="shrink-0 text-[#2BB673]">
             <path d="M3 8.5l3 3L13 4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
           <span className="min-w-0 [overflow-wrap:anywhere]">{`Sent to ${done.sent.to} · ${clockTime(done.sent.at)}`}</span>
-          {!done.logged && <span className="text-[#9A9A98]">{"It couldn't be noted in the history."}</span>}
+          {!done.logged && <span className="text-[color:var(--c-9a9a98)]">{"It couldn't be noted in the history."}</span>}
         </span>
       )}
       <div className="flex items-center gap-1.5">
@@ -651,7 +652,7 @@ function ReplyBox({ source, initial, hint, send }: { source: IssueSource; initia
             "Send"
           )}
         </button>
-        <span className="text-[11.5px] leading-4 text-[#9A9A98]">{`From ${source.account.title} in ${SOURCE_NAME[source.app]}`}</span>
+        <span className="text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">{`From ${source.account.title} in ${SOURCE_NAME[source.app]}`}</span>
       </div>
     </div>
   );

@@ -10,6 +10,7 @@ import { OpenLink } from "./panel-tabs";
 import { InlineConfirm, since, small, undash } from "./side-group";
 import { IssueSource } from "./source-view";
 import { CloseButton, useNow } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Issues, the first section of Orbit: what a routine or a bot opened because someone needs it handled
@@ -260,7 +261,7 @@ async function update(user: string, ws: string, id: string, patch: IssuePatch): 
     return null;
   } catch {
     if (before) patchHere(s, (all) => all.map((i) => (i.id === id ? before : i)));
-    return "Couldn't reach Bops. Try again.";
+    return `Couldn't reach ${BRAND.name}. Try again.`;
   }
 }
 
@@ -285,7 +286,7 @@ async function remove(user: string, ws: string, id: string): Promise<string | nu
     patchHere(s, (all) => all.filter((i) => i.id !== id));
     return null;
   } catch {
-    return "Couldn't reach Bops. Try again.";
+    return `Couldn't reach ${BRAND.name}. Try again.`;
   }
 }
 
@@ -343,12 +344,12 @@ export function IssueSideRow({ issue, onClick }: { issue: Issue; onClick: () => 
   return (
     <button
       onClick={onClick}
-      className="flex h-[30px] shrink-0 items-center gap-2 rounded-[10px] pl-[33px] pr-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
+      className="flex h-[30px] shrink-0 items-center gap-2 rounded-[10px] pl-[33px] pr-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)]"
     >
       <StatusDot status={issue.status} size={7} />
       <span className="min-w-0 flex-1 truncate text-[13.5px] leading-[18px]">
-        <span className={isOpen(issue) ? "text-ink" : "text-[#9A9A98]"}>{undash(issue.title)}</span>
-        {issue.customer?.name && <span className="text-[#9A9A98]">{` · ${undash(issue.customer.name)}`}</span>}
+        <span className={isOpen(issue) ? "text-ink" : "text-[color:var(--c-9a9a98)]"}>{undash(issue.title)}</span>
+        {issue.customer?.name && <span className="text-[color:var(--c-9a9a98)]">{` · ${undash(issue.customer.name)}`}</span>}
       </span>
     </button>
   );
@@ -360,7 +361,7 @@ type StatusFilter = "active" | IssueStatus | "all";
 const STATUS_FILTERS: { id: StatusFilter; label: string }[] = [{ id: "active", label: "Not done" }, ...STATUSES.map((s) => ({ id: s.id as StatusFilter, label: s.label })), { id: "all", label: "Everything" }];
 
 const SELECT =
-  "h-7 appearance-none rounded-full bg-[#F2F2F0] pl-3 pr-7 text-[12.5px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-[#EAEAE7] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]";
+  "h-7 appearance-none rounded-full bg-[color:var(--c-f2f2f0)] pl-3 pr-7 text-[12.5px] font-medium leading-4 text-[color:var(--c-3a3a38)] outline-none hover:bg-[color:var(--c-eaeae7)] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]";
 
 /**
  * A filter pill and the down mark that says it opens, drawn in its right padding (a select can't hold
@@ -432,7 +433,7 @@ export function IssuesPage({
           </span>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">Issues</span>
-            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">What needs handling, opened by your routines and bots: outages, bugs, customers waiting.</span>
+            <span className="text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)]">What needs handling, opened by your routines and bots: outages, bugs, customers waiting.</span>
           </div>
           <CloseButton onClick={onClose} className="mt-1.5" />
         </div>
@@ -479,11 +480,11 @@ export function IssuesPage({
               <Spinner size={16} color="#9A9A98" />
             </div>
           ) : !issues.length ? (
-            <div className="py-12 text-center text-[13.5px] leading-5 text-[#6B6B6B]">Issues show up here when a routine or a bot opens one</div>
+            <div className="py-12 text-center text-[13.5px] leading-5 text-[color:var(--c-6b6b6b)]">Issues show up here when a routine or a bot opens one</div>
           ) : !shown.length ? (
-            <div className="py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">{filtered ? "No issues match these filters." : "Nothing open."}</div>
+            <div className="py-10 text-center text-[13.5px] leading-5 text-[color:var(--c-6b6b6b)]">{filtered ? "No issues match these filters." : "Nothing open."}</div>
           ) : (
-            <div className="flex flex-col overflow-hidden rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
+            <div className="flex flex-col overflow-hidden rounded-2xl shadow-[0_0_0_1px_var(--c-ececea)]">
               {shown.map((i, n) => (
                 <IssueRow key={i.id} issue={i} last={n === shown.length - 1} onOpen={() => setOpenId(i.id)} />
               ))}
@@ -497,19 +498,19 @@ export function IssuesPage({
 
 function IssueRow({ issue, last, onOpen }: { issue: Issue; last: boolean; onOpen: () => void }) {
   return (
-    <button onClick={onOpen} data-issue={issue.id} className={`flex items-center gap-3 px-3.5 py-3 text-left hover:bg-[#FAFAF9] ${last ? "" : "border-b border-[#F0F0EE]"}`}>
+    <button onClick={onOpen} data-issue={issue.id} className={`flex items-center gap-3 px-3.5 py-3 text-left hover:bg-[#FAFAF9] ${last ? "" : "border-b border-[color:var(--c-f0f0ee)]"}`}>
       <StatusDot status={issue.status} />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex items-center gap-1.5">
-          <span className={`truncate text-[14px] font-medium leading-[18px] ${isOpen(issue) ? "text-ink" : "text-[#9A9A98]"}`}>{undash(issue.title)}</span>
+          <span className={`truncate text-[14px] font-medium leading-[18px] ${isOpen(issue) ? "text-ink" : "text-[color:var(--c-9a9a98)]"}`}>{undash(issue.title)}</span>
           <PriorityMark priority={issue.priority} />
         </span>
         {(issue.customer?.name || issue.tags.length > 0) && (
-          <span className="truncate text-[12.5px] leading-[17px] text-[#6B6B6B]">{[issue.customer?.name && undash(issue.customer.name), issue.tags.join(", ")].filter(Boolean).join(" · ")}</span>
+          <span className="truncate text-[12.5px] leading-[17px] text-[color:var(--c-6b6b6b)]">{[issue.customer?.name && undash(issue.customer.name), issue.tags.join(", ")].filter(Boolean).join(" · ")}</span>
         )}
       </span>
       {issue.sourceApp && <AppLogo app={issue.sourceApp} name={appName(issue.sourceApp)} size={18} />}
-      <span className="w-[52px] shrink-0 text-right text-[12px] tabular-nums leading-4 text-[#9A9A98]" title={new Date(issue.openedAt).toLocaleString()}>
+      <span className="w-[52px] shrink-0 text-right text-[12px] tabular-nums leading-4 text-[color:var(--c-9a9a98)]" title={new Date(issue.openedAt).toLocaleString()}>
         {since(issue.openedAt)}
       </span>
     </button>
@@ -680,7 +681,7 @@ function TagPicker({
       style={{ width: PICK_W }}
       className="motion-menu-in fixed z-[61] flex flex-col overflow-hidden rounded-xl bg-white shadow-[0_0_0_1px_#0000000F,0_12px_30px_-10px_#00000040]"
     >
-      <label className="flex h-9 shrink-0 items-center gap-2 border-b border-[#F0F0EE] px-3 text-[#9A9A98]">
+      <label className="flex h-9 shrink-0 items-center gap-2 border-b border-[color:var(--c-f0f0ee)] px-3 text-[color:var(--c-9a9a98)]">
         <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
           <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
           <path d="M10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -703,7 +704,7 @@ function TagPicker({
             setActive(0);
           }}
           onKeyDown={keys}
-          className="min-w-0 flex-1 bg-transparent text-[13px] leading-[18px] text-ink outline-none placeholder:text-[#9A9A98]"
+          className="min-w-0 flex-1 bg-transparent text-[13px] leading-[18px] text-ink outline-none placeholder:text-[color:var(--c-9a9a98)]"
         />
       </label>
       <div id={`${id}-list`} role="listbox" aria-label={label} aria-multiselectable={multi || undefined} className="flex min-h-0 flex-1 flex-col overflow-y-auto p-1">
@@ -722,7 +723,7 @@ function TagPicker({
               onMouseDown={(e) => e.preventDefault()}
               onMouseMove={() => n !== at && setActive(n)}
               onClick={() => choose(r)}
-              className={`flex h-7 shrink-0 items-center gap-2 rounded-lg px-2 text-[12.5px] leading-4 ${off ? "text-[#C9C9C6]" : "text-ink"} ${n === at ? "bg-[#F2F2F0]" : ""}`}
+              className={`flex h-7 shrink-0 items-center gap-2 rounded-lg px-2 text-[12.5px] leading-4 ${off ? "text-[color:var(--c-c9c9c6)]" : "text-ink"} ${n === at ? "bg-[color:var(--c-f2f2f0)]" : ""}`}
             >
               <span className="flex w-3 shrink-0 justify-center">
                 {r.make ? (
@@ -747,11 +748,11 @@ function TagPicker({
             </div>
           );
         })}
-        {!rows.length && <div className="px-2 py-1.5 text-[12.5px] leading-4 text-[#9A9A98]">{hint ?? (term ? "No tag matches" : "No tags yet")}</div>}
+        {!rows.length && <div className="px-2 py-1.5 text-[12.5px] leading-4 text-[color:var(--c-9a9a98)]">{hint ?? (term ? "No tag matches" : "No tags yet")}</div>}
       </div>
       {(full || error) && (
-        <div className="flex flex-col gap-1 border-t border-[#F0F0EE] px-3 py-2 text-[11.5px] leading-4">
-          {full && <span className="text-[#9A9A98]">{full}</span>}
+        <div className="flex flex-col gap-1 border-t border-[color:var(--c-f0f0ee)] px-3 py-2 text-[11.5px] leading-4">
+          {full && <span className="text-[color:var(--c-9a9a98)]">{full}</span>}
           {error && (
             <span role="alert" className="text-[#B42318]">
               {error}
@@ -777,7 +778,7 @@ function TagFilter({ tags, value, onChange }: { tags: string[]; value: string; o
         aria-expanded={open}
         aria-label={`Tag: ${value || "Any tag"}`}
         onClick={() => setOpen(!open)}
-        className={`${SELECT} max-w-[180px] truncate text-left aria-expanded:bg-[#EAEAE7]`}
+        className={`${SELECT} max-w-[180px] truncate text-left aria-expanded:bg-[color:var(--c-eaeae7)]`}
       >
         {value || "Any tag"}
       </button>
@@ -847,20 +848,20 @@ function IssueView({ issue, ws, acts, tags, onBack, onClose }: { issue: Issue; w
   const history = [...(issue.history ?? [])].sort((a, b) => b.at - a.at);
   const meta = [issue.customer?.name && undash(issue.customer.name), issue.sourceApp && `From ${appName(issue.sourceApp)}`, `Opened ${since(issue.openedAt)}`].filter(Boolean).join(" · ");
   const seg = (on: boolean) =>
-    `flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 transition-colors duration-150 ease-out motion-reduce:transition-none ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`;
+    `flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 transition-colors duration-150 ease-out motion-reduce:transition-none ${on ? "bg-ink text-white" : "bg-[color:var(--c-f2f2f0)] text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-eaeae7)]"}`;
 
   return (
     <div ref={page} className="motion-fade-in flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 pb-8 pt-7">
       <div className="flex w-full max-w-[560px] flex-col gap-5">
         <div className="flex items-start gap-3">
-          <button onClick={onBack} aria-label="Back to issues" title="Back to issues" className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
+          <button onClick={onBack} aria-label="Back to issues" title="Back to issues" className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]">
             <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
               <path d="M7.5 2.5L4 6l3.5 3.5" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em] [overflow-wrap:anywhere]">{undash(issue.title)}</span>
-            <span className="flex items-center gap-1.5 text-[13px] leading-[19px] text-[#6B6B6B]">
+            <span className="flex items-center gap-1.5 text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)]">
               {issue.sourceApp && <AppLogo app={issue.sourceApp} name={appName(issue.sourceApp)} size={16} />}
               <span className="min-w-0 truncate">{meta}</span>
             </span>
@@ -886,9 +887,9 @@ function IssueView({ issue, ws, acts, tags, onBack, onClose }: { issue: Issue; w
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
             {issue.tags.map((t) => (
-              <span key={t} className="flex h-7 items-center gap-1 rounded-full bg-white pl-3 pr-1 text-[12.5px] font-medium leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3]">
+              <span key={t} className="flex h-7 items-center gap-1 rounded-full bg-white pl-3 pr-1 text-[12.5px] font-medium leading-4 text-[color:var(--c-3a3a38)] shadow-[0_0_0_1px_var(--c-e6e6e3)]">
                 {t}
-                <button onClick={() => void change({ tags: issue.tags.filter((x) => x !== t) })} aria-label={`Remove ${t}`} className="flex size-5 items-center justify-center rounded-full text-[#9A9A98] hover:bg-[#F2F2F0] hover:text-ink">
+                <button onClick={() => void change({ tags: issue.tags.filter((x) => x !== t) })} aria-label={`Remove ${t}`} className="flex size-5 items-center justify-center rounded-full text-[color:var(--c-9a9a98)] hover:bg-[color:var(--c-f2f2f0)] hover:text-ink">
                   <svg width="8" height="8" viewBox="0 0 12 12" aria-hidden>
                     <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                   </svg>
@@ -901,7 +902,7 @@ function IssueView({ issue, ws, acts, tags, onBack, onClose }: { issue: Issue; w
               aria-haspopup="dialog"
               aria-expanded={picking}
               onClick={() => setPicking(!picking)}
-              className={`flex h-7 items-center rounded-full px-2.5 text-[12.5px] font-medium leading-4 hover:bg-[#F2F2F0] hover:text-ink ${picking ? "bg-[#F2F2F0] text-ink" : "text-[#6B6B6B]"}`}
+              className={`flex h-7 items-center rounded-full px-2.5 text-[12.5px] font-medium leading-4 hover:bg-[color:var(--c-f2f2f0)] hover:text-ink ${picking ? "bg-[color:var(--c-f2f2f0)] text-ink" : "text-[color:var(--c-6b6b6b)]"}`}
             >
               + Tag
             </button>
@@ -933,7 +934,7 @@ function IssueView({ issue, ws, acts, tags, onBack, onClose }: { issue: Issue; w
 
         {(issue.summary || issue.url) && (
           <div className="flex flex-col gap-2.5">
-            {issue.summary && <p className="whitespace-pre-wrap text-[13.5px] leading-5 text-[#3A3A38] [overflow-wrap:anywhere]">{undash(issue.summary)}</p>}
+            {issue.summary && <p className="whitespace-pre-wrap text-[13.5px] leading-5 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">{undash(issue.summary)}</p>}
             {issue.url && (
               <a
                 href={issue.url}
@@ -944,7 +945,7 @@ function IssueView({ issue, ws, acts, tags, onBack, onClose }: { issue: Issue; w
                   e.preventDefault();
                   openLink(issue.url!, issue.title);
                 }}
-                className="flex items-center gap-1 self-start text-[13px] font-medium leading-4 text-ink underline decoration-[#C9C9C6] underline-offset-[3px] hover:decoration-ink"
+                className="flex items-center gap-1 self-start text-[13px] font-medium leading-4 text-ink underline decoration-[color:var(--c-c9c9c6)] underline-offset-[3px] hover:decoration-ink"
               >
                 {issue.sourceApp ? `Open in ${appName(issue.sourceApp)}` : "Open the original"}
                 <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden>
@@ -958,7 +959,7 @@ function IssueView({ issue, ws, acts, tags, onBack, onClose }: { issue: Issue; w
         <IssueSource issue={issue} ws={ws} onReplied={() => readHistory(issue.id)} />
 
         <div className="flex flex-col gap-2">
-          <span className="px-1 text-[12px] font-medium leading-4 text-[#9A9A98]">History</span>
+          <span className="px-1 text-[12px] font-medium leading-4 text-[color:var(--c-9a9a98)]">History</span>
           <form
             onSubmit={async (e) => {
               e.preventDefault();
@@ -969,7 +970,7 @@ function IssueView({ issue, ws, acts, tags, onBack, onClose }: { issue: Issue; w
               setSaving(false);
               if (ok) setNote("");
             }}
-            className="flex h-9 items-center gap-2 rounded-full bg-white pl-3.5 pr-1 shadow-[0_0_0_1px_#E6E6E3] focus-within:shadow-[0_0_0_1.5px_#0A0A0A]"
+            className="flex h-9 items-center gap-2 rounded-full bg-white pl-3.5 pr-1 shadow-[0_0_0_1px_var(--c-e6e6e3)] focus-within:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
           >
             <input
               value={note}
@@ -977,10 +978,10 @@ function IssueView({ issue, ws, acts, tags, onBack, onClose }: { issue: Issue; w
               placeholder="Add a note"
               aria-label="Add a note"
               maxLength={1000}
-              className="min-w-0 flex-1 bg-transparent text-[13.5px] leading-5 text-ink outline-none placeholder:text-[#9A9A98]"
+              className="min-w-0 flex-1 bg-transparent text-[13.5px] leading-5 text-ink outline-none placeholder:text-[color:var(--c-9a9a98)]"
             />
             {note.trim() && (
-              <button type="submit" disabled={saving} className="rounded-full bg-[#F2F2F0] px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:bg-[#EAEAE7] disabled:opacity-40">
+              <button type="submit" disabled={saving} className="rounded-full bg-[color:var(--c-f2f2f0)] px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-eaeae7)] disabled:opacity-40">
                 {saving ? "Saving" : "Add"}
               </button>
             )}
@@ -988,9 +989,9 @@ function IssueView({ issue, ws, acts, tags, onBack, onClose }: { issue: Issue; w
           {history.length > 0 && (
             <div className="flex flex-col gap-1.5">
               {history.map((h, n) => (
-                <div key={`${h.at}.${n}`} className="flex flex-col gap-1 rounded-xl bg-[#F7F7F6] px-3 py-2">
-                  <span className="whitespace-pre-wrap text-[13px] leading-[19px] text-[#3A3A38] [overflow-wrap:anywhere]">{undash(h.text)}</span>
-                  <span className="text-[11.5px] leading-4 text-[#9A9A98]">{[h.who && undash(h.who), since(h.at)].filter(Boolean).join(" · ")}</span>
+                <div key={`${h.at}.${n}`} className="flex flex-col gap-1 rounded-xl bg-[color:var(--c-f7f7f6)] px-3 py-2">
+                  <span className="whitespace-pre-wrap text-[13px] leading-[19px] text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">{undash(h.text)}</span>
+                  <span className="text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">{[h.who && undash(h.who), since(h.at)].filter(Boolean).join(" · ")}</span>
                 </div>
               ))}
             </div>

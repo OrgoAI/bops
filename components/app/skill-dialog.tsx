@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Spinner } from "./mascot";
 import { post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * "Save as skill", from a chat's menu (or a thread's): the bot rereads the chat and the threads it started
@@ -38,18 +39,18 @@ function draftOnce(key: string, body: { botId: string; chatId: string; sessionId
         const json = ((await res.json().catch(() => null)) as Drafted | null) ?? {};
         return res.ok && json.draft ? json : { error: json.error ?? "Couldn't write a draft. Try again." };
       })
-      .catch(() => ({ error: "Couldn't reach Bops. Try again." }));
+      .catch(() => ({ error: `Couldn't reach ${BRAND.name}. Try again.` }));
     drafting.set(key, asked);
     void asked.finally(() => drafting.delete(key));
   }
   return asked;
 }
 
-const FIELD = "w-full bg-[#F7F7F6] text-[13px] outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A]";
+const FIELD = "w-full bg-[color:var(--c-f7f7f6)] text-[13px] outline-none shadow-[0_0_0_1px_var(--c-e6e6e3)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]";
 const INPUT = `${FIELD} h-8 rounded-full px-3`;
 const AREA = `${FIELD} resize-none rounded-[12px] px-3 py-1.5 leading-[18px]`;
 const LABEL = "flex flex-col gap-1";
-const LABEL_TEXT = "text-[12px] font-medium leading-4 text-[#6B6B6B]";
+const LABEL_TEXT = "text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)]";
 const PILL = "rounded-full px-3.5 py-1.5 text-[13px] font-medium leading-4 disabled:opacity-50";
 
 /** "Save as skill", over everything: reads the chat, then the draft to edit, Save draft, Publish and Cancel. */
@@ -132,7 +133,7 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
       }
       setSaved(how);
     } catch {
-      setError("Couldn't reach Bops. Try again.");
+      setError(`Couldn't reach ${BRAND.name}. Try again.`);
       setBusy(null);
     }
   };
@@ -159,14 +160,14 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
           <span id="skill-title" className="text-[15px] font-semibold leading-5">
             Save as skill
           </span>
-          <span id="skill-line" className="pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
+          <span id="skill-line" className="pt-1 text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)]">
             How this workspace does this kind of job. Once published, your bot reads it the next time a job like this comes up.
           </span>
         </div>
 
         {fields ? (
           <div className="flex min-h-0 flex-col gap-3 overflow-y-auto px-5 pt-4">
-            {fields.updates && updating && <span className="text-[12.5px] leading-[18px] text-[#3A3A38]">This updates &ldquo;{updating}&rdquo;.</span>}
+            {fields.updates && updating && <span className="text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">This updates &ldquo;{updating}&rdquo;.</span>}
             <label className={LABEL}>
               <span className={LABEL_TEXT}>Name</span>
               <input autoFocus value={fields.name} onChange={set("name")} maxLength={NAME_MAX} placeholder="Weekly invoice summary" className={INPUT} />
@@ -183,17 +184,17 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
               <div className={LABEL}>
                 <span className={LABEL_TEXT}>Files</span>
                 {fields.files.map((f) => (
-                  <details key={f.path} className="rounded-[12px] bg-[#F7F7F6] px-3 py-2 text-[12px] leading-[17px] text-[#3A3A38]">
+                  <details key={f.path} className="rounded-[12px] bg-[color:var(--c-f7f7f6)] px-3 py-2 text-[12px] leading-[17px] text-[color:var(--c-3a3a38)]">
                     <summary className="font-mono">{f.path}</summary>
                     <pre className="whitespace-pre-wrap pt-1.5 font-mono text-[11.5px]">{f.content}</pre>
                   </details>
                 ))}
-                <span className="text-[12px] leading-4 text-[#9A9A98]">Scripts only say what they&apos;d do until run with --apply, and run once you approve them in Skills, in Knowledge.</span>
+                <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">Scripts only say what they&apos;d do until run with --apply, and run once you approve them in Skills, in Knowledge.</span>
               </div>
             )}
           </div>
         ) : error ? null : (
-          <div role="status" className="flex items-center gap-2 px-5 py-8 text-[13px] leading-[18px] text-[#6B6B6B]">
+          <div role="status" className="flex items-center gap-2 px-5 py-8 text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)]">
             <Spinner size={12} color="#6B6B6B" />
             Reading the chat…
           </div>
@@ -203,7 +204,7 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
           <span role="alert" className="flex flex-col gap-0.5 px-5 pt-3 text-[12.5px] leading-[18px] text-[#B42318]">
             {error}
             {problems.map((p, i) => (
-              <span key={i} className="text-[12px] text-[#6B6B6B]">
+              <span key={i} className="text-[12px] text-[color:var(--c-6b6b6b)]">
                 <span className="font-mono">{p.path}{p.line ? `:${p.line}` : ""}</span> {p.reason}
               </span>
             ))}
@@ -211,7 +212,7 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
         )}
 
         <div className="flex items-center justify-end gap-2 px-5 pb-5 pt-5">
-          <button disabled={!!busy} onClick={onClose} className={`${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          <button disabled={!!busy} onClick={onClose} className={`${PILL} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
             Cancel
           </button>
           {!fields && error ? (
@@ -220,7 +221,7 @@ export function SaveSkillDialog({ botId, chatId, sessionId, onClose }: { botId: 
             </button>
           ) : (
             <>
-              <button disabled={!saved && (!ready || !!busy)} onClick={() => void save("draft")} className={`${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+              <button disabled={!saved && (!ready || !!busy)} onClick={() => void save("draft")} className={`${PILL} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
                 {saved === "draft" ? "Saved" : busy === "draft" ? "Saving…" : "Save draft"}
               </button>
               <button disabled={!saved && (!ready || !!busy)} onClick={() => void save("publish")} className={`${PILL} flex min-w-[76px] items-center justify-center bg-ink text-white`}>

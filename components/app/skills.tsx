@@ -9,6 +9,7 @@ import { Fold } from "./fold";
 import { Mascot, Spinner } from "./mascot";
 import { Chevron, readSectionOpen, writeSectionOpen } from "./side-group";
 import { CloseButton, currentWorkspace, post, teamOf } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Skills: a workspace's ways of doing a kind of job (skills) and the tools Bops built that bots run (apps),
@@ -74,7 +75,7 @@ export function SkillsIcon({ size = 14 }: { size?: number }) {
 }
 
 const PILL = "rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
-const CHIP = "rounded-full bg-[#F2F2F0] px-2 py-px text-[11px] leading-4 text-[#6B6B6B]";
+const CHIP = "rounded-full bg-[color:var(--c-f2f2f0)] px-2 py-px text-[11px] leading-4 text-[color:var(--c-6b6b6b)]";
 const DRAFT = "shrink-0 rounded-full bg-highlighter px-2 py-px text-[11px] font-medium leading-4 text-ink";
 const RISK: Record<string, string> = { read: "Reads only", write: "Changes things", destructive: "Can delete" };
 
@@ -154,7 +155,7 @@ async function call<T>(body: Record<string, unknown>): Promise<{ ok: true; json:
     const json = (await res.json().catch(() => ({}))) as T & { error?: string; problems?: Problem[] };
     return res.ok ? { ok: true, json } : { ok: false, error: json.error ?? "That didn't work. Try again.", problems: json.problems };
   } catch {
-    return { ok: false, error: "Couldn't reach Bops. Try again." };
+    return { ok: false, error: `Couldn't reach ${BRAND.name}. Try again.` };
   }
 }
 
@@ -235,7 +236,7 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
           </span>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <span className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{only === "app" ? "Apps" : "Skills"}</span>
-            <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
+            <span className="text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)]">
               {about} {orgo ? "Kept in step with Orgo." : "Kept on this Mac."}
             </span>
           </div>
@@ -254,7 +255,7 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
             {picker && (
               <div className="flex flex-wrap gap-2">
                 {kinds.map((k) => (
-                  <button key={k} disabled={!!importing} onClick={() => void importFolder(k)} className={`${PILL} flex items-center gap-1.5 bg-[#F2F2F0] text-ink hover:bg-[#EAEAE7]`}>
+                  <button key={k} disabled={!!importing} onClick={() => void importFolder(k)} className={`${PILL} flex items-center gap-1.5 bg-[color:var(--c-f2f2f0)] text-ink hover:bg-[color:var(--c-eaeae7)]`}>
                     {importing === k && <Spinner size={11} color="#6B6B6B" />}
                     {k === "skill" ? "Import a skill folder" : "Import an app folder"}
                   </button>
@@ -278,7 +279,7 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
                   </LabelSection>
                 ))}
                 {!s.list.length && (
-                  <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
+                  <span className="text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)]">
                     {s.kind === "app"
                       ? `No apps yet.${picker ? " Import a folder with the program and its files." : ""}`
                       : `No skills of your own yet. Save one from a chat\u2019s menu${picker ? ", or import a folder" : ""}.`}
@@ -309,15 +310,15 @@ function LabelSection({ user, ws, group: g, first, children }: { user: string; w
         onClick={() => setOpen(!open)}
         className="flex items-center gap-1.5 self-start rounded-md py-0.5 pr-1 text-[13px] font-semibold leading-4 text-ink"
       >
-        <span className="text-[#9A9A98]">
+        <span className="text-[color:var(--c-9a9a98)]">
           <Chevron open={open} />
         </span>
         {g.label}
-        <span className="font-normal tabular-nums text-[#9A9A98]">{g.count}</span>
+        <span className="font-normal tabular-nums text-[color:var(--c-9a9a98)]">{g.count}</span>
         {g.builtin && <span className={`${CHIP} font-normal`}>Built in</span>}
       </button>
       <Fold open={open} lazy>
-        <div className="flex flex-col overflow-hidden rounded-2xl border border-[#ECECEA] bg-white">{children}</div>
+        <div className="flex flex-col overflow-hidden rounded-2xl border border-[color:var(--c-ececea)] bg-white">{children}</div>
       </Fold>
     </div>
   );
@@ -333,11 +334,11 @@ function SkillRow({ name, description, draft, auto, onOpen }: { name: string; de
       type="button"
       onClick={onOpen}
       title={`${name}\n${description}`}
-      className="flex min-w-0 items-center gap-2.5 border-b border-black/[0.05] px-3.5 py-2 text-left last:border-b-0 hover:bg-[#FCFCFB]"
+      className="flex min-w-0 items-center gap-2.5 border-b border-black/[0.05] px-3.5 py-2 text-left last:border-b-0 hover:bg-[color:var(--c-fcfcfb)]"
     >
       <span className="max-w-[45%] shrink-0 truncate text-[13px] font-medium leading-[18px]">{name}</span>
-      <span className="min-w-0 flex-1 truncate text-[12.5px] leading-[18px] text-[#6B6B6B]">{description}</span>
-      {auto && <span className={`${CHIP} shrink-0`} data-tip="Label picked by Bops. Open it to confirm or change it">auto</span>}
+      <span className="min-w-0 flex-1 truncate text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">{description}</span>
+      {auto && <span className={`${CHIP} shrink-0`} data-tip={`Label picked by ${BRAND.name}. Open it to confirm or change it`}>auto</span>}
       {draft && <span className={DRAFT}>Draft</span>}
     </button>
   );
@@ -349,7 +350,7 @@ function BuiltinView({ skill: s, onBack }: { skill: BuiltinSkill; onBack: () => 
   const files = s.files ?? [];
   return (
     <div className="motion-fade-in flex flex-col gap-4">
-      <button onClick={onBack} className="self-start text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+      <button onClick={onBack} className="self-start text-[12.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
         ‹ Back
       </button>
       <div className="flex flex-col gap-1">
@@ -358,8 +359,8 @@ function BuiltinView({ skill: s, onBack }: { skill: BuiltinSkill; onBack: () => 
           <span className={CHIP}>Built in</span>
           <span className={CHIP}>{cleanLabel(s.label)}</span>
         </span>
-        <span className="text-[13px] leading-[19px] text-[#3A3A38]">{s.description}</span>
-        <span className="text-[12px] leading-4 text-[#9A9A98]">Every bot has it. It comes with Bops, so it can&apos;t be changed here.</span>
+        <span className="text-[13px] leading-[19px] text-[color:var(--c-3a3a38)]">{s.description}</span>
+        <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">Every bot has it. It comes with {BRAND.name}, so it can&apos;t be changed here.</span>
       </div>
       {files.length > 0 && (
         <Group title="Files">
@@ -367,12 +368,12 @@ function BuiltinView({ skill: s, onBack }: { skill: BuiltinSkill; onBack: () => 
             <div key={f.path} className={`flex flex-col gap-1.5 px-4 py-2 ${i === files.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
               <div className="flex items-center gap-2">
                 <span className="min-w-0 flex-1 truncate font-mono text-[12px] leading-4">{f.path}</span>
-                <button onClick={() => setShown(shown === f.path ? null : f.path)} className="shrink-0 text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+                <button onClick={() => setShown(shown === f.path ? null : f.path)} className="shrink-0 text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
                   {shown === f.path ? "Hide" : "View"}
                 </button>
               </div>
               {shown === f.path && (
-                <pre className="motion-fade-in max-h-[260px] overflow-auto whitespace-pre-wrap rounded-[10px] bg-[#F7F7F6] px-3 py-2 font-mono text-[11.5px] leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#ECECEA]">{f.content}</pre>
+                <pre className="motion-fade-in max-h-[260px] overflow-auto whitespace-pre-wrap rounded-[10px] bg-[color:var(--c-f7f7f6)] px-3 py-2 font-mono text-[11.5px] leading-4 text-[color:var(--c-3a3a38)] shadow-[0_0_0_1px_var(--c-ececea)]">{f.content}</pre>
               )}
             </div>
           ))}
@@ -387,7 +388,7 @@ function BuiltinView({ skill: s, onBack }: { skill: BuiltinSkill; onBack: () => 
   );
 }
 
-const MENU_ITEM = "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-4 text-ink outline-none hover:bg-[#F2F2F0] focus-visible:bg-[#F2F2F0]";
+const MENU_ITEM = "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] leading-4 text-ink outline-none hover:bg-[color:var(--c-f2f2f0)] focus-visible:bg-[color:var(--c-f2f2f0)]";
 
 /**
  * A skill's label as a chip, which opens the labels there are to move it to one, or to a new one. `auto`: Bops
@@ -405,7 +406,7 @@ function LabelChip({ label, labels, busy, auto, onPick }: { label: string; label
         aria-label={`Label: ${label}. Change it`}
         data-label-chip={label}
         onClick={() => setOpen(!open)}
-        className={`${CHIP} flex items-center gap-1 hover:bg-[#EAEAE7] disabled:opacity-50`}
+        className={`${CHIP} flex items-center gap-1 hover:bg-[color:var(--c-eaeae7)] disabled:opacity-50`}
       >
         {label}
         <svg width="8" height="8" viewBox="0 0 12 12" className="shrink-0" aria-hidden>
@@ -414,13 +415,13 @@ function LabelChip({ label, labels, busy, auto, onPick }: { label: string; label
       </button>
       {auto && (
         <>
-          <span className={CHIP} data-tip="Bops picked this label. It stays on this Mac until you confirm it">
+          <span className={CHIP} data-tip={`${BRAND.name} picked this label. It stays on this Mac until you confirm it`}>
             auto
           </span>
           <button type="button" disabled={busy} data-label-confirm onClick={() => onPick(label)} className="text-[12px] font-medium leading-4 text-ink disabled:opacity-50">
             Confirm
           </button>
-          <button type="button" disabled={busy} onClick={() => setOpen(true)} className="text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink disabled:opacity-50">
+          <button type="button" disabled={busy} onClick={() => setOpen(true)} className="text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink disabled:opacity-50">
             Change
           </button>
         </>
@@ -510,7 +511,7 @@ export function LabelMenu({ current, labels, onPick, onClose }: { current: strin
               onChange={(e) => setName(e.target.value)}
               placeholder="Label name"
               aria-label="New label"
-              className="min-w-0 flex-1 rounded-lg bg-[#F7F7F6] px-2 py-1.5 text-[13px] leading-4 text-ink outline-none placeholder:text-[#9A9A98] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+              className="min-w-0 flex-1 rounded-lg bg-[color:var(--c-f7f7f6)] px-2 py-1.5 text-[13px] leading-4 text-ink outline-none placeholder:text-[color:var(--c-9a9a98)] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
             />
             <button type="submit" disabled={!name.trim()} className="rounded-full bg-ink px-2.5 py-1 text-[12px] font-medium leading-4 text-white disabled:opacity-40">
               Save
@@ -530,10 +531,10 @@ export function LabelMenu({ current, labels, onPick, onClose }: { current: strin
 function ImportNote({ result: r, onDismiss }: { result: { name?: string; skipped: Problem[]; warnings: Problem[]; error?: string; updated?: boolean }; onDismiss: () => void }) {
   const lines = [...r.skipped, ...r.warnings];
   return (
-    <div role="status" className={`flex flex-col gap-1.5 rounded-2xl px-3.5 py-3 text-[12.5px] leading-[18px] ${r.error ? "bg-[#FEF3F2] text-[#3A3A38]" : "bg-[#F7F7F6] text-[#3A3A38]"}`}>
+    <div role="status" className={`flex flex-col gap-1.5 rounded-2xl px-3.5 py-3 text-[12.5px] leading-[18px] ${r.error ? "bg-[#FEF3F2] text-[color:var(--c-3a3a38)]" : "bg-[color:var(--c-f7f7f6)] text-[color:var(--c-3a3a38)]"}`}>
       <span className="flex items-start gap-2">
         <span className="min-w-0 flex-1 font-medium">{r.error ?? `${r.updated ? `Updated ${r.name} from the folder. Publish it to have its bots use it.` : `Imported ${r.name} as a draft.`}${r.skipped.length ? ` Left out ${r.skipped.length} file${r.skipped.length === 1 ? "" : "s"}:` : ""}`}</span>
-        <button onClick={onDismiss} className="text-[12px] font-medium text-[#6B6B6B] hover:text-ink">
+        <button onClick={onDismiss} className="text-[12px] font-medium text-[color:var(--c-6b6b6b)] hover:text-ink">
           Dismiss
         </button>
       </span>
@@ -542,10 +543,10 @@ function ImportNote({ result: r, onDismiss }: { result: { name?: string; skipped
           {lines.slice(0, 30).map((p, i) => (
             <li key={`${p.path}:${p.line ?? 0}:${i}`} className="flex gap-2">
               <span className="truncate font-mono text-[11.5px]">{p.path || "the folder"}{p.line ? `:${p.line}` : ""}</span>
-              <span className="text-[#6B6B6B]">{p.reason}</span>
+              <span className="text-[color:var(--c-6b6b6b)]">{p.reason}</span>
             </li>
           ))}
-          {lines.length > 30 && <li className="text-[#9A9A98]">and {lines.length - 30} more</li>}
+          {lines.length > 30 && <li className="text-[color:var(--c-9a9a98)]">and {lines.length - 30} more</li>}
         </ul>
       )}
     </div>
@@ -640,7 +641,7 @@ function SkillView({
 
   return (
     <div className="motion-fade-in flex flex-col gap-4">
-      <button onClick={onBack} className="self-start text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+      <button onClick={onBack} className="self-start text-[12.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
         ‹ Back
       </button>
       <div className="flex flex-col gap-1">
@@ -651,9 +652,9 @@ function SkillView({
           {r.risk && <span className={CHIP}>{RISK[r.risk] ?? r.risk}</span>}
           {r.runsOn && <span className={CHIP}>Runs {r.runsOn === "local" ? "on its computer" : `on ${r.runsOn}`}</span>}
         </span>
-        <span className="text-[13px] leading-[19px] text-[#3A3A38]">{r.description}</span>
-        {r.status === "draft" && <span className="text-[12px] leading-4 text-[#9A9A98]">Its bots don&apos;t use it until it&apos;s published.</span>}
-        {detail?.changed && r.status === "published" && !version && <span className="text-[12px] leading-4 text-[#9A9A98]">Its folder changed since v{r.version}. Publish to have its bots use the change.</span>}
+        <span className="text-[13px] leading-[19px] text-[color:var(--c-3a3a38)]">{r.description}</span>
+        {r.status === "draft" && <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">Its bots don&apos;t use it until it&apos;s published.</span>}
+        {detail?.changed && r.status === "published" && !version && <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">Its folder changed since v{r.version}. Publish to have its bots use the change.</span>}
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -663,12 +664,12 @@ function SkillView({
           </button>
         )}
         {reveal && detail?.dir && !detail.missing && (
-          <button onClick={() => void reveal(detail.dir!)} className={`${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          <button onClick={() => void reveal(detail.dir!)} className={`${PILL} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
             Open in Finder
           </button>
         )}
         {picker && !version && (
-          <button disabled={!!busy} onClick={() => void fromFolder()} data-tip="Pick a folder to be its next version. Publish it after." className={`${PILL} flex items-center gap-1.5 bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+          <button disabled={!!busy} onClick={() => void fromFolder()} data-tip="Pick a folder to be its next version. Publish it after." className={`${PILL} flex items-center gap-1.5 bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
             {busy === "folder" && <Spinner size={11} color="#6B6B6B" />}
             Update from folder
           </button>
@@ -679,11 +680,11 @@ function SkillView({
       </div>
       {sure && (
         <div className="flex flex-wrap items-center gap-2 rounded-[10px] bg-[#FEF3F2] px-3 py-2">
-          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[#3A3A38]">Delete this {word}, its folder and every version? Its bots stop using it.</span>
+          <span className="min-w-0 flex-1 text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">Delete this {word}, its folder and every version? Its bots stop using it.</span>
           <button disabled={!!busy} onClick={() => void act("delete", { action: "delete" }).then((ok) => ok && onBack())} className={`${PILL} bg-[#B42318] text-white`}>
             {busy === "delete" ? "Deleting…" : "Delete"}
           </button>
-          <button onClick={() => setSure(false)} className={`${PILL} bg-white hover:bg-[#F7F7F6]`}>
+          <button onClick={() => setSure(false)} className={`${PILL} bg-white hover:bg-[color:var(--c-f7f7f6)]`}>
             Cancel
           </button>
         </div>
@@ -692,7 +693,7 @@ function SkillView({
         <div role="alert" className="flex flex-col gap-0.5 text-[12.5px] leading-[18px] text-[#B42318]">
           <span>{error}</span>
           {problems.map((p, i) => (
-            <span key={i} className="text-[12px] text-[#6B6B6B]">
+            <span key={i} className="text-[12px] text-[color:var(--c-6b6b6b)]">
               <span className="font-mono">{p.path || "the folder"}{p.line ? `:${p.line}` : ""}</span> {p.reason}
             </span>
           ))}
@@ -712,7 +713,7 @@ function SkillView({
                   disabled={!!busy}
                   data-tip={on ? `${b.name} has it. Tap to take it away` : `Give it to ${b.name}`}
                   onClick={() => void act(`bot:${b.id}`, { action: "bot", botId: b.id, on: !on })}
-                  className={`flex h-[26px] items-center gap-1.5 rounded-full pl-1 pr-2.5 text-[12px] font-medium leading-4 disabled:opacity-50 ${on ? "bg-[#FBFFE0] text-ink shadow-[0_0_0_1.5px_#0A0A0A]" : "text-[#6B6B6B] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"}`}
+                  className={`flex h-[26px] items-center gap-1.5 rounded-full pl-1 pr-2.5 text-[12px] font-medium leading-4 disabled:opacity-50 ${on ? "bg-[color:var(--c-fbffe0)] text-ink shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" : "text-[color:var(--c-6b6b6b)] shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-fcfcfb)]"}`}
                 >
                   <Mascot botId={b.id} color={b.color} size={18} antenna={false} />
                   {b.name}
@@ -731,10 +732,10 @@ function SkillView({
             return (
               <div key={v.version} className={`flex items-center gap-2 px-4 py-2 ${i === all.length - 1 ? "pb-3" : "border-b border-black/[0.05]"}`}>
                 <span className="text-[13px] font-medium leading-4">v{v.version}</span>
-                <span className="text-[12px] leading-4 text-[#9A9A98]">{new Date(v.at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
+                <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{new Date(v.at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
                 {current && <span className={CHIP}>In use</span>}
                 <span className="flex-1" />
-                <button onClick={() => setVersion(viewing ? undefined : v.version)} className="text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+                <button onClick={() => setVersion(viewing ? undefined : v.version)} className="text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
                   {viewing ? "Back to the folder" : "View"}
                 </button>
                 {!current && (
@@ -750,13 +751,13 @@ function SkillView({
 
       {!detail ? (
         !error && (
-          <span role="status" className="flex items-center gap-2 text-[13px] text-[#6B6B6B]">
+          <span role="status" className="flex items-center gap-2 text-[13px] text-[color:var(--c-6b6b6b)]">
             <Spinner size={12} color="#6B6B6B" />
             Reading it
           </span>
         )
       ) : detail.missing ? (
-        <span className="text-[13px] leading-[19px] text-[#6B6B6B]">Its folder isn&apos;t on this Mac.</span>
+        <span className="text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)]">Its folder isn&apos;t on this Mac.</span>
       ) : (
         <>
           {detail.files.length > 0 && (
@@ -802,10 +803,10 @@ function FileRow({ ws, skill: r, file: f, version, last, onApproved }: { ws: str
     <div className={`flex flex-col gap-1.5 px-4 py-2 ${last ? "pb-3" : "border-b border-black/[0.05]"}`}>
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] leading-4">{f.path}</span>
-        <span className="shrink-0 text-[11.5px] leading-4 text-[#9A9A98]">{f.binary ? `Binary, ${size}` : size}</span>
+        <span className="shrink-0 text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">{f.binary ? `Binary, ${size}` : size}</span>
         {f.script && (f.approved ? <span className={CHIP}>Approved</span> : <span className="rounded-full bg-[#FFF4E5] px-2 py-px text-[11px] leading-4 text-[#9A5B00]">Needs approval</span>)}
         {(!f.binary || f.script) && (
-          <button onClick={() => void review()} className="shrink-0 text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+          <button onClick={() => void review()} className="shrink-0 text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
             {text !== null ? "Hide" : f.script && !f.approved ? "Review" : "View"}
           </button>
         )}
@@ -813,16 +814,16 @@ function FileRow({ ws, skill: r, file: f, version, last, onApproved }: { ws: str
       {text !== null && (
         <div className="motion-fade-in flex flex-col gap-2">
           {f.binary ? (
-            <p className="rounded-[10px] bg-[#F7F7F6] px-3 py-2 text-[12px] leading-[17px] text-[#3A3A38] shadow-[0_0_0_1px_#ECECEA]">A program, so it can&apos;t be shown as text. Approve it only if you trust where it came from.</p>
+            <p className="rounded-[10px] bg-[color:var(--c-f7f7f6)] px-3 py-2 text-[12px] leading-[17px] text-[color:var(--c-3a3a38)] shadow-[0_0_0_1px_var(--c-ececea)]">A program, so it can&apos;t be shown as text. Approve it only if you trust where it came from.</p>
           ) : (
-            <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap rounded-[10px] bg-[#F7F7F6] px-3 py-2 font-mono text-[11.5px] leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#ECECEA]">{text}</pre>
+            <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap rounded-[10px] bg-[color:var(--c-f7f7f6)] px-3 py-2 font-mono text-[11.5px] leading-4 text-[color:var(--c-3a3a38)] shadow-[0_0_0_1px_var(--c-ececea)]">{text}</pre>
           )}
           {f.script && (
             <span className="flex flex-wrap items-center gap-2">
-              <span className="font-mono text-[11px] text-[#9A9A98]">sha256 {f.sha256.slice(0, 16)}</span>
+              <span className="font-mono text-[11px] text-[color:var(--c-9a9a98)]">sha256 {f.sha256.slice(0, 16)}</span>
               <span className="flex-1" />
               {f.approved ? (
-                <button disabled={busy} onClick={() => void approve(false)} className={`${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+                <button disabled={busy} onClick={() => void approve(false)} className={`${PILL} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
                   Take approval back
                 </button>
               ) : (
@@ -845,7 +846,7 @@ function FileRow({ ws, skill: r, file: f, version, last, onApproved }: { ws: str
 
 function Group({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="flex flex-col rounded-2xl bg-white shadow-[0_0_0_1px_#ECECEA]">
+    <div className="flex flex-col rounded-2xl bg-white shadow-[0_0_0_1px_var(--c-ececea)]">
       <span className="px-4 pb-1 pt-[11px] text-[13px] font-semibold leading-4">{title}</span>
       {children}
     </div>
@@ -856,7 +857,7 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
 function inline(text: string): ReactNode[] {
   return text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((part, i) =>
     part.startsWith("`") && part.endsWith("`") && part.length > 1 ? (
-      <code key={i} className="rounded bg-[#F2F2F0] px-1 font-mono text-[11.5px]">
+      <code key={i} className="rounded bg-[color:var(--c-f2f2f0)] px-1 font-mono text-[11.5px]">
         {part.slice(1, -1)}
       </code>
     ) : part.startsWith("**") && part.endsWith("**") && part.length > 3 ? (
@@ -882,7 +883,7 @@ export function SkillMarkdown({ text }: { text: string }) {
       while (i < lines.length && !lines[i].trim().startsWith(fence)) code.push(lines[i++]);
       i++;
       out.push(
-        <pre key={key++} className="overflow-x-auto rounded-[10px] bg-[#F7F7F6] px-3 py-2 font-mono text-[11.5px] leading-4 text-[#3A3A38]">
+        <pre key={key++} className="overflow-x-auto rounded-[10px] bg-[color:var(--c-f7f7f6)] px-3 py-2 font-mono text-[11.5px] leading-4 text-[color:var(--c-3a3a38)]">
           {code.join("\n")}
         </pre>,
       );
@@ -925,7 +926,7 @@ export function SkillMarkdown({ text }: { text: string }) {
       </p>,
     );
   }
-  return <div className="flex flex-col gap-2 text-[13px] leading-[19px] text-[#3A3A38]">{out}</div>;
+  return <div className="flex flex-col gap-2 text-[13px] leading-[19px] text-[color:var(--c-3a3a38)]">{out}</div>;
 }
 
 /** Suggest labels with AI: whether a small model picks a label for a new skill (on unless the owner turned it off). */
@@ -942,12 +943,12 @@ function SuggestToggle({ ws, on }: { ws: string; on: boolean }) {
   return (
     <div className="flex flex-col gap-1">
       <button type="button" role="switch" aria-checked={on} disabled={busy} data-label-suggest onClick={() => void flip()} className="flex items-center gap-2.5 self-start text-left disabled:opacity-50">
-        <span className={`flex h-[18px] w-[30px] shrink-0 items-center rounded-full p-0.5 transition-colors ${on ? "bg-ink" : "bg-[#D6D6D3]"}`}>
+        <span className={`flex h-[18px] w-[30px] shrink-0 items-center rounded-full p-0.5 transition-colors ${on ? "bg-ink" : "bg-[color:var(--c-d6d6d3)]"}`}>
           <span className={`size-[14px] rounded-full bg-white transition-transform ${on ? "translate-x-[12px]" : ""}`} />
         </span>
         <span className="flex flex-col gap-0.5">
           <span className="text-[13px] font-medium leading-4">Suggest labels with AI</span>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">A small model picks a label for a new skill. You confirm or change it.</span>
+          <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">A small model picks a label for a new skill. You confirm or change it.</span>
         </span>
       </button>
       {error && (
@@ -961,7 +962,7 @@ function SuggestToggle({ ws, on }: { ws: string; on: boolean }) {
 
 /* ---------------- Who has what ---------------- */
 
-const CELL = "flex size-[18px] items-center justify-center rounded-[5px] outline-none focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50";
+const CELL = "flex size-[18px] items-center justify-center rounded-[5px] outline-none focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] disabled:opacity-50";
 
 /**
  * Who has what: the workspace's labels (rows, each with how many skills) by its bots (columns), a tick where a bot
@@ -989,18 +990,18 @@ function WhoHasWhat({ ws, team, refs, info, onOpen }: { ws: string; team: Bot[];
     <section data-who-has-what className="flex flex-col gap-2">
       <span className="flex flex-col gap-0.5">
         <span className="text-[13px] font-semibold leading-4">Who has what</span>
-        <span className="text-[12px] leading-4 text-[#6B6B6B]">A tick gives that bot every skill in the label, new ones too. A skill that names its own bots goes by them.</span>
+        <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">A tick gives that bot every skill in the label, new ones too. A skill that names its own bots goes by them.</span>
       </span>
-      <div className="overflow-x-auto rounded-2xl border border-[#ECECEA] bg-white">
+      <div className="overflow-x-auto rounded-2xl border border-[color:var(--c-ececea)] bg-white">
         <table className="w-full border-collapse text-left">
           <thead>
             <tr className="border-b border-black/[0.05]">
-              <th className="px-3.5 py-2 text-[12px] font-medium leading-4 text-[#6B6B6B]">Label</th>
+              <th className="px-3.5 py-2 text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Label</th>
               {team.map((b) => (
                 <th key={b.id} scope="col" className="px-1.5 py-2 text-center">
                   <span className="flex flex-col items-center gap-0.5" title={b.name}>
                     <Mascot botId={b.id} color={b.color} size={18} antenna={false} />
-                    <span className="max-w-[64px] truncate text-[11px] font-medium leading-3 text-[#3A3A38]">{b.name}</span>
+                    <span className="max-w-[64px] truncate text-[11px] font-medium leading-3 text-[color:var(--c-3a3a38)]">{b.name}</span>
                   </span>
                 </th>
               ))}
@@ -1022,11 +1023,11 @@ function WhoHasWhat({ ws, team, refs, info, onOpen }: { ws: string; team: Bot[];
                         title={labelInfoOf(info, label)?.about || undefined}
                         className="flex items-center gap-1.5 text-[13px] font-medium leading-4 text-ink"
                       >
-                        <span className="text-[#9A9A98]">
+                        <span className="text-[color:var(--c-9a9a98)]">
                           <Chevron open={rowOpen} />
                         </span>
                         <span className="max-w-[180px] truncate">{label}</span>
-                        <span className="font-normal tabular-nums text-[#9A9A98]">{inIt.length}</span>
+                        <span className="font-normal tabular-nums text-[color:var(--c-9a9a98)]">{inIt.length}</span>
                       </button>
                     </td>
                     {team.map((b) => {
@@ -1041,7 +1042,7 @@ function WhoHasWhat({ ws, team, refs, info, onOpen }: { ws: string; team: Bot[];
                               aria-label={`${b.name} has ${label}`}
                               disabled={!!busy}
                               onClick={() => void run(`cell:${b.id}:${label}`, { action: "bot-label", botId: b.id, label, on: !on })}
-                              className={`${CELL} ${on ? "bg-ink text-white" : "bg-white shadow-[0_0_0_1px_#D6D6D3] hover:bg-[#FCFCFB]"}`}
+                              className={`${CELL} ${on ? "bg-ink text-white" : "bg-white shadow-[0_0_0_1px_var(--c-d6d6d3)] hover:bg-[color:var(--c-fcfcfb)]"}`}
                             >
                               {busy === `cell:${b.id}:${label}` ? (
                                 <Spinner size={9} color={on ? "#FFFFFF" : "#6B6B6B"} />
@@ -1058,13 +1059,13 @@ function WhoHasWhat({ ws, team, refs, info, onOpen }: { ws: string; team: Bot[];
                       );
                     })}
                     <td className="px-2 py-2 text-right">
-                      <button type="button" onClick={() => setEditing(editing === label ? null : label)} className="text-[12px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+                      <button type="button" onClick={() => setEditing(editing === label ? null : label)} className="text-[12px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
                         Edit
                       </button>
                     </td>
                   </tr>
                   {editing === label && (
-                    <tr className="border-b border-black/[0.05] bg-[#FCFCFB]">
+                    <tr className="border-b border-black/[0.05] bg-[color:var(--c-fcfcfb)]">
                       <td colSpan={team.length + 2} className="px-3.5 py-2.5">
                         <LabelEditor
                           label={label}
@@ -1095,7 +1096,7 @@ function WhoHasWhat({ ws, team, refs, info, onOpen }: { ws: string; team: Bot[];
                                 </button>
                                 {r.status === "draft" && <span className={DRAFT}>Draft</span>}
                                 {r.botIds.length > 0 ? (
-                                  <span className="flex flex-wrap items-center gap-1 text-[11.5px] leading-4 text-[#6B6B6B]">
+                                  <span className="flex flex-wrap items-center gap-1 text-[11.5px] leading-4 text-[color:var(--c-6b6b6b)]">
                                     Only
                                     {r.botIds.map((id) => (
                                       <span key={id} className={CHIP}>
@@ -1108,7 +1109,7 @@ function WhoHasWhat({ ws, team, refs, info, onOpen }: { ws: string; team: Bot[];
                             ))}
                           </ul>
                         ) : (
-                          <span className="text-[12px] leading-4 text-[#9A9A98]">No skills in it yet.</span>
+                          <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">No skills in it yet.</span>
                         )}
                       </td>
                     </tr>
@@ -1132,7 +1133,7 @@ function WhoHasWhat({ ws, team, refs, info, onOpen }: { ws: string; team: Bot[];
 function LabelEditor({ label, about, busy, onSave, onCancel }: { label: string; about: string; busy: boolean; onSave: (name: string, about: string) => Promise<void>; onCancel: () => void }) {
   const [name, setName] = useState(label);
   const [line, setLine] = useState(about);
-  const field = "min-w-0 rounded-lg bg-white px-2 py-1.5 text-[13px] leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] outline-none placeholder:text-[#9A9A98] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]";
+  const field = "min-w-0 rounded-lg bg-white px-2 py-1.5 text-[13px] leading-4 text-ink shadow-[0_0_0_1px_var(--c-e2e2df)] outline-none placeholder:text-[color:var(--c-9a9a98)] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]";
   return (
     <form
       onSubmit={(e) => {
@@ -1147,10 +1148,10 @@ function LabelEditor({ label, about, busy, onSave, onCancel }: { label: string; 
         <button type="submit" disabled={busy || !name.trim()} className={`${PILL} bg-ink text-white`}>
           Save
         </button>
-        <button type="button" onClick={onCancel} className={`${PILL} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
+        <button type="button" onClick={onCancel} className={`${PILL} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`}>
           Cancel
         </button>
-        <span className="text-[11.5px] leading-4 text-[#9A9A98]">A new name moves every skill in it.</span>
+        <span className="text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">A new name moves every skill in it.</span>
       </span>
     </form>
   );

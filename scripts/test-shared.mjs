@@ -1563,7 +1563,7 @@ await check("an @orgo.ai owner's app work never reaches the window of anyone the
 
 await check("the People sheet says what members see: the bots the owner picks, never the saved logins or keys", () => {
   const src = readFileSync(`${root}/components/app/members.tsx`, "utf8");
-  assert.match(src, /In Bops they see everything of the bots you pick, your chats with them too\./);
+  assert.match(src, /In \{BRAND\.name\} they see everything of the bots you pick, your chats with them too\./);
   assert.ok(!/They see everything in the workspace/.test(src));
   assert.match(src, /"Never your saved logins\." : "Never your saved logins or keys\."/, "the keys only while Bops put none of its own on the computers");
   assert.ok(!/never this Mac, your chats/.test(src));

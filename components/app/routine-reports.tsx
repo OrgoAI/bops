@@ -148,18 +148,18 @@ export function ReportsSheet({
     // Clicking anywhere outside the sheet closes it, as the × does (a thread's sheet, chat-view.tsx).
     <div ref={box} role="dialog" aria-label={`Reports for ${title}`} onClick={onClose} className="motion-fade-in absolute inset-0 z-20 flex flex-col bg-white/70 px-3 pb-3 pt-3 backdrop-blur-[2px]">
       <div onClick={(e) => e.stopPropagation()} className="motion-sheet-in flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000038]">
-        <div className="flex items-center gap-2.5 border-b border-[#F0F0EE] py-3.5 pl-4 pr-3.5">
-          {bot ? <Mascot botId={bot.id} color={bot.color} size={32} /> : <span className="size-8 shrink-0 rounded-full bg-[#ECECEA]" />}
+        <div className="flex items-center gap-2.5 border-b border-[color:var(--c-f0f0ee)] py-3.5 pl-4 pr-3.5">
+          {bot ? <Mascot botId={bot.id} color={bot.color} size={32} /> : <span className="size-8 shrink-0 rounded-full bg-[color:var(--c-ececea)]" />}
           <div className="flex min-w-0 flex-1 flex-col gap-px">
             <span ref={heading} tabIndex={-1} className="truncate text-[15px] font-semibold leading-[18px] outline-none">
               {title}
             </span>
-            <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">
+            <span className="truncate text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
               Reports · {bot ? `${bot.name} · ` : ""}
               {describeSchedule(r.schedule, zone)}
             </span>
           </div>
-          <button onClick={onClose} aria-label="Close reports" className="flex size-[34px] shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] outline-none hover:bg-[#F7F7F6] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]">
+          <button onClick={onClose} aria-label="Close reports" className="flex size-[34px] shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_var(--c-e6e6e3)] outline-none hover:bg-[color:var(--c-f7f7f6)] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]">
             <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
               <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
             </svg>
@@ -168,12 +168,12 @@ export function ReportsSheet({
 
         <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-4 pt-3">
           {note && (
-            <span data-reports-note className="px-1.5 text-[12.5px] leading-[17px] text-[#6B6B6B]">
+            <span data-reports-note className="px-1.5 text-[12.5px] leading-[17px] text-[color:var(--c-6b6b6b)]">
               {note}
             </span>
           )}
           {!reports.length && !loading ? (
-            <span data-reports-empty className="px-1.5 py-6 text-center text-[13.5px] leading-5 text-[#9A9A98]">
+            <span data-reports-empty className="px-1.5 py-6 text-center text-[13.5px] leading-5 text-[color:var(--c-9a9a98)]">
               No runs yet
             </span>
           ) : (
@@ -197,7 +197,7 @@ export function ReportsSheet({
           )}
           {loading && (
             // As tall as a run's line, where the earlier runs come in.
-            <span data-reports-loading className="flex h-[52px] shrink-0 items-center gap-2 px-3.5 text-[12.5px] leading-4 text-[#9A9A98]">
+            <span data-reports-loading className="flex h-[52px] shrink-0 items-center gap-2 px-3.5 text-[12.5px] leading-4 text-[color:var(--c-9a9a98)]">
               <Spinner size={12} color="#9A9A98" />
               Loading earlier runs
             </span>
@@ -240,26 +240,26 @@ function ReportRow({
   const kept = !said.length && x.status === "ok" ? (x.summary ?? x.thread?.answer) : undefined;
   const preview = said.length ? firstLine(said[0].text) : kept ? firstLine(kept) : x.status === "failed" && x.error ? undash(x.error) : "";
   return (
-    <li data-report={x.key} className={`flex flex-col ${last ? "" : "border-b border-[#F0F0EE]"}`}>
+    <li data-report={x.key} className={`flex flex-col ${last ? "" : "border-b border-[color:var(--c-f0f0ee)]"}`}>
       <button
         data-report-head
         onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full min-w-0 items-start gap-3 rounded-xl py-3 pl-2 pr-2.5 text-left outline-none focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]"
+        className="flex w-full min-w-0 items-start gap-3 rounded-xl py-3 pl-2 pr-2.5 text-left outline-none focus-visible:shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)]"
       >
         <span className="relative flex shrink-0 pt-px">
-          {bot ? <Mascot botId={bot.id} color={bot.color} size={24} antenna={false} /> : <span className="size-6 rounded-full bg-[#ECECEA]" />}
+          {bot ? <Mascot botId={bot.id} color={bot.color} size={24} antenna={false} /> : <span className="size-6 rounded-full bg-[color:var(--c-ececea)]" />}
           <StatusMark status={x.status} />
         </span>
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="text-[13.5px] font-medium leading-[18px] text-ink">{ranWhen(x.at, now, tz)}</span>
-          <span className={`text-[12px] leading-4 ${x.status === "failed" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
+          <span className={`text-[12px] leading-4 ${x.status === "failed" ? "text-[#B42318]" : "text-[color:var(--c-6b6b6b)]"}`}>
             {words}
             {took ? ` · took ${took}` : ""}
           </span>
-          {!open && preview && <span className="truncate text-[12.5px] leading-[17px] text-[#9A9A98]">{preview}</span>}
+          {!open && preview && <span className="truncate text-[12.5px] leading-[17px] text-[color:var(--c-9a9a98)]">{preview}</span>}
         </span>
-        <span className="pt-[3px] text-[#B0B0AD]">
+        <span className="pt-[3px] text-[color:var(--c-b0b0ad)]">
           <Chevron open={open} />
         </span>
       </button>
@@ -288,7 +288,7 @@ function ReportRow({
           {x.thread && onOpenThread && (
             <button
               onClick={() => onOpenThread(x.thread!)}
-              className="self-start text-[12.5px] font-medium leading-4 text-ink underline decoration-[#C9C9C6] underline-offset-2 outline-none hover:decoration-ink focus-visible:decoration-ink"
+              className="self-start text-[12.5px] font-medium leading-4 text-ink underline decoration-[color:var(--c-c9c9c6)] underline-offset-2 outline-none hover:decoration-ink focus-visible:decoration-ink"
             >
               Open its thread
             </button>
@@ -300,7 +300,7 @@ function ReportRow({
 }
 
 function Plain({ children }: { children: React.ReactNode }) {
-  return <span className="text-[13px] leading-[19px] text-[#6B6B6B] [overflow-wrap:anywhere]">{children}</span>;
+  return <span className="text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)] [overflow-wrap:anywhere]">{children}</span>;
 }
 
 /** What a run said, as the chat shows a bot's words: in full, cut with Show all when taller than CUT_PX; then the replies it wrote to send, as in the chat. */
@@ -325,14 +325,14 @@ function Said({ message, state, text = message?.text ?? "", botId = message?.bot
   const cut = long && !all;
   return (
     <div className="flex flex-col gap-1">
-      {caption && <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">{caption}</span>}
+      {caption && <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-9a9a98)]">{caption}</span>}
       <div
         ref={bubble}
         data-said
-        className={`relative whitespace-pre-wrap rounded-[18px] bg-[#F2F2F0] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${cut ? "max-h-[220px] overflow-hidden" : ""}`}
+        className={`relative whitespace-pre-wrap rounded-[18px] bg-[color:var(--c-f2f2f0)] px-3.5 py-2 text-[14px] leading-5 [overflow-wrap:anywhere] ${cut ? "max-h-[220px] overflow-hidden" : ""}`}
       >
         <Rich text={text} botId={botId} />
-        {cut && <span aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-10 rounded-b-[18px] bg-gradient-to-t from-[#F2F2F0] to-[#F2F2F0]/0" />}
+        {cut && <span aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-10 rounded-b-[18px] bg-gradient-to-t from-[color:var(--c-f2f2f0)] to-[color:var(--c-f2f2f0)]/0" />}
       </div>
       {long && (
         <button

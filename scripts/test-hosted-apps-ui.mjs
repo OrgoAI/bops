@@ -404,7 +404,7 @@ await test("the tab's address, then its domains: each with how it's doing, Check
   assert.ok(mine.includes(">Waiting for its DNS<") && !mine.includes("<a "), "and isn't a link yet");
   assert.ok(mine.includes(">DNS at Cloudflare<") && !apex.includes("DNS at"), "who keeps its DNS, on its line");
   const outside = between(mine, "data-outside-dns", "data-zone=");
-  assert.match(mine, /data-publish="recipes\.example\.com" data-outside-dns="true" class="[^"]*bg-\[#F6F6F4\]/, "its DNS greyed out under it");
+  assert.match(mine, /data-publish="recipes\.example\.com" data-outside-dns="true" class="[^"]*bg-\[color:var\(--c-f6f6f4\)\]/, "its DNS greyed out under it");
   assert.ok(text(outside).includes("Orgo can't set these. Add them at Cloudflare, then Verify."), "the records to set, where its DNS is kept");
   assert.ok(!apex.includes("data-outside-dns"), "not on one bought through Orgo");
   assert.ok(mine.includes(">_orgo-verify.recipes<") && mine.includes(">tok-mine<") && mine.includes(">Found<"));
@@ -1614,7 +1614,7 @@ await test("Add a site, clicked: its name as its address takes it (as typed), Ad
     await click(m.box.querySelector("[data-remove-app]"));
     assert.ok(m.box.textContent.includes("Remove suite? Its 2 sites and their domains come off the web, and it leaves this workspace."), "asked once more, of the sites on the web (suite-till never was)");
     const tick0 = m.box.querySelector('input[type="checkbox"]');
-    assert.equal(tick0.getAttribute("class"), "size-3.5 accent-[#0A0A0A]", "as every checkbox here");
+    assert.equal(tick0.getAttribute("class"), "size-3.5 accent-[color:var(--c-0a0a0a)]", "as every checkbox here");
     const tick = m.box.querySelector('input[type="checkbox"]');
     assert.equal(tick.checked, false, "its code kept, to start");
     assert.ok(m.box.textContent.includes("Delete its code in Ingot too, with all its history. This can't be undone."));

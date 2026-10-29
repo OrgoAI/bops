@@ -138,6 +138,86 @@
   --color-highlighter: #e9ff3b;
 }
 
+/*
+ * The palette's neutrals as tokens (the app's classes read them: bg-[color:var(--c-f2f2f0)]), named for
+ * Bops' own color so Bops looks exactly as before; a brand gives each its own below.
+ */
+:root {
+  --c-0a0a0a: #0a0a0a;
+  --c-2a2a28: #2a2a28;
+  --c-3a3a38: #3a3a38;
+  --c-3a3a3a: #3a3a3a;
+  --c-6b6b6b: #6b6b6b;
+  --c-8a8a88: #8a8a88;
+  --c-9a9a98: #9a9a98;
+  --c-b0b0ad: #b0b0ad;
+  --c-b5b5b2: #b5b5b2;
+  --c-c9c9c6: #c9c9c6;
+  --c-d9d9d6: #d9d9d6;
+  --c-e2e2df: #e2e2df;
+  --c-e6e6e3: #e6e6e3;
+  --c-eaeae7: #eaeae7;
+  --c-ececea: #ececea;
+  --c-f0f0ee: #f0f0ee;
+  --c-eeeeec: #eeeeec;
+  --c-f2f2f0: #f2f2f0;
+  --c-f4f4f2: #f4f4f2;
+  --c-f6f6f4: #f6f6f4;
+  --c-f7f7f6: #f7f7f6;
+  --c-f9f9f8: #f9f9f8;
+  --c-fcfcfb: #fcfcfb;
+  --c-fbffe0: #fbffe0;
+  --c-fdffe6: #fdffe6;
+  --c-fbffd9: #fbffd9;
+  --c-fdfff6: #fdfff6;
+  --c-e6f57a: #e6f57a;
+}
+
+/*
+ * Momentum AMP's build (lib/brand.ts, momentumamp.com): deep indigo where Bops has ink, a light brand
+ * violet where Bops has the highlighter (still the color of "needs you", dark text on it as before),
+ * a lavender desk, and Poppins throughout. The brand's own violet (#A200FF) is the accent below.
+ */
+html[data-brand="momentum"] {
+  --color-ink: #381574;
+  --color-paper: #ffffff;
+  --color-desk: #f6f1f9;
+  --color-pencil: #5f5a70;
+  --color-rule: #e7e1ee;
+  --color-highlighter: #d2a1ff;
+  --color-brand: #a200ff;
+  --font-geist-sans: var(--font-brand);
+  /* Its neutrals: indigo ink, violet-gray text, lavender lines and surfaces, a soft violet for the highlighter's washes. */
+  --c-0a0a0a: #381574;
+  --c-2a2a28: #2e1a55;
+  --c-3a3a38: #453565;
+  --c-3a3a3a: #453565;
+  --c-6b6b6b: #6a5f85;
+  --c-8a8a88: #8b80a3;
+  --c-9a9a98: #9d93b5;
+  --c-b0b0ad: #b7aecb;
+  --c-b5b5b2: #bbb2cf;
+  --c-c9c9c6: #cec3e0;
+  --c-d9d9d6: #ddd3ec;
+  --c-e2e2df: #e3d9f0;
+  --c-e6e6e3: #e7def3;
+  --c-eaeae7: #ebe3f5;
+  --c-ececea: #ede6f6;
+  --c-f0f0ee: #f1ebf8;
+  --c-eeeeec: #efe6f8;
+  --c-f2f2f0: #f3ecfa;
+  --c-f4f4f2: #f5effb;
+  --c-f6f6f4: #f7f2fc;
+  --c-f7f7f6: #f8f3fc;
+  --c-f9f9f8: #faf6fd;
+  --c-fcfcfb: #fdfafe;
+  --c-fbffe0: #f6ecff;
+  --c-fdffe6: #f8f0ff;
+  --c-fbffd9: #f3e6ff;
+  --c-fdfff6: #fbf6ff;
+  --c-e6f57a: #d9b3ff;
+}
+
 @keyframes drift {
   0%, 100% { transform: translate(0, 0); }
   30% { transform: translate(-38px, -46px); }

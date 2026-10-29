@@ -7,6 +7,7 @@ import { useMacApp } from "./mac-screens";
 import { RestartConfirm, useCanRestart } from "./restart";
 import { post } from "./ui";
 import { UpdateSettings } from "./update-notice";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Everything Bops needs on this Mac, in one place (Setup). It never stands in the way: signing in goes
@@ -172,10 +173,10 @@ type Items = ReturnType<typeof useSetupItems>;
 /* ---------------- The cards ---------------- */
 
 type Tone = "ok" | "todo" | "off" | "none";
-const DOT: Record<Tone, string> = { ok: "bg-[#2BB673]", todo: "bg-[#E59A0B]", off: "bg-[#C9C9C6]", none: "bg-[#C9C9C6]" };
+const DOT: Record<Tone, string> = { ok: "bg-[#2BB673]", todo: "bg-[#E59A0B]", off: "bg-[color:var(--c-c9c9c6)]", none: "bg-[color:var(--c-c9c9c6)]" };
 const pill = "shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-50";
 const dark = `${pill} bg-ink text-white`;
-const light = `${pill} bg-[#F2F2F0] hover:bg-[#EAEAE7]`;
+const light = `${pill} bg-[color:var(--c-f2f2f0)] hover:bg-[color:var(--c-eaeae7)]`;
 
 /** One thing to set up: what it is, where it stands, its buttons (`children`), and anything that goes under it (`below`, lined up with the title). */
 function Card({
@@ -198,16 +199,16 @@ function Card({
   below?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col rounded-[14px] bg-white p-3.5 shadow-[0_0_0_1px_#E6E6E3]">
+    <div className="flex flex-col rounded-[14px] bg-white p-3.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
       <div className="flex items-center gap-3">
-        <span className={`flex size-9 shrink-0 items-center justify-center rounded-[11px] ${tone === "ok" ? "bg-ink text-highlighter" : "bg-[#F2F2F0] text-ink"}`}>{icon}</span>
+        <span className={`flex size-9 shrink-0 items-center justify-center rounded-[11px] ${tone === "ok" ? "bg-ink text-highlighter" : "bg-[color:var(--c-f2f2f0)] text-ink"}`}>{icon}</span>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex items-center gap-1.5">
             <span className="text-[13.5px] font-semibold leading-[18px]">{title}</span>
-            {chip && <span className="rounded-full bg-[#F2F2F0] px-2 py-px text-[11px] font-medium leading-4 text-[#3A3A38]">{chip}</span>}
+            {chip && <span className="rounded-full bg-[color:var(--c-f2f2f0)] px-2 py-px text-[11px] font-medium leading-4 text-[color:var(--c-3a3a38)]">{chip}</span>}
           </span>
           <span className="text-[12px] leading-4 text-pencil">{line}</span>
-          <span className="flex items-center gap-1.5 pt-0.5 text-[12px] leading-4 text-[#3A3A38]">
+          <span className="flex items-center gap-1.5 pt-0.5 text-[12px] leading-4 text-[color:var(--c-3a3a38)]">
             <span className={`size-[7px] shrink-0 rounded-full ${DOT[tone]}`} />
             {status}
           </span>
@@ -254,7 +255,7 @@ const ICONS = {
 };
 
 const COPY: Record<"screen" | "microphone" | "notifications", { title: string; line: string }> = {
-  screen: { title: "Screen recording", line: "See your Mac live in Bops, and watch bots work on it." },
+  screen: { title: "Screen recording", line: `See your Mac live in ${BRAND.name}, and watch bots work on it.` },
   microphone: { title: "Microphone", line: "Talk to your bots on a call." },
   notifications: { title: "Notifications", line: "Hear from bots when something needs you." },
 };
@@ -265,14 +266,14 @@ function PermissionCard({ id, items }: { id: "screen" | "microphone" | "notifica
   const s = perms.status?.[id];
   const copy = COPY[id];
   if (!perms.inApp)
-    return <Card icon={ICONS[id]} title={copy.title} line={copy.line} tone="none" status="Needs the Bops app for Mac" />;
+    return <Card icon={ICONS[id]} title={copy.title} line={copy.line} tone="none" status={`Needs the ${BRAND.name} app for Mac`} />;
   if (!s) return <Card icon={ICONS[id]} title={copy.title} line={copy.line} tone="none" status="Checking" />;
   // Screen Recording turned on while Bops was open: macOS applies it on the next launch.
   const restart = id === "screen" && (perms.restart || (s !== "granted" && sentToSettings.has("screen")));
   const status =
     s === "granted"
       ? id === "screen" && perms.restart
-        ? "Allowed. Restart Bops to use it"
+        ? `Allowed. Restart ${BRAND.name} to use it`
         : "Allowed"
       : s === "restricted"
         ? id === "notifications"
@@ -280,7 +281,7 @@ function PermissionCard({ id, items }: { id: "screen" | "microphone" | "notifica
           : "Blocked by your Mac's settings or admin"
         : s === "denied"
           ? restart
-            ? "Turn on Bops in System Settings, then restart Bops"
+            ? `Turn on ${BRAND.name} in System Settings, then restart ${BRAND.name}`
             : "Off. Turn it on in System Settings"
           : id === "notifications" && s === "unknown"
             ? "Asked. Check System Settings if none showed"
@@ -290,7 +291,7 @@ function PermissionCard({ id, items }: { id: "screen" | "microphone" | "notifica
     <Card icon={ICONS[id]} title={copy.title} line={copy.line} tone={tone} status={status}>
       {restart && (
         <button onClick={() => setRestarting(true)} className={s === "granted" ? dark : light}>
-          Restart Bops
+          Restart {BRAND.name}
         </button>
       )}
       {restarting && <RestartConfirm onClose={() => setRestarting(false)} />}
@@ -376,11 +377,11 @@ export function Setup({ state, onClose }: { state: AppState; onClose: () => void
       >
         <div className="flex flex-col items-center gap-1.5 pb-5 text-center">
           <Mascot botId="boppy" color="#0A0A0A" size={48} />
-          <span className="pt-3 text-[20px] font-semibold leading-6 tracking-[-0.01em]">Set up Bops on this Mac</span>
+          <span className="pt-3 text-[20px] font-semibold leading-6 tracking-[-0.01em]">Set up {BRAND.name} on this Mac</span>
           <span className="max-w-[380px] text-[13.5px] leading-[19px] text-pencil">
             {items.perms.inApp
               ? "A few things your bots need. Allow what you want now; you can change any of it later in Settings."
-              : "Screen, microphone and notifications need the Bops app for Mac. You can set up the rest here."}
+              : `Screen, microphone and notifications need the ${BRAND.name} app for Mac. You can set up the rest here.`}
           </span>
         </div>
         <div className="flex flex-col gap-2">
@@ -406,7 +407,7 @@ export function Setup({ state, onClose }: { state: AppState; onClose: () => void
             onClick={() => void finish()}
             className={
               askable
-                ? "flex h-10 w-full items-center justify-center rounded-full text-[13.5px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB] disabled:opacity-50"
+                ? "flex h-10 w-full items-center justify-center rounded-full text-[13.5px] font-medium shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-fcfcfb)] disabled:opacity-50"
                 : "flex h-10 w-full items-center justify-center gap-2 rounded-full bg-ink text-[13.5px] font-medium text-white disabled:opacity-50"
             }
           >
@@ -417,7 +418,7 @@ export function Setup({ state, onClose }: { state: AppState; onClose: () => void
             <span className="text-center text-[12px] leading-4 text-pencil">
               Something not working?{" "}
               <button onClick={() => setRestart(true)} className="underline underline-offset-2 hover:text-ink">
-                Restart Bops
+                Restart {BRAND.name}
               </button>
             </span>
           )}
@@ -503,7 +504,7 @@ function FullAccessSetup({ items }: { items: Items }) {
       {row(
         disk,
         "Your files",
-        disk ? "Bops has Full Disk Access." : "Give Bops Full Disk Access in System Settings, then come back.",
+        disk ? `${BRAND.name} has Full Disk Access.` : `Give ${BRAND.name} Full Disk Access in System Settings, then come back.`,
         !disk && (
           <button onClick={() => void items.openSettings("fullDisk")} className={dark}>
             Open Settings
@@ -545,7 +546,7 @@ function FullAccessCard({ items }: { items: Items }) {
       icon={ICONS.fullAccess}
       title="Full access for bots"
       chip={on ? "On" : undefined}
-      line="Bots' tasks on this Mac get a shell, your files and your apps, outside Bops' sandbox. Anything you could do here, they can."
+      line={`Bots' tasks on this Mac get a shell, your files and your apps, outside ${BRAND.name}' sandbox. Anything you could do here, they can.`}
       tone={on ? (set || !items.perms.inApp ? "ok" : "todo") : "off"}
       status={on ? (set || !items.perms.inApp ? "Bots can use your files and apps" : "Two steps left, so macOS never stops a bot mid-task") : "Off: bots on this Mac only browse, in a Chrome of their own"}
       below={on && items.perms.inApp ? <FullAccessSetup items={items} /> : undefined}

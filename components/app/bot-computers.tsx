@@ -62,21 +62,21 @@ export function BotComputersList({ state, keys, padded }: { state: AppState; key
         const line = own ? keyLine(key, state.runners?.[own]) : null;
         const identity = !!own && state.runners?.[own]?.status === "running" && state.runners[own].auth === "identity";
         return (
-          <div key={b.id} className="flex items-center border-b border-[#F0F0EE] py-2.5 last:border-0">
+          <div key={b.id} className="flex items-center border-b border-[color:var(--c-f0f0ee)] py-2.5 last:border-0">
             <span className="flex w-[200px] items-center gap-2">
               <Mascot botId={b.id} color={b.color} size={20} />
               <span className="text-[13.5px] font-medium">{b.name}</span>
             </span>
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="flex items-center gap-1.5 text-[12.5px] text-[#3A3A38]">
+              <span className="flex items-center gap-1.5 text-[12.5px] text-[color:var(--c-3a3a38)]">
                 <span
-                  className={`size-[7px] rounded-full ${onThisMac(state) || workBot(b, state.bots).computerStatus === "ready" ? "bg-[#2BB673]" : workBot(b, state.bots).computerStatus === "cloning" ? "bg-[#E59A0B]" : "bg-[#C9C9C6]"}`}
+                  className={`size-[7px] rounded-full ${onThisMac(state) || workBot(b, state.bots).computerStatus === "ready" ? "bg-[#2BB673]" : workBot(b, state.bots).computerStatus === "cloning" ? "bg-[#E59A0B]" : "bg-[color:var(--c-c9c9c6)]"}`}
                 />
                 {computerNow(state, b)}
               </span>
-              {identity && <span className="min-w-0 truncate pl-[13px] text-[12px] leading-4 text-[#6B6B6B]">{IDENTITY_LINE}</span>}
+              {identity && <span className="min-w-0 truncate pl-[13px] text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{IDENTITY_LINE}</span>}
               {line && (
-                <span className="flex min-w-0 items-center gap-2 pl-[13px] text-[12px] leading-4 text-[#6B6B6B]">
+                <span className="flex min-w-0 items-center gap-2 pl-[13px] text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
                   <span className="min-w-0 truncate" data-tip={key?.name || undefined}>
                     {line}
                   </span>

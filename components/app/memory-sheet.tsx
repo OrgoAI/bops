@@ -66,20 +66,20 @@ export function MemorySheet({ state, onClose }: { state: AppState; onClose: () =
         onClick={(e) => e.stopPropagation()}
         className="motion-dialog-in relative flex max-h-full w-full max-w-[560px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]"
       >
-        <button onClick={onClose} aria-label="Close" className="absolute right-3 top-3 z-10 flex size-8 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0]">
+        <button onClick={onClose} aria-label="Close" className="absolute right-3 top-3 z-10 flex size-8 items-center justify-center rounded-full text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-f2f2f0)]">
           <svg width="11" height="11" viewBox="0 0 12 12">
             <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </svg>
         </button>
         <div className="px-6 pb-3 pt-5">
           <div className="text-[18px] font-semibold leading-6 tracking-[-0.01em]">Memory</div>
-          <div className="pt-0.5 text-[13px] leading-5 text-[#6B6B6B]">What {here?.name ?? "this workspace"}&rsquo;s bots know about you. They add to it as you talk.</div>
+          <div className="pt-0.5 text-[13px] leading-5 text-[color:var(--c-6b6b6b)]">What {here?.name ?? "this workspace"}&rsquo;s bots know about you. They add to it as you talk.</div>
         </div>
         <div className="flex min-h-0 flex-col gap-5 overflow-y-auto px-6 pb-6">
           {!info ? (
-            <div className="py-6 text-center text-[13px] text-[#9A9A98]">Loading…</div>
+            <div className="py-6 text-center text-[13px] text-[color:var(--c-9a9a98)]">Loading…</div>
           ) : !info.on ? (
-            <div className="py-6 text-center text-[13px] text-[#9A9A98]">Memory isn&rsquo;t on yet.</div>
+            <div className="py-6 text-center text-[13px] text-[color:var(--c-9a9a98)]">Memory isn&rsquo;t on yet.</div>
           ) : (
             <>
               <Source ws={ws} info={info} others={others} onChange={reload} />
@@ -94,9 +94,9 @@ export function MemorySheet({ state, onClose }: { state: AppState; onClose: () =
   );
 }
 
-const SECTION = "text-[12px] font-medium uppercase tracking-[0.04em] text-[#9A9A98]";
-const BUTTON = "h-8 shrink-0 rounded-full bg-[#0A0A0A] px-3.5 text-[13px] font-medium text-white hover:bg-[#2A2A2A] disabled:opacity-40";
-const QUIET = "h-8 shrink-0 rounded-full bg-white px-3.5 text-[13px] font-medium shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6] disabled:opacity-40";
+const SECTION = "text-[12px] font-medium uppercase tracking-[0.04em] text-[color:var(--c-9a9a98)]";
+const BUTTON = "h-8 shrink-0 rounded-full bg-[color:var(--c-0a0a0a)] px-3.5 text-[13px] font-medium text-white hover:bg-[#2A2A2A] disabled:opacity-40";
+const QUIET = "h-8 shrink-0 rounded-full bg-white px-3.5 text-[13px] font-medium shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)] disabled:opacity-40";
 
 /** Its own memory, or another workspace's (both read and add to the same one). */
 function Source({ ws, info, others, onChange }: { ws: string; info: Info; others: { id: string; name: string }[]; onChange: () => void }) {
@@ -112,7 +112,7 @@ function Source({ ws, info, others, onChange }: { ws: string; info: Info; others
   return (
     <section className="flex flex-col gap-2">
       <div className={SECTION}>Where it lives</div>
-      <div className="flex flex-col gap-1 rounded-[14px] bg-[#F7F7F6] p-1">
+      <div className="flex flex-col gap-1 rounded-[14px] bg-[color:var(--c-f7f7f6)] p-1">
         <Choice on={info.own} disabled={busy} onClick={() => !info.own && set(null)} title="Its own memory" detail={info.own && info.sharedWith.length ? `Also used by ${info.sharedWith.map((s) => s.name).join(", ")}` : info.bank.startsWith("bops-") ? "Starts empty, learns as you go" : `Your ${info.bank} memory, shared with your other agents`} />
         {others.map((o) => (
           <Choice key={o.id} on={sharing?.id === o.id} disabled={busy} onClick={() => sharing?.id !== o.id && set(o.id)} title={`Share with ${o.name}`} detail="Both workspaces read and add to one memory" />
@@ -124,11 +124,11 @@ function Source({ ws, info, others, onChange }: { ws: string; info: Info; others
 
 function Choice({ on, disabled, onClick, title, detail }: { on: boolean; disabled?: boolean; onClick: () => void; title: string; detail: string }) {
   return (
-    <button disabled={disabled} onClick={onClick} className={`flex items-center gap-2.5 rounded-[11px] px-3 py-2 text-left ${on ? "bg-white shadow-[0_0_0_1px_#E6E6E3]" : "hover:bg-black/[0.03]"}`}>
-      <span className={`flex size-4 shrink-0 items-center justify-center rounded-full ${on ? "bg-[#0A0A0A]" : "shadow-[inset_0_0_0_1.5px_#C9C9C6]"}`}>{on && <span className="size-1.5 rounded-full bg-white" />}</span>
+    <button disabled={disabled} onClick={onClick} className={`flex items-center gap-2.5 rounded-[11px] px-3 py-2 text-left ${on ? "bg-white shadow-[0_0_0_1px_var(--c-e6e6e3)]" : "hover:bg-black/[0.03]"}`}>
+      <span className={`flex size-4 shrink-0 items-center justify-center rounded-full ${on ? "bg-[color:var(--c-0a0a0a)]" : "shadow-[inset_0_0_0_1.5px_var(--c-c9c9c6)]"}`}>{on && <span className="size-1.5 rounded-full bg-white" />}</span>
       <span className="min-w-0">
         <span className="block text-[14px] font-medium leading-5">{title}</span>
-        <span className="block text-[12px] leading-4 text-[#9A9A98]">{detail}</span>
+        <span className="block text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{detail}</span>
       </span>
     </button>
   );
@@ -171,28 +171,28 @@ function Copy({ ws, info, others }: { ws: string; info: Info; others: { id: stri
       <div className={SECTION}>Start with what another workspace knows</div>
       <div className="flex flex-wrap gap-1.5">
         {from.map((o) => (
-          <button key={o.id} disabled={!!busy} onClick={() => void look(o.id)} className={`${QUIET} ${pick === o.id ? "shadow-[0_0_0_1.5px_#0A0A0A]" : ""}`}>
+          <button key={o.id} disabled={!!busy} onClick={() => void look(o.id)} className={`${QUIET} ${pick === o.id ? "shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" : ""}`}>
             From {o.name}
           </button>
         ))}
       </div>
-      {busy && <div className="text-[13px] text-[#9A9A98]">{busy}</div>}
+      {busy && <div className="text-[13px] text-[color:var(--c-9a9a98)]">{busy}</div>}
       {error && <div className="text-[13px] text-[#B42318]">{error}</div>}
       {done && <div className="text-[13px] text-[#1F7A3A]">{done}</div>}
       {preview && (
-        <div className="flex flex-col gap-2 rounded-[14px] bg-[#F7F7F6] p-3">
+        <div className="flex flex-col gap-2 rounded-[14px] bg-[color:var(--c-f7f7f6)] p-3">
           {(["personal", "work"] as const).map((k) => (
             <label key={k} className="flex items-start gap-2.5">
-              <input type="checkbox" checked={kinds[k]} onChange={(e) => setKinds((x) => ({ ...x, [k]: e.target.checked }))} className="mt-0.5 size-4 accent-[#0A0A0A]" />
+              <input type="checkbox" checked={kinds[k]} onChange={(e) => setKinds((x) => ({ ...x, [k]: e.target.checked }))} className="mt-0.5 size-4 accent-[color:var(--c-0a0a0a)]" />
               <span className="min-w-0">
                 <span className="block text-[14px] font-medium leading-5">
                   {k === "personal" ? "Personal" : "Work"} · {preview[k]}
                 </span>
-                <span className="block text-[12px] leading-4 text-[#9A9A98]">{preview.examples[k].slice(0, 3).join(" · ") || "Nothing"}</span>
+                <span className="block text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{preview.examples[k].slice(0, 3).join(" · ") || "Nothing"}</span>
               </span>
             </label>
           ))}
-          {preview.skipped > 0 && <div className="text-[12px] text-[#9A9A98]">Leaves out {preview.skipped} that look learned wrong.</div>}
+          {preview.skipped > 0 && <div className="text-[12px] text-[color:var(--c-9a9a98)]">Leaves out {preview.skipped} that look learned wrong.</div>}
           <div className="flex justify-end pt-1">
             <button disabled={!!busy || (!kinds.personal && !kinds.work)} onClick={() => void copy()} className={BUTTON}>
               Copy {(kinds.personal ? preview.personal : 0) + (kinds.work ? preview.work : 0)}
@@ -241,23 +241,23 @@ function Review({ ws, review, onChange }: { ws: string; review: ReviewSummary | 
         </button>
       </div>
       {review?.running ? (
-        <div className="text-[13px] text-[#9A9A98]">
+        <div className="text-[13px] text-[color:var(--c-9a9a98)]">
           Read {review.checked.toLocaleString()}
           {review.total ? ` of ${review.total.toLocaleString()}` : ""} facts…
         </div>
       ) : review?.error ? (
         <div className="text-[13px] text-[#B42318]">{review.error}</div>
       ) : !review ? (
-        <div className="text-[13px] text-[#9A9A98]">Finds facts that look learned wrong, so you can delete them.</div>
+        <div className="text-[13px] text-[color:var(--c-9a9a98)]">Finds facts that look learned wrong, so you can delete them.</div>
       ) : !review.groups.length ? (
-        <div className="text-[13px] text-[#9A9A98]">Checked {review.checked.toLocaleString()} facts. Nothing left to look at.</div>
+        <div className="text-[13px] text-[color:var(--c-9a9a98)]">Checked {review.checked.toLocaleString()} facts. Nothing left to look at.</div>
       ) : (
         <>
-          <div className="text-[13px] text-[#6B6B6B]">
+          <div className="text-[13px] text-[color:var(--c-6b6b6b)]">
             {review.flagged.toLocaleString()} of {review.checked.toLocaleString()} facts look wrong.
             {review.deleting && ` Deleting ${GROUPS[review.deleting.group].title.toLowerCase()}: ${review.deleting.done.toLocaleString()} of ${review.deleting.total.toLocaleString()}…`}
           </div>
-          <div className="flex flex-col divide-y divide-[#ECECEA] rounded-[14px] shadow-[0_0_0_1px_#ECECEA]">
+          <div className="flex flex-col divide-y divide-[color:var(--c-ececea)] rounded-[14px] shadow-[0_0_0_1px_var(--c-ececea)]">
             {review.groups.map((g) => {
               const items = g.items.filter((f) => !gone.has(f.id));
               const expanded = open === g.key;
@@ -270,9 +270,9 @@ function Review({ ws, review, onChange }: { ws: string; review: ReviewSummary | 
                       </svg>
                       <span className="min-w-0">
                         <span className="block text-[14px] font-medium leading-5">
-                          {GROUPS[g.key].title} <span className="font-normal text-[#9A9A98]">· {g.count.toLocaleString()}</span>
+                          {GROUPS[g.key].title} <span className="font-normal text-[color:var(--c-9a9a98)]">· {g.count.toLocaleString()}</span>
                         </span>
-                        <span className="block text-[12px] leading-4 text-[#9A9A98]">{GROUPS[g.key].detail}</span>
+                        <span className="block text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{GROUPS[g.key].detail}</span>
                       </span>
                     </button>
                     {g.key !== "unsure" &&
@@ -281,7 +281,7 @@ function Review({ ws, review, onChange }: { ws: string; review: ReviewSummary | 
                           Delete {g.count.toLocaleString()}?
                         </button>
                       ) : (
-                        <button disabled={busy} onClick={() => setConfirm(g.key)} className="h-7 shrink-0 rounded-full bg-[#F7F7F6] px-2.5 text-[12px] font-medium text-[#B42318] hover:bg-[#FBEAEA] disabled:opacity-40">
+                        <button disabled={busy} onClick={() => setConfirm(g.key)} className="h-7 shrink-0 rounded-full bg-[color:var(--c-f7f7f6)] px-2.5 text-[12px] font-medium text-[#B42318] hover:bg-[#FBEAEA] disabled:opacity-40">
                           Delete all
                         </button>
                       ))}
@@ -291,7 +291,7 @@ function Review({ ws, review, onChange }: { ws: string; review: ReviewSummary | 
                       {items.map((f) => (
                         <div key={f.id} className="flex items-center gap-2 py-1.5 pl-[30px] pr-3">
                           <div className="min-w-0 flex-1 text-[13px] leading-[18px] [overflow-wrap:anywhere]">{f.text}</div>
-                          <button onClick={() => settle(f.id, "keep")} className="h-7 shrink-0 rounded-full px-2.5 text-[12px] font-medium text-[#6B6B6B] hover:bg-[#F2F2F0]">
+                          <button onClick={() => settle(f.id, "keep")} className="h-7 shrink-0 rounded-full px-2.5 text-[12px] font-medium text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-f2f2f0)]">
                             Keep
                           </button>
                           <button onClick={() => settle(f.id, "delete")} className="h-7 shrink-0 rounded-full px-2.5 text-[12px] font-medium text-[#B42318] hover:bg-[#FBEAEA]">
@@ -299,7 +299,7 @@ function Review({ ws, review, onChange }: { ws: string; review: ReviewSummary | 
                           </button>
                         </div>
                       ))}
-                      {g.count > g.items.length && <div className="py-1.5 pl-[30px] text-[12px] text-[#9A9A98]">And {(g.count - g.items.length).toLocaleString()} more like these.</div>}
+                      {g.count > g.items.length && <div className="py-1.5 pl-[30px] text-[12px] text-[color:var(--c-9a9a98)]">And {(g.count - g.items.length).toLocaleString()} more like these.</div>}
                     </div>
                   )}
                 </div>
@@ -328,10 +328,10 @@ function Card({ info }: { info: Info }) {
                   <path d="M5.5 7V5a2.5 2.5 0 015 0v2" fill="none" stroke="#9A9A98" strokeWidth="1.4" />
                 </svg>
               ) : (
-                <span className="size-1 rounded-full bg-[#C9C9C6]" />
+                <span className="size-1 rounded-full bg-[color:var(--c-c9c9c6)]" />
               )}
             </span>
-            <span className={`min-w-0 [overflow-wrap:anywhere] ${l.private ? "text-[#9A9A98]" : ""}`}>{l.text}</span>
+            <span className={`min-w-0 [overflow-wrap:anywhere] ${l.private ? "text-[color:var(--c-9a9a98)]" : ""}`}>{l.text}</span>
           </div>
         ))}
       </div>

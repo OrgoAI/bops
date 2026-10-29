@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { PRIVACY, TERMS } from "@/lib/links";
 import { Mascot, Spinner } from "./mascot";
 import { useTelemetryHere } from "./usage-data";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Signing in, the app's first screen until someone is signed in. A Bops user is an Orgo user, but
@@ -59,7 +60,7 @@ export function useAuthStatus(key: unknown) {
 }
 
 /** What a sign-out asks first when some of the user's changes haven't reached Bops Cloud yet. */
-const UNSENT = "Some changes haven't reached Bops Cloud yet. Sign out anyway?";
+const UNSENT = `Some changes haven't reached ${BRAND.name} Cloud yet. Sign out anyway?`;
 
 /**
  * Sign out of Orgo on this Mac (for the account page and the menu). The app goes back to the sign-in
@@ -87,8 +88,13 @@ export function CloudUnreachable({ onRetry }: { onRetry: () => void }) {
       <div className="h-11 shrink-0 [-webkit-app-region:drag]" />
       <div className="flex flex-1 flex-col items-center justify-center px-6 pb-16">
         <div className="flex w-[400px] animate-[call-in_220ms_ease-out] flex-col items-center rounded-[22px] bg-white px-8 pb-7 pt-9 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
-          <Mascot botId="boppy" color="#0A0A0A" size={56} />
-          <Heading title="Can't reach Bops Cloud" line="Bops can't reach Bops Cloud to load your chats. Check your internet connection." />
+          {BRAND.mark ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={BRAND.mark.src} alt={BRAND.mark.alt} height={56} className="h-14 w-auto" />
+          ) : (
+            <Mascot botId="boppy" color="#0A0A0A" size={56} />
+          )}
+          <Heading title={`Can't reach ${BRAND.name} Cloud`} line={`${BRAND.name} can't reach ${BRAND.name} Cloud to load your chats. Check your internet connection.`} />
           <button
             disabled={busy}
             onClick={() => {
@@ -132,8 +138,8 @@ const openInBrowser = (url: string) => void window.open(url, "_blank", "noopener
 
 const primary = "flex h-10 w-full items-center justify-center gap-2 rounded-full bg-ink text-[13.5px] font-medium text-white disabled:opacity-50";
 const secondary =
-  "flex h-10 w-full items-center justify-center gap-2 rounded-full text-[13.5px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB] disabled:opacity-50";
-const link = "font-medium text-ink underline underline-offset-2 hover:text-[#3A3A38] disabled:opacity-50";
+  "flex h-10 w-full items-center justify-center gap-2 rounded-full text-[13.5px] font-medium shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-fcfcfb)] disabled:opacity-50";
+const link = "font-medium text-ink underline underline-offset-2 hover:text-[color:var(--c-3a3a38)] disabled:opacity-50";
 
 export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
   const [step, setStep] = useState<Step>({ kind: "idle" });
@@ -226,7 +232,12 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
       <div className="flex flex-1 flex-col items-center justify-center px-6 pb-16">
         <div className="flex w-[400px] animate-[call-in_220ms_ease-out] flex-col items-center rounded-[22px] bg-white px-8 pb-7 pt-9 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
           <span className={step.kind === "waiting" || step.kind === "starting" || step.kind === "saving" ? "animate-[bob_2.4s_ease-in-out_infinite] motion-reduce:animate-none" : ""}>
+            {BRAND.mark ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={BRAND.mark.src} alt={BRAND.mark.alt} height={56} className="h-14 w-auto" />
+          ) : (
             <Mascot botId="boppy" color="#0A0A0A" size={56} />
+          )}
           </span>
           {step.kind === "waiting" ? (
             <Waiting step={step} way={way} onReopen={() => openInBrowser(step.code.verificationUrl)} onCancel={cancel} />
@@ -256,7 +267,7 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
           </a>
           .
         </span>
-        {telemetryHere && <span className="pt-1.5 text-[12px] leading-4 text-pencil">Bops shares usage counts and error reports with Orgo, never your content. You can turn this off in Settings.</span>}
+        {telemetryHere && <span className="pt-1.5 text-[12px] leading-4 text-pencil">{BRAND.name} shares usage counts and error reports with Orgo, never your content. You can turn this off in Settings.</span>}
       </div>
     </div>
   );
@@ -276,7 +287,7 @@ function Welcome({ starting, onStart }: { starting: Way | null; onStart: (way: W
   const busy = starting !== null;
   return (
     <>
-      <Heading title="Welcome to Bops" line="Sign in or make an account to get started. It's free." />
+      <Heading title={`Welcome to ${BRAND.name}`} line="Sign in or make an account to get started. It's free." />
       <div className="flex w-full flex-col gap-2">
         <button disabled={busy} onClick={() => onStart("google")} className={primary}>
           {starting === "google" ? <Spinner size={13} color="#FFFFFF" /> : <GoogleMark />}
@@ -301,8 +312,8 @@ function Welcome({ starting, onStart }: { starting: Way | null; onStart: (way: W
 const PROBLEMS: Record<Problem, { title: string; line: string; action: string }> = {
   offline: { title: "Couldn't connect", line: "Check your internet connection, then try again.", action: "Try again" },
   orgo: { title: "Something went wrong", line: "Signing in isn't working right now. Try again in a moment.", action: "Try again" },
-  keychain: { title: "Couldn't save your sign-in", line: "Your Mac didn't let Bops keep it in the keychain. Unlock your Mac, then try again.", action: "Try again" },
-  cloud: { title: "Couldn't load your Bops", line: "Couldn't load your Bops from Bops Cloud. Try again.", action: "Try again" },
+  keychain: { title: "Couldn't save your sign-in", line: `Your Mac didn't let ${BRAND.name} keep it in the keychain. Unlock your Mac, then try again.`, action: "Try again" },
+  cloud: { title: `Couldn't load your ${BRAND.name}`, line: `Couldn't load your ${BRAND.name} from ${BRAND.name} Cloud. Try again.`, action: "Try again" },
 };
 
 /** Where expired, declined and failed attempts come back to: again the same way, or back to pick another. */
@@ -342,9 +353,9 @@ function Retry({
 
 /** What to do in the browser, by the way picked. Every way lands on Orgo's page shown as Bops; Google and email go straight to that sign-in. */
 const FINISH: Record<Way, string> = {
-  google: "Sign in with Google, check that the page shows this code, then allow Bops.",
-  email: "Sign in with your email, check that the page shows this code, then allow Bops.",
-  orgo: "Your browser is open at orgo.ai. Check that it shows this code, then allow Bops.",
+  google: `Sign in with Google, check that the page shows this code, then allow Bops.`,
+  email: `Sign in with your email, check that the page shows this code, then allow Bops.`,
+  orgo: `Your browser is open at orgo.ai. Check that it shows this code, then allow Bops.`,
 };
 
 function Waiting({ step, way, onReopen, onCancel }: { step: Extract<Step, { kind: "waiting" }>; way: Way; onReopen: () => void; onCancel: () => void }) {
@@ -370,14 +381,14 @@ function Waiting({ step, way, onReopen, onCancel }: { step: Extract<Step, { kind
       <Heading title="Finish in your browser" line={FINISH[way]} />
       <button
         onClick={copy}
-        className="group flex w-full flex-col items-center gap-1 rounded-[14px] bg-[#F7F7F6] py-4 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F3F3F1]"
+        className="group flex w-full flex-col items-center gap-1 rounded-[14px] bg-[color:var(--c-f7f7f6)] py-4 shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[#F3F3F1]"
       >
         <span className="font-mono text-[26px] font-semibold leading-8 tracking-[0.12em]">{step.code.userCode}</span>
         <span className="text-[11.5px] leading-4 text-pencil">{copied ? "Copied" : "Click to copy"}</span>
       </button>
       <div className="flex w-full flex-col gap-2 pb-5 pt-4">
         <div className="flex items-center justify-between text-[12.5px] leading-4">
-          <span className="flex items-center gap-2 text-[#3A3A38]">
+          <span className="flex items-center gap-2 text-[color:var(--c-3a3a38)]">
             <Spinner size={12} color="#3A3A38" />
             Waiting for you to approve
           </span>
@@ -409,7 +420,7 @@ function Approved({ who }: { who: string }) {
         </svg>
         You&apos;re in
       </span>
-      <span className="text-[13.5px] leading-[19px] text-pencil">{who ? `Signed in as ${who}. Opening Bops.` : "Opening Bops."}</span>
+      <span className="text-[13.5px] leading-[19px] text-pencil">{who ? `Signed in as ${who}. Opening ${BRAND.name}.` : `Opening ${BRAND.name}.`}</span>
     </div>
   );
 }

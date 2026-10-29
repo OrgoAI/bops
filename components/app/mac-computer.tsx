@@ -8,6 +8,7 @@ import { LiveScreen, type ScreenInput } from "./live-screen";
 import { WatchBadge, WatchEye, WatchOverlay, type Spot } from "./watch-overlay";
 import { Mascot } from "./mascot";
 import { botBezel, post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /**
  * Your Mac, shown like a bot's computer (computer.tsx): one big live screen in a frame, a row of
@@ -246,7 +247,7 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
   const header =
     mode === "focus" ? (
       <div className="flex items-center gap-2.5">
-        <button onClick={onBack} className="flex items-center gap-1.5 rounded-full py-1.5 pl-2 pr-3 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
+        <button onClick={onBack} className="flex items-center gap-1.5 rounded-full py-1.5 pl-2 pr-3 shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]">
           <svg width="12" height="12" viewBox="0 0 14 14">
             <path d="M9 2.5L4.5 7 9 11.5" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
@@ -261,11 +262,11 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
               <button
                 key={i.key}
                 onClick={() => pick(i)}
-                className={`flex items-center gap-1.5 rounded-[9px] py-[5px] ${i.bot ? "pl-1.5" : "pl-2.5"} pr-2.5 ${on ? "bg-ink" : i.session ? "bg-[#F2F2F0]" : "shadow-[inset_0_0_0_1.2px_#D9D9D6]"}`}
+                className={`flex items-center gap-1.5 rounded-[9px] py-[5px] ${i.bot ? "pl-1.5" : "pl-2.5"} pr-2.5 ${on ? "bg-ink" : i.session ? "bg-[color:var(--c-f2f2f0)]" : "shadow-[inset_0_0_0_1.2px_var(--c-d9d9d6)]"}`}
               >
                 {i.bot && <Mascot botId={i.bot.id} color={i.bot.color} size={14} antenna={false} />}
                 {i.bot && <span className={`text-[12px] font-medium leading-4 ${on ? "text-white" : "text-ink"}`}>{i.bot.name}</span>}
-                <span className={`max-w-[120px] truncate text-[12px] leading-4 ${on ? "text-white/70" : "text-[#6B6B6B]"}`}>{i.label}</span>
+                <span className={`max-w-[120px] truncate text-[12px] leading-4 ${on ? "text-white/70" : "text-[color:var(--c-6b6b6b)]"}`}>{i.label}</span>
               </button>
             );
           })}
@@ -327,7 +328,7 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
                 {current.watch && <WatchOverlay watch={current.watch} anchor={markerOf(current)} />}
                 {/* Hovering: a soft ring and a pill, like a bot's computer. */}
                 <div className="pointer-events-none absolute inset-0 z-30 opacity-0 transition-opacity duration-200 group-hover/screen:opacity-100">
-                  <div className="absolute inset-0 rounded-[22px] shadow-[inset_0_0_0_2.5px_#0A0A0A]" />
+                  <div className="absolute inset-0 rounded-[22px] shadow-[inset_0_0_0_2.5px_var(--c-0a0a0a)]" />
                 </div>
                 {/* Pointing at the screen brings up its controls, like a bot's computer: watch it, see it bigger, settings. */}
                 <div
@@ -350,7 +351,7 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
                     <button
                       onClick={() => setWatchSheet(current.kind === "window" ? { app: current.app, title: current.label, windowId: current.windowId, watch: current.watch } : null)}
                       title={current.watch ? `Change what ${current.label} is watched for` : "Keep an eye on a window and tell me when something needs me"}
-                      className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium leading-4 text-ink hover:bg-[#F2F2F0]"
+                      className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[13px] font-medium leading-4 text-ink hover:bg-[color:var(--c-f2f2f0)]"
                     >
                       <WatchEye size={13} />
                       {current.watch ? "Edit" : "Watch"}
@@ -358,7 +359,7 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
                   )}
                   <button
                     onClick={() => (mode === "panel" ? onFocus?.() : fullscreen())}
-                    className={`flex items-center gap-1.5 rounded-full py-1.5 pl-2.5 pr-3.5 text-[13px] font-semibold leading-4 ${current.kind === "browser" ? "text-ink hover:bg-[#F2F2F0]" : "bg-ink text-white"}`}
+                    className={`flex items-center gap-1.5 rounded-full py-1.5 pl-2.5 pr-3.5 text-[13px] font-semibold leading-4 ${current.kind === "browser" ? "text-ink hover:bg-[color:var(--c-f2f2f0)]" : "bg-ink text-white"}`}
                   >
                     <svg width="11" height="11" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                       <path d="M1.5 5V1.5H5M9 1.5h3.5V5M12.5 9v3.5H9M5 12.5H1.5V9" />
@@ -385,14 +386,14 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
       {mode === "panel" && !blocked && followRow && (
         <div className="-mb-1 flex items-center gap-2">
           {following ? (
-            <span className="flex items-center gap-1.5 text-[12px] leading-4 text-[#6B6B6B]" title="Bops shows the window being worked on. Pick one to stay on it.">
+            <span className="flex items-center gap-1.5 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]" title={`${BRAND.name} shows the window being worked on. Pick one to stay on it.`}>
               <span className="size-1.5 animate-pulse rounded-full bg-[#2BB673]" />
               {grid.length ? `Watching ${grid.length} windows at once` : "Following the action"}
             </span>
           ) : (
-            <span className="flex items-center gap-1.5 text-[12px] leading-4 text-[#6B6B6B]">
+            <span className="flex items-center gap-1.5 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
               Staying on {current?.label ?? "this"}
-              <button onClick={() => setPin(null)} className="rounded-full bg-white px-2 py-[2px] font-medium text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]">
+              <button onClick={() => setPin(null)} className="rounded-full bg-white px-2 py-[2px] font-medium text-ink shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)]">
                 Follow
               </button>
             </span>
@@ -412,29 +413,29 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
                 title={i.session ? `${i.bot?.name} · ${i.session.title}` : i.sub}
                 style={
                   waitingOn(i)
-                    ? { boxShadow: "0 0 0 2px #0A0A0A, 0 0 0 4px #E8FF3A" }
+                    ? { boxShadow: "0 0 0 2px #0A0A0A, 0 0 0 4px var(--color-highlighter)" }
                     : !inView && acting(i) && i.bot
                       ? { boxShadow: `0 0 0 2px ${botBezel(i.bot)}, 0 0 14px -2px ${botBezel(i.bot)}` }
                       : undefined
                 }
-                className={`relative flex min-w-0 flex-col gap-1.5 rounded-xl p-1.5 text-left transition-shadow duration-300 ${items.length >= 4 ? "flex-1 basis-0" : "w-[calc((100%-30px)/4)] flex-none"} ${inView ? "bg-white shadow-[0_0_0_2px_#0A0A0A]" : i.session ? "bg-[#F7F7F6]" : "shadow-[inset_0_0_0_1.5px_#E2E2DF]"}`}
+                className={`relative flex min-w-0 flex-col gap-1.5 rounded-xl p-1.5 text-left transition-shadow duration-300 ${items.length >= 4 ? "flex-1 basis-0" : "w-[calc((100%-30px)/4)] flex-none"} ${inView ? "bg-white shadow-[0_0_0_2px_var(--c-0a0a0a)]" : i.session ? "bg-[color:var(--c-f7f7f6)]" : "shadow-[inset_0_0_0_1.5px_var(--c-e2e2df)]"}`}
               >
                 <div className="relative h-[52px] shrink-0 overflow-hidden rounded-[7px] bg-[#111111]">
                   <Live key={`${i.sourceId}-t`} item={i} fps={2} maxWidth={400} fit="cover" className="h-full w-full" />
                   {i.watch && <WatchBadge watch={i.watch} />}
-                  {i.session && live(i.session) && <span className={`absolute right-1 top-1 size-[9px] rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A] ${acting(i) ? "animate-pulse" : ""}`} />}
+                  {i.session && live(i.session) && <span className={`absolute right-1 top-1 size-[9px] rounded-full bg-highlighter shadow-[0_0_0_1.5px_var(--c-0a0a0a)] ${acting(i) ? "animate-pulse" : ""}`} />}
                 </div>
                 <div className="flex min-w-0 items-center gap-[5px] text-[11px] leading-[14px]">
                   {i.bot ? (
                     <>
                       <Mascot botId={i.bot.id} color={i.bot.color} size={14} antenna={false} />
                       <span className="shrink-0 font-semibold">{i.bot.name}</span>
-                      <span className={`truncate ${inView ? "text-ink" : "text-[#6B6B6B]"}`}>{i.label}</span>
+                      <span className={`truncate ${inView ? "text-ink" : "text-[color:var(--c-6b6b6b)]"}`}>{i.label}</span>
                     </>
                   ) : i.watch ? (
                     <span className="truncate pl-0.5 font-semibold">{i.label}</span>
                   ) : (
-                    <span className="truncate pl-0.5 text-[#9A9A98]">{i.label}</span>
+                    <span className="truncate pl-0.5 text-[color:var(--c-9a9a98)]">{i.label}</span>
                   )}
                 </div>
               </button>
@@ -445,8 +446,8 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
 
       {/* Under the screen, only when something's going on: a task, or news. Its controls are on the screen. */}
       {!blocked && showBar && (
-        <div className={`flex max-w-full items-center gap-3 self-center rounded-full bg-white py-1.5 pl-3.5 pr-1.5 shadow-[0_0_0_1px_#ECECEA,0_6px_18px_-10px_#00000040]`}>
-          <span className={`size-2 shrink-0 rounded-full ${yours || items.some(waitingOn) ? "bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" : working.length ? "bg-[#2BB673]" : "bg-[#C9C9C6]"}`} />
+        <div className={`flex max-w-full items-center gap-3 self-center rounded-full bg-white py-1.5 pl-3.5 pr-1.5 shadow-[0_0_0_1px_var(--c-ececea),0_6px_18px_-10px_#00000040]`}>
+          <span className={`size-2 shrink-0 rounded-full ${yours || items.some(waitingOn) ? "bg-highlighter shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" : working.length ? "bg-[#2BB673]" : "bg-[color:var(--c-c9c9c6)]"}`} />
           <span className="min-w-0 truncate text-[13px] leading-4">
             {yours
               ? `You have control of ${current?.bot?.name ?? "the bot"}'s Chrome · click and type on it, then hand it back`
@@ -479,7 +480,7 @@ function MacComputerView({ state, mode, onFocus, onBack, onOpenThread, showThrea
           {current?.session && !grid.length && !yours && (
             <button
               onClick={() => onOpenThread(current.session!)}
-              className="shrink-0 rounded-full px-3 py-1.5 text-[13px] font-medium leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] hover:bg-[#F7F7F6]"
+              className="shrink-0 rounded-full px-3 py-1.5 text-[13px] font-medium leading-4 text-ink shadow-[0_0_0_1px_var(--c-e2e2df)] hover:bg-[color:var(--c-f7f7f6)]"
             >
               Open thread
             </button>
@@ -558,7 +559,7 @@ function WhoPill({ item: i }: { item: Item }) {
     <span className="pointer-events-none absolute bottom-2 left-2 z-20 flex max-w-[85%] items-center gap-1 rounded-full bg-white/95 py-[2px] pl-1 pr-2 text-[11px] leading-[14px] shadow-[0_0_0_1px_#0000000F]">
       {i.bot && <Mascot botId={i.bot.id} color={i.bot.color} size={13} antenna={false} />}
       <span className="shrink-0 font-semibold">{i.bot?.name ?? "A bot"}</span>
-      <span className="truncate text-[#3A3A38]">
+      <span className="truncate text-[color:var(--c-3a3a38)]">
         {i.label} · {i.session.title}
       </span>
     </span>
@@ -569,17 +570,17 @@ function Blocked({ why }: { why: "app" | "loading" | "permission" | "nothing" })
   if (why === "loading") return <div className="h-full w-full animate-pulse" />;
   const [title, body] =
     why === "app"
-      ? ["Open the Bops app to watch your Mac", "A browser tab can't see your screen. In the Bops app, your displays and the windows bots use show here live."]
+      ? [`Open the ${BRAND.name} app to watch your Mac`, `A browser tab can't see your screen. In the ${BRAND.name} app, your displays and the windows bots use show here live.`]
       : why === "permission"
-        ? ["Let Bops see your screen", "macOS asks once: turn on Bops under Screen Recording, then quit and reopen Bops."]
-        : ["Nothing to show yet", "Bops can't find a display to show."];
+        ? [`Let ${BRAND.name} see your screen`, `macOS asks once: turn on ${BRAND.name} under Screen Recording, then quit and reopen ${BRAND.name}.`]
+        : ["Nothing to show yet", `${BRAND.name} can't find a display to show.`];
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-8 text-center">
       <span className="flex size-11 items-center justify-center rounded-2xl bg-ink text-highlighter">
         <MacIcon size={20} />
       </span>
       <span className="text-[15px] font-semibold leading-5 text-ink">{title}</span>
-      <span className="max-w-[340px] text-[12.5px] leading-[18px] text-[#6B6B6B]">{body}</span>
+      <span className="max-w-[340px] text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)]">{body}</span>
       {why === "permission" && (
         <button onClick={() => void window.bopsMac?.openScreenSettings()} className="mt-1 rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-medium text-white">
           Open Screen Recording settings
@@ -595,7 +596,7 @@ function SettingsButton({ onClick, label }: { onClick: () => void; label?: boole
       onClick={onClick}
       title="Your Mac settings: the words that mean your Mac"
       aria-label="Your Mac settings"
-      className={`flex shrink-0 items-center justify-center gap-1.5 rounded-full text-[12.5px] font-medium text-[#3A3A38] hover:bg-[#F2F2F0] ${label ? "px-3 py-1.5 shadow-[0_0_0_1px_#E2E2DF]" : "size-8"}`}
+      className={`flex shrink-0 items-center justify-center gap-1.5 rounded-full text-[12.5px] font-medium text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-f2f2f0)] ${label ? "px-3 py-1.5 shadow-[0_0_0_1px_var(--c-e2e2df)]" : "size-8"}`}
     >
       <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
         <path d="M2.5 4.5h6M11.5 4.5h2M2.5 11.5h2M7.5 11.5h6" />
@@ -612,7 +613,7 @@ function MacSettingsSheet({ state, onClose }: { state: AppState; onClose: () => 
   return (
     <div onClick={onClose} className="absolute inset-0 z-50 flex items-start justify-center bg-black/10 p-4 backdrop-blur-[2px]">
       <div onClick={(e) => e.stopPropagation()} className="relative flex max-h-full w-full max-w-[520px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]">
-        <button onClick={onClose} aria-label="Close" className="absolute right-3 top-3 z-10 flex size-8 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0]">
+        <button onClick={onClose} aria-label="Close" className="absolute right-3 top-3 z-10 flex size-8 items-center justify-center rounded-full text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-f2f2f0)]">
           <svg width="11" height="11" viewBox="0 0 12 12">
             <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </svg>
@@ -680,21 +681,21 @@ function MacWatchSheet({ target, onClose }: { target: { app?: string; title?: st
         </div>
         {!picked ? (
           <>
-            <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Pick the window. Bops reads its text when it changes (no screenshots, nothing clicked) and tells you when something needs you.</span>
-            <div className="flex max-h-[300px] flex-col overflow-y-auto rounded-xl shadow-[0_0_0_1px_#ECECEA]">
+            <span className="text-[12.5px] leading-[17px] text-[color:var(--c-6b6b6b)]">Pick the window. {BRAND.name} reads its text when it changes (no screenshots, nothing clicked) and tells you when something needs you.</span>
+            <div className="flex max-h-[300px] flex-col overflow-y-auto rounded-xl shadow-[0_0_0_1px_var(--c-ececea)]">
               {windows === null ? (
-                <span className="px-3 py-3 text-[12.5px] text-[#9A9A98]">Looking at your windows…</span>
+                <span className="px-3 py-3 text-[12.5px] text-[color:var(--c-9a9a98)]">Looking at your windows…</span>
               ) : windows.length === 0 ? (
-                <span className="px-3 py-3 text-[12.5px] text-[#9A9A98]">No windows to watch right now.</span>
+                <span className="px-3 py-3 text-[12.5px] text-[color:var(--c-9a9a98)]">No windows to watch right now.</span>
               ) : (
                 windows.map((w) => (
                   <button
                     key={w.windowId}
                     onClick={() => setPicked(w)}
-                    className="flex items-center gap-2 border-b border-[#F0F0EE] px-3 py-2 text-left last:border-0 hover:bg-[#FCFCFB]"
+                    className="flex items-center gap-2 border-b border-[color:var(--c-f0f0ee)] px-3 py-2 text-left last:border-0 hover:bg-[color:var(--c-fcfcfb)]"
                   >
                     <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">{w.title}</span>
-                    <span className="shrink-0 text-[12px] text-[#9A9A98]">{w.app}</span>
+                    <span className="shrink-0 text-[12px] text-[color:var(--c-9a9a98)]">{w.app}</span>
                   </button>
                 ))
               )}
@@ -702,10 +703,10 @@ function MacWatchSheet({ target, onClose }: { target: { app?: string; title?: st
           </>
         ) : (
           <>
-            <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Tell me when there&rsquo;s:</span>
+            <span className="text-[12.5px] leading-[17px] text-[color:var(--c-6b6b6b)]">Tell me when there&rsquo;s:</span>
             <div className="flex flex-wrap gap-1.5">
               {watchPicks(picked.app!, picked.title ?? picked.app!).map((p) => (
-                <button key={p} disabled={busy} onClick={() => void save(p)} className="rounded-full bg-[#F2F2F0] px-3 py-1.5 text-[12.5px] font-medium leading-4 hover:bg-[#EAEAE7] disabled:opacity-50">
+                <button key={p} disabled={busy} onClick={() => void save(p)} className="rounded-full bg-[color:var(--c-f2f2f0)] px-3 py-1.5 text-[12.5px] font-medium leading-4 hover:bg-[color:var(--c-eaeae7)] disabled:opacity-50">
                   {p}
                 </button>
               ))}
@@ -722,7 +723,7 @@ function MacWatchSheet({ target, onClose }: { target: { app?: string; title?: st
                 value={lookFor}
                 onChange={(e) => setLookFor(e.target.value)}
                 placeholder="Or say it your way"
-                className="h-9 min-w-0 flex-1 rounded-xl bg-[#F7F7F6] px-3 text-[13.5px] outline-none placeholder:text-[#9A9A98] focus:bg-white focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+                className="h-9 min-w-0 flex-1 rounded-xl bg-[color:var(--c-f7f7f6)] px-3 text-[13.5px] outline-none placeholder:text-[color:var(--c-9a9a98)] focus:bg-white focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
               />
               <button type="submit" disabled={busy || !lookFor.trim()} className="h-9 shrink-0 rounded-xl bg-ink px-3.5 text-[13px] font-medium text-white disabled:opacity-30">
                 {picked.watch ? "Save" : "Watch"}

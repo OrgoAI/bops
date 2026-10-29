@@ -105,7 +105,7 @@ export function AttachmentTray({ items, onRemove }: { items: Attachment[]; onRem
           <img src={a.preview} alt="" className={`size-full rounded-[12px] object-cover shadow-[0_0_0_1px_#0000001A] ${a.status === "failed" ? "opacity-40" : ""}`} />
           {a.status === "uploading" && (
             <span className="absolute inset-0 flex items-center justify-center rounded-[12px] bg-white/50">
-              <span className="size-4 animate-spin rounded-full border-2 border-[#0A0A0A]/20 border-t-[#0A0A0A]" />
+              <span className="size-4 animate-spin rounded-full border-2 border-[color:var(--c-0a0a0a)]/20 border-t-[color:var(--c-0a0a0a)]" />
             </span>
           )}
           {a.status === "failed" && <span data-tip={a.error ?? "Couldn't attach this"} className="absolute inset-0 flex items-center justify-center text-[11px] font-medium text-[#B42318]">Failed</span>}
@@ -113,7 +113,7 @@ export function AttachmentTray({ items, onRemove }: { items: Attachment[]; onRem
             type="button"
             onClick={() => onRemove(a.key)}
             aria-label="Remove image"
-            className="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full bg-[#0A0A0A] text-white shadow-[0_0_0_2px_#FFFFFF]"
+            className="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full bg-[color:var(--c-0a0a0a)] text-white shadow-[0_0_0_2px_#FFFFFF]"
           >
             <svg width="8" height="8" viewBox="0 0 12 12" aria-hidden>
               <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
@@ -133,7 +133,7 @@ export function MessageImages({ images, previews, align = "end" }: { images?: Pi
   // A workspace shared with the user: its images are the owner's, kept where they were sent from, not here.
   if (!previews && !readAllowed(srcs[0]))
     return (
-      <div className={`rounded-[14px] px-3 py-2 text-[12.5px] leading-4 text-[#6B6B6B] shadow-[0_0_0_1px_#E6E6E3] ${align === "end" ? "self-end" : "self-start"}`}>
+      <div className={`rounded-[14px] px-3 py-2 text-[12.5px] leading-4 text-[color:var(--c-6b6b6b)] shadow-[0_0_0_1px_var(--c-e6e6e3)] ${align === "end" ? "self-end" : "self-start"}`}>
         {srcs.length === 1 ? "An image" : `${srcs.length} images`}. Images in a shared workspace aren&apos;t shown yet.
       </div>
     );

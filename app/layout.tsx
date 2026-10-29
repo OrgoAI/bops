@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Poppins } from "next/font/google";
+import { BRAND } from "@/lib/brand";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -12,16 +13,24 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// A partner's build in its own type (lib/brand.ts): Momentum AMP sets everything in Poppins.
+const poppins = Poppins({
+  variable: "--font-brand",
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+});
+
 export const metadata: Metadata = {
-  title: "Bops",
-  description: "AI coworkers with their own computers.",
+  title: BRAND.name,
+  description: BRAND.tagline,
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      data-brand={BRAND.id}
+      className={`${geistSans.variable} ${geistMono.variable} ${BRAND.id === "momentum" ? poppins.variable : ""} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">{children}</body>
     </html>

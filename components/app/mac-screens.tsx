@@ -132,7 +132,7 @@ export function MacStream({
   return (
     <div className={`relative bg-[#111111] ${className}`}>
       <video ref={setVideo} muted playsInline onResize={(e) => e.currentTarget.videoWidth && sized.current?.(e.currentTarget.videoWidth, e.currentTarget.videoHeight)} className={`h-full w-full ${fit === "cover" ? "object-cover object-top" : "object-contain"} ${failed ? "invisible" : ""}`} />
-      {failed && <div className="absolute inset-0 flex items-center justify-center px-3 text-center text-[11.5px] text-[#9A9A98]">Can&rsquo;t see this right now</div>}
+      {failed && <div className="absolute inset-0 flex items-center justify-center px-3 text-center text-[11.5px] text-[color:var(--c-9a9a98)]">Can&rsquo;t see this right now</div>}
     </div>
   );
 }

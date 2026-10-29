@@ -25,14 +25,14 @@ export const post = async (url: string, body: unknown = {}, method = "POST") => 
 export const screenNo = (display?: number) => (display === undefined ? undefined : screenNumber(display));
 
 /** A choice card in Settings (Where your bots work, Where routines run): picked, or not; and its radio. */
-export const option = (on: boolean) => (on ? "bg-[#FBFFE0] shadow-[0_0_0_1.5px_#0A0A0A]" : "shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]");
+export const option = (on: boolean) => (on ? "bg-[color:var(--c-fbffe0)] shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" : "shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-fcfcfb)]");
 export const radio = (on: boolean) =>
   on ? (
     <span className="flex size-4 items-center justify-center rounded-full bg-ink">
       <span className="size-1.5 rounded-full bg-highlighter" />
     </span>
   ) : (
-    <span className="size-4 rounded-full shadow-[inset_0_0_0_1.5px_#C9C9C6]" />
+    <span className="size-4 rounded-full shadow-[inset_0_0_0_1.5px_var(--c-c9c9c6)]" />
   );
 
 export function ago(t: number) {
@@ -156,7 +156,7 @@ export function StatusIcon({ session: s, size = 13, dark, owner, member, okWait 
   const icon = live(s) && !waits ? (
     <Spinner size={size} color={dark ? "#0A0A0A" : "#3A3A38"} />
   ) : needsYou(s) || waits ? (
-    <span className="block rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A]" style={{ width: size - 3, height: size - 3 }} />
+    <span className="block rounded-full bg-highlighter shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" style={{ width: size - 3, height: size - 3 }} />
   ) : s.status === "done" ? (
     <svg width={size} height={size} viewBox="0 0 14 14" className="block">
       <path d="M3 7.5l2.5 2.5L11 4.5" fill="none" stroke="#2BB673" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -218,7 +218,7 @@ export function RoundButton({ label, onClick, children, active }: { label: strin
       title={label}
       aria-label={label}
       onClick={onClick}
-      className={`flex size-[34px] shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] ${active ? "bg-[#EEEEEC]" : "bg-white hover:bg-[#FCFCFB]"}`}
+      className={`flex size-[34px] shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_var(--c-e6e6e3)] ${active ? "bg-[color:var(--c-eeeeec)]" : "bg-white hover:bg-[color:var(--c-fcfcfb)]"}`}
     >
       <svg width="15" height="15" viewBox="0 0 16 16">
         {children}
@@ -245,7 +245,7 @@ export function NeedsYouDot({ className = "" }: { className?: string }) {
 /** The round X the Account sheet closes with, for a tab on the right that reads as a page (the Vault, a bot's profile). */
 export function CloseButton({ onClick, className = "" }: { onClick: () => void; className?: string }) {
   return (
-    <button onClick={onClick} aria-label="Close" className={`flex size-8 shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6] ${className}`}>
+    <button onClick={onClick} aria-label="Close" className={`flex size-8 shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)] ${className}`}>
       <svg width="12" height="12" viewBox="0 0 12 12">
         <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
       </svg>
@@ -283,7 +283,7 @@ export function BrandTile({ item, size }: { item: { name: string; color: string;
 export function ReadOnlyLine({ state, botIds = [], className = "" }: { state: AppState; botIds?: readonly string[]; className?: string }) {
   if (!state.shared) return null;
   return (
-    <div data-read-only className={`rounded-[14px] bg-[#F7F7F5] px-3.5 py-2.5 text-center text-[13px] leading-[18px] text-[#6B6B6B] ${className}`}>
+    <div data-read-only className={`rounded-[14px] bg-[#F7F7F5] px-3.5 py-2.5 text-center text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)] ${className}`}>
       {readOnlyLine(botIds, state.shared.levels)}
     </div>
   );

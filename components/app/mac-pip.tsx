@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { MacTiles, PIP_KEY, useMacTiles } from "./mac-tab";
 import { useAppState } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /** Tells the Bops window to open the Your Mac tab (it listens for this key changing). */
 export const OPEN_MAC_KEY = "bops.openMac";
@@ -36,11 +37,11 @@ export function MacPip() {
     <div className="flex h-screen flex-col gap-2 p-2 font-sans text-ink antialiased">
       <div className="flex items-center gap-1 rounded-full bg-white/95 py-1 pl-3 pr-1 shadow-[0_0_0_1px_#0000000F,0_6px_16px_-10px_#00000059] [-webkit-app-region:drag]">
         <span className="size-2 shrink-0 animate-pulse rounded-full bg-[#2BB673]" />
-        <span className="flex-1 truncate pl-1 text-[12px] font-medium text-[#3A3A38]">On your Mac</span>
-        <button onClick={openMac} title="Open Your Mac in Bops" className="rounded-full px-2 py-0.5 text-[11.5px] font-medium text-[#6B6B6B] hover:bg-black/[0.06] hover:text-ink [-webkit-app-region:no-drag]">
-          Bops
+        <span className="flex-1 truncate pl-1 text-[12px] font-medium text-[color:var(--c-3a3a38)]">On your Mac</span>
+        <button onClick={openMac} title={`Open Your Mac in ${BRAND.name}`} className="rounded-full px-2 py-0.5 text-[11.5px] font-medium text-[color:var(--c-6b6b6b)] hover:bg-black/[0.06] hover:text-ink [-webkit-app-region:no-drag]">
+          {BRAND.name}
         </button>
-        <button onClick={() => bridge()?.closePip?.() ?? window.close()} aria-label="Put back in Bops" title="Put back in Bops" className="flex size-6 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-black/[0.06] hover:text-ink [-webkit-app-region:no-drag]">
+        <button onClick={() => bridge()?.closePip?.() ?? window.close()} aria-label={`Put back in ${BRAND.name}`} title={`Put back in ${BRAND.name}`} className="flex size-6 items-center justify-center rounded-full text-[color:var(--c-6b6b6b)] hover:bg-black/[0.06] hover:text-ink [-webkit-app-region:no-drag]">
           <svg width="9" height="9" viewBox="0 0 12 12">
             <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </svg>
@@ -51,7 +52,7 @@ export function MacPip() {
           <MacTiles tiles={tiles} onOpen={openMac} max={720} tall />
         </div>
       ) : (
-        <div className="flex flex-1 items-center justify-center rounded-2xl bg-white/90 px-4 text-center text-[12.5px] leading-[18px] text-[#6B6B6B] shadow-[0_0_0_1px_#0000000F]">
+        <div className="flex flex-1 items-center justify-center rounded-2xl bg-white/90 px-4 text-center text-[12.5px] leading-[18px] text-[color:var(--c-6b6b6b)] shadow-[0_0_0_1px_#0000000F]">
           Nothing on your Mac right now. Windows show here while a bot works on your Mac.
         </div>
       )}

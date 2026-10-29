@@ -20,6 +20,7 @@ import {
 } from "@/lib/privacy";
 import type { DeletedDays, KeepDays } from "@/lib/types";
 import { post } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /**
  * Settings → Your data (lib/privacy.ts, app/api/privacy): where each kind of the user's things is kept and how
@@ -72,11 +73,11 @@ function daysLeft(until: number) {
 }
 
 const pill = (on: boolean) =>
-  `rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-60 ${on ? "bg-ink text-white" : "shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]"}`;
-const small = "shrink-0 rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6] disabled:opacity-60";
-const card = "flex flex-col gap-2.5 rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]";
+  `rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 disabled:opacity-60 ${on ? "bg-ink text-white" : "shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]"}`;
+const small = "shrink-0 rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)] disabled:opacity-60";
+const card = "flex flex-col gap-2.5 rounded-[14px] p-3.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]";
 const danger = "rounded-full bg-[#B42318] px-3 py-1.5 text-[12.5px] font-semibold leading-4 text-white disabled:opacity-60";
-const sub = "text-[12px] leading-4 text-[#6B6B6B]";
+const sub = "text-[12px] leading-4 text-[color:var(--c-6b6b6b)]";
 
 /** Where each kind of thing is kept and how it goes, one plain line each. */
 function WhereKept({ info }: { info: PrivacyInfo }) {
@@ -95,12 +96,12 @@ function WhereKept({ info }: { info: PrivacyInfo }) {
       where: "Kept in this Mac's Keychain. A bot signing in fills them into that site's page, never into a chat or a model.",
       how: "Remove one in Logins, or disconnect its channel.",
     },
-    { kind: "Keys bots use", where: "Orgo's vault, encrypted. Bops keeps only their names.", how: "Delete one in Logins." },
+    { kind: "Keys bots use", where: `Orgo's vault, encrypted. ${BRAND.name} keeps only their names.`, how: "Delete one in Logins." },
     {
       kind: "Chats, routines and settings",
-      where: "Bops Cloud, Orgo's database, so your Macs and iPhone match.",
+      where: `${BRAND.name} Cloud, Orgo's database, so your Macs and iPhone match.`,
       how: "Delete a message from its menu, or keep them for less time below.",
-      extra: <span className="text-[12px] leading-4 text-[#3A3A38]">{many(info.messages, "message")}</span>,
+      extra: <span className="text-[12px] leading-4 text-[color:var(--c-3a3a38)]">{many(info.messages, "message")}</span>,
     },
     { kind: "Memory and Knowledge", where: "Honcho, the memory service Orgo uses, keeps what it learned from your chats and calls.", how: "It stays until you forget it in Knowledge." },
     { kind: "Skill, app and table files", where: "Orgo's file storage.", how: "Delete a skill, app or CRM file where you see it." },
@@ -111,7 +112,7 @@ function WhereKept({ info }: { info: PrivacyInfo }) {
       extra: (
         <span className="flex flex-wrap gap-1.5">
           {here.map(([name, line]) => (
-            <span key={name} className="rounded-full bg-[#F7F7F6] px-2 py-0.5 text-[11.5px] leading-4 text-[#3A3A38]">
+            <span key={name} className="rounded-full bg-[color:var(--c-f7f7f6)] px-2 py-0.5 text-[11.5px] leading-4 text-[color:var(--c-3a3a38)]">
               {name} {line}
             </span>
           ))}
@@ -123,9 +124,9 @@ function WhereKept({ info }: { info: PrivacyInfo }) {
     { kind: "Answers to chats and tasks", where: "OpenAI keeps each one 30 days.", how: "Then it's deleted there." },
   ];
   return (
-    <div className="flex flex-col rounded-[14px] px-3.5 shadow-[0_0_0_1px_#E6E6E3]">
+    <div className="flex flex-col rounded-[14px] px-3.5 shadow-[0_0_0_1px_var(--c-e6e6e3)]">
       {rows.map((r) => (
-        <div key={r.kind} className="flex flex-col gap-1 border-b border-[#F0F0EE] py-2.5 last:border-0">
+        <div key={r.kind} className="flex flex-col gap-1 border-b border-[color:var(--c-f0f0ee)] py-2.5 last:border-0">
           <span className="text-[13px] font-medium leading-4">{r.kind}</span>
           <span className={sub}>
             {r.where} {r.how}
@@ -140,10 +141,10 @@ function WhereKept({ info }: { info: PrivacyInfo }) {
 /** One in Recently deleted: what it was, when it was deleted and goes for good, Restore and Delete now. */
 function DeletedRow({ item, busy, act }: { item: DeletedItem; busy: boolean; act: (body: { restore: string } | { deleteNow: string }) => void }) {
   return (
-    <div className="flex items-center gap-3 border-b border-[#F0F0EE] py-2 last:border-0">
+    <div className="flex items-center gap-3 border-b border-[color:var(--c-f0f0ee)] py-2 last:border-0">
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="truncate text-[12.5px] font-medium leading-4">{item.what}</span>
-        <span className="text-[11.5px] leading-4 text-[#6B6B6B]">
+        <span className="text-[11.5px] leading-4 text-[color:var(--c-6b6b6b)]">
           {KIND_NAMES[item.kind]}
           {item.kind !== "message" && item.messages ? ` · ${many(item.messages, "message")}` : ""} · deleted {daysAgo(item.at)} · goes {daysLeft(item.until)}
         </span>
@@ -221,7 +222,7 @@ export function YourData() {
     <div className="flex flex-col gap-2 px-[22px] pt-4">
       <div className="flex flex-col gap-0.5">
         <span className="text-[13px] font-semibold">Your data</span>
-        <span className={sub}>Where Bops keeps your things, how long, and what a delete leaves behind.</span>
+        <span className={sub}>Where {BRAND.name} keeps your things, how long, and what a delete leaves behind.</span>
       </div>
 
       <WhereKept info={info} />
@@ -230,7 +231,7 @@ export function YourData() {
         <div className="flex flex-col gap-0.5">
           <span className="text-[13px] font-medium">Keep chats and calls</span>
           <span className={sub}>
-            Older messages and finished threads are deleted from Bops Cloud and all your Macs, with each Mac&apos;s call notes, last screens, and the images and pages no kept message shows.
+            Older messages and finished threads are deleted from {BRAND.name} Cloud and all your Macs, with each Mac&apos;s call notes, last screens, and the images and pages no kept message shows.
           </span>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -242,7 +243,7 @@ export function YourData() {
         </div>
         {asking && (
           <div className="flex flex-col gap-2 rounded-[10px] bg-[#FFF4F2] p-3">
-            <span className="text-[12.5px] leading-[18px] text-[#3A3A38]">{goesLine(asking.keepDays, asking.goes)}</span>
+            <span className="text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">{goesLine(asking.keepDays, asking.goes)}</span>
             <div className="flex gap-2">
               <button type="button" disabled={busy} onClick={() => void send({ keepDays: asking.keepDays }).then(() => setAsking(null))} className={danger}>
                 Delete and keep {KEEP_NAMES.get(asking.keepDays)}
@@ -259,9 +260,9 @@ export function YourData() {
         <div className="flex flex-col gap-0.5">
           <span className="text-[13px] font-medium">When you delete something</span>
           <span className={sub}>
-            A message, thread or group chat you delete leaves your chats and Bops Cloud at once.
+            A message, thread or group chat you delete leaves your chats and {BRAND.name} Cloud at once.
             {info.deletedDays
-              ? " A copy stays on this Mac only, so you can restore it. Bops Cloud never gets the copy, and what you kept between us is never copied."
+              ? ` A copy stays on this Mac only, so you can restore it. ${BRAND.name} Cloud never gets the copy, and what you kept between us is never copied.`
               : " Its images on this Mac go too."}
           </span>
         </div>
@@ -274,7 +275,7 @@ export function YourData() {
         </div>
         {askingDeleted && (
           <div className="flex flex-col gap-2 rounded-[10px] bg-[#FFF4F2] p-3">
-            <span className="text-[12.5px] leading-[18px] text-[#3A3A38]">{deletedGoesLine(askingDeleted.deletedDays, askingDeleted.goes)}</span>
+            <span className="text-[12.5px] leading-[18px] text-[color:var(--c-3a3a38)]">{deletedGoesLine(askingDeleted.deletedDays, askingDeleted.goes)}</span>
             <div className="flex gap-2">
               <button type="button" disabled={busy} onClick={() => void send({ deletedDays: askingDeleted.deletedDays }).then(() => setAskingDeleted(null))} className={danger}>
                 {askingDeleted.deletedDays ? `Delete and keep ${askingDeleted.deletedDays} days` : "Delete and keep none"}
@@ -299,7 +300,7 @@ export function YourData() {
 
       {error && <span className="text-[12px] leading-4 text-[#B42318]">{error}</span>}
       <span className={sub}>
-        Not covered yet: Honcho keeps what it learned from chats and calls until you forget it in Knowledge. OpenAI keeps answers to chats and tasks 30 days. Start over keeps a copy of your chats in Bops Cloud.
+        Not covered yet: Honcho keeps what it learned from chats and calls until you forget it in Knowledge. OpenAI keeps answers to chats and tasks 30 days. Start over keeps a copy of your chats in {BRAND.name} Cloud.
       </span>
     </div>
   );

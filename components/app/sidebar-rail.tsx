@@ -103,7 +103,7 @@ export function SidebarRail({
           <button
             onClick={onWorkspaces}
             aria-label={`${wsName}: switch workspaces`}
-            className="flex size-[34px] shrink-0 items-center justify-center rounded-[10px] bg-white text-[14px] font-semibold text-ink shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB]"
+            className="flex size-[34px] shrink-0 items-center justify-center rounded-[10px] bg-white text-[14px] font-semibold text-ink shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-fcfcfb)]"
           >
             <span aria-hidden>{[...wsName.trim()][0]?.toUpperCase() ?? "M"}</span>
           </button>
@@ -118,7 +118,7 @@ export function SidebarRail({
           </RoundButton>
         )}
       </div>
-      <div aria-hidden className="mx-auto mb-2 h-px w-8 shrink-0 bg-[#E6E6E3]" />
+      <div aria-hidden className="mx-auto mb-2 h-px w-8 shrink-0 bg-[color:var(--c-e6e6e3)]" />
 
       {/* As wide as the rail, so the selected chat's mark at its edge isn't cut off. */}
       <nav ref={list} aria-label="Chats" className="-mx-3 flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto px-3 pt-1 [scrollbar-width:none]">
@@ -140,7 +140,7 @@ export function SidebarRail({
               aria-current={selected ? "page" : undefined}
               data-tip={says ? `${name}: ${says}` : name}
               data-rail-chat={c.id}
-              className={`group/chat relative flex size-12 shrink-0 items-center justify-center rounded-[14px] outline-none focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${selected ? "bg-[#EEEEEC]" : "hover:bg-black/[0.03]"} ${menu && solo && menu.botId === solo.id ? "shadow-[inset_0_0_0_1.5px_#0A0A0A]" : ""}`}
+              className={`group/chat relative flex size-12 shrink-0 items-center justify-center rounded-[14px] outline-none focus-visible:shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)] ${selected ? "bg-[color:var(--c-eeeeec)]" : "hover:bg-black/[0.03]"} ${menu && solo && menu.botId === solo.id ? "shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)]" : ""}`}
             >
               {selected && <span aria-hidden className="absolute -left-3 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-ink" />}
               <span className="relative flex">
@@ -150,14 +150,14 @@ export function SidebarRail({
                   <span
                     aria-hidden
                     data-rail-mark="you"
-                    className={`absolute -right-2 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-highlighter px-1 text-[10px] font-semibold leading-none tabular-nums text-ink ${selected ? "shadow-[inset_0_0_0_1.2px_#0A0A0A,0_0_0_2px_#EEEEEC]" : "shadow-[inset_0_0_0_1.2px_#0A0A0A,0_0_0_2px_#F9F9F8]"}`}
+                    className={`absolute -right-2 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-highlighter px-1 text-[10px] font-semibold leading-none tabular-nums text-ink ${selected ? "shadow-[inset_0_0_0_1.2px_var(--c-0a0a0a),0_0_0_2px_var(--c-eeeeec)]" : "shadow-[inset_0_0_0_1.2px_var(--c-0a0a0a),0_0_0_2px_var(--c-f9f9f8)]"}`}
                   >
                     {mark.waiting > 9 ? "9+" : mark.waiting}
                   </span>
                 ) : unread ? (
-                  <span aria-hidden data-rail-mark="unread" className="absolute -right-0.5 -top-0.5 size-[9px] rounded-full bg-highlighter shadow-[0_0_0_1.5px_#0A0A0A,0_0_0_3px_#F9F9F8]" />
+                  <span aria-hidden data-rail-mark="unread" className="absolute -right-0.5 -top-0.5 size-[9px] rounded-full bg-highlighter shadow-[0_0_0_1.5px_var(--c-0a0a0a),0_0_0_3px_var(--c-f9f9f8)]" />
                 ) : mark.working ? (
-                  <span aria-hidden data-rail-mark="working" className={`absolute -right-1.5 -top-1.5 flex size-4 items-center justify-center rounded-full bg-white ${selected ? "shadow-[0_0_0_1px_#E6E6E3,0_0_0_3px_#EEEEEC]" : "shadow-[0_0_0_1px_#E6E6E3,0_0_0_3px_#F9F9F8]"}`}>
+                  <span aria-hidden data-rail-mark="working" className={`absolute -right-1.5 -top-1.5 flex size-4 items-center justify-center rounded-full bg-white ${selected ? "shadow-[0_0_0_1px_var(--c-e6e6e3),0_0_0_3px_var(--c-eeeeec)]" : "shadow-[0_0_0_1px_var(--c-e6e6e3),0_0_0_3px_var(--c-f9f9f8)]"}`}>
                     <Spinner size={10} color="#3A3A38" />
                   </span>
                 ) : null}

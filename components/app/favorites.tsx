@@ -130,7 +130,7 @@ export function SideMenu({ x, y, label, items, onClose }: { x: number; y: number
               onClose();
               item.onPick();
             }}
-            className="flex h-8 items-center rounded-lg px-2.5 text-left text-[13px] leading-4 text-ink outline-none hover:bg-[#F2F2F0] focus-visible:bg-[#F2F2F0] disabled:text-[#C9C9C6] disabled:hover:bg-transparent"
+            className="flex h-8 items-center rounded-lg px-2.5 text-left text-[13px] leading-4 text-ink outline-none hover:bg-[color:var(--c-f2f2f0)] focus-visible:bg-[color:var(--c-f2f2f0)] disabled:text-[color:var(--c-c9c9c6)] disabled:hover:bg-transparent"
           >
             {item.label}
           </button>

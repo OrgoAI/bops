@@ -8,6 +8,7 @@ import { CHECK_TIMES, checkerOf, isKeyApp } from "@/lib/routine-catalog";
 import { Mascot, Spinner } from "./mascot";
 import { KeyIcon } from "./screen-cards";
 import { ago, post, teamOf } from "./ui";
+import { BRAND } from "@/lib/brand";
 
 /*
  * The user's apps, in the Vault. Only what's connected is listed, one row per app (however many
@@ -48,13 +49,13 @@ export function AppLogo({ app, name, size }: { app: string; name: string; size: 
   const radius = Math.round(size * 0.26);
   if (isKeyApp(app))
     return (
-      <span role="img" aria-label={name} className="flex shrink-0 items-center justify-center bg-[#F2F2F0] text-[#3A3A38]" style={{ width: size, height: size, borderRadius: radius }}>
+      <span role="img" aria-label={name} className="flex shrink-0 items-center justify-center bg-[color:var(--c-f2f2f0)] text-[color:var(--c-3a3a38)]" style={{ width: size, height: size, borderRadius: radius }}>
         <KeyIcon size={Math.max(10, Math.round(size * 0.6))} />
       </span>
     );
   if (broken)
     return (
-      <span className="flex shrink-0 items-center justify-center bg-[#F2F2F0] font-semibold text-[#3A3A38]" style={{ width: size, height: size, borderRadius: radius, fontSize: Math.round(size * 0.42) }}>
+      <span className="flex shrink-0 items-center justify-center bg-[color:var(--c-f2f2f0)] font-semibold text-[color:var(--c-3a3a38)]" style={{ width: size, height: size, borderRadius: radius, fontSize: Math.round(size * 0.42) }}>
         {name.slice(0, 1).toUpperCase()}
       </span>
     );
@@ -92,11 +93,11 @@ export function Connecting({ state }: { state: AppState }) {
   return (
     <>
       {(state.connecting ?? []).map((c) => (
-        <div key={c.id} className="flex items-center gap-3 rounded-2xl bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_#ECECEA]">
+        <div key={c.id} className="flex items-center gap-3 rounded-2xl bg-white px-3.5 py-2.5 shadow-[0_0_0_1px_var(--c-ececea)]">
           <AppLogo app={c.app} name={c.appName} size={28} />
           <span className="flex min-w-0 flex-1 flex-col">
             <span className="text-[13.5px] font-medium leading-[18px]">{c.appName}</span>
-            <span className={`truncate text-[12px] leading-4 ${c.status === "failed" ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>
+            <span className={`truncate text-[12px] leading-4 ${c.status === "failed" ? "text-[#B42318]" : "text-[color:var(--c-6b6b6b)]"}`}>
               {c.status === "failed" ? `Couldn't connect: ${c.error ?? "try again"}` : "Finish signing in in your browser…"}
             </span>
           </span>
@@ -105,7 +106,7 @@ export function Connecting({ state }: { state: AppState }) {
               Try again
             </button>
           )}
-          <button onClick={() => void post("/api/apps", { waiting: c.id }, "DELETE")} className="shrink-0 rounded-full px-2 py-1 text-[12px] text-[#6B6B6B] hover:bg-[#F2F2F0]">
+          <button onClick={() => void post("/api/apps", { waiting: c.id }, "DELETE")} className="shrink-0 rounded-full px-2 py-1 text-[12px] text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-f2f2f0)]">
             {c.status === "waiting" ? "Cancel" : "Dismiss"}
           </button>
         </div>
@@ -120,11 +121,11 @@ export function QuickStart({ onPick }: { onPick: (app: string) => void }) {
   // Once the catalog is in, only apps it offers (signed in with Orgo, the ones that can connect through Bops Cloud).
   const pick = (apps ? FEATURED_APPS.map((a) => apps.find((x) => x.app === a)).filter((x): x is CatalogApp => !!x) : FEATURED_APPS.map((a) => ({ app: a, name: a }))).slice(0, 8);
   return (
-    <div className="flex flex-col gap-2.5 rounded-2xl px-4 py-4 shadow-[0_0_0_1px_#ECECEA]">
-      <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">Connect the apps you work in, and your bots use them directly: faster and steadier than clicking through them on a computer.</span>
+    <div className="flex flex-col gap-2.5 rounded-2xl px-4 py-4 shadow-[0_0_0_1px_var(--c-ececea)]">
+      <span className="text-[12.5px] leading-[17px] text-[color:var(--c-6b6b6b)]">Connect the apps you work in, and your bots use them directly: faster and steadier than clicking through them on a computer.</span>
       <div className="grid grid-cols-4 gap-1.5">
         {pick.map((a) => (
-          <button key={a.app} onClick={() => onPick(a.app)} className="flex items-center gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-[#F7F7F6]">
+          <button key={a.app} onClick={() => onPick(a.app)} className="flex items-center gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-[color:var(--c-f7f7f6)]">
             <AppLogo app={a.app} name={a.name} size={22} />
             <span className="truncate text-[12.5px] font-medium leading-4">{a.name}</span>
           </button>
@@ -136,7 +137,7 @@ export function QuickStart({ onPick }: { onPick: (app: string) => void }) {
 
 /** A row's round icon button (Rename, Remove, Show, Copy), here and on key rows (keys.tsx). */
 export const rowIconBtn =
-  "flex size-7 shrink-0 items-center justify-center rounded-full text-[#6B6B6B] outline-none transition-colors hover:bg-black/[0.05] hover:text-ink focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50";
+  "flex size-7 shrink-0 items-center justify-center rounded-full text-[color:var(--c-6b6b6b)] outline-none transition-colors hover:bg-black/[0.05] hover:text-ink focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] disabled:opacity-50";
 /** The same, for the one that removes: red on hover. */
 export const rowTrashBtn = `${rowIconBtn} hover:!bg-[#FEF3F2] hover:!text-[#B42318]`;
 
@@ -184,7 +185,7 @@ export function AccountBlock({ state, account: a, many, last, onSignIn }: { stat
             onBlur={save}
             onKeyDown={(e) => (e.key === "Enter" ? save() : e.key === "Escape" && (e.preventDefault(), setLabel(a.label ?? ""), setNaming(false)))}
             placeholder="Work, Personal…"
-            className="h-7 w-[150px] rounded-lg bg-white px-2 text-[12.5px] outline-none shadow-[0_0_0_1.5px_#0A0A0A]"
+            className="h-7 w-[150px] rounded-lg bg-white px-2 text-[12.5px] outline-none shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
           />
         ) : (
           <span className="min-w-0 truncate text-[13.5px] font-medium leading-[18px]">{openApp ? "Ready to use" : accountTitle(a)}</span>
@@ -201,7 +202,7 @@ export function AccountBlock({ state, account: a, many, last, onSignIn }: { stat
             <button onClick={() => void post("/api/apps", { account: a.id }, "DELETE")} className="rounded-full bg-[#B42318] px-2.5 py-1 text-[12px] font-semibold leading-4 text-white">
               {openApp ? "Remove" : "Disconnect"}
             </button>
-            <button onClick={() => setSure(false)} className="rounded-full px-2 py-1 text-[12px] text-[#6B6B6B]">
+            <button onClick={() => setSure(false)} className="rounded-full px-2 py-1 text-[12px] text-[color:var(--c-6b6b6b)]">
               Keep
             </button>
           </span>
@@ -229,7 +230,7 @@ export function AccountBlock({ state, account: a, many, last, onSignIn }: { stat
             onSet={set}
           />
         </div>
-        <span className="shrink-0 text-[12px] leading-4 text-[#9A9A98]">{meta}</span>
+        <span className="shrink-0 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{meta}</span>
       </div>
     </div>
   );
@@ -328,10 +329,10 @@ function ChipMenu({ anchor, label, onClose, children }: { anchor: () => HTMLElem
   );
 }
 
-const menuItem = "flex h-7 items-center gap-2 rounded-lg px-2 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F2F2F0]";
+const menuItem = "flex h-7 items-center gap-2 rounded-lg px-2 text-left text-[12.5px] leading-4 text-ink hover:bg-[color:var(--c-f2f2f0)]";
 
 /** A bot's chip: its mascot and name, small and round (BotChips, and BotChip). */
-const CHIP = "flex h-6 items-center gap-1 rounded-full bg-[#F4F4F2] pl-[3px] pr-2 text-[12px] font-medium leading-4 text-[#3A3A38]";
+const CHIP = "flex h-6 items-center gap-1 rounded-full bg-[color:var(--c-f4f4f2)] pl-[3px] pr-2 text-[12px] font-medium leading-4 text-[color:var(--c-3a3a38)]";
 
 /** A bot as a chip that only says who, nothing to open (a routine's row on the Routines page): `tip` on hover. */
 export function BotChip({ bot, tip }: { bot: Bot; tip: string }) {
@@ -392,15 +393,15 @@ export function BotChips<T extends string>({
             disabled={disabled}
             data-tip={`${b.name}: ${choices.find((c) => c.id === level(b))?.name ?? ""}`}
             onClick={() => setOpen(open === b.id ? null : b.id)}
-            className={`${CHIP} outline-none hover:bg-[#EDEDEA] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50`}
+            className={`${CHIP} outline-none hover:bg-[#EDEDEA] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] disabled:opacity-50`}
           >
             <Mascot botId={b.id} color={b.color} size={18} antenna={false} />
             {b.name}
-            {word && <span className="font-normal text-[#9A9A98]">{word}</span>}
+            {word && <span className="font-normal text-[color:var(--c-9a9a98)]">{word}</span>}
           </button>
         );
       })}
-      {!users.length && <span className="pr-1 text-[12px] leading-4 text-[#9A9A98]">No bot can use it</span>}
+      {!users.length && <span className="pr-1 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">No bot can use it</span>}
       {rest.length > 0 && (
         <button
           ref={(el) => void (el ? anchors.current.set("+", el) : anchors.current.delete("+"))}
@@ -410,7 +411,7 @@ export function BotChips<T extends string>({
           disabled={disabled}
           data-tip={`Can't use it: ${rest.map((b) => b.name).join(", ")}`}
           onClick={() => setOpen(open === "+" ? null : "+")}
-          className="h-6 rounded-full px-2 text-[12px] font-medium leading-4 text-[#9A9A98] outline-none hover:bg-[#F4F4F2] hover:text-[#3A3A38] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50"
+          className="h-6 rounded-full px-2 text-[12px] font-medium leading-4 text-[color:var(--c-9a9a98)] outline-none hover:bg-[color:var(--c-f4f4f2)] hover:text-[color:var(--c-3a3a38)] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] disabled:opacity-50"
         >
           +{rest.length}
         </button>
@@ -507,8 +508,8 @@ export function AppPicker({ state, start, replaces, onClose }: { state: AppState
           <ConnectStep state={state} app={info} replaces={replaces} onBack={start ? onClose : () => setChosen(undefined)} onDone={onClose} hasOne={connected.has(info.app)} />
         ) : (
           <>
-            <div className="flex items-center gap-2.5 border-b border-[#F0F0EE] px-4 py-3">
-              <svg width="15" height="15" viewBox="0 0 16 16" className="shrink-0 text-[#9A9A98]">
+            <div className="flex items-center gap-2.5 border-b border-[color:var(--c-f0f0ee)] px-4 py-3">
+              <svg width="15" height="15" viewBox="0 0 16 16" className="shrink-0 text-[color:var(--c-9a9a98)]">
                 <circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" strokeWidth="1.6" />
                 <path d="M11 11l3.5 3.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
               </svg>
@@ -527,43 +528,43 @@ export function AppPicker({ state, start, replaces, onClose }: { state: AppState
                   if (e.key === "Enter" && list[cursor]) setChosen(list[cursor].app);
                 }}
                 placeholder={apps ? `Search ${apps.length.toLocaleString()} apps: Notion, HubSpot, QuickBooks…` : "Search apps…"}
-                className="min-w-0 flex-1 bg-transparent text-[15px] leading-5 outline-none placeholder:text-[#9A9A98]"
+                className="min-w-0 flex-1 bg-transparent text-[15px] leading-5 outline-none placeholder:text-[color:var(--c-9a9a98)]"
               />
-              <kbd className="shrink-0 rounded-md bg-[#F2F2F0] px-1.5 py-0.5 text-[11px] text-[#6B6B6B]">esc</kbd>
+              <kbd className="shrink-0 rounded-md bg-[color:var(--c-f2f2f0)] px-1.5 py-0.5 text-[11px] text-[color:var(--c-6b6b6b)]">esc</kbd>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
               {!apps ? (
-                <div className="flex items-center justify-center gap-2 py-10 text-[13px] text-[#9A9A98]">{error ? `Couldn't load the apps: ${error}` : <><Spinner size={14} /> Loading apps…</>}</div>
+                <div className="flex items-center justify-center gap-2 py-10 text-[13px] text-[color:var(--c-9a9a98)]">{error ? `Couldn't load the apps: ${error}` : <><Spinner size={14} /> Loading apps…</>}</div>
               ) : !q.trim() ? (
                 <>
-                  <div className="px-2 pb-1.5 pt-1 text-[11.5px] font-medium uppercase tracking-[0.05em] text-[#9A9A98]">Popular for business</div>
+                  <div className="px-2 pb-1.5 pt-1 text-[11.5px] font-medium uppercase tracking-[0.05em] text-[color:var(--c-9a9a98)]">Popular for business</div>
                   <div className="grid grid-cols-3 gap-0.5">
                     {featured.map((a, i) => (
-                      <button key={a.app} onMouseEnter={() => setCursor(i)} onClick={() => setChosen(a.app)} className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-left ${cursor === i ? "bg-[#F4F4F2]" : ""}`}>
+                      <button key={a.app} onMouseEnter={() => setCursor(i)} onClick={() => setChosen(a.app)} className={`flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-left ${cursor === i ? "bg-[color:var(--c-f4f4f2)]" : ""}`}>
                         <AppLogo app={a.app} name={a.name} size={26} />
                         <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium leading-[18px]">{a.name}</span>
                         {connected.has(a.app) && <Check />}
                       </button>
                     ))}
                   </div>
-                  <div className="px-2 pb-1 pt-3 text-[12px] leading-4 text-[#9A9A98]">Type to search every app.</div>
+                  <div className="px-2 pb-1 pt-3 text-[12px] leading-4 text-[color:var(--c-9a9a98)]">Type to search every app.</div>
                 </>
               ) : results.length ? (
                 results.map((a, i) => (
-                  <button key={a.app} onMouseEnter={() => setCursor(i)} onClick={() => setChosen(a.app)} className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left ${cursor === i ? "bg-[#F4F4F2]" : ""}`}>
+                  <button key={a.app} onMouseEnter={() => setCursor(i)} onClick={() => setChosen(a.app)} className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left ${cursor === i ? "bg-[color:var(--c-f4f4f2)]" : ""}`}>
                     <AppLogo app={a.app} name={a.name} size={30} />
                     <span className="flex min-w-0 flex-1 flex-col">
                       <span className="flex items-center gap-1.5">
                         <span className="truncate text-[14px] font-medium leading-[18px]">{a.name}</span>
                         {connected.has(a.app) && <Check />}
                       </span>
-                      <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">{a.about ?? a.tags.join(" · ")}</span>
+                      <span className="truncate text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{a.about ?? a.tags.join(" · ")}</span>
                     </span>
-                    {a.tags[0] && <span className="shrink-0 rounded-full bg-[#F2F2F0] px-2 py-0.5 text-[11px] capitalize leading-4 text-[#6B6B6B]">{a.tags[0]}</span>}
+                    {a.tags[0] && <span className="shrink-0 rounded-full bg-[color:var(--c-f2f2f0)] px-2 py-0.5 text-[11px] capitalize leading-4 text-[color:var(--c-6b6b6b)]">{a.tags[0]}</span>}
                   </button>
                 ))
               ) : (
-                <div className="py-10 text-center text-[13px] text-[#9A9A98]">No app called &ldquo;{q}&rdquo;. Bots can still use it on their computer.</div>
+                <div className="py-10 text-center text-[13px] text-[color:var(--c-9a9a98)]">No app called &ldquo;{q}&rdquo;. Bots can still use it on their computer.</div>
               )}
             </div>
           </>
@@ -634,12 +635,12 @@ export function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }:
     a.auth === "open"
       ? `${a.name} needs no sign-in: your bots can use it straight away.`
       : a.auth === "key"
-        ? `${a.name} connects with an API key. A secure page opens in your browser and asks for it. Bops never sees it.`
-        : `${a.name}'s own sign-in opens in your browser. Bops never sees your password.`;
+        ? `${a.name} connects with an API key. A secure page opens in your browser and asks for it. ${BRAND.name} never sees it.`
+        : `${a.name}'s own sign-in opens in your browser. ${BRAND.name} never sees your password.`;
   return (
     <div className="flex flex-col gap-4 p-5">
       <div className="flex items-start gap-3">
-        <button onClick={onBack} aria-label="Back" className="-ml-1 mt-1 flex size-7 shrink-0 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-[#F2F2F0]">
+        <button onClick={onBack} aria-label="Back" className="-ml-1 mt-1 flex size-7 shrink-0 items-center justify-center rounded-full text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-f2f2f0)]">
           <svg width="12" height="12" viewBox="0 0 12 12">
             <path d="M7.5 2.5L4 6l3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
@@ -647,7 +648,7 @@ export function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }:
         <AppLogo app={a.app} name={a.name} size={44} />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="text-[17px] font-semibold leading-[22px]">{old ? `Sign in to ${a.name} again` : hasOne ? `Add another ${a.name} account` : `Connect ${a.name}`}</span>
-          <span className="text-[12.5px] leading-[17px] text-[#6B6B6B]">{old ? `For ${accountTitle(old)}. Your bots keep the access they had.` : (a.about ?? how)}</span>
+          <span className="text-[12.5px] leading-[17px] text-[color:var(--c-6b6b6b)]">{old ? `For ${accountTitle(old)}. Your bots keep the access they had.` : (a.about ?? how)}</span>
         </div>
       </div>
 
@@ -655,12 +656,12 @@ export function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }:
         <>
           {a.auth !== "open" && (
             <label className="flex flex-col gap-1">
-              <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">Name it · optional{hasOne ? ", so bots can tell your accounts apart" : ""}</span>
-              <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Work, Personal, Client X…" className="w-full rounded-xl bg-[#F7F7F6] px-3 py-2 text-[13.5px] leading-[18px] outline-none placeholder:text-[#9A9A98] focus:bg-white focus:shadow-[0_0_0_1.5px_#0A0A0A]" />
+              <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Name it · optional{hasOne ? ", so bots can tell your accounts apart" : ""}</span>
+              <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Work, Personal, Client X…" className="w-full rounded-xl bg-[color:var(--c-f7f7f6)] px-3 py-2 text-[13.5px] leading-[18px] outline-none placeholder:text-[color:var(--c-9a9a98)] focus:bg-white focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" />
             </label>
           )}
           <div className="flex flex-col gap-1.5">
-            <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">Who can use it</span>
+            <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">Who can use it</span>
             <div className="flex flex-wrap gap-1.5">
               {team.map((b) => {
                 const on = bots.includes(b.id);
@@ -668,7 +669,7 @@ export function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }:
                   <button
                     key={b.id}
                     onClick={() => setBots(on ? bots.filter((x) => x !== b.id) : [...bots, b.id])}
-                    className={`flex items-center gap-1.5 rounded-full py-1 pl-1 pr-2.5 text-[12.5px] leading-4 ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#6B6B6B]"}`}
+                    className={`flex items-center gap-1.5 rounded-full py-1 pl-1 pr-2.5 text-[12.5px] leading-4 ${on ? "bg-ink text-white" : "bg-[color:var(--c-f2f2f0)] text-[color:var(--c-6b6b6b)]"}`}
                   >
                     <Mascot botId={b.id} color={b.color} size={18} antenna={false} />
                     {b.name}
@@ -678,15 +679,15 @@ export function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }:
             </div>
             <div className="flex gap-1.5 pt-1">
               {APP_LEVELS.map((l) => (
-                <button key={l.id} onClick={() => setLevel(l.id)} className={`flex-1 rounded-xl px-3 py-2 text-left ${level === l.id ? "bg-white shadow-[0_0_0_1.5px_#0A0A0A]" : "bg-[#F7F7F6] hover:bg-[#F2F2F0]"}`}>
+                <button key={l.id} onClick={() => setLevel(l.id)} className={`flex-1 rounded-xl px-3 py-2 text-left ${level === l.id ? "bg-white shadow-[0_0_0_1.5px_var(--c-0a0a0a)]" : "bg-[color:var(--c-f7f7f6)] hover:bg-[color:var(--c-f2f2f0)]"}`}>
                   <span className="block text-[13px] font-medium leading-[18px]">{l.name}</span>
-                  <span className="block text-[11.5px] leading-[15px] text-[#6B6B6B]">{l.hint}</span>
+                  <span className="block text-[11.5px] leading-[15px] text-[color:var(--c-6b6b6b)]">{l.hint}</span>
                 </button>
               ))}
             </div>
           </div>
           <div className="flex flex-col gap-1.5">
-            <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">How often</span>
+            <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)]">How often</span>
             <div role="radiogroup" aria-label="How often" className="flex flex-wrap gap-1.5">
               {HOW_OFTEN.map((o) => {
                 const on = o.schedule === check;
@@ -698,7 +699,7 @@ export function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }:
                     aria-checked={on}
                     disabled={!checker}
                     onClick={() => setOften(o.label)}
-                    className={`rounded-full px-2.5 py-1 text-[12.5px] leading-4 disabled:opacity-50 ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#6B6B6B] hover:bg-[#EAEAE7]"}`}
+                    className={`rounded-full px-2.5 py-1 text-[12.5px] leading-4 disabled:opacity-50 ${on ? "bg-ink text-white" : "bg-[color:var(--c-f2f2f0)] text-[color:var(--c-6b6b6b)] hover:bg-[color:var(--c-eaeae7)]"}`}
                   >
                     {o.label}
                   </button>
@@ -706,9 +707,9 @@ export function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }:
               })}
             </div>
             {!checker ? (
-              <span className="text-[11.5px] leading-[15px] text-[#9A9A98]">Pick a bot above first: it does the checks.</span>
+              <span className="text-[11.5px] leading-[15px] text-[color:var(--c-9a9a98)]">Pick a bot above first: it does the checks.</span>
             ) : (
-              check && <span className="text-[11.5px] leading-[15px] text-[#6B6B6B]">{checkLine(checker.name, a.name, level, check, state.owner?.timeZone)}</span>
+              check && <span className="text-[11.5px] leading-[15px] text-[color:var(--c-6b6b6b)]">{checkLine(checker.name, a.name, level, check, state.owner?.timeZone)}</span>
             )}
           </div>
         </>
@@ -716,10 +717,10 @@ export function ConnectStep({ state, app: a, replaces, hasOne, onBack, onDone }:
 
       {error && <span className="rounded-xl bg-[#FFF4F2] px-3 py-2 text-[12.5px] leading-[17px] text-[#B42318]">{error}</span>}
       <div className="flex items-center gap-3">
-        <button onClick={() => void connect()} disabled={busy} className="shrink-0 whitespace-nowrap rounded-full bg-ink px-4 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[#2A2A28] disabled:opacity-50">
+        <button onClick={() => void connect()} disabled={busy} className="shrink-0 whitespace-nowrap rounded-full bg-ink px-4 py-2 text-[13px] font-semibold leading-4 text-white hover:bg-[color:var(--c-2a2a28)] disabled:opacity-50">
           {busy ? "Opening…" : a.auth === "open" ? `Add ${a.name}` : old ? "Sign in" : "Continue to sign in"}
         </button>
-        <span className="text-[11.5px] leading-4 text-[#9A9A98]">{a.auth === "open" ? "" : how}</span>
+        <span className="text-[11.5px] leading-4 text-[color:var(--c-9a9a98)]">{a.auth === "open" ? "" : how}</span>
       </div>
     </div>
   );

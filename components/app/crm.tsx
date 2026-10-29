@@ -392,7 +392,7 @@ export function CrmSection({
 
   return (
     <div
-      className={`flex flex-col rounded-[12px] pt-4 ${dropping ? "shadow-[inset_0_0_0_1.5px_#0A0A0A]" : ""}`}
+      className={`flex flex-col rounded-[12px] pt-4 ${dropping ? "shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)]" : ""}`}
       onDragOver={(e) => {
         if (![...e.dataTransfer.types].includes("Files")) return;
         e.preventDefault();
@@ -406,14 +406,14 @@ export function CrmSection({
       }}
     >
       <div className="flex items-center pb-1.5 pl-2.5 pr-1.5">
-        <span className="flex-1 text-[13px] font-medium leading-4 text-[#9A9A98]">CRM</span>
+        <span className="flex-1 text-[13px] font-medium leading-4 text-[color:var(--c-9a9a98)]">CRM</span>
         <button
           ref={plus}
           aria-label="New CRM file"
           aria-haspopup="menu"
           aria-expanded={!!menu}
           onClick={() => (menu ? setMenu(null) : openMenu())}
-          className={`flex size-5 items-center justify-center rounded-md hover:bg-black/[0.06] hover:text-ink ${menu ? "bg-black/[0.06] text-ink" : "text-[#9A9A98]"}`}
+          className={`flex size-5 items-center justify-center rounded-md hover:bg-black/[0.06] hover:text-ink ${menu ? "bg-black/[0.06] text-ink" : "text-[color:var(--c-9a9a98)]"}`}
         >
           <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden>
             <path d="M8 2.5v11M2.5 8h11" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
@@ -427,7 +427,7 @@ export function CrmSection({
             role="menu"
             aria-label="New CRM file"
             onKeyDown={menuKeys}
-            className="fixed z-50 flex w-[220px] flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_rgba(0,0,0,0.12)]"
+            className="fixed z-50 flex w-[220px] flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_var(--c-e6e6e3),0_12px_32px_rgba(0,0,0,0.12)]"
             style={{ left: menu.x, top: menu.y, transform: menu.up ? "translateY(-100%)" : undefined }}
           >
             <button
@@ -470,7 +470,7 @@ export function CrmSection({
           </div>,
           document.body,
         )}
-      {dropping && <div className="px-2.5 pb-1 text-[13px] leading-[18px] text-[#3A3A38]">Drop a CSV to add it</div>}
+      {dropping && <div className="px-2.5 pb-1 text-[13px] leading-[18px] text-[color:var(--c-3a3a38)]">Drop a CSV to add it</div>}
       {naming && !naming.from && (
         <NameInput value={naming.name} placeholder="Name the file" onChange={(name) => setNaming({ name })} onSave={() => void save()} onCancel={() => setNaming(null)} />
       )}
@@ -481,11 +481,11 @@ export function CrmSection({
           <div
             key={f.name}
             onMouseLeave={() => sure === f.name && setSure(null)}
-            className={`group/crm flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 has-[>button:first-child:focus-visible]:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${isActive(f) ? "bg-[#EEEEEC]" : "hover:bg-black/[0.03]"}`}
+            className={`group/crm flex h-[34px] items-center gap-2 rounded-[10px] px-2.5 has-[>button:first-child:focus-visible]:shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)] ${isActive(f) ? "bg-[color:var(--c-eeeeec)]" : "hover:bg-black/[0.03]"}`}
           >
             {/* Its focus shows as a ring on the whole row (above). */}
             <button onClick={() => onOpen(ws, f.name)} className="flex h-full min-w-0 flex-1 items-center gap-2 text-left outline-none">
-              <span className="text-[#6B6B6B]">
+              <span className="text-[color:var(--c-6b6b6b)]">
                 <CrmFileIcon />
               </span>
               <span className="min-w-0 flex-1 truncate text-[14px] leading-[18px]">{f.name}</span>
@@ -502,12 +502,12 @@ export function CrmSection({
               </button>
             ) : (
               <>
-                <span className="shrink-0 text-[12px] tabular-nums text-[#9A9A98] group-hover/crm:hidden group-has-[:focus-visible]/crm:hidden">{f.rows.toLocaleString("en-US")}</span>
+                <span className="shrink-0 text-[12px] tabular-nums text-[color:var(--c-9a9a98)] group-hover/crm:hidden group-has-[:focus-visible]/crm:hidden">{f.rows.toLocaleString("en-US")}</span>
                 <span className="hidden shrink-0 items-center group-hover/crm:flex group-has-[:focus-visible]/crm:flex">
                   <button
                     onClick={() => setNaming({ from: f.name, name: f.name })}
                     aria-label={`Rename ${f.name}`}
-                    className="flex size-5 items-center justify-center rounded-md text-[#9A9A98] hover:bg-black/[0.06] hover:text-ink"
+                    className="flex size-5 items-center justify-center rounded-md text-[color:var(--c-9a9a98)] hover:bg-black/[0.06] hover:text-ink"
                   >
                     <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden>
                       <path d="M3 13l1-3.5L11 2.5l2.5 2.5L6.5 12 3 13z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
@@ -521,16 +521,16 @@ export function CrmSection({
         ),
       )}
       {files && !list.length && !naming && (
-        <button onClick={openMenu} aria-haspopup="menu" className="px-2.5 py-1 text-left text-[13px] leading-[18px] text-[#9A9A98] hover:text-[#6B6B6B]">
+        <button onClick={openMenu} aria-haspopup="menu" className="px-2.5 py-1 text-left text-[13px] leading-[18px] text-[color:var(--c-9a9a98)] hover:text-[color:var(--c-6b6b6b)]">
           No files yet. Start a pipeline or import a CSV.
         </button>
       )}
       {!query && (all ? shown.length > 4 : shown.length > rows.length) && (
-        <button onClick={() => setAll(!all)} className="self-start rounded-[8px] px-2.5 py-1 text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink">
+        <button onClick={() => setAll(!all)} className="self-start rounded-[8px] px-2.5 py-1 text-[12.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)] hover:text-ink">
           {all ? "Show less" : `Show all (${shown.length})`}
         </button>
       )}
-      {said && <span className={`px-2.5 pt-1 text-[12px] leading-4 ${said.bad ? "text-[#B42318]" : "text-[#6B6B6B]"}`}>{said.text}</span>}
+      {said && <span className={`px-2.5 pt-1 text-[12px] leading-4 ${said.bad ? "text-[#B42318]" : "text-[color:var(--c-6b6b6b)]"}`}>{said.text}</span>}
       <input
         ref={picker}
         type="file"
@@ -618,7 +618,7 @@ const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" })
 
 function RingButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button onClick={onClick} aria-label={label} className="flex size-8 shrink-0 items-center justify-center rounded-full text-ink shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
+    <button onClick={onClick} aria-label={label} className="flex size-8 shrink-0 items-center justify-center rounded-full text-ink shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]">
       <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden>
         {children}
       </svg>
@@ -632,13 +632,13 @@ const STROKE = { fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeL
 function Pick({ label, value, onChange, children }: { label: string; value: string; onChange: (v: string) => void; children: React.ReactNode }) {
   return (
     <label className="flex items-center gap-2">
-      <span className="text-[12px] leading-4 text-[#9A9A98]">{label}</span>
+      <span className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{label}</span>
       <span className="relative flex">
         <select
           aria-label={label}
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="h-8 max-w-[220px] appearance-none truncate rounded-full bg-white pl-3 pr-7 text-[13px] text-ink shadow-[0_0_0_1px_#E6E6E3] outline-none hover:bg-[#FCFCFB] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+          className="h-8 max-w-[220px] appearance-none truncate rounded-full bg-white pl-3 pr-7 text-[13px] text-ink shadow-[0_0_0_1px_var(--c-e6e6e3)] outline-none hover:bg-[color:var(--c-fcfcfb)] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
         >
           {children}
         </select>
@@ -651,7 +651,7 @@ function Pick({ label, value, onChange, children }: { label: string; value: stri
 }
 
 /** The pinned Delete column's edge while columns are hidden behind it: a hairline and a soft shadow. */
-const PINNED_SHADOW = "shadow-[inset_1px_0_0_#ECECEA,-10px_0_12px_-10px_rgba(0,0,0,0.16)]";
+const PINNED_SHADOW = "shadow-[inset_1px_0_0_var(--c-ececea),-10px_0_12px_-10px_rgba(0,0,0,0.16)]";
 
 const EMPTY_COLUMNS: string[] = [];
 const EMPTY_ROWS: string[][] = [];
@@ -858,7 +858,7 @@ export function CrmView({
     return (
       <Frame mode={mode} drop={drop}>
         <div className="flex flex-col items-center gap-3 py-16 text-center">
-          <span className="text-[13.5px] leading-5 text-[#6B6B6B]">{status === "gone" ? "This file isn't there anymore." : "Couldn't load this file."}</span>
+          <span className="text-[13.5px] leading-5 text-[color:var(--c-6b6b6b)]">{status === "gone" ? "This file isn't there anymore." : "Couldn't load this file."}</span>
           <button onClick={status === "gone" ? onClose : reload} className="rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-medium leading-4 text-white">
             {status === "gone" ? "Close" : "Try again"}
           </button>
@@ -974,7 +974,7 @@ export function CrmView({
     grouped?.noDate && by >= 0 ? `${grouped.noDate === 1 ? "1 row has" : `${grouped.noDate.toLocaleString("en-US")} rows have`} no date in ${columns[by]}.` : "",
     lineWanted && kind === "bar" && rows.length ? "Line needs dates in at least two months." : "",
   ].filter(Boolean);
-  const headCell = "sticky top-0 border-b border-[#ECECEA] bg-white px-3 py-2 text-left align-bottom text-[12.5px] font-medium leading-4 text-[#6B6B6B]";
+  const headCell = "sticky top-0 border-b border-[color:var(--c-ececea)] bg-white px-3 py-2 text-left align-bottom text-[12.5px] font-medium leading-4 text-[color:var(--c-6b6b6b)]";
   const widthOf = (c: number) => (/^notes?$/i.test(columns[c]) ? "min-w-[120px] max-w-[360px]" : "min-w-[120px] max-w-[280px]");
 
   return (
@@ -985,12 +985,12 @@ export function CrmView({
         </span>
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <span className="truncate text-[20px] font-semibold leading-6 tracking-[-0.01em]">{data.name}</span>
-          <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
+          <span className="text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)]">
             {rowsWord(rows.length)}, {columns.length} {columns.length === 1 ? "column" : "columns"}
             {saving === "saving" ? " · Saving…" : saving === "saved" ? " · Saved" : ""}
           </span>
           {problem && <span className="text-[13px] leading-[19px] text-[#B42318]">{problem}</span>}
-          {told && !problem && <span className="text-[13px] leading-[19px] text-[#6B6B6B]">{told}</span>}
+          {told && !problem && <span className="text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)]">{told}</span>}
         </div>
         <div className="mt-1.5 flex shrink-0 gap-1.5">
           {mode === "focus" ? (
@@ -1046,7 +1046,7 @@ export function CrmView({
                 aria-disabled={blocked || undefined}
                 data-tip={blocked ? "Line needs a date column, like Close date." : undefined}
                 onClick={() => !blocked && setView({ ...view, kind: k })}
-                className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : blocked ? "cursor-default text-[#C9C9C6]" : "text-[#6B6B6B] hover:text-ink"}`}
+                className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${on ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : blocked ? "cursor-default text-[color:var(--c-c9c9c6)]" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}
               >
                 {k === "bar" ? "Bar" : "Line"}
               </button>
@@ -1055,22 +1055,22 @@ export function CrmView({
         </div>
       </div>
 
-      <div className="flex flex-col gap-3 rounded-2xl px-4 pb-3 pt-3.5 shadow-[0_0_0_1px_#ECECEA]">
+      <div className="flex flex-col gap-3 rounded-2xl px-4 pb-3 pt-3.5 shadow-[0_0_0_1px_var(--c-ececea)]">
         <div className="flex items-baseline justify-between gap-3">
           <span className="truncate text-[14px] font-semibold leading-5">{title}</span>
           {!!rows.length && (
-            <span className="shrink-0 text-[12.5px] leading-4 text-[#9A9A98] tabular-nums">{sum >= 0 ? `Total ${formatNumber(total, { money })}` : rowsWord(counted)}</span>
+            <span className="shrink-0 text-[12.5px] leading-4 text-[color:var(--c-9a9a98)] tabular-nums">{sum >= 0 ? `Total ${formatNumber(total, { money })}` : rowsWord(counted)}</span>
           )}
         </div>
         {rows.length ? (
           <CrmChart groups={groups} kind={kind} title={title} money={money} count={sum < 0} wide={mode === "focus"} selected={pickedGroup ? pickedGroup.key : null} onSelect={setPicked} />
         ) : (
-          <div className="py-8 text-center text-[13px] leading-5 text-[#6B6B6B]">No rows yet. Add one below, or ask a bot to add some.</div>
+          <div className="py-8 text-center text-[13px] leading-5 text-[color:var(--c-6b6b6b)]">No rows yet. Add one below, or ask a bot to add some.</div>
         )}
         {!!notes.length && (
           <div className="flex flex-col gap-0.5">
             {notes.map((n) => (
-              <span key={n} className="text-[12px] leading-4 text-[#9A9A98]">
+              <span key={n} className="text-[12px] leading-4 text-[color:var(--c-9a9a98)]">
                 {n}
               </span>
             ))}
@@ -1091,14 +1091,14 @@ export function CrmView({
             }}
             placeholder="Search rows"
             aria-label="Search rows"
-            className="h-8 w-[220px] max-w-full rounded-full bg-white px-3.5 text-[13px] shadow-[0_0_0_1px_#E6E6E3] outline-none placeholder:text-[#9A9A98] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+            className="h-8 w-[220px] max-w-full rounded-full bg-white px-3.5 text-[13px] shadow-[0_0_0_1px_var(--c-e6e6e3)] outline-none placeholder:text-[color:var(--c-9a9a98)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
           />
           {pickedGroup && (
-            <span className="flex h-7 shrink-0 items-center gap-1 rounded-full bg-[#F2F2F0] pl-2.5 pr-1 text-[12.5px] leading-4 text-[#3A3A38]">
+            <span className="flex h-7 shrink-0 items-center gap-1 rounded-full bg-[color:var(--c-f2f2f0)] pl-2.5 pr-1 text-[12.5px] leading-4 text-[color:var(--c-3a3a38)]">
               <span className="max-w-[180px] truncate">
                 {byName}: {pickedGroup.label}
               </span>
-              <button aria-label="Clear filter" onClick={() => setPicked(null)} className="flex size-5 shrink-0 items-center justify-center rounded-full text-[#6B6B6B] hover:bg-black/[0.06] hover:text-ink">
+              <button aria-label="Clear filter" onClick={() => setPicked(null)} className="flex size-5 shrink-0 items-center justify-center rounded-full text-[color:var(--c-6b6b6b)] hover:bg-black/[0.06] hover:text-ink">
                 <svg width="8" height="8" viewBox="0 0 12 12" aria-hidden>
                   <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                 </svg>
@@ -1107,25 +1107,25 @@ export function CrmView({
           )}
           {filtered && (
             <>
-              <span className="shrink-0 text-[12.5px] leading-4 text-[#9A9A98] tabular-nums">{rowsWord(order.length)}</span>
+              <span className="shrink-0 text-[12.5px] leading-4 text-[color:var(--c-9a9a98)] tabular-nums">{rowsWord(order.length)}</span>
               <button
                 onClick={() => {
                   setPicked(null);
                   setSearch("");
                 }}
-                className="shrink-0 text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:text-ink"
+                className="shrink-0 text-[12.5px] font-medium leading-4 text-[color:var(--c-3a3a38)] hover:text-ink"
               >
                 Clear
               </button>
             </>
           )}
-          <button onClick={addRow} className="ml-auto shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
+          <button onClick={addRow} className="ml-auto shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[color:var(--c-3a3a38)] shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-[color:var(--c-f7f7f6)]">
             + Add row
           </button>
         </div>
 
-        <div ref={scroller} className="max-h-[70vh] overflow-auto rounded-2xl shadow-[0_0_0_1px_#ECECEA]">
-          <table ref={grid} role="grid" aria-label={`${data.name} rows`} className="w-max min-w-full border-separate border-spacing-0 text-[13px] leading-[18px] text-[#3A3A38]">
+        <div ref={scroller} className="max-h-[70vh] overflow-auto rounded-2xl shadow-[0_0_0_1px_var(--c-ececea)]">
+          <table ref={grid} role="grid" aria-label={`${data.name} rows`} className="w-max min-w-full border-separate border-spacing-0 text-[13px] leading-[18px] text-[color:var(--c-3a3a38)]">
             <thead>
               <tr>
                 {columns.map((name, c) => {
@@ -1146,7 +1146,7 @@ export function CrmView({
                           }}
                           onBlur={renameColumn}
                           aria-label="Column name"
-                          className={`h-6 w-full min-w-[110px] rounded-[6px] bg-[#F4F4F2] px-1.5 text-[12.5px] font-medium text-ink outline-none focus:shadow-[0_0_0_1.5px_#0A0A0A] ${widthOf(c)}`}
+                          className={`h-6 w-full min-w-[110px] rounded-[6px] bg-[color:var(--c-f4f4f2)] px-1.5 text-[12.5px] font-medium text-ink outline-none focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] ${widthOf(c)}`}
                         />
                       ) : (
                         <button
@@ -1190,7 +1190,7 @@ export function CrmView({
                         setRenaming(null);
                         setAdding("");
                       }}
-                      className="font-medium text-[#6B6B6B] hover:text-ink"
+                      className="font-medium text-[color:var(--c-6b6b6b)] hover:text-ink"
                     >
                       + Add column
                     </button>
@@ -1209,12 +1209,12 @@ export function CrmView({
                       onBlur={addColumn}
                       placeholder="Column name"
                       aria-label="Column name"
-                      className="h-6 w-[130px] rounded-[6px] bg-[#F4F4F2] px-1.5 text-[12.5px] font-medium text-ink outline-none placeholder:font-normal placeholder:text-[#9A9A98] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+                      className="h-6 w-[130px] rounded-[6px] bg-[color:var(--c-f4f4f2)] px-1.5 text-[12.5px] font-medium text-ink outline-none placeholder:font-normal placeholder:text-[color:var(--c-9a9a98)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
                     />
                   )}
                 </th>
                 {/* Over each row's Delete, pinned to the right edge. */}
-                <th className={`sticky right-0 top-0 z-[3] w-0 border-b border-[#ECECEA] bg-white px-2 py-1 align-middle ${more ? PINNED_SHADOW : ""}`}>
+                <th className={`sticky right-0 top-0 z-[3] w-0 border-b border-[color:var(--c-ececea)] bg-white px-2 py-1 align-middle ${more ? PINNED_SHADOW : ""}`}>
                   {(more || across) && (
                     <button
                       aria-label={more ? "More columns" : "Back to the first columns"}
@@ -1224,7 +1224,7 @@ export function CrmView({
                         if (more) el.scrollBy({ left: Math.max(160, el.clientWidth - 240), behavior: "smooth" });
                         else el.scrollTo({ left: 0, behavior: "smooth" });
                       }}
-                      className="ml-auto flex size-6 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.06] hover:text-ink"
+                      className="ml-auto flex size-6 items-center justify-center rounded-md text-[color:var(--c-6b6b6b)] hover:bg-black/[0.06] hover:text-ink"
                     >
                       <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden>
                         <path d={more ? "M4.5 2.5L8 6l-3.5 3.5" : "M7.5 2.5L4 6l3.5 3.5"} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -1255,7 +1255,7 @@ export function CrmView({
                             startEdit(i, c);
                           } else gridKeys(e, i, c);
                         }}
-                        className={`border-b border-[#F0F0EE] px-3 align-top outline-none group-hover/row:bg-black/[0.02] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${editing ? "py-1" : "cursor-text py-2"}`}
+                        className={`border-b border-[color:var(--c-f0f0ee)] px-3 align-top outline-none group-hover/row:bg-black/[0.02] focus-visible:shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)] ${editing ? "py-1" : "cursor-text py-2"}`}
                       >
                         {editing ? (
                           <textarea
@@ -1290,7 +1290,7 @@ export function CrmView({
                             }}
                             onBlur={() => finish(i, c, edit.draft, null)}
                             aria-label={`${columns[c]}, row ${i + 1}`}
-                            className={`block w-full resize-none overflow-hidden rounded-[6px] bg-[#F4F4F2] px-1.5 py-1 text-[13px] leading-[18px] text-ink outline-none focus:shadow-[0_0_0_1.5px_#0A0A0A] ${widthOf(c)} ${right ? "text-right tabular-nums" : ""}`}
+                            className={`block w-full resize-none overflow-hidden rounded-[6px] bg-[color:var(--c-f4f4f2)] px-1.5 py-1 text-[13px] leading-[18px] text-ink outline-none focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] ${widthOf(c)} ${right ? "text-right tabular-nums" : ""}`}
                           />
                         ) : (
                           <div className={`line-clamp-2 whitespace-pre-wrap break-words ${widthOf(c)} ${right ? "text-right tabular-nums" : ""}`}>{v}</div>
@@ -1299,8 +1299,8 @@ export function CrmView({
                     );
                   })}
                   {/* Under "+ Add column". */}
-                  <td className="border-b border-[#F0F0EE] group-hover/row:bg-black/[0.02]" />
-                  <td className={`sticky right-0 z-[1] border-b border-[#F0F0EE] bg-white px-2 py-1 text-right align-middle group-hover/row:bg-[#FAFAFA] ${more ? PINNED_SHADOW : ""}`}>
+                  <td className="border-b border-[color:var(--c-f0f0ee)] group-hover/row:bg-black/[0.02]" />
+                  <td className={`sticky right-0 z-[1] border-b border-[color:var(--c-f0f0ee)] bg-white px-2 py-1 text-right align-middle group-hover/row:bg-[#FAFAFA] ${more ? PINNED_SHADOW : ""}`}>
                     {deleting === i ? (
                       <span
                         ref={reveal}
@@ -1330,7 +1330,7 @@ export function CrmView({
                             setDeleting(null);
                             if (e.detail === 0) focusCell(i, columns.length);
                           }}
-                          className="rounded-full px-2 py-1 text-[12px] leading-4 text-[#6B6B6B]"
+                          className="rounded-full px-2 py-1 text-[12px] leading-4 text-[color:var(--c-6b6b6b)]"
                         >
                           Keep
                         </button>
@@ -1343,7 +1343,7 @@ export function CrmView({
                         onFocus={() => onCell(i, columns.length)}
                         onKeyDown={(e) => gridKeys(e, i, columns.length)}
                         onClick={() => setDeleting(i)}
-                        className="ml-auto flex size-6 items-center justify-center rounded-md text-[#9A9A98] opacity-0 hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 group-hover/row:opacity-100"
+                        className="ml-auto flex size-6 items-center justify-center rounded-md text-[color:var(--c-9a9a98)] opacity-0 hover:bg-black/[0.06] hover:text-[#B42318] focus-visible:opacity-100 group-hover/row:opacity-100"
                       >
                         <svg width="9" height="9" viewBox="0 0 12 12" aria-hidden>
                           <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -1357,17 +1357,17 @@ export function CrmView({
           </table>
         </div>
         <div className="flex flex-wrap items-center gap-3 px-1">
-          <button onClick={addRow} className="text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:text-ink">
+          <button onClick={addRow} className="text-[12.5px] font-medium leading-4 text-[color:var(--c-3a3a38)] hover:text-ink">
             + Add row
           </button>
           <span className="flex-1" />
-          {!!rows.length && !order.length && <span className="text-[12.5px] leading-4 text-[#9A9A98]">No rows match.</span>}
+          {!!rows.length && !order.length && <span className="text-[12.5px] leading-4 text-[color:var(--c-9a9a98)]">No rows match.</span>}
           {order.length > shown && (
             <>
-              <span className="text-[12.5px] leading-4 text-[#9A9A98] tabular-nums">
+              <span className="text-[12.5px] leading-4 text-[color:var(--c-9a9a98)] tabular-nums">
                 Showing {shown.toLocaleString("en-US")} of {rowsWord(order.length)}.
               </span>
-              <button onClick={() => setShown(shown + CRM_LIMITS.tableRows)} className="text-[12.5px] font-medium leading-4 text-[#3A3A38] hover:text-ink">
+              <button onClick={() => setShown(shown + CRM_LIMITS.tableRows)} className="text-[12.5px] font-medium leading-4 text-[color:var(--c-3a3a38)] hover:text-ink">
                 Show 200 more
               </button>
             </>
@@ -1394,7 +1394,7 @@ function Frame({ mode, drop, children }: { mode: "panel" | "focus"; drop: Drop; 
         <div className={`flex w-full flex-col gap-5 ${mode === "focus" ? "mx-auto max-w-[1200px]" : ""}`}>{children}</div>
       </div>
       {dropping && (
-        <div className="pointer-events-none absolute inset-2 flex items-start justify-center rounded-2xl pt-4 shadow-[inset_0_0_0_1.5px_#0A0A0A]">
+        <div className="pointer-events-none absolute inset-2 flex items-start justify-center rounded-2xl pt-4 shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)]">
           <span className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white">Drop a CSV to add it</span>
         </div>
       )}
@@ -1427,19 +1427,19 @@ export function CrmNote({ m, readOnly = false }: { m: Message; readOnly?: boolea
   };
   const button = "shrink-0 rounded-full px-2 py-0.5 text-[12px] font-medium leading-4 text-ink hover:bg-black/[0.05] disabled:opacity-40";
   return (
-    <div className="flex w-full max-w-[400px] flex-col self-center rounded-[14px] bg-[#F7F7F6] py-2 pl-3 pr-1.5 text-[12px] leading-4">
+    <div className="flex w-full max-w-[400px] flex-col self-center rounded-[14px] bg-[color:var(--c-f7f7f6)] py-2 pl-3 pr-1.5 text-[12px] leading-4">
       <div className="flex items-center gap-2">
-        <span className="shrink-0 text-[#9A9A98]">
+        <span className="shrink-0 text-[color:var(--c-9a9a98)]">
           <CrmFileIcon size={13} />
         </span>
-        <span className={`min-w-0 flex-1 ${c.undone ? "text-[#9A9A98] line-through" : "text-[#3A3A3A]"}`}>{m.text}</span>
+        <span className={`min-w-0 flex-1 ${c.undone ? "text-[color:var(--c-9a9a98)] line-through" : "text-[color:var(--c-3a3a3a)]"}`}>{m.text}</span>
         {open && !readOnly && !(c.undone && c.created) && (
           <button onClick={() => open(c.ws, c.file)} className={button}>
             Open
           </button>
         )}
         {c.undone ? (
-          <span className="shrink-0 px-2 py-0.5 font-medium text-[#9A9A98]">Undone</span>
+          <span className="shrink-0 px-2 py-0.5 font-medium text-[color:var(--c-9a9a98)]">Undone</span>
         ) : (
           !readOnly && (
             <button disabled={busy} onClick={() => void undo()} className={button}>

@@ -22,6 +22,7 @@ import { WhereToFind } from "./channels";
 import { undash } from "./side-group";
 import { readOnly, you, your, Your, yourMac } from "@/lib/shared";
 import { BOOK_A_CALL } from "@/lib/links";
+import { BRAND } from "@/lib/brand";
 
 /** The parts of a bot's profile. Its computer has a tab of its own (see panel-tabs.tsx). */
 export type Section = "details" | "skills" | "routines" | "memory" | "phone";
@@ -84,11 +85,11 @@ export function BotPanel({
           key={t}
           onClick={() => (t === "routines" ? openRoutines(null) : onTab(t))}
           className={`rounded-[10px] px-3 py-1.5 text-[14px] capitalize leading-[18px] ${
-            tab === t ? (t === "details" ? "bg-white/70 font-medium text-ink shadow-[0_0_0_1px_#0000000F]" : "bg-[#EEEEEC] font-medium text-ink") : "text-[#6B6B6B] hover:text-ink"
+            tab === t ? (t === "details" ? "bg-white/70 font-medium text-ink shadow-[0_0_0_1px_#0000000F]" : "bg-[color:var(--c-eeeeec)] font-medium text-ink") : "text-[color:var(--c-6b6b6b)] hover:text-ink"
           }`}
         >
           {t}
-          {t === "phone" && <span className="ml-1 align-[1px] text-[10px] font-semibold uppercase tracking-[0.04em] text-[#9A9A98]">soon</span>}
+          {t === "phone" && <span className="ml-1 align-[1px] text-[10px] font-semibold uppercase tracking-[0.04em] text-[color:var(--c-9a9a98)]">soon</span>}
         </button>
       ))}
     </div>
@@ -119,8 +120,8 @@ export function BotPanel({
         <Mascot botId={b.id} color={b.color} size={52} />
         <div className="flex flex-col items-center gap-px">
           <div className="text-[20px] font-semibold leading-6 tracking-[-0.01em]">{b.name}</div>
-          <div className="flex items-center gap-1.5 text-[13px] leading-4 text-[#6B6B6B]">
-            {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}
+          <div className="flex items-center gap-1.5 text-[13px] leading-4 text-[color:var(--c-6b6b6b)]">
+            {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · ${BRAND.name} team`}
             <BotBrainBadge state={state} bot={b} />
           </div>
         </div>
@@ -193,7 +194,7 @@ function Details({
   const glass = "bg-white/60 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]";
 
   const share = async () => {
-    await navigator.clipboard.writeText([`${b.name} (${b.role}, Bops)`, b.phone, b.email].filter(Boolean).join("\n"));
+    await navigator.clipboard.writeText([`${b.name} (${b.role}, ${BRAND.name})`, b.phone, b.email].filter(Boolean).join("\n"));
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -206,8 +207,8 @@ function Details({
       </div>
       <div className="flex flex-col items-center gap-0.5">
         <div className="text-[26px] font-bold leading-[30px] tracking-[-0.02em]">{b.name}</div>
-        <div className="flex items-center gap-1.5 text-[13px] font-medium leading-4 text-[#3A3A38]">
-          {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}
+        <div className="flex items-center gap-1.5 text-[13px] font-medium leading-4 text-[color:var(--c-3a3a38)]">
+          {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · ${BRAND.name} team`}
           <BotBrainBadge state={state} bot={b} className="bg-white/60 shadow-[0_0_0_1px_#0000000F]" />
         </div>
       </div>
@@ -224,7 +225,7 @@ function Details({
           <path d="M3 2.2h2.6l1 2.6-1.6 1a7 7 0 003 3l1-1.6 2.6 1V11a.9.9 0 01-.9.9A9.6 9.6 0 012.1 3.1.9.9 0 013 2.2z" fill="#0A0A0A" />
         </ActionButton>
         {/* Video calls with bots aren't here yet; meanwhile it books a video call with the Bops team. */}
-        <ActionButton label="Book a 20-minute video call with the Bops team" onClick={() => window.open(BOOK_A_CALL)}>
+        <ActionButton label={`Book a 20-minute video call with the ${BRAND.name} team`} onClick={() => window.open(BOOK_A_CALL)}>
           <rect x="1.2" y="3.5" width="8" height="7" rx="1.5" fill="#0A0A0A" />
           <path d="M9.6 6.2l3.2-2v5.6L9.6 7.8z" fill="#0A0A0A" />
         </ActionButton>
@@ -263,14 +264,14 @@ function Details({
       <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="text-[13px] font-semibold leading-4">Thinking</span>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">{EFFORT_HINT[b.effort ?? "auto"]}</span>
+          <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{EFFORT_HINT[b.effort ?? "auto"]}</span>
         </div>
         <div className="flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px]">
           {(["auto", "low", "medium", "high"] as const).map((e) => (
             <button
               key={e}
               onClick={() => void post("/api/bots", { botId: b.id, effort: e }, "PATCH")}
-              className={`rounded-full px-2.5 py-1 text-[12px] capitalize leading-4 ${(b.effort ?? "auto") === e ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+              className={`rounded-full px-2.5 py-1 text-[12px] capitalize leading-4 ${(b.effort ?? "auto") === e ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}
             >
               {e}
             </button>
@@ -281,7 +282,7 @@ function Details({
       <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="text-[13px] font-semibold leading-4">Works on</span>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">
+          <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
             {(b.runsOn ?? "auto") === "auto" ? `Its cloud computer, or ${yourMac(state)} when a task needs it` : b.runsOn === "mac" ? `${Your(state)} Mac, always` : "Its cloud computer, always"}
           </span>
         </div>
@@ -290,7 +291,7 @@ function Details({
             <button
               key={v}
               onClick={() => void post("/api/bots", { botId: b.id, runsOn: v }, "PATCH")}
-              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${(b.runsOn ?? "auto") === v ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${(b.runsOn ?? "auto") === v ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}
             >
               {label}
             </button>
@@ -301,7 +302,7 @@ function Details({
       <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="text-[13px] font-semibold leading-4">Approvals</span>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">
+          <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
             {b.autoApprove ? "Sends, posts and changes things without asking. Still asks before paying" : `Asks ${you(state)} before it sends, posts, deletes or pays`}
           </span>
         </div>
@@ -310,7 +311,7 @@ function Details({
             <button
               key={label}
               onClick={() => void post("/api/bots", { botId: b.id, autoApprove: v }, "PATCH")}
-              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${!!b.autoApprove === v ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${!!b.autoApprove === v ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}
             >
               {label}
             </button>
@@ -322,7 +323,7 @@ function Details({
         <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
           <div className="flex min-w-0 flex-1 flex-col">
             <span className="text-[13px] font-semibold leading-4">Business data</span>
-            <span className="text-[12px] leading-4 text-[#6B6B6B]">
+            <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
               {b.dataOff ? "No lookups of companies, people or contacts" : "Looks up companies, people, work emails and company news. Cents a lookup, from AI credit"}
             </span>
           </div>
@@ -331,7 +332,7 @@ function Details({
               <button
                 key={label}
                 onClick={() => void post("/api/bots", { botId: b.id, dataOff: v }, "PATCH")}
-                className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${!!b.dataOff === v ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+                className={`rounded-full px-2.5 py-1 text-[12px] leading-4 ${!!b.dataOff === v ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}
               >
                 {label}
               </button>
@@ -355,7 +356,7 @@ function Details({
         <button
           onClick={() => void post("/api/sessions", { botId: b.id }, "DELETE")}
           disabled={!running}
-          className={`flex-1 rounded-[14px] px-4 py-[11px] text-left text-[14px] leading-[18px] text-[#B42318] disabled:text-[#C9C9C6] ${glass}`}
+          className={`flex-1 rounded-[14px] px-4 py-[11px] text-left text-[14px] leading-[18px] text-[#B42318] disabled:text-[color:var(--c-c9c9c6)] ${glass}`}
         >
           {running ? `Pause ${b.name} · ${running} running` : `${b.name} is idle`}
         </button>
@@ -400,14 +401,14 @@ function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppSta
       <div className="flex items-center gap-3">
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="text-[13px] font-semibold leading-4">Computer</span>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">
+          <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">
             {b.isMain
-              ? `Works on ${your(state)} free Bops computer, which ${main.name} has, with ${b.name}'s team`
+              ? `Works on ${your(state)} free ${BRAND.name} computer, which ${main.name} has, with ${b.name}'s team`
               : shared
                 ? `Works on ${main.name}'s computer, on screens no one else is using`
                 : plan?.plan?.bops
                   ? ownIsBops(plan.plan, b)
-                    ? "Its own Bops computer"
+                    ? `Its own ${BRAND.name} computer`
                     : "Its own cloud computer, on your Orgo plan"
                   : "Its own cloud computer, a copy of the main bot's"}
           </span>
@@ -418,7 +419,7 @@ function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppSta
               key={v}
               disabled={busy || (v === "own" && shared && !!noRoom)}
               onClick={() => void pick(v)}
-              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 disabled:opacity-60 ${(v === "shared") === shared ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
+              className={`rounded-full px-2.5 py-1 text-[12px] leading-4 disabled:opacity-60 ${(v === "shared") === shared ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[color:var(--c-6b6b6b)] hover:text-ink"}`}
             >
               {label}
             </button>
@@ -427,14 +428,14 @@ function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppSta
       </div>
       {sure && (
         <div className="motion-rise-in flex flex-col gap-2 rounded-xl bg-[#FEF3F2] px-3 py-2.5 shadow-[0_0_0_1px_#FECDCA]">
-          <span className="text-[12.5px] leading-[17px] text-[#3A3A38]">
+          <span className="text-[12.5px] leading-[17px] text-[color:var(--c-3a3a38)]">
             {`Move ${b.name} to ${main.name}'s computer? Its own computer is deleted, with anything saved on it that ${main.name}'s doesn't have.`}
           </span>
           <div className="flex gap-2">
             <button onClick={() => void pick("shared")} disabled={busy} className="rounded-full bg-[#B42318] px-3 py-1 text-[12.5px] font-semibold text-white disabled:opacity-60">
               {busy ? "Moving…" : "Move and delete"}
             </button>
-            <button onClick={() => setSure(false)} disabled={busy} className="rounded-full px-3 py-1 text-[12.5px] font-medium shadow-[0_0_0_1px_#E6E6E3]">
+            <button onClick={() => setSure(false)} disabled={busy} className="rounded-full px-3 py-1 text-[12.5px] font-medium shadow-[0_0_0_1px_var(--c-e6e6e3)]">
               Keep its own
             </button>
           </div>
@@ -468,13 +469,13 @@ function DeleteBot({ bot: b, apps }: { bot: Bot; apps: string | null }) {
   };
   if (!sure)
     return (
-      <button onClick={() => setSure(true)} className="self-center py-1 text-[13px] text-[#9A9A98] hover:text-[#B42318]">
+      <button onClick={() => setSure(true)} className="self-center py-1 text-[13px] text-[color:var(--c-9a9a98)] hover:text-[#B42318]">
         Delete {b.name}
       </button>
     );
   return (
     <div className="motion-rise-in flex w-full flex-col gap-2.5 rounded-2xl bg-[#FEF3F2] px-4 py-3 shadow-[0_0_0_1px_#FECDCA]">
-      <span className="text-[13px] leading-[18px] text-[#3A3A38]">
+      <span className="text-[13px] leading-[18px] text-[color:var(--c-3a3a38)]">
         {sharesComputer(b)
           ? `Delete ${b.name}? Its chat, threads and routines go with it; the computer it works on stays.${apps ? ` ${apps}` : ""} This can't be undone.`
           : `Delete ${b.name}? Its computer, chat, threads and routines go with it.${apps ? ` ${apps}` : ""} This can't be undone.`}
@@ -484,7 +485,7 @@ function DeleteBot({ bot: b, apps }: { bot: Bot; apps: string | null }) {
         <button onClick={() => void remove()} disabled={busy} className="rounded-full bg-[#B42318] px-3.5 py-1.5 text-[13px] font-semibold text-white disabled:opacity-60">
           {busy ? "Deleting…" : `Delete ${b.name}`}
         </button>
-        <button onClick={() => setSure(false)} disabled={busy} className="rounded-full px-3.5 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_#E6E6E3]">
+        <button onClick={() => setSure(false)} disabled={busy} className="rounded-full px-3.5 py-1.5 text-[13px] font-medium shadow-[0_0_0_1px_var(--c-e6e6e3)]">
           Keep
         </button>
       </div>
@@ -554,7 +555,7 @@ function usePhonePlan(): PhonePlan {
 function PlanNeeded({ what, bot: b, onUpgrade, onCancel }: { what: string; bot: Bot; onUpgrade: () => void; onCancel?: () => void }) {
   return (
     <div className="flex flex-col gap-2 px-4 pb-[11px] text-[12px] leading-4">
-      <span className="text-[#3A3A38]">
+      <span className="text-[color:var(--c-3a3a38)]">
         {what} comes with a plan. Pro and Max include a phone number and an email for {b.name}.
       </span>
       <div className="flex items-center gap-3">
@@ -562,7 +563,7 @@ function PlanNeeded({ what, bot: b, onUpgrade, onCancel }: { what: string; bot: 
           Purchase a plan
         </button>
         {onCancel && (
-          <button onClick={onCancel} className="text-[12px] font-medium text-[#6B6B6B] hover:text-ink">
+          <button onClick={onCancel} className="text-[12px] font-medium text-[color:var(--c-6b6b6b)] hover:text-ink">
             Not now
           </button>
         )}
@@ -578,7 +579,7 @@ function PlanNeeded({ what, bot: b, onUpgrade, onCancel }: { what: string; bot: 
 function PlanRoom({ short, onUpgrade, onCancel }: { short: PlanRoomShort; onUpgrade: () => void; onCancel?: () => void }) {
   return (
     <div className="flex flex-col gap-2 px-4 pb-[11px] text-[12px] leading-4">
-      <span className="text-[#3A3A38]">{short.text}</span>
+      <span className="text-[color:var(--c-3a3a38)]">{short.text}</span>
       {(short.upgrade || onCancel) && (
         <div className="flex items-center gap-3">
           {short.upgrade && (
@@ -587,7 +588,7 @@ function PlanRoom({ short, onUpgrade, onCancel }: { short: PlanRoomShort; onUpgr
             </button>
           )}
           {onCancel && (
-            <button onClick={onCancel} className="text-[12px] font-medium text-[#6B6B6B] hover:text-ink">
+            <button onClick={onCancel} className="text-[12px] font-medium text-[color:var(--c-6b6b6b)] hover:text-ink">
               Not now
             </button>
           )}
@@ -622,7 +623,7 @@ function GetEmail({ bot: b }: { bot: Bot }) {
         </button>
       </div>
       {said && (
-        <span role="alert" className="text-[#6B6B6B]">
+        <span role="alert" className="text-[color:var(--c-6b6b6b)]">
           {said}
         </span>
       )}
@@ -724,7 +725,7 @@ function GetNumber({ bot: b, plan, room, onUpgrade }: { bot: Bot; plan: PhonePla
   return (
     <div className="flex flex-col gap-2 px-4 pb-[11px] text-[12px] leading-4">
       <label className="flex items-center gap-2">
-        <span className="text-[#6B6B6B]">Area code</span>
+        <span className="text-[color:var(--c-6b6b6b)]">Area code</span>
         <input
           value={code ?? ""}
           onChange={(e) => type(e.target.value)}
@@ -734,20 +735,20 @@ function GetNumber({ bot: b, plan, room, onUpgrade }: { bot: Bot; plan: PhonePla
           aria-label="Area code"
           inputMode="numeric"
           maxLength={3}
-          className="h-7 w-[64px] rounded-full bg-[#F7F7F6] px-3 text-[13px] tabular-nums outline-none shadow-[0_0_0_1px_#E6E6E3] focus:shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50"
+          className="h-7 w-[64px] rounded-full bg-[color:var(--c-f7f7f6)] px-3 text-[13px] tabular-nums outline-none shadow-[0_0_0_1px_var(--c-e6e6e3)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] disabled:opacity-50"
         />
-        {(searching || code === null) && <span className="text-[#9A9A98]">Looking for numbers…</span>}
+        {(searching || code === null) && <span className="text-[color:var(--c-9a9a98)]">Looking for numbers…</span>}
       </label>
       {!searching && found && (
         <>
           {nearby && (
-            <span className="text-[#6B6B6B]">
+            <span className="text-[color:var(--c-6b6b6b)]">
               No {asked} numbers left. Nearby: {nearby.areaCode} {nearby.city || placeOf(nearby)}
             </span>
           )}
-          {found.anywhere && found.options.length > 0 && <span className="text-[#6B6B6B]">No {asked} numbers left, or nearby. These are from elsewhere in the US.</span>}
+          {found.anywhere && found.options.length > 0 && <span className="text-[color:var(--c-6b6b6b)]">No {asked} numbers left, or nearby. These are from elsewhere in the US.</span>}
           {found.options.length === 0 ? (
-            <span className="text-[#6B6B6B]">No numbers for sale right now. Try another area code.</span>
+            <span className="text-[color:var(--c-6b6b6b)]">No numbers for sale right now. Try another area code.</span>
           ) : (
             <div role="radiogroup" aria-label="Where the number is from" className="flex flex-wrap gap-1.5">
               {found.options.map((o) => {
@@ -759,7 +760,7 @@ function GetNumber({ bot: b, plan, room, onUpgrade }: { bot: Bot; plan: PhonePla
                     aria-checked={chosen}
                     disabled={busy}
                     onClick={() => setPicked(o)}
-                    className={`rounded-full px-2.5 py-1 text-[12.5px] font-medium leading-4 disabled:opacity-50 ${chosen ? "bg-ink text-white" : "text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:bg-black/[0.04]"}`}
+                    className={`rounded-full px-2.5 py-1 text-[12.5px] font-medium leading-4 disabled:opacity-50 ${chosen ? "bg-ink text-white" : "text-[color:var(--c-3a3a38)] shadow-[0_0_0_1px_var(--c-e6e6e3)] hover:bg-black/[0.04]"}`}
                   >
                     {optionLabel(o)}
                   </button>
@@ -769,7 +770,7 @@ function GetNumber({ bot: b, plan, room, onUpgrade }: { bot: Bot; plan: PhonePla
           )}
         </>
       )}
-      {code !== null && code.length > 0 && code.length < 3 && <span className="text-[#9A9A98]">An area code is 3 digits.</span>}
+      {code !== null && code.length > 0 && code.length < 3 && <span className="text-[color:var(--c-9a9a98)]">An area code is 3 digits.</span>}
       <div className="flex items-center gap-3">
         <button
           onClick={() => void get()}
@@ -778,7 +779,7 @@ function GetNumber({ bot: b, plan, room, onUpgrade }: { bot: Bot; plan: PhonePla
         >
           {busy ? "Getting the number…" : "Get this number"}
         </button>
-        <button disabled={busy} onClick={() => setPicking(false)} className="text-[12px] font-medium text-[#6B6B6B] hover:text-ink disabled:opacity-40">
+        <button disabled={busy} onClick={() => setPicking(false)} className="text-[12px] font-medium text-[color:var(--c-6b6b6b)] hover:text-ink disabled:opacity-40">
           Cancel
         </button>
       </div>
@@ -802,14 +803,14 @@ function Field({ label, value, empty }: { label: string; value?: string; empty: 
   return (
     <div className="flex items-center gap-2 px-4 py-[11px]">
       <div className="flex min-w-0 flex-1 flex-col gap-px">
-        <span className="text-[12px] leading-[15px] text-[#6B6B6B]">{label}</span>
-        <span className={`select-text truncate text-[16px] leading-[21px] ${value ? "text-ink" : "text-[14px] text-[#9A9A98]"}`}>{value ?? empty}</span>
+        <span className="text-[12px] leading-[15px] text-[color:var(--c-6b6b6b)]">{label}</span>
+        <span className={`select-text truncate text-[16px] leading-[21px] ${value ? "text-ink" : "text-[14px] text-[color:var(--c-9a9a98)]"}`}>{value ?? empty}</span>
       </div>
       {value && (
         <button
           onClick={copy}
           aria-label={copied ? "Copied" : `Copy ${label.split(" ")[0]}`}
-          className={`flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-[12px] font-medium leading-4 transition-colors ${copied ? "bg-[#2BB673]/15 text-[#1E8A55]" : "text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink"}`}
+          className={`flex h-7 shrink-0 items-center gap-1 rounded-full px-2.5 text-[12px] font-medium leading-4 transition-colors ${copied ? "bg-[#2BB673]/15 text-[#1E8A55]" : "text-[color:var(--c-6b6b6b)] hover:bg-black/[0.05] hover:text-ink"}`}
         >
           {copied ? (
             <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden>
@@ -854,7 +855,7 @@ function HowIWork({ bot: b, className }: { bot: Bot; className: string }) {
       setSaved(true);
       setTimeout(() => setSaved(false), 1500);
     } catch {
-      setError("Couldn't reach Bops. Try again.");
+      setError(`Couldn't reach ${BRAND.name}. Try again.`);
     } finally {
       setBusy(false);
     }
@@ -863,7 +864,7 @@ function HowIWork({ bot: b, className }: { bot: Bot; className: string }) {
     <div className={`flex w-full flex-col gap-2 rounded-2xl px-4 py-3 ${className}`}>
       <div className="flex flex-col">
         <span className="text-[13px] font-semibold leading-4">How I work</span>
-        <span className="text-[12px] leading-4 text-[#6B6B6B]">{b.name} keeps this in mind in chats, tasks and calls</span>
+        <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">{b.name} keeps this in mind in chats, tasks and calls</span>
       </div>
       <textarea
         value={text}
@@ -886,19 +887,19 @@ function HowIWork({ bot: b, className }: { bot: Bot; className: string }) {
         maxLength={MAX_PERSONA_CHARS}
         aria-label={`How ${b.name} works`}
         placeholder={`How should ${b.name} work? For example: keep replies short, check my calendar before suggesting times, never email clients before 9 AM.`}
-        className="w-full resize-none rounded-[12px] bg-white/70 px-3 py-2 text-[13px] leading-[18px] outline-none shadow-[0_0_0_1px_#E6E6E3] placeholder:text-[#9A9A98] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
+        className="w-full resize-none rounded-[12px] bg-white/70 px-3 py-2 text-[13px] leading-[18px] outline-none shadow-[0_0_0_1px_var(--c-e6e6e3)] placeholder:text-[color:var(--c-9a9a98)] focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
       />
       <div className="flex items-center gap-2">
         <button disabled={!changed || busy} onClick={() => void save()} className="rounded-full bg-ink px-3 py-1.5 text-[12.5px] font-medium leading-4 text-white disabled:opacity-40">
           {busy ? "Saving…" : "Save"}
         </button>
-        {saved && <span className="motion-fade-in text-[12px] leading-4 text-[#6B6B6B]">Saved</span>}
+        {saved && <span className="motion-fade-in text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">Saved</span>}
         {error && (
           <span role="alert" className="min-w-0 text-[12px] leading-4 text-[#B42318]">
             {error}
           </span>
         )}
-        {left <= MAX_PERSONA_CHARS / 10 && <span className="ml-auto shrink-0 text-[12px] tabular-nums leading-4 text-[#9A9A98]">{left === 1 ? "1 character left" : `${left} characters left`}</span>}
+        {left <= MAX_PERSONA_CHARS / 10 && <span className="ml-auto shrink-0 text-[12px] tabular-nums leading-4 text-[color:var(--c-9a9a98)]">{left === 1 ? "1 character left" : `${left} characters left`}</span>}
       </div>
     </div>
   );
@@ -948,7 +949,7 @@ function Uses({ state, bot: b, onOpenVault, onOpenRoutines, className }: { state
                     <button
                       onClick={() => onOpenRoutines(x.app)}
                       aria-label={`${routineCount(n)} from ${x.appName}`}
-                      className="h-[22px] rounded-full bg-black/[0.05] px-2 text-[11.5px] tabular-nums leading-4 text-[#3A3A38] outline-none hover:bg-black/[0.08] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]"
+                      className="h-[22px] rounded-full bg-black/[0.05] px-2 text-[11.5px] tabular-nums leading-4 text-[color:var(--c-3a3a38)] outline-none hover:bg-black/[0.08] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]"
                     >
                       {routineCount(n)}
                     </button>
@@ -964,7 +965,7 @@ function Uses({ state, bot: b, onOpenVault, onOpenRoutines, className }: { state
             ))}
           </span>
         ) : (
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">No apps or logins yet</span>
+          <span className="text-[12px] leading-4 text-[color:var(--c-6b6b6b)]">No apps or logins yet</span>
         )}
       </div>
       <button onClick={onOpenVault} className="shrink-0 text-[12px] font-medium leading-4 text-ink">
@@ -1004,7 +1005,7 @@ function Phone({ state, bot: b }: { state: AppState; bot: Bot }) {
             <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
               <Mascot botId={b.id} color={b.color} size={48} />
               <span className="text-[13px] font-semibold">{b.name}&apos;s phone</span>
-              <span className="text-[11.5px] leading-4 text-[#6B6B6B]">Coming soon</span>
+              <span className="text-[11.5px] leading-4 text-[color:var(--c-6b6b6b)]">Coming soon</span>
             </div>
           </div>
         </div>
@@ -1014,17 +1015,17 @@ function Phone({ state, bot: b }: { state: AppState; bot: Bot }) {
           <span className="text-[14px] font-semibold leading-[18px]">A real phone, not a simulator</span>
           <ComingSoon />
         </span>
-        <span className="text-[13px] leading-5 text-[#3A3A38]">
+        <span className="text-[13px] leading-5 text-[color:var(--c-3a3a38)]">
           Soon {b.name} will get its own physical phone in the cloud, with its own number for calls, texts, iMessage and two-factor codes. It will drive the phone the same way it drives its computer.
         </span>
         <div className="flex flex-wrap gap-1.5">
           {["Calls", "SMS", "iMessage", "2FA codes", "Apps"].map((x) => (
-            <span key={x} className="rounded-full bg-[#F2F2F0] px-2.5 py-1 text-[12px] leading-4">
+            <span key={x} className="rounded-full bg-[color:var(--c-f2f2f0)] px-2.5 py-1 text-[12px] leading-4">
               {x}
             </span>
           ))}
         </div>
-        <span className="text-[12px] leading-[17px] text-[#9A9A98]">
+        <span className="text-[12px] leading-[17px] text-[color:var(--c-9a9a98)]">
           {state.shared
             ? `Not available yet. Until then, the owner can text and call ${b.isMain ? b.name : "their main bot"} on its number.`
             : `Not available yet. Until then, you can text and call ${b.isMain ? b.name : "your main bot"} on its number (Settings, How your bots reach you).`}

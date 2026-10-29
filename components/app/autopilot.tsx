@@ -29,6 +29,7 @@ import { CloseButton, currentWorkspace, needsYou, post, ReadOnlyLine, teamOf } f
 import { FooterButton } from "./sidebar-footer";
 import { deleteQuestion, RoutineWeek, useClock, weekPlan, WeekLegend, WeekLetters } from "./routine-week";
 import { ReportsSheet } from "./routine-reports";
+import { BRAND } from "@/lib/brand";
 
 /*
  * Routines: what the workspace's bots do on their own, and how. Schedules (routines: a reminder, a turn
@@ -164,7 +165,7 @@ export function TagChips({ tags }: { tags?: string[] }) {
   return (
     <span className="flex flex-wrap gap-1">
       {tags.map((t) => (
-        <span key={t} className="rounded-full bg-black/[0.05] px-2 py-0.5 text-[11.5px] leading-4 text-[#3A3A38]">
+        <span key={t} className="rounded-full bg-black/[0.05] px-2 py-0.5 text-[11.5px] leading-4 text-[color:var(--c-3a3a38)]">
           {t}
         </span>
       ))}
@@ -188,7 +189,7 @@ function deliveryName(d: Delivery, state: AppState) {
 
 /** Every place a schedule's results go: the bot's chat in Bops always, then what it delivers to. */
 function destinations(r: Routine, state: AppState) {
-  const to = ["Bops chat"];
+  const to = [`${BRAND.name} chat`];
   if (r.deliverTo) to.push(deliveryName(r.deliverTo, state));
   if (r.textTo && r.deliverTo?.kind !== "text") to.push("Text");
   return to.join(", ");
@@ -233,7 +234,7 @@ async function send(url: string, body: unknown, method: string, answered?: (json
     if (r.ok && !said) return answered?.(j) ?? null;
     return typeof said === "string" && said ? undash(said) : "That didn't work. Try again.";
   } catch {
-    return "Couldn't reach Bops. Try again.";
+    return `Couldn't reach ${BRAND.name}. Try again.`;
   }
 }
 
@@ -321,7 +322,7 @@ export function AutopilotButton({ state, expanded = false, pressed = expanded, o
       icon={<AutopilotIcon size={16} />}
       badge={
         news > 0 && (
-          <span key={news} className="motion-dot-in pointer-events-none absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-highlighter px-1 text-[11px] font-semibold leading-none tabular-nums text-ink shadow-[0_0_0_2px_#F9F9F8]">
+          <span key={news} className="motion-dot-in pointer-events-none absolute -right-1 -top-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-highlighter px-1 text-[11px] font-semibold leading-none tabular-nums text-ink shadow-[0_0_0_2px_var(--c-f9f9f8)]">
             {news}
           </span>
         )
@@ -372,16 +373,16 @@ function SidebarGroup({
   return (
     <div className="flex flex-col pt-3">
       <button onClick={() => onOpen({ section: first })} className={SIDE_HEAD}>
-        <span className="text-[#6B6B6B]">
+        <span className="text-[color:var(--c-6b6b6b)]">
           <AutopilotIcon id="schedules" />
         </span>
         <span className="flex-1">{GROUP_NAME}</span>
         {news > 0 && <NewPill />}
-        {total > 0 && <span className="tabular-nums font-normal text-[#9A9A98]">{total}</span>}
+        {total > 0 && <span className="tabular-nums font-normal text-[color:var(--c-9a9a98)]">{total}</span>}
       </button>
       {next.slice(0, max)}
       {next.length > max && (
-        <button onClick={() => onOpen({ section: first })} className={`${SIDE_ROW} text-[13px] leading-[18px] text-[#6B6B6B] hover:text-ink`}>
+        <button onClick={() => onOpen({ section: first })} className={`${SIDE_ROW} text-[13px] leading-[18px] text-[color:var(--c-6b6b6b)] hover:text-ink`}>
           Show all {next.length}
         </button>
       )}
@@ -391,10 +392,10 @@ function SidebarGroup({
 
 /** A row in the sidebar's pinned box, while it searches: Routines. */
 export const SIDE_HEAD =
-  "flex h-8 w-full items-center gap-2 rounded-[10px] px-2.5 text-left text-[13px] font-medium leading-4 text-[#3A3A38] outline-none hover:bg-black/[0.04] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]";
+  "flex h-8 w-full items-center gap-2 rounded-[10px] px-2.5 text-left text-[13px] font-medium leading-4 text-[color:var(--c-3a3a38)] outline-none hover:bg-black/[0.04] focus-visible:shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)]";
 
 const SIDE_ROW =
-  "flex h-[30px] shrink-0 items-center gap-2 rounded-[10px] pl-8 pr-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A]";
+  "flex h-[30px] shrink-0 items-center gap-2 rounded-[10px] pl-8 pr-2.5 text-left outline-none hover:bg-black/[0.03] focus-visible:shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)]";
 
 /** A schedule in the sidebar: its name, then when it runs next (or Paused, Done) and "quiet" in grey; a red dot when its last run or delivery failed. */
 function ScheduleLine({ routine: r, state, tz, onClick }: { routine: Routine; state: AppState; tz?: string; onClick: () => void }) {
@@ -404,8 +405,8 @@ function ScheduleLine({ routine: r, state, tz, onClick }: { routine: Routine; st
   return (
     <button onClick={onClick} onAnimationEnd={fresh.done} className={`${SIDE_ROW} ${fresh.on ? "motion-new-item" : ""}`}>
       <span className="min-w-0 flex-1 truncate text-[13.5px] leading-[18px]">
-        <span className={r.enabled ? "text-ink" : "text-[#9A9A98]"}>{undash(r.title)}</span>
-        <span className="text-[#9A9A98]">
+        <span className={r.enabled ? "text-ink" : "text-[color:var(--c-9a9a98)]"}>{undash(r.title)}</span>
+        <span className="text-[color:var(--c-9a9a98)]">
           {" · "}
           {line}
         </span>
@@ -434,8 +435,8 @@ function MonitorLine({ watch: w, onClick, readOnly }: { watch: Watch; onClick: (
       className={`group/watch ${SIDE_ROW} ${fresh.on ? "motion-new-item" : ""}`}
     >
       <span className="min-w-0 flex-1 truncate text-[13.5px] leading-[18px]">
-        <span className={off ? "text-[#9A9A98]" : "text-ink"}>{watchName(w)}</span>
-        <span className="text-[#9A9A98]">
+        <span className={off ? "text-[color:var(--c-9a9a98)]" : "text-ink"}>{watchName(w)}</span>
+        <span className="text-[color:var(--c-9a9a98)]">
           {" · "}
           {undash(w.lookFor)}
         </span>
@@ -445,7 +446,7 @@ function MonitorLine({ watch: w, onClick, readOnly }: { watch: Watch; onClick: (
       ) : error && !w.paused ? (
         <TroubleDot tip={`Couldn't read the page: ${undash(error)}`} />
       ) : (
-        off && <span className="shrink-0 text-[12px] text-[#9A9A98] group-hover/watch:hidden group-has-[:focus-visible]/watch:hidden group-focus-visible/watch:hidden">Paused</span>
+        off && <span className="shrink-0 text-[12px] text-[color:var(--c-9a9a98)] group-hover/watch:hidden group-has-[:focus-visible]/watch:hidden group-focus-visible/watch:hidden">Paused</span>
       )}
       {!readOnly && (
         <DeleteX
@@ -512,7 +513,7 @@ export function FilterPill({ on, onClick, children }: { on: boolean; onClick: ()
     <button
       onClick={onClick}
       aria-pressed={on}
-      className={`flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 outline-none transition-colors duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] motion-reduce:transition-none ${on ? "bg-ink text-white" : "bg-[#F2F2F0] text-[#3A3A38] hover:bg-[#EAEAE7]"}`}
+      className={`flex h-7 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium leading-4 outline-none transition-colors duration-150 ease-out focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] motion-reduce:transition-none ${on ? "bg-ink text-white" : "bg-[color:var(--c-f2f2f0)] text-[color:var(--c-3a3a38)] hover:bg-[color:var(--c-eaeae7)]"}`}
     >
       {children}
     </button>
@@ -534,7 +535,7 @@ export function RoutineList({
   onOpenWatch,
   onReport,
   chips = false,
-  className = "shadow-[0_0_0_1px_#ECECEA]",
+  className = "shadow-[0_0_0_1px_var(--c-ececea)]",
 }: {
   state: AppState;
   schedules: Routine[];
@@ -603,7 +604,7 @@ export function RoutinesEmpty({ bot, asks, onAsk, children }: { bot?: Bot; asks?
       <Mascot botId={face?.id ?? "boppy"} color={face?.color ?? "#0A0A0A"} size={52} />
       <span className="flex max-w-[340px] flex-col gap-1">
         <span className="text-[15px] font-semibold leading-5 text-ink">{bot ? `${bot.name} has no routines yet` : "No routines yet"}</span>
-        <span className="text-[13.5px] leading-5 text-[#6B6B6B]">{`Ask ${bot ? bot.name : "a bot"} to do something on a schedule, or to watch a page`}</span>
+        <span className="text-[13.5px] leading-5 text-[color:var(--c-6b6b6b)]">{`Ask ${bot ? bot.name : "a bot"} to do something on a schedule, or to watch a page`}</span>
       </span>
       {/* What it offers, else the asks. */}
       {children ||
@@ -614,7 +615,7 @@ export function RoutinesEmpty({ bot, asks, onAsk, children }: { bot?: Bot; asks?
                 key={a}
                 onClick={() => onAsk(asks.id, a)}
                 data-tip={`Opens ${asks.name}'s chat with this typed, not sent`}
-                className="rounded-full bg-[#F2F2F0] px-3 py-1.5 text-[12.5px] leading-4 text-[#3A3A38] outline-none transition-colors duration-150 ease-out hover:bg-[#EAEAE7] focus-visible:shadow-[0_0_0_1.5px_#0A0A0A] motion-reduce:transition-none"
+                className="rounded-full bg-[color:var(--c-f2f2f0)] px-3 py-1.5 text-[12.5px] leading-4 text-[color:var(--c-3a3a38)] outline-none transition-colors duration-150 ease-out hover:bg-[color:var(--c-eaeae7)] focus-visible:shadow-[0_0_0_1.5px_var(--c-0a0a0a)] motion-reduce:transition-none"
               >
                 {a}
               </button>
@@ -749,11 +750,11 @@ export function AutopilotPage({
               <span data-list-heading tabIndex={-1} className="text-[20px] font-semibold leading-6 tracking-[-0.01em] outline-none">
                 {GROUP_NAME}
               </span>
-              <span className="text-[13px] leading-[19px] text-[#6B6B6B]">
+              <span className="text-[13px] leading-[19px] text-[color:var(--c-6b6b6b)]">
                 {state.shared ? "What the owner's bots do on their own" : "What your bots do on their own"}. How they do each job is in{" "}
                 {/* The link and its period together, so the period never starts a line on its own. */}
                 <span className="whitespace-nowrap">
-                  <button onClick={onOpenSkills} className="font-medium text-ink underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink">
+                  <button onClick={onOpenSkills} className="font-medium text-ink underline decoration-[color:var(--c-c9c9c6)] underline-offset-2 hover:decoration-ink">
                     Skills
                   </button>
                   .
@@ -772,7 +773,7 @@ export function AutopilotPage({
                   {(needsN > 0 || filter.needsYou) && (
                     <FilterPill on={!!filter.needsYou} onClick={() => setFilter({ ...filter, needsYou: !filter.needsYou })}>
                       Needs you
-                      <span className={`tabular-nums ${filter.needsYou ? "text-white/60" : "text-[#9A9A98]"}`}>{needsN}</span>
+                      <span className={`tabular-nums ${filter.needsYou ? "text-white/60" : "text-[color:var(--c-9a9a98)]"}`}>{needsN}</span>
                     </FilterPill>
                   )}
                   {apps.map((a) => (
@@ -811,7 +812,7 @@ export function AutopilotPage({
               ) : !total ? (
                 <RoutinesEmpty asks={askable(state, main)} onAsk={onAsk} />
               ) : !shown.schedules.length && !shown.monitors.length ? (
-                <div className="flex flex-col items-center gap-2 py-10 text-center text-[13.5px] leading-5 text-[#6B6B6B]">
+                <div className="flex flex-col items-center gap-2 py-10 text-center text-[13.5px] leading-5 text-[color:var(--c-6b6b6b)]">
                   Nothing matches these filters
                   <button onClick={() => setFilter({})} className={small("plain")}>
                     Show all
@@ -883,7 +884,7 @@ function PageRow({
 }) {
   const fresh = useFresh(id);
   return (
-    <div ref={rowRef} data-item={id} onAnimationEnd={fresh.done} className={`flex flex-col ${last ? "" : "border-b border-[#F0F0EE]"} ${fresh.on ? "motion-new-item" : ""}`}>
+    <div ref={rowRef} data-item={id} onAnimationEnd={fresh.done} className={`flex flex-col ${last ? "" : "border-b border-[color:var(--c-f0f0ee)]"} ${fresh.on ? "motion-new-item" : ""}`}>
       {editing ? (
         <div className="px-3.5 py-3">{editing}</div>
       ) : (
@@ -892,15 +893,15 @@ function PageRow({
             data-row-head
             onClick={onToggle}
             aria-expanded={open}
-            className={`flex min-w-0 flex-1 items-start gap-3 py-3 pl-3.5 pr-3.5 text-left outline-none focus-visible:shadow-[inset_0_0_0_1.5px_#0A0A0A] ${remove ? TOUCH_ROOM : ""}`}
+            className={`flex min-w-0 flex-1 items-start gap-3 py-3 pl-3.5 pr-3.5 text-left outline-none focus-visible:shadow-[inset_0_0_0_1.5px_var(--c-0a0a0a)] ${remove ? TOUCH_ROOM : ""}`}
           >
             {lead && <span className={`flex shrink-0 pt-px ${dim ? "opacity-50" : ""}`}>{lead}</span>}
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className={`truncate text-[14px] font-medium leading-[18px] ${dim ? "text-[#9A9A98]" : "text-ink"}`}>{title}</span>
-              {line && <span className={`text-[12.5px] leading-[17px] text-[#6B6B6B] ${open ? "[overflow-wrap:anywhere]" : "truncate"}`}>{line}</span>}
+              <span className={`truncate text-[14px] font-medium leading-[18px] ${dim ? "text-[color:var(--c-9a9a98)]" : "text-ink"}`}>{title}</span>
+              {line && <span className={`text-[12.5px] leading-[17px] text-[color:var(--c-6b6b6b)] ${open ? "[overflow-wrap:anywhere]" : "truncate"}`}>{line}</span>}
             </span>
             {end && <span className="flex shrink-0 items-center gap-1.5 pt-px">{end}</span>}
-            <span className={`pt-[3px] text-[#B0B0AD] ${remove ? CHEVRON_GIVES_WAY : ""}`}>
+            <span className={`pt-[3px] text-[color:var(--c-b0b0ad)] ${remove ? CHEVRON_GIVES_WAY : ""}`}>
               <Chevron open={open} />
             </span>
           </button>
@@ -929,8 +930,8 @@ function Facts({ rows }: { rows: [string, ReactNode][] }) {
         .filter(([, v]) => v !== null && v !== undefined && v !== false && v !== "")
         .map(([k, v]) => (
           <Fragment key={k}>
-            <dt className="text-[#9A9A98]">{k}</dt>
-            <dd className="min-w-0 text-[#3A3A38] [overflow-wrap:anywhere]">{v}</dd>
+            <dt className="text-[color:var(--c-9a9a98)]">{k}</dt>
+            <dd className="min-w-0 text-[color:var(--c-3a3a38)] [overflow-wrap:anywhere]">{v}</dd>
           </Fragment>
         ))}
     </dl>
@@ -965,8 +966,8 @@ function Words({ label, text, clamp = false }: { label: string; text: string; cl
   }, [clamp, all, text]);
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">{label}</span>
-      <span className="rounded-xl bg-[#F7F7F6] px-3 py-2 text-[13px] leading-[19px] text-[#3A3A38]">
+      <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-9a9a98)]">{label}</span>
+      <span className="rounded-xl bg-[color:var(--c-f7f7f6)] px-3 py-2 text-[13px] leading-[19px] text-[color:var(--c-3a3a38)]">
         <span ref={box} className={`whitespace-pre-wrap [overflow-wrap:anywhere] ${clamp && !all ? "line-clamp-4" : "block"}`}>
           {undash(text)}
         </span>
@@ -1055,7 +1056,7 @@ function ScheduleEdit({
     ...(quiet !== !!r.quiet ? { quiet } : {}),
   };
   const changed = Object.keys(edit).length > 0;
-  const field = "w-full rounded-xl bg-[#F7F7F6] px-3 py-2 text-[13px] leading-[18px] outline-none focus:bg-white focus:shadow-[0_0_0_1.5px_#0A0A0A]";
+  const field = "w-full rounded-xl bg-[color:var(--c-f7f7f6)] px-3 py-2 text-[13px] leading-[18px] outline-none focus:bg-white focus:shadow-[0_0_0_1.5px_var(--c-0a0a0a)]";
   return (
     <form
       onSubmit={(e) => {
@@ -1074,20 +1075,20 @@ function ScheduleEdit({
       className="flex flex-col gap-2.5"
     >
       <label className="flex flex-col gap-1">
-        <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">Name</span>
+        <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-9a9a98)]">Name</span>
         <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} className={field} />
       </label>
       <label className="flex flex-col gap-1">
-        <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">What it does</span>
+        <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-9a9a98)]">What it does</span>
         <textarea value={goal} onChange={(e) => setGoal(e.target.value)} rows={3} className={`${field} resize-none`} />
       </label>
       <div className="flex flex-col gap-1">
-        <span className="text-[11.5px] font-medium leading-4 text-[#9A9A98]">When</span>
+        <span className="text-[11.5px] font-medium leading-4 text-[color:var(--c-9a9a98)]">When</span>
         <CadencePicker value={when.schedule} onChange={when.setSchedule} zone={when.zone} ownerZone={tz} onZone={when.setZone} presets={ctx.presets} calendar={ctx.calendar} disabled={busy} />
       </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <label className="flex items-center gap-2 text-[12.5px] leading-4 text-[#3A3A38]">
-          <input type="checkbox" checked={quiet} onChange={(e) => setQuiet(e.target.checked)} className="size-3.5 accent-[#0A0A0A]" />
+        <label className="flex items-center gap-2 text-[12.5px] leading-4 text-[color:var(--c-3a3a38)]">
+          <input type="checkbox" checked={quiet} onChange={(e) => setQuiet(e.target.checked)} className="size-3.5 accent-[color:var(--c-0a0a0a)]" />
           Quiet: post only when there&rsquo;s something for you
         </label>
       </div>
@@ -1138,7 +1139,7 @@ function WhenChange({ routine: r, state, tz, busy, onSave, onCancel }: { routine
 
 /** A row's bot: its mascot, saying its name on hover (one that's gone: a grey circle). */
 function BotMark({ bot }: { bot?: Bot }) {
-  if (!bot) return <span className="size-6 rounded-full bg-[#ECECEA]" />;
+  if (!bot) return <span className="size-6 rounded-full bg-[color:var(--c-ececea)]" />;
   return (
     <span role="img" aria-label={bot.name} data-tip={bot.name} className="flex">
       <Mascot botId={bot.id} color={bot.color} size={24} antenna={false} />
@@ -1383,7 +1384,7 @@ export function ScheduleRow({
             ) : (
               <span key="when">
                 {`${describeSchedule(r.schedule, zone)}${next ? `. Next: ${next}` : ""}`}
-                {zone && zone !== tz ? <span className="text-[#9A9A98]">{` (${zone.split("/").pop()?.replace(/_/g, " ")} time)`}</span> : null}
+                {zone && zone !== tz ? <span className="text-[color:var(--c-9a9a98)]">{` (${zone.split("/").pop()?.replace(/_/g, " ")} time)`}</span> : null}
                 {!done(r) && !state.shared && (
                   <button onClick={() => setChangingWhen(true)} disabled={!!busy} className="ml-1.5 text-[12px] font-medium leading-4 text-ink underline-offset-2 outline-none hover:underline focus-visible:underline disabled:opacity-40">
                     Change
@@ -1397,8 +1398,8 @@ export function ScheduleRow({
             skips.length > 0 && (
               <span key="skipping" className="flex flex-wrap items-center gap-1">
                 {skips.map((x) => (
-                  <span key={x} className="inline-flex items-center gap-1 rounded-full bg-[#F2F2F0] py-0.5 pl-2 pr-0.5 text-[12px] leading-4">
-                    <span className="line-through decoration-[#9A9A98]">{whenText(x, now, tz)}</span>
+                  <span key={x} className="inline-flex items-center gap-1 rounded-full bg-[color:var(--c-f2f2f0)] py-0.5 pl-2 pr-0.5 text-[12px] leading-4">
+                    <span className="line-through decoration-[color:var(--c-9a9a98)]">{whenText(x, now, tz)}</span>
                     {!state.shared && (
                     <button
                       onClick={() => void run("unskip", "/api/routines", { id: r.id, action: "unskip", at: x }, "PATCH")}
@@ -1515,7 +1516,7 @@ export function MonitorRow({
         sure && (
           <>
             <InlineConfirm
-              text="Stop watching this? Bops stops checking it."
+              text={`Stop watching this? ${BRAND.name} stops checking it.`}
               action="Stop"
               doing="Stopping…"
               busy={busy === "remove"}
@@ -1547,7 +1548,7 @@ export function MonitorRow({
       )}
       {!sure && <ErrorLine text={error} />}
       {found && !error && !busy && (
-        <span role="status" className="text-[12.5px] leading-4 text-[#6B6B6B]">
+        <span role="status" className="text-[12.5px] leading-4 text-[color:var(--c-6b6b6b)]">
           {found}
         </span>
       )}
@@ -1559,7 +1560,7 @@ export function MonitorRow({
             "Watching",
             url ? (
               // Opens in the user's own browser (the Mac app hands new windows to it).
-              <a key="url" href={url} target="_blank" rel="noreferrer" className="text-ink underline decoration-[#C9C9C6] underline-offset-2 hover:decoration-ink">
+              <a key="url" href={url} target="_blank" rel="noreferrer" className="text-ink underline decoration-[color:var(--c-c9c9c6)] underline-offset-2 hover:decoration-ink">
                 {shortUrl(url)}
               </a>
             ) : (
@@ -1577,7 +1578,7 @@ export function MonitorRow({
             w.alert && (
               <span className="flex flex-col gap-0.5">
                 <span>{undash(w.alert.text)}</span>
-                <span className="text-[#9A9A98]">{since(w.alert.at)}</span>
+                <span className="text-[color:var(--c-9a9a98)]">{since(w.alert.at)}</span>
               </span>
             ),
           ],
