@@ -225,6 +225,10 @@ assert.equal(R.runnerFor({ app: { name: "crm" } }, screen, true), "agents", "wor
 process.env.BOPS_TASK_RUNNER = "off";
 assert.equal(R.runnerMode(), "off");
 assert.equal(R.runnerFor({}, agents, true), "computer");
+// A benchmark's forced route: its runner, whatever the mode; none named, the usual rule (the computer tool here).
+assert.equal(R.runnerFor({}, { by: "forced", ...agents }, true), "agents", "forced to Agents, even with the mode off");
+assert.equal(R.runnerFor({}, { by: "forced", ...screen }, false), "computer", "forced to the computer tool, even with BOPS_COMPUTER_TOOL=0");
+assert.equal(R.runnerFor({}, { by: "forced" }, true), "computer", "a forced model alone: the computer tool, as before");
 delete process.env.BOPS_TASK_RUNNER;
 
 // A bot set to low, medium or high: that, and Jev isn't asked. High is Astra, as it always was.

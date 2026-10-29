@@ -2764,17 +2764,18 @@ async function run(sessionId: string) {
     patchSession(sessionId, (x) => {
       if (x.brainRun) delete x.brainRun.waits;
     });
-  // A new cloud thread's route, with its runner (taskRunner): asked once, before it starts.
-  if (!mac && !brain && !s.agentSessionId && !s.runner && !s.route) {
-    const route = await routeTask(b.effort, s.goal, b.id, { runner: runnerMode() !== "off" });
+  // A cloud thread's runner, before its first turn (routing.ts runnerFor): its route asked for first when it
+  // has none (Jev reads the goal), or the one it came with (a benchmark's forced route; one picked up again).
+  if (!mac && !brain && !s.agentSessionId && !s.runner) {
+    const route = s.route ?? (await routeTask(b.effort, s.goal, b.id, { runner: runnerMode() !== "off" }));
     const runner = runnerFor(s, route, computerToolOn());
-    patchSession(sessionId, { effort: route.effort, route, ...(runner === "computer" ? { runner } : {}) });
-    logTaskRoute(sessionId, runner);
+    patchSession(sessionId, { ...(s.route ? {} : { effort: route.effort, route }), ...(runner === "computer" ? { runner } : {}) });
+    if (!s.route) logTaskRoute(sessionId, runner);
   }
   // A cloud thread on the Responses API's computer tool (computer-task.ts), or one that started on it. A thread
-  // that started on an Agents API session stays on that; so does one from before routes said (computerToolOn).
+  // that started on an Agents API session stays on that.
   const now = session(sessionId)!;
-  const onComputerTool = !mac && !brain && (now.runner === "computer" || (!now.agentSessionId && !now.route && computerToolOn()));
+  const onComputerTool = !mac && !brain && now.runner === "computer";
   // Until its cleanup is done (a thread moved to the Mac waits for that: waitsForCloud).
   runs.add(sessionId);
   // On its brain: stopped if the brain goes, or its bot goes off it, meanwhile (brainLeft).

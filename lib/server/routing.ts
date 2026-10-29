@@ -200,9 +200,11 @@ export function runnerFrom(a: Partial<Record<keyof typeof RUNNER_QUESTIONS, Answ
  * What a new cloud thread runs on. `computerTool` false (BOPS_COMPUTER_TOOL=0): an Agents API session,
  * every one. Otherwise the computer tool, unless BOPS_TASK_RUNNER=on and the thread is work on one of the
  * workspace's apps (work_on_app: `app`) or Jev read its goal as code, building, or separate jobs at once.
- * In shadow (the default), the computer tool runs and the pick is only logged.
+ * In shadow (the default), the computer tool runs and the pick is only logged. A benchmark's forced route
+ * with a runner (POST /api/sessions) runs on that one, whatever the mode.
  */
-export function runnerFor(s: { app?: unknown }, route: Pick<TaskRoute, "runner">, computerTool: boolean): "agents" | "computer" {
+export function runnerFor(s: { app?: unknown }, route: Pick<TaskRoute, "runner" | "by">, computerTool: boolean): "agents" | "computer" {
+  if (route.by === "forced" && route.runner) return route.runner.pick;
   if (!computerTool) return "agents";
   if (runnerMode() !== "on") return "computer";
   return s.app || route.runner?.pick === "agents" ? "agents" : "computer";
