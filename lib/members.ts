@@ -6,8 +6,9 @@
  * (lib/server/orgo.ts bopsWorkspace). The people the user adds are members of that Orgo workspace:
  * they sign in on orgo.ai and see every bot's computer there, and can have Orgo's agent work on any of
  * them (Orgo's roles cover the whole workspace, whatever bots they're given in Bops), and in their own Bops they see the bots the user picks for each of them (Person.access,
- * lib/member-access.ts), with those bots' chats and threads, read only (lib/shared.ts, cloud/members.ts).
- * Never the user's Vault keys or this Mac's logins.
+ * lib/member-access.ts), with those bots' chats and threads: watched with Read, and with Write chatted with,
+ * set to work, answered and stopped too (lib/shared.ts, cloud/members.ts). Never the user's Vault keys or this
+ * Mac's logins.
  * Bops keeps none of this itself: orgo-web holds the list, the invites and the plan's rules (Free
  * adds nobody, Pro 2 people, Max up to 5), and the app shows what it says. Nobody is added from an
  * orgo-web that doesn't send its numbers (seats): one from before that rule holds no plan to it.
@@ -131,14 +132,15 @@ export const ROLE_LINES: Record<MemberRole, string> = {
 
 /**
  * What each level means for a bot, under the sheet's bot picker and on hover over each level. Read is all
- * of the bot, the owner's own chats with it too (cloud/ws-slice.ts). Write is kept and shown, and works
- * as Read until people can act in a shared workspace. The levels are Bops': on orgo.ai Orgo's role covers
- * every bot's computer, None's too.
+ * of the bot, the owner's own chats with it too (cloud/ws-slice.ts). Write takes in Read, and they can act
+ * too: chat with it (a group only with Write on every bot in it), reply in its threads, answer what it asks
+ * and stop its runs, from their own Bops (cloud/members.ts act). Never the owner's logins, keys, Macs or
+ * settings. The levels are Bops': on orgo.ai Orgo's role covers every bot's computer, None's too.
  */
 export const ACCESS_TIPS: Record<AccessLevel, string> = {
   none: "Can't see this bot in Bops. On orgo.ai they still see its computer.",
   read: "Sees everything this bot does, including your chats with it.",
-  write: "Works as Read for now. Once people can act in a shared workspace, they can chat with it and run it too.",
+  write: "Can chat with this bot, have it do work, answer what it asks and stop it. Never your logins, keys or Macs.",
 };
 
 /** An address the form sends: trimmed, lowercased, and shaped like name@domain.tld. Null when it isn't. */

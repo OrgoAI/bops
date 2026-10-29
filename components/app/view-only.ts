@@ -2,8 +2,11 @@
 
 /**
  * While a workspace shared with the user is open (AppState.shared, lib/shared.ts), nothing in the window
- * changes anything: every call that would (anything but a GET) to the app's own server is answered here
- * with 403 and the read only line, without going out, wherever in the window it's made. Only what leaves
+ * changes anything through the app's own routes: every call that would (anything but a GET) to the app's own
+ * server is answered here with 403 and the read only line, without going out, wherever in the window it's made.
+ * What a member with Write does there (chat, reply, answer, stop) goes only through /api/workspaces/shared, to
+ * the owner's Bops by way of Bops Cloud (shared-act.ts), never a route that would act on the user's own bot of
+ * that id. Only what leaves
  * or switches the workspace, signing in and out, notices, usage events, what's on screen and what's the
  * user's own (their vault, account and name) go through. Nor do the reads the server answers from the
  * user's own bots or workspaces by id (a shared bot's id is often one of theirs, "boppy"): their memory,
@@ -30,6 +33,8 @@ const OWN_READS = [
   /^\/api\/orbit(\/|\?|$)/,
   /^\/api\/skills(\/|\?|$)/,
   /^\/api\/routines\/suggestions(\/|\?|$)/,
+  // A routine's runs, by id: the user's own routine of that id, never the owner's (its reports read the shared copy only).
+  /^\/api\/routines\/[^/]+\/runs(\/|\?|$)/,
   /^\/api\/crm(\/|\?|$)/,
   /^\/api\/files(\/|\?|$)/,
   /^\/api\/vnc(\/|\?|$)/,
@@ -40,6 +45,8 @@ const OWN_READS = [
   /^\/api\/screen(\/|\?|$)/,
   /^\/api\/screen-action(\/|\?|$)/,
   /^\/api\/mail\/handle(\/|\?|$)/,
+  // The email or thread a drafted reply answers, read from the user's own account: never the owner's (the server refuses it too).
+  /^\/api\/drafts\/source(\/|\?|$)/,
   /^\/api\/made-apps(\/|\?|$)/,
   /^\/api\/hosted-apps(\/|\?|$)/,
   // A watch's suggestions read a bot's screen by its id: the user's own bot of that id, never the owner's.
@@ -48,6 +55,8 @@ const OWN_READS = [
   /^\/api\/mac(\/|\?|$)/,
   // Images in chats, by id: what was sent from this Mac, never the owner's (attachments.tsx says they aren't shared).
   /^\/api\/uploads(\/|\?|$)/,
+  // Settings → Your data: the user's own chats' numbers and Recently deleted, never the owner's (the server refuses it too).
+  /^\/api\/privacy(\/|\?|$)/,
 ];
 
 /** The app's own server's path a call goes to, or null for a call elsewhere. */

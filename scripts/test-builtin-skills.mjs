@@ -34,7 +34,7 @@ registerHooks({
 });
 
 const { BUILTIN_LABELS, BUILTIN_SKILLS } = await import(`${root}/lib/builtin-skills.ts`);
-const { APPS_LABEL, OTHER, SKILL_LABEL_MAX, cleanLabel } = await import(`${root}/lib/skill-labels.ts`);
+const { APPS_LABEL, SKILL_LABEL_MAX, cleanLabel, isUnsorted } = await import(`${root}/lib/skill-labels.ts`);
 const { BUNDLE_LIMITS, SLUG_RE, checkFolder, isScript, renderSkillMd } = await import(`${root}/lib/server/skill-bundle.ts`);
 
 let failures = 0;
@@ -59,7 +59,7 @@ const INGOT_SUBCOMMANDS = new Set(["clone", "status", "diff", "commit", "pull", 
 const TAUGHT = ["clone", "status", "diff", "commit", "pull", "log", "show", "checkout", "export", "git-url"];
 /** Each tool a body may name, with its arguments: Bops' chat tools, then Ingot's (ingot/internal/mcp/hosted.go). */
 const TOOLS = {
-  work_on_app: ["app", "name", "change"],
+  work_on_app: ["app", "name", "change", "deploy"],
   deploy_app: ["app", "at"],
   read_skill: ["name", "file"],
   repo_status: ["dir"],
@@ -96,7 +96,7 @@ check("The labels: APPS_LABEL among them, each one clean, short, its own and wit
   for (const l of BUILTIN_LABELS) {
     assert.equal(cleanLabel(l.label), l.label, `${l.label} is kept as it's written`);
     assert.ok(l.label.length <= SKILL_LABEL_MAX, l.label);
-    assert.notEqual(l.label.toLowerCase(), OTHER.toLowerCase());
+    assert.ok(!isUnsorted(l.label), `${l.label} is Unsorted`);
     assert.ok(!seen.has(l.label.toLowerCase()), `${l.label} twice`);
     seen.add(l.label.toLowerCase());
     assert.ok(l.about.trim().length > 20 && l.about.length < NOTE_LINE_MAX, `${l.label}: about is ${l.about.length} characters`);

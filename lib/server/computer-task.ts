@@ -13,7 +13,7 @@ import { callApi, callApiTool, usableKeys } from "./keys";
 import { readSkill, READ_SKILL_TOOL } from "./workspace-skills";
 import { bot, patchSession, session, stateEpoch } from "./store";
 import { recordTokens, usageTags } from "./usage";
-import type { AppApproval, Session } from "@/lib/types";
+import { othersThread, type AppApproval, type Session } from "@/lib/types";
 
 /**
  * A thread on a bot's Orgo computer, run on the Responses API's own `computer` tool: the model sees
@@ -133,6 +133,8 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   // call_api with the user's keys (keys.ts) reads only (GET): anything that changes something is asked for in the chat.
   // Not for a task someone outside Bops started, like the CRM. Not bank, payroll or compliance keys (chatOnly):
   // the task's browser and shell can reach any site, so a page could have it type what they answer anywhere.
+  // Nor for one a member with Write started or told something (othersThread): the owner's saved logins, apps and
+  // keys are theirs alone, whoever has Write on the bot. (Checked each turn: a member's reply can come mid-task.)
   const outside = outsideTask(t.sessionId);
   const keyed = outside ? [] : (await usableKeys(b)).filter((k) => !k.chatOnly);
   const tools = [
@@ -140,10 +142,10 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
     { type: "web_search" },
     SHELL_TOOL,
     PAGE_TOOL,
-    VAULT_TOOL,
+    ...(outside ? [] : [VAULT_TOOL]),
     ...(t.parts ? PART_TOOLS : []),
     READ_SKILL_TOOL,
-    ...(t.apps ? APP_TOOLS(b) : []),
+    ...(t.apps && !outside ? APP_TOOLS(b) : []),
     ...DATA_TOOLS(b),
     ...(outside ? [] : CRM_TOOLS(b)),
     ...(keyed.length ? [callApiTool(keyed, { getOnly: true })] : []),
@@ -658,11 +660,11 @@ export function pageLook(g: PageGuard, script: string, r: { text: string; run?: 
   return { look, note };
 }
 
-/** A task someone outside Bops started (Session.fromOutside), or a part of one (split_task: Session.partOf), whether or not the part was marked so. */
-function outsideTask(id: string) {
-  const s = session(id);
-  return !!s?.fromOutside || (!!s?.partOf && !!session(s.partOf)?.fromOutside);
-}
+/**
+ * A task that's someone else's work (lib/types.ts othersThread): one someone outside Bops started, or a member with
+ * Write started or told something, or a part of one. It has none of the owner's own: their logins, keys, CRM, apps.
+ */
+const outsideTask = (id: string) => othersThread(session(id), session);
 
 /**
  * A tool call that may take a while (an app, a lookup, a sign-in), raced against the turn's Stop: a stopped
@@ -717,7 +719,7 @@ async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = ne
     } else if (o.name === "check_parts" && t.parts) {
       t.step("parts", args.wait ? "waiting for its parts" : "checked on its parts");
       output = await t.parts.check(args.wait === true, t.signal);
-    } else if (o.name === "sign_in_from_vault") {
+    } else if (o.name === "sign_in_from_vault" && !outside) {
       t.step("vault", "signing in with a saved login");
       output = await orStop(t, import("./vault").then((v) => v.vaultSignIn(s.botId, t.display, t.sessionId)));
     } else if (o.name === "read_skill") {

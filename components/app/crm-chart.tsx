@@ -115,7 +115,6 @@ function Bars({ wide, ...s }: Shared & { wide: boolean }) {
               role="option"
               aria-selected={s.picked === i}
               aria-label={s.said(g)}
-              className="cursor-pointer"
               onPointerEnter={() => s.onHover(i)}
               onPointerLeave={() => s.onHover(null)}
               onClick={() => s.onPick(i)}

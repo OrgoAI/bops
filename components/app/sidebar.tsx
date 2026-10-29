@@ -3,9 +3,9 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { MAIN_WORKSPACE, waitingAsks, WORKSPACE_APPS_SINCE, workspaceOf, type AppState, type Chat, type Session, type Watch } from "@/lib/types";
 import { initialsOf, signOutOfOrgo } from "./account";
-import { AutopilotIcon, AutopilotSections, routinesEntry, type AutopilotOpen } from "./autopilot";
+import { AutopilotButton, AutopilotIcon, AutopilotSections, routinesEntry, type AutopilotOpen } from "./autopilot";
 import { categoriesOpen } from "@/lib/memory-categories";
-import { PeopleIcon, useMembersCount } from "./members";
+import { MembersButton, PeopleIcon, useMembersCount } from "./members";
 import { FooterButton, useFooterHover, type FooterKey, type FooterPage } from "./sidebar-footer";
 import { AppsIcon } from "./made-apps";
 import { KnowledgeIcon, useKnowledgeNews, type MemoryOpen } from "./memory-categories";
@@ -19,9 +19,19 @@ import { useIssues } from "./orbit-issues";
 import { UpdateNotice } from "./update-notice";
 import { forgetWorkspaceHere } from "@/lib/workspace-local";
 import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, NeedsYouDot, post, RoundButton, SideToggleIcon, useNow } from "./ui";
-import { ownerWho, roleLabel, sharedBy, type SharedWorkspace } from "@/lib/shared";
+import { ownerWho, roleLabel, saidBy, saidName, sharedBy, type SharedWorkspace } from "@/lib/shared";
 import { appsShown } from "@/lib/apps-access";
 import { BRAND } from "@/lib/brand";
+
+/** A chat's newest message, if it has one. */
+export const lastMessageOf = (state: AppState, c: Chat) => [...state.messages].reverse().find((m) => m.chatId === c.id);
+
+/** The workspace's chats as the sidebar lists them (folded to its rail too): the main bot's first, as it runs the team, then by latest activity. */
+export function sidebarChats(state: AppState): Chat[] {
+  const activity = (c: Chat) => lastMessageOf(state, c)?.at ?? c.createdAt;
+  const pin = (c: Chat) => (c.kind === "bot" && state.bots.find((x) => x.id === c.botIds[0])?.isMain ? 1 : 0);
+  return state.chats.filter((c) => chatInWorkspace(state, c)).sort((a, b) => pin(b) - pin(a) || activity(b) - activity(a));
+}
 
 /**
  * The sidebar for one workspace (switch at the top). On top, Favorites: Needs your attention while
@@ -53,6 +63,7 @@ export function Sidebar({
   menuActions: actions,
   onCollapse,
   search = null,
+  workspaces = false,
 }: {
   state: AppState;
   chatId: string;
@@ -78,10 +89,12 @@ export function Sidebar({
   footer?: FooterPage;
   /** What a bot's right-click menu does (bot-menu.tsx). */
   menuActions?: BotMenuActions;
-  /** Hide the sidebar (bops-app.tsx brings it back from the title bar). */
+  /** Fold the sidebar to its rail of icons (sidebar-rail.tsx, which unfolds it again). */
   onCollapse?: () => void;
-  /** Tests: searching for this from the start. */
+  /** Searching for this from the start (expanded from the rail's Search: ""; tests). */
   search?: string | null;
+  /** The workspace switcher open from the start (expanded from the rail's workspace). */
+  workspaces?: boolean;
 }) {
   const [query, setQuery] = useState<string | null>(search);
   const q = query?.trim().toLowerCase();
@@ -113,16 +126,9 @@ export function Sidebar({
   // Gone with the sidebar (signing out), so the next sign-in's first paint has nothing new in it either.
   useEffect(() => forgetShown, []);
 
-  const lastMessage = (c: Chat) => [...state.messages].reverse().find((m) => m.chatId === c.id);
-  const activity = (c: Chat) => lastMessage(c)?.at ?? c.createdAt;
+  const lastMessage = (c: Chat) => lastMessageOf(state, c);
   const ws = currentWorkspace(state);
-  const chats = [...state.chats]
-    .filter((c) => chatInWorkspace(state, c))
-    .filter((c) => !q || chatName(c, state.bots).toLowerCase().includes(q) || state.messages.some((m) => m.chatId === c.id && m.text.toLowerCase().includes(q)))
-    .sort((a, b) => {
-      const pin = (c: Chat) => (c.kind === "bot" && state.bots.find((x) => x.id === c.botIds[0])?.isMain ? 1 : 0);
-      return pin(b) - pin(a) || activity(b) - activity(a);
-    });
+  const chats = sidebarChats(state).filter((c) => !q || chatName(c, state.bots).toLowerCase().includes(q) || state.messages.some((m) => m.chatId === c.id && m.text.toLowerCase().includes(q)));
 
   // Each bot's threads, under its row (a quiet routine's run that found nothing for the user posted
   // nothing, so it isn't listed either). A search lists the ones that match, flat, under Threads.
@@ -178,10 +184,12 @@ export function Sidebar({
   };
 
   return (
-    <aside className="flex min-h-0 flex-col border-r border-[color:var(--c-ececea)] bg-[color:var(--c-f9f9f8)] px-2.5 pb-3 pt-3.5">
+    // Its color and edge are the column's (bops-app.tsx), which it keeps folded to the rail (sidebar-rail.tsx);
+    // its width is its own, so sliding open it's uncovered rather than squeezed.
+    <aside className="flex min-h-0 w-[340px] shrink-0 flex-col px-2.5 pb-3 pt-3.5">
       <div className="flex items-center justify-between pb-3 pl-2.5 pr-2">
         {query === null ? (
-          <WorkspaceSwitcher state={state} />
+          <WorkspaceSwitcher state={state} opened={workspaces} />
         ) : (
           <input
             autoFocus
@@ -198,8 +206,8 @@ export function Sidebar({
           {onCollapse && (
             <button
               onClick={onCollapse}
-              title="Hide the sidebar (⌘\)"
-              aria-label="Hide the sidebar"
+              title="Collapse the sidebar (⌘\)"
+              aria-label="Collapse the sidebar"
               className="flex size-[34px] shrink-0 items-center justify-center rounded-full hover:bg-black/[0.05]"
             >
               <SideToggleIcon side="left" open />
@@ -291,34 +299,95 @@ export function Sidebar({
  * rest; pointing at (or tabbing to) Connect apps grows it into the pill, with the apps you've connected,
  * as you shrink to your initials (sidebar-footer.tsx). It opens your logins (the Vault). `hover` seeds
  * the pointed-at one (tests).
+ * `vertical`: the folded sidebar's (sidebar-rail.tsx), with no room for a menu's worth of words: People,
+ * Connect apps, Routines, Knowledge and Apps as round buttons in a column, the open page's filled in grey,
+ * and you at the bottom. Their tooltips say what they are; `news` is Knowledge's dot there (tests).
  */
 export function SidebarFooter({
   state,
   open = "vault",
   hover: initialHover,
+  news,
+  vertical = false,
   you,
   onVault,
+  onMembers,
+  onOpenAutopilot,
+  onOpenMemory,
+  onApps,
 }: {
   state: AppState;
-  open?: FooterPage;
+  /** The page that's open; null, none (only the vertical column says so). */
+  open?: FooterPage | null;
   hover?: FooterKey;
+  news?: boolean;
+  vertical?: boolean;
   you: (expanded: boolean) => ReactNode;
   onVault: () => void;
+  /** The column's other pages (the row has them in your menu). */
+  onMembers?: () => void;
+  onOpenAutopilot?: (open: AutopilotOpen) => void;
+  onOpenMemory?: (open: MemoryOpen) => void;
+  /** The Apps home: the apps the bots made (made-apps.tsx). */
+  onApps?: () => void;
 }) {
   const { hover, row } = useFooterHover(initialHover);
+  const connect = (expanded: boolean, pressed: boolean) => (
+    <FooterButton
+      name="vault"
+      expanded={expanded}
+      pressed={pressed}
+      label="Connect apps"
+      tip={vertical ? "Connect apps: your accounts and logins, and which bots can use them" : undefined}
+      onClick={onVault}
+      trail={<AppsTrail state={state} expanded={expanded} />}
+    />
+  );
+  if (vertical) {
+    const knowledge = categoriesOpen(state);
+    // Apps only for an @orgo.ai account for now (lib/apps-access.ts), and never in a shared workspace (they're its owner's).
+    const apps = appsShown(state);
+    return (
+      // Each slot held to a circle (your initials too, however wide).
+      <div data-footer-column className="flex flex-col items-center gap-2 pt-3 [&_button[aria-pressed=true]]:bg-[color:var(--c-eeeeec)] [&>[data-footer-key]]:w-9">
+        {onMembers && <MembersButton state={state} pressed={open === "people"} onClick={onMembers} />}
+        {connect(false, open === "vault")}
+        {onOpenAutopilot && <AutopilotButton state={state} pressed={open === "routines"} onOpen={onOpenAutopilot} />}
+        {knowledge && onOpenMemory && <KnowledgeButton state={state} expanded={false} pressed={open === "knowledge"} news={news} onOpen={() => onOpenMemory({})} />}
+        {apps && onApps && <FooterButton name="apps" expanded={false} pressed={open === "apps"} label="Apps" tip="Apps your bots made for you" onClick={onApps} icon={<AppsIcon size={16} />} />}
+        {you(false)}
+      </div>
+    );
+  }
   const pill = hover === "vault" ? "vault" : "you";
   return (
     <div {...row} data-footer-row className="flex items-center gap-1 pb-1 pt-3">
       {you(pill === "you")}
-      <FooterButton
-        name="vault"
-        expanded={pill === "vault"}
-        pressed={open === "vault" && pill === "vault"}
-        label="Connect apps"
-        onClick={onVault}
-        trail={<AppsTrail state={state} expanded={pill === "vault"} />}
-      />
+      {connect(pill === "vault", open === "vault" && pill === "vault")}
     </div>
+  );
+}
+
+/**
+ * Knowledge in the folded sidebar's column, with a blue dot on its corner while there's something new in
+ * it (what memory learned since it was last open: memory-categories.tsx useKnowledgeNews), none while it's
+ * the open page. `news` is for the tests.
+ */
+export function KnowledgeButton({ state, expanded, pressed, news: given, onOpen }: { state: AppState; expanded: boolean; pressed: boolean; news?: boolean; onOpen: () => void }) {
+  const fresh = useKnowledgeNews(currentWorkspace(state), state.account?.user.id ?? "");
+  const news = (given ?? fresh) && !pressed;
+  return (
+    <FooterButton
+      name="knowledge"
+      expanded={expanded}
+      pressed={pressed}
+      label="Knowledge"
+      tip={state.shared ? "Knowledge: what the owner's bots know" : news ? "Knowledge: something new your bots learned" : "Knowledge: what your bots know, learned as you chat"}
+      ariaLabel={news ? "Knowledge, something new" : undefined}
+      onClick={onOpen}
+      icon={<KnowledgeIcon size={16} />}
+      badge={news && <NewDot />}
+    />
   );
 }
 
@@ -392,15 +461,15 @@ export function YouMenu(props: { state: AppState; expanded?: boolean; onAccount:
 
 /** The pages in your menu: the one open on the right (sidebar-footer.tsx footerPageOf), and how to open each. */
 type MenuPages = {
-  open?: FooterPage;
+  open?: FooterPage | null;
   onMembers: () => void;
   onOpenAutopilot: (open: AutopilotOpen) => void;
   onOpenMemory: (open: MemoryOpen) => void;
   onApps: () => void;
 };
 
-/** YouMenu, told whether this Mac needs something (the sidebar reads that once, for Needs you too). */
-function YouMenuView({
+/** YouMenu, told whether this Mac needs something (the sidebar and its rail read that once, for Needs you too). */
+export function YouMenuView({
   state,
   expanded = false,
   needsYou,
@@ -488,7 +557,8 @@ function YouMenuView({
         </button>
       )}
       {open && (
-        <div className="motion-menu-in absolute bottom-[calc(100%+8px)] left-0 z-30 flex w-[248px] origin-bottom-left flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_var(--c-e6e6e3),0_12px_32px_rgba(0,0,0,0.12)]">
+        // Over the chat column's own sheets (z-40, z-50) when it opens from the rail, past the column's edge.
+        <div className="motion-menu-in absolute bottom-[calc(100%+8px)] left-0 z-[60] flex w-[248px] origin-bottom-left flex-col rounded-[14px] bg-white p-1.5 shadow-[0_0_0_1px_var(--c-e6e6e3),0_12px_32px_rgba(0,0,0,0.12)]">
           <div className="flex flex-col gap-0.5 px-2.5 pb-2 pt-1.5">
             <span className="truncate text-[14px] font-semibold leading-[18px]">{user?.name || state.owner?.name || "You"}</span>
             <span className="truncate text-[12px] leading-4 text-[color:var(--c-9a9a98)]">{user ? (user.email ?? "Signed in with Orgo") : "Not signed in"}</span>
@@ -580,7 +650,7 @@ function YouMenuView({
  * The main bot's mark: a small star on its avatar's corner, cut out of the row with a ring of the row's
  * own color (selected, hovered or not), so it reads as a badge and not as part of the mascot.
  */
-function MainStar({ selected }: { selected: boolean }) {
+export function MainStar({ selected }: { selected: boolean }) {
   return (
     <span
       role="img"
@@ -621,8 +691,9 @@ function ChatRow({
 }) {
   const members = state.bots.filter((b) => c.botIds.includes(b.id));
   const solo = c.kind === "bot" ? members[0] : undefined;
-  // A shared workspace's chats have no read mark of the viewer's (readAt is the owner's): none are unread.
-  const unread = !!last && last.role !== "user" && last.at > (c.readAt ?? 0) && !selected && !state.shared;
+  // A shared workspace's chats have no read mark of the viewer's (readAt is the owner's): none are unread. In the
+  // owner's own, a member's message (someone they gave Write) is new to them like a bot's.
+  const unread = !!last && (last.role !== "user" || saidBy(last, state) !== "you") && last.at > (c.readAt ?? 0) && !selected && !state.shared;
   const dot = usePop(unread);
   const typing = c.typing.length > 0;
   // A routine's post says which routine, as the chat does above it ("From a routine · …"): an alert on its
@@ -632,7 +703,7 @@ function ChatRow({
     ? "typing…"
     : last
       ? last.role === "user"
-        ? `${ownerWho(state.shared)}: ${last.text}`
+        ? `${saidName(last, state) ?? ownerWho(state.shared)}: ${last.text}`
         : routine
           ? `${undash(routine)}: ${last.text}`
           : c.kind === "group" && last.botId

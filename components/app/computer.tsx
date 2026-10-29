@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { BLOCKER_LABEL, computerAsleep, computerCheckMs, computerInUse, DISPLAYS, isScreenWatch, live, streamsLive, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
-import { freeComputerOpen, setupShort } from "@/lib/orgo-plans";
+import { freeComputerOpen, ownIsBops, setupShort } from "@/lib/orgo-plans";
 import { BotCursor } from "./bot-cursor";
 import { LiveDesktop, Waking } from "./live-desktop";
 import { LiveScreen, type ScreenInput } from "./live-screen";
@@ -1236,7 +1236,7 @@ function NoComputer({ state, bot: b, host }: { state: AppState; bot: Bot; /** Th
           : host.id !== b.id
             ? `${b.name} works on ${host.name}'s computer, which isn't set up yet. It starts the first time either of them needs it.`
             : plan?.plan?.bops
-              ? `${b.name} doesn't have a computer yet. It gets a ${BRAND.name} computer of its own, fresh from the ${BRAND.name} template.`
+              ? `${b.name} doesn't have a computer yet. It gets ${ownIsBops(plan.plan, b) ? `a ${BRAND.name} computer of its own` : "a computer of its own on your Orgo plan"}, fresh from the ${BRAND.name} template.`
               : `${b.name} doesn't have a computer yet. It gets a copy of the main bot's computer: apps, logins and open screens.`}
       </span>
       {plan && noRoom ? (

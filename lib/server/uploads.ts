@@ -1,5 +1,5 @@
 import "server-only";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { id, userDir } from "./store";
 
@@ -8,7 +8,7 @@ import { id, userDir } from "./store";
  * (.data/users/<id>/uploads): another account signed in here can't open them. Messages refer to them
  * by id; the page shows them from /api/uploads/<id>, and bots see them as images (dataUrlOf).
  */
-const uploadsDir = () => {
+export const uploadsDir = () => {
   const dir = userDir();
   return dir ? join(dir, "uploads") : null;
 };
@@ -44,4 +44,20 @@ export function uploadPath(upId: string) {
 export function dataUrlOf(upId: string) {
   const f = uploadPath(upId);
   return f ? `data:${f.type};base64,${readFileSync(/*turbopackIgnore: true*/ f.path).toString("base64")}` : null;
+}
+
+/**
+ * Delete images from this Mac (their messages went for good: lib/server/remove.ts), but never one a message
+ * still in the chats shows (`kept`: their ids). How many went.
+ */
+export function dropUploads(ids: Iterable<string>, kept: Set<string>): number {
+  let n = 0;
+  for (const upId of ids) {
+    if (kept.has(upId)) continue;
+    const f = uploadPath(upId);
+    if (!f) continue;
+    rmSync(/*turbopackIgnore: true*/ f.path, { force: true });
+    n++;
+  }
+  return n;
 }

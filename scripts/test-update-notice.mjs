@@ -14,6 +14,11 @@ import ts from "typescript";
 const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 registerHooks({
+  // "@/…" as the app's tsconfig has it (components import @/lib/brand).
+  resolve(specifier, context, next) {
+    if (specifier.startsWith("@/")) return next(pathToFileURL(`${root}/${specifier.slice(2)}.ts`).href, context);
+    return next(specifier, context);
+  },
   load(url, context, next) {
     if (!url.endsWith(".tsx")) return next(url, context);
     const source = readFileSync(fileURLToPath(url), "utf8");

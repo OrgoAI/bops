@@ -164,7 +164,24 @@ export function useRise(fresh: () => boolean) {
  * while it goes). Cancel, the safe choice, has focus, so Enter, Space and Esc all cancel; Esc cancels and
  * only that (preventDefault keeps the page open), even while it works.
  */
-export function InlineConfirm({ text, action, doing, busy, onConfirm, onCancel }: { text: string; action: string; doing: string; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
+export function InlineConfirm({
+  text,
+  action,
+  doing,
+  busy,
+  onConfirm,
+  onCancel,
+  extra,
+}: {
+  text: string;
+  action: string;
+  doing: string;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  /** More to choose before confirming (a box to tick), on a line of its own under the question. */
+  extra?: ReactNode;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
   const was = useRef(busy);
@@ -202,6 +219,7 @@ export function InlineConfirm({ text, action, doing, busy, onConfirm, onCancel }
           Cancel
         </button>
       </span>
+      {extra && <span className="basis-full">{extra}</span>}
     </div>
   );
 }

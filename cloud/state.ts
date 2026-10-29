@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { gunzip, gzip } from "node:zlib";
 import type pg from "pg";
 import type { CloudUser } from "./auth.ts";
-import { query, tx } from "./db.ts";
+import { accountDeleted, query, sweepDeletedUsers, tx } from "./db.ts";
 import { HttpError, readBody, sendJson, type Route } from "./http.ts";
 import { afterStateUpload } from "./plans.ts";
 import { appVersionOf, olderThan } from "./app-version.ts";
@@ -324,10 +324,25 @@ async function removeMessages(c: pg.PoolClient, userId: string, ids: string[]) {
   );
 }
 
-/** Lock the user's row (making the empty one if there's none), so their writes go one at a time and seqs land in order. */
+/**
+ * Lock the user's row (making the empty one if there's none), so their writes go one at a time and seqs
+ * land in order. A user deleted lately (bops.deleted_users, delete-user.ts) is refused (accountDeleted),
+ * whoever writes: a Mac's stale copy, a computer's runner, or the cloud's own answer to a phone message
+ * that finished after the delete. Read under the lock, which the delete takes too, so a write waiting on
+ * it while the delete runs finds the user gone once it gets it.
+ */
 async function lockUser(c: pg.PoolClient, userId: string) {
-  await c.query(`INSERT INTO bops.app_state (user_id, state, version) VALUES ($1, '{}'::jsonb, 0) ON CONFLICT (user_id) DO NOTHING`, [userId]);
-  const r = await c.query<{ version: string; protocol: number }>("SELECT version, protocol FROM bops.app_state WHERE user_id = $1 FOR UPDATE", [userId]);
+  await c.query(
+    `INSERT INTO bops.app_state (user_id, state, version) SELECT $1, '{}'::jsonb, 0
+     WHERE NOT EXISTS (SELECT 1 FROM bops.deleted_users WHERE user_id = $1)
+     ON CONFLICT (user_id) DO NOTHING`,
+    [userId],
+  );
+  const r = await c.query<{ version: string; protocol: number; gone: boolean }>(
+    "SELECT version, protocol, EXISTS (SELECT 1 FROM bops.deleted_users d WHERE d.user_id = $1) AS gone FROM bops.app_state WHERE user_id = $1 FOR UPDATE",
+    [userId],
+  );
+  if (!r.rows[0] || r.rows[0].gone) throw accountDeleted();
   return { version: Number(r.rows[0].version), protocol: r.rows[0].protocol };
 }
 
@@ -718,9 +733,41 @@ export async function sweepRemovedMessages(days = REMOVED_KEEP_DAYS): Promise<nu
   return Number(r.rows[0]?.n ?? 0);
 }
 
-/** Sweep removed messages every hour; returns the stop. */
+/**
+ * How long a copy taken before Start over (POST /v1/state/backups) is kept. It's the whole state with
+ * every message, so it's kept only as long as someone would come back for what they cleared: past it, a
+ * Start over is what the user meant.
+ */
+export const BACKUP_KEEP_DAYS = 30;
+/** The most of those copies kept per user, the newest: someone starting over again and again keeps the last few, not every one. */
+export const BACKUPS_PER_USER = 5;
+
+/**
+ * Copies taken before Start over go for good once they're older than `days`, or past the newest `keep`
+ * of their user's (newest by when they were taken). Returns how many went.
+ */
+export async function sweepBackups(days = BACKUP_KEEP_DAYS, keep = BACKUPS_PER_USER): Promise<number> {
+  const r = await query(
+    `DELETE FROM bops.app_state_backups
+     WHERE created_at < now() - make_interval(days => $1)
+        OR id IN (SELECT id FROM (SELECT id, row_number() OVER (PARTITION BY user_id ORDER BY created_at DESC, id DESC) AS n FROM bops.app_state_backups) t WHERE n > $2)`,
+    [days, keep],
+  );
+  return r.rowCount ?? 0;
+}
+
+/**
+ * Every hour: removed messages past REMOVED_KEEP_DAYS go for good, copies before Start over past
+ * BACKUP_KEEP_DAYS or BACKUPS_PER_USER, and users deleted more than db.ts DELETED_KEEP_DAYS ago leave
+ * bops.deleted_users. Returns the stop.
+ */
 export function startStateSweeps(): () => void {
-  const t = setInterval(() => void sweepRemovedMessages().catch((e: Error) => console.warn(`[state] sweep: ${e.message}`)), SWEEP_MS);
+  const sweep = () => {
+    void sweepRemovedMessages().catch((e: Error) => console.warn(`[state] sweep: ${e.message}`));
+    void sweepBackups().catch((e: Error) => console.warn(`[state] backups sweep: ${e.message}`));
+    void sweepDeletedUsers().catch((e: Error) => console.warn(`[state] deleted users sweep: ${e.message}`));
+  };
+  const t = setInterval(sweep, SWEEP_MS);
   t.unref?.();
   return () => clearInterval(t);
 }

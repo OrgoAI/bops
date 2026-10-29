@@ -253,6 +253,31 @@ await test("the motion: a flex-grow swap on one curve, inside the row, and none 
   assert.match(reduced, /\.motion-footer-slot,\s*\.motion-footer-label \{\s*transition: none;/);
 });
 
+await test("the row in the 340px column: you take what Connect apps leaves, its edge inside the column", () => {
+  const html = renderYou(base, "vault");
+  assert.equal(slots(html).length, 2);
+  assert.match(html, /data-footer-row="true" class="flex items-center gap-1 pb-1 pt-3"/, "4px apart, no padding at the sides");
+  const app = readFileSync(`${root}/components/app/bops-app.tsx`, "utf8");
+  const side = readFileSync(`${root}/components/app/sidebar.tsx`, "utf8");
+  const width = Number(app.match(/grid-cols-\[(\d+)px_minmax/)[1]);
+  assert.equal(width, 340, "the sidebar's width");
+  assert.match(side, /<aside className="flex min-h-0 w-\[340px\] shrink-0 flex-col [^"]*px-2\.5 /, "the column's width, 10px at each side");
+  // Its 1px edge is the column's, drawn inside it (bops-app.tsx), so it takes none of the 340px.
+  assert.match(app, /bg-\[color:var\(--c-f9f9f8\)\] shadow-\[inset_-1px_0_0_var\(--c-ececea\)\]/, "a 1px edge on the right, inside the column (the palette's tokens: app/globals.css)");
+  const pill = width - 2 * 10 - 36 - 4;
+  assert.equal(pill, 280, "the pill's room: your name, or Connect apps with three logos");
+});
+
+await test("folded to the rail: People, Connect apps, Routines, Knowledge and Apps as round buttons, the open one pressed, you last", () => {
+  const html = renderToStaticMarkup(h(SidebarFooter, { state: base, open: "routines", vertical: true, you: () => h("span", { id: "you" }, "TI"), onVault: noop, onMembers: noop, onOpenAutopilot: noop, onOpenMemory: noop, onApps: noop }));
+  const s = slots(html);
+  assert.deepEqual(s.map((x) => x.label), ["People", "Connect apps", "Routines", "Knowledge", "Apps"]);
+  assert.ok(s.every((x) => x.round && x.title), "round, each with its tooltip");
+  assert.deepEqual(s.filter((x) => x.pressed).map((x) => x.label), ["Routines"]);
+  assert.ok(html.indexOf('id="you"') > html.lastIndexOf("data-footer-slot"), "you at the bottom");
+  assert.equal(s[1].title, "Connect apps: your accounts and logins, and which bots can use them");
+});
+
 await test("the workspace switcher says under the default why Orgo still shows bops while its name waits for the apps", () => {
   const ws = [
     { id: "ws_main", name: "bops-", createdAt: 0, orgoProjectId: "p_bops", orgoName: "bops" },

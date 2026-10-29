@@ -77,6 +77,22 @@ export function dropOlderMac(userId: string, level: number): void {
   mac.ws.close(4000, "replaced");
 }
 
+/** The close code a deleted user's tunnel ends with: not "replaced" (4000), so the app tries again, and is turned down as signed out. */
+export const DELETED_CLOSE = 4001;
+
+/**
+ * The user was deleted (delete-user.ts): their Mac's tunnel, if it's open, ends now, and what it was
+ * asked is answered as nothing. It can't open again: their sign-in is turned down (auth.ts). True when
+ * one was open.
+ */
+export function closeFor(userId: string): boolean {
+  const mac = macs.get(userId);
+  if (!mac) return false;
+  detach(mac);
+  mac.ws.close(DELETED_CLOSE, "account deleted");
+  return true;
+}
+
 /** Send a request to the user's Mac and wait for its answer; null when the Mac isn't connected or doesn't answer in time. */
 export async function requestMac(userId: string, req: MacRequest, timeoutMs: number): Promise<MacResponse | null> {
   const mac = macs.get(userId);
@@ -98,11 +114,14 @@ export async function requestMac(userId: string, req: MacRequest, timeoutMs: num
 
 /**
  * Keep an event for the user's Mac (bops.cloud_pending) and send it now if the Mac is connected.
- * With `expiresAt`, one still waiting then is dropped instead of handed over late.
+ * With `expiresAt`, one still waiting then is dropped instead of handed over late. One with the same `dedupeKey`
+ * that expired without being taken is dropped first, as it would be when the Mac next connects: it was never
+ * handed over, so it holds no place (a member's Try again after their act expired, with the same key, goes).
  */
 export async function queueForMac(userId: string, kind: PendingKind, payload: unknown, dedupeKey?: string, expiresAt?: Date): Promise<void> {
   if (Date.now() - clearedAt >= timing.clearEveryMs) void clearOldEvents().catch((e: Error) => console.warn(`[tunnel] couldn't clear old events: ${e.message}`));
   await ensureUserRow(userId);
+  if (dedupeKey) await query("DELETE FROM bops.cloud_pending WHERE user_id = $1 AND dedupe_key = $2 AND delivered_at IS NULL AND expires_at <= now()", [userId, dedupeKey]);
   const r = await query<PendingRow>(
     `INSERT INTO bops.cloud_pending (user_id, kind, payload, dedupe_key, expires_at) VALUES ($1, $2, $3::jsonb, $4, $5)
      ON CONFLICT (user_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING

@@ -1508,7 +1508,7 @@ Cl.cloudSessionNow().typesafe = false;
   assert.deepEqual(readdirSync(skills), ["weekly-invoice-summary"]);
   assert.deepEqual(readdirSync(join(L.taskWorkspace(id), "capabilities", "apps")), ["invoice-checker"]);
   const skill = readFileSync(join(skills, "weekly-invoice-summary", "SKILL.md"), "utf8");
-  assert.match(skill, /^---\nname: weekly-invoice-summary\ndescription: "When asked for the week's invoices"\nversion: "0\.1\.0"\nmetadata: \{label: Finance\}\n---\n/, "published with its label");
+  assert.match(skill, /^---\nname: weekly-invoice-summary\ndescription: "When asked for the week's invoices"\nmetadata: \{label: Finance, version: "0\.1\.0"\}\n---\n/, "published with its label");
   assert.match(skill, /Open the Invoices folder/);
   // A script nobody approved yet isn't executable in the task.
   assert.equal(statSync(join(skills, "weekly-invoice-summary", "scripts", "sum.sh")).mode & 0o111, 0);

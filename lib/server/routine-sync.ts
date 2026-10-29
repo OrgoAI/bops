@@ -1,6 +1,7 @@
 import "server-only";
 import { normalizeSchedule } from "@/cloud/schedule";
 import { templateById } from "@/lib/routine-catalog";
+import { QUIET_SUMMARY, recordedRun, RUNS_MAX, SUMMARY_MAX, type RecordedRun } from "@/lib/routine-reports";
 import { waitingAsks, workspaceOf, type Routine, type RoutineRun } from "@/lib/types";
 import { onRunner, runnerRoutine, runnerRuns } from "./runner";
 import { bot, getState, pullState } from "./store";
@@ -25,7 +26,9 @@ import { outbox } from "./sync-outbox";
  * routines a call: a workspace with more sends them 500 at a time, and what's gone is deleted one by one
  * (GET the list, DELETE each Orgo has that Bops doesn't), so deletes reach Orgo past 500 too. A workspace
  * that gets its Orgo project only later (workspaces.ts bindMissingProjects) sends its full copy then
- * (routinesBound). Runs on the signed-in Orgo key (orgo.ts apiKey); signed out, nothing is sent.
+ * (routinesBound). Runs on the signed-in Orgo key (orgo.ts apiKey); signed out, nothing is sent. Each
+ * finished run goes with what it said (its summary: the message it posted, cut to 2000), so its report
+ * is there on another Mac or after the chat is cleared; the Routines page reads them back (routineRuns).
  *
  * Orgo wakes a computer for its runner by these (runner.ts): each routine says how it runs (`run`) and
  * whether the Mac runs it (`onMac`: it needs the Mac, runner.ts pinnedToMac, as a reminder and a chat run
@@ -49,8 +52,8 @@ const RETRY_MAX_MS = 30 * 60_000;
 /** The most finished runs kept waiting for one workspace (the newest). */
 const MAX_RUNS_WAITING = 200;
 
-/** A finished run waiting to go; `oid` is its entry in the outbox kept on disk. */
-type WaitingRun = { bopsId: string; run: RoutineRun; finishedAt: number; oid?: string };
+/** A finished run waiting to go, with what it said (`said`, cut as runSummary cuts it); `oid` is its entry in the outbox kept on disk. */
+type WaitingRun = { bopsId: string; run: RoutineRun; finishedAt: number; said?: string; oid?: string };
 type Pending = { timer?: ReturnType<typeof setTimeout>; deleteMissing: boolean; runs: WaitingRun[]; tries?: number };
 
 const g = globalThis as unknown as {
@@ -59,6 +62,7 @@ const g = globalThis as unknown as {
   __bopsRoutineSyncStarted?: boolean;
   __bopsRoutineSyncInFlight?: Map<string, Promise<void>>;
   __bopsRoutineSyncHeld?: Map<string, Pick<Pending, "deleteMissing" | "runs">>;
+  __bopsRoutineOrgoIds?: Map<string, string>;
 };
 /** What's waiting to go, by workspace. */
 const pending = (g.__bopsRoutineSync ??= new Map());
@@ -68,6 +72,8 @@ const missing = (g.__bopsRoutineSyncMissing ??= new Map());
 const inFlight = (g.__bopsRoutineSyncInFlight ??= new Map());
 /** A batch Orgo refused (a 400, too big): not sent again as it is, but its deleteMissing and runs go with the next change. */
 const held = (g.__bopsRoutineSyncHeld ??= new Map());
+/** Each routine's Orgo id, by its Bops id, as Orgo last answered (a PUT, or its list): what its runs are read by. */
+const orgoIdOf = (g.__bopsRoutineOrgoIds ??= new Map());
 /** Finished runs Orgo hasn't taken yet, kept on disk until it does (the newest MAX_RUNS_WAITING per workspace). */
 const runsOutbox = outbox<Omit<WaitingRun, "oid">>("routine-runs", MAX_RUNS_WAITING);
 
@@ -143,25 +149,39 @@ export function routinePayload(r: Routine) {
   };
 }
 
-/** A finished run as orgo-web takes it: quiet is a run that went fine with nothing to say. */
-export function runPayload(run: RoutineRun, finishedAt: number) {
+/**
+ * What a run said, as its record keeps it: the message text, trimmed, never more than orgo-web takes
+ * (SUMMARY_MAX, counted as it counts), cut with an ellipsis; undefined for nothing.
+ */
+export function runSummary(text: string | undefined): string | undefined {
+  const t = cleanText(text ?? "", Infinity).trim();
+  if (!t) return undefined;
+  return t.length <= SUMMARY_MAX ? t : `${fit(t, SUMMARY_MAX - 1).trimEnd()}…`;
+}
+
+/**
+ * A finished run as orgo-web takes it: quiet is a run that went fine with nothing to say (QUIET_SUMMARY);
+ * one that said something goes with what it said (`said`, runSummary).
+ */
+export function runPayload(run: RoutineRun, finishedAt: number, said?: string) {
   const status = run.status === "failed" ? "failed" : run.status === "skipped" ? "skipped" : "ok";
+  const summary = run.status === "quiet" ? QUIET_SUMMARY : status === "ok" ? runSummary(said) : undefined;
   return {
     startedAt: new Date(run.at).toISOString(),
     finishedAt: new Date(Math.max(finishedAt, run.at)).toISOString(),
     status,
     ms: Math.max(0, Math.round(finishedAt - run.at)),
-    ...(run.status === "quiet" ? { summary: "Nothing needed the user." } : {}),
+    ...(summary ? { summary } : {}),
     ...(run.error && cleanText(run.error, 2000) ? { error: cleanText(run.error, 2000) } : {}),
   };
 }
 
 /** One call to orgo-web with the signed-in key: its status and JSON, or null when it didn't answer or no one is signed in. */
-async function send(method: "GET" | "PUT" | "POST" | "DELETE", path: string, body?: unknown): Promise<{ status: number; json: unknown } | null> {
+async function send(method: "GET" | "PUT" | "POST" | "DELETE", path: string, body?: unknown, timeoutMs = TIMEOUT_MS): Promise<{ status: number; json: unknown } | null> {
   const { apiKey, callOrgo } = await import("./orgo");
   const key = await apiKey().catch(() => "");
   if (!key) return null;
-  return callOrgo(key, path, { method, ...(body === undefined ? {} : { body }), timeoutMs: TIMEOUT_MS });
+  return callOrgo(key, path, { method, ...(body === undefined ? {} : { body }), timeoutMs });
 }
 
 /** The Orgo id of each routine the PUT answered with, by its Bops id. */
@@ -230,7 +250,10 @@ async function flush(wsId: string): Promise<void> {
       }
       return;
     }
-    for (const [bopsId, id] of orgoIds(res?.json)) ids.set(bopsId, id);
+    for (const [bopsId, id] of orgoIds(res?.json)) {
+      ids.set(bopsId, id);
+      orgoIdOf.set(bopsId, id);
+    }
   }
   missing.delete(projectId);
   if (over && p.deleteMissing && !runner && !(await deleteGone(wsId, base, new Set(all.map((r) => r.bopsId))))) requeue(wsId, p, [], true);
@@ -242,7 +265,7 @@ async function flush(wsId: string): Promise<void> {
       runsOutbox.done([x.oid]);
       continue;
     }
-    const s = await send("POST", `${base}/${encodeURIComponent(orgoId)}/runs`, runPayload(x.run, x.finishedAt));
+    const s = await send("POST", `${base}/${encodeURIComponent(orgoId)}/runs`, runPayload(x.run, x.finishedAt, x.said));
     if (retryable(s?.status ?? null)) again.push(x);
     else runsOutbox.done([x.oid]);
     if (s && s.status >= 300 && s.status !== 404) console.warn(`[routine-sync] ${wsId}: Orgo answered ${s.status} to a run`);
@@ -359,8 +382,11 @@ function restoreRuns() {
   }
 }
 
-/** A routine's run was recorded (routines.ts record): once it's finished, it goes to Orgo with the routine. */
-export function routineRan(routineId: string, run: RoutineRun) {
+/**
+ * A routine's run was recorded (routines.ts record): once it's finished, it goes to Orgo with the routine,
+ * and with what it said in the chat (`said`: the message it posted), kept as its summary.
+ */
+export function routineRan(routineId: string, run: RoutineRun, said?: string) {
   try {
     if (run.status === "running") return;
     const r = getState().routines.find((x) => x.id === routineId);
@@ -368,7 +394,8 @@ export function routineRan(routineId: string, run: RoutineRun) {
     if (!at || routesMissing(at.projectId)) return;
     // What an earlier run of Bops left waiting first, so this one isn't handed back with it.
     restoreRuns();
-    const item = { bopsId: routineId, run: { ...run }, finishedAt: Date.now() };
+    const summary = run.status === "ok" ? runSummary(said) : undefined;
+    const item = { bopsId: routineId, run: { ...run }, finishedAt: Date.now(), ...(summary ? { said: summary } : {}) };
     const oid = runsOutbox.add(at.wsId, item);
     queue(at.wsId, (p) => {
       p.runs.push({ ...item, oid });
@@ -444,6 +471,54 @@ export function syncRoutinesOnStart() {
   }
 }
 
+/** How long the Routines page waits on Orgo for a routine's runs before it shows what Bops has. */
+const READ_TIMEOUT_MS = 8_000;
+
+/**
+ * What routineRuns answers: Orgo's record of the routine's runs, newest first (`ok`); none to read (`none`: its
+ * workspace has no Orgo project, so the chat is all there is); or Orgo didn't answer for now (`offline`: no
+ * answer, signed out, an Orgo without the routes, or a computer's runner, whose key may only write them).
+ */
+export type RoutineRunsAnswer = { orgo: "ok"; runs: RecordedRun[] } | { orgo: "none" | "offline"; runs: null };
+
+/**
+ * A routine's runs as Orgo recorded them (GET /api/projects/{id}/routines/{orgoId}/runs, the newest `limit`,
+ * at most 100), for its reports on the Routines page (lib/routine-reports.ts). Its Orgo id is the one the
+ * last PUT answered, else Orgo's list is read for it (and an id Orgo no longer knows is looked up again,
+ * once). A routine Orgo hasn't a copy of yet has no runs there. Undefined for a routine Bops hasn't.
+ */
+export async function routineRuns(routineId: string, limit = RUNS_MAX): Promise<RoutineRunsAnswer | undefined> {
+  const r = getState().routines.find((x) => x.id === routineId);
+  if (!r) return undefined;
+  const at = projectOfBot(r.botId);
+  if (!at) return { orgo: "none", runs: null };
+  if (onRunner() || routesMissing(at.projectId)) return { orgo: "offline", runs: null };
+  const n = Math.max(1, Math.min(RUNS_MAX, Math.floor(limit) || RUNS_MAX));
+  const base = `/api/projects/${encodeURIComponent(at.projectId)}/routines`;
+  const lookUp = async (): Promise<boolean> => {
+    const res = await send("GET", base, undefined, READ_TIMEOUT_MS);
+    if (!res || res.status !== 200) return false;
+    for (const [bopsId, id] of orgoIds(res.json)) orgoIdOf.set(bopsId, id);
+    return true;
+  };
+  for (let tries = 0; tries < 2; tries++) {
+    if (!orgoIdOf.has(routineId) && !(await lookUp())) return { orgo: "offline", runs: null };
+    const id = orgoIdOf.get(routineId);
+    if (!id) return { orgo: "ok", runs: [] };
+    const res = await send("GET", `${base}/${encodeURIComponent(id)}/runs?limit=${n}`, undefined, READ_TIMEOUT_MS);
+    // Gone from Orgo since (deleted and sent again under a new id): looked up once more.
+    if (res?.status === 404) {
+      orgoIdOf.delete(routineId);
+      continue;
+    }
+    const list = (res?.json as { runs?: unknown } | undefined)?.runs;
+    if (!res || res.status !== 200 || !Array.isArray(list)) return { orgo: "offline", runs: null };
+    const runs = list.map(recordedRun).filter((x) => x !== undefined);
+    return { orgo: "ok", runs: runs.sort((a, b) => b.startedAt - a.startedAt) };
+  }
+  return { orgo: "ok", runs: [] };
+}
+
 /** Tests: send what's waiting now, without the wait, and forget what was learned. */
 export const routineSyncForTests = {
   flushAll: async () => {
@@ -459,6 +534,7 @@ export const routineSyncForTests = {
     missing.clear();
     inFlight.clear();
     held.clear();
+    orgoIdOf.clear();
     g.__bopsRoutineSyncStarted = false;
   },
   /** The finished runs still in the outbox (on disk with the user's folder). */

@@ -132,10 +132,11 @@ async function macBriefing(botId: string) {
  * it runs, what's waiting on the user, what finished lately. Same state the app draws, so "what's
  * everyone doing?" and "who's free?" have true answers.
  */
-export function teamBriefing(mainId: string) {
+export function teamBriefing(mainId: string, seen?: ReadonlySet<string>) {
   const state = getState();
   const main = state.bots.find((b) => b.id === mainId);
-  const others = state.bots.filter((b) => b.id !== mainId && workspaceOf(b) === workspaceOf(main));
+  // `seen`: on a member's turn, only the bots they see (chat.ts TurnOptions.member): one not given them stays hidden.
+  const others = state.bots.filter((b) => b.id !== mainId && workspaceOf(b) === workspaceOf(main) && (!seen || seen.has(b.id)));
   if (!others.length) return "Your team: just you so far.";
   const now = Date.now();
   const owner = ownerName();

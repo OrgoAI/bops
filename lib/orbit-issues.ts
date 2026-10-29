@@ -42,6 +42,8 @@ export type Issue = {
   sourceApp?: string;
   externalId?: string;
   url?: string;
+  /** The user's connected account the bot read that thread or ticket in (AppAccount.id), when the turn that opened it knew: where the issue's page reads it. */
+  accountId?: string;
   /** Who it's for, and their item in Orbit (People or Companies) when there is one. */
   customer?: { name: string; itemKey?: string };
   /** The bot that opened it, and the routine whose run did. */
@@ -61,8 +63,8 @@ export type Issue = {
 /** The most tags an issue has (more are left off). */
 export const MAX_ISSUE_TAGS = 6;
 
-/** What the window and the bots may change. `draft`: a reply drafted for it (in its history). */
-export type IssuePatch = { status?: IssueStatus; priority?: IssuePriority; tags?: string[]; note?: string; draft?: string };
+/** What the window and the bots may change. `draft`: a reply drafted for it; `replied`: one the user sent from its page (each in its history). */
+export type IssuePatch = { status?: IssueStatus; priority?: IssuePriority; tags?: string[]; note?: string; draft?: string; replied?: string };
 
 /** What a bot or a routine gives to open one (or update the one already open for its thread or ticket). */
 export type IssueOpen = {
@@ -78,6 +80,8 @@ export type IssueOpen = {
   note?: string;
   /** When the newest message on the thread or ticket came in (ms). */
   lastMessageAt?: number;
+  /** The account the opening turn read the thread in (never the bot's to say: chat.ts knows it from what the turn read). */
+  accountId?: string;
 };
 
 export const isIssueId = (id: unknown): id is string => typeof id === "string" && /^issue-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id);

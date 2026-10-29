@@ -1,5 +1,6 @@
 import "server-only";
 import { BRAINS_ON, brainOf, sharesComputer, workBot, workspaceOf, type AppState, type BrainKind } from "@/lib/types";
+import { cleanLabel } from "@/lib/skill-labels";
 import { targetNameOf } from "./access-sync";
 import { onRunner } from "./persist";
 import { cleanText, fit } from "./routine-sync";
@@ -17,7 +18,10 @@ import { getState, stateReady, stateTooNew, watchChanges } from "./store";
  * key), in a build with brains (BRAINS_ON), and only once orgo-web says it takes that kind (the map's
  * answer lists `kinds`: an orgo-web that doesn't would refuse the whole map with a 400). The first map
  * of a run reads the kinds first (GET), so it already holds the brains: one without them would have
- * orgo-web delete every brain row and make it again.
+ * orgo-web delete every brain row and make it again. Each bot carries the labels of its workspace's skills it
+ * has (Bot.skillLabels: `skill_labels`, null for every label; lib/skill-labels.ts botHasSkill) only once
+ * orgo-web says it takes that field (the GET's and the map's answer list `bot_fields`): an older orgo-web
+ * refuses a map with a field it doesn't know, the whole of it. That GET goes once a run, before the first map.
  *
  * The same rules as routine-sync.ts: Bops stays the source and nothing waits on Orgo. A workspace whose
  * map changed sends the whole of it SYNC_DEBOUNCE_MS after the last change in a burst (PUT
@@ -37,10 +41,11 @@ const RETRY_MAX_MS = 30 * 60_000;
 const TIMEOUT_MS = 15_000;
 /** orgo-web's caps (lib/bops-map/body.ts MAP_LIMITS): the most of each one PUT sends, and the longest text in each field. */
 const CAPS = { bots: 200, resources: 2000, watches: 500 };
-const MAX = { id: 128, name: 200, role: 500, ref: 256, app: 128, lookFor: 2000, url: 2048, everyMin: 10080, keys: 200, keyName: 128 };
+const MAX = { id: 128, name: 200, role: 500, ref: 256, app: 128, lookFor: 2000, url: 2048, everyMin: 10080, keys: 200, keyName: 128, labels: 200 };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export type MapBot = { bopsId: string; name: string; role: string; isMain: boolean; computer: "own" | "shared"; desktopId: string | null; brain?: string; keys: string[] };
+/** `skill_labels`: the labels of its workspace's skills it has, null for every label (only to an orgo-web whose bot_fields list it). */
+export type MapBot = { bopsId: string; name: string; role: string; isMain: boolean; computer: "own" | "shared"; desktopId: string | null; brain?: string; keys: string[]; skill_labels?: string[] | null };
 export type MapResource = { kind: "app" | "login" | "phone" | "inbox" | "channel" | "brain"; ref: string; name: string; app?: string; status?: string; ownerBotId?: string };
 export type MapWatch = { bopsId: string; botId: string; kind: "screen" | "page" | "mac"; site: string; lookFor: string; url?: string; everyMin?: number; paused: boolean };
 export type BopsMap = { bots: MapBot[]; resources: MapResource[]; watches: MapWatch[] };
@@ -57,6 +62,7 @@ const g = globalThis as unknown as {
   __bopsMapCutSaid?: Set<string>;
   __bopsMapKinds?: string[] | null;
   __bopsMapKindsAsk?: Promise<boolean>;
+  __bopsMapBotFields?: string[] | null;
 };
 const pending = (g.__bopsMapSync ??= new Map());
 const missing = (g.__bopsMapSyncMissing ??= new Map());
@@ -68,6 +74,8 @@ const seen = (g.__bopsMapSeen ??= new Map());
 
 /** The resource kinds orgo-web takes, as its last answer to the map said (null: not said yet, or an orgo-web that doesn't say). */
 const kindsTaken = () => g.__bopsMapKinds ?? null;
+/** The bot fields orgo-web takes beyond the first ones, as it last said (null: not said yet). */
+const botFieldsTaken = () => g.__bopsMapBotFields ?? null;
 /** A brain's kind as orgo-web names it (bops_resources.app). */
 const BRAIN_APP: Record<BrainKind, string> = { claude: "claude_code", codex: "codex" };
 
@@ -96,6 +104,8 @@ export function bopsMapPayload(wsId: string, s: AppState = getState()): BopsMap 
       ...(keeps(brain, MAX.id) ? { brain } : {}),
       // Always said, so a key taken away goes from Orgo's copy too (an empty list is none).
       keys: [...new Set(b.keys ?? [])].filter((k) => keeps(k, MAX.keyName)).sort().slice(0, MAX.keys),
+      // Always said where Orgo takes it, so a bot set back to every label is null there too.
+      ...(botFieldsTaken()?.includes("skill_labels") ? { skill_labels: b.skillLabels ? [...new Set(b.skillLabels.map((l) => cleanLabel(l)))].filter((l) => keeps(l, MAX.name)).sort().slice(0, MAX.labels) : null } : {}),
     };
   });
 
@@ -169,31 +179,37 @@ const routesMissing = (projectId: string, now = Date.now()) => (missing.get(proj
 /** Orgo didn't answer, answered 5xx, or for now (signed out, a timeout, too many at once): worth sending again. */
 const retryable = (status: number | null) => status === null || status >= 500 || status === 401 || status === 403 || status === 408 || status === 429;
 
-async function send(path: string, body: unknown): Promise<{ status: number; json?: { kinds?: unknown } } | null> {
+async function send(path: string, body: unknown): Promise<{ status: number; json?: { kinds?: unknown; bot_fields?: unknown } } | null> {
   const { apiKey, callOrgo } = await import("./orgo");
   const key = await apiKey().catch(() => "");
   if (!key) return null;
-  return callOrgo<{ kinds?: unknown }>(key, path, { method: "PUT", body, timeoutMs: TIMEOUT_MS });
+  return callOrgo<{ kinds?: unknown; bot_fields?: unknown }>(key, path, { method: "PUT", body, timeoutMs: TIMEOUT_MS });
 }
 
 const isKinds = (k: unknown): k is string[] => Array.isArray(k) && k.every((x) => typeof x === "string");
 
 /**
- * In a build with brains, the kinds orgo-web takes, read once a run before the first map goes (GET
- * /api/projects/{id}/bops answers them too), so that map holds the brains already. False when Orgo didn't
- * answer for now (the map waits for the backoff); true otherwise (an orgo-web that doesn't say takes none;
- * one without the route: the PUT finds out).
+ * What orgo-web takes, read once a run before the first map goes (GET /api/projects/{id}/bops answers it too):
+ * the resource kinds (in a build with brains, so that map holds the brains already) and the bot fields beyond the
+ * first ones (skill_labels). False when Orgo didn't answer for now (the map waits for the backoff); true otherwise
+ * (an orgo-web that doesn't say takes none; one without the route: the PUT finds out).
  */
 function learnKinds(projectId: string): Promise<boolean> {
-  if (!BRAINS_ON || kindsTaken() !== null) return Promise.resolve(true);
+  if ((!BRAINS_ON || kindsTaken() !== null) && botFieldsTaken() !== null) return Promise.resolve(true);
   g.__bopsMapKindsAsk ??= (async () => {
     const { apiKey, callOrgo } = await import("./orgo");
     const key = await apiKey().catch(() => "");
     if (!key) return false;
-    const r = await callOrgo<{ kinds?: unknown }>(key, `/api/projects/${encodeURIComponent(projectId)}/bops`, { timeoutMs: TIMEOUT_MS });
+    const r = await callOrgo<{ kinds?: unknown; bot_fields?: unknown }>(key, `/api/projects/${encodeURIComponent(projectId)}/bops`, { timeoutMs: TIMEOUT_MS });
     const status = r?.status ?? null;
     if (status === 200) {
-      if (kindsTaken() === null) g.__bopsMapKinds = isKinds(r!.json?.kinds) ? r!.json.kinds : [];
+      if (kindsTaken() === null && BRAINS_ON) g.__bopsMapKinds = isKinds(r!.json?.kinds) ? r!.json.kinds : [];
+      if (botFieldsTaken() === null) g.__bopsMapBotFields = isKinds(r!.json?.bot_fields) ? r!.json.bot_fields : [];
+      return true;
+    }
+    // An orgo-web without the route takes no more fields: the PUT finds out it's missing.
+    if (status === 404 || status === 405) {
+      if (botFieldsTaken() === null) g.__bopsMapBotFields = [];
       return true;
     }
     return !retryable(status);
@@ -234,6 +250,16 @@ async function flush(wsId: string): Promise<void> {
     const had = kindsTaken();
     g.__bopsMapKinds = kinds as string[];
     if (!had?.includes("brain") && kinds.includes("brain")) {
+      seen.clear();
+      look();
+    }
+  }
+  // Likewise the bot fields it takes: skill_labels newly taken goes at once.
+  const fields = res?.json?.bot_fields;
+  if (isKinds(fields)) {
+    const had = botFieldsTaken();
+    g.__bopsMapBotFields = fields as string[];
+    if (!had?.includes("skill_labels") && fields.includes("skill_labels")) {
       seen.clear();
       look();
     }
@@ -324,6 +350,7 @@ export const bopsSyncForTests = {
     seen.clear();
     g.__bopsMapKinds = undefined;
     g.__bopsMapKindsAsk = undefined;
+    g.__bopsMapBotFields = undefined;
     if (g.__bopsMapSoon) clearTimeout(g.__bopsMapSoon);
     g.__bopsMapSoon = undefined;
     g.__bopsMapStarted = false;

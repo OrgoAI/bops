@@ -21,7 +21,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ name: stri
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const wsId = (typeof b.ws === "string" && b.ws.trim()) || getState().workspace || MAIN_WORKSPACE;
   try {
-    return Response.json(await addRecord(wsId, name, b.zone, b));
+    return Response.json(await addRecord(wsId, name, b.zone, b, b.site));
   } catch (e) {
     return e instanceof HostedAppError ? Response.json({ error: e.message, ...e.extra }, { status: e.status }) : Response.json({ error: (e as Error).message }, { status: 500 });
   }

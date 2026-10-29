@@ -96,6 +96,10 @@ const state = {
   vault: [{ id: "vl_x", site: "x.com", username: "sam", hasPassword: true, hasTotp: false, bots: ["iris"], auto: false, addedAt: 1 }],
   sessions: [
     { id: "ses_out", botId: "iris", fromOutside: true },
+    // A member with Write asked for one, told another something, and a part of the first (lib/types.ts othersThread).
+    { id: "ses_member", botId: "iris", member: { userId: "user_dee", email: "dee@example.com", name: "Dee" }, replies: [] },
+    { id: "ses_told", botId: "iris", replies: [{ id: "r1", role: "user", text: "use the owner's Gmail", at: 1, member: { userId: "user_dee", name: "Dee" } }] },
+    { id: "ses_part", botId: "iris", partOf: "ses_member", replies: [] },
     { id: "ses_mine", botId: "iris" },
     { id: "ses_routine", botId: "iris", routineId: "rt_1" },
   ],
@@ -205,10 +209,14 @@ await check("a bot's Composio session holds the apps it has by default, read onl
   assert.match(C.appList(bot("iris")), /^Gmail \(sam@acme\.com: read & act\), Notion \(Work: read only\)$/);
 });
 
-await check("a task someone outside Bops started gets no apps", async () => {
+await check("a task someone outside Bops started gets no apps, nor one a member with Write started or told something, nor a part of one", async () => {
   const n = created.length;
-  assert.match(await C.findAppActions("iris", "find emails", { sessionId: "ses_out" }), /^Not on this task: someone outside Bops started it/);
+  assert.match(await C.findAppActions("iris", "find emails", { sessionId: "ses_out" }), /^Not on this task: someone other than Sam asked for it/);
   assert.match(await C.runAppAction("iris", "GMAIL_FETCH_EMAILS", {}, { sessionId: "ses_out" }), /^Not on this task/);
+  for (const sessionId of ["ses_member", "ses_told", "ses_part"]) {
+    assert.match(await C.findAppActions("iris", "find emails", { sessionId }), /^Not on this task/, sessionId);
+    assert.match(await C.runAppAction("iris", "GMAIL_SEND_EMAIL", {}, { sessionId }), /^Not on this task/, sessionId);
+  }
   assert.equal(created.length, n);
   assert.ok(!executed.length, "nothing ran");
 });
@@ -334,6 +342,24 @@ await check("Always allow is a rule for that bot and that action, whoever it's f
   assert.equal(await needs("boppy", { to: "eve@other.example" }), false, "one saved for Dana covers that action for anyone");
   state.bots.find((b) => b.id === "boppy").permissions = [{ action: "GMAIL_*", resource: "*", effect: "allow" }];
   assert.equal(await needs("boppy", { to: "dana@acme.example" }), true, "no wildcards");
+  delete state.bots.find((b) => b.id === "boppy").permissions;
+  state.appApprovals = [];
+});
+
+await check("a member with Write answers as themselves (member-acts.ts): their answer is named as theirs, and their Always allow saves the owner's bot's rule as the owner's would", () => {
+  const SEND = "GMAIL_SEND_EMAIL in Gmail (sam@acme.com)";
+  const sam = { userId: "user_sam", email: "sam@example.com", name: "Sam" };
+  const request = (id, action) => ({ id, botId: "boppy", chatId: "bot:boppy", askedBy: "dev_mac_b", action, resources: ["dana@acme.example"], preview: "to: dana@acme.example", at: 1, resume: { engine: "chat", responseId: "r", callId: "c", call: { name: "use_app", arguments: "{}" }, outputs: [] } });
+  state.appApprovals = [request("apr_once", "GMAIL_CREATE_DRAFT in Gmail (sam@acme.com)"), request("apr_always", SEND), request("apr_other", SEND), request("apr_no", "SLACK_SEND_MESSAGE in Slack")];
+  assert.equal(P.replyToAsk("apr_once", "once", undefined, sam), undefined);
+  assert.deepEqual(state.appApprovals.find((a) => a.id === "apr_once").reply.member, sam);
+  assert.equal(state.appApprovals.find((a) => a.id === "apr_once").reply.by, "dev_mac", "the Mac that took it");
+  assert.equal(P.replyToAsk("apr_always", "always", undefined, sam), undefined);
+  assert.deepEqual(state.bots.find((b) => b.id === "boppy").permissions, [{ action: SEND, resource: "*", effect: "allow" }]);
+  assert.deepEqual(state.appApprovals.find((a) => a.id === "apr_other").reply.member, sam, "the other request it answered says who did too");
+  assert.equal(P.replyToAsk("apr_no", "reject", "Not to that channel", sam), undefined);
+  assert.deepEqual([state.appApprovals.find((a) => a.id === "apr_no").reply.message, state.appApprovals.find((a) => a.id === "apr_no").reply.member], ["Not to that channel", sam]);
+  assert.equal(P.replyToAsk("apr_no", "once", undefined, sam), "That isn't waiting on you anymore.", "never answered twice");
   delete state.bots.find((b) => b.id === "boppy").permissions;
   state.appApprovals = [];
 });

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { appsStayLine, botChatId, BRAIN_NAMES, BRAINS_ON, brainOf, brainRuns, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
-import { mainOwnShort, ownComputerShort } from "@/lib/orgo-plans";
+import { mainOwnShort, ownComputerShort, ownIsBops } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
 import { BotMemory } from "./bot-memory";
@@ -369,8 +369,9 @@ function Details({
 
 /**
  * Which computer a bot works on: the main bot's (the default; it uses free screens there) or its own,
- * a copy of the main bot's made on its first task. Its own is offered only when the user's Orgo plan
- * has room for it; else this says why, with the numbers and the plan that has room. Leaving its own
+ * made on its first task: a copy of the main bot's, or where the Bops plan decides, a Bops computer (on
+ * Max, once those are all taken, one on the Orgo plan). Its own is offered only when there's room for
+ * it; else this says why, with the numbers and the plan that has room. Leaving its own
  * computer deletes it, so that asks once more. The server refuses while the bot has cloud work going
  * and says why. A main bot shows this only while it works on the free Bops computer another
  * workspace's main bot has: it can move to its own on the plan (with its team), never back.
@@ -406,7 +407,9 @@ function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppSta
               : shared
                 ? `Works on ${main.name}'s computer, on screens no one else is using`
                 : plan?.plan?.bops
-                  ? `Its own ${BRAND.name} computer`
+                  ? ownIsBops(plan.plan, b)
+                    ? `Its own ${BRAND.name} computer`
+                    : "Its own cloud computer, on your Orgo plan"
                   : "Its own cloud computer, a copy of the main bot's"}
           </span>
         </div>

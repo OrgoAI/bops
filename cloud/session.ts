@@ -127,6 +127,14 @@ async function findOrMakePod(userId: string): Promise<string> {
     // AgentMail refuses a second pod with the same client id: look for the first. Anything else is a real failure.
     if (!(e instanceof ProviderError) || e.status < 400 || e.status >= 500) throw e;
   }
+  const found = await findPod(userId);
+  if (found) return found;
+  throw new Error(`AgentMail made no pod for ${clientId} and has none`);
+}
+
+/** The user's pod at AgentMail by its client id `bops-<userId>`, or null when it has none (delete-user.ts looks for one a setup cut short never kept). */
+export async function findPod(userId: string): Promise<string | null> {
+  const clientId = `bops-${userId}`;
   let pageToken = "";
   for (let page = 0; page < 100; page++) {
     const r = await agentmail<{ pods?: Pod[]; next_page_token?: string | null }>(`/v0/pods?limit=100${pageToken ? `&page_token=${encodeURIComponent(pageToken)}` : ""}`);
@@ -135,7 +143,7 @@ async function findOrMakePod(userId: string): Promise<string> {
     if (!r.next_page_token) break;
     pageToken = r.next_page_token;
   }
-  throw new Error(`AgentMail made no pod for ${clientId} and has none`);
+  return null;
 }
 
 /** Whether bots' addresses can go on BOPS_MAIL_DOMAIN, last checked (at most every 5 minutes). */
