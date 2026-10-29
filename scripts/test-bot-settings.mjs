@@ -1,7 +1,8 @@
 // Tests for what a bot's settings page changes on the server: PATCH /api/bots with its call voice, Answers calls, its
 // built in sequences and Replies to others (app/api/bots/route.ts); the voice calls speak in (lib/server/call.ts
 // voiceFor), which never rewrites Bot.voice; calls turned away (lib/server/phone-voice.ts); mail past the hour's cap
-// held, outside mail kept quiet, and Never for emails to others (lib/server/mail.ts). OpenAI is a fake on localhost,
+// held, outside mail kept quiet, and Never for emails to others (lib/server/mail.ts); the site a bot works on (its
+// Works on row) and a computer's name (PATCH /api/workspaces computerName), kept on the workspace. OpenAI is a fake on localhost,
 // AgentMail and AgentPhone fakes in this process, the state a throwaway file store in a temporary folder: nothing
 // reaches a real service, and nobody is called, texted or emailed.
 // Usage: node --conditions=react-server scripts/test-bot-settings.mjs
@@ -298,6 +299,41 @@ const settle = () => new Promise((r) => setTimeout(r, 50));
   assert.equal(mail.sent.length, sent + 1);
   await patch({ othersMail: "ask" });
   console.log("mail: Never sends nothing to others and asks nothing");
+}
+
+/* ---------------- Works on, and a computer's name (lib/server/bot-groups.ts) ---------------- */
+
+{
+  const ws = () => S.getState().workspaces.find((w) => w.id === "ws_main");
+  S.update((s) => {
+    s.workspaces.find((w) => w.id === "ws_main").hostedApps = { shop: { botId: sam().id, computerId: "comp_test", sites: [{ name: "blog" }] } };
+    s.bots.find((b) => b.isMain).computerId = "comp_test";
+  });
+  const said = async (r) => ({ status: r.status, ...(await r.json()) });
+  assert.equal((await patch({ site: { app: "shop", site: "blog" } })).status, 200);
+  assert.deepEqual(ws().botSites, { [sam().id]: { app: "shop", site: "blog" } }, "kept on its workspace");
+  assert.equal(sam().site, undefined, "never on the bot");
+  assert.equal((await patch({ site: { app: "shop" } })).status, 200);
+  assert.deepEqual(ws().botSites[sam().id], { app: "shop", site: "shop" }, "the app's own site when none is named");
+  assert.deepEqual(await said(await patch({ site: { app: "shop", site: "nope" } })), { status: 404, error: "There's no site by that name in this workspace's apps." });
+  assert.equal((await patch({ site: "shop" })).status, 400);
+  assert.equal((await patch({ site: null }, false)).status, 403, "only from the Bops window");
+  assert.deepEqual(ws().botSites[sam().id], { app: "shop", site: "shop" }, "unchanged");
+  assert.equal((await patch({ site: null })).status, 200);
+  assert.equal(ws().botSites, undefined, "None: gone, and the map with it");
+
+  const wsRoute = await import(`${root}/app/api/workspaces/route.ts`);
+  const name = (body, window = true) =>
+    wsRoute.PATCH(new Request("http://localhost/api/workspaces", { method: "PATCH", headers: { "content-type": "application/json", ...(window ? { "x-bops-window": "window-token-test" } : {}) }, body: JSON.stringify(body) }));
+  assert.deepEqual(await said(await name({ id: "ws_main", computerName: { computer: "comp_test", name: "  Front   desk " } })), { status: 200, ok: true, name: "Front desk" });
+  assert.deepEqual(ws().computerNames, { comp_test: "Front desk" });
+  assert.equal((await name({ id: "ws_main", computerName: { computer: "comp_test", name: "Mine" } }, false)).status, 403, "only the owner's window names it");
+  assert.equal((await name({ id: "ws_main", computerName: { computer: "comp_elsewhere", name: "Mine" } })).status, 404, "only a computer its bots work on");
+  assert.equal((await name({ computerName: { computer: "comp_test", name: "Mine" } })).status, 400);
+  assert.deepEqual(ws().computerNames, { comp_test: "Front desk" }, "unchanged by any of those");
+  assert.deepEqual(await said(await name({ id: "ws_main", computerName: { computer: "comp_test", name: "" } })), { status: 200, ok: true, name: "" });
+  assert.equal(ws().computerNames, undefined, "empty: its default back");
+  console.log("Works on and a computer's name: kept on the workspace, the owner's window only");
 }
 
 fake.close();

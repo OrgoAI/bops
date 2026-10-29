@@ -4,6 +4,7 @@ import { notReady } from "@/lib/server/ready";
 import { closeShared, sharedOpen } from "@/lib/server/shared";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 import { olderBopsOnAccount } from "@/lib/server/chart";
+import { GroupError, setComputerName } from "@/lib/server/bot-groups";
 
 /**
  * `?preview=<id>`: what deleting that workspace takes with it, for the confirm (its computers, keys, skills
@@ -50,12 +51,14 @@ export async function POST(request: Request) {
  * (revertWorkspaceMigration, DESIGN.md section 8), for a rollback. `favorites` (with `id`): the kinds pinned to
  * the sidebar, the whole list in order (setFavorites). `chain` (with `id`): the workspace's team chart, whole
  * (setChain), only from the Bops window and never while a workspace shared with the user is open; what was kept
- * comes back.
+ * comes back. `computerName` (with `id`): { computer, name } names one of its computers, the one its bots' group in the
+ * sidebar is called (lib/bot-groups.ts; an empty name gives it its default back), the owner's alone as the chart is;
+ * answers { ok, name }.
  */
 export async function PATCH(request: Request) {
   const unready = notReady();
   if (unready) return unready;
-  const { id, name, current, noticeSeen, revertOrgoMove, syncNames, favorites, chain } = (await request.json().catch(() => ({}))) as {
+  const { id, name, current, noticeSeen, revertOrgoMove, syncNames, favorites, chain, computerName } = (await request.json().catch(() => ({}))) as {
     id?: string;
     name?: string;
     current?: string;
@@ -64,8 +67,19 @@ export async function PATCH(request: Request) {
     syncNames?: boolean;
     favorites?: unknown;
     chain?: unknown;
+    computerName?: { computer?: unknown; name?: unknown };
   };
   ensureMain();
+  // What a computer is called is the owner's to say too: from their own window, with their own workspace open.
+  if (computerName !== undefined) {
+    if (!id) return Response.json({ error: "Say which workspace." }, { status: 400 });
+    if (!fromBopsWindow(request) || sharedOpen()) return Response.json({ error: "Only the owner can name a computer." }, { status: 403 });
+    try {
+      return Response.json({ ok: true, name: setComputerName(id, computerName?.computer, computerName?.name) });
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: e instanceof GroupError ? e.status : 400 });
+    }
+  }
   // Who may ask whom is the owner's to say: from their own window, with their own workspace open.
   if (chain !== undefined) {
     if (!id) return Response.json({ error: "Say which workspace." }, { status: 400 });

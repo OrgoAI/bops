@@ -245,6 +245,67 @@ const NODE_SERVER = [
 /** Its package.json: a start script, and nothing to install. */
 const NODE_PACKAGE = ["{", '  "name": "my-app",', '  "private": true,', '  "scripts": { "start": "node server.js" }', "}", ""];
 
+const LAUNCH_LOCALLY = [
+  "# Launch an app locally",
+  "",
+  "Run the app from its working folder on your computer so the user can try it at http://localhost:3000 on your screen while you change it. That address is where a Google login set up for localhost works, so it's how they test signing in before anything is public.",
+  "",
+  "## 1. The package manager",
+  "Go by the lockfile in the app's folder: pnpm-lock.yaml is pnpm, yarn.lock is yarn, bun.lockb or bun.lock is bun, and package-lock.json (or no lockfile) is npm. If pnpm or yarn isn't there, run `corepack enable` first. Never switch an app to another package manager.",
+  "",
+  "## 2. Install",
+  "Install when node_modules is missing, or package.json or the lockfile changed since you last installed. Use the lockfile as it is: `npm ci`, `pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile` (Yarn 2 and up: `yarn install --immutable`) or `bun install --frozen-lockfile`. If that fails because the lockfile is out of date, run the plain install once and say so.",
+  "",
+  "## 3. Start it on port 3000",
+  "Check the port is free with `ss -ltn | grep ':3000 '`. If something else holds it, take the next free one (3001, 3002 and on) and tell the user a Google login needs that port's callback added too.",
+  "Run it in the background from the app's folder, its output in a log, with the dev command its framework takes:",
+  "1. Next.js: `npx next dev -p 3000 -H 0.0.0.0` (or the package manager's exec).",
+  "2. Vite: `npx vite --port 3000 --host 0.0.0.0 --strictPort`.",
+  "3. Create React App: `PORT=3000 npm start`.",
+  "4. Astro, Remix, SvelteKit or Nuxt: their dev script with their own port and host flags.",
+  "5. Anything else: `PORT=3000 HOST=0.0.0.0 npm run dev`, or with only a start script `PORT=3000 npm start`.",
+  "6. A plain index.html: `python3 -m http.server 3000`.",
+  "If its dev script already sets a port, use that one and say which. For example: `nohup npx next dev -p 3000 -H 0.0.0.0 > /tmp/<name>-dev.log 2>&1 &`.",
+  "",
+  "## 4. Signing in",
+  "An app using NextAuth or Auth.js (next-auth or @auth in package.json) signs in on AUTH_URL. Unless the app's own .env.local sets it, start it with `AUTH_URL=http://localhost:3000` (and NEXTAUTH_URL too for next-auth 4). Google's redirect for it is http://localhost:3000/api/auth/callback/google.",
+  "",
+  "## 5. Ready means it answers",
+  "Wait until `curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/` gives a status below 500. If it doesn't, read the last lines of the log, fix the cause, and start it again. Never say it's ready before it answers.",
+  "",
+  "## 6. Show it",
+  "Open http://localhost:3000 in your screen's Chrome, in a new tab so your other tabs stay, and tell the user it's open on your screen at that address and they can sign in there. When you change the code the dev server picks it up: say what changed.",
+  "",
+  "## 7. Stop it",
+  "Stop it when the user is done or asks, and before you start another app on the same port.",
+];
+
+const PREVIEW_ON_A_PUBLIC_URL = [
+  "# Test on a public preview URL",
+  "",
+  "When the user wants to try the app from anywhere (their phone, someone else's computer, a link to share) before it's live, put it on its Preview: the app's own https address, apart from its live site. Deploying there never touches what's live.",
+  "",
+  "## Before you deploy",
+  "1. It runs locally (Launch an app locally) and its build script passes.",
+  "2. It listens on $PORT and 0.0.0.0 (Make a web app that deploys cleanly).",
+  "3. Commit it. A deploy builds a committed changeset, never what's only in your folder.",
+  "",
+  "## Its commands",
+  "Make sure the site's settings say how to build and run it, from package.json and its lockfile. Set only the ones that aren't set, and never change ones the user set:",
+  "1. Install: `npm ci`, `pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile` or `bun install --frozen-lockfile`.",
+  "2. Build: its build script, for example `npm run build`.",
+  "3. Start: its start script on the given port, for example `PORT=$PORT npm start` or `npx next start -p $PORT -H 0.0.0.0`.",
+  "",
+  "## Signing in on the preview",
+  "An app using NextAuth or Auth.js needs AUTH_URL set to the preview's own address in the Preview's variables, and its secrets as variables, never in the repo. For Google login that address has to be in the Google OAuth client, as an origin and with /api/auth/callback/google as a redirect: tell the user once, the first time a preview address is used, which two lines to add.",
+  "",
+  "## Deploy and share",
+  "1. deploy_app with app: it goes to the Preview. It goes live only when the owner's own words ask for that.",
+  "2. Wait until the preview address answers: `curl -s -o /dev/null -w '%{http_code}' <preview address>` gives a status below 500.",
+  "3. Open it on your screen too, and give the user the link.",
+  "4. If the deploy fails, read its log, fix the cause, commit and deploy again. Never share a link that doesn't answer.",
+];
+
 export const BUILTIN_SKILLS: BuiltinSkill[] = [
   {
     slug: "bops-work-on-an-app",
@@ -284,6 +345,20 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     description: "Read when someone asks what changed in an app, when, or who changed it: ingot log and show, comparing two changesets, an older version, and putting an older one live.",
     label: APPS_LABEL,
     body: APP_HISTORY.join("\n"),
+  },
+  {
+    slug: "bops-launch-app-locally",
+    name: "Launch an app locally",
+    description: "Read when someone asks to run, launch or try an app on your computer: the right package manager, installing, starting it on localhost:3000, signing in there, and opening it on your screen.",
+    label: APPS_LABEL,
+    body: LAUNCH_LOCALLY.join("\n"),
+  },
+  {
+    slug: "bops-preview-on-a-public-url",
+    name: "Test on a public preview URL",
+    description: "Read when someone wants to test an app publicly or share a link before it's live: its build and start commands, signing in on the preview address, and deploying to the Preview.",
+    label: APPS_LABEL,
+    body: PREVIEW_ON_A_PUBLIC_URL.join("\n"),
   },
 ];
 

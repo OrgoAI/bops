@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
 import { accessOf, appsLevelOf, currentFor, isAccessLevel, levelOf, permits, seesChat, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
-import type { SharedApp, SharedApps, SharedWsSlice, WsRole } from "./protocol.ts";
+import type { SharedApp, SharedApps, SharedGroup, SharedWsSlice, WsRole } from "./protocol.ts";
 
 /**
  * What a member of a shared workspace is shown of its owner's state (members.ts, GET /v1/ws/:projectId/state),
@@ -243,8 +243,15 @@ const MAX_SHARED_APPS = 30;
  * members (Workspace.appsForMembers) its head, sites, history, deploys and members' acts; each site's settings and the
  * workspace's own domains only at Write. Never its variables, tokens, keys, logs, error text, computer or project ids.
  */
-export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>): SharedApps | undefined {
-  if (viewer.role === "owner" || !workspace || !appsOpenTo(viewer.email)) return undefined;
+/** Whether a workspace has apps: its owner (the account whose state this is) signs in with an @orgo.ai email (apps-team.ts). */
+export const ownerAppsOpen = (blob: Record<string, unknown> | null | undefined): boolean => {
+  const account = isObject(blob?.account) ? blob.account : undefined;
+  const user = isObject(account?.user) ? account.user : undefined;
+  return appsOpenTo(typeof user?.email === "string" ? user.email : undefined);
+};
+
+export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>, open = false): SharedApps | undefined {
+  if (viewer.role === "owner" || !workspace || !open) return undefined;
   const level = appsLevelOf(access);
   if (!permits(level, "read") || !isObject(workspace.hostedApps)) return undefined;
   const write = level === "write";
@@ -275,6 +282,64 @@ export function appsFor(workspace: Record<string, unknown> | null, viewer: Slice
     });
   const owned = write && Array.isArray(seen.owned) ? (keep(seen.owned, [{ id: true, domain: true }]) as { id: string; domain: string }[]) : undefined;
   return { level: write ? "write" : "read", at: typeof seen.at === "number" ? seen.at : 0, list, ...(owned?.length ? { owned } : {}) };
+}
+
+/** Whether a bot works on another bot's computer (lib/types.ts sharesComputer, on the owner's state as it is). */
+const sharesComputer = (b: Record<string, unknown>) =>
+  b.isMain === true ? b.computer === "shared" && !b.computerId : (typeof b.computer === "string" ? b.computer : b.computerId ? "own" : "shared") === "shared";
+
+/** The bot whose computer `b` works on (lib/types.ts workBot), of the owner's `bots`. */
+function hostOf(b: Record<string, unknown>, bots: Record<string, unknown>[], depth = 0): Record<string, unknown> {
+  if (!sharesComputer(b) || depth > 2) return b;
+  if (b.isMain === true) return bots.find((x) => x.isMain === true && x.freeComputer === true && typeof x.computerId === "string" && x.computerId && x.id !== b.id) ?? b;
+  const main = bots.find((x) => x.isMain === true && wsOfBot(x) === wsOfBot(b));
+  return main ? hostOf(main, bots, depth + 1) : b;
+}
+
+/**
+ * The computers the `shown` bots of workspace `ws` work on with two or more of them on one besides the main bot
+ * (lib/bot-groups.ts groups them in the sidebar): each by a key of its own, a hash of the workspace and the computer's id (never the id), its bots
+ * shown, the name the owner gave it (Workspace.computerNames) and its bot when that's one shown. Undefined: none.
+ */
+export function computersOf(blob: Record<string, unknown>, ws: string, workspace: Record<string, unknown> | null, shown: Record<string, unknown>[]): SharedGroup[] | undefined {
+  const all = list(blob.bots);
+  const ids = new Set(shown.map((b) => b.id));
+  const on = new Map<string, string[]>();
+  const hosts = new Map<string, unknown>();
+  for (const b of shown) {
+    if (typeof b.id !== "string") continue;
+    const h = hostOf(b, all);
+    if (typeof h.computerId !== "string" || !h.computerId) continue;
+    on.set(h.computerId, [...(on.get(h.computerId) ?? []), b.id]);
+    hosts.set(h.computerId, h.id);
+  }
+  const names = isObject(workspace?.computerNames) ? workspace.computerNames : {};
+  const out: SharedGroup[] = [];
+  const main = new Set(shown.flatMap((b) => (b.isMain === true ? [b.id] : [])));
+  for (const [computerId, bots] of on) {
+    // As the sidebar groups them: two or more besides the main bot, which keeps its own row.
+    if (bots.filter((id) => !main.has(id)).length < 2) continue;
+    const name = Object.hasOwn(names, computerId) && typeof names[computerId] === "string" ? (names[computerId] as string).slice(0, 40) : undefined;
+    const host = hosts.get(computerId);
+    out.push({
+      key: `c${createHash("sha256").update(`${ws}:${computerId}`).digest("hex").slice(0, 16)}`,
+      bots,
+      ...(name ? { name } : {}),
+      ...(typeof host === "string" && ids.has(host) ? { host } : {}),
+    });
+  }
+  return out.length ? out : undefined;
+}
+
+/** The site each of the `shown` bots works on (Workspace.botSites), by bot id: what the owner said, nothing else. Undefined: none. */
+export function sitesOf(workspace: Record<string, unknown> | null, shown: Record<string, unknown>[]): Record<string, { app: string; site: string }> | undefined {
+  const all = isObject(workspace?.botSites) ? workspace.botSites : {};
+  const out: Record<string, { app: string; site: string }> = {};
+  for (const b of shown) {
+    const x = typeof b.id === "string" && Object.hasOwn(all, b.id) ? all[b.id] : undefined;
+    if (isObject(x) && typeof x.app === "string" && typeof x.site === "string") out[b.id as string] = { app: x.app, site: x.site };
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** A chat's bots, or none when they aren't all bot ids (so it's never shown to anyone but the owner). */
@@ -308,7 +373,7 @@ export function appThreadsOf(blob: Record<string, unknown>): Set<string> {
  */
 export function appThreadsFor(blob: Record<string, unknown>, access: MemberAccess, viewer: SliceViewer): Set<string> {
   const all = appThreadsOf(blob);
-  if (!appsOpenTo(viewer.email) || !all.size) return all;
+  if (!ownerAppsOpen(blob) || !all.size) return all;
   const botOf = new Map(list(blob.sessions).map((s) => [s.id, s.botId]));
   return new Set([...all].filter((id) => {
     const bot = botOf.get(id);
@@ -320,8 +385,8 @@ export function appThreadsFor(blob: Record<string, unknown>, access: MemberAcces
  * The bots whose app lines in a chat a viewer other than the owner is shown (sharedMessage `appBots`): the
  * ones they have at Write, when apps are open to their email (appThreadsFor); none otherwise.
  */
-export function appBotsFor(access: MemberAccess, viewer: SliceViewer, botIds: Iterable<string>): Set<string> {
-  if (!appsOpenTo(viewer.email)) return new Set();
+export function appBotsFor(access: MemberAccess, viewer: SliceViewer, botIds: Iterable<string>, open = false): Set<string> {
+  if (!open) return new Set();
   return new Set([...botIds].filter((id) => permits(levelOf(access, id), "write")));
 }
 
@@ -388,7 +453,10 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
   const all = (items: Record<string, unknown>[], spec: Spec) => items.map((x) => keep(x, spec) as Record<string, unknown>);
   const bots = viewer.role === "owner" ? undefined : new Set(s.bots.map((b) => b.id));
   const chats = bots && new Set(s.chats.map((c) => c.id));
-  const apps = access && bots ? appsFor(s.workspace, viewer, access, bots) : undefined;
+  const apps = access && bots ? appsFor(s.workspace, viewer, access, bots, ownerAppsOpen(blob)) : undefined;
+  // The computers the bots shown share, and (with Your Apps) the site each works on: only there when there's any.
+  const groups = computersOf(blob, ws, s.workspace, s.bots);
+  const sites = apps ? sitesOf(s.workspace, s.bots) : undefined;
   return {
     workspace: s.workspace ? (keep(s.workspace, WORKSPACE) as Record<string, unknown>) : null,
     bots: all(s.bots, BOT),
@@ -403,6 +471,8 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
     ...(access ? { levels: Object.fromEntries(s.bots.map((b) => [String(b.id), levelOf(access, String(b.id)) === "write" ? ("write" as const) : ("read" as const)])) } : {}),
     // Your Apps, for someone given it (appsFor): part of the fingerprint, so a deploy landing gives them a new one.
     ...(access && apps ? { apps } : {}),
+    ...(groups ? { groups } : {}),
+    ...(sites ? { sites } : {}),
   };
 }
 

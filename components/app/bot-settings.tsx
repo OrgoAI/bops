@@ -12,6 +12,7 @@ import { autopilotOf } from "./autopilot";
 import { ComputerChoice, ContactActions, contactOf, DeleteBot, Field, GetEmail, GetNumber, GLASS, HowIWork, PlanNeeded, PlanRoom, Uses, usePhonePlan, type PhonePlan } from "./bot-panel";
 import { AiSlot } from "./bot-settings-ai";
 import { BotMemory } from "./bot-memory";
+import { WorksOnRow } from "./bot-groups";
 import { BotSkills } from "./bot-skills";
 import { WhereToFind } from "./channels";
 import { ComputerSummary } from "./computer";
@@ -709,6 +710,8 @@ function ComputerBody({ state, bot: b, links, onRoutines }: { state: AppState; b
   return (
     <div className="flex flex-col gap-2.5">
       <ComputerSummary state={state} bot={b} className="w-full bg-white/70 shadow-[0_0_0_1px_#ECECEA]" onOpen={() => links.onOpenComputer(b.id)} />
+      {/* The site of the workspace's apps it works on: the sidebar says it under its name. The owner's to pick. */}
+      <WorksOnRow state={state} bot={b} readOnly={!!state.shared} className="bg-white/70 shadow-[0_0_0_1px_#ECECEA]" />
       {(!b.isMain || sharesComputer(b)) && state.host !== "mac" && !readOnly(state) && <ComputerChoice state={state} bot={b} className="bg-white/70 shadow-[0_0_0_1px_#ECECEA]" onUpgrade={links.onUpgrade} />}
       {!state.shared && <Uses state={state} bot={b} onOpenVault={links.onOpenVault} onOpenRoutines={onRoutines} className="bg-white/70 shadow-[0_0_0_1px_#ECECEA]" />}
       <BotKeys state={state} bot={b} onAdd={() => links.onOpenKeys(b.id)} className="bg-white/70 shadow-[0_0_0_1px_#ECECEA]" />

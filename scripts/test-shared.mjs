@@ -1832,7 +1832,8 @@ await check("Your Apps in a shared workspace: shown with the apps the owner gave
   const withApps = (level, acts) => ({ ...cloudState(), hash: `h-apps-${level}-${acts?.length ?? 0}`, state: { ...cloudState().state, apps: { level, at: 10, list: [{ ...shop, ...(acts ? { acts } : {}) }] } } });
   let answer = { status: 200, body: withApps("write") };
   const copy = new SharedCopy(async () => answer);
-  await copy.open(listed);
+  // An Orgo team owner's workspace: its apps show to whoever it's shared with and given Your Apps.
+  await copy.open({ ...listed, owner: "dana@orgo.ai" });
   const team = () => ({ ...own(), account: { user: { id: "u-sam", name: "Sam", email: "sam@orgo.ai" } } });
   const v = viewState(team(), copy.openNow(), copy.data(), {}, copy.acts());
   assert.deepEqual(v.shared.apps.list.map((a) => a.name), ["shop"]);
@@ -1845,7 +1846,10 @@ await check("Your Apps in a shared workspace: shown with the apps the owner gave
   assert.equal(A.appsOwnShown(v), false, "Settings, Domains, Bops' app skills and the made apps stay the owner's");
   const none = viewState(team(), copy.openNow(), cloudState(), {});
   assert.equal(A.appsShown(none), false, "no apps given: nothing");
-  assert.equal(A.appsShown({ ...v, account: { user: { email: "sam@example.com" } } }), false, "apps not open to the viewer");
+  // The workspace's owner decides, not who's looking: any viewer given Your Apps sees an Orgo team owner's apps, and
+  // nobody sees apps in a workspace whose owner isn't Orgo's team.
+  assert.equal(A.appsShown({ ...v, account: { user: { email: "sam@example.com" } } }), true, "a viewer outside Orgo's team sees an Orgo team owner's apps");
+  assert.equal(A.appsShown({ ...v, shared: { ...v.shared, owner: "dana@acme.test" } }), false, "an owner outside Orgo's team: no apps");
   // An act on an app: sent, pending until the owner's Bops keeps it on the app, then gone (its ok and said show there).
   const sent = [];
   const r = await actWith(copy, { act: "deploy", app: "shop" }, "key_deploy_01", sam, async (body) => (sent.push(JSON.parse(body)), { status: 202, body: { ok: true, macOn: true } }));

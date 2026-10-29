@@ -15,6 +15,7 @@ import { DEFAULT_UNDELETABLE, deleteOrgoWorkspace, forgetBotAccess, forgetBotInC
 import { apiKey, orgo as orgoApi, OrgoError, perWorkspaceProjects } from "./orgo";
 import { routinesRemovedInWorkspace } from "./routine-sync";
 import { forgetBotSettings } from "./bot-settings";
+import { forgetBotSite } from "./bot-groups";
 import { brainsOf, removeBrain } from "./brains";
 
 /**
@@ -347,6 +348,7 @@ export async function deleteBot(botId: string, withWorkspace = false) {
     forgetBotAccess(state, botId);
     forgetBotInChain(state, botId, wsId, lead);
     forgetBotSettings(state, botId, wsId);
+    forgetBotSite(state, botId, wsId);
     for (const key of Object.keys(state.screens ?? {})) if (key.startsWith(`${botId}:`)) delete state.screens![key];
     if (state.takeover?.botId === botId) state.takeover = undefined;
   });
