@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import type { AccountInfo, BopsPlan, SpendKind, TokenSource, UsageTotals } from "@/lib/account";
 import type { BopsTier } from "@/cloud/protocol";
 import {
@@ -32,8 +31,8 @@ import {
 import { freeHoursWords, PLAN_CARDS } from "@/lib/plan-includes";
 import type { AppState } from "@/lib/types";
 import { Mascot, Spinner } from "./mascot";
-import { signOutOfOrgo as signOutAsking } from "./sign-in";
-import { refreshState } from "./ui";
+import { signOutOfOrgo as signOutAsking, UNSENT } from "./sign-in";
+import { AskInPlace, refreshState } from "./ui";
 
 /*
  * The account: who you are on Orgo, your Bops plan (Free, Pro or Max; an Orgo plan doesn't change it,
@@ -55,12 +54,34 @@ export function initialsFrom(label: string) {
   return ((parts[0]?.[0] ?? "") + (parts.length > 1 ? parts[parts.length - 1][0] : (parts[0]?.[1] ?? ""))).toUpperCase() || "?";
 }
 
-/** Sign out of Orgo on this Mac (the route clears the key from the Keychain), asking first when changes haven't reached Bops Cloud. */
-export const signOutOfOrgo = async () => {
-  const res = await signOutAsking();
+/** Sign out of Orgo on this Mac (the route clears the key from the Keychain), asking first (`askFirst`) when changes haven't reached Bops Cloud. */
+export const signOutOfOrgo = async (askFirst: () => Promise<boolean>) => {
+  const res = await signOutAsking(askFirst);
   await refreshState();
   return res;
 };
+
+/**
+ * Signing out from a button: `signOut`, and `ask`, the question to show in place of the button when changes haven't
+ * reached Bops Cloud ("Sign out anyway?", ui.tsx AskInPlace), null while there's none. `after`: once it went (or didn't).
+ */
+export function useSignOut(after?: () => void) {
+  const [asking, setAsking] = useState<((yes: boolean) => void) | null>(null);
+  const [busy, setBusy] = useState(false);
+  const signOut = async () => {
+    if (busy) return;
+    setBusy(true);
+    await signOutOfOrgo(() => new Promise<boolean>((resolve) => setAsking(() => resolve))).catch(() => null);
+    setBusy(false);
+    after?.();
+  };
+  const answer = (yes: boolean) => {
+    asking?.(yes);
+    setAsking(null);
+  };
+  const ask = asking ? <AskInPlace compact danger title={UNSENT.title} line={UNSENT.line} action="Sign out" onConfirm={() => answer(true)} onCancel={() => answer(false)} /> : null;
+  return { signOut, ask, busy };
+}
 
 const compact = (n: number) => new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: n < 10_000 ? 0 : 1 }).format(n);
 const hours = (h: number) => (h < 10 ? h.toFixed(1).replace(/\.0$/, "") : Math.round(h).toLocaleString());
@@ -68,7 +89,12 @@ const day = (t: number) => new Date(t).toLocaleDateString(undefined, { month: "s
 const money = (cents: number, currency = "usd") =>
   new Intl.NumberFormat(undefined, { style: "currency", currency: currency.toUpperCase(), minimumFractionDigits: cents % 100 ? 2 : 0 }).format(cents / 100);
 
-export function Account({ state, onClose, onThisMac }: { state: AppState; onClose: () => void; onThisMac?: () => void }) {
+/**
+ * GET /api/account, for the Account sheet and Settings' Plan and credit and Usage: what it said, whether the route
+ * failed (the sections say so and offer a retry, not a spinner forever), and read again when Bops comes back to the
+ * front (after paying or managing the plan in the browser).
+ */
+export function useAccountInfo() {
   const [info, setInfo] = useState<AccountInfo | null>(null);
   const [loading, setLoading] = useState(true);
   // The route itself failed (not Orgo): the sections say so and offer a retry, not a spinner forever.
@@ -95,68 +121,32 @@ export function Account({ state, onClose, onThisMac }: { state: AppState; onClos
   };
   // The Bops plan read again on its own (after adding credit): the balance shows it.
   const setBops = useCallback((bops: BopsPlan) => setInfo((i) => (i ? { ...i, bops } : i)), []);
+  return { info, loading, failed, load, setBops };
+}
 
-  // The header shows at once from the app's state; the rest fills in when the route answers.
+/** Settings, Account, Plan and credit: your Bops plan and credit, and your bots' inboxes and numbers. */
+export function PlanAndCredit({ state }: { state: AppState }) {
+  const { info, loading, failed, setBops } = useAccountInfo();
   const user = info?.user ?? state.account?.user ?? null;
-  const name = user?.name?.trim() || state.owner?.name.trim() || user?.email?.split("@")[0] || "You";
-  const signOut = async () => {
-    await signOutOfOrgo();
-    onClose();
-  };
-
   return (
-    <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} className="motion-dialog-in flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
-        <div className="flex items-center gap-3.5 border-b border-[#F0F0EE] px-[22px] py-[18px]">
-          <span className="flex size-12 shrink-0 items-center justify-center rounded-full bg-ink text-[16px] font-semibold tracking-[0.02em] text-highlighter">{initialsOf(state)}</span>
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <span className="truncate text-[18px] font-semibold leading-[22px]">{name}</span>
-            <span className="truncate text-[13px] leading-[17px] text-[#6B6B6B]">
-              {user ? (user.email ?? "Signed in with Orgo") : "Not signed in"}
-              {user && info?.signedInAt ? <span className="text-[#9A9A98]"> · on this Mac since {day(info.signedInAt)}</span> : null}
-            </span>
-          </div>
-          <button onClick={onClose} aria-label="Close" className="flex size-8 shrink-0 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3]">
-            <svg width="12" height="12" viewBox="0 0 12 12">
-              <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
-            </svg>
-          </button>
-        </div>
-
-        {/* Every signed-in user has a Bops plan: Free until Orgo says Pro or Max. */}
-        {user && (info || (failed && !loading) ? <YourPlan plan={info?.bops} known={!!info} onPlan={setBops} userId={user.id} /> : <Placeholder title="Your plan" />)}
-        {info ? (
-          <Usage info={info} />
-        ) : failed && !loading ? (
-          <Section title="Bops usage">
-            <LoadFailed onRetry={load} />
-          </Section>
-        ) : (
-          <Placeholder title="Bops usage" />
-        )}
-        {info && <Reach info={info} />}
-
-        <div className="flex items-center justify-between gap-3 px-[22px] pb-5 pt-5">
-          <span className="text-[12px] leading-4 text-[#9A9A98]">
-            Your Bops computer is free. AI credit pays for what your bots do, at cost.
-            {onThisMac && (
-              <>
-                {" "}
-                <button onClick={onThisMac} className="underline underline-offset-2 hover:text-ink">
-                  Permissions on this Mac
-                </button>
-              </>
-            )}
-          </span>
-          {user && (
-            <button onClick={() => void signOut()} className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 text-[#3A3A38] shadow-[0_0_0_1px_#E6E6E3] hover:text-[#B42318]">
-              Sign out
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
+    <>
+      {user ? info || (failed && !loading) ? <YourPlan plan={info?.bops} known={!!info} onPlan={setBops} userId={user.id} /> : <Placeholder title="Your plan" /> : <Notice>Sign in with Orgo to see your plan.</Notice>}
+      {info && <Reach info={info} />}
+    </>
   );
+}
+
+/** Settings, Account, Usage: what your bots used this month and last. */
+export function UsageSection() {
+  const { info, loading, failed, load } = useAccountInfo();
+  if (info) return <Usage info={info} />;
+  if (failed && !loading)
+    return (
+      <Section title="Bops usage">
+        <LoadFailed onRetry={load} />
+      </Section>
+    );
+  return <Placeholder title="Bops usage" />;
 }
 
 export function Section({ title, aside, children }: { title: string; aside?: React.ReactNode; children: React.ReactNode }) {
@@ -705,10 +695,10 @@ function AddCredit({ plan, topUp, onPlan, userId }: { plan: BopsPlan; topUp: Top
 }
 
 /**
- * "Add $50 of AI credit? Charged once to Visa ending 4242.", over everything (the sheet too), like
- * Restart Bops. Nothing is charged until Pay. A card the bank wants to confirm, or one it declines,
- * charges nothing and turns this into the way to Checkout for the same amount. While an answer is
- * missing there's no other way to pay, and Cancel keeps the purchase for Add credit.
+ * "Add $50 of AI credit? Charged once to Visa ending 4242.", asked in place under Add credit (ui.tsx AskInPlace).
+ * Nothing is charged until Pay. A card the bank wants to confirm, or one it declines, charges nothing and turns this
+ * into the way to Checkout for the same amount. While an answer is missing there's no other way to pay, and Cancel
+ * (or Esc) keeps the purchase for Add credit.
  */
 function ConfirmCredit({
   purchase,
@@ -725,55 +715,25 @@ function ConfirmCredit({
   onOtherWay: () => void;
   onCancel: () => void;
 }) {
-  useEffect(() => {
-    // Escape cancels this alone, not the sheet under it (the app closes its sheets on Escape, on window).
-    const esc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();
-      if (!busy) onCancel();
-    };
-    document.addEventListener("keydown", esc);
-    return () => document.removeEventListener("keydown", esc);
-  }, [busy, onCancel]);
   const copy = confirmCopy(purchase);
-  const warning = error ?? copy.error;
-  const pill = "rounded-full px-3.5 py-1.5 text-[13px] font-medium leading-4 disabled:opacity-50";
-  return createPortal(
-    <div className="motion-fade-in fixed inset-0 z-[70] flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={() => !busy && onCancel()}>
-      <div
-        role="alertdialog"
-        aria-labelledby="add-credit-title"
-        aria-describedby="add-credit-line"
-        onClick={(e) => e.stopPropagation()}
-        className="motion-dialog-in flex w-[340px] flex-col rounded-[18px] bg-white p-5 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
-      >
-        <span id="add-credit-title" className="text-[15px] font-semibold leading-5">
-          {copy.title}
-        </span>
-        <span id="add-credit-line" className="pt-1 text-[13px] leading-[18px] text-[#6B6B6B]">
-          {copy.line}
-        </span>
-        {warning && (
-          <span role="alert" className="pt-2 text-[12.5px] leading-[18px] text-[#B42318]">
-            {warning}
-          </span>
-        )}
-        <div className="flex items-center justify-end gap-2 pt-5">
-          {copy.otherWay && (
-            <button disabled={busy} onClick={onOtherWay} className="mr-auto text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink disabled:opacity-50">
-              Pay another way
-            </button>
-          )}
-          <button disabled={busy} onClick={onCancel} className={`${pill} bg-[#F2F2F0] hover:bg-[#EAEAE7]`}>
-            Cancel
+  return (
+    <AskInPlace
+      compact
+      title={copy.title}
+      line={copy.line}
+      action={copy.confirmLabel}
+      busy={busy}
+      error={error ?? copy.error}
+      onConfirm={onPay}
+      onCancel={onCancel}
+      other={
+        copy.otherWay && (
+          <button type="button" disabled={busy} onClick={onOtherWay} className="text-[12.5px] font-medium leading-4 text-[#6B6B6B] hover:text-ink disabled:opacity-50">
+            Pay another way
           </button>
-          <button autoFocus disabled={busy} onClick={onPay} className={`${pill} flex min-w-[76px] items-center justify-center bg-ink text-white`}>
-            {busy ? <Spinner size={12} color="#FFFFFF" /> : copy.confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body,
+        )
+      }
+    />
   );
 }
 

@@ -396,6 +396,33 @@ test("removed messages are swept after 30 days; live ones never are; the user's 
   assert.equal(await kept(), Number(removed.seq));
 });
 
+test("many removed in one write, one of them written again: every reader hears each, and the sweep takes only the ones still removed after 30 days", async () => {
+  const id = user("many-removed");
+  await postMessages(id, [1, 2, 3, 4, 5].map((i) => msg(i)));
+  const s1 = (await page(id, 0)).seq;
+  // A chat's every message, or several picked: one write.
+  const res = await postMessages(id, [], ["msg_000001", "msg_000002", "msg_000003", "msg_000004"]);
+  assert.equal(res.status, 200);
+  const removed = await page(id, s1);
+  assert.deepEqual(removed.messages.map((m) => [m.id, m.json]), [["msg_000001", null], ["msg_000002", null], ["msg_000003", null], ["msg_000004", null]]);
+  assert.deepEqual((await page(id, 0)).messages.map((m) => m.id), ["msg_000005"], "from the start, they're gone");
+  // Undo (Restore on the Mac): two written again as they were, each with a seq after its removal's.
+  await postMessages(id, [msg(2), msg(3)]);
+  const back = await page(id, removed.seq);
+  assert.deepEqual(back.messages.map((m) => [m.id, m.json?.text]), [["msg_000002", "hello 2"], ["msg_000003", "hello 3"]]);
+  assert.ok(back.messages.every((m) => m.seq > removed.seq));
+  // (Read from the start in the order they were written: each Mac puts them in time order, lib/server/persist-cloud.ts.)
+  assert.deepEqual((await page(id, 0)).messages.map((m) => m.id).sort(), ["msg_000002", "msg_000003", "msg_000005"]);
+  // 30 days on: the rows still removed go for good, the ones written again stay.
+  await query("UPDATE bops.chat_messages SET updated_at = now() - make_interval(days => $2) WHERE user_id = $1", [id, REMOVED_KEEP_DAYS + 1]);
+  assert.ok((await sweepRemovedMessages()) >= 2);
+  const left = await query<{ id: string; live: boolean }>("SELECT id, json IS NOT NULL AS live FROM bops.chat_messages WHERE user_id = $1 ORDER BY id", [id]);
+  assert.deepEqual(left.rows.map((x) => [x.id, x.live]), [["msg_000002", true], ["msg_000003", true], ["msg_000005", true]]);
+  // Restored after the sweep: a new row, as any new message.
+  await postMessages(id, [msg(1)]);
+  assert.deepEqual((await page(id, 0)).messages.map((m) => m.id).sort(), ["msg_000001", "msg_000002", "msg_000003", "msg_000005"]);
+});
+
 test("the migration moves messages out of the states already uploaded, and runs again safely", async () => {
   const id = user("migrate");
   // A row as a build from before left it, before 0010 ran.

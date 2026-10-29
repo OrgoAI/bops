@@ -1,4 +1,4 @@
-import { and, botForAgent, skillsOf, view, type Bot, type State } from "./calls.ts";
+import { and, botForAgent, callSettings, skillsOf, view, type Bot, type CallSettings, type State } from "./calls.ts";
 import { config } from "./config.ts";
 import { hasCredit } from "./credit.ts";
 import type { CallerVerdict, CloudCallPayload } from "./protocol.ts";
@@ -76,8 +76,12 @@ const SPOKEN = "Each of your replies is spoken aloud by a voice that reads your 
 function ownerPrompt(s: State, b: Bot, c: VoiceCall) {
   const { apps, places, kinds } = skillsOf(s, b);
   const theirs = s.owner ? `${s.owner}'s` : "their";
+  // Who it is on the team, as on a call in the app (voicePrompt in lib/server/call.ts): the main bot runs it.
+  const role = typeof b.role === "string" && b.role.trim() ? b.role.trim().slice(0, 60) : "";
+  const what = b.isMain ? `${theirs} chief of staff in Bops` : role ? `${theirs} ${role} bot in Bops` : "an AI assistant";
   return [
-    `You are ${b.name}, an AI assistant, on a phone call with ${s.owner ? `${s.owner}, who you work for` : "the person you work for"}. The computer you work on is offline right now, so you can't do tasks or look anything up until it's back.`,
+    `You are ${b.name}, ${what}, on a phone call with ${s.owner ? `${s.owner}, who you work for` : "the person you work for"}. The computer you work on is offline right now, so you can't do tasks or look anything up until it's back.`,
+    ...(s.ownerAbout ? [`About ${s.owner ?? "them"}: ${s.ownerAbout}`] : []),
     ...(apps.length ? [`When it's back you can use ${theirs} apps again: ${apps.join(", ")}.`] : []),
     ...(places.length ? [`You're also in ${and(places)}, where ${s.owner ?? "they"} can message you.`] : []),
     `You're answering from Bops Cloud: texts sent to you meanwhile wait there for the computer${kinds.has("slack") ? ", and Slack messages for up to a day" : ""}.`,
@@ -195,6 +199,16 @@ function messageFrom(a: Record<string, unknown>, before?: CallMessage): CallMess
  * Answer one turn of a call to the user's number (AgentPhone's agent.message on channel "voice"),
  * as the bot whose number it is, for the owner or for anyone else as `verdict` says.
  */
+/**
+ * The short no a call hears when the bot's settings page turned calls away (lib/server/phone-voice.ts callsOff, the
+ * same words): Answers calls off, for everyone; Someone else calls off, for a caller who isn't the owner. Else null.
+ */
+export function turnedAway(b: Pick<Bot, "name">, set: CallSettings, owner: boolean): string | null {
+  if (set.answersCalls === false) return owner ? `Sorry, ${b.name} isn't taking calls right now. You can text this number. Bye!` : "Sorry, this number isn't taking calls right now. Bye!";
+  if (!owner && set.othersCallsOff) return "Sorry, this number isn't taking calls right now. Bye!";
+  return null;
+}
+
 export async function cloudVoiceTurn(userId: string, event: ApVoiceEvent, verdict: CallerVerdict): Promise<VoiceReply> {
   const callId = callIdOf(event);
   const d = event.data ?? {};
@@ -215,7 +229,10 @@ export async function cloudVoiceTurn(userId: string, event: ApVoiceEvent, verdic
   const heard = str(d.transcript);
   if (heard) c.turns.push({ who: "Caller", text: heard });
   let reply: VoiceReply;
-  if (Date.now() - c.startedAt > timing.maxCallMs || c.turns.filter((t) => t.who === "Caller").length > MAX_TURNS) {
+  const off = turnedAway(b, callSettings(s, b), c.owner);
+  if (off) {
+    reply = { text: off, hangup: true };
+  } else if (Date.now() - c.startedAt > timing.maxCallMs || c.turns.filter((t) => t.who === "Caller").length > MAX_TURNS) {
     reply = { text: "I have to go now. Bye!", hangup: true };
   } else if (!config.openaiKey()) {
     reply = { text: c.owner ? `Hi, it's ${b.name}. I can't talk right now. Text me at this number and I'll get back to you.` : "Sorry, nobody can take your call right now. Bye!", hangup: true };

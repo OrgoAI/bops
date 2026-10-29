@@ -8,8 +8,8 @@ import { MAIN_WORKSPACE } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 /**
- * Set or remove an app's variables (AppEnvChange in lib/hosted-apps.ts: { ws, env: { NAME: value | null } }),
- * only from the Bops window. The values are the user's secrets: they go on to orgo-web as they came and
+ * Set or remove an app's variables (AppEnvChange in lib/hosted-apps.ts: { ws, where?, env: { NAME: value | null } }:
+ * Prod's, Staging's, or Local's own on its computer), only from the Bops window. The values are the user's secrets: they go on to orgo-web as they came and
  * nowhere else (never kept, logged or answered); the answer is the variables' names, { env }.
  */
 export async function PATCH(request: Request, ctx: { params: Promise<{ name: string }> }) {
@@ -21,7 +21,7 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ name: str
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const wsId = (typeof b.ws === "string" && b.ws.trim()) || getState().workspace || MAIN_WORKSPACE;
   try {
-    return Response.json(await changeEnv(wsId, name, b.env, b.site));
+    return Response.json(await changeEnv(wsId, name, b.env, b.site, b.where));
   } catch (e) {
     // Never anything of what was sent: a refusal here names a variable at most.
     return e instanceof HostedAppError ? Response.json({ error: e.message, ...e.extra }, { status: e.status }) : Response.json({ error: "Couldn't save the variables. Try again." }, { status: 500 });

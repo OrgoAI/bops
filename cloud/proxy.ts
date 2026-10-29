@@ -858,6 +858,8 @@ const agentphone: Spec = {
     rule("DELETE v1/numbers/:number/contact-card"),
     // Where a number's calls go: its agent (voice turns to the agent's webhook, what Bops uses), a SIP trunk, or nowhere.
     rule("PATCH v1/numbers/:number/voice-routing"),
+    // AgentPhone's voices (a read: nothing changes), for the closest to a bot's own (lib/server/phone.ts voiceToAgent), set with PATCH v1/agents/:agent.
+    rule("GET v1/agents/voices"),
     rule("GET v1/agents", { json: recordNumbers }),
     rule("POST v1/agents", { json: recordNumbers }),
     rule("PATCH v1/agents/:agent", { json: recordNumbers }),

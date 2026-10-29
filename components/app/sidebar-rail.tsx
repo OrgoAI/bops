@@ -14,6 +14,8 @@ import type { FooterPage } from "./sidebar-footer";
 import { needsByBot, railMark, threadsByBot } from "./sidebar-sections";
 import { ChatAvatar, chatName, currentWorkspace, RoundButton, SideToggleIcon } from "./ui";
 import { UpdateButton } from "./update-notice";
+import { MailAddressRail } from "./mail-address";
+import { NoticeRail } from "./notice-popup";
 
 /**
  * The sidebar folded (its toggle, or ⌘\): a narrow rail of icons in its place, so the chat and the panel
@@ -39,7 +41,7 @@ export function SidebarRail({
   onAccount,
   onSettings,
   onSetup,
-  onMembers,
+  onTeam,
   onVault,
   onOpenAutopilot,
   onOpenMemory,
@@ -62,7 +64,8 @@ export function SidebarRail({
   onAccount: () => void;
   onSettings: () => void;
   onSetup: () => void;
-  onMembers: () => void;
+  /** Team, in Settings (from your initials' menu). */
+  onTeam: () => void;
   onVault: () => void;
   onOpenAutopilot: (open: AutopilotOpen) => void;
   onOpenMemory: (open: MemoryOpen) => void;
@@ -167,15 +170,16 @@ export function SidebarRail({
         })}
       </nav>
 
-      <div className="flex shrink-0 flex-col items-center pt-2 empty:hidden">
+      <div className="flex shrink-0 flex-col items-center gap-2 pt-2 empty:hidden">
         <UpdateButton onOpen={onExpand} />
+        {!state.shared && <MailAddressRail state={state} onOpen={onExpand} />}
+        <NoticeRail onOpen={onExpand} />
       </div>
       <SidebarFooter
         vertical
         state={state}
         open={footer}
-        you={() => <YouMenuView state={state} needsYou={setup.length > 0} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} />}
-        onMembers={onMembers}
+        you={() => <YouMenuView state={state} needsYou={setup.length > 0} onAccount={onAccount} onSettings={onSettings} onSetup={onSetup} onTeam={onTeam} />}
         onVault={onVault}
         onOpenAutopilot={onOpenAutopilot}
         onOpenMemory={onOpenMemory}

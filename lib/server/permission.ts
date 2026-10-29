@@ -39,7 +39,7 @@ import { addMessage, bot, changeLanded, getState, id, ownerName, pullState, sess
  */
 
 /** What a tool call needs the user's OK for, in the request's own words (AppApproval). */
-export type AskSpec = Pick<AppApproval, "action" | "resources" | "preview" | "kind" | "api">;
+export type AskSpec = Pick<AppApproval, "action" | "resources" | "preview" | "kind" | "api" | "askedFor">;
 
 /** A tool's call needs the user's OK: the engine running it pauses there (askFor). */
 export class NeedsOk extends Error {
@@ -90,6 +90,7 @@ export function askFor(spec: AskSpec, place: AskPlace, resume: AskResume): AppAp
     preview: spec.preview,
     ...(spec.kind ? { kind: spec.kind } : {}),
     ...(spec.api ? { api: spec.api } : {}),
+    ...(spec.askedFor ? { askedFor: spec.askedFor } : {}),
     at: Date.now(),
     resume,
   };

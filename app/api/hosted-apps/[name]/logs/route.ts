@@ -20,7 +20,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ name: strin
   const url = new URL(request.url);
   const wsId = url.searchParams.get("ws") ?? getState().workspace ?? MAIN_WORKSPACE;
   try {
-    return Response.json(await appLog(wsId, name, url.searchParams.get("after"), url.searchParams.get("site") ?? undefined));
+    return Response.json(await appLog(wsId, name, url.searchParams.get("after"), url.searchParams.get("site") ?? undefined, url.searchParams.get("env") ?? undefined));
   } catch (e) {
     return e instanceof HostedAppError ? Response.json({ error: e.message }, { status: e.status }) : Response.json({ error: (e as Error).message }, { status: 500 });
   }

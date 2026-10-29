@@ -757,7 +757,9 @@ export function cloudStore({ get, replace, touch, went }: StateAccess): Persiste
         changed = true;
       } else if (r.status !== 200 && r.status !== 404) refused("Reading your Bops", r);
     }
-    const all = Date.now() - sync.pulledAt > REMOVED_KEPT_MS;
+    // Away too long to have heard of every removal, or never read past the start (an account with no messages at
+    // sign in): a read from the start leaves removed rows out (cloud/state.ts), so what went is what isn't there.
+    const all = Date.now() - sync.pulledAt > REMOVED_KEPT_MS || sync.seq === 0;
     if (h.body.seq !== sync.seq || all) {
       let after = all ? 0 : sync.seq;
       const seen = all ? new Set<string>() : undefined;
@@ -770,7 +772,7 @@ export function cloudStore({ get, replace, touch, went }: StateAccess): Persiste
         if (!p.body.more) break;
       }
       if (seen) {
-        // Away too long to have heard of every removal: a synced message the cloud no longer has went.
+        // A synced message the cloud no longer has went (one with changes here not up yet stays, and goes up).
         const st = get();
         const keep = st.messages.filter((m) => seen.has(m.id) || fp(m) !== sync.msgHashes.get(m.id));
         if (keep.length !== st.messages.length) {

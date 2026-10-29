@@ -21,11 +21,26 @@ export { appsOpenTo };
 export const appsOpen = (state: Pick<AppState, "account"> | null | undefined): boolean => appsOpenTo(state?.account?.user.email);
 
 /**
- * Does the window show apps here: open to the account, and not in a workspace someone else shared with
- * them (its apps, and Bops' skills for them, are its owner's, whoever the viewer is). Every part of the
- * window that shows anything of apps asks this.
+ * Does the window show apps here: open to the account, and in their own workspace, or one someone shared with them
+ * whose owner gave them Your Apps (SharedOpen.apps: its apps on the web, read only or to deploy). What stays the
+ * owner's whoever the viewer is asks appsOwnShown.
  */
-export const appsShown = (state: Pick<AppState, "account" | "shared"> | null | undefined): boolean => appsOpen(state) && !state?.shared;
+export const appsShown = (state: Pick<AppState, "account" | "shared"> | null | undefined): boolean => appsOpen(state) && (!state?.shared || !!state.shared.apps);
+
+/**
+ * What the apps page is called where it shows (appsShown): Your Apps in the user's own workspace; in one shared with
+ * them, its owner's apps on the web, which neither they nor their bots made, so Apps, in that workspace. The footer's
+ * button, its tab, its New Tab tile and the page say the same.
+ */
+export const appsName = (state: Pick<AppState, "shared"> | null | undefined) => (state?.shared ? "Apps" : "Your Apps");
+export const appsLine = (state: Pick<AppState, "shared"> | null | undefined) => (state?.shared ? `Apps on the web in ${state.shared.name}` : "Apps your bots made for you");
+
+/**
+ * What stays the owner's own even where a shared workspace shows its apps (appsShown): Settings, Domains; Bops' own
+ * skills for apps; the apps the bots made (tiles, their tabs and lines in a chat); and what the server sends the window
+ * of them (appsForWindow). Apps open to the account, and not in a workspace someone else shared with them.
+ */
+export const appsOwnShown = (state: Pick<AppState, "account" | "shared"> | null | undefined): boolean => appsOpen(state) && !state?.shared;
 
 /**
  * The state as the window gets it (app/api/state): where it doesn't show apps (appsShown), nothing of them,
@@ -33,11 +48,11 @@ export const appsShown = (state: Pick<AppState, "account" | "shared"> | null | u
  * Message.appNote), no apps on the web or Ingot tokens on a workspace, no app a thread works on.
  */
 export function appsForWindow(state: AppState): AppState {
-  if (appsShown(state)) return state;
+  if (appsOwnShown(state)) return state;
   return {
     ...state,
     madeApps: undefined,
-    workspaces: state.workspaces?.map((w) => (w.hostedApps || w.ingotTokens ? { ...w, hostedApps: undefined, ingotTokens: undefined } : w)),
+    workspaces: state.workspaces?.map((w) => (w.hostedApps || w.ingotTokens || w.appsForMembers ? { ...w, hostedApps: undefined, ingotTokens: undefined, appsForMembers: undefined } : w)),
     sessions: state.sessions.map((s) => (s.app ? { ...s, app: undefined } : s)),
     messages: state.messages.filter((m) => !m.madeApp && !m.appNote),
   };

@@ -66,4 +66,26 @@ assert.equal(P.alwaysScope("Max", { action: "Send Email in Gmail (work)", kind: 
 assert.equal(P.alwaysScope("Sam", { action: "Call Stripe", kind: "api" }), "Always allow Sam to call Stripe, whatever it sends.");
 assert.equal(P.alwaysScope("Sam", { action: "Use Bash", kind: "brain" }), "Always allow Sam to use Bash, whatever it runs.");
 
+/* ---------------- Replies to others: never, ask, allow ---------------- */
+
+const ask = [{ action: "Send an email", resource: "*", effect: "ask" }];
+const NEVER = { mailNever: true };
+assert.equal(P.mailRule({}), "ask", "no rule, Just do it off: with your OK");
+assert.equal(P.mailRule({ autoApprove: true }), "allow", "no rule, Just do it on: on its own");
+assert.equal(P.mailRule({ permissions: ask, autoApprove: true }, NEVER), "never", "Never is the bot's settings (BotSettings.mailNever)");
+assert.equal(P.mailRule({ permissions: ask, autoApprove: true }, {}), "ask", "without it, the ask rule");
+assert.equal(P.mailRule({ permissions: [...ask, ...ava] }), "allow", "the last rule wins");
+assert.equal(P.mailRule({ permissions: ask, autoApprove: true }), "ask");
+const other = { action: "Call Stripe", resource: "*", effect: "allow" };
+const mixed = [{ action: "Send an email", resource: "dana@acme.example", effect: "allow" }, other, ...ask];
+assert.deepEqual(P.withMailRule(mixed, "never"), [other, ...ask], "Never keeps an ask rule (a Bops from before asks), others kept");
+assert.deepEqual(P.withMailRule(mixed, "ask"), [other, ...ask], "With your OK: an ask rule, whatever Just do it says now");
+assert.deepEqual(P.withMailRule(undefined, "ask"), ask);
+assert.deepEqual(P.withMailRule(mixed, "allow"), [other, ...ava], "allow: the rule Always allow saves");
+assert.deepEqual(P.withMailRule(undefined, "allow"), ava);
+for (const e of ["never", "ask", "allow"])
+  for (const j of [false, true]) for (const later of [false, true]) assert.equal(P.mailRule({ permissions: P.withMailRule(mixed, e), autoApprove: later }, e === "never" ? NEVER : {}), e, `${e} reads back (Just do it ${j}, then ${later})`);
+// With your OK picked while Just do it was off, then Just do it on: it still asks before emailing anyone else.
+assert.equal(P.allows({ permissions: P.withMailRule(undefined, "ask"), autoApprove: true }, "Send an email"), false);
+
 console.log("permission: all tests passed");

@@ -16,11 +16,9 @@ CFG="${CLAUDE_CONFIG_DIR:?which brain}"; CFG="${CFG%/}"
 PROFILE="$(dirname "$CFG")/.signin-$(basename "$CFG")"
 mkdir -p "$PROFILE" && chmod 700 "$PROFILE"
 CHROME="$(command -v google-chrome-stable || echo /usr/bin/google-chrome-stable)"
-# Sized to the screen, over the terminal, as the bots' Chrome is (bops-chrome).
-read -r W H < <(xdotool getdisplaygeometry 2>/dev/null) || true
-[[ "${W:-}" =~ ^[0-9]+$ && "${H:-}" =~ ^[0-9]+$ ]] || { W=1280; H=720; }
+# Filling the screen, over the terminal, as the bots' Chrome does (bops-chrome).
 GTK_THEME=Arc-Lighter setsid nohup "$CHROME" \
   --no-sandbox --disable-gpu --no-first-run --no-default-browser-check --hide-crash-restore-bubble --incognito \
   --user-data-dir="$PROFILE" --class=BopsSignIn --new-window \
-  --window-position=120,80 --window-size="$((W - 240)),$((H - 190))" "$URL" \
+  --start-maximized "$URL" \
   < /dev/null > /dev/null 2>&1 &

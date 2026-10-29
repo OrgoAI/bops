@@ -278,7 +278,7 @@ await check("a task's deploy once it committed, with no sign-in meanwhile: deplo
   await H.deployAfterTask("ses_app");
   assert.ok(calls.slice(from).some((c) => c.as === "alex" && c.what === "POST /api/computers/c_a/deploy-projects/dp_new/deployments"));
   assert.deepEqual(bobsCalls(from), []);
-  assert.match(deploySaid(S.getState()).at(-1)?.text ?? "", /^Deploying the newest commit of todo/);
+  assert.match(deploySaid(S.getState()).at(-1)?.text ?? "", /^Deploying (a preview of )?the newest commit of todo/);
   assert.equal(S.getState().sessions[0].app.deployAfter, undefined);
 });
 

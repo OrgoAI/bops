@@ -471,4 +471,19 @@ await test("Threads: a search still lists the matching ones flat under Threads",
   assert.deepEqual(threadIds(html.slice(at(html, ">Threads<"))), ["n2", "n4", "n5", "n3", "n1"], "flat, in the same order");
 });
 
+/* ---------------- The workspace menu's Team chart row ---------------- */
+
+await test("the workspace menu has a Team chart row for the open workspace, the owner's own only", async () => {
+  const { WorkspaceSwitcher } = await import(pathToFileURL(`${root}/components/app/sidebar.tsx`).href);
+  const menu = (state, onTeamChart = noop) => renderToStaticMarkup(h(WorkspaceSwitcher, { state, opened: true, sharedList: [], onTeamChart }));
+  assert.match(menu(world()), /data-team-chart-row="true"[^>]*>[\s\S]*?Org chart<span[^>]*>[^<]*<\/span><\/button>/);
+  // Through the sidebar too.
+  assert.match(render(world(), { workspaces: true, onTeamChart: noop }), /data-team-chart-row/);
+  // A workspace shared with the user open: never.
+  const shared = world({ shared: { projectId: "p9", name: "Acme", owner: "dana@acme.example", role: "member", wsId: "shared_p9" } });
+  assert.ok(!menu(shared).includes("data-team-chart-row"));
+  // Nowhere to open it: no row.
+  assert.ok(!renderToStaticMarkup(h(WorkspaceSwitcher, { state: world(), opened: true, sharedList: [] })).includes("data-team-chart-row"));
+});
+
 console.log(`\nsidebar: ${passed} passed`);

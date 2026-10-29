@@ -284,13 +284,14 @@ await test("an invite goes out with the bots chosen, and the form starts over af
   assert.equal(summaryOf(form), "1 bot, read");
   await type(form.querySelector("input"), "Riley@Example.com");
   await submit(form);
-  assert.deepEqual(fake.sent, [{ method: "POST", body: { email: "riley@example.com", role: "viewer", access: { others: "none", bots: { boppy: "read" } } } }]);
+  // (Your Apps rides along at Read, a new invite's default: lib/member-access.ts inviteDefault.)
+  assert.deepEqual(fake.sent, [{ method: "POST", body: { email: "riley@example.com", role: "viewer", access: { others: "none", bots: { boppy: "read" }, apps: "read" } } }]);
   assert.equal(summaryOf(box.querySelector("form")), "Every bot, read", "back to the default after it's sent");
   assert.equal(box.querySelector("form [data-bot-access]"), null, "and the picker closed");
   // Not chosen: every bot there now to read, new ones hidden.
   await type(box.querySelector("form input"), "sky@example.com");
   await submit(box.querySelector("form"));
-  assert.deepEqual(fake.sent[1].body.access, { others: "none", bots: { boppy: "read", sam: "read" } });
+  assert.deepEqual(fake.sent[1].body.access, { others: "none", bots: { boppy: "read", sam: "read" }, apps: "read" });
   await done();
 });
 
@@ -462,6 +463,111 @@ await test("View only and None say what Orgo lets people do on orgo.ai, and keys
   ({ box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop })));
   assert.ok(box.textContent.includes(`${M.WORDS.keysOff} ${M.WORDS.keysOffAnyone}`));
   await done();
+});
+
+/* ---------------- The team chart (team-chart.tsx) ---------------- */
+
+const Chart = await import(pathToFileURL(`${root}/components/app/team-chart.tsx`).href);
+
+await test("the sheet links to the team chart, never with a shared workspace open", async () => {
+  bops();
+  let opened = 0;
+  let { box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop, onTeamChart: () => opened++ }));
+  const link = box.querySelector("[data-chart-link]");
+  assert.equal(link?.textContent, "See the org chart");
+  await click(link);
+  assert.equal(opened, 1);
+  await done();
+  ({ box, done } = await mount(h(S.Members, { state: { ...base, shared: { projectId: "p9", name: "Acme", owner: "dana@acme.test", role: "member", wsId: "shared_p9" } }, onClose: noop, onUpgrade: noop, onTeamChart: noop })));
+  assert.equal(box.querySelector("[data-chart-link]"), null);
+  await done();
+  ({ box, done } = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop })));
+  assert.equal(box.querySelector("[data-chart-link]"), null, "nowhere to go: no link");
+  await done();
+});
+
+await test("a level changed from the chart goes through the same PATCH /api/members as this sheet", async () => {
+  const fake = bops();
+  // The chart reads who has access from People (GET /api/members), as this sheet does.
+  const { box, done } = await mount(h(Chart.TeamChart, { state: base, focus: "sam", onClose: noop }));
+  const row = box.querySelector('[aria-label="What Jamie Lee can do with Sam"]');
+  assert.ok(row, "the person is on the bot's sheet, with the sheet's own control");
+  await click(buttonOf(row, "Write"));
+  assert.deepEqual(fake.sent.at(-1), { method: "PATCH", body: { memberId: "m1", access: { others: "none", bots: { boppy: "read", sam: "write" } } } });
+  await done();
+});
+
+await test("Your Apps: a row of its own beside the bots under Access, Read for a new invite, Write sent with the bots, in each line; only with a bot; only where apps are open to the owner", async () => {
+  // Apps open to the owner (an @orgo.ai account, lib/apps-access.ts).
+  const team = { ...base, account: { user: { id: "u1", name: "Tess Ito", email: "tess@orgo.ai" } } };
+  const fake = bops();
+  fake.info.people[0].access = { others: "none", bots: { boppy: "read" }, apps: "read" };
+  let older = false;
+  const sheetFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (String(url) === "/api/workspaces?olderBops=1" ? { ok: true, status: 200, json: async () => ({ older }) } : sheetFetch(url, init));
+  let m = await mount(h(S.Members, { state: team, onClose: noop, onUpgrade: noop }));
+  assert.equal(summaryOf(rowOf(m.box, "Jamie Lee")), "1 bot, read · Your Apps, read", "worded as the bots are");
+  assert.match(rowOf(m.box, "Jamie Lee").querySelector("[data-access-summary]").className, /min-w-0 truncate/, "the line gives way, cut with an ellipsis");
+  assert.equal(rowOf(m.box, "Jamie Lee").querySelector("[data-access-summary]").getAttribute("title"), "1 bot, read · Your Apps, read", "and says it whole on hover");
+  assert.match(summaryOf(rowOf(m.box, "alex@example.com")), /^Every bot, 1 to write, new bots to read · Your Apps not set · Computers/, "an invite from before the scope: not set, never None");
+  assert.equal(summaryOf(m.box.querySelector("form")), "Every bot, read · Your Apps, read", "a new invite starts at Read");
+  await click(buttonOf(rowOf(m.box, "Jamie Lee"), "Access"));
+  const picker = () => rowOf(m.box, "Jamie Lee").querySelector("[data-bot-access]");
+  const apps = picker().querySelector("[data-apps-access]");
+  assert.ok(apps, "the Your Apps row, behind the list's hairline");
+  assert.match(apps.textContent, /^Your Apps/);
+  assert.equal(levelButton(picker(), "Your Apps", "Read").getAttribute("aria-checked"), "true");
+  assert.equal(levelButton(picker(), "Your Apps", "Write").getAttribute("data-tip"), "Also deploys them, goes back to an earlier deploy, changes a site's settings and uses your domains.");
+  assert.equal(levelButton(picker(), "Your Apps", "None").getAttribute("data-tip"), "Doesn't see your apps.");
+  assert.equal(picker().querySelector("[data-apps-legend]").textContent, "Your Apps never shows them variables or keys, and only you buy domains.");
+  assert.equal(picker().querySelector("[data-apps-older]"), null, "no older Macs, no line");
+  assert.equal(picker().querySelector("[data-apps-note]").textContent, "They see your apps once Bops Cloud updates. Until then, nothing changes for them.", "Bops Cloud doesn't show them yet");
+  await click(levelButton(picker(), "Your Apps", "Write"));
+  assert.deepEqual(fake.sent.at(-1), { method: "PATCH", body: { memberId: "m1", access: { others: "none", bots: { boppy: "read" }, apps: "write" } } });
+  assert.equal(summaryOf(rowOf(m.box, "Jamie Lee")), "1 bot, read · Your Apps, write");
+  // A bot changed afterwards keeps Your Apps as it is.
+  await click(levelButton(picker(), "Sam", "Read"));
+  assert.deepEqual(fake.sent.at(-1).body.access, { others: "none", bots: { boppy: "read", sam: "read" }, apps: "write" });
+  // The invite form's picker has it too, and sends it.
+  const form = m.box.querySelector("form");
+  await click(buttonOf(form, "Choose access"));
+  await click(levelButton(form.querySelector("[data-bot-access]"), "Your Apps", "None"));
+  assert.equal(summaryOf(form), "Every bot, read", "nothing said at None");
+  await type(form.querySelector("input"), "riley@example.com");
+  await submit(form);
+  assert.deepEqual(fake.sent.at(-1).body.access, { others: "none", bots: { boppy: "read", sam: "read" }, apps: "none" });
+  await m.done();
+  // A Mac on the account on a Bops from before: said under the row.
+  older = true;
+  m = await mount(h(S.Members, { state: team, onClose: noop, onUpgrade: noop }));
+  await click(buttonOf(rowOf(m.box, "Jamie Lee"), "Access"));
+  assert.equal(rowOf(m.box, "Jamie Lee").querySelector("[data-apps-older]").textContent, "One of your Macs runs an older Bops. A change made there can hide Your Apps from someone until this Mac is on again.");
+  await m.done();
+  // Not set yet (someone shared with before the scope): no level picked, and a bot changed sends none.
+  fake.info.people[0].access = { others: "none", bots: { boppy: "read" } };
+  m = await mount(h(S.Members, { state: team, onClose: noop, onUpgrade: noop }));
+  assert.equal(summaryOf(rowOf(m.box, "Jamie Lee")), "1 bot, read · Your Apps not set");
+  await click(buttonOf(rowOf(m.box, "Jamie Lee"), "Access"));
+  assert.equal(picker().querySelectorAll('[aria-label="What they can do with Your Apps"] [aria-checked="true"]').length, 0, "no level picked");
+  await click(levelButton(picker(), "Sam", "Read"));
+  assert.deepEqual(fake.sent.at(-1).body.access, { others: "none", bots: { boppy: "read", sam: "read" } }, "never None nobody picked");
+  await m.done();
+  // Your Apps comes with a bot: with every bot at None, its row is off and says why.
+  fake.info.people[0].access = { others: "none", bots: {} };
+  m = await mount(h(S.Members, { state: team, onClose: noop, onUpgrade: noop }));
+  await click(buttonOf(rowOf(m.box, "Jamie Lee"), "Access"));
+  assert.equal(levelButton(picker(), "Your Apps", "Read").disabled, true);
+  assert.equal(levelButton(picker(), "Your Apps", "None").getAttribute("aria-checked"), "true");
+  assert.equal(picker().querySelector("[data-apps-note]").textContent, "Give them a bot first. Your Apps comes with one.");
+  await m.done();
+  globalThis.fetch = sheetFetch;
+  // Apps not open to the owner: no row, no words.
+  bops();
+  m = await mount(h(S.Members, { state: base, onClose: noop, onUpgrade: noop }));
+  await click(buttonOf(rowOf(m.box, "Jamie Lee"), "Bots"));
+  assert.equal(m.box.querySelector("[data-apps-access]"), null);
+  assert.doesNotMatch(m.box.textContent, /Your Apps/);
+  await m.done();
 });
 
 console.log(`${passed} passed`);

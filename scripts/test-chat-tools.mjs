@@ -140,8 +140,16 @@ globalThis.fetch = async (input, init) => {
     const out = next ? await next(b) : response(`resp_${asked.length}`, [said("Done.")]);
     return out instanceof Response ? out : json(out);
   }
+  // Jev (decide.ts), only while a test sets `jev.answer`: it gets the questions asked, and answers them.
+  if (url.origin === "https://api.typesafe.ai" && jev.answer) {
+    const b = JSON.parse(await req.text());
+    jev.asked.push(b);
+    return json({ answers: jev.answer(b), model: "jev-test" });
+  }
   throw new TypeError(`fetch failed (the test is offline: ${url.host})`);
 };
+/** Jev's fake: off (decide answers null, as without a key) until a test sets `answer`. */
+const jev = { answer: null, asked: [] };
 const warned = [];
 console.warn = (...a) => warned.push(a.join(" "));
 
@@ -1806,7 +1814,7 @@ const giveAccess = (sam, tom = { boppy: "write" }) =>
   });
 giveAccess({ boppy: "write" });
 
-await check("a member's turn (someone the owner gave Write on the bot, from their own Bops): their words named as theirs, never the owner's; the bot's own work, none of the owner's logins, keys, Mac, memory or standing things", async () => {
+await check("a member's turn (someone the owner gave Write on the bot, from their own Bops): their words named as theirs, never the owner's; the bot's own work and the logins it has, every write asking the owner; none of the owner's drafts, Mac, memory or standing things", async () => {
   const sam = { userId: "user_sam", email: "sam@example.com", name: "Sam", ref: "key_sam_00001" };
   const said = (text, member, rest = []) => Chat.handleMessage(chatId, text, undefined, undefined, undefined, undefined, undefined, undefined, undefined, member, ...rest);
   answers.push(calling(toolCall("start_task", { title: "Train tickets", goal: "Book the 9am train to Boston on Amtrak.", say: "Booking it.", where: "mac", then_on_mac: "Open the ticket on the Mac", skill: null })), reply("Booked."));
@@ -1822,8 +1830,13 @@ await check("a member's turn (someone the owner gave Write on the bot, from thei
   assert.match(now, /\\"Sam\\" \(sam@example\.com\) is talking to you now, not Alex: someone Alex gave this bot to\./);
   hear(asked[n].input.find((x) => x.role === "developer").content);
   const names = toolNames(asked[n]);
-  for (const no of ["call_api", "use_app", "find_app_actions", "draft_reply", "schedule", "manage_routine", "watch", "stop_watch", "create_skill", "create_bot", "remember", "text_me", "orbit_forget", "make_app", "change_app", "work_on_app", "deploy_app"]) assert.ok(!names.includes(no), `no ${no}`);
-  for (const yes of ["web_search", "web_fetch", "start_task", "read_skill", "make_image"]) assert.ok(names.includes(yes), `has ${yes}`);
+  for (const no of ["draft_reply", "schedule", "manage_routine", "watch", "stop_watch", "create_skill", "create_bot", "remember", "text_me", "orbit_forget", "make_app", "change_app", "work_on_app", "deploy_app"]) assert.ok(!names.includes(no), `no ${no}`);
+  // The owner's apps this bot has: Sam reaches them through it (lib/types.ts levelIn), and anything that changes something asks Alex.
+  for (const yes of ["web_search", "web_fetch", "start_task", "read_skill", "make_image", "use_app", "find_app_actions"]) assert.ok(names.includes(yes), `has ${yes}`);
+  assert.match(now, /You may use the apps, keys and logins you have here for them, but anything that sends, changes, deletes or pays waits for Alex's yes/);
+  assert.doesNotMatch(now, /their accounts, keys/, "no longer told the owner's accounts and keys are off limits");
+  const useApp = asked[n].tools.find((t) => t.name === "use_app");
+  assert.doesNotMatch(useApp.description, /Just do it/, "never told it runs without asking for Sam");
   // The task it started: as an outside turn's is placed (never the owner's Mac, no last step there), but Sam's.
   assert.deepEqual(started.slice(k).map((o) => [o.title, o.member?.userId, o.ownerAsked, o.outside]), [["Train tickets", "user_sam", false, undefined]]);
   // The owner's own words still count as the owner's; Sam's never do.
@@ -1913,8 +1926,409 @@ await check("a member's turn that paused for an OK goes on as theirs (ChatPause 
   assert.ok(asked[n], "the turn went on");
   // (It goes on from the response it paused in, so what it's told is as it was then.)
   const names = toolNames(asked[n]);
-  for (const no of ["schedule", "create_bot", "use_app", "remember"]) assert.ok(!names.includes(no), `still Sam's turn: no ${no}`);
+  for (const no of ["schedule", "create_bot", "draft_reply", "remember"]) assert.ok(!names.includes(no), `still Sam's turn: no ${no}`);
   assert.ok(names.includes("start_task"));
+  assert.doesNotMatch(asked[n].tools.find((t) => t.name === "use_app")?.description ?? "", /Just do it/, "still Sam's turn: every write asks Alex");
+});
+
+/* ---------------- The team chart (lib/chain.ts) ---------------- */
+
+// What a main bot and a teammate had with no team chart, before there was one (read from Bops at 83dba96 with this state):
+// the same tools, and none of the chart's lines.
+const TYPICAL_TOOLS = ["web_search", "react", "start_task", "schedule", "manage_routine", "make_page", "make_app", "change_app", "make_image", "work_on_app", "deploy_app", "local_app", "hand_off", "find_app_actions", "use_app", "draft_reply", "web_fetch", "read_skill", "propose_skill_change", "create_skill", "update_skill", "text_me", "check_email", "read_email", "send_email", "reply_email", "watch", "stop_watch", "ask_teammate", "create_bot"];
+const TEAMMATE_TOOLS = ["web_search", "react", "start_task", "schedule", "manage_routine", "make_page", "make_app", "change_app", "make_image", "work_on_app", "deploy_app", "local_app", "web_fetch", "read_skill", "propose_skill_change", "create_skill", "update_skill", "text_me", "watch", "stop_watch", "ask_teammate"];
+const CHART_LINES = /You run the team: every bot answers to you|You answer to |You lead |You talk only with the bots in your line|Besides the bots in your line|bot: Alex set you up to work for|take work only from|takes work only from|keeps? (its|their) memory to (it|them)sel(f|ves)|Your memory is your own/;
+// (Answers an earlier check queued and didn't use go, so each turn here gets its own.)
+answers.length = 0;
+await check("with no team chart, a main bot and a teammate have the tools and words they had before", async () => {
+  answers.push(reply("Hi."));
+  const n = asked.length;
+  await Chat.handleMessage(botChatId("max"), "hello again");
+  assert.deepEqual(toolNames(typical), TYPICAL_TOOLS);
+  assert.ok(!CHART_LINES.test(typical.instructions), "none of the chart's lines");
+  assert.match(typical.instructions, /\nYou run the team\. Hand work to the bot whose role fits with hand_off; keep what nobody owns\.\nTeam: max \(Max, Research\)\./);
+  assert.deepEqual(toolNames(asked[n]), TEAMMATE_TOOLS);
+  assert.ok(!CHART_LINES.test(asked[n].instructions + notesOf(asked[n])));
+  assert.equal(asked[n].tools.find((t) => t.name === "ask_teammate").parameters.properties.bot_id.enum.join(), "boppy");
+});
+
+// Acme's chart, on the main workspace: Boppy runs it; Nova leads Pip; Juno is Ava's and talks only with its line
+// and Nova; Rex talks only with its line and takes no work handed down; Max talks with whoever talks sideways.
+const CHART = { bots: { pip: { lead: "nova" }, juno: { sideways: "closed", for: "ava@example.com", forName: "Ava" }, rex: { sideways: "closed", takesWork: false } }, pairs: { "juno>nova": true } };
+const TEAM = [
+  { id: "nova", name: "Nova", role: "Sales" },
+  { id: "pip", name: "Pip", role: "Outreach" },
+  { id: "juno", name: "Juno", role: "Assistant", email: "juno@acme.example" },
+  { id: "rex", name: "Rex", role: "Assistant", email: "rex@acme.example" },
+];
+const setChart = (chain) => S.update((s) => (s.workspaces[0].chain = chain));
+S.update((s) => {
+  for (const t of TEAM) {
+    s.bots.push({ ...t, color: "#4F7BF7", isMain: false, computerStatus: "none" });
+    s.chats.push({ id: botChatId(t.id), kind: "bot", botIds: [t.id], typing: [] });
+  }
+  s.workspaces[0].memberAccess = { ...s.workspaces[0].memberAccess, "ava@example.com": { others: "none", bots: { juno: "write" }, at: 1 } };
+  s.workspaces[0].chain = CHART;
+});
+/** One turn of a bot's own chat, with what its model calls do: the request it made, and what each call got. */
+async function botTurnWith(botId, text, items = [], final = "Ok.") {
+  answers.push(...(items.length ? [calling(...items)] : []), reply(final));
+  const n = asked.length;
+  await Chat.handleMessage(botChatId(botId), text);
+  // A turn whose calls weren't lookups made no second call: its final answer isn't left for the next turn.
+  answers.length = 0;
+  return { first: asked[n], all: asked.slice(n), out: (i = 0) => hear(outputOf(asked[n + 1], i)) };
+}
+const enumOf = (body, tool, prop = "bot_id") => body.tools.find((t) => t.name === tool)?.parameters.properties[prop].enum ?? null;
+const everything = (body) => `${body.instructions}\n${JSON.stringify(body.tools)}\n${JSON.stringify(body.input)}`;
+const lastNotes = (chat) => S.getState().messages.filter((m) => m.chatId === chat && m.role === "system").map((m) => m.text);
+
+await check("a bot that talks only with its line knows only its line and its exceptions: no other bot's name, address, work or briefing anywhere in its turn", async () => {
+  const { first } = await botTurnWith("juno", "who's on the team?");
+  hear(first.instructions);
+  assert.deepEqual(enumOf(first, "ask_teammate"), ["boppy", "nova"]);
+  // (Max is named in Bops' own examples: "why did you ask Max?". Never as a teammate.)
+  for (const name of ["Rex", "rex@acme.example", "Pip", "Outreach", '"max"', "Max (Research", "Max, Research", "max (Max"]) assert.ok(!everything(first).includes(name), `${name} isn't in Juno's turn`);
+  assert.match(first.instructions, /\nYou answer to Boppy, Alex's chief of staff, who sees what you're working on\.\n/);
+  assert.match(first.instructions, /\nYou're Ava's bot: Alex set you up to work for Ava, someone they added to the team\.\n/);
+  assert.match(first.instructions, /\nBesides the bots in your line, you can ask only Nova\. If Alex asks about another bot, say Boppy can tell them\.\n/);
+  assert.ok(!toolNames(first).includes("hand_off"), "no bots under it: no hand_off");
+  const rex = (await botTurnWith("rex", "hello")).first;
+  hear(rex.instructions);
+  assert.match(rex.instructions, /\nYou talk only with the bots in your line\. If Alex asks about another bot, say Boppy can tell them\.\n/);
+  assert.deepEqual(enumOf(rex, "ask_teammate"), ["boppy"]);
+  assert.ok(!/Your teammates can be reached at: [^\n]*(juno|Nova)/.test(rex.instructions));
+});
+
+await check("ask_teammate: a bot it may not ask, or one made up, is no such teammate; nothing reaches them", async () => {
+  for (const id of ["rex", "ghost", "max"]) {
+    const n = asked.length;
+    const t = await botTurnWith("juno", `ask ${id}`, [toolCall("ask_teammate", { bot_id: id, question: "What are you working on?" })]);
+    assert.equal(t.out(), "No such teammate.");
+    assert.equal(asked.length, n + 2, "no teammate's model call");
+  }
+  assert.ok(!S.getState().messages.some((m) => m.chatId.includes("rex") && m.text === "What are you working on?"), "no question in their conversation");
+});
+
+await check("the main bot answering Juno says nothing of the bots Juno may not ask: its briefing and its team are only what Juno knows", async () => {
+  const t = await botTurnWith("juno", "what's the team doing?", [toolCall("ask_teammate", { bot_id: "boppy", question: "What is everyone working on?" })], "Here's what Boppy says.");
+  const theirs = t.all[1];
+  hear(theirs.instructions);
+  assert.match(theirs.instructions, /This is your conversation with Juno \(Assistant\), your teammate/);
+  assert.match(theirs.instructions, /Your team, as of now \(you run it\):\n- Nova \(Sales\)[^\n]*\n- Juno \(Assistant\)/);
+  for (const name of ["Rex", "rex@acme.example", "Pip", "Max (Research", "Max, Research", "max (Max"]) assert.ok(!theirs.instructions.includes(name), `${name} isn't in Boppy's answer to Juno`);
+});
+
+await check("a teammate's answer names only the bots the asker knows: not another bot's thread on the computer they share, its page, nor the chats about it", async () => {
+  // Rex works on Boppy's computer (the default) on something Juno may not hear of; Boppy's chat with Alex is about it too.
+  const bc = botChatId("boppy");
+  const now = Date.now();
+  const was = structuredClone(S.getState().bots.find((x) => x.id === "boppy"));
+  S.update((st) => {
+    Object.assign(st.bots.find((x) => x.id === "boppy"), { computerId: "comp_boppy", computerStatus: "ready" });
+    st.sessions.push({ id: "ses_rex_offer", botId: "rex", chatId: botChatId("rex"), sentVia: "you", title: "Draft the secret offer letter", goal: "x", host: "orgo", status: "running", display: 101, steps: [], replies: [], createdAt: now });
+    st.screenLog = { ...(st.screenLog ?? {}), "boppy:102": { sessionId: "ses_rex_old", botId: "rex", title: "Ben's offer terms", at: now - 60_000 } };
+    st.messages.push(
+      { id: "msg_rex_1", chatId: bc, role: "user", text: "Have Rex draft Ben's offer letter by Friday.", at: now - 5000 },
+      { id: "msg_rex_2", chatId: bc, role: "bot", botId: "boppy", text: "On it: the letter is under way.", at: now - 4000 },
+      { id: "msg_rex_3", chatId: bc, role: "user", text: "What's on my calendar today?", at: now - 3000 },
+      { id: "msg_rex_4", chatId: bc, role: "bot", botId: "boppy", text: "Two calls this afternoon.", at: now - 2000 },
+    );
+  });
+  try {
+    const t = await botTurnWith("juno", "what's on Boppy's computer?", [toolCall("ask_teammate", { bot_id: "boppy", question: "What's on your screens?" })], "Here's what Boppy says.");
+    const theirs = t.all[1];
+    hear(theirs.instructions);
+    assert.match(theirs.instructions, /This is your conversation with Juno/);
+    assert.match(theirs.instructions, /\nScreen 2: another bot's task is running there; it's not yours, don't touch it\./);
+    assert.match(theirs.instructions, /\nScreen 3: free, left by another bot's task [^\n]*\./);
+    assert.ok(!/Screen 3: free · /.test(theirs.instructions), "nor the page it left open");
+    assert.match(theirs.instructions, /Your recent chat with Alex, for context:\n[^]*Alex: What's on my calendar today\?\nBoppy: Two calls this afternoon\./);
+    for (const word of ["Rex", "rex@acme.example", "secret offer letter", "Ben's offer", "the letter is under way"]) assert.ok(!theirs.instructions.includes(word), `${word} isn't in Boppy's answer to Juno`);
+    // Juno's own turn on the computer it shares says no more.
+    for (const word of ["Rex", "secret offer letter", "Ben's offer"]) assert.ok(!everything(t.first).includes(word), `${word} isn't in Juno's turn`);
+    // Boppy itself, which leads every bot, is told whose it is.
+    answers.push(reply("Rex is on it."));
+    const n = asked.length;
+    await Chat.handleMessage(chatId, "what's Rex doing?");
+    assert.match(notesOf(asked[n]), /Screen 2: Rex is working there on \\"Draft the secret offer letter\\"/);
+  } finally {
+    S.update((st) => {
+      Object.assign(st.bots.find((x) => x.id === "boppy"), { computerId: was.computerId, computerStatus: was.computerStatus });
+      if (!was.computerId) delete st.bots.find((x) => x.id === "boppy").computerId;
+      st.sessions = st.sessions.filter((x) => x.id !== "ses_rex_offer");
+      delete st.screenLog["boppy:102"];
+      st.messages = st.messages.filter((m) => !m.id?.startsWith("msg_rex_"));
+    });
+  }
+});
+
+await check("a bot that doesn't read the team's memory gets none of it through a teammate: no memory, no chats with Alex", async () => {
+  setChart({ ...CHART, bots: { ...CHART.bots, rex: { ...CHART.bots.rex, memory: "own", readsTeam: false } } });
+  S.update((st) => st.messages.push({ id: "msg_team_fact", chatId: botChatId("boppy"), role: "user", text: "Our office moves to Elm Road in May.", at: Date.now() }));
+  try {
+    const t = await botTurnWith("rex", "ask Boppy about the office", [toolCall("ask_teammate", { bot_id: "boppy", question: "Where is the office?" })], "Ok.");
+    hear(t.all[1].instructions);
+    assert.match(t.all[1].instructions, /This is your conversation with Rex/);
+    assert.ok(!t.all[1].instructions.includes("Your recent chat with Alex") && !t.all[1].instructions.includes("Elm Road"), "nothing of what the team knows");
+    // One that still reads the team's (Juno) hears it as before.
+    const j = await botTurnWith("juno", "ask Boppy about the office", [toolCall("ask_teammate", { bot_id: "boppy", question: "Where is the office?" })], "Ok.");
+    assert.match(j.all[1].instructions, /Your recent chat with Alex, for context:[^]*Elm Road/);
+  } finally {
+    setChart(CHART);
+    S.update((st) => (st.messages = st.messages.filter((m) => m.id !== "msg_team_fact")));
+  }
+});
+
+await check("a lead hands work only to the bots under it, sees their work, and is told so; its bot answers to it", async () => {
+  const nova = (await botTurnWith("nova", "hi")).first;
+  hear(nova.instructions + notesOf(nova));
+  assert.deepEqual(enumOf(nova, "hand_off"), ["pip"]);
+  assert.match(nova.instructions, /\nYou lead Pip\. Hand them work that fits their role with hand_off, and you see what they're doing\.\n/);
+  assert.match(notesOf(nova), /The bots you lead, as of now:\\n- Pip \(Outreach\)/);
+  const pip = (await botTurnWith("pip", "hi")).first;
+  hear(pip.instructions);
+  assert.match(pip.instructions, /\nYou answer to Nova \(Sales\), who sees what you're working on\.\n/);
+  assert.ok(!toolNames(pip).includes("hand_off"));
+  // The main bot: the chart's words, the bot that takes no work out of hand_off, whom a bot works for and answers to.
+  answers.push(reply("Hi."));
+  const n = asked.length;
+  await Chat.handleMessage(chatId, "who's who?");
+  const main = asked[n];
+  hear(main.instructions);
+  assert.match(main.instructions, /\nYou run the team: every bot answers to you, and you see what each one is doing\. Hand work to the bot whose role fits with hand_off; keep what nobody owns\.\n/);
+  assert.match(main.instructions, /\nRex takes work only from Alex and the people it works for, so don't hand it work\.\n/);
+  // Where the walls are, with no bot keeping its memory to itself: whom each can't ask, so it passes on nothing past them.
+  assert.match(
+    main.instructions,
+    /\nNot every bot may ask every other: Rex talks only with the bots in its line; Max can't ask Juno and Rex; Nova can ask only Max of the bots beside it; Pip can ask only Max of the bots beside it; Juno can ask only Nova of the bots beside it\. Tell a bot about another bot's work only when it may ask that bot\.\n/,
+  );
+  assert.match(main.instructions, /juno \(Juno, Assistant, works for Ava, juno@acme\.example\)/);
+  assert.match(main.instructions, /pip \(Pip, Outreach, answers to Nova\)/);
+  assert.deepEqual(enumOf(main, "hand_off"), ["max", "nova", "pip", "juno"]);
+});
+
+await check("a hand off the chart doesn't allow says why, in the chat and to the bot, and starts nothing", async () => {
+  const k = started.length;
+  const t = await botTurnWith("nova", "give this to Max", [toolCall("hand_off", { bot_id: "max", title: "Lead list", goal: "Find ten leads.", say: "Handing it to Max.", where: "auto", then_on_mac: null })]);
+  assert.equal(t.out(), "Not handed off: Max isn't under Nova on the org chart.");
+  assert.ok(lastNotes(botChatId("nova")).includes("Not handed off: Max isn't under Nova on the org chart."));
+  answers.push(calling(toolCall("hand_off", { bot_id: "rex", title: "Notes", goal: "Tidy the notes.", say: "Rex will do it.", where: "auto", then_on_mac: null })), reply("Rex can't take it."));
+  const n = asked.length;
+  await Chat.handleMessage(chatId, "hand the notes to Rex");
+  assert.equal(hear(outputOf(asked[n + 1])), "Not handed off: Rex takes work only from Alex.");
+  const ghost = await botTurnWith("nova", "give it to someone", [toolCall("hand_off", { bot_id: "ghost", title: "X", goal: "Do X.", say: "Ok.", where: "auto", then_on_mac: null })]);
+  assert.equal(ghost.out(), "Couldn't hand that off: no such teammate");
+  assert.equal(started.length, k, "no task started");
+  // Down the chart it goes.
+  await botTurnWith("nova", "give it to Pip", [toolCall("hand_off", { bot_id: "pip", title: "Outreach list", goal: "Write to the ten leads.", say: "Pip's on it.", where: "auto", then_on_mac: null })]);
+  assert.deepEqual(started.slice(k).map((o) => [o.botId, o.sentVia, o.viaBot]), [["pip", "nova", true]]);
+});
+
+await check("tell_task lists and sends only to threads of the bot itself or of bots it may ask", async () => {
+  const jc = botChatId("juno");
+  const now = Date.now();
+  S.update((st) => st.sessions.push(
+    { id: "ses_juno", botId: "juno", chatId: jc, sentVia: "you", title: "Juno's list", goal: "x", host: "orgo", status: "running", steps: [], replies: [], createdAt: now },
+    { id: "ses_rexs", botId: "rex", chatId: jc, sentVia: "boppy", title: "Rex's notes", goal: "x", host: "orgo", status: "running", steps: [], replies: [], createdAt: now },
+  ));
+  try {
+    const t = await botTurnWith("juno", "add one more", [toolCall("tell_task", { thread_id: "ses_rexs", message: "Add one more.", on_mac: false, say: "Adding it." })]);
+    assert.deepEqual(enumOf(t.first, "tell_task", "thread_id"), ["ses_juno"]);
+    assert.ok(!everything(t.first).includes("Rex's notes"));
+    assert.ok(lastNotes(jc).includes("Couldn't find that task"));
+  } finally {
+    S.update((st) => (st.sessions = st.sessions.filter((x) => !["ses_juno", "ses_rexs"].includes(x.id))));
+  }
+});
+
+await check("stop_watch stops only a watch the turn was shown; manage_routine only a routine of the bot or of the bots under it", async () => {
+  S.update((st) => {
+    st.watches = [...(st.watches ?? []), { id: "w_rex", botId: "rex", site: "x.com", lookFor: "DMs", since: 1, display: 101 }];
+    st.routines.push(
+      { id: "rtn_rex", botId: "rex", title: "Rex's digest", goal: "x", schedule: { kind: "daily", time: "09:00" }, enabled: true },
+      { id: "rtn_pip", botId: "pip", title: "Pip's check", goal: "x", schedule: { kind: "daily", time: "10:00" }, enabled: true },
+    );
+  });
+  try {
+    const w = await botTurnWith("juno", "stop watching x.com", [toolCall("stop_watch", { watch_id: "w_rex" })]);
+    assert.equal(w.out(), "No such watch.");
+    assert.ok(S.getState().watches.some((x) => x.id === "w_rex"), "the watch stays");
+    assert.ok(!everything(w.first).includes("w_rex"));
+    const r = await botTurnWith("nova", "pause Rex's digest", [toolCall("manage_routine", { routine_id: "rtn_rex", action: "pause", at: null, schedule: null, title: null, goal: null, quiet: null, time_zone: null })]);
+    assert.equal(r.out(), "No such routine. Its id is in the Routines list.");
+    assert.equal(S.getState().routines.find((x) => x.id === "rtn_rex").enabled, true);
+    assert.match(notesOf(r.first), /rtn_pip: \\"Pip's check\\" \(Pip\)/);
+    assert.ok(!notesOf(r.first).includes("rtn_rex"));
+    const p = await botTurnWith("nova", "pause Pip's check", [toolCall("manage_routine", { routine_id: "rtn_pip", action: "pause", at: null, schedule: null, title: null, goal: null, quiet: null, time_zone: null })]);
+    assert.equal(p.out(), `Paused "Pip's check".`);
+  } finally {
+    S.update((st) => {
+      st.watches = st.watches.filter((x) => x.id !== "w_rex");
+      st.routines = st.routines.filter((x) => !["rtn_rex", "rtn_pip"].includes(x.id));
+    });
+  }
+});
+
+await check("in a group chat a bot's question goes only to the bots it may ask, and it's told whom it may ask", async () => {
+  const gid = "chat_group_chart";
+  S.update((st) => st.chats.push({ id: gid, kind: "group", botIds: ["juno", "max", "nova"], typing: [], title: "Launch" }));
+  process.env.TYPESAFE_API_KEY = "ts-test-chart";
+  // Alex's message is for Juno; Juno's answer puts a question to the others, which nobody takes up.
+  jev.asked = [];
+  jev.answer = (b) => (b.questions.need ? { need: { type: "choice", choice: "words", confidence: 1, probabilities: { words: 1 } }, juno: { type: "noul", noul: 0.95 }, max: { type: "noul", noul: 0 }, nova: { type: "noul", noul: 0 } } : {});
+  try {
+    answers.push(reply("Max and Nova, what do you think of the launch date?"));
+    const n = asked.length;
+    await Chat.handleMessage(gid, "Juno, what's the plan for the launch?");
+    hear(notesOf(asked[n]));
+    assert.match(notesOf(asked[n]), /To ask another bot here something, address them by name: Nova\. Don't repeat what another bot already said\./);
+    // The group's other bots: by name only the ones it may ask.
+    assert.match(notesOf(asked[n]), /This is a group chat with Alex, Nova \(Sales\) and another bot\. You were picked/);
+    assert.ok(!notesOf(asked[n]).includes("Max (Research)"));
+    // Who answers what (plan): Alex's message, then Juno's.
+    const plans = jev.asked.filter((b) => b.questions.reaction);
+    assert.equal(plans.length, 2, "Alex's message, then Juno's");
+    assert.deepEqual(Object.keys(plans[0].questions).filter((k) => !["need", "reaction"].includes(k)).sort(), ["juno", "max", "nova"], "Alex's message: any of them");
+    assert.deepEqual(Object.keys(plans[1].questions).filter((k) => k !== "reaction").sort(), ["nova"], "only Nova may be put Juno's question");
+  } finally {
+    jev.answer = null;
+    delete process.env.TYPESAFE_API_KEY;
+    S.update((st) => {
+      st.chats = st.chats.filter((c) => c.id !== gid);
+      st.messages = st.messages.filter((m) => m.chatId !== gid);
+    });
+  }
+});
+
+await check("a member's turn on a bot is held to both: the chart and what they're given", async () => {
+  // Sam has Write on Nova and Max, Read on Rex: Nova may ask Max (both sideways) but never Rex (closed), whatever Sam has.
+  S.update((s) => (s.workspaces[0].memberAccess["sam@example.com"] = { others: "none", bots: { nova: "write", max: "write", rex: "read", pip: "read" }, at: 1 }));
+  try {
+    answers.push(reply("Ok."));
+    const n = asked.length;
+    await Chat.handleMessage(botChatId("nova"), "hi", undefined, undefined, undefined, undefined, undefined, undefined, undefined, { userId: "user_sam", email: "sam@example.com", name: "Sam", ref: "key_sam_chart1" });
+    assert.deepEqual(enumOf(asked[n], "ask_teammate"), ["max", "pip"]);
+    assert.equal(enumOf(asked[n], "hand_off"), null, "Pip is only at Read for Sam: no hand_off");
+    // A member's turn on a bot that keeps its memory to itself: no memory either way.
+    setChart({ ...CHART, bots: { ...CHART.bots, nova: { memory: "own" } } });
+    answers.push(reply("Ok."));
+    const m = asked.length;
+    await Chat.handleMessage(botChatId("nova"), "remember this", undefined, undefined, undefined, undefined, undefined, undefined, undefined, { userId: "user_sam", email: "sam@example.com", name: "Sam", ref: "key_sam_chart2" });
+    for (const no of ["remember", "recall"]) assert.ok(!toolNames(asked[m]).includes(no), `no ${no}`);
+    assert.ok(!notesOf(asked[m]).includes("long-term memory"));
+  } finally {
+    setChart(CHART);
+    S.update((s) => (s.workspaces[0].memberAccess["sam@example.com"] = { others: "none", bots: { boppy: "write" } }));
+  }
+});
+
+await check("a member's turn names only the bots they see: Pip's lead, Nova, isn't named to someone who has Pip alone", async () => {
+  S.update((s) => (s.workspaces[0].memberAccess["cy@example.com"] = { others: "none", bots: { pip: "write" }, at: 1 }));
+  try {
+    answers.push(reply("Ok."));
+    const n = asked.length;
+    await Chat.handleMessage(botChatId("pip"), "hi", undefined, undefined, undefined, undefined, undefined, undefined, undefined, { userId: "user_cy", email: "cy@example.com", name: "Cy", ref: "key_cy_chart1" });
+    answers.length = 0;
+    hear(asked[n].instructions);
+    assert.equal(enumOf(asked[n], "ask_teammate"), null, "nobody Cy sees to ask");
+    assert.match(asked[n].instructions, /\nYou answer to a lead on the team, who sees what you're working on\.\n/);
+    assert.ok(!everything(asked[n]).includes("Nova"), "Nova isn't named on Cy's turn");
+  } finally {
+    S.update((s) => delete s.workspaces[0].memberAccess["cy@example.com"]);
+  }
+});
+
+await check("a bot that keeps its memory to itself is told so, the main bot is told it sees its work not what it was told, and as a teammate it answers from its work, never its memory or chats", async () => {
+  setChart({ ...CHART, bots: { ...CHART.bots, juno: { ...CHART.bots.juno, memory: "own" } } });
+  S.update((st) => st.messages.push({ id: "msg_juno_private", chatId: botChatId("juno"), role: "user", text: "My sister's birthday is in May.", at: Date.now() }));
+  try {
+    const juno = (await botTurnWith("juno", "hi")).first;
+    hear(juno.instructions);
+    assert.match(juno.instructions, /\nYour memory is your own: what you learn here isn't shared with the other bots\. When a teammate asks you something, tell them about your work, never what Alex or Ava told you\.\nYou can still read what the team knows about Alex\.\n/);
+    // The main bot asks Juno: Juno answers from its work, with no memory and none of its chats with Alex.
+    answers.push(calling(toolCall("ask_teammate", { bot_id: "juno", question: "What is Ava planning?" })), reply("Juno is on her list."), reply("Ok."));
+    const n = asked.length;
+    await Chat.handleMessage(chatId, "what is Juno up to?");
+    answers.length = 0;
+    const main = asked[n];
+    hear(main.instructions);
+    assert.match(main.instructions, /\nJuno keeps its memory to itself: you see what it's working on, not what it was told\.\nNot every bot may ask every other: [^\n]*\. Tell a bot about another bot's work only when it may ask that bot\.\n/);
+    const theirs = asked[n + 1];
+    hear(theirs.instructions);
+    assert.match(theirs.instructions, /\nYour memory and chats are your own: answer Boppy about your work \(what you're doing, what's done\), never what Alex or Ava told you\./);
+    assert.ok(!theirs.instructions.includes("My sister's birthday") && !theirs.instructions.includes("Your recent chat with Alex"), "none of its chats with Alex");
+  } finally {
+    setChart(CHART);
+    S.update((st) => (st.messages = st.messages.filter((m) => m.id !== "msg_juno_private")));
+  }
+});
+
+await check("PATCH /api/workspaces { id, chain }: kept as cleanChain makes it, only from the Bops window, never while a shared workspace is open", async () => {
+  const Route = await import(`${root}/app/api/workspaces/route.ts`);
+  const { orgoKey } = await import(`${root}/lib/server/orgo-auth.ts`);
+  const req = (body, headers = {}) => new Request("http://127.0.0.1:3210/api/workspaces", { method: "PATCH", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const was = S.getState().workspaces[0].chain;
+  try {
+    const res = await Route.PATCH(req({ id: "ws_main", chain: { sideways: "closed", bots: { pip: { lead: "pip" }, boppy: { memory: "own" }, juno: { for: "nobody@example.com" } }, pairs: { "max>boppy": true, "max>rex": true } } }));
+    assert.equal(res.status, 200);
+    const got = (await res.json()).chain;
+    assert.deepEqual({ ...got, at: 0 }, { sideways: "closed", pairs: { "max>rex": true }, at: 0 });
+    assert.ok(got.at > 0, "stamped");
+    assert.deepEqual(S.getState().workspaces[0].chain, got);
+    assert.equal((await Route.PATCH(req({ chain: {} }))).status, 400, "which workspace");
+    assert.equal((await Route.PATCH(req({ id: "ws_nope", chain: {} }))).status, 404);
+    process.env.BOPS_UI_TOKEN = "window-token-test";
+    try {
+      const no = await Route.PATCH(req({ id: "ws_main", chain: {} }));
+      assert.equal(no.status, 403);
+      assert.deepEqual(await no.json(), { error: "Only the owner can change the org chart." });
+      assert.equal((await Route.PATCH(req({ id: "ws_main", chain: was }, { "x-bops-window": "window-token-test" }))).status, 200);
+    } finally {
+      delete process.env.BOPS_UI_TOKEN;
+    }
+    globalThis.bopsShared = { user: S.stateUser(), key: orgoKey(), copy: { openNow: () => ({ projectId: "p_shared" }), data: () => ({ messages: [] }), close() {} }, subscriber: { stop() {} }, moods: { forApp: () => ({}) } };
+    try {
+      assert.equal((await Route.PATCH(req({ id: "ws_main", chain: {} }))).status, 403);
+    } finally {
+      globalThis.bopsShared = null;
+    }
+    assert.deepEqual(S.getState().workspaces[0].chain.bots, was.bots, "nothing changed while shared");
+  } finally {
+    setChart(CHART);
+  }
+});
+
+await check("GET /api/workspaces?olderBops=1: a runner on a Bops from before the chart says so; one new enough, stopped or none doesn't", async () => {
+  const Route = await import(`${root}/app/api/workspaces/route.ts`);
+  const older = async () => (await (await Route.GET(new Request("http://127.0.0.1:3210/api/workspaces?olderBops=1"))).json()).older;
+  const runner = (version, status = "running") => ({ status, version, buildId: "b1", by: "dev_1", at: 1 });
+  try {
+    assert.equal(await older(), false, "no runner, and Orgo can't be asked here");
+    S.update((st) => (st.runners = { comp_a: runner("0.0.32") }));
+    assert.equal(await older(), true);
+    S.update((st) => (st.runners = { comp_a: runner("0.0.33"), comp_b: runner("0.0.31", "stopping"), comp_c: runner("0.0.30", "failed") }));
+    assert.equal(await older(), false, "new enough, or not running turns");
+  } finally {
+    S.update((st) => delete st.runners);
+  }
+});
+
+await check("a deleted bot's place on the chart: the bots under it answer to its lead, its exceptions go", async () => {
+  const W2 = await import(`${root}/lib/server/workspaces.ts`);
+  const st = structuredClone(S.getState());
+  st.workspaces[0].chain = { bots: { nova: { lead: "max" }, pip: { lead: "nova" } }, pairs: { "juno>nova": true, "juno>max": true } };
+  W2.forgetBotInChain(st, "nova", "ws_main", "max");
+  assert.deepEqual(st.workspaces[0].chain, { bots: { pip: { lead: "max" } }, pairs: { "juno>max": true } });
+  W2.forgetBotInChain(st, "max", "ws_main", "boppy");
+  assert.deepEqual(st.workspaces[0].chain, {}, "under the main bot now: nothing left to say");
+});
+
+S.update((s) => {
+  s.bots = s.bots.filter((b) => !TEAM.some((t) => t.id === b.id));
+  s.chats = s.chats.filter((c) => !TEAM.some((t) => c.id === botChatId(t.id)));
+  delete s.workspaces[0].chain;
+  delete s.workspaces[0].memberAccess["ava@example.com"];
 });
 
 /* ---------------- Plain words ---------------- */

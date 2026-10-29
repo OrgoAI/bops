@@ -49,10 +49,59 @@ export type AppProjectBehind = { site: string; computerId: string; projectId: st
 export type AppSiteHosting = { name: string; projectId?: string; url?: string };
 
 /**
- * How many sites an app can have: as many deploy projects as one computer takes (orgo-web
- * PROJECTS_PER_COMPUTER), which other apps on that computer count toward too (Orgo says so then).
+ * How many sites an app can have: each is two deploy projects on its computer (Prod's and Staging's), and
+ * orgo-web takes 10 a computer (PROJECTS_PER_COMPUTER), which other apps on that computer count toward too
+ * (Orgo says so then).
  */
 export const MAX_SITES = 5;
+
+/* ---------------- Its environments: Local, Staging and Prod, all on its computer ---------------- */
+
+/**
+ * Where an app runs, all three on its bot's own computer (the one AppHosting names), like Vercel's
+ * Development, Preview and Production:
+ * - "local": its working folder (/workspace/apps/<name>) run as a dev server there, on a port of its own,
+ *   started and stopped from Your Apps or by the bot (vm/bin/bops-local). Not public: it opens on the
+ *   computer's screen, or from this Mac over the tailnet. Its variables are Staging's, and its own on top.
+ * - "staging": a second deploy project of each site on the computer (stagingName: <site>-staging, so its
+ *   address is <site>-staging.orgo.dev), with its own variables and settings. Deploy goes here by default.
+ * - "prod": each site's own deploy project, as every app had before, and its real domains (Cloudflare
+ *   first). Promote puts on it the changeset Staging serves.
+ * Nothing of Local or Staging is kept in Bops' state: Staging's projects are found on the computer by their
+ * names (so an older Bops, which knows only AppHosting, never loses or changes them), Local's dev servers
+ * are written on the computer itself.
+ */
+export type AppEnv = "local" | "staging" | "prod";
+export const APP_ENVS: readonly AppEnv[] = ["local", "staging", "prod"];
+export const isAppEnv = (v: unknown): v is AppEnv => typeof v === "string" && (APP_ENVS as readonly string[]).includes(v);
+
+/** A site's Staging as Orgo says it: its deploy project on the app's computer (null: none yet), its address, what it serves, its newest deploy. */
+export type StagingSite = { projectId: string | null; url: string | null; serving: string | null; live: HostedApp["live"] };
+
+/**
+ * A site's Local as its computer said it last: its dev server's state (starting: its port doesn't answer
+ * yet; failed: it stopped by itself, `error` its last words), port, the command it runs, when it started,
+ * and `url`, where this Mac opens it (over the tailnet; null: it opens on its computer's screen). `env`:
+ * the names of its own variables (on top of Staging's, which it reads unless set here).
+ */
+export type LocalSite = {
+  state: "running" | "starting" | "stopped" | "failed";
+  port: number | null;
+  command: string | null;
+  since: number | null;
+  error: string | null;
+  url: string | null;
+  env: string[];
+};
+
+/**
+ * GET /api/hosted-apps/[name]/local?ws= : every site's Local, by site name (the app's own named as the app).
+ * `asleep`: its computer sleeps, so none runs (nothing was asked of it, so it stays asleep); `why`: it
+ * couldn't be asked (no computer, Orgo not answering). POST …/local { ws, action: "start" | "stop" | "open",
+ * site?, command? } answers it again: start (its command, or the one it had, or the one its folder says),
+ * stop, or open it on its computer's screen (`opened`).
+ */
+export type LocalAnswer = { sites: Record<string, LocalSite>; asleep?: true; why?: string; opened?: true };
 
 /**
  * A site's name: one an app could have, short enough to be its deploy project's (orgo-web takes 32
@@ -87,6 +136,8 @@ export type HostedApp = {
    * and `serving` say it of the app's own above. Not there for an app with one site.
    */
   sites?: HostedSite[];
+  /** Its own site's Staging (not there when Orgo couldn't be asked). `live`, `serving` and `hosting` above are Prod's. */
+  staging?: StagingSite;
 };
 
 /**
@@ -94,7 +145,7 @@ export type HostedApp = {
  * and its domains (the ones its computer serves on its port), read with every site's from its computer's
  * list at once; not there when Orgo couldn't say, or wasn't asked (its tab reads them again when it opens).
  */
-export type HostedSite = { name: string; projectId: string | null; url: string | null; serving: string | null; live: HostedApp["live"]; domains?: SiteDomain[] };
+export type HostedSite = { name: string; projectId: string | null; url: string | null; serving: string | null; live: HostedApp["live"]; domains?: SiteDomain[]; staging?: StagingSite };
 
 /** One of a site's domains as its app's Sites list shows it: its name and how it's doing (live, or waiting for its DNS). */
 export type SiteDomain = { domain: string; status: AppDomainStatus };
@@ -135,11 +186,16 @@ export type HostedAppsAnswer = { enabled: boolean; why?: string; apps: HostedApp
  * GET /api/hosted-apps/[name]/logs?ws=&after=&site= answers the newest deploy's { state, log, next, more }.
  *
  * Every route about one site of it (logs, settings, env, dns, domains) takes `site` the same way, in its
- * query or its body: none names the app's own site, as before there were more.
+ * query or its body: none names the app's own site, as before there were more. Deploy, rollback, logs,
+ * settings take `env` the same way ("staging"), and env takes `where` ("staging", or "local": Local's own
+ * variables, kept on its computer): none is Prod, as before there was Staging. Deploy from the window sends "staging". "promote" { site?, at? }
+ * deploys on Prod the changeset Staging serves (each site's own; `at`, with `site`: the one the window saw,
+ * refused when Staging moved on since).
  */
 export type HostedAppAction =
-  | { ws: string; action: "deploy"; at?: string; botId?: string; site?: string }
-  | { ws: string; action: "rollback"; deployment: string; site?: string }
+  | { ws: string; action: "deploy"; at?: string; botId?: string; site?: string; env?: "staging" | "prod" }
+  | { ws: string; action: "promote"; at?: string; site?: string }
+  | { ws: string; action: "rollback"; deployment: string; site?: string; env?: "staging" | "prod" }
   | { ws: string; action: "addSite" | "removeSite"; site: string };
 
 /** What removing an app did: `said`, what couldn't be (a domain Orgo kept), in words. */
@@ -201,6 +257,12 @@ export type AppDomain = {
    */
   publish: { type: string; name: string; value: string; found?: "ok" | "missing" | "wrong" }[];
   where?: string | null;
+  /**
+   * One bought elsewhere whose DNS is in the user's own Cloudflare account (the zone it's in, as Cloudflare
+   * names it, and its id there), read with the Cloudflare key in their Orgo vault: Bops can set its records
+   * there (CloudflarePlan). Not there without that key, or when its zone isn't in that account.
+   */
+  cloudflare?: { zone: string; zoneId: string };
 };
 
 /**
@@ -281,9 +343,17 @@ export type AppDeploy = {
  * removes variables (answers { env } names), making its deploy project first when it has none yet, so its
  * first build has them; their values go to Orgo alone, never into Bops' state or its logs.
  */
-export type AppSettingsAnswer = { url: string | null; settings: AppProjectSettings | null; env: string[]; deploys: AppDeploy[]; said?: string };
-export type AppSettingsChange = { ws: string; site?: string; port?: number | string; install?: string; build?: string; start?: string; health?: string };
-export type AppEnvChange = { ws: string; site?: string; env: Record<string, string | null> };
+export type AppSettingsAnswer = {
+  url: string | null;
+  settings: AppProjectSettings | null;
+  env: string[];
+  deploys: AppDeploy[];
+  said?: string;
+  /** Of Staging's (env=staging): Prod's variables' names, so the window says which Staging doesn't have. */
+  prodEnv?: string[];
+};
+export type AppSettingsChange = { ws: string; site?: string; env?: "staging" | "prod"; port?: number | string; install?: string; build?: string; start?: string; health?: string };
+export type AppEnvChange = { ws: string; site?: string; where?: AppEnv; env: Record<string, string | null> };
 
 /** A variable's name as orgo-web takes it (uppercase shell names); PORT and the shell's own are Orgo's. */
 export const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
@@ -321,17 +391,73 @@ export type Registrant = Partial<Record<RegistrantField, string>>;
 /**
  * GET /api/hosted-apps/[name]/domains?ws= (the window only): what a domain can be added from. `buy.open`
  * false with why when buying isn't possible here (not open to the account, view only access, a key for one
- * workspace); `owned`: the workspace's bought domains nothing points at yet, to use as they are; `contact`:
- * who the user registered their last domain to, as Orgo keeps it, to fill the form (never kept by Bops).
+ * workspace); `owned`: every one of the workspace's bought domains (active ones), each with the names under
+ * it that point somewhere already (`inUse`: the app that serves it when it's on this app's computer, else
+ * `where`, the computer's name), so one is used as it is, or with a name under it; `contact`: who the user
+ * registered their last domain to, as Orgo keeps it, to fill the form (never kept by Bops).
  */
-export type AppDomainOptions = { buy: { open: boolean; why?: string }; owned: { id: string; domain: string }[]; contact: Registrant | null };
+export type AppDomainOptions = { buy: { open: boolean; why?: string }; owned: OwnedDomain[]; contact: Registrant | null; cloudflare?: CloudflareOptions };
+
+/**
+ * What Add a domain offers from the user's own Cloudflare account, read with the Cloudflare key in their
+ * Orgo vault through Orgo (the key never leaves Orgo): its active domains (zones), the first 200 (`more`:
+ * there are others), or why none (`why`: the key is there but Orgo or Cloudflare can't use it now). Not
+ * there at all without a Cloudflare key: Add a domain is as it was.
+ */
+export type CloudflareOptions = { zones: CloudflareZone[]; more?: true; why?: undefined } | { why: string; zones?: undefined };
+
+/**
+ * One of the user's Cloudflare domains (a zone): its id there, its name, the Cloudflare account it's in when
+ * the key sees more than one, and the names on this app's computer that are it or under it (as OwnedDomain's).
+ */
+export type CloudflareZone = { id: string; domain: string; account?: string; inUse: OwnedDomain["inUse"] };
+
+/**
+ * One line of what Bops would change in Cloudflare for a domain: `op` add, change (the record `was` before),
+ * remove, same (set already: nothing to do) or blocked (`note` says why, and nothing is written). `name` in
+ * full, `host` as the zone names it (@ for the zone itself). `theirs`: a record Bops didn't set, changed only
+ * after the user said so (Replace and add); `stale`: one Bops set for a domain that's gone.
+ */
+export type CloudflareChange = {
+  op: "add" | "change" | "remove" | "same" | "blocked";
+  type: string;
+  name: string;
+  host: string;
+  value: string;
+  was?: string;
+  theirs?: true;
+  stale?: true;
+  note?: string;
+};
+
+/**
+ * What Bops would set in Cloudflare for one of the app's domains, before anything is written
+ * (GET /api/hosted-apps/[name]/domains/[domainId]/cloudflare?ws=&site=): the zone and its id there, every
+ * change, whether one needs the user's OK (`ask`), why it can't be (`blocked`), and the plan's fingerprint,
+ * which the apply sends back so only this very plan is written.
+ */
+export type CloudflarePlan = { zone: string; zoneId: string; domain: string; domainId: string; changes: CloudflareChange[]; ask: boolean; blocked: string | null; fingerprint: string };
+
+/**
+ * POST …/domains/[domainId]/cloudflare { ws, site?, plan, replace? }: the plan written in one Cloudflare batch
+ * (all of it or none), then Orgo asked to check the domain. Answers it as checked, and how many records were
+ * written; refused with { error, code }: STALE with the plan as it is now (`cloudflare`), NEEDS_OK when it
+ * replaces records Bops didn't set and `replace` wasn't sent, BLOCKED, NO_EDIT, UNKNOWN (Cloudflare didn't
+ * answer, so whether it went in isn't known).
+ */
+export type CloudflareApplied = AppDomainChecked & { written: number };
+export type CloudflareApply = { ws: string; site?: string; plan: string; replace?: true };
+
+/** One of the workspace's bought domains as Add a domain offers it: what points at it or under it already. */
+export type OwnedDomain = { id: string; domain: string; inUse: { name: string; app?: string; where?: string }[] };
 
 /**
  * POST /api/hosted-apps/[name]/domains (the window only):
  * - { ws, action: "buy", domain, registrant, price }: buys it for `price` cents of Orgo credits (refused,
  *   with the price now, when it changed), then points it at this app;
  * - { ws, action: "connect", domain } (one the user owns, or a name under one bought through Orgo) or
- *   { ws, action: "connect", zone } (a bought one, by its id): points it at this app.
+ *   { ws, action: "connect", zone, subdomain? } (a bought one, by its id, or the name `subdomain` under
+ *   it, like www): points it at this app.
  * Answers AppDomainAdded: the app's domains as they are now and the one added. A buy that went through but
  * couldn't be pointed here says so in `error`, with `bought`. Refused: { error, code?, field?, price?,
  * renewal?, years?, available? } (Orgo's code, so the window can ask again at a new price).
@@ -339,6 +465,117 @@ export type AppDomainOptions = { buy: { open: boolean; why?: string }; owned: { 
  * POST …/domains/[id] { ws } checks a domain's DNS (answers { domain, said? }), DELETE …/domains/[id] { ws }
  * removes it from the app (answers AppDomainsAnswer).
  */
-export type AppDomainAdd = ({ ws: string; action: "buy"; domain: string; registrant: Registrant; price: number } | { ws: string; action: "connect"; domain?: string; zone?: string }) & { site?: string };
-export type AppDomainAdded = { domains: AppDomainsAnswer; domain: AppDomain | null; bought?: string; error?: string };
+export type AppDomainAdd = (
+  | { ws: string; action: "buy"; domain: string; registrant: Registrant; price: number }
+  | { ws: string; action: "connect"; domain?: string; zone?: string; subdomain?: string }
+  | { ws: string; action: "cloudflare"; zone: string; subdomain?: string }
+) & { site?: string };
+/**
+ * `cloudflare` and `fresh`: one added from the user's Cloudflare ({ action: "cloudflare", zone, subdomain? },
+ * the zone by its Cloudflare id), with what Bops would set there for it; it was just pointed here, so Cancel
+ * takes it off again.
+ */
+export type AppDomainAdded = { domains: AppDomainsAnswer; domain: AppDomain | null; bought?: string; error?: string; cloudflare?: CloudflarePlan; fresh?: true };
 export type AppDomainChecked = { domain: AppDomain; said?: string };
+/** DELETE …/domains/[id]: its domains as they are now; `said`, what Bops couldn't take off in Cloudflare too, in words. */
+export type AppDomainRemoved = AppDomainsAnswer & { said?: string };
+
+/**
+ * Search results as a person reads them (as orgo.ai orders them): the exact name typed first, then the ones
+ * that can be bought, then the rest, each group in Orgo's order.
+ */
+export function offersInOrder(results: DomainOffer[], typed: string): DomainOffer[] {
+  const exact = typed.trim().toLowerCase();
+  const rank = (o: DomainOffer) => (o.domain === exact ? 0 : o.status === "available" && o.price !== null ? 1 : 2);
+  return results
+    .map((o, i) => ({ o, i }))
+    .sort((a, b) => rank(a.o) - rank(b.o) || a.i - b.i)
+    .map(({ o }) => o);
+}
+
+/**
+ * A name under a bought domain as it's typed to point it, lowercase ("" for the domain itself): labels of
+ * letters, digits and hyphens, 1 to 63 each, no hyphen at either end, joined by dots. Null: it can't be one.
+ */
+export function subdomainTyped(s: unknown): string | null {
+  if (typeof s !== "string") return null;
+  const t = s.trim().toLowerCase().replace(/\.+$/, "");
+  if (!t) return "";
+  return t.length <= 200 && t.split(".").every((l) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(l)) ? t : null;
+}
+
+/* ---------------- The workspace's domains ---------------- */
+
+/**
+ * A name under one of the workspace's bought domains (or the domain itself) that points at a computer: the
+ * app that serves it, and its site when that isn't the app's own, when it's one of this workspace's apps;
+ * else `where`, the computer's name. `status`: how it's doing there.
+ */
+export type DomainUse = { name: string; status: AppDomainStatus; app?: string; site?: string; where?: string };
+
+/** A domain the workspace bought through Orgo (orgo-web lists only pending and active ones), with its renewal and what points at it. */
+export type WorkspaceDomain = { id: string; domain: string; status: "pending" | "active"; renewal?: AppRenewal; uses: DomainUse[] };
+
+/**
+ * GET /api/domains?ws= (Settings, Domains; the window only). `open` false with why: nothing of domains
+ * here (not signed in, not on Orgo, closed to the account, Bops on a bot's computer). `buy` and `contact`
+ * as in AppDomainOptions; `domains` newest first, as Orgo lists them.
+ */
+export type WorkspaceDomainsAnswer = { open: boolean; why?: string; buy: { open: boolean; why?: string }; contact: Registrant | null; domains: WorkspaceDomain[] };
+
+/**
+ * POST /api/domains { ws, domain, registrant, price }: bought for the workspace at `price` cents of Orgo
+ * credits (the price the user saw), pointed nowhere. Answers the list as it is now, and the one bought.
+ */
+export type WorkspaceDomainBuy = { ws: string; domain: string; registrant: Registrant; price: number };
+export type WorkspaceDomainBought = { domains: WorkspaceDomainsAnswer; bought: string };
+
+/**
+ * GET /api/domains/[zone]?ws= : one of its bought domains' zone (each record Orgo keeps locked, with why),
+ * with its renewal, and what points at it. PATCH /api/domains/[zone] { ws, autoRenew } turns its auto-renew
+ * on or off (answers { renewal }). POST /api/domains/[zone]/records { ws, ...AppDnsInput } adds a record,
+ * PATCH …/records/[id] { ws, ...AppDnsInput } changes one, DELETE …/records/[id] { ws } removes one; each
+ * answers AppDnsWritten, or why not (as the app's own DNS routes do).
+ */
+export type WorkspaceZoneAnswer = { zone: AppDnsZone; uses: DomainUse[] };
+
+/**
+ * What people a workspace is shared with see of its apps on the web, at Your Apps Read or more (Workspace.appsForMembers,
+ * lib/server/apps-for-members.ts seeApps), as the owner's Mac last read Ingot and Orgo: never variables, Ingot tokens,
+ * keys, deploy logs or a deploy's error text, who a domain is registered to, DNS records, or computer and project ids.
+ */
+export type AppsForMembers = {
+  /** When this Mac last read them: written when something changed, or an hour after the last write. */
+  at: number;
+  apps: Record<string, AppForMembers>;
+  /** The workspace's domains bought through Orgo, for Use a domain: sent to Write only (cloud/ws-slice.ts appsFor). */
+  owned?: { id: string; domain: string }[];
+};
+
+/** One app as members see it (AppsForMembers.apps). */
+export type AppForMembers = {
+  /** The newest changeset on main. */
+  head: { id: string; message: string; at: number } | null;
+  /** Every site, its own first: HostedSite without its project id. */
+  sites: { name: string; url: string | null; serving: string | null; live: { id: string; state: DeployState | null; when: number | null } | null; domains?: SiteDomain[] }[];
+  /** The newest MEMBER_COMMITS changesets on main (AppCommit without `serving`, which `sites[].serving` says). */
+  commits: { id: string; message: string; author: string; at: number; changes: AppCommit["changes"] }[];
+  /** The newest MEMBER_DEPLOYS deploys of each site, newest first: AppDeploy without `error`. */
+  deploys: (Omit<AppDeploy, "error"> & { site: string })[];
+  /** Each site's settings (AppProjectSettings), by site: sent to Write only. */
+  settings?: Record<string, AppProjectSettings>;
+  /** What members did to it, newest first, at most MEMBER_ACTS: who, what, and how it went (named as the member). */
+  acts?: MemberAppAct[];
+};
+
+/** A member's act on an app, as the owner's Mac did it or refused it (lib/server/member-acts.ts). */
+export type MemberAppAct = { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain"; site?: string; domain?: string; ok: boolean; said?: string; at: number };
+
+/** How much members are shown: apps, sites of each, changesets, deploys a site, and acts kept. */
+export const MEMBER_APPS = 30;
+export const MEMBER_COMMITS = 20;
+export const MEMBER_DEPLOYS = 10;
+export const MEMBER_ACTS_KEPT = 10;
+
+/** An app's sites by name: its own (named as the app), then AppHosting.sites in order. */
+export const sitesOfHosting = (h: Pick<AppHosting, "sites">, name: string): string[] => [name, ...(h.sites ?? []).map((s) => s.name)];

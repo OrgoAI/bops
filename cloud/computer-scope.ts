@@ -171,13 +171,24 @@ export function computersMessage(m: Blob, bots: Set<string>, chats: Set<string>,
 
 export type Level = "read" | "act";
 
-/** What a bot may do in an app account (lib/types.ts levelOf): what the user set, else Read & act for its workspace's bots by default. */
-export function levelOf(b: Blob, a: Blob): Level | null {
-  const set = isObject(b.access) ? b.access[a.id as string] : undefined;
+/**
+ * What a bot may do in an app account (lib/types.ts levelOf): what the user set, else Read & act for the bots of its
+ * workspace by default, and of each workspace it's switched on in (`usedIn`: Workspace.loginsOn, usedInOf).
+ */
+export function levelOf(b: Blob, a: Blob, usedIn?: readonly string[]): Level | null {
+  const set = isObject(b.access) && Object.hasOwn(b.access, a.id as string) ? b.access[a.id as string] : undefined;
   if (set === "read" || set === "act") return set;
   const openToTeam = !!a.workspaceId && !a.onlyGiven;
-  if (set === "none" || CHANNEL_APPS.has(a.app as string) || !openToTeam || workspaceOf(a) !== workspaceOf(b)) return null;
-  return "act";
+  if (set === "none" || CHANNEL_APPS.has(a.app as string) || !openToTeam) return null;
+  return workspaceOf(a) === workspaceOf(b) || !!usedIn?.includes(workspaceOf(b)) ? "act" : null;
+}
+
+/** The workspaces an account is switched on in besides its own (lib/types.ts usedIn: Workspace.loginsOn["app:<id>"]). */
+export function usedInOf(state: Blob, accountId: string): string[] {
+  const key = `app:${accountId}`;
+  return listOf(state.workspaces)
+    .filter((w) => isObject(w.loginsOn) && Object.hasOwn(w.loginsOn, key) && isObject(w.loginsOn[key]))
+    .map((w) => w.id as string);
 }
 
 /**
@@ -190,8 +201,9 @@ export function grantsOn(state: Blob, desktopId: string, botId?: string): Map<st
   const out = new Map<string, { app: string; level: Level }>();
   for (const a of listOf(state.accounts)) {
     if (a.status !== "active" || typeof a.app !== "string") continue;
+    const usedIn = usedInOf(state, a.id as string);
     for (const b of bots) {
-      const level = levelOf(b, a);
+      const level = levelOf(b, a, usedIn);
       if (!level) continue;
       const had = out.get(a.id as string);
       out.set(a.id as string, { app: a.app, level: had?.level === "act" || level === "act" ? "act" : "read" });

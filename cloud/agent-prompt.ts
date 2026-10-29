@@ -1,3 +1,4 @@
+import { mayAsk, type Chain } from "./chain.ts";
 import { ABOUT_BOPS, ASKING, WRITING } from "./style.ts";
 
 /**
@@ -19,7 +20,7 @@ export type AgentBot = { id: string; name: string; role: string; color: string; 
 /** Boppy as a new Mac install makes it (lib/server/store.ts): the main bot of a user with no state yet. */
 export const DEFAULT_BOT: AgentBot = { id: "boppy", name: "Boppy", role: "Chief of Staff", color: "#0A0A0A", isMain: true };
 
-type Workspace = { id: string; line?: { phone: string; type: string }; memory?: unknown };
+type Workspace = { id: string; line?: { phone: string; type: string }; memory?: unknown; chain?: Chain };
 type Task = { id: string; botId: string; title: string; status: string };
 type Channel = { kind: string; botId: string; handle?: string };
 
@@ -66,6 +67,8 @@ export function agentView(raw: unknown): AgentView {
         id: str(w.id),
         ...(isObject(w.line) && str(w.line.phone) ? { line: { phone: str(w.line.phone), type: str(w.line.type) } } : {}),
         ...(w.memory !== undefined ? { memory: w.memory } : {}),
+        // The team chart (cloud/chain.ts): who the bot may ask, and whose memory is its own. Read with care there.
+        ...(isObject(w.chain) ? { chain: w.chain as Chain } : {}),
       })),
     sessions: objects(s.sessions)
       .filter((x) => !!str(x.id) && !!str(x.botId))
@@ -155,7 +158,8 @@ function phoneLines(v: AgentView, name: string | null) {
 export function instructionsFor(v: AgentView, b: AgentBot, orgoName?: string | null): string {
   const name = ownerNameOf(v, orgoName);
   const owner = name ?? "the user";
-  const others = v.bots.filter((x) => x.id !== b.id && workspaceOf(x) === workspaceOf(b));
+  // Its teammates: the ones it may ask on the team chart (every one, for the main bot and without a chart).
+  const others = v.bots.filter((x) => x.id !== b.id && workspaceOf(x) === workspaceOf(b) && mayAsk(v, b.id, x.id));
   return [
     `You are ${b.name}, ${owner}'s chief of staff in Bops. ${ownerLine(v, name)}`,
     "This is a text conversation, like iMessage. Write short, plain, friendly replies: usually one to three sentences, no headings or tables.",

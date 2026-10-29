@@ -13,7 +13,7 @@ import { callApi, callApiTool, usableKeys } from "./keys";
 import { readSkill, READ_SKILL_TOOL } from "./workspace-skills";
 import { bot, patchSession, session, stateEpoch } from "./store";
 import { recordTokens, usageTags } from "./usage";
-import { othersThread, type AppApproval, type Session } from "@/lib/types";
+import { othersThread, outsideThread, type AppApproval, type Session } from "@/lib/types";
 
 /**
  * A thread on a bot's Orgo computer, run on the Responses API's own `computer` tool: the model sees
@@ -133,9 +133,11 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
   // call_api with the user's keys (keys.ts) reads only (GET): anything that changes something is asked for in the chat.
   // Not for a task someone outside Bops started, like the CRM. Not bank, payroll or compliance keys (chatOnly):
   // the task's browser and shell can reach any site, so a page could have it type what they answer anywhere.
-  // Nor for one a member with Write started or told something (othersThread): the owner's saved logins, apps and
-  // keys are theirs alone, whoever has Write on the bot. (Checked each turn: a member's reply can come mid-task.)
-  const outside = outsideTask(t.sessionId);
+  // One a member with Write started or told something (memberThread) has the logins its bot has: they reach the
+  // owner's logins only through the bots they may tell, every write asks the owner, and a saved site login signs in
+  // only when it's set to sign in by itself. Not the CRM (othersThread). (Checked each turn: a reply can come mid-task.)
+  const outside = strangersTask(t.sessionId);
+  const others = outsideTask(t.sessionId);
   const keyed = outside ? [] : (await usableKeys(b)).filter((k) => !k.chatOnly);
   const tools = [
     { type: "computer" },
@@ -147,7 +149,7 @@ async function steps(t: ComputerTurn, ws: { socket?: ResponsesSocket | null }): 
     READ_SKILL_TOOL,
     ...(t.apps && !outside ? APP_TOOLS(b) : []),
     ...DATA_TOOLS(b),
-    ...(outside ? [] : CRM_TOOLS(b)),
+    ...(others ? [] : CRM_TOOLS(b)),
     ...(keyed.length ? [callApiTool(keyed, { getOnly: true })] : []),
   ];
   const guard = newPageGuard();
@@ -662,9 +664,14 @@ export function pageLook(g: PageGuard, script: string, r: { text: string; run?: 
 
 /**
  * A task that's someone else's work (lib/types.ts othersThread): one someone outside Bops started, or a member with
- * Write started or told something, or a part of one. It has none of the owner's own: their logins, keys, CRM, apps.
+ * Write started or told something, or a part of one. It has none of the owner's CRM.
  */
 const outsideTask = (id: string) => othersThread(session(id), session);
+/**
+ * A stranger's task (lib/types.ts outsideThread): one someone outside Bops started, or a part of one. It has none of
+ * the owner's logins either: their saved site logins, keys and Connected apps.
+ */
+const strangersTask = (id: string) => outsideThread(session(id), session);
 
 /**
  * A tool call that may take a while (an app, a lookup, a sign-in), raced against the turn's Stop: a stopped
@@ -686,7 +693,9 @@ function orStop<T>(t: ComputerTurn, work: Promise<T>): Promise<T> {
  */
 async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = newPageGuard(), opts: { approved?: boolean } = {}): Promise<FunctionOutput | { pause: AskSpec }> {
   const s = session(t.sessionId)!;
-  const outside = outsideTask(t.sessionId);
+  // A stranger's task has none of the owner's logins; anyone else's (a member's too) none of the CRM.
+  const outside = strangersTask(t.sessionId);
+  const others = outsideTask(t.sessionId);
   let args: Record<string, unknown> = {};
   try {
     args = JSON.parse(o.arguments || "{}");
@@ -741,7 +750,7 @@ async function runFunction(t: ComputerTurn, o: OutputItem, guard: PageGuard = ne
     } else if (o.name && DATA_TOOL_NAMES.has(o.name)) {
       t.step(o.name, o.name === "business_search" ? `looked up ${String(args.job ?? "business data")}` : o.name === "find_data" ? `looked for "${String(args.query ?? "").slice(0, 60)}" in business data` : `got ${String(args.endpoint_id ?? "data")}`);
       output = await orStop(t, runDataTool(s.botId, o.name, args, { sessionId: t.sessionId }, { approved: opts.approved }));
-    } else if (o.name && CRM_TOOL_NAMES.has(o.name) && !outside) {
+    } else if (o.name && CRM_TOOL_NAMES.has(o.name) && !others) {
       t.step(o.name, crmStep(o.name, args));
       output = await orStop(t, runCrmTool(s.botId, o.name, args, { sessionId: t.sessionId }));
     } else output = `Unknown tool ${o.name}.`;

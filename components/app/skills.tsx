@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { appsShown } from "@/lib/apps-access";
+import { appsOwnShown } from "@/lib/apps-access";
 import { builtinLabels, builtinSkills, type BuiltinSkill } from "@/lib/builtin-skills";
 import { botHasLabel, botHasSkill, cleanLabel, isUnsorted, LABEL_ABOUT_MAX, labelInfoOf, sameLabel, SKILL_LABEL_MAX, UNSORTED, type SkillGroup, type SkillLabelInfo } from "@/lib/skill-labels";
 import { workspaceOf, type AppState, type Bot, type SkillKind, type SkillRef } from "@/lib/types";
@@ -206,7 +206,7 @@ export function SkillsPage({ state, only, focus, focusAt, nav, onClose }: { stat
   const ref = open ? [...skills, ...apps].find((r) => `${r.kind}:${r.slug}` === open) : undefined;
   const info = state.workspaces?.find((w) => w.id === ws)?.skillLabelInfo ?? [];
   // Bops' own Apps and source control skills only where apps are shown (lib/apps-access.ts): never in a shared workspace.
-  const appsHere = appsShown(state);
+  const appsHere = appsOwnShown(state);
   const ours = open?.startsWith("builtin:") ? builtinSkills(appsHere).find((s) => `builtin:${s.slug}` === open) : undefined;
   const kinds: SkillKind[] = only ? [only] : ["skill", "app"];
   // Who has what: the owner's, in their own window (never in a workspace shared with them).

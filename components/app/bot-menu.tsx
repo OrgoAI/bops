@@ -2,8 +2,8 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { appsStayLine, live, type AppState, type Bot, type Effort } from "@/lib/types";
-import { Mascot, Spinner } from "./mascot";
-import { needsYou, post } from "./ui";
+import { Mascot } from "./mascot";
+import { AskInPlace, needsYou, post } from "./ui";
 import { EFFORT_HINT, type Section } from "./bot-panel";
 
 /** What the menu's actions do, from the app (bops-app.tsx). */
@@ -22,7 +22,7 @@ const EFFORTS: Effort[] = ["auto", "low", "medium", "high"];
 /**
  * A bot's right-click menu (the sidebar's rows): who it is and what it's doing, four quick actions
  * (chat, call, its computer, its profile), what it runs (routines, its number and inbox), its settings
- * (Just do it, how hard it thinks), and Delete, which asks first and says what goes with it. The main
+ * (Just do it, how hard it thinks), and Delete, which asks first, in place, and says what goes with it. The main
  * bot runs the team, so it has no Delete. Esc, a click outside or a scroll closes it.
  */
 export function BotMenu({ state, bot: b, x, y, onClose, actions }: { state: AppState; bot: Bot; x: number; y: number; onClose: () => void; actions: BotMenuActions }) {
@@ -36,7 +36,7 @@ export function BotMenu({ state, bot: b, x, y, onClose, actions }: { state: AppS
     if (!el) return;
     const r = el.getBoundingClientRect();
     setAt({ left: Math.max(8, Math.min(x, window.innerWidth - r.width - 8)), top: Math.max(8, Math.min(y, window.innerHeight - r.height - 8)) });
-  }, [x, y, thinking]);
+  }, [x, y, thinking, confirm]);
   useEffect(() => {
     const key = (e: KeyboardEvent) => e.key === "Escape" && !confirm && onClose();
     const away = () => !confirm && onClose();
@@ -69,11 +69,10 @@ export function BotMenu({ state, bot: b, x, y, onClose, actions }: { state: AppS
   const row = "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] leading-4 text-ink hover:bg-[#F2F2F0]";
   const quick = "flex flex-1 flex-col items-center gap-1.5 rounded-xl py-2.5 text-[11.5px] font-medium leading-[14px]";
 
-  if (confirm) return <DeleteBot state={state} bot={b} onClose={onClose} />;
-
   return (
     <>
-      <div className="fixed inset-0 z-50" onMouseDown={onClose} onContextMenu={(e) => (e.preventDefault(), onClose())} onWheel={onClose} />
+      {/* A press outside closes it; while Delete asks, it puts the question away first. */}
+      <div className="fixed inset-0 z-50" onMouseDown={() => (confirm ? setConfirm(false) : onClose())} onContextMenu={(e) => (e.preventDefault(), onClose())} onWheel={() => !confirm && onClose()} />
       <div
         ref={ref}
         role="menu"
@@ -169,9 +168,13 @@ export function BotMenu({ state, bot: b, x, y, onClose, actions }: { state: AppS
         {!b.isMain && (
           <>
             <div className="mx-1.5 my-1 h-px bg-[#ECECEA]" />
-            <button role="menuitem" onClick={() => setConfirm(true)} className={`${row} text-[#B42318] hover:bg-[#FEF3F2]`}>
-              Delete {b.name}…
-            </button>
+            {confirm ? (
+              <DeleteBot state={state} bot={b} onCancel={() => setConfirm(false)} onDone={onClose} />
+            ) : (
+              <button role="menuitem" onClick={() => setConfirm(true)} className={`${row} text-[#B42318] hover:bg-[#FEF3F2]`}>
+                Delete {b.name}…
+              </button>
+            )}
           </>
         )}
       </div>
@@ -180,21 +183,14 @@ export function BotMenu({ state, bot: b, x, y, onClose, actions }: { state: AppS
 }
 
 /**
- * Deleting a bot, asked once more, saying what goes with it (lib/server/remove.ts deleteBot: its own
- * computer and everything on it, its inboxes, its chat, threads and routines) and what stays (memory
- * and Knowledge, the user's apps and logins, its messages in group chats, and the apps it made, which
- * go to the main bot). Cancel has focus.
+ * Deleting a bot, asked once more in place of the menu's Delete (ui.tsx AskInPlace), saying what goes with it
+ * (lib/server/remove.ts deleteBot: its own computer and everything on it, its inboxes, its chat, threads and routines)
+ * and what stays (memory and Knowledge, the user's apps and logins, its messages in group chats, and the apps it made,
+ * which go to the main bot). Cancel has focus; Esc is Cancel.
  */
-function DeleteBot({ state, bot: b, onClose }: { state: AppState; bot: Bot; onClose: () => void }) {
+function DeleteBot({ state, bot: b, onCancel, onDone }: { state: AppState; bot: Bot; onCancel: () => void; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const cancel = useRef<HTMLButtonElement>(null);
-  useEffect(() => cancel.current?.focus(), []);
-  useEffect(() => {
-    const key = (e: KeyboardEvent) => e.key === "Escape" && !busy && onClose();
-    window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
-  }, [busy, onClose]);
   const threads = state.sessions.filter((s) => s.botId === b.id).length;
   const routines = state.routines.filter((r) => r.botId === b.id).length;
   const host = !b.computerId ? state.bots.find((x) => x.isMain && x.id !== b.id) : undefined;
@@ -209,50 +205,27 @@ function DeleteBot({ state, bot: b, onClose }: { state: AppState; bot: Bot; onCl
     setBusy(true);
     setError(null);
     const r = await post("/api/bots", { botId: b.id }, "DELETE");
-    if (r.ok) return onClose();
+    if (r.ok) return onDone();
     setBusy(false);
     setError(((await r.json().catch(() => ({}))) as { error?: string }).error ?? "Couldn't delete it.");
   };
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
-      <div role="alertdialog" aria-labelledby="delete-bot-title" className="flex w-[420px] flex-col gap-[18px] rounded-[20px] bg-white p-6 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-24px_#00000059]">
-        <div className="flex items-center gap-3">
-          <Mascot botId={b.id} color={b.color} size={42} />
-          <div className="flex flex-col gap-0.5">
-            <span id="delete-bot-title" className="text-[19px] font-bold leading-6 tracking-[-0.015em]">
-              Delete {b.name}?
-            </span>
-            <span className="text-[13px] leading-4 text-[#6B6B6B]">This can&rsquo;t be undone.</span>
-          </div>
-        </div>
-        <div className="flex flex-col gap-2">
-          <span className="font-mono text-[11px] font-medium tracking-[0.06em] text-[#B42318]">GOES WITH {b.name.toUpperCase()}</span>
+    <div className="px-1 pb-1">
+      <AskInPlace compact danger focus="cancel" title={`Delete ${b.name}?`} line="This can't be undone." action={`Delete ${b.name}`} busy={busy} error={error} onConfirm={() => void remove()} onCancel={onCancel}>
+        <div className="flex flex-col gap-1">
+          <span className="font-mono text-[10.5px] font-medium tracking-[0.06em] text-[#B42318]">GOES WITH {b.name.toUpperCase()}</span>
           {goes.map((g) => (
-            <span key={g} className="text-[13.5px] leading-5 text-ink">
+            <span key={g} className="text-[12.5px] leading-[17px] text-ink">
               {g}
             </span>
           ))}
         </div>
-        <div className="flex flex-col gap-2 border-t border-[#ECECEA] pt-3.5">
-          <span className="font-mono text-[11px] font-medium tracking-[0.06em] text-[#6B6B6B]">STAYS</span>
-          <span className="text-[13.5px] leading-5 text-[#3A3A38]">{stays.join(", ").replace(/^./, (c) => c.toUpperCase())}</span>
-          {madeApps && <span className="text-[13.5px] leading-5 text-[#3A3A38]">{madeApps}</span>}
+        <div className="flex flex-col gap-1 border-t border-[#FECDCA] pt-2">
+          <span className="font-mono text-[10.5px] font-medium tracking-[0.06em] text-[#6B6B6B]">STAYS</span>
+          <span className="text-[12.5px] leading-[17px] text-[#3A3A38]">{stays.join(", ").replace(/^./, (c) => c.toUpperCase())}</span>
+          {madeApps && <span className="text-[12.5px] leading-[17px] text-[#3A3A38]">{madeApps}</span>}
         </div>
-        {error && (
-          <span role="alert" className="text-[13px] leading-[18px] text-[#B42318]">
-            {error}
-          </span>
-        )}
-        <div className="flex justify-end gap-2">
-          <button ref={cancel} onClick={onClose} disabled={busy} className="rounded-full px-4 py-2 text-[13.5px] font-semibold shadow-[0_0_0_1.5px_#0A0A0A] disabled:opacity-50">
-            Cancel
-          </button>
-          <button onClick={() => void remove()} disabled={busy} className="flex items-center gap-2 rounded-full bg-[#B42318] px-4 py-2 text-[13.5px] font-semibold text-white disabled:opacity-70">
-            {busy && <Spinner size={11} color="#FFFFFF" />}
-            {busy ? "Deleting…" : `Delete ${b.name}`}
-          </button>
-        </div>
-      </div>
+      </AskInPlace>
     </div>
   );
 }

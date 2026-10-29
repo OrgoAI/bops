@@ -13,8 +13,10 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 
 // lib/server/orgo.ts BOPS_TEMPLATE moves to this version once it's built (and orgo-web's curated ref,
-// lib/curated-templates.ts). 0.1.9 asks Orgo for the computer's own key (secrets: orgo_api_key).
-const VERSION = "0.1.9";
+// lib/curated-templates.ts). 0.1.9 asks Orgo for the computer's own key (secrets: orgo_api_key). 0.1.11 has
+// an 80 GB disk (orgo-web's BOPS_COMPUTER_DISK_GB; 0.1.10 was orgo-web's own build of 0.1.8 with it) and
+// screens laid out like a normal computer: Chrome fills each one, and Orgo's own taskbar stays hidden.
+const VERSION = "0.1.11";
 const CODEX_VERSION = "0.160.0";
 // The same as lib/server/brains.ts CLAUDE_CODE_VERSION, which installs it on older computers.
 const CLAUDE_CODE_VERSION = "2.1.292";
@@ -41,7 +43,7 @@ const template = {
     },
   ],
   // 4:3, boxier than 16:9, like a laptop screen; every screen on the computer matches it.
-  hardware: { cpu: 4, ram_gb: 16, resolution: "1280x960x24", auto_stop_minutes: 0 },
+  hardware: { cpu: 4, ram_gb: 16, disk_gb: 80, resolution: "1280x960x24", auto_stop_minutes: 0 },
   build: {
     apt: [
       "python3.12-venv", "jq", "rsync", "xdotool", "scrot", "hsetroot", "plank", "libglib2.0-bin",
@@ -77,11 +79,13 @@ const template = {
     { to: "/usr/local/bin/bops-agent", inline: read("vm/bin/bops-agent"), mode: "0755" },
     // The bot's own desktop (wallpaper, Chrome theme, home screen, dock); Bops supplies the bot's pages.
     { to: "/usr/local/bin/bops-desktop", inline: read("vm/bin/bops-desktop"), mode: "0755" },
+    { to: "/usr/local/bin/bops-screen-layout", inline: read("vm/bin/bops-screen-layout"), mode: "0755" },
     { to: "/opt/bops/bops-home.py", inline: read("vm/bops-home.py"), mode: "0755" },
   ],
   hooks: {
     on_pre_snapshot: "apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/codex* /tmp/node-setup.sh",
-    on_resume: "mkdir -p /root/.bops /var/log/bops && chmod 700 /root/.bops",
+    // Every wake lays the screens out again (Chrome filling each, Orgo's taskbar hidden), in the background.
+    on_resume: "mkdir -p /root/.bops /var/log/bops && chmod 700 /root/.bops && (setsid nohup bops-screen-layout > /var/log/bops/screen-layout.log 2>&1 < /dev/null &)",
   },
 };
 

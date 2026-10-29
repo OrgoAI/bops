@@ -4,6 +4,8 @@ import { fullAccessOn } from "./full-access";
 import { sameComputer, screenPages, workComputer } from "./screens";
 import { ago, holdsScreen, LEFT_FOR_MS, screenNo } from "@/lib/screens";
 import { bot, getState, ownerName } from "./store";
+import { asksNow } from "./chart";
+import { belowOf } from "@/lib/chain";
 
 /**
  * A bot's computer, in a few lines, for the bot itself: what each screen is doing (its threads,
@@ -11,7 +13,7 @@ import { bot, getState, ownerName } from "./store";
  * the user, and what's up next. Built from the same state the Computer panel draws, so what a bot
  * believes about its screens is what the user sees. Chat turns, calls and thread turns all get it.
  */
-export async function computerBriefing(botId: string, opts: { thread?: string } = {}): Promise<string> {
+export async function computerBriefing(botId: string, opts: { thread?: string; sees?: (id: string) => boolean } = {}): Promise<string> {
   const b = bot(botId);
   if (!b) return "";
   const state = getState();
@@ -32,9 +34,13 @@ export async function computerBriefing(botId: string, opts: { thread?: string } 
     const at = s.helperOrder?.indexOf(d) ?? -1;
     return at >= 0 ? s.helperNames?.[at] : undefined;
   };
+  // Another bot it may name here: one it may ask (the team chart, lib/chain.ts), and that whoever it's telling may
+  // hear of too (`sees`: a teammate asking it, a person on their turn). Any other is "another bot's task": no name,
+  // no title, no page of its work, though its screen still counts as busy.
+  const named = (id: string) => id === botId || (asksNow(botId, id) && (!opts.sees || opts.sees(id)));
   // A thread, as this bot says it: itself, one of its own, or another bot's.
   const whose = (owner: string, id: string, title: string) =>
-    owner === botId ? (opts.thread === id ? "this thread (you)" : `your thread "${title}"`) : `${bot(owner)?.name ?? "another bot"}'s thread "${title}"`;
+    owner === botId ? (opts.thread === id ? "this thread (you)" : `your thread "${title}"`) : named(owner) ? `${bot(owner)?.name ?? "another bot"}'s thread "${title}"` : "another bot's task";
   // What's open on each screen, read from its browser (quick, and only where Bops can reach it).
   const pages = await screenPages(b);
   const pageText = (i: number) => {
@@ -66,16 +72,21 @@ export async function computerBriefing(botId: string, opts: { thread?: string } 
       return `Screen ${n}: ${name ? `helper ${name}` : "a helper"} for ${opts.thread === parent.id ? "this thread" : `"${parent.title}"`}${task ? ` · ${task}` : ""} · showing ${pageText(i)}.`;
     }
     const other = mates.find((s) => s.display === d || s.helperScreens?.includes(d));
-    if (other) return `Screen ${n}: ${bot(other.botId)?.name ?? "another bot"} is working there on "${other.title}"; it's not yours, don't touch it.`;
+    if (other)
+      return named(other.botId)
+        ? `Screen ${n}: ${bot(other.botId)?.name ?? "another bot"} is working there on "${other.title}"; it's not yours, don't touch it.`
+        : `Screen ${n}: another bot's task is running there; it's not yours, don't touch it.`;
     const w = state.watches?.find((x) => isScreenWatch(x) && sameComputer(x.botId, botId) && x.display === d);
     if (w)
       return `Screen ${n}: watched for ${owner} · ${w.site}, for ${w.lookFor}${w.away ? " · paused: it shows something else right now" : ""}${w.alert ? ` · waiting for ${owner}: "${w.alert.text}"` : ""}. Leave it on ${w.site}; don't use it for other work.`;
     // Kept for a thread waiting on the user (lib/screens.ts holdsScreen): its answer picks it up here.
     const holder = state.sessions.find((x) => holdsScreen(x) && x.lastDisplay === d && sameComputer(x.botId, botId));
-    if (holder) return `Screen ${n}: kept for ${whose(holder.botId, holder.id, holder.title)} while it waits on ${owner}; don't use it for other work · showing ${pageText(i)}.`;
-    // Who left it, and on what: a thread picked up again carries on from that page.
+    if (holder) return `Screen ${n}: kept for ${whose(holder.botId, holder.id, holder.title)} while it waits on ${owner}; don't use it for other work${named(holder.botId) ? ` · showing ${pageText(i)}` : ""}.`;
+    // Who left it, and on what: a thread picked up again carries on from that page. (Not the page of a bot's work it
+    // may not name, however long ago it was left.)
     const left = state.screenLog?.[`${c.id}:${d}`];
     const recent = left && Date.now() - left.at < LEFT_FOR_MS ? `, left by ${whose(left.botId, left.sessionId, left.title)} ${ago(left.at)}` : "";
+    if (left && !named(left.botId)) return `Screen ${n}: free${recent}.`;
     return `Screen ${n}: free · ${pageText(i)} is open${recent}.`;
   });
 
@@ -128,16 +139,19 @@ async function macBriefing(botId: string) {
 }
 
 /**
- * The whole team at a glance, for the main bot (Sam runs the team): each bot's live work and where
- * it runs, what's waiting on the user, what finished lately. Same state the app draws, so "what's
- * everyone doing?" and "who's free?" have true answers.
+ * The team at a glance, for a bot that leads others: the main bot (Sam runs the team) sees every bot, and a
+ * lead on the team chart (lib/chain.ts) the bots under it, at any depth. Each bot's live work and where it
+ * runs, what's waiting on the user, what finished lately. Same state the app draws, so "what's everyone
+ * doing?" and "who's free?" have true answers.
  */
-export function teamBriefing(mainId: string, seen?: ReadonlySet<string>) {
+export function teamBriefing(leadId: string, seen?: ReadonlySet<string>) {
   const state = getState();
-  const main = state.bots.find((b) => b.id === mainId);
-  // `seen`: on a member's turn, only the bots they see (chat.ts TurnOptions.member): one not given them stays hidden.
-  const others = state.bots.filter((b) => b.id !== mainId && workspaceOf(b) === workspaceOf(main) && (!seen || seen.has(b.id)));
-  if (!others.length) return "Your team: just you so far.";
+  const lead = state.bots.find((b) => b.id === leadId);
+  const below = new Set(belowOf(state, leadId));
+  // `seen`: on a member's turn, only the bots they see (chat.ts TurnOptions.member): one not given them stays hidden;
+  // for a teammate's answer, only the bots the one asking may ask (chat.ts askTeammate).
+  const others = state.bots.filter((b) => b.id !== leadId && workspaceOf(b) === workspaceOf(lead) && below.has(b.id) && (!seen || seen.has(b.id)));
+  if (!others.length) return lead?.isMain ? "Your team: just you so far." : "";
   const now = Date.now();
   const owner = ownerName();
   const where = (s: Session) => (s.runsOn === "mac" ? `on ${owner}'s Mac` : s.askWhere ? `waiting for ${owner} to pick Mac or cloud` : "in the cloud");
@@ -146,7 +160,9 @@ export function teamBriefing(mainId: string, seen?: ReadonlySet<string>) {
     const running = mine.filter(live);
     // Where each runs: its computer's screen n (the number the user sees in the app), or the Mac.
     const shared = workComputer(b).id !== b.id;
-    const on = (s: Session) => (s.runsOn === "mac" || s.display === undefined ? where(s) : `on ${shared ? "your computer's" : "its computer's"} screen ${screenNo(s.display)}`);
+    // (The computer it shares is the main bot's: "yours" only to the main bot.)
+    const host = lead?.isMain ? "your computer" : `${workComputer(b).name}'s computer`;
+    const on = (s: Session) => (s.runsOn === "mac" || s.display === undefined ? where(s) : `on ${shared ? `${host}'s` : "its computer's"} screen ${screenNo(s.display)}`);
     const doing = running.map((s) => `"${s.title}" (${s.status === "queued" ? "up next" : (s.activity ?? "working")}, ${on(s)}${s.blocker ? `, stuck: needs ${owner}, ${BLOCKER_LABEL[s.blocker]}` : ""})`);
     const alerts = (state.watches ?? []).filter((w) => w.botId === b.id && w.alert).map((w) => `heads-up on ${w.site}: "${w.alert!.text}"`);
     const watching = (state.watches ?? []).filter((w) => w.botId === b.id).map((w) => w.site);
@@ -156,7 +172,7 @@ export function teamBriefing(mainId: string, seen?: ReadonlySet<string>) {
       .map((s) => `"${s.title}" (${s.status === "done" ? "done" : "didn't finish"})`);
     // A bot that shares works on the main bot's computer (workComputer); it has none of its own.
     const c = workComputer(b);
-    const computer = c.id !== b.id ? "Works on your computer." : c.computerStatus === "ready" ? "" : c.computerStatus === "cloning" ? "Its computer is being set up." : "No computer yet.";
+    const computer = c.id !== b.id ? `Works on ${host}.` : c.computerStatus === "ready" ? "" : c.computerStatus === "cloning" ? "Its computer is being set up." : "No computer yet.";
     return [
       `- ${b.name} (${b.role}${b.runsOn && b.runsOn !== "auto" ? `, works on ${b.runsOn === "mac" ? `${owner}'s Mac` : "the cloud"}` : ""}):`,
       doing.length ? `working on ${doing.join("; ")}.` : "free.",
@@ -168,5 +184,5 @@ export function teamBriefing(mainId: string, seen?: ReadonlySet<string>) {
       .filter(Boolean)
       .join(" ");
   });
-  return ["Your team, as of now (you run it):", ...lines].join("\n");
+  return [lead?.isMain ? "Your team, as of now (you run it):" : "The bots you lead, as of now:", ...lines].join("\n");
 }

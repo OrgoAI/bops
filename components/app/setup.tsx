@@ -2,26 +2,25 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppState } from "@/lib/types";
-import { Mascot, Spinner } from "./mascot";
+import { Spinner } from "./mascot";
 import { useMacApp } from "./mac-screens";
-import { RestartConfirm, useCanRestart } from "./restart";
+import { RestartAsk } from "./restart";
 import { post } from "./ui";
 import { UpdateSettings } from "./update-notice";
 
 /*
- * Everything Bops needs on this Mac, in one place (Setup). It never stands in the way: signing in goes
- * straight to the app, and the account menu (sidebar.tsx) shows a badge while something here still
- * needs the user and they haven't skipped it, and opens this as a sheet. Settings → This Mac has the
- * same cards.
+ * Everything Bops needs on this Mac, in one place: Settings → This Mac. It never stands in the way: signing in
+ * goes straight to the app, and the account menu (sidebar.tsx) shows a badge while something here still
+ * needs the user and they haven't skipped it, and opens Settings there (a page, never a sheet over the app).
  *
  * - Screen recording, the microphone and notifications are this app's own macOS permissions, asked
  *   through the Mac app (desktop/main.cjs, window.bopsMac.permissions). In a browser they can't be.
  * - Routing through this Mac: bots' computers reach the internet through this Mac (app/api/relay).
  *   It's on by default wherever Orgo offers it, so the card shows it on; turning it off sticks.
  *
- * When something's off, the setup screen also offers Restart Bops (restart.tsx), under its buttons.
+ * When something's off, the account menu offers Restart Bops (restart.tsx), as the Screen recording card does.
  *
- * - Full access (Settings → This Mac only, never Setup): bots' tasks on this Mac run outside Bops'
+ * - Full access (Settings → This Mac only): bots' tasks on this Mac run outside Bops'
  *   sandbox, with a shell, the user's files and apps (MacState.fullAccess). Off until the user turns it on.
  *
  * The user's mobile isn't asked for here: it becomes theirs when they call or text their bot's number
@@ -287,13 +286,12 @@ function PermissionCard({ id, items }: { id: "screen" | "microphone" | "notifica
             : "Not asked yet";
   const tone: Tone = s === "granted" && !(id === "screen" && perms.restart) ? "ok" : s === "not-determined" || s === "unknown" ? "off" : "todo";
   return (
-    <Card icon={ICONS[id]} title={copy.title} line={copy.line} tone={tone} status={status}>
-      {restart && (
+    <Card icon={ICONS[id]} title={copy.title} line={copy.line} tone={tone} status={status} below={restarting ? <RestartAsk compact onCancel={() => setRestarting(false)} /> : undefined}>
+      {restart && !restarting && (
         <button onClick={() => setRestarting(true)} className={s === "granted" ? dark : light}>
           Restart Bops
         </button>
       )}
-      {restarting && <RestartConfirm onClose={() => setRestarting(false)} />}
       {s === "not-determined" || (id === "notifications" && s === "unknown") ? (
         <button disabled={!!asking} onClick={() => void ask(id)} className={dark}>
           {asking === id ? <Spinner size={11} color="#FFFFFF" /> : "Allow"}
@@ -348,85 +346,7 @@ async function allowAll(items: Items) {
   }
 }
 
-/* ---------------- The setup screen ---------------- */
-
-/**
- * The setup screen, as a sheet over the app (from the account menu and its badge): everything in one
- * place, each item skippable. Continue records what still waits on the user as skipped, which puts the
- * badge away for those.
- */
-export function Setup({ state, onClose }: { state: AppState; onClose: () => void }) {
-  const items = useSetupItems(state, "setup");
-  const [busy, setBusy] = useState(false);
-  const [allowing, setAllowing] = useState(false);
-  const canRestart = useCanRestart();
-  const [restart, setRestart] = useState(false);
-  const askable = items.perms.inApp && ASKED.some((id) => items.perms.status?.[id] === "not-determined" || (id === "notifications" && items.perms.status?.[id] === "unknown"));
-  const finish = async () => {
-    setBusy(true);
-    await post("/api/setup", { skipped: items.waiting }).catch(() => undefined);
-    setBusy(false);
-    onClose();
-  };
-  return (
-    <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="motion-dialog-in flex max-h-[90vh] w-[560px] flex-col overflow-y-auto rounded-[22px] bg-white px-7 pb-6 pt-8 shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]"
-      >
-        <div className="flex flex-col items-center gap-1.5 pb-5 text-center">
-          <Mascot botId="boppy" color="#0A0A0A" size={48} />
-          <span className="pt-3 text-[20px] font-semibold leading-6 tracking-[-0.01em]">Set up Bops on this Mac</span>
-          <span className="max-w-[380px] text-[13.5px] leading-[19px] text-pencil">
-            {items.perms.inApp
-              ? "A few things your bots need. Allow what you want now; you can change any of it later in Settings."
-              : "Screen, microphone and notifications need the Bops app for Mac. You can set up the rest here."}
-          </span>
-        </div>
-        <div className="flex flex-col gap-2">
-          <span className="text-[12px] leading-4 text-pencil">This Mac</span>
-          <Cards items={items} />
-        </div>
-        <div className="flex flex-col gap-2 pt-5">
-          {askable && (
-            <button
-              disabled={allowing}
-              onClick={() => {
-                setAllowing(true);
-                void allowAll(items).finally(() => setAllowing(false));
-              }}
-              className="flex h-10 w-full items-center justify-center gap-2 rounded-full bg-ink text-[13.5px] font-medium text-white disabled:opacity-50"
-            >
-              {allowing && <Spinner size={13} color="#FFFFFF" />}
-              {allowing ? "Asking your Mac" : "Allow all"}
-            </button>
-          )}
-          <button
-            disabled={busy}
-            onClick={() => void finish()}
-            className={
-              askable
-                ? "flex h-10 w-full items-center justify-center rounded-full text-[13.5px] font-medium shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#FCFCFB] disabled:opacity-50"
-                : "flex h-10 w-full items-center justify-center gap-2 rounded-full bg-ink text-[13.5px] font-medium text-white disabled:opacity-50"
-            }
-          >
-            {items.waiting.length ? "Continue" : "Done"}
-          </button>
-          {!!items.waiting.length && <span className="text-center text-[12px] leading-4 text-pencil">Anything you skip stays in Settings.</span>}
-          {canRestart && (
-            <span className="text-center text-[12px] leading-4 text-pencil">
-              Something not working?{" "}
-              <button onClick={() => setRestart(true)} className="underline underline-offset-2 hover:text-ink">
-                Restart Bops
-              </button>
-            </span>
-          )}
-        </div>
-        {restart && <RestartConfirm onClose={() => setRestart(false)} />}
-      </div>
-    </div>
-  );
-}
+/* ---------------- What still waits ---------------- */
 
 /**
  * What on the setup screen still needs the user and they haven't skipped there, in the screen's order:
@@ -454,18 +374,37 @@ export const SETUP_NEEDS: Record<SetupItem, string> = {
 
 /* ---------------- In Settings ---------------- */
 
-/** Settings → This Mac: the same cards, to come back to any time. */
+/**
+ * Settings → This Mac: the cards, to come back to any time, and where the account menu's Permissions on this Mac and the
+ * badge on your initials open. While something still needs you and you haven't skipped it, Skip for now records it as
+ * skipped (what the setup screen's Continue did), which puts the badge away for it.
+ */
 export function ThisMacSettings({ state }: { state: AppState }) {
   const items = useSetupItems(state, "settings");
+  const [busy, setBusy] = useState(false);
+  const skipped = new Set(state.setup?.skipped ?? []);
+  const waiting = items.waiting.filter((i) => !skipped.has(i));
+  const skip = async () => {
+    setBusy(true);
+    await post("/api/setup", { skipped: items.waiting }).catch(() => undefined);
+    setBusy(false);
+  };
   return (
     <div className="flex flex-col gap-2 px-[22px] pt-4">
       <div className="flex items-center justify-between gap-3">
         <span className="text-[13px] font-semibold">This Mac</span>
-        {items.perms.inApp && ASKED.some((id) => items.perms.status?.[id] === "not-determined") && (
-          <button onClick={() => void allowAll(items)} className={light}>
-            Allow all
-          </button>
-        )}
+        <span className="flex items-center gap-1.5">
+          {items.perms.inApp && ASKED.some((id) => items.perms.status?.[id] === "not-determined") && (
+            <button onClick={() => void allowAll(items)} className={light}>
+              Allow all
+            </button>
+          )}
+          {waiting.length > 0 && (
+            <button data-setup-skip disabled={busy} onClick={() => void skip()} className={light} title="Anything you skip stays here">
+              Skip for now
+            </button>
+          )}
+        </span>
       </div>
       <Cards items={items} />
       <FullAccessCard items={items} />

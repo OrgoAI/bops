@@ -1,6 +1,6 @@
 import "server-only";
 import { CHECK_TEMPLATE, checkerOf, checkGoal, checkTitle, coveredByCheck, quietOf, sameApp, scheduleOf, TAG_LEARNING_APPS, TAG_NAME_MAX, TAG_NAME_WORDS, tagName, tagsOf, templatesFor, type RoutineTemplate } from "@/lib/routine-catalog";
-import { botChatId, levelOf, MAIN_WORKSPACE, workspaceOf, type AppConnecting, type AppState, type Routine, type Schedule, type Watch, type WorkspaceTag } from "@/lib/types";
+import { botChatId, levelIn, MAIN_WORKSPACE, workspaceOf, type AppConnecting, type AppState, type Routine, type Schedule, type Watch, type WorkspaceTag } from "@/lib/types";
 import { createRoutine, deleteRoutine } from "./routines";
 import { addMessage, bot, getState, update } from "./store";
 import { findSkill } from "./workspace-skills";
@@ -123,7 +123,7 @@ export function makeCheck(accountId: string, grant: AppConnecting["grant"]): { r
   const s = getState();
   const account = s.accounts?.find((a) => a.id === accountId);
   const b = checkerOf(grant.bots, s.bots);
-  const level = account && b ? levelOf(b, account) : null;
+  const level = account && b ? levelIn(s, b, account) : null;
   if (!account || !b || !level) return { error: "No bot that can use it was picked to check it." };
   const had = s.routines.find((r) => checks(r, b.id, accountId));
   if (had) return { routine: had };

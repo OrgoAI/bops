@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { appsOpenTo } from "./apps-team.ts";
-import { accessOf, currentFor, isAccessLevel, levelOf, permits, seesChat, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
-import type { SharedWsSlice, WsRole } from "./protocol.ts";
+import { accessOf, appsLevelOf, currentFor, isAccessLevel, levelOf, permits, seesChat, type AccessLevel, type MemberAccess, type MemberAccessMap } from "./member-access.ts";
+import type { SharedApp, SharedApps, SharedWsSlice, WsRole } from "./protocol.ts";
 
 /**
  * What a member of a shared workspace is shown of its owner's state (members.ts, GET /v1/ws/:projectId/state),
@@ -221,7 +221,60 @@ export function viewerAccess(workspace: Record<string, unknown> | null, viewer: 
   const o = isObject(kept) && currentFor(kept, viewer.joinedAt) ? kept : {};
   const bots: Record<string, AccessLevel> = Object.create(null);
   if (isObject(o.bots)) for (const [id, level] of Object.entries(o.bots)) bots[id] = isAccessLevel(level) ? level : "none";
-  return { others: isAccessLevel(o.others) ? o.others : "none", bots };
+  return { others: isAccessLevel(o.others) ? o.others : "none", bots, ...(isAccessLevel(o.apps) ? { apps: o.apps } : {}) };
+}
+
+/* ---------------- Your Apps ---------------- */
+
+/** What's shown of each app's own record (lib/hosted-apps.ts AppHosting) is worked out field by field in appsFor; of what the owner's Mac read for members (AppForMembers): */
+const SITE_SEEN: Spec = { name: true, url: true, serving: true, live: { id: true, state: true, when: true }, domains: [{ domain: true, status: true }] };
+const COMMIT_SEEN: Spec = { id: true, message: true, author: true, at: true, changes: { added: true, modified: true, deleted: true } };
+const DEPLOY_SEEN: Spec = { id: true, state: true, at: true, rollback: true, when: true, live: true, canRollback: true, site: true };
+const ACT_SEEN: Spec = { key: true, userId: true, name: true, act: true, site: true, domain: true, ok: true, said: true, at: true };
+const SETTINGS_SEEN: Spec = { port: true, install: true, build: true, start: true, health: true };
+/** The most apps a member is shown. */
+const MAX_SHARED_APPS = 30;
+
+/**
+ * A workspace's apps on the web as `viewer` is shown them (SharedWsSlice.apps): only for someone other than the owner,
+ * with apps open to their email (apps-team.ts, as for the owner) and Your Apps at Read or more on an entry that's for
+ * their membership now (viewerAccess), in a workspace with apps. Allow lists only: of each app's record its name, its
+ * bot (only one they see), address, whether it lost its computer and its sites' names; of what the owner's Mac read for
+ * members (Workspace.appsForMembers) its head, sites, history, deploys and members' acts; each site's settings and the
+ * workspace's own domains only at Write. Never its variables, tokens, keys, logs, error text, computer or project ids.
+ */
+export function appsFor(workspace: Record<string, unknown> | null, viewer: SliceViewer, access: MemberAccess, botsSeen: ReadonlySet<unknown>): SharedApps | undefined {
+  if (viewer.role === "owner" || !workspace || !appsOpenTo(viewer.email)) return undefined;
+  const level = appsLevelOf(access);
+  if (!permits(level, "read") || !isObject(workspace.hostedApps)) return undefined;
+  const write = level === "write";
+  const seen = isObject(workspace.appsForMembers) ? workspace.appsForMembers : {};
+  const seenApps = isObject(seen.apps) ? seen.apps : {};
+  const list: SharedApp[] = Object.entries(workspace.hostedApps)
+    .filter(([name, h]) => /^[a-z0-9-]{1,64}$/.test(name) && isObject(h))
+    .slice(0, MAX_SHARED_APPS)
+    .map(([name, h]) => {
+      const host = h as Record<string, unknown>;
+      const got = isObject(seenApps[name]) ? (seenApps[name] as Record<string, unknown>) : {};
+      const settings = write && isObject(got.settings) ? Object.fromEntries(Object.entries(got.settings).filter(([site, v]) => /^[a-z0-9-]{1,64}$/.test(site) && isObject(v)).map(([site, v]) => [site, keep(v, SETTINGS_SEEN)])) : undefined;
+      const sites = Array.isArray(host.sites) ? host.sites.flatMap((x) => (isObject(x) && typeof x.name === "string" ? [x.name] : [])) : [];
+      const app: Record<string, unknown> = {
+        name,
+        ...(typeof host.botId === "string" && botsSeen.has(host.botId) ? { botId: host.botId } : {}),
+        ...(typeof host.url === "string" ? { url: host.url } : {}),
+        ...(typeof host.lost === "number" ? { lost: true } : {}),
+        ...(sites.length ? { siteNames: sites } : {}),
+        ...(got.head === null ? { head: null } : isObject(got.head) ? { head: keep(got.head, { id: true, message: true, at: true }) } : {}),
+        ...(Array.isArray(got.sites) ? { sites: keep(got.sites, [SITE_SEEN]) } : {}),
+        ...(Array.isArray(got.commits) ? { commits: keep(got.commits, [COMMIT_SEEN]) } : {}),
+        ...(Array.isArray(got.deploys) ? { deploys: keep(got.deploys, [DEPLOY_SEEN]) } : {}),
+        ...(Array.isArray(got.acts) ? { acts: keep(got.acts, [ACT_SEEN]) } : {}),
+        ...(settings && Object.keys(settings).length ? { settings } : {}),
+      };
+      return app as SharedApp;
+    });
+  const owned = write && Array.isArray(seen.owned) ? (keep(seen.owned, [{ id: true, domain: true }]) as { id: string; domain: string }[]) : undefined;
+  return { level: write ? "write" : "read", at: typeof seen.at === "number" ? seen.at : 0, list, ...(owned?.length ? { owned } : {}) };
 }
 
 /** A chat's bots, or none when they aren't all bot ids (so it's never shown to anyone but the owner). */
@@ -335,6 +388,7 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
   const all = (items: Record<string, unknown>[], spec: Spec) => items.map((x) => keep(x, spec) as Record<string, unknown>);
   const bots = viewer.role === "owner" ? undefined : new Set(s.bots.map((b) => b.id));
   const chats = bots && new Set(s.chats.map((c) => c.id));
+  const apps = access && bots ? appsFor(s.workspace, viewer, access, bots) : undefined;
   return {
     workspace: s.workspace ? (keep(s.workspace, WORKSPACE) as Record<string, unknown>) : null,
     bots: all(s.bots, BOT),
@@ -347,6 +401,8 @@ export function sharedSlice(blob: Record<string, unknown>, ws: string, viewer: S
     // What they may do with each bot shown, so their window opens what Write lets them do (lib/shared.ts canAct).
     // Part of the fingerprint: the owner moving a bot from Read to Write, or back, gives them a new one.
     ...(access ? { levels: Object.fromEntries(s.bots.map((b) => [String(b.id), levelOf(access, String(b.id)) === "write" ? ("write" as const) : ("read" as const)])) } : {}),
+    // Your Apps, for someone given it (appsFor): part of the fingerprint, so a deploy landing gives them a new one.
+    ...(access && apps ? { apps } : {}),
   };
 }
 

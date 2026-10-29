@@ -1,5 +1,6 @@
 import { appsOpen } from "@/lib/apps-access";
 import { addApp, HostedAppError, listApps } from "@/lib/server/hosted-apps";
+import { seeAppsFromPage } from "@/lib/server/apps-for-members";
 import { notReady } from "@/lib/server/ready";
 import { getState } from "@/lib/server/store";
 import { fromBopsWindow } from "@/lib/server/ui-token";
@@ -20,7 +21,10 @@ export async function GET(request: Request) {
   if (!appsOpen(getState())) return Response.json({ error: "Not found" }, { status: 404 });
   const wsId = new URL(request.url).searchParams.get("ws") ?? getState().workspace ?? MAIN_WORKSPACE;
   try {
-    return Response.json(await listApps(wsId));
+    const answer = await listApps(wsId);
+    // What people with Your Apps see of them, from what was just read (lib/server/apps-for-members.ts), now and then.
+    void seeAppsFromPage(wsId, answer.apps).catch((e: Error) => console.warn(`[hosted-apps] members' view: ${e.message}`));
+    return Response.json(answer);
   } catch (e) {
     return e instanceof HostedAppError ? Response.json({ error: e.message }, { status: e.status }) : Response.json({ error: (e as Error).message }, { status: 500 });
   }

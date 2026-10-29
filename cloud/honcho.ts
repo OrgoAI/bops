@@ -1,3 +1,4 @@
+import { ownMemory, readsTeam, type ChainState, type ChainWorkspace } from "./chain.ts";
 import { config } from "./config.ts";
 import { honchoPrefix } from "./session.ts";
 import { recordUsage } from "./usage.ts";
@@ -32,6 +33,20 @@ export function bindingFor(workspaceId: string, own: unknown): Binding {
   const b = own as Partial<Binding> | null | undefined;
   if (b && typeof b.bank === "string" && typeof b.peer === "string") return { bank: b.bank, peer: b.peer };
   return workspaceId === "ws_main" ? { bank: "bops", peer: "user" } : { bank: `bops-${clean(workspaceId)}`, peer: "user" };
+}
+
+/**
+ * The banks a bot's turn reads, as the Mac picks them (lib/server/memory.ts scopeOf, bindingOf): its workspace's, or,
+ * for a bot that keeps its memory to itself on the team chart (cloud/chain.ts), its own (<team bank>-bot-<id>, the
+ * team's peer) first, with the team's after it while it still reads the team's. The first is where its chat is saved.
+ */
+export function bindingsOfBot(v: { bots: ChainState["bots"]; workspaces?: readonly (ChainWorkspace & { memory?: unknown })[] }, botId: string): Binding[] {
+  const b = v.bots.find((x) => x.id === botId);
+  const ws = b?.workspaceId ?? "ws_main";
+  const team = bindingFor(ws, v.workspaces?.find((w) => w.id === ws)?.memory);
+  if (!ownMemory(v, botId)) return [team];
+  const own = { bank: `${team.bank}-bot-${clean(botId)}`, peer: team.peer };
+  return readsTeam(v, botId) ? [own, team] : [own];
 }
 
 /** The Honcho workspace of a bank, under the user's prefix; null for a binding that isn't made of Honcho ids. */
@@ -82,20 +97,29 @@ export const keptFromOthers = (text: string) => SECRET.test(text.replace(/[â€˜â€
  * What the bot should know about the user for what they just said (`about`), as the Mac's memoryBlock
  * writes it; "" when memory is off, empty, slow (past `ms`) or failing.
  */
-export async function memoryBlock(userId: string, b: Binding, about: string, owner: string, ms = 2500): Promise<string> {
-  const ws = workspaceOf(userId, b);
-  if (!config.honchoKey() || !ws) return "";
+export async function memoryBlock(userId: string, banks: Binding | Binding[], about: string, owner: string, ms = 2500): Promise<string> {
+  // Each bank read at once (a bot's own and the team's: bindingsOfBot), within the same time.
+  const wss = (Array.isArray(banks) ? banks : [banks]).map((b) => ({ b, ws: workspaceOf(userId, b) }));
+  if (!config.honchoKey() || !wss.length || wss.some((x) => !x.ws)) return "";
   try {
-    const ctx = (await honcho("GET", `${base(ws)}/peers/${enc(b.peer)}/context`, {
-      query: { search_query: (about.trim() || owner).slice(0, 400), search_top_k: "10", max_conclusions: "12", include_most_frequent: "false" },
-      timeoutMs: ms,
-    })) as { representation?: unknown; peer_card?: unknown } | null;
-    const card = (Array.isArray(ctx?.peer_card) ? ctx.peer_card : []).filter((l): l is string => typeof l === "string").map((l) => l.trim()).filter(Boolean);
-    const learned = String(ctx?.representation ?? "")
-      .split("\n")
-      .map((l) => l.replace(/^\[[^\]]+\]\s*/, "").trim())
-      .filter((l) => l && !l.startsWith("#"))
-      .slice(0, 16);
+    const read = async ({ b, ws }: { b: Binding; ws: string | null }) =>
+      (await honcho("GET", `${base(ws!)}/peers/${enc(b.peer)}/context`, {
+        query: { search_query: (about.trim() || owner).slice(0, 400), search_top_k: "10", max_conclusions: "12", include_most_frequent: "false" },
+        timeoutMs: ms,
+      })) as { representation?: unknown; peer_card?: unknown } | null;
+    const all = await Promise.all(wss.map(read));
+    const card = [...new Set(all.flatMap((ctx) => (Array.isArray(ctx?.peer_card) ? ctx.peer_card : []).filter((l): l is string => typeof l === "string").map((l) => l.trim()).filter(Boolean)))];
+    const learned = [
+      ...new Set(
+        all.flatMap((ctx) =>
+          String(ctx?.representation ?? "")
+            .split("\n")
+            .map((l) => l.replace(/^\[[^\]]+\]\s*/, "").trim())
+            .filter((l) => l && !l.startsWith("#"))
+            .slice(0, 16),
+        ),
+      ),
+    ];
     const lines = card.filter(shareable);
     const recent = learned.filter(shareable).slice(0, 12);
     if (!lines.length && !recent.length) return "";

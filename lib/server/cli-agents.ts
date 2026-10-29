@@ -1,9 +1,13 @@
 import "server-only";
-import { BRAIN_NAMES, BRAINS_ON, live, planName, type Brain, type BrainKind } from "@/lib/types";
-import { brainById, ensureBrainTools, ensureClaudeCode, ensureCodex, revealBrainKey } from "./brains";
+import { randomBytes } from "node:crypto";
+import { AGENTS, agentLabel, aiOf, isCli, keyVendor, ROUTE_NAMES, shellLabel, threadAgent, type AgentRun } from "@/lib/agents";
+import { redactDeep } from "@/lib/secret-patterns";
+import { BRAINS_ON, CLI_NAMES, live, planName, workspaceOf, type Bot, type Brain, type CliKind } from "@/lib/types";
+import { ensureBrainTools, ensureClaudeCode, ensureCodex, ensureOpenCode, revealBrainKey, revealNamedKey } from "./brains";
+import { KeysError } from "./keys";
 import { heldAsk } from "./permission";
 import { orgo } from "./orgo";
-import { ownerName, session } from "./store";
+import { bot, getState, ownerName, session } from "./store";
 
 /**
  * A bot's threads on its brain (lib/server/brains.ts Brain) instead of Bops agent: Claude Code or Codex on
@@ -24,9 +28,14 @@ import { ownerName, session } from "./store";
  * approveTool), with the app approval card.
  *
  * A driver is one CLI's part in this: how it's installed, what it's told, how a message is written for it,
- * and how its output reads. Claude Code's and Codex's are here, on the same files and turn loop. Codex runs
- * one `codex exec` per message on the same thread (bops-agent keeps it going between them), on the user's
- * OpenAI key only, with full access on the computer as Bops agent's executor has there.
+ * and how its output reads. Claude Code's, Codex's and OpenCode's are here, on the same files and turn loop.
+ * Codex and OpenCode run one `codex exec` (`opencode run`) per message on the same thread (bops-agent keeps it
+ * going between them), on the user's own key, with full access on the computer as Bops agent's executor has.
+ *
+ * Every process a thread starts runs as its bot's agent (lib/agents.ts, the bot's AI profile): bops-brain gives
+ * it only that bot's and that agent's settings, its own claude, codex and opencode, and on a key a token for a
+ * gate that holds the key for that run (vm/bin/bops-ai-gate), so several bots on one computer each keep to
+ * their own. The agent is read again from the bot's profile at every start (agentNow), never from the thread alone.
  */
 
 /** What Bops reads from a brain's CLI. `parent`: a helper's (Claude Code's Task), by the call that started it. */
@@ -42,12 +51,21 @@ export type CliEvent =
    * not with the end of its turn). `stop`: turned down at the plan's usage limit or the key's ("limit"), or
    * for its sign-in or key ("auth").
    */
-  | { type: "result"; ok: boolean; text?: string; stop?: "limit" | "auth" }
+  | { type: "result"; ok: boolean; text?: string; stop?: CliStop }
   | { type: "exited"; code: number };
+
+/**
+ * Why a CLI agent stopped and waits on the user: its plan's or key's limit, its sign in or key turned down, a
+ * model its account can't use, its provider not answering, or the Vault has given all the keys it allows this hour.
+ */
+export type CliStop = "limit" | "auth" | "model" | "down" | "vault";
 
 /** One CLI agent, as the turn loop uses it. */
 export type CliDriver = {
-  kind: BrainKind;
+  kind: CliKind;
+  /** Its session id as Bops keeps it and puts it in a command (one that isn't is never used), and a new one for a thread. */
+  cliId: (v: string | undefined) => string | undefined;
+  newSession: () => string;
   /** Its CLI and Bops' scripts on a computer (once per run of Bops). */
   prepare: (computerId: string) => Promise<void>;
   /** What it's told about itself after Bops' briefing: whose tools it has, and what asks the user. */
@@ -70,13 +88,15 @@ const RESTARTS = 2;
 const READ_MOST = 256 * 1024;
 const MARK = "@@bops-agent@@ ";
 
-/** The replies a user taps when a brain stopped at its limit (sessions.ts replyToSession). */
+/** The replies a user taps when a brain stopped and waits on them (sessions.ts replyToSession). */
 export const FINISH_ON_BOPS = "Finish on Bops agent";
 export const WAIT = "Wait";
+/** Its provider wasn't answering: it starts again on its own agent, now. */
+export const TRY_AGAIN = "Try again";
 /** Which of them a reply is, when it's one. */
-export function limitPick(text: string): "bops" | "wait" | undefined {
+export function limitPick(text: string): "bops" | "wait" | "retry" | undefined {
   const t = text.trim().toLowerCase().replace(/[.!]+$/, "");
-  return t === FINISH_ON_BOPS.toLowerCase() ? "bops" : t === WAIT.toLowerCase() ? "wait" : undefined;
+  return t === FINISH_ON_BOPS.toLowerCase() ? "bops" : t === WAIT.toLowerCase() ? "wait" : t === TRY_AGAIN.toLowerCase() ? "retry" : undefined;
 }
 
 /* ---------------- Claude Code ---------------- */
@@ -115,7 +135,7 @@ function claudeTool(name: string, args: Record<string, unknown>): { tool: string
     case "WebFetch":
       return { tool: "search", detail: `read ${cut((str(args.url) ?? "a page").replace(/^https?:\/\/(www\.)?/, ""), 70)}` };
     case "TodoWrite":
-      return { tool: "note", detail: "updated its to-do list" };
+      return { tool: "note", detail: "updated its todo list" };
     case "Task":
     case "Agent":
       return { tool: "helper", detail: str(args.description) ? `brought in a helper for ${cut(str(args.description)!, 60)}` : "started a helper" };
@@ -129,13 +149,25 @@ const failure = (e: Record<string, unknown>) =>
   [str(e.result), ...(Array.isArray(e.errors) ? e.errors.map((x) => (typeof x === "string" ? x : str((x as { message?: unknown })?.message))) : [])].filter(Boolean).join(" ").trim() ||
   (e.subtype === "error_max_turns" ? "it reached the most turns it may take" : `it stopped (${str(e.subtype) ?? "an error"})`);
 
-/** A brain's CLI turned a turn down at a limit (the plan's usage, the key's credit, quota or rate), or for its sign-in or key. */
+/**
+ * A CLI agent turned a turn down: at a limit (the plan's usage, the key's credit, quota or rate), for its sign in
+ * or key, for a model its account can't use (never a quiet run on the CLI's own default model instead), or its
+ * provider isn't answering (or the gate couldn't reach it).
+ */
 const LIMIT = /usage limit|limit reached|hit your (usage )?limit|out of (extra )?usage|credit balance is too low|rate.?limit|quota|too many requests|\b429\b/i;
-const AUTH = /(invalid|incorrect) api key|please run \/login|not logged in|log ?in again|oauth token|token (has )?expired|authentication|unauthori[sz]ed|\b401\b/i;
-export const stopOf = (text: string) => (LIMIT.test(text) ? "limit" : AUTH.test(text) ? "auth" : undefined);
+const AUTH = /(invalid|incorrect) (x-)?api.?key|please run \/login|not logged in|log ?in again|oauth token|token (has )?expired|authentication|unauthori[sz]ed|\b401\b|provider\.auth/i;
+const MODEL = /\bmodel\b.{0,80}\b(not available|not found|not allowed|invalid|does not exist|isn't available|is not supported)\b|\b(invalid|unknown|unsupported) model\b/i;
+const DOWN = /overloaded|\b529\b|\b502\b|\b503\b|connection (refused|reset)|ECONNREFUSED|ECONNRESET|service unavailable|Bops couldn't reach/i;
+export const stopOf = (text: string): Exclude<CliStop, "vault"> | undefined => (LIMIT.test(text) ? "limit" : AUTH.test(text) ? "auth" : MODEL.test(text) ? "model" : DOWN.test(text) ? "down" : undefined);
+
+/** A UUID, as Claude Code's and Codex's sessions are. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const uuidId = (v: string | undefined) => (v && UUID.test(v) ? v : undefined);
 
 export const claudeDriver: CliDriver = {
   kind: "claude",
+  cliId: uuidId,
+  newSession: () => crypto.randomUUID(),
   steers: true,
   asks: true,
   prepare: async (computerId) => {
@@ -210,6 +242,8 @@ const NOT_STARTED = /^MCP client for `([^`]+)` (?:failed to start|timed out)/;
  */
 export const codexDriver: CliDriver = {
   kind: "codex",
+  cliId: uuidId,
+  newSession: () => crypto.randomUUID(),
   steers: false,
   asks: false,
   prepare: async (computerId) => {
@@ -243,7 +277,7 @@ export const codexDriver: CliDriver = {
         const args = item.arguments && typeof item.arguments === "object" && !Array.isArray(item.arguments) ? (item.arguments as Record<string, unknown>) : {};
         return [{ type: "tool", id, tool, args, ...(server === "screen" || server === "browser" ? {} : { detail: `used ${tool} (${server})` }) }];
       }
-      if (item.type === "todo_list") return [{ type: "tool", id, tool: "note", detail: "updated its to-do list", args: {} }];
+      if (item.type === "todo_list") return [{ type: "tool", id, tool: "note", detail: "updated its todo list", args: {} }];
       if (item.type === "collab_tool_call" && item.tool === "spawn_agent")
         return [{ type: "tool", id, tool: "helper", detail: str(item.prompt) ? `brought in a helper for ${cut(str(item.prompt)!, 60)}` : "started a helper", args: { description: str(item.prompt) ?? "" } }];
       return [];
@@ -260,10 +294,88 @@ export const codexDriver: CliDriver = {
   },
 };
 
-/** None in a build without brains (BRAINS_ON): every thread runs on Bops agent, one a brain ran too. */
-const DRIVERS: Partial<Record<BrainKind, CliDriver>> = BRAINS_ON ? { claude: claudeDriver, codex: codexDriver } : {};
-/** The driver for a brain's CLI, when this build runs it (one without runs on Bops agent). */
-export const cliDriver = (kind: BrainKind) => DRIVERS[kind];
+/* ---------------- OpenCode ---------------- */
+
+/** OpenCode's own tools, worded as Claude Code's are. Bops' MCP tools come as <server>_<tool>. */
+function openCodeTool(name: string, args: Record<string, unknown>): { tool: string; detail?: string } {
+  const mcp = /^(screen|browser)_(.+)$/.exec(name);
+  if (mcp) return { tool: mcp[2] };
+  switch (name) {
+    case "bash":
+      return { tool: "command", detail: `ran ${cut(str(args.command) ?? "a command", 100)}` };
+    case "read":
+      return { tool: "read", detail: `read ${base(args.filePath ?? args.file_path)}` };
+    case "edit":
+    case "patch":
+      return { tool: "edit", detail: `edited ${base(args.filePath ?? args.file_path)}` };
+    case "write":
+      return { tool: "edit", detail: `wrote ${base(args.filePath ?? args.file_path)}` };
+    case "glob":
+    case "grep":
+    case "list":
+      return { tool: "search", detail: name === "grep" ? `searched files for "${cut(str(args.pattern) ?? "", 50)}"` : `looked for files like ${cut(str(args.pattern) ?? str(args.path) ?? "", 60)}` };
+    case "webfetch":
+      return { tool: "search", detail: `read ${cut((str(args.url) ?? "a page").replace(/^https?:\/\/(www\.)?/, ""), 70)}` };
+    case "todowrite":
+    case "todoread":
+      return { tool: "note", detail: "updated its todo list" };
+    case "task":
+      return { tool: "helper", detail: str(args.description) ? `brought in a helper for ${cut(str(args.description)!, 60)}` : "started a helper" };
+    default:
+      return { tool: name, detail: `used ${name}` };
+  }
+}
+
+/** OpenCode's session for a thread: Bops makes it, as OpenCode's own look ("ses_" and letters), and OpenCode creates it on the first run. */
+const SES = /^ses_[A-Za-z0-9]{8,40}$/;
+const ABC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+/**
+ * OpenCode 2.0.27 (`opencode run --standalone --format json`, bops-agent _opencode): each message a run of its
+ * own on the thread's session, on a private server (never the background service other bots on the computer
+ * would share), its events as its run writes them (step_start, text, reasoning, tool_use once a tool ends,
+ * error), then Bops' own line saying how the turn ended. Like Codex it doesn't steer and never asks.
+ */
+export const opencodeDriver: CliDriver = {
+  kind: "opencode",
+  cliId: (v) => (v && SES.test(v) ? v : undefined),
+  newSession: () => `ses_${Array.from(randomBytes(24), (n) => ABC[n % ABC.length]).join("")}`,
+  steers: false,
+  asks: false,
+  prepare: async (computerId) => {
+    await ensureOpenCode(computerId);
+    await ensureBrainTools(computerId);
+  },
+  note: (owner) =>
+    `You run as OpenCode on this computer, for Bops. Your tools are OpenCode's own (bash for the shell, read, edit and write for files, glob and grep to find things, webfetch to read a page, your to-do list) and Bops' (the screen server's tools for the screen, ${owner}'s apps and signing in with their saved logins; the browser server's for the Chrome on your screen). Where the instructions above name a tool, use the one of yours that does that: the shell is bash. What would change ${owner}'s apps (sending, posting, paying) asks them in Bops first and waits for their answer; if they say no, don't do it another way.`,
+  line: (text) => `${JSON.stringify({ text })}\n`,
+  parse: (e) => {
+    if (e.type === "bops" && e.subtype === "started") return [{ type: "started", session: str(e.session), failed: [] }];
+    if (e.type === "bops" && e.subtype === "turn") {
+      if (e.ok === true) return [{ type: "result", ok: true }];
+      const text = str(e.error)?.trim() || "its turn failed";
+      const stop = stopOf(text);
+      return [{ type: "result", ok: false, text, ...(stop ? { stop } : {}) }];
+    }
+    if (e.type === "bops" && e.subtype === "exited") return [{ type: "exited", code: Number(e.code) || 0 }];
+    const part = (e.part && typeof e.part === "object" ? e.part : {}) as Record<string, unknown>;
+    if (e.type === "text" && str(part.text)?.trim()) return [{ type: "text", text: str(part.text)!.trim() }];
+    if (e.type === "reasoning" && str(part.text)?.trim()) return [{ type: "thinking", text: str(part.text)!.trim().split("\n")[0] }];
+    if (e.type === "tool_use") {
+      const st = (part.state && typeof part.state === "object" ? part.state : {}) as Record<string, unknown>;
+      const args = st.input && typeof st.input === "object" && !Array.isArray(st.input) ? (st.input as Record<string, unknown>) : {};
+      const name = str(part.tool) ?? "tool";
+      const t = openCodeTool(name, args);
+      return [{ type: "tool", id: str(part.id) ?? "", ...t, ...(st.status === "error" && t.detail ? { detail: `couldn't: ${t.detail}` } : {}), args }];
+    }
+    return [];
+  },
+};
+
+/** None in a build without brains (BRAINS_ON): every thread runs on Bops agent, one a CLI agent ran too. */
+const DRIVERS: Partial<Record<CliKind, CliDriver>> = BRAINS_ON ? { claude: claudeDriver, codex: codexDriver, opencode: opencodeDriver } : {};
+/** The driver for a CLI agent, when this build runs it (one without runs on Bops agent). */
+export const cliDriver = (kind: CliKind) => DRIVERS[kind];
 
 /* ---------------- The thread's CLI on its computer ---------------- */
 
@@ -272,7 +384,9 @@ export type CliRun = {
   sessionId: string;
   computerId: string;
   display: number;
-  brain: Brain;
+  /** The agent it runs on as the run began (lib/agents.ts threadAgent), and its name for what the thread says. */
+  agent: AgentRun;
+  name: string;
   driver: CliDriver;
   /** The CLI's session for the thread (Session.brainRun.cli), and whether it should have it already (it began it before). */
   cli: string;
@@ -293,19 +407,71 @@ export type CliRun = {
 const b64 = (s: string) => Buffer.from(s).toString("base64");
 
 /**
- * A CLI session's id as Bops keeps it and puts it in a command: Claude Code's and Codex's are both UUIDs. One
- * that isn't (the CLI's output said something else, and the bot's own shell can write there) is never used.
+ * A CLI session's id as Bops keeps it and puts it in a command: Claude Code's and Codex's are UUIDs, OpenCode's
+ * "ses_" and letters. One that isn't (the CLI's output said something else, and the bot's own shell can write
+ * there) is never used.
  */
-export const cliId = (v: string | undefined) => (v && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v) ? v : undefined);
+export const cliId = (v: string | undefined) => uuidId(v) ?? opencodeDriver.cliId(v);
 
 /**
- * The brain as it is now, for a start of its process (each one: a run can last long): the user may have
- * removed it meanwhile, and a key brain's key is the Vault's now, not when the run began.
+ * The thread's agent as its bot's profile has it now, for a start of its process (each one: a run can last
+ * long): the user may have switched or removed it meanwhile, or moved it to another account, and nothing more
+ * runs on the old one; a key is the Vault's now, not when the run began. Throws, in words, when it changed.
  */
-function brainNow(x: Brain): Brain {
-  const now = brainById(x.id);
-  if (!now) throw new Error(`${x.name} isn't there anymore, so it didn't start again`);
-  return now;
+export function agentNow(o: Pick<CliRun, "sessionId" | "agent" | "name">): { run: AgentRun; bot: Bot } {
+  const s = session(o.sessionId);
+  const b = s && bot(s.botId);
+  if (!s || !b) throw new Error("That thread isn't there anymore");
+  const now = threadAgent(s, b, getState());
+  if (now.gone || now.kind !== o.agent.kind || now.agent.id !== o.agent.agent.id || now.agent.pays !== o.agent.agent.pays || now.account?.id !== o.agent.account?.id)
+    throw new Error(`${b.name} doesn't run ${o.name} anymore, so this stopped`);
+  return { run: now, bot: b };
+}
+
+/**
+ * The flags that make a process on the computer this bot's agent's (bops-agent, bops-brain run --bot): the bot,
+ * the agent, its model and thinking, where its key goes, and the bot's other agents (for its wrappers: a Claude
+ * plan works in all its threads, a key only in its own agent's). Every value is checked here and again there.
+ */
+const safe = (v: string | undefined) => (v && /^[A-Za-z0-9._:/-]+$/.test(v) ? v : undefined);
+
+/** The bot's CLI agents but `except`, for its wrappers (bops-brain --also: "claude:plan:<account>:<model>,codex:key:<account>:"). */
+export function alsoSpec(b: Bot, except?: string) {
+  return aiOf(b, getState())
+    .agents.filter((x) => isCli(x.kind) && x.id !== except)
+    .map((x) => `${x.kind}:${x.pays}:${safe(x.account) ?? "-"}:${safe(x.model) ?? ""}`)
+    .filter((x) => /^[a-z]+:[a-z]+:[A-Za-z0-9_-]+:[A-Za-z0-9._:/-]*$/.test(x))
+    .join(",");
+}
+
+export function agentFlags(r: AgentRun, b: Bot) {
+  const others = alsoSpec(b, r.agent.id);
+  const effort = r.kind !== "opencode" && (b.effort === "low" || b.effort === "medium" || b.effort === "high") ? b.effort : undefined;
+  return [
+    "--bot", b.id,
+    "--agent", r.agent.id,
+    ...(safe(r.model) ? ["--model", r.model!] : []),
+    ...(effort ? ["--effort", effort] : []),
+    ...(r.route ? ["--route", r.route] : []),
+    ...(others ? ["--also", others] : []),
+    "--label", shellLabel(b.name),
+  ].filter((x) => /^[A-Za-z0-9._:/,-]+$/.test(x));
+}
+
+/**
+ * The key an agent on a key runs on, for one start only: its account's (Claude Code, Codex), or for OpenCode
+ * its model's provider's, from the Vault. When the Vault has given all it allows this hour, the thread waits
+ * for it (CliStopped "vault") rather than failing.
+ */
+export async function revealAgentKey(r: AgentRun, b: Bot): Promise<string> {
+  try {
+    if (r.account) return await revealBrainKey(r.account);
+    if (!r.keyName) throw new Error(`${AGENTS[r.kind].name} has no key to run on`);
+    return await revealNamedKey(r.keyName, workspaceOf(b));
+  } catch (e) {
+    if (e instanceof KeysError && e.status === 429) throw new BrainStopped("vault", e.message);
+    throw e;
+  }
 }
 
 /** A file for the thread's CLI on the computer (bops-agent put), from stdin: never on a command line of its own. */
@@ -318,10 +484,10 @@ async function put(run: Pick<CliRun, "computerId" | "sessionId">, name: "mcp.jso
  * Set a thread's CLI up on its computer for a run: its tools (`mcp`: the MCP servers' config) and its
  * briefing (`prompt`), which every start of its process in this run uses.
  */
-export async function openRun(o: { sessionId: string; computerId: string; display: number; brain: Brain; driver: CliDriver; cli: string; resume: boolean; mcp: unknown; prompt: string; args?: string[] }): Promise<CliRun> {
+export async function openRun(o: { sessionId: string; computerId: string; display: number; agent: AgentRun; driver: CliDriver; cli: string; resume: boolean; mcp: unknown; prompt: string; args?: string[] }): Promise<CliRun> {
   await put(o, "mcp.json", JSON.stringify(o.mcp));
   await put(o, "prompt.md", o.prompt);
-  return { sessionId: o.sessionId, computerId: o.computerId, display: o.display, brain: o.brain, driver: o.driver, cli: o.cli, resume: o.resume, up: false, restarts: 0, offset: 0, helpers: new Map(), down: new Set(), ...(o.args?.length ? { args: o.args } : {}) };
+  return { sessionId: o.sessionId, computerId: o.computerId, display: o.display, agent: o.agent, name: CLI_NAMES[o.driver.kind], driver: o.driver, cli: o.cli, resume: o.resume, up: false, restarts: 0, offset: 0, helpers: new Map(), down: new Set(), ...(o.args?.length ? { args: o.args } : {}) };
 }
 
 /**
@@ -330,14 +496,14 @@ export async function openRun(o: { sessionId: string; computerId: string; displa
  * for this start only). Says which.
  */
 async function startCli(run: CliRun): Promise<"resumed" | "fresh"> {
-  const x = brainNow(run.brain);
-  const cli = cliId(run.cli);
-  if (!cli) throw new Error(`${x.name} has no session Bops can pick up`);
-  if (x.auth === "key") await put(run, "key", await revealBrainKey(x));
+  const { run: now, bot: b } = agentNow(run);
+  const cli = run.driver.cliId(run.cli);
+  if (!cli) throw new Error(`${run.name} has no session Bops can pick up`);
+  if (now.agent.pays === "key") await put(run, "key", await revealAgentKey(now, b));
   const more = (run.args ?? []).filter((a) => /^[A-Za-z0-9=_.:/-]+$/.test(a));
-  const r = await orgo.bash(run.computerId, `bops-agent start ${run.sessionId} ${x.id} ${run.driver.kind} ${run.display} ${run.computerId} '${cli}'${more.length ? ` -- ${more.join(" ")}` : ""}`, 30);
+  const r = await orgo.bash(run.computerId, `bops-agent start ${run.sessionId} ${now.account?.id ?? "-"} ${run.driver.kind} ${run.display} ${run.computerId} '${cli}' ${agentFlags(now, b).join(" ")}${more.length ? ` -- ${more.join(" ")}` : ""}`, 30);
   const mode = /started (resumed|fresh)/.exec(r.output)?.[1] as "resumed" | "fresh" | undefined;
-  if (!mode) throw new Error(`${run.brain.name} didn't start on the computer (${r.output.trim().slice(-160) || "no answer"})`);
+  if (!mode) throw new Error(`${run.name} didn't start on the computer (${r.output.trim().slice(-160) || "no answer"})`);
   run.up = true;
   run.offset = 0;
   return mode;
@@ -348,7 +514,7 @@ async function sendCli(run: CliRun, text: string) {
   const r = await orgo.bash(run.computerId, `echo ${b64(run.driver.line(text))} | base64 -d | bops-agent send ${run.sessionId}`, 30);
   if (r.output.includes("sent")) return true;
   if (r.output.includes("gone")) return false;
-  throw new Error(`Bops couldn't reach ${run.brain.name} on the computer (${r.output.trim().slice(0, 120) || "no answer"})`);
+  throw new Error(`Bops couldn't reach ${run.name} on the computer (${r.output.trim().slice(0, 120) || "no answer"})`);
 }
 
 /** What the process said since the last read, whether there's more of it to read, and whether it still runs (when it doesn't, its last error words). */
@@ -362,13 +528,14 @@ async function readCli(run: CliRun): Promise<{ events: CliEvent[]; alive: boolea
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      events.push(...run.driver.parse(JSON.parse(line) as Record<string, unknown>));
+      // A key or token the CLI happened to say (an `env` it ran, an error) never comes into Bops.
+      events.push(...run.driver.parse(redactDeep(JSON.parse(line) as Record<string, unknown>)));
     } catch {
       /* a line that isn't an event */
     }
   }
   if (typeof h.next === "number" && h.next >= run.offset) run.offset = h.next;
-  return { events, alive: !!h.alive, more: !!h.more, err: h.err ?? "" };
+  return { events, alive: !!h.alive, more: !!h.more, err: redactDeep(h.err ?? "") };
 }
 
 /** Stop the thread's process now (Stop: SIGINT, then harder). */
@@ -382,21 +549,41 @@ export async function closeCli(run: Pick<CliRun, "computerId" | "sessionId">) {
 }
 
 /**
- * Open a thread's Claude Code session in a terminal on a screen of its computer, for the user to work with
- * it there (sessions.ts openInTerminal): the thread's headless process goes first (bops-agent terminal), then
- * xfce4-terminal runs Claude Code's own `--resume` of the thread's session there, with the thread's tools
- * and briefing (`mcp`, `prompt`, as a run has them) through bops-brain run: an empty environment, the brain's
- * own folder. A key brain's key goes along as a file that run reads and deletes. What Claude Code asks, the
- * user answers in the terminal.
+ * Open a thread's CLI session in a terminal on a screen of its computer, for the user to work with it there
+ * (sessions.ts openInTerminal): the thread's headless process goes first (bops-agent terminal), then
+ * xfce4-terminal runs the CLI's own resume of the thread's session there (Claude Code's `--resume` with the
+ * thread's tools and briefing, Codex's `resume`, OpenCode on the session) through bops-brain run as the bot's
+ * agent; once the CLI is closed it's the bot's own shell, with the same settings. A key goes along as a file
+ * that run reads and deletes. What the CLI asks, the user answers in the terminal.
  */
-export async function openTerminal(o: { sessionId: string; computerId: string; display: number; brain: Brain; cli: string; mcp: unknown; prompt: string }) {
-  const x = brainNow(o.brain);
-  const cli = cliId(o.cli);
-  if (!cli) throw new Error(`${x.name} has no session to open`);
+export async function openTerminal(o: { sessionId: string; computerId: string; display: number; agent: AgentRun; cli: string; mcp: unknown; prompt: string }) {
+  const name = CLI_NAMES[o.agent.kind as CliKind];
+  const { run: now, bot: b } = agentNow({ sessionId: o.sessionId, agent: o.agent, name });
+  const driver = cliDriver(now.kind as CliKind);
+  const cli = driver?.cliId(o.cli);
+  if (!driver || !cli) throw new Error(`${name} has no session to open`);
   await put(o, "mcp.json", JSON.stringify(o.mcp));
   await put(o, "prompt.md", o.prompt);
-  if (x.auth === "key") await put(o, "key", await revealBrainKey(x));
-  const r = await orgo.bash(o.computerId, `bops-agent terminal ${o.sessionId} ${x.id} ${o.display} ${o.computerId} '${cli}'`, 30);
+  if (now.agent.pays === "key") await put(o, "key", await revealAgentKey(now, b));
+  const r = await orgo.bash(o.computerId, `bops-agent terminal ${o.sessionId} ${now.account?.id ?? "-"} ${o.display} ${o.computerId} '${cli}' --kind ${driver.kind} ${agentFlags(now, b).join(" ")}`, 30);
+  if (!r.output.includes("terminal on")) throw new Error(`its terminal didn't open (${r.output.trim().slice(-160) || "no answer"})`);
+}
+
+/**
+ * A bot's own terminal with no thread (its profile's Open its terminal): its shell on a screen of its computer,
+ * as its Default CLI agent (or its first), so claude, codex and opencode there are the bot's own. A key goes
+ * along as a file the run reads and deletes, for the gate that holds it while the terminal is open.
+ */
+export async function openShell(o: { botId: string; computerId: string; display: number; agent: AgentRun; bot: Bot }) {
+  const driver = cliDriver(o.agent.kind as CliKind);
+  if (!driver) throw new Error("Only Claude Code, Codex or OpenCode opens a terminal");
+  await driver.prepare(o.computerId);
+  if (o.agent.agent.pays === "key") {
+    const key = await revealAgentKey(o.agent, o.bot);
+    const r = await orgo.bash(o.computerId, `echo ${b64(key)} | base64 -d | bops-agent put shell-${o.botId} key`, 30);
+    if (!r.output.includes("ok")) throw new Error(`Bops couldn't set up the computer for this (${r.output.trim().slice(0, 120) || "no answer"})`);
+  }
+  const r = await orgo.bash(o.computerId, `bops-agent shell ${o.botId} ${o.agent.account?.id ?? "-"} ${driver.kind} ${o.display} ${o.computerId} ${agentFlags(o.agent, o.bot).join(" ")}`, 30);
   if (!r.output.includes("terminal on")) throw new Error(`its terminal didn't open (${r.output.trim().slice(-160) || "no answer"})`);
 }
 
@@ -405,10 +592,10 @@ export async function closeTerminal(run: Pick<CliRun, "computerId" | "sessionId"
   await orgo.bash(run.computerId, `bops-agent unterm ${run.sessionId}`, 30);
 }
 
-/** A brain's CLI turned a turn down at its limit or for its sign-in or key (CliEvent stop): the thread waits on the user. */
+/** A CLI agent turned a turn down (CliStop): the thread waits on the user. */
 export class BrainStopped extends Error {
-  why: "limit" | "auth";
-  constructor(why: "limit" | "auth", said: string) {
+  why: CliStop;
+  constructor(why: CliStop, said: string) {
     super(said);
     this.why = why;
   }
@@ -452,7 +639,7 @@ const CUT_OFF = "(From Bops: you were cut off while you worked on this, and star
  * again (RESTARTS at most) and given again what it hadn't answered.
  */
 export async function cliTurn(run: CliRun, t: CliTurn): Promise<string> {
-  const name = run.brain.name;
+  const name = run.name;
   const queue: string[] = [];
   // Its latest words of its own: a step once it goes on, or nothing when they're its answer.
   let said: string | undefined;
@@ -647,8 +834,6 @@ export async function approveTool(botId: string, sessionId: string, args: Record
 
 /* ---------------- Waiting on the user ---------------- */
 
-/** Whose key a key brain runs on. */
-const vendor = (x: Pick<Brain, "kind">) => (x.kind === "codex" ? "OpenAI" : "Anthropic");
 
 /** When a limit resets, as Claude Code said it ("…|1760032800", or "resets 3pm"). */
 function resetsAt(text: string) {
@@ -657,26 +842,40 @@ function resetsAt(text: string) {
   return /\bresets? (?:at )?([^.·|\n]{1,40})/i.exec(text)?.[1]?.trim();
 }
 
-/** What a thread waiting for its plan brain's sign-in says (sessions.ts brainTurns). `where`: "Sam's computer". */
-export const signInWords = (x: Brain, where: string, began: boolean) => `${x.name} isn't signed in on ${where}. Sign in with your Claude plan there and I'll ${began ? "carry on" : "start"}.`;
+/** What a thread waiting for its Claude plan's sign in says (sessions.ts brainTurns). `where`: "Sam's computer". */
+export const signInWords = (x: Pick<Brain, "name">, where: string, began: boolean) => `${x.name} isn't signed in on ${where}. Sign in with your Claude plan there and I'll ${began ? "carry on" : "start"}.`;
 
 /**
- * What a thread says when its brain stopped (BrainStopped), with the two replies it offers (tidyAnswer makes
- * them buttons): Bops agent finishes it, on AI credit, or it waits. `plan`: the signed-in plan, when known.
+ * What a thread says when its CLI agent stopped (BrainStopped), with the replies it offers (tidyAnswer makes them
+ * buttons): Bops agent finishes it, on AI credit, or it waits (a reply carries it on, which tries again); a provider
+ * that wasn't answering is tried again now (Try again); the Vault's hour starts it again by itself in a few minutes
+ * (sessions.ts vaultWaitsDue), so Wait there is just that. `plan`: the signed in plan, when known. `bot`: its name,
+ * for its profile, where a model for new threads is picked.
  */
-export function stoppedWords(x: Brain, why: "limit" | "auth", said: string, where: string, plan?: string) {
+export function stoppedWords(r: Pick<AgentRun, "kind" | "agent" | "model">, why: CliStop, said: string, where: string, plan?: string, bot?: string) {
+  const name = AGENTS[r.kind].name;
+  const onPlan = r.agent.pays === "plan";
+  const vendor = keyVendor({ ...r.agent, model: r.model });
   const resets = why === "limit" ? resetsAt(said) : undefined;
   const until = resets ? ` until ${resets}` : "";
+  const finish = "I can finish this on Bops agent, on your AI credit";
+  if (why === "model")
+    return `Your ${onPlan ? planName(plan) : `${vendor} key`} can't use ${agentLabel({ kind: r.kind, model: r.model }).replace(`${name} · `, "")}. Pick another model for new threads in ${bot ? `${bot}'s` : "the bot's"} profile. ${finish}, or wait.\n\nOptions: ${FINISH_ON_BOPS} | ${WAIT}`;
+  if (why === "vault") return `Waiting for your Vault. It allows 30 key uses an hour, so this starts again by itself in a few minutes. Or I can finish it on Bops agent, on your AI credit.\n\nOptions: ${FINISH_ON_BOPS} | ${WAIT}`;
+  if (why === "down") {
+    const who = r.kind === "claude" ? "Claude" : r.kind === "codex" ? "OpenAI" : (ROUTE_NAMES[r.model?.split("/")[0] as keyof typeof ROUTE_NAMES] ?? "Its provider");
+    return `${who} isn't answering right now. I can try again, or finish this on Bops agent, on your AI credit.\n\nOptions: ${TRY_AGAIN} | ${FINISH_ON_BOPS}`;
+  }
   const what =
     why === "limit"
-      ? x.auth === "plan"
-        ? `${x.name} reached your ${planName(plan)}'s usage limit${until}.`
-        : `${x.name} reached what your ${vendor(x)} key allows${until}.`
-      : x.auth === "plan"
-        ? `${x.name} isn't signed in to your Claude plan on ${where} anymore.`
-        : `${vendor(x)} turned down your key for ${x.name}.`;
-  return `${what} I can finish this on Bops agent, on your AI credit, or wait.\n\nOptions: ${FINISH_ON_BOPS} | ${WAIT}`;
+      ? onPlan
+        ? `${name} reached your ${planName(plan)}'s usage limit${until}.`
+        : `${name} reached what your ${vendor} key allows${until}.`
+      : onPlan
+        ? `${name} isn't signed in to your Claude plan on ${where} anymore.`
+        : `${vendor} turned down your key for ${name}.`;
+  return `${what} ${finish}, or wait.\n\nOptions: ${FINISH_ON_BOPS} | ${WAIT}`;
 }
 
-/** A brain's name for the record, when the brain is gone. */
-export const brainName = (x: Brain | undefined, kind: BrainKind) => x?.name ?? BRAIN_NAMES[kind];
+/** A CLI agent's name for the record. */
+export const brainName = (x: Brain | undefined, kind: CliKind) => (x && x.name !== CLI_NAMES[kind] && kind !== "opencode" ? x.name : CLI_NAMES[kind]);

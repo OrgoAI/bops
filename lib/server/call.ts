@@ -1,17 +1,18 @@
 import "server-only";
 import { computerBriefing, teamBriefing } from "./briefing";
+import { belowOf } from "@/lib/chain";
 import { appsOpen } from "@/lib/apps-access";
 import { aboutBops, SPEAKING } from "./style";
 import { howIWork } from "@/cloud/style";
 import { appsNote, placesNote } from "./skills";
 import { dataNote } from "./treg";
 import { openaiClient } from "./openai-client";
-import { botChatId, live, MAX_PERSONA_CHARS, type Bot } from "@/lib/types";
+import { botChatId, CALL_VOICES, isCallVoice, live, MAX_PERSONA_CHARS, settingsOf, type Bot } from "@/lib/types";
 import { handleMessage } from "./chat";
 import { callEnded, callStarted } from "./attention";
 import { noteOutOfCredit, OUT_OF_CREDIT } from "./cloud";
 import { chose, decide } from "./decide";
-import { memoryBlock, OWNER_WHO, saveToMemory, wsOf } from "./memory";
+import { memoryBlock, OWNER_WHO, saveToMemory, scopeOf } from "./memory";
 import { addMessage, bot, getState, ownerLine, ownerName, update } from "./store";
 import { recordCallMinutes, usageTags } from "./usage";
 import { contactLine } from "./bots";
@@ -30,14 +31,16 @@ const client = openaiClient({ maxRetries: 0 });
  * man's for a man's, and a man's when the name could be either or isn't a name (Jev decides, once
  * per name). Within that, the bot's id picks the voice, so it's the same on every call.
  */
-const MALE = ["cedar", "ash", "echo", "ballad", "verse"];
-const FEMALE = ["marin", "coral", "shimmer", "sage"];
+const MALE: readonly string[] = CALL_VOICES.slice(0, 5);
+const FEMALE: readonly string[] = CALL_VOICES.slice(5);
 const genders = new Map<string, "female" | "male">();
 export async function voiceFor(b: Bot) {
   const voice = await chooseVoice(b);
   // Kept on the bot, so Bops Cloud answers its calls in the same voice while the Mac is away.
   if (b.voice !== voice) update(() => void (b.voice = voice));
-  return voice;
+  // The one picked on its settings page, when there is one: kept apart from `voice`, which stays what a Bops from before writes too.
+  const picked = settingsOf(getState(), b).callVoice;
+  return isCallVoice(picked) ? picked : voice;
 }
 
 /** Every bot's voice, chosen and kept (the phone's catch-up runs it): a new or renamed bot gets its own before its first call. */
@@ -104,10 +107,11 @@ export async function voicePrompt(b: Bot, how: "live" | "turns" = "live") {
       : `${owner} called your phone number, and you picked up. Each of your replies is spoken aloud by a voice that reads your text: write only the words to say, one or two short sentences, plain words, no markdown, lists, links, emoji or symbols. Say numbers, times and addresses the way people say them. When ${owner} is done, call end_call with a short goodbye.`,
     `Here's your computer as of the start of this call. Use it for questions about what you're doing or what's waiting on ${owner}; for anything that may have changed since, delegate.`,
     await computerBriefing(b.id).catch(() => ""),
-    b.isMain ? teamBriefing(b.id) : "",
+    // The bots it leads on the team chart (lib/chain.ts): the main bot every bot.
+    b.isMain || belowOf(getState(), b.id).length ? teamBriefing(b.id) : "",
     recent ? `Your recent text conversation with ${owner}, for context:\n${recent}` : "",
     // What's known about the user (long-term memory), so the call knows them like the chat does.
-    await memoryBlock(wsOf(b.id), recent || owner),
+    await memoryBlock(scopeOf(b.id), recent || owner),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -159,7 +163,7 @@ export function endCall(botId: string, seconds: number, transcript?: { who: stri
   if (!phone) recordCallMinutes(botId, seconds);
   // The call goes into long-term memory like a chat, so what the user said out loud is remembered too.
   if (transcript?.length)
-    saveToMemory(wsOf(botId), "chat", botChatId(botId), transcript.slice(-200).map((t) => ({ who: t.who === "owner" ? OWNER_WHO : botId, text: t.text.slice(0, 2000) })), { chat: "call" });
+    saveToMemory(scopeOf(botId), "chat", botChatId(botId), transcript.slice(-200).map((t) => ({ who: t.who === "owner" ? OWNER_WHO : botId, text: t.text.slice(0, 2000) })), { chat: "call" });
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);
   addMessage({ chatId: botChatId(botId), role: "system", text: `${phone ? "Phone call" : "Call"} ended · ${m ? `${m}m ` : ""}${s}s`, call: { seconds: Math.round(seconds), phone } });

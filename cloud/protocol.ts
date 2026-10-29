@@ -637,6 +637,33 @@ export type SharedWsSlice = {
   approvals?: Record<string, unknown>[];
   /** For anyone but the owner: their level for each bot shown ("read" or "write"). None for the owner (every bot is theirs). */
   levels?: Record<string, "read" | "write">;
+  /**
+   * The workspace's apps on the web, for someone given Your Apps at Read or more (cloud/ws-slice.ts appsFor), as the owner's
+   * Mac last read them. None for the owner (their own page reads them), for anyone else without Read, and from a Bops
+   * Cloud before the scope.
+   */
+  apps?: SharedApps;
+};
+
+/** What a member with Your Apps sees of a workspace's apps (SharedWsSlice.apps): `at` when the owner's Mac last read them. */
+export type SharedApps = { level: "read" | "write"; at: number; list: SharedApp[]; /** The workspace's domains bought through Orgo: Write only. */ owned?: { id: string; domain: string }[] };
+/** One app as a member sees it (lib/hosted-apps.ts AppForMembers, spelled out: this file imports nothing). */
+export type SharedApp = {
+  name: string;
+  /** Its other sites' names (its own is named as the app). */
+  siteNames?: string[];
+  /** Its bot, when it's one they see. */
+  botId?: string;
+  url?: string;
+  /** Its computer went: it needs a new home (a deploy gives it one). */
+  lost?: true;
+  head?: { id: string; message: string; at: number } | null;
+  sites?: { name: string; url: string | null; serving: string | null; live: { id: string; state: string | null; when: number | null } | null; domains?: { domain: string; status: string }[] }[];
+  commits?: { id: string; message: string; author: string; at: number; changes: { added: number; modified: number; deleted: number } }[];
+  deploys?: { id: string; state: string; at: string | null; rollback: boolean; when: number | null; live: boolean; canRollback: boolean; site: string }[];
+  /** Each site's settings: Write only. */
+  settings?: Record<string, { port: number | null; install: string | null; build: string | null; start: string | null; health?: string }>;
+  acts?: { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain"; site?: string; domain?: string; ok: boolean; said?: string; at: number }[];
 };
 export type SharedWsState = {
   projectId: string;
@@ -650,7 +677,15 @@ export type SharedWsState = {
   more: string[];
   /** The caller's Orgo user id: the window tells its own words (Message.member) from other members' with it. */
   you?: string;
+  /**
+   * Read again over a copy (?have=): the messages of these chats the owner deleted since the copy's seq, by id
+   * (the newest MAX_GONE), so it drops them from the older pages it read too ("Show earlier messages"). Unset
+   * from a Bops Cloud from before.
+   */
+  gone?: string[];
 };
+/** The most deleted ids a read again says (SharedWsState.gone). */
+export const MAX_GONE = 2000;
 export type SharedWsUnchanged = { hash: string; seq: number; unchanged: true };
 export const MESSAGES_PER_CHAT = 200;
 
@@ -665,7 +700,18 @@ export type MemberAct =
   | { act: "reply"; sessionId: string; text: string }
   | { act: "answer"; askId: string; reply: "once" | "always" | "reject"; message?: string }
   | { act: "stop"; sessionIds: string[] }
-  | { act: "dismiss"; sessionId: string };
+  | { act: "dismiss"; sessionId: string }
+  // Your Apps at Write (SharedWsSlice.apps): done by the owner's Mac, named as the member (lib/server/member-acts.ts).
+  | MemberAppAct;
+/** What a member with Your Apps at Write does to an app: deploy (the newest changeset, or `at`), go back to an earlier deploy, change a site's settings, or use one of the workspace's own domains (`zone`, its id). */
+export type MemberAppAct =
+  | { act: "deploy"; app: string; site?: string; at?: string }
+  | { act: "rollback"; app: string; deployment: string; site?: string }
+  | { act: "settings"; app: string; site?: string; port?: number; install?: string; build?: string; start?: string; health?: string }
+  | { act: "domain"; app: string; site?: string; zone: string; subdomain?: string };
+export const isAppAct = (a: { act: string }): a is MemberAppAct => a.act === "deploy" || a.act === "rollback" || a.act === "settings" || a.act === "domain";
+/** 403: the apps are shown to the caller at Read (Your Apps), not Write. */
+export const MEMBER_APPS_READ_ONLY = "member_apps_read_only";
 /** `key`: the member's own id for this act (8 to 64 of A-Z a-z 0-9 _ -): sent again on a retry, it's never done twice. */
 export type MemberActBody = { key: string; act: MemberAct };
 /**

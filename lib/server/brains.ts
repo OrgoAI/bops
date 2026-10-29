@@ -2,8 +2,9 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { agentIdFor, aiOf, cleanAi, hasProfile } from "@/lib/agents";
 import { screenMap } from "@/lib/screens";
-import { botChatId, BRAIN_KEYS, BRAIN_NAMES, BRAINS_ON, planName, workspaceOf, type Brain, type BrainAuth, type BrainKind, type BrainSignIn } from "@/lib/types";
+import { botChatId, BRAIN_KEYS, BRAIN_NAMES, BRAINS_ON, planName, workspaceOf, type Bot, type BotAi, type Brain, type BrainAuth, type BrainKind, type BrainSignIn } from "@/lib/types";
 import { keysOf, listKeys, revealKey, type KeyScope } from "./keys";
 import { orgo } from "./orgo";
 import { sameComputer, workComputer } from "./screens";
@@ -33,6 +34,10 @@ export const CLAUDE_BIN = `${CLAUDE_PREFIX}/bin/claude`;
 /** Codex, in the computer's image (orgo/bops-base.mjs), at the version the image pins (ensureCodex fetches it onto a computer without it). */
 export const CODEX_BIN = "/usr/local/bin/codex";
 export const CODEX_VERSION = "0.160.0";
+/** OpenCode on every computer: npm's opencode-ai at the version Bops checked (its run --standalone, --session and JSON events), never on a PATH. */
+export const OPENCODE_VERSION = "2.0.27";
+export const OPENCODE_PREFIX = "/opt/bops/opencode";
+export const OPENCODE_BIN = `${OPENCODE_PREFIX}/bin/opencode`;
 /** Each brain's folder on a computer: Claude Code's CLAUDE_CONFIG_DIR, Codex's CODEX_HOME. */
 export const BRAINS_DIR = "/root/.bops/brains";
 export const brainDir = (brainId: string) => `${BRAINS_DIR}/${brainId}`;
@@ -108,6 +113,28 @@ export function addBrain(n: NewBrain): Brain {
 }
 
 /**
+ * A bot's AI profile (Bot.ai, lib/agents.ts) kept in step with a change made the older way, from Settings' brains
+ * (a brain's bots, a bot's brain): an agent on that account added ("may"), made its Default ("use"), or taken
+ * off ("none"). A bot with no profile yet needs nothing: its brains say it (lib/agents.ts legacyAi).
+ */
+function toProfile(c: Bot, x: Brain, level: "use" | "may" | "none", brains: Brain[]) {
+  if (!c.ai) return;
+  const has = c.ai.agents.find((a) => a.account === x.id);
+  if (level === "none") {
+    c.ai.agents = c.ai.agents.filter((a) => a.account !== x.id);
+    if (has && c.ai.default === has.id) c.ai.default = "bops";
+  } else {
+    const id = has?.id ?? agentIdFor(c.id, x.id);
+    if (!has) c.ai.agents.push({ id, kind: x.kind, pays: x.auth, account: x.id });
+    if (level === "use") c.ai.default = id;
+    else if (c.ai.default === id) c.ai.default = "bops";
+  }
+  const ai = cleanAi(c.ai, brains, workspaceOf(c));
+  if (ai) c.ai = ai;
+  else delete c.ai;
+}
+
+/**
  * What a brain runs now for bots that aren't on it anymore (or for any, once it's gone) stops at once
  * (sessions.ts brainLeft): nothing more runs on the user's plan or key after they said so. The threads it
  * stopped, with their computers.
@@ -118,22 +145,49 @@ async function letGo(brainId: string, name: string) {
 }
 const letGoNow = (brainId: string, name: string) => void letGo(brainId, name).catch((e: Error) => console.warn(`[brains] stopping ${brainId}'s threads: ${e.message}`));
 
+/** The workspace's bots' profiles as they run now, before a change from here (followProfiles). */
+const profilesOf = (wsId: string) => new Map<string, BotAi>(getState().bots.filter((b) => workspaceOf(b) === wsId).map((b) => [b.id, aiOf(b, getState())]));
+
+/**
+ * After a change from here: each bot whose profile it changed has its computer follow (bot-ai.ts aiChanged: a
+ * terminal on what went closes, and its folders there go, its other agents' wrappers written again). Its threads
+ * on the account were stopped by brainLeft.
+ */
+function followProfiles(before: Map<string, BotAi>) {
+  void import("./bot-ai")
+    .then(({ aiChanged }) => {
+      for (const [botId, was] of before) {
+        const b = bot(botId);
+        if (b) aiChanged(botId, was, hasProfile(b, getState()) ? aiOf(b, getState()) : undefined, false);
+      }
+    })
+    .catch((e: Error) => console.warn(`[brains] bots' computers after a change: ${e.message}`));
+}
+
 /** Rename a brain, change which bots may use it, or (a key brain) where its key is. A bot taken off it goes back to Bops agent. */
 export function updateBrain(brainId: string, p: { name?: string; bots?: string[]; keyScope?: KeyScope }): Brain {
   const x = need(brainId);
   if (p.name !== undefined && !cleanName(p.name)) throw new BrainError("Give it a name.", 400);
   const bots = p.bots === undefined ? undefined : botsIn(p.bots, x.workspaceId);
+  const before = profilesOf(x.workspaceId);
   update((s) => {
     const y = s.brains?.find((z) => z.id === brainId);
     if (!y) return;
     if (p.name !== undefined) y.name = cleanName(p.name);
     if (bots) {
+      const was = y.bots;
       y.bots = bots;
-      for (const b of s.bots) if (b.brain === brainId && !bots.includes(b.id)) delete b.brain;
+      for (const b of s.bots) {
+        if (b.brain === brainId && !bots.includes(b.id)) delete b.brain;
+        if (bots.includes(b.id) !== was.includes(b.id)) toProfile(b, y, bots.includes(b.id) ? "may" : "none", s.brains ?? []);
+      }
     }
     if (p.keyScope && y.auth === "key") y.keyScope = p.keyScope === "workspace" ? "workspace" : "all";
   });
-  if (bots) letGoNow(brainId, x.name);
+  if (bots) {
+    letGoNow(brainId, x.name);
+    followProfiles(before);
+  }
   return brainById(brainId)!;
 }
 
@@ -145,6 +199,7 @@ export function setBrainBot(brainId: string, botId: string, level: "use" | "may"
   const x = need(brainId);
   const b = bot(botId);
   if (!b || workspaceOf(b) !== x.workspaceId) throw new BrainError("No such bot here.", 404);
+  const before = new Map([[botId, aiOf(b, getState())]]);
   update((s) => {
     const y = s.brains?.find((z) => z.id === brainId);
     const c = s.bots.find((z) => z.id === botId);
@@ -153,8 +208,10 @@ export function setBrainBot(brainId: string, botId: string, level: "use" | "may"
     y.bots = level === "none" ? rest : [...rest, botId];
     if (level === "use") c.brain = brainId;
     else if (c.brain === brainId) delete c.brain;
+    toProfile(c, y, level, s.brains ?? []);
   });
   if (level !== "use") letGoNow(brainId, x.name);
+  followProfiles(before);
   return brainById(brainId)!;
 }
 
@@ -164,10 +221,17 @@ export function setBotBrain(botId: string, brainId: string | null) {
   if (!b) throw new BrainError("No such bot.", 404);
   if (brainId !== null && !need(brainId).bots.includes(botId)) throw new BrainError(`${b.name} isn't on that brain. Add it in Settings, Brain.`, 400);
   const was = b.brain && brainById(b.brain);
-  update(() => {
+  update((s) => {
     const c = bot(botId)!;
     if (brainId) c.brain = brainId;
     else delete c.brain;
+    if (c.ai) {
+      const to = brainId ? c.ai.agents.find((a) => a.account === brainId)?.id : undefined;
+      c.ai.default = to ?? "bops";
+      const ai = cleanAi(c.ai, s.brains ?? [], workspaceOf(c));
+      if (ai) c.ai = ai;
+      else delete c.ai;
+    }
   });
   if (was && was.id !== brainId) letGoNow(was.id, was.name);
 }
@@ -183,10 +247,21 @@ export function removeBrain(brainId: string) {
   stopWatching(brainId);
   const ran = getState().sessions.flatMap((s) => (s.brainRun?.brainId === brainId ? [s.brainRun.computerId] : []));
   const computers = [...new Set([...(x.signIns ?? []).map((s) => s.computerId), ...(x.signingIn ? [x.signingIn.computerId] : []), ...ran])];
+  const before = profilesOf(x.workspaceId);
   update((s) => {
     s.brains = (s.brains ?? []).filter((y) => y.id !== brainId);
-    for (const b of s.bots) if (b.brain === brainId) delete b.brain;
+    for (const b of s.bots) {
+      if (b.brain === brainId) delete b.brain;
+      // Its agents go from every bot's profile (one that was a Default leaves Bops agent as the Default).
+      if (b.ai?.agents.some((a) => a.account === brainId)) {
+        const agents = b.ai.agents.filter((a) => a.account !== brainId);
+        const ai = { agents, default: agents.some((a) => a.id === b.ai!.default) ? b.ai.default : "bops" };
+        if (agents.length > 1 || agents[0]?.model || ai.default !== "bops") b.ai = ai;
+        else delete b.ai;
+      }
+    }
   });
+  followProfiles(before);
   void letGo(brainId, x.name)
     .catch(() => [] as { sessionId: string; computerId: string }[])
     .then((left) => {
@@ -267,10 +342,13 @@ const BRAIN_TOOLS = [
   ["vm/bin/bops-brain", "/usr/local/bin/bops-brain"],
   ["vm/bin/bops-brain-browser", "/usr/local/bin/bops-brain-browser"],
   ["vm/bin/bops-agent", "/usr/local/bin/bops-agent"],
+  // A key run's gate (bops-brain run), and the executor that takes a bot's own bin (a bot with a profile's Bops agent).
+  ["vm/bin/bops-ai-gate", "/usr/local/bin/bops-ai-gate"],
+  ["vm/bin/bops-exec", "/usr/local/bin/bops-exec"],
 ] as const;
 const toolsChecked = new Map<string, string>();
 
-/** Put the brain scripts (vm/bin/bops-brain, bops-brain-browser, bops-agent) on a computer that's missing them or behind, as sessions.ts does the screen tools. */
+/** Put the brain scripts (vm/bin/bops-brain, bops-brain-browser, bops-agent, bops-ai-gate, bops-exec) on a computer that's missing them or behind, as sessions.ts does the screen tools. */
 export async function ensureBrainTools(computerId: string) {
   const files = BRAIN_TOOLS.map(([src, dst]) => {
     const body = readFileSync(join(/*turbopackIgnore: true*/ process.cwd(), src));
@@ -285,6 +363,32 @@ export async function ensureBrainTools(computerId: string) {
     if (!r.output.includes("ok")) throw new BrainError(`Bops couldn't set up the computer for its brains (${r.output.trim().slice(0, 120)}).`, 502);
   }
   toolsChecked.set(computerId, want);
+}
+
+/** Each computer's install of OpenCode, once per run of Bops; one that failed is tried again next time. */
+const openCodeReady = new Map<string, Promise<void>>();
+
+/** The shell that installs the pinned OpenCode (npm's own package) unless that version is there, and says so. */
+export function openCodeInstallCommand() {
+  const v = OPENCODE_VERSION;
+  const has = `[ "$(OPENCODE_DISABLE_AUTOUPDATE=1 ${OPENCODE_BIN} --version 2>/dev/null | sed 's/^v//')" = "${v}" ]`;
+  return [
+    "mkdir -p /var/log/bops",
+    `${has} || (mkdir -p ${OPENCODE_PREFIX} && npm install -g --prefix ${OPENCODE_PREFIX} --no-audit --no-fund --loglevel=error opencode-ai@${v} > /var/log/bops/opencode-install.log 2>&1)`,
+    `if ${has}; then echo "opencode ${v}"; else tail -3 /var/log/bops/opencode-install.log; fi`,
+  ].join("\n");
+}
+
+/** OpenCode on a computer, at OPENCODE_VERSION, into OPENCODE_PREFIX (on no PATH: a bot's wrapper runs it). Throws with plain words when it can't be. */
+export function ensureOpenCode(computerId: string): Promise<void> {
+  const known = openCodeReady.get(computerId);
+  if (known) return known;
+  const ready = orgo.bash(computerId, openCodeInstallCommand(), 280).then((r) => {
+    if (!r.output.includes(`opencode ${OPENCODE_VERSION}`)) throw new BrainError(`OpenCode didn't install on the computer (${r.output.trim().slice(-160) || "no answer"}).`, 502);
+  });
+  ready.catch(() => openCodeReady.delete(computerId));
+  openCodeReady.set(computerId, ready);
+  return ready;
 }
 
 /* ---------------- Signed in, or not ---------------- */
@@ -509,7 +613,16 @@ export async function signOut(brainId: string, botId: string) {
  */
 export async function revealBrainKey(x: Brain): Promise<string> {
   if (x.auth !== "key" || !x.keyName) throw new BrainError(`${x.name} doesn't run on a key.`, 400);
-  const name = x.keyName;
+  return revealNamedKey(x.keyName, x.workspaceId, x.keyScope);
+}
+
+/**
+ * A key of the Vault's by its name, for one run only (an agent on a key: its account's, or OpenCode's provider's),
+ * as the bots' calls find one: the workspace's own first, else the one for all workspaces. Never kept, logged, or
+ * shown to a model.
+ */
+export async function revealNamedKey(name: string, wsId: string, was?: KeyScope): Promise<string> {
+  const x = { workspaceId: wsId, keyScope: was };
   // The key as the Vault has it now, as the bots' calls find one: the workspace's own first, else the one for
   // all workspaces (not where it was when the brain was added: it may have been replaced in the other since).
   // When the Vault can't say, where it was then.

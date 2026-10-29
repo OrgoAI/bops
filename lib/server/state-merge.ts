@@ -86,7 +86,8 @@ export function fromShared(blob: Blob, device: string): Blob {
  *   Mac and a names sync on the other (workspaces.ts noteOrgoName, which only notes when Orgo last
  *   changed its project) both stay, and the old name never comes back over the new one, and its
  *   favorites (a list of names, not of things with ids) are one field: pinned or reordered on both
- *   Macs, the list of the Mac saving now (the last to write) goes whole; anything
+ *   Macs, the list of the Mac saving now (the last to write) goes whole, and so is its team chart
+ *   (chain), never a mix of two; anything
  *   else changed on both keeps this Mac's copy whole, as its fields go together (a watch's alert and
  *   what it was told);
  * - usage is both ledgers together; macs, and any other object, key by key;
@@ -139,7 +140,45 @@ const KEPT_MARKS = ["sessions", "routines", "watches"] as const;
 
 function mergeValue(key: string, b: unknown, m: unknown, t: unknown, top: boolean, me?: Me): unknown {
   const v = mergeEither(key, b, m, t, top, me);
+  if (top && key === "workspaces") return keepAppsLevels(v, [m, t, b]);
   return top && (KEPT_MARKS as readonly string[]).includes(key) ? keepMarks(v, [b, m, t]) : v;
+}
+
+const LEVELS = new Set(["none", "read", "write"]);
+
+/**
+ * A person's Your Apps level (MemberAccess.apps) put back where an older Bops dropped it: its People sheet, or its own
+ * look at who's still there, rewrites a person's entry as `{ others, bots }` and loses the level (it reads as none:
+ * access lost, never gained). For each entry of the merged `merged` workspaces with no level, the level that person
+ * had in the first of `copies` (this side's, the other's, the one before) that has one. Never into an entry set with an
+ * invite (`invite`) from a copy where it wasn't (removed and invited again on an older Mac starts fresh, as their bots
+ * do). An entry taken out stays out.
+ */
+export function keepAppsLevels(merged: unknown, copies: unknown[]): unknown {
+  if (!Array.isArray(merged)) return merged;
+  const entryIn = (copy: unknown, ws: string, key: string): Blob | undefined => {
+    const w = Array.isArray(copy) ? copy.find((x) => isObject(x) && x.id === ws) : undefined;
+    const map = isObject(w) && isObject(w.memberAccess) ? w.memberAccess : undefined;
+    const e = map && Object.hasOwn(map, key) ? map[key] : undefined;
+    return isObject(e) ? e : undefined;
+  };
+  return merged.map((w) => {
+    if (!isObject(w) || typeof w.id !== "string" || !isObject(w.memberAccess)) return w;
+    let changed = false;
+    const map: Blob = {};
+    for (const [key, e] of Object.entries(w.memberAccess)) {
+      map[key] = e;
+      if (!isObject(e) || e.apps !== undefined) continue;
+      for (const copy of copies) {
+        const had = entryIn(copy, w.id, key);
+        if (!had || !LEVELS.has(had.apps as string) || (e.invite === true && had.invite !== true)) continue;
+        map[key] = { ...e, apps: had.apps };
+        changed = true;
+        break;
+      }
+    }
+    return changed ? { ...w, memberAccess: map } : w;
+  });
 }
 
 /**
@@ -171,6 +210,9 @@ function mergeEither(key: string, b: unknown, m: unknown, t: unknown, top: boole
       : undefined;
     return mergeById(Array.isArray(b) ? b : [], (m as { id: string }[]) ?? [], (t as { id: string }[]) ?? [], both, me?.older, top && key === "appApprovals");
   }
+  // A workspace's team chart (Workspace.chain) is one field, like its favorites: changed on both, the copy of the
+  // Bops saving now goes whole (an older Bops's: theirs), never a mix of two charts.
+  if (!top && key === "chain") return me?.older ? t : m;
   if (isObject(m) && isObject(t)) return mergeObject(isObject(b) ? b : {}, m, t, false, me);
   return me?.older ? t : m;
 }

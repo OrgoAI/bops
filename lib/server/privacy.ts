@@ -3,14 +3,32 @@ import { appendFileSync, closeSync, createReadStream, createWriteStream, existsS
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { pipeline } from "node:stream/promises";
-import { busyImages, busyThreads, expiredMessages, expiredThreads, keepCutoff, keepsLess, pageIdsOf, privacyOf, uploadIdsOf, type HereCount, type KeepGoes, type PrivacyInfo } from "@/lib/privacy";
-import type { AppState, DeletedDays, KeepDays, Message } from "@/lib/types";
+import {
+  busyImages,
+  busyThreads,
+  clearCutoff,
+  clearPlan,
+  expiredMessages,
+  expiredThreads,
+  inUse,
+  keepCutoff,
+  keepsLess,
+  pageIdsOf,
+  privacyOf,
+  uploadIdsOf,
+  type ClearChoice,
+  type ClearGoes,
+  type HereCount,
+  type KeepGoes,
+  type PrivacyInfo,
+} from "@/lib/privacy";
+import { workspaceOf, type AppState, type DeletedDays, type KeepDays, type Message } from "@/lib/types";
 import { sleptSince } from "./awake";
 import { deletedGoing, listDeleted, purgeAllDeleted, purgeExpiredDeleted } from "./deleted";
 import { dropFrame, framesDir } from "./frames";
-import { pagesDir } from "./pages";
+import { dropPages, pagesDir } from "./pages";
 import { loopHere, onPostgres } from "./persist";
-import { deleteMessages, deleteThreads } from "./remove";
+import { deleteChats, deleteMessages, deleteThreads } from "./remove";
 import {
   flushState,
   getState,
@@ -126,20 +144,21 @@ const routeLog = () => {
 
 /**
  * This Mac's files older than `cutoff` that the sweep deletes: images (uploads.ts) and pages (pages.ts) no
- * message in `kept` shows or links to (nor, for images, a busy thread works from: busyImages), and threads'
- * last frames (frames.ts), but a busy thread's. Only files named as Bops names them: nothing else in those
- * folders is ever touched.
+ * message in `kept` shows or links to (nor, for images, a busy thread works from: busyImages; for pages, a
+ * thread's own words), and threads' last frames (frames.ts), but a busy thread's; nor any named in `spare`. Only
+ * files named as Bops names them: nothing else in those folders is ever touched.
  */
-function oldFiles(cutoff: number, kept: readonly Message[], state: Pick<AppState, "sessions" | "appApprovals">): string[] {
+function oldFiles(cutoff: number, kept: readonly Message[], state: Pick<AppState, "sessions" | "appApprovals">, spare: ReadonlySet<string> = new Set()): string[] {
   const busy = busyThreads(state);
   const pics = new Set([...uploadIdsOf(kept), ...busyImages(state, busy)]);
-  const pages = pageIdsOf(kept);
+  // The pages the kept messages link to, and those a thread's own words do (lib/privacy.ts inUse).
+  const pages = new Set([...pageIdsOf(kept), ...inUse({ messages: [], sessions: state.sessions, appApprovals: state.appApprovals }).pages]);
   const out: string[] = [];
   const look = (dir: string | null, named: RegExp, keep: (id: string) => boolean) => {
     if (!dir || !existsSync(/*turbopackIgnore: true*/ dir)) return;
     for (const f of readdirSync(/*turbopackIgnore: true*/ dir)) {
       const m = named.exec(f);
-      if (!m || keep(m[1])) continue;
+      if (!m || keep(m[1]) || spare.has(m[1])) continue;
       const p = join(/*turbopackIgnore: true*/ dir, f);
       try {
         const st = lstatSync(/*turbopackIgnore: true*/ p);
@@ -351,14 +370,18 @@ watchArrivals("privacy", heardChoices);
 
 /**
  * A delete made on another Mac (watchGone): gone at once there (deletedDays 0), what this Mac kept beside it
- * goes too, as remove.ts leaveBehind does where it was made: the images only those messages showed, and the
- * threads' last frames here. With days to keep what's deleted, they stay: the copy on that Mac comes back
+ * goes too, as remove.ts leaveBehind does where it was made: the images and pages only those messages showed,
+ * and the threads' last frames here. With days to keep what's deleted, they stay: the copy on that Mac comes back
  * with Restore, and so do they here.
  */
 watchGone("privacy", ({ messages, sessions }) => {
   if (!loopHere("privacy") || onPostgres() || !stateReady() || privacyOf(getState()).deletedDays !== 0) return;
   try {
-    if (messages.length) dropUploads(uploadIdsOf(messages), uploadIdsOf(getState().messages));
+    if (messages.length) {
+      const used = inUse(getState());
+      dropUploads(uploadIdsOf(messages), used.images);
+      dropPages(pageIdsOf(messages), used.pages);
+    }
     for (const s of sessions) dropFrame(s.id);
   } catch (e) {
     warn(e as Error);
@@ -462,17 +485,77 @@ export function privacyInfo(now = Date.now()): PrivacyInfo {
   // The copies whose time is up go first only by choices this Mac knows are current (choicesFresh): else they're listed as they are.
   const deleted = listDeleted(now, { current: choicesFresh() });
   const st = getState();
-  const info: PrivacyInfo = { ...privacyOf(st), messages: st.messages.length, here: here(), deleted };
+  const info: PrivacyInfo = { ...privacyOf(st), messages: st.messages.length, here: here(), deleted, bots: botsListed(st) };
   if (g.__bopsPrivacySweep) info.sweeping = true;
   return info;
 }
 
+/** The bots Delete now can be for (PrivacyInfo.bots), each with its workspace's name when there are more than one. */
+function botsListed(st: AppState): NonNullable<PrivacyInfo["bots"]> {
+  const spaces = st.workspaces ?? [];
+  return st.bots.map((b) => {
+    const w = spaces.length > 1 ? spaces.find((x) => x.id === workspaceOf(b))?.name : undefined;
+    return { id: b.id, name: b.name, ...(w ? { workspace: w } : {}) };
+  });
+}
+
+/**
+ * What Delete now takes (lib/privacy.ts ClearGoes), all Delete now (clearNow) does: the messages and threads
+ * (clearPlan); for every bot, this Mac's files older than its cutoff that no message left shows (oldFiles; with
+ * days to keep what's deleted, the ones the deleted messages show go into the copy, not counted here), and the
+ * lines of its two logs older than it.
+ */
+async function clearGoes(choice: ClearChoice, now: number): Promise<ClearGoes> {
+  const st = getState();
+  const plan = clearPlan(st, choice, now);
+  const out: ClearGoes = { ...choice, messages: plan.messages.size, threads: plan.threads.size, files: 0, lines: 0 };
+  if (choice.bot) return out;
+  const cutoff = clearCutoff(choice.olderThan, now);
+  const kept = st.messages.filter((m) => !plan.messages.has(m.id));
+  // With days to keep what's deleted, what the deleted messages and threads show goes into their copy instead.
+  const going = st.messages.filter((m) => plan.messages.has(m.id));
+  const spare = privacyOf(st).deletedDays > 0 ? new Set([...uploadIdsOf(going), ...pageIdsOf(going), ...plan.threads]) : new Set<string>();
+  out.files = oldFiles(cutoff, kept, { ...st, sessions: st.sessions.filter((s) => !plan.threads.has(s.id)) }, spare).length;
+  for (const log of [callLog(), routeLog()]) out.lines += (await oldLines(log, cutoff).catch(() => ({ lines: 0 }))).lines;
+  return out;
+}
+
+export type ClearResult = { messages: number; threads: number; files: number; lines: number; restore: string | null };
+
+/**
+ * Delete now (POST /api/privacy { clear }), as the user asked, once the window said what it takes (clearGoes):
+ * the messages and threads (remove.ts deleteChats: one copy under Recently deleted when the user keeps one,
+ * else for good), so from Bops Cloud and every Mac with the next save; for every bot, this Mac's own as the
+ * sweep deletes them, older than its cutoff: the files no message left shows and the lines of its call notes
+ * and model choices (never into a copy). Not by any choice this Mac holds, so it needs no current state: it's
+ * what the user asked now, of what this Mac has (another Mac's newest, not here yet, stays).
+ */
+export async function clearNow(choice: ClearChoice, now = Date.now()): Promise<ClearResult> {
+  const r = deleteChats(choice, { now });
+  const out: ClearResult = { messages: r.messages, threads: r.threads, files: 0, lines: 0, restore: r.restore };
+  if (!choice.bot) {
+    const cutoff = clearCutoff(choice.olderThan, now);
+    const st = getState();
+    for (const p of oldFiles(cutoff, st.messages, st))
+      try {
+        rmSync(/*turbopackIgnore: true*/ p, { force: true });
+        out.files++;
+      } catch {}
+    for (const log of [callLog(), routeLog()]) out.lines += await pruneLog(log, cutoff).catch((e: Error) => (warn(e), 0));
+  }
+  forgetHere();
+  if (out.messages || out.threads || out.files || out.lines) console.info(`[privacy] Delete now: ${out.messages} messages, ${out.threads} threads, ${out.files} files and ${out.lines} log lines`);
+  return out;
+}
+
 /**
  * GET /api/privacy with a choice the window means to make: privacyInfo, with what choosing it deletes now
- * (goes for a keep, goesDeleted for fewer days for what the user deletes), for the window to ask first.
+ * (goes for a keep, goesDeleted for fewer days for what the user deletes, goesNow for Delete now), for the
+ * window to ask first.
  */
-export async function privacyPreview(proposed: { keepDays?: KeepDays; deletedDays?: DeletedDays }, now = Date.now()): Promise<PrivacyInfo> {
+export async function privacyPreview(proposed: { keepDays?: KeepDays; deletedDays?: DeletedDays; clear?: ClearChoice }, now = Date.now()): Promise<PrivacyInfo> {
   const info = privacyInfo(now);
+  if (proposed.clear) info.goesNow = await clearGoes(proposed.clear, now);
   if (proposed.keepDays !== undefined) info.goes = await goesWith(proposed.keepDays, now);
   // By the days alone, as setPrivacy deletes by them: the keep's are the sweep's.
   if (proposed.deletedDays !== undefined) info.goesDeleted = { deletedDays: proposed.deletedDays, copies: deletedGoing({ deletedDays: proposed.deletedDays, keepDays: null }, now) };

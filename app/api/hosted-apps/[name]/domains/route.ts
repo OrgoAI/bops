@@ -1,5 +1,5 @@
 import { appsOpen } from "@/lib/apps-access";
-import { buyDomain, connectDomain, domainOptions, HostedAppError, setAutoRenew } from "@/lib/server/hosted-apps";
+import { buyDomain, connectDomain, connectFromCloudflare, domainOptions, HostedAppError, setAutoRenew } from "@/lib/server/hosted-apps";
 import { notReady } from "@/lib/server/ready";
 import { getState } from "@/lib/server/store";
 import { fromBopsWindow } from "@/lib/server/ui-token";
@@ -17,7 +17,7 @@ const wsOf = (b: Record<string, unknown>) => (typeof b.ws === "string" && b.ws.t
 
 /**
  * What a domain can be added to the app from (AppDomainOptions in lib/hosted-apps.ts): whether one can be
- * bought, the workspace's bought domains nothing points at yet, and who the user registered their last one to.
+ * bought, the workspace's bought domains (with what points at each), and who the user registered their last one to.
  * That's the user's own address and phone: the window only.
  */
 export async function GET(request: Request, ctx: { params: Promise<{ name: string }> }) {
@@ -36,7 +36,8 @@ export async function GET(request: Request, ctx: { params: Promise<{ name: strin
 
 /**
  * Add a domain to the app (AppDomainAdd): "buy" one at the price the user saw, then point it here, or
- * "connect" one the user owns, or one the workspace bought. Answers AppDomainAdded, or why not.
+ * "connect" one the user owns, or one the workspace bought (or a name under it), or "cloudflare" one of the user's
+ * Cloudflare domains (or a name under it), with what Bops would set there for it. Answers AppDomainAdded, or why not.
  */
 export async function POST(request: Request, ctx: { params: Promise<{ name: string }> }) {
   const unready = notReady() ?? notFromWindow(request);
@@ -46,7 +47,9 @@ export async function POST(request: Request, ctx: { params: Promise<{ name: stri
   const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   try {
     if (b.action === "buy") return Response.json(await buyDomain(wsOf(b), name, { domain: b.domain, registrant: b.registrant, price: b.price }, b.site));
-    if (b.action === "connect") return Response.json(await connectDomain(wsOf(b), name, { domain: b.domain, ...(b.zone !== undefined ? { zone: b.zone } : {}) }, b.site));
+    if (b.action === "connect")
+      return Response.json(await connectDomain(wsOf(b), name, { domain: b.domain, ...(b.zone !== undefined ? { zone: b.zone, subdomain: b.subdomain } : {}) }, b.site));
+    if (b.action === "cloudflare") return Response.json(await connectFromCloudflare(wsOf(b), name, { zone: b.zone, subdomain: b.subdomain }, b.site));
     return Response.json({ error: "What should happen to it?" }, { status: 400 });
   } catch (e) {
     return answer(e);

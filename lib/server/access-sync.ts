@@ -2,7 +2,7 @@ import "server-only";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { accessIsDefault, levelOf, workspaceOf, type AccessUse, type AppAccount, type LastUses } from "@/lib/types";
+import { accessIsDefault, levelIn, memberOf, memberThread, workspaceOf, type AccessUse, type AppAccount, type LastUses } from "@/lib/types";
 import { onRunner } from "./persist";
 import { cleanText, fit } from "./routine-sync";
 import { bot, getState, session, stateReady, userDir, watchChanges } from "./store";
@@ -47,8 +47,23 @@ export const LOG_KEEP = 500;
 /** One grant as orgo-web takes it: a bot, one account, key or login, and how far it may go there. */
 export type AccessGrant = { bot: string; botName: string; kind: "app" | "key" | "login"; target: string; targetName: string; level: "none" | "read" | "act"; isDefault: boolean };
 
-/** Where a use happened, as the callers know it: a chat (and why it ran: a routine, a call) or a thread. */
-export type UseWhere = { chatId?: string; sessionId?: string; via?: AccessUse["via"]; viaId?: string };
+/**
+ * Where a use happened, as the callers know it: a chat (and why it ran: a routine, a call) or a thread. `member`: a
+ * member's turn in the chat (chat.ts TurnOptions.member), by name: the use is for them, and anything it changes asks
+ * the owner (forMember). A thread of theirs says so itself (lib/types.ts memberThread).
+ */
+export type UseWhere = { chatId?: string; sessionId?: string; via?: AccessUse["via"]; viaId?: string; member?: string };
+
+/**
+ * The member a use is for (a turn of theirs, or a thread they started or told something), by name, or undefined: the
+ * owner's own. Theirs is used through a bot they may tell, and anything it would send, change, delete or pay waits for
+ * the owner's yes, whatever the bot's rules, Just do it or a low risk guess say.
+ */
+export function forMember(w: UseWhere): string | undefined {
+  if (w.member) return w.member;
+  const s = w.sessionId ? session(w.sessionId) : undefined;
+  return s && memberThread(s, session) ? (memberOf(s, session)?.name ?? "someone you gave this bot to") : undefined;
+}
 
 /** A use waiting to go; `oid` is its entry in the outbox kept on disk. */
 type Waiting = AccessUse & { oid?: string };
@@ -82,7 +97,7 @@ export function targetNameOf(a: AppAccount) {
 
 /**
  * A workspace's whole effective set, as orgo-web takes it: each of its bots with every account connected
- * there or that one of them may use (levelOf, the default unless the user set it), every key (`keyNames`,
+ * there or that one of them may use (levelIn: the default, here or where it's switched on, unless the user set it), every key (`keyNames`,
  * the vault's, and any a bot has) and every login one of them may use. Keys and logins are "act" or
  * "none". A key is the default when no bot was given it; a login when it's for every bot.
  */
@@ -94,8 +109,8 @@ export function accessPayload(wsId: string, keyNames: string[] = []): AccessGran
     out.push({ bot: b.id, botName: fit(b.name, MAX.name), kind, target: fit(target, MAX.target), targetName: fit(targetName, MAX.name), level, isDefault });
   // Another workspace's accounts and logins (their names) stay out, unless a bot here may use one.
   for (const a of s.accounts ?? []) {
-    if (workspaceOf(a) !== wsId && !team.some((b) => levelOf(b, a))) continue;
-    for (const b of team) row(b, "app", a.id, targetNameOf(a), levelOf(b, a) ?? "none", accessIsDefault(b, a));
+    if (workspaceOf(a) !== wsId && !team.some((b) => levelIn(s, b, a))) continue;
+    for (const b of team) row(b, "app", a.id, targetNameOf(a), levelIn(s, b, a) ?? "none", accessIsDefault(b, a));
   }
   const keys = [...new Set([...keyNames, ...team.flatMap((b) => b.keys ?? [])])].sort();
   for (const k of keys)
@@ -364,12 +379,14 @@ function saveSoon() {
 }
 
 /** Where a use ran: as the caller said (a chat turn for a routine or a call), else a routine's thread, a thread, or a chat. */
-export function viaOf(w: UseWhere): Pick<AccessUse, "via" | "viaId"> {
-  if (w.via) return { via: w.via, ...(w.viaId ? { viaId: w.viaId } : {}) };
+export function viaOf(w: UseWhere): Pick<AccessUse, "via" | "viaId" | "for"> {
+  const who = forMember(w);
+  const of = who ? { for: who } : {};
+  if (w.via) return { via: w.via, ...(w.viaId ? { viaId: w.viaId } : {}), ...of };
   const s = w.sessionId ? session(w.sessionId) : undefined;
-  if (s?.routineId) return { via: "routine", viaId: s.routineId };
-  if (w.sessionId) return { via: "thread", viaId: w.sessionId };
-  return { via: "chat" };
+  if (s?.routineId) return { via: "routine", viaId: s.routineId, ...of };
+  if (w.sessionId) return { via: "thread", viaId: w.sessionId, ...of };
+  return { via: "chat", ...of };
 }
 
 /** Only the chat and thread of a UseWhere, for an approval card (AppApproval). */
@@ -406,7 +423,7 @@ export function lastUses(botIds: Set<string>): LastUses {
   const uses = logOf().uses;
   for (let i = uses.length - 1; i >= 0; i--) {
     const u = uses[i];
-    if (u.outcome === "ok" && botIds.has(u.bot) && !out[u.target]) out[u.target] = { bot: u.bot, at: u.at };
+    if (u.outcome === "ok" && botIds.has(u.bot) && !out[u.target]) out[u.target] = { bot: u.bot, at: u.at, ...(u.for ? { for: u.for } : {}) };
   }
   return out;
 }

@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Lay this computer's screens out like a normal computer: Bops' Chrome fills each screen, and Orgo's
+# own taskbar and launcher on screen 4 (display 99) stay out of sight, so the only bar on top is
+# Chrome's. Bops' dock (bops-desktop) hides under a window that fills the screen.
+# Safe to re-run; runs from bops-desktop and on every wake (the template's on_resume hook), so a
+# computer that was never dressed, or was dressed when Chrome floated in the middle of the wallpaper,
+# looks the same.
+#
+# Usage: bops-screen-layout
+set -uo pipefail
+
+# Screen 4's settings live in its own session's xfconfd: asked on any other session bus, xfconf-query
+# changes a copy nobody reads. So :99 is asked on its panel's own bus.
+PANEL=$(pgrep -o -x xfce4-panel 2>/dev/null)
+BUS99=""
+[ -n "$PANEL" ] && BUS99=$(tr '\0' '\n' < "/proc/$PANEL/environ" 2>/dev/null | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
+x99() { env DISPLAY=:99 ${BUS99:+DBUS_SESSION_BUS_ADDRESS=$BUS99} "$@"; }
+
+# 1. Orgo's taskbar (a clock bar on top) and launcher (under Bops' dock): always hidden. Hidden, not
+# quit: Orgo's watchdog restarts the taskbar whenever it exits. The panel only takes a new autohide
+# when it starts again, so it's restarted while one of its bars is still drawn on screen.
+if [ -n "$PANEL" ]; then
+  for P in $(x99 xfconf-query -c xfce4-panel -p /panels 2>/dev/null | grep -E '^[0-9]+$'); do
+    x99 xfconf-query -c xfce4-panel -p "/panels/panel-$P/autohide-behavior" -n -t uint -s 2 2>/dev/null
+  done
+  # A bar still drawn: a panel window more than its 3 pixel reveal strip tall, inside the screen.
+  read -r _ H99 < <(DISPLAY=:99 xdotool getdisplaygeometry 2>/dev/null || echo "1280 960")
+  if DISPLAY=:99 wmctrl -lG 2>/dev/null | awk -v h="$H99" '$8 == "xfce4-panel" && $4 >= 0 && $6 > 3 && $4 < h {found=1} END {exit !found}'; then
+    x99 xfce4-panel -r >/dev/null 2>&1 &
+  fi
+fi
+
+# 2. Bops' Chrome fills its screen, tabs and all (it starts maximized; this catches windows opened
+# before that, or moved since). A dock that was always shown kept the bottom of the screen for itself,
+# and set to hide it can go on keeping it until it starts again: then a maximized Chrome stops short of
+# the bottom. So a screen whose work area is shorter than the screen while its dock hides gets its dock
+# started again (on the dock's own session bus), and its Chrome maximized again to the full height.
+for N in 99 100 101 102; do
+  read -r W H < <(DISPLAY=":$N" xdotool getdisplaygeometry 2>/dev/null || echo "1280 960")
+  AREA_H=$(DISPLAY=":$N" xprop -root _NET_WORKAREA 2>/dev/null | sed -n 's/.*= *[0-9]*, *[0-9]*, *[0-9]*, *\([0-9]*\).*/\1/p')
+  # Only the newest dock of a screen stays: an older one left running (it can outlive a restart) keeps
+  # holding the bottom of the screen with its old setting.
+  OLD_DOCKS=$(pgrep -f "^plank -n dock$N\$" | sort -n | head -n -1)
+  for P in $OLD_DOCKS; do kill "$P" 2>/dev/null; sleep 0.3; kill -9 "$P" 2>/dev/null; done
+  [ -n "$OLD_DOCKS" ] && { sleep 1; AREA_H=$(DISPLAY=":$N" xprop -root _NET_WORKAREA 2>/dev/null | sed -n 's/.*= *[0-9]*, *[0-9]*, *[0-9]*, *\([0-9]*\).*/\1/p'); }
+  DOCK=$(pgrep -f "^plank -n dock$N\$" | sort -n | tail -1)
+  if [ -n "$DOCK" ] && [ -n "$AREA_H" ] && [ "$AREA_H" -lt "$H" ]; then
+    DBUS=$(tr '\0' '\n' < "/proc/$DOCK/environ" 2>/dev/null | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)
+    MODE=$(env ${DBUS:+DBUS_SESSION_BUS_ADDRESS=$DBUS} gsettings get "net.launchpad.plank.dock.settings:/net/launchpad/plank/docks/dock$N/" hide-mode 2>/dev/null)
+    if [ "$MODE" != "'none'" ]; then
+      kill "$DOCK" 2>/dev/null; sleep 0.5; kill -9 "$DOCK" 2>/dev/null
+      env DISPLAY=":$N" ${DBUS:+DBUS_SESSION_BUS_ADDRESS=$DBUS} setsid nohup plank -n "dock$N" </dev/null >>"/var/log/bops/plank-$N.log" 2>&1 &
+      sleep 1.5
+    fi
+  fi
+  for WIN in $(DISPLAY=":$N" xdotool search --onlyvisible --class BopsBrowser 2>/dev/null); do
+    read -r WW WH < <(DISPLAY=":$N" xdotool getwindowgeometry "$WIN" 2>/dev/null | sed -n 's/.*Geometry: \([0-9]*\)x\([0-9]*\).*/\1 \2/p')
+    # Maximized again from scratch when it falls short, so it takes the work area as it is now.
+    [ "${WH:-0}" -lt "$H" ] && DISPLAY=":$N" wmctrl -i -r "$WIN" -b remove,maximized_vert,maximized_horz 2>/dev/null
+    DISPLAY=":$N" wmctrl -i -r "$WIN" -b add,maximized_vert,maximized_horz 2>/dev/null \
+      || DISPLAY=":$N" xdotool windowmove "$WIN" 0 0 windowsize "$WIN" "$W" "$H" 2>/dev/null
+  done
+done
+echo "screens laid out"

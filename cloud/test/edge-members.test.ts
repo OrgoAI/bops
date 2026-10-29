@@ -27,6 +27,9 @@ const both = newUserId("both");
 const actOwner = newUserId("act-owner");
 const writer = newUserId("writer");
 const other = newUserId("other-writer");
+const appsOwner = newUserId("apps-owner");
+const teamMember = newUserId("orgo");
+const APPS_PROJECT = "77777777-8888-9999-aaaa-bbbbbbbbbbbb";
 const ACT_PROJECT = "66666666-7777-8888-9999-000000000000";
 const SECRET = "edge-members-plan-secret-0123456789abcdef"; // gitleaks:allow (made up for this test)
 const PROJECT = "11111111-2222-3333-4444-555555555555";
@@ -47,7 +50,8 @@ after(async () => {
   await orgo.close();
   await query("DELETE FROM bops.chat_messages WHERE user_id = ANY($1::text[])", [[owner, member]]);
   await query("DELETE FROM bops.cloud_limits WHERE key = ANY($1::text[])", [[`member:act:${writer}`, `member:act:${other}`]]);
-  await dropUsers([owner, member, outsider, both, actOwner, writer, other]);
+  await query("DELETE FROM bops.cloud_limits WHERE key = $1", [`member:act:${teamMember}`]);
+  await dropUsers([owner, member, outsider, both, actOwner, writer, other, appsOwner, teamMember]);
   await closeDb();
 });
 
@@ -138,6 +142,30 @@ test("a member reads all of the bot they were given as it's shown, the owner's o
   assert.deepEqual(none.body.state.workspace, { id: "ws_acme", name: "Acme", createdAt: 1 });
   assert.deepEqual([none.body.state.bots, none.body.state.chats, none.body.state.sessions, none.body.state.routines, none.body.messages], [[], [], [], [], []]);
   assert.ok(!/@example\.com\b/.test(JSON.stringify(none.body)), "nobody's email, theirs or the member's");
+});
+
+test("read again over a copy, a member is told what the owner deleted since it (theirs to see only), so it goes from the older pages they read too; restored, it's back", async () => {
+  const del = (remove: string[], upsert: unknown[] = []) => fetch(`${cloud.url}/v1/messages`, { method: "POST", headers: headers(owner), body: JSON.stringify({ upsert, remove }) });
+  const first = await read(member);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.gone, undefined, "a first read has nothing to drop");
+  // The owner deletes two of Max's messages and one of Dana's (a chat this member isn't shown) at once.
+  assert.equal((await del(["m1", "m2", "d1"])).status, 200);
+  const again = await read(member, `?have=${first.body.hash}.${first.body.seq}`);
+  assert.equal(again.status, 200);
+  assert.ok(again.body.seq > first.body.seq);
+  assert.deepEqual(again.body.messages.map((m) => m.id), ["m3", "m3b"]);
+  assert.deepEqual([...(again.body.gone ?? [])].sort(), ["m1", "m2"], "only the chats they're shown");
+  // From that read on, nothing more went: none to drop.
+  const later = await read(member, `?have=x.${again.body.seq}`);
+  assert.equal(later.body.gone, undefined);
+  // The owner restores one: written again, it's back with a new seq, and not among what went since it.
+  assert.equal((await del([], [{ id: "m1", chatId: "bot:max", role: "user", text: "find leads", at: 10 }])).status, 200);
+  const back = await read(member, `?have=${again.body.hash}.${again.body.seq}`);
+  assert.deepEqual(back.body.messages.map((m) => m.id), ["m1", "m3", "m3b"]);
+  assert.equal(back.body.gone, undefined);
+  // Put back as the first test left them, for the tests after.
+  assert.equal((await del([], [{ id: "m2", chatId: "bot:max", role: "bot", botId: "max", text: "on it", at: 11 }, { id: "d1", chatId: "bot:dana", role: "user", text: "only for the shortlist", at: 14 }])).status, 200);
 });
 
 test("an owner whose state the cloud hasn't got, or that has no such workspace, gives a member nothing to open", async () => {
@@ -336,4 +364,53 @@ test("orgo-web's notice that a member is out drops what they did that still wait
   assert.deepEqual((await pending(actOwner)).map((r) => (r.payload as MemberActPayload).member.userId), [other]);
   assert.equal((await act(writer, "edge_drop_002")).status, 404, "and they act no more");
   delete roles[`${other} ${ACT_PROJECT}`];
+});
+
+test("Your Apps: a member of Orgo's team given it reads the apps as allowed, acts at Write, and is refused at Read", async () => {
+  roles[`${teamMember} ${APPS_PROJECT}`] = { role: "member", ownerUserId: appsOwner, bopsWsId: "ws_apps", name: "Apps" };
+  const state = (level: string) => ({
+    workspaces: [
+      {
+        id: "ws_apps",
+        name: "Apps",
+        createdAt: 1,
+        memberAccess: { [`${teamMember}@orgo.ai`]: { others: "none", bots: { max: "read" }, apps: level } },
+        hostedApps: { shop: { botId: "max", computerId: "comp-1", projectId: "proj-1", url: "https://shop.orgo.dev" } },
+        ingotTokens: { "comp-1": { id: "tok-1", sum: "s", at: 1 } },
+        appsForMembers: {
+          at: 10,
+          apps: { shop: { head: null, sites: [{ name: "shop", url: "https://shop.orgo.dev", serving: null, live: null }], commits: [], deploys: [], settings: { shop: { port: 3000, install: null, build: null, start: "npm start" } } } },
+          owned: [{ id: "zone-1", domain: "acme.example" }],
+        },
+      },
+    ],
+    bots: [{ id: "max", name: "Max", workspaceId: "ws_apps" }],
+    chats: [{ id: "bot:max", kind: "bot", botIds: ["max"], workspaceId: "ws_apps" }],
+  });
+  const put = async (level: string, base: number) => {
+    const r = await fetch(`${cloud.url}/v1/state`, { method: "PUT", headers: headers(appsOwner), body: JSON.stringify({ base, state: state(level) }) });
+    assert.equal(r.status, 200);
+    return ((await r.json()) as { version: number }).version;
+  };
+  const v = await put("read", 0);
+  const res = await fetch(`${cloud.url}/v1/ws/${APPS_PROJECT}/state`, { headers: { Authorization: `Bearer ${keyOf(teamMember)}` } });
+  const body = (await res.json()) as SharedWsState;
+  assert.equal(body.state.apps?.level, "read");
+  assert.deepEqual(body.state.apps?.list.map((a) => [a.name, a.botId, a.url]), [["shop", "max", "https://shop.orgo.dev"]]);
+  assert.equal(body.state.apps?.list[0].settings, undefined);
+  assert.equal(body.state.apps?.owned, undefined);
+  for (const hidden of ["comp-1", "proj-1", "tok-1", "memberAccess", "appsForMembers"]) assert.ok(!JSON.stringify(body).includes(hidden), `"${hidden}" isn't shown`);
+  const go = (key: string) =>
+    fetch(`${cloud.url}/v1/ws/${APPS_PROJECT}/act`, { method: "POST", headers: { Authorization: `Bearer ${keyOf(teamMember)}`, "content-type": "application/json" }, body: JSON.stringify({ key, act: { act: "deploy", app: "shop" } }) }).then(
+      async (r) => ({ status: r.status, json: (await r.json()) as Record<string, unknown> }),
+    );
+  const read = await go("edge_apps_001");
+  assert.deepEqual([read.status, read.json.code], [403, "member_apps_read_only"]);
+  await put("write", v);
+  const w = (await (await fetch(`${cloud.url}/v1/ws/${APPS_PROJECT}/state`, { headers: { Authorization: `Bearer ${keyOf(teamMember)}` } })).json()) as SharedWsState;
+  assert.deepEqual(w.state.apps?.owned, [{ id: "zone-1", domain: "acme.example" }]);
+  assert.deepEqual(w.state.apps?.list[0].settings, { shop: { port: 3000, install: null, build: null, start: "npm start" } });
+  assert.equal((await go("edge_apps_002")).status, 202);
+  const rows = await pending(appsOwner);
+  assert.deepEqual(rows.map((r) => (r.payload as MemberActPayload).act), [{ act: "deploy", app: "shop" }], "queued for the owner's Mac, as theirs");
 });

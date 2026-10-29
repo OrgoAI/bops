@@ -1,5 +1,9 @@
-import { askMemory, askWorkspace, copyMemory, deleteGroup, fixFact, forgetFact, memoryFor, memoryInfo, pinFact, previewCopy, reviewMemory, settleFlag, shareMemory, undoMemory } from "@/lib/server/memory";
-import { currentWorkspaceId } from "@/lib/server/workspaces";
+import { askMemory, askWorkspace, copyMemory, deleteGroup, fixFact, forgetFact, memoryFor, memoryInfo, pinFact, previewCopy, reviewMemory, scopeOf, settleFlag, shareMemory, undoMemory } from "@/lib/server/memory";
+import { bringInOwnBank, dropOwnBank } from "@/lib/server/memory-deletes";
+import { getState } from "@/lib/server/store";
+import { ownMemory } from "@/lib/chain";
+import { sharedOpen } from "@/lib/server/shared";
+import { currentWorkspaceId, setChainBot } from "@/lib/server/workspaces";
 import type { MemoryGroup } from "@/lib/types";
 import { notReady } from "@/lib/server/ready";
 
@@ -16,7 +20,7 @@ export async function GET(request: Request) {
 }
 
 type Body = {
-  action: "undo" | "forget-old" | "review" | "delete" | "keep" | "delete-group" | "ask" | "fix" | "pin" | "forget" | "preview-copy" | "copy" | "share" | "own";
+  action: "undo" | "forget-old" | "review" | "delete" | "keep" | "delete-group" | "ask" | "fix" | "pin" | "forget" | "preview-copy" | "copy" | "share" | "own" | "bring-in" | "drop-own";
   messageId?: string;
   ws?: string;
   id?: string;
@@ -33,6 +37,8 @@ export async function POST(request: Request) {
   if (unready) return unready;
   const b = (await request.json().catch(() => ({}))) as Body;
   const ws = b.ws ?? currentWorkspaceId();
+  // From a bot's Memory tab: its memory scope (its own bank while it keeps its memory to itself: lib/chain.ts).
+  const where = b.bot ? scopeOf(b.bot) : ws;
   try {
     switch (b.action) {
       case "undo":
@@ -50,14 +56,25 @@ export async function POST(request: Request) {
         // A bot's Memory tab asks as that bot (its workspace); the Knowledge page asks its workspace.
         return Response.json(b.bot ? await askMemory(b.bot, b.question ?? "") : await askWorkspace(ws, b.question ?? ""));
       case "fix":
-        await fixFact(ws, b.id ?? "", b.text ?? "");
+        await fixFact(where, b.id ?? "", b.text ?? "");
         return Response.json({ ok: true });
       case "pin":
-        await pinFact(ws, b.text ?? "");
+        await pinFact(where, b.text ?? "");
         return Response.json({ ok: true });
       case "forget":
-        await forgetFact(ws, b.id ?? "");
+        await forgetFact(where, b.id ?? "");
         return Response.json({ ok: true });
+      // What a bot kept to itself, back with the team's (Bring it in), or deleted (a bank kept apart let go): the owner's only.
+      case "bring-in":
+      case "drop-own": {
+        if (!b.bot || sharedOpen()) return Response.json({ error: "Only the owner can change this." }, { status: 403 });
+        // Only a bank kept apart: never the one a bot still keeps its memory in (the chart's change comes first).
+        if (ownMemory(getState(), b.bot)) return Response.json({ error: "It still keeps its memory to itself." }, { status: 409 });
+        // (Its bank goes through the outbox: memory not answering now only puts that off. Memory off refuses Bring it in.)
+        const count = b.action === "bring-in" ? await bringInOwnBank(b.bot) : (await dropOwnBank(b.bot), 0);
+        setChainBot(b.bot, { kept: undefined });
+        return Response.json({ ok: true, count });
+      }
       case "delete-group":
         if (b.group) deleteGroup(ws, b.group);
         return Response.json({ ok: true });

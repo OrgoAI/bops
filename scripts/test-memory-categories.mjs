@@ -2762,6 +2762,54 @@ await section("The shared helpers: what's coming up, what's settled, and dates i
   for (const label of [day, Cat.whenLabel("2026-10-17T15:00", now), Cat.whenLabel("2027-01-05", now)]) noDashes(label);
 });
 
+/* ---------------- A bot that keeps its memory to itself (lib/chain.ts) ---------------- */
+
+await section("Knowledge is built from the team's bank only: a bot that keeps its memory to itself only reads it and adds nothing, and one that doesn't read the team's has no Knowledge", async () => {
+  const O = await import(`${root}/lib/server/orbit.ts`);
+  S.update((s) => {
+    for (const [id, name] of [["kit", "Kit"], ["lou", "Lou"]]) s.bots.push({ id, name, role: "Assistant", color: "#4F7BF7", isMain: false, computerStatus: "none" });
+    s.workspaces.find((w) => w.id === MAIN).chain = { bots: { kit: { memory: "own", readsTeam: false }, lou: { memory: "own" } } };
+  });
+  try {
+    // What Kit learns goes to its own bank, which Knowledge never reads: nothing is sorted from it.
+    assert.equal(Mem.bindingOf(Mem.scopeOf("kit")).bank, `${Mem.bankOf(MAIN)}-bot-kit`);
+    assert.equal(await Mem.learn(Mem.scopeOf("kit"), "The secret project is called Falcon."), "Saved.");
+    const before = openai.calls.length;
+    const r = await refresh(MAIN);
+    assert.ok(!JSON.stringify(r.items).includes("Falcon"), "not in Knowledge");
+    assert.ok(!openai.calls.slice(before).some((c) => c.texts.some((t) => t.includes("Falcon"))), "never sorted");
+    assert.deepEqual(hbank(Mem.bankOf(MAIN)).facts.filter((f) => f.text.includes("Falcon")), []);
+    // Kit doesn't read the team's: no Knowledge tools, note or line, and a call made up anyway is refused.
+    const kit = S.getState().bots.find((b) => b.id === "kit");
+    const lou = S.getState().bots.find((b) => b.id === "lou");
+    const boppy = S.getState().bots.find((b) => b.id === "boppy");
+    assert.deepEqual(O.ORBIT_TOOLS(kit), []);
+    assert.equal(O.orbitNote(kit), "");
+    assert.equal(O.orbitNowLine(kit), "");
+    assert.equal(await O.runOrbitTool("kit", "orbit_read", { category: null, search: null, include_done: false }), "orbit_read isn't a tool you have here.");
+    // Lou still knows what the team knows: it reads Knowledge, and never writes to it (no update, forget or issue of its
+    // own), whatever the model calls.
+    assert.ok(O.ORBIT_TOOLS(boppy).some((t) => t.name === "orbit_issue_open"), "the main bot has every Knowledge tool");
+    assert.deepEqual(O.ORBIT_TOOLS(lou).map((t) => t.name), O.ORBIT_TOOLS(boppy).map((t) => t.name).filter((n) => n === "orbit_read" || n === "orbit_issue_list"));
+    assert.ok(O.ORBIT_TOOLS(lou).length > 0);
+    for (const [name, args] of [
+      ["orbit_update", { item_id: "0123456789", done: true, title: null, detail: null, hide: null }],
+      ["orbit_forget", { item_id: "0123456789", confirmed: true }],
+      ["orbit_issue_open", { title: "Acme's dispute", summary: "Ava's dispute with Acme", priority: null, tags: null, status: null, source_app: null, external_id: null, url: null, customer: "Acme", note: null, last_message_at: null }],
+      ["orbit_issue_update", { issue_id: "iss_0123456789", status: "done", priority: null, tags: null, note: null, reply_draft: null }],
+    ])
+      assert.equal(await O.runOrbitTool("lou", name, args), `${name} isn't a tool you have here.`, name);
+    assert.match(O.orbitNote(lou), /you only read Knowledge: what you remember stays with you and never shows there/);
+    assert.ok(!/orbit_update|orbit_forget|orbit_issue_open|orbit_issue_update/.test(O.orbitNote(lou)), "its note offers no tool it doesn't have");
+    noDashes(O.orbitNote(lou));
+  } finally {
+    S.update((s) => {
+      s.bots = s.bots.filter((b) => !["kit", "lou"].includes(b.id));
+      delete s.workspaces.find((w) => w.id === MAIN).chain;
+    });
+  }
+});
+
 /* ---------------- Plain words ---------------- */
 
 await section("Plain words: no dashes in anything the user reads", async () => {

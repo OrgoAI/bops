@@ -1,5 +1,5 @@
 import "server-only";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { id, userDir } from "./store";
 
@@ -28,4 +28,28 @@ export function readPage(pageId: string) {
   if (!DIR || !/^page_[a-z0-9]+$/i.test(pageId)) return null;
   const file = join(DIR, `${pageId}.html`);
   return existsSync(file) ? readFileSync(file, "utf8") : null;
+}
+
+/** Where a page is on this Mac (null: no such page, or not one Bops named). */
+export function pagePath(pageId: string) {
+  const DIR = pagesDir();
+  if (!DIR || !/^page_[a-z0-9]+$/i.test(pageId)) return null;
+  const file = join(/*turbopackIgnore: true*/ DIR, `${pageId}.html`);
+  return existsSync(/*turbopackIgnore: true*/ file) ? file : null;
+}
+
+/**
+ * The pages of a delete that nothing left links to (`kept`: lib/privacy.ts inUse), off this Mac, as uploads.ts
+ * dropUploads does for images. How many went.
+ */
+export function dropPages(ids: Iterable<string>, kept: ReadonlySet<string>): number {
+  let n = 0;
+  for (const pageId of ids) {
+    if (kept.has(pageId)) continue;
+    const file = pagePath(pageId);
+    if (!file) continue;
+    rmSync(/*turbopackIgnore: true*/ file, { force: true });
+    n++;
+  }
+  return n;
 }

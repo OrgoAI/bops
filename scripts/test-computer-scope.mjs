@@ -96,16 +96,29 @@ function randomState(r) {
     ...(r() < 0.7 ? { workspaceId: pick(r, ["ws_main", "ws_two"]) } : {}),
     ...(r() < 0.3 ? { onlyGiven: true } : {}),
   }));
-  return { bots, accounts };
+  // Used in (Workspace.loginsOn): some accounts switched on in a workspace, and now and then something that isn't an entry.
+  const workspaces = ["ws_main", "ws_two"].map((id) => {
+    const on = {};
+    for (const a of ["a1", "a2", "a3"]) {
+      const v = pick(r, [undefined, undefined, { at: 1 }, null, true]);
+      if (v !== undefined) on[`app:${a}`] = v;
+    }
+    return { id, name: id, createdAt: 1, ...(Object.keys(on).length ? { loginsOn: on } : {}) };
+  });
+  return { bots, accounts, workspaces };
 }
 
-await check("which bot's computer each bot works on, and what it may do in each account: as lib/types.ts says, over 2000 states", () => {
+await check("which bot's computer each bot works on, and what it may do in each account (Used in too): as lib/types.ts says, over 2000 states", () => {
   const r = rng(7);
   for (let i = 0; i < 2000; i++) {
     const s = randomState(r);
     for (const b of s.bots) {
       assert.equal(C.workBotOf(b, s.bots).id, T.workBot(b, s.bots).id, JSON.stringify(s));
-      for (const a of s.accounts) assert.equal(C.levelOf(b, a), T.levelOf(b, a), JSON.stringify({ b, a }));
+      for (const a of s.accounts) {
+        assert.equal(C.levelOf(b, a), T.levelOf(b, a), JSON.stringify({ b, a }));
+        assert.deepEqual(C.usedInOf(s, a.id), T.usedIn(s, T.appLoginKey(a.id)), JSON.stringify(s.workspaces));
+        assert.equal(C.levelOf(b, a, C.usedInOf(s, a.id)), T.levelIn(s, b, a), JSON.stringify({ b, a, w: s.workspaces }));
+      }
     }
     const on = C.botsOn(s, D1).map((b) => b.id);
     assert.deepEqual(on, s.bots.filter((b) => T.workBot(b, s.bots).computerId?.toLowerCase() === D1).map((b) => b.id), "any case of its id");
@@ -414,6 +427,10 @@ await check("what its bots may use: their chats, accounts, inboxes, lines and me
   assert.deepEqual([...C.chatsOn(s, D1)].sort(), ["bot:helper", "bot:main", "g"]);
   assert.deepEqual([...C.grantsOn(s, D1)].map(([id, g]) => [id, g.level]), [["a1", "act"], ["a2", "read"]], "an expired account isn't one");
   assert.deepEqual([...C.grantsOn(s, D1, "helper")].map(([id]) => id), ["a1"]);
+  assert.deepEqual([...C.grantsOn(s, D2)], [], "Iris, of ws_two, hasn't ws_main's Gmail");
+  const on = structuredClone(s);
+  on.workspaces[1].loginsOn = { "app:a1": { at: 1 }, "app:a2": { at: 1 } };
+  assert.deepEqual([...C.grantsOn(on, D2)].map(([id, g]) => [id, g.level]), [["a1", "act"]], "switched on in ws_two (Used in): Iris has it there; one only the bots given it have, not");
   assert.deepEqual([...C.inboxesOn(s, D1)].sort(), ["in-main", "in-old"]);
   assert.deepEqual([...C.inboxesOn(s, D2)], ["in-iris"], "Iris's own, never the main bot's");
   assert.deepEqual([...C.inboxesOn(s, D3)], ["in-main"], "Sam has no inbox of its own: its workspace main bot's, which its routine's email goes from; Dana's workspace has no main bot with one");

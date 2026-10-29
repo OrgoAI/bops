@@ -1,4 +1,4 @@
-import { KEY_PROVIDERS, KeysError, grantKey, keyGrants, keysOf, keysProject, listKeys, saveKey } from "@/lib/server/keys";
+import { KEY_PROVIDERS, KeysError, grantKey, keyGrants, keyHomes, keysOf, keysProject, listKeys, saveKey } from "@/lib/server/keys";
 import { notReady } from "@/lib/server/ready";
 import { fromBopsWindow } from "@/lib/server/ui-token";
 
@@ -26,12 +26,22 @@ export async function GET(request: Request) {
   const grants = keyGrants();
   const workspaceKeys = !!keysProject();
   try {
-    const keys = keysOf(await listKeys({ fresh: new URL(request.url).searchParams.has("fresh") })).map((k) => ({
-      ...providers.find((p) => p.name === k.name)!,
-      updatedAt: k.updatedAt,
-      scope: k.workspaceId ? "workspace" : "all",
-      bots: grants[k.name] ?? [],
-    }));
+    const all = await listKeys({ fresh: new URL(request.url).searchParams.has("fresh") });
+    const homes = keyHomes(all);
+    const project = keysProject();
+    const keys = keysOf(all).map((k) => {
+      const h = homes.find((x) => x.name === k.name && x.project === k.workspaceId);
+      return {
+        ...providers.find((p) => p.name === k.name)!,
+        updatedAt: k.updatedAt,
+        scope: k.workspaceId ? "workspace" : "all",
+        bots: grants[k.name] ?? [],
+        // Used in (lib/server/logins.ts): the other workspaces it's switched on in, and the one it's from when that's
+        // another one (switched on here).
+        usedIn: h?.usedIn ?? [],
+        ...(k.workspaceId && k.workspaceId !== project && h?.home ? { from: h.home } : {}),
+      };
+    });
     return Response.json({ signedIn: true, keys, providers, workspaceKeys });
   } catch (e) {
     if (e instanceof KeysError && e.status === 401) return Response.json({ signedIn: false, keys: [], providers, workspaceKeys, error: e.message });

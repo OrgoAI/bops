@@ -1,3 +1,4 @@
+import type { MemberAppAct, SharedApps } from "@/cloud/protocol";
 /**
  * Workspaces shared with the user (cloud/members.ts, lib/server/shared.ts): someone added them to one of
  * their Bops workspaces' Orgo projects, and they watch it here. With Write on a bot (the owner's choice,
@@ -26,7 +27,17 @@ export type SharedWorkspace = { projectId: string; name: string; owner: string; 
  * `levels`: the viewer's level for each of its bots, as the owner set it (Write lets them act: canAct).
  * `you`: the viewer's Orgo user id, which tells their own words there from other members' (saidBy).
  */
-export type SharedOpen = SharedWorkspace & { wsId: string; ownBots?: Record<string, number>; more?: string[]; levels?: Record<string, "read" | "write">; you?: string };
+export type SharedOpen = SharedWorkspace & {
+  wsId: string;
+  ownBots?: Record<string, number>;
+  more?: string[];
+  levels?: Record<string, "read" | "write">;
+  you?: string;
+  /** The workspace's apps, when the owner gave the user Your Apps (cloud/ws-slice.ts appsFor). */
+  apps?: SharedApps;
+  /** What the user did to them that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
+  appActs?: { key: string; act: MemberAppAct; at: number; state: "sending" | "waiting" | "failed"; error?: string }[];
+};
 
 /** The id a shared workspace has in the window's state: its own Bops id could be the same as one of the user's ("ws_main"). */
 export const sharedWsId = (projectId: string) => `shared_${projectId}`;

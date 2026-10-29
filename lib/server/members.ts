@@ -14,7 +14,7 @@ import {
   type Person,
   type SeatsError,
 } from "@/lib/members";
-import { accessKey, accessOf, cleanAccess, currentFor, timeOf, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
+import { accessKey, accessOf, cleanAccess, currentFor, isAccessLevel, timeOf, type MemberAccess, type MemberAccessMap } from "@/lib/member-access";
 import { PEOPLE_CAPS } from "@/lib/plan-includes";
 import { MAIN_WORKSPACE, runnerKeyMade } from "@/lib/types";
 import { trackServerEvent } from "./analytics";
@@ -229,8 +229,8 @@ function forgetGone(wsId: string, before: MemberAccessMap | undefined, json: Rec
   }
 }
 
-/** What the sheet shows of an entry: the levels, never when it was set. */
-const levelsOf = (a: MemberAccess): MemberAccess => ({ others: a.others, bots: a.bots });
+/** What the sheet shows of an entry: the bots and Your Apps (left out while it isn't set), never when it was set. */
+const levelsOf = (a: MemberAccess): MemberAccess => ({ others: a.others, bots: a.bots, ...(isAccessLevel(a.apps) ? { apps: a.apps } : {}) });
 
 /**
  * Orgo's list as the sheet shows it: the user, everyone else by name, and the invites newest first,
@@ -435,6 +435,27 @@ const memberIdIn = (v: unknown) => (typeof v === "string" && /^[A-Za-z0-9_-]{1,1
 const accessIn = (v: unknown) => (v === undefined ? undefined : cleanAccess(v));
 
 /**
+ * The bots an invite still waiting gives (the team chart's Make it theirs, and its Undo), without sending it again:
+ * kept by its email as the invite's, from when that access was first kept (member-access.ts currentFor), so it
+ * counts only for the membership the invite begins. Only an invite Orgo lists as waiting now.
+ */
+async function changeInviteAccess(body: { invite?: unknown; access?: unknown }): Promise<Answer> {
+  const who = await signedIn();
+  if ("status" in who) return who;
+  const email = emailOf(body.invite);
+  const access = accessIn(body.access);
+  if (!email || access === undefined) return no(400, "BAD_REQUEST", WORDS.whatToSend);
+  if (access === null) return no(400, "BAD_ACCESS", WORDS.whatToSend);
+  const sheet = await sheetFor(who.key);
+  if ("status" in sheet) return sheet;
+  if (!sheet.info.invites.some((i) => i.email === email)) return no(404, "GONE", WORDS.gone);
+  const key = accessKey({ email })!;
+  const had = accessMapOf(sheet.wsId)?.[key];
+  setMemberAccess(sheet.wsId, key, access, { invite: true, ...(typeof had?.at === "number" ? { at: had.at } : {}) });
+  return ok({ ok: true });
+}
+
+/**
  * POST /api/members {email, role, access?}: invite someone, or send their invite again (with the role
  * asked for now). Its link comes back only when Orgo couldn't email it, for the user to send themselves.
  * `access`, to this workspace's bots, is kept once Orgo has the invite. Sent again without it, what was
@@ -481,9 +502,11 @@ export async function invite(body: { email?: unknown; role?: unknown; access?: u
  * PATCH /api/members {memberId, role?, access?}: change what someone can do, either or both. `role`, on
  * the bots' computers: View only always, Full access when it's on. `access`, to this workspace's bots:
  * kept under the key of the member as Orgo lists them now (their email, or a guest's user id), never one
- * the window sent, and only once Orgo took the role, when there's one.
+ * the window sent, and only once Orgo took the role, when there's one. {invite, access} (no memberId): an
+ * invite still waiting gets these bots without being sent again (changeInviteAccess).
  */
-export async function changeAccess(body: { memberId?: unknown; role?: unknown; access?: unknown }): Promise<Answer> {
+export async function changeAccess(body: { memberId?: unknown; role?: unknown; access?: unknown; invite?: unknown }): Promise<Answer> {
+  if (body.invite !== undefined && body.memberId === undefined) return changeInviteAccess(body);
   const who = await signedIn();
   if ("status" in who) return who;
   const memberId = memberIdIn(body.memberId);

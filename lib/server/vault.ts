@@ -1,6 +1,6 @@
 import "server-only";
 import { createHmac } from "node:crypto";
-import { DISPLAYS, live, othersThread, type ScreenRead, type VaultLogin } from "@/lib/types";
+import { DISPLAYS, live, mayUseLogin, memberThread, outsideThread, type ScreenRead, type VaultLogin } from "@/lib/types";
 import { deleteUserSecret, getUserSecret, setUserSecret } from "./keychain";
 import { onTab, openPages } from "./local";
 import { readScreen } from "./screen-watch";
@@ -46,7 +46,7 @@ export function loginsFor(botId: string, url: string) {
 }
 
 /** Whether the bot may use the login, whichever site. */
-const mayUse = (l: VaultLogin, botId: string) => l.bots === "all" || l.bots.includes(botId);
+const mayUse = (l: VaultLogin, botId: string) => mayUseLogin(l, botId);
 
 /** The logins a bot may use on a page, best match first, as the state lists them (their passwords may be elsewhere: loginsFor). */
 function fitting(botId: string, url: string) {
@@ -133,7 +133,7 @@ export async function signInWith(botId: string, display: number, loginId: string
   const l = logins().find((x) => x.id === loginId);
   if (!b || !l) throw new Error("no such login");
   if (onRunner()) throw new Error("saved logins work only from the Bops app on your Mac");
-  if (l.bots !== "all" && !l.bots.includes(botId)) throw new Error(`${b.name} isn't allowed to use this login`);
+  if (!mayUse(l, botId)) throw new Error(`${b.name} isn't allowed to use this login`);
   const lock = `${botId}:${display}`;
   if (signingIn.has(lock)) return { signedIn: false, busy: true, read: getState().screens?.[lock] };
   signingIn.add(lock);
@@ -212,12 +212,15 @@ export async function vaultSignIn(botId: string, display: number, sessionId: str
     return `${owner}'s saved logins sign in only from Bops on their Mac, not here. Say in one short line that you need ${owner} to sign in on your screen, and stop there: once they have, you carry on.`;
   }
   if (!s || !live(s)) return "This task isn't running anymore.";
-  // Someone else's work (an outside turn's task, or one a member with Write started or told something: othersThread):
-  // the owner's saved logins are theirs alone. The thread waits for the owner to sign it in, as on a runner.
-  if (othersThread(s, session)) {
+  // A stranger's work (an outside turn's task: outsideThread): the owner's saved logins are only for the people they
+  // work with. The thread waits for the owner to sign it in, as on a runner. A member's (one a member with Write
+  // started or told something: memberThread) may use the ones its bot has that sign in by themselves, as below: the
+  // others wait for the owner, with the card.
+  if (outsideThread(s, session)) {
     if (!s.blocker) patchSession(sessionId, { blocker: "sign_in" });
-    return `${owner}'s saved logins are only for ${owner}'s own work, and someone else asked for this task. Say in one short line that you need ${owner} to sign in on your screen, and stop there: once they have, you carry on.`;
+    return `${owner}'s saved logins are only for the people ${owner} works with, and someone outside Bops asked for this task. Say in one short line that you need ${owner} to sign in on your screen, and stop there: once they have, you carry on.`;
   }
+  const forMember = memberThread(s, session);
   const ep = screenEndpoint(b, display);
   if (!ep) return "Bops can't reach that screen right now.";
   const pages = await openPages(ep).catch(() => []);
@@ -229,7 +232,7 @@ export async function vaultSignIn(botId: string, display: number, sessionId: str
   if (!fits.length) {
     const asks = pages.filter((p) => loginsFor(botId, p.url).length).map((p) => siteOfUrl(p.url));
     if (asks.length)
-      return `${owner}'s saved ${[...new Set(asks)].join(", ")} login is set to ask first. Stop and say in one sentence that you need to sign in: a card lets ${owner} sign you in with one tap.`;
+      return `${owner}'s saved ${[...new Set(asks)].join(", ")} login is set to ask first${forMember ? `, so only ${owner} can sign you in with it` : ""}. Stop and say in one sentence that you need to sign in: a card lets ${owner} sign you in with one tap.`;
     return `No login saved in ${owner}'s Logins fits a page open on that screen (${[...new Set(pages.map((p) => siteOfUrl(p.url)))].join(", ") || "none"}). Stop and say so in one sentence: ${owner} can add one in Logins, or sign you in with the card.`;
   }
   const task = s.goal ?? "";

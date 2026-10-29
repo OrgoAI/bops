@@ -18,7 +18,7 @@ import { startComputerChecks } from "@/lib/server/sessions";
 import { startRunsOn } from "@/lib/server/runner";
 import { startBopsSync } from "@/lib/server/bops-sync";
 import { startRunnerInstalls } from "@/lib/server/runner-install";
-import { retryHeldRenameOnStart, startProjectBinding } from "@/lib/server/workspaces";
+import { giveAppsRead, retryHeldRenameOnStart, startProjectBinding } from "@/lib/server/workspaces";
 import { startMadeAppsSync } from "@/lib/server/made-apps-sync";
 import { startCrmSync } from "@/lib/server/crm-sync";
 import { startPrivacy } from "@/lib/server/privacy";
@@ -36,7 +36,8 @@ export const dynamic = "force-dynamic";
  * for each workspace that has none yet (workspaces.ts startProjectBinding), and the apps the bots made
  * and the CRM's files in step with Orgo's record of them (made-apps-sync.ts, crm-sync.ts), the Keep chats
  * and calls sweep (privacy.ts), and once a start the default workspace's name held for the apps is tried
- * again (workspaces.ts retryDefaultRename).
+ * again (workspaces.ts retryDefaultRename), and everyone a workspace was shared with before Your Apps is given it at
+ * Read, once (workspaces.ts giveAppsRead).
  * With a workspace shared with the user open, it's that workspace's state, read only (lib/server/shared.ts).
  */
 export async function GET(request: Request) {
@@ -54,6 +55,13 @@ export async function GET(request: Request) {
   startCrmSync();
   startPrivacy();
   retryHeldRenameOnStart();
+  // Your Apps at Read for everyone already shared with, once per workspace, as soon as the state is here: before the
+  // People sheet can show them unset (workspaces.ts giveAppsRead; a look at a few workspaces once it's done).
+  try {
+    giveAppsRead();
+  } catch (e) {
+    console.warn(`[state] Your Apps at Read: ${(e as Error).message}`);
+  }
   const have = new URL(request.url).searchParams.get("v");
   // A workspace shared with the user is open: its state in place of their own workspace's, never theirs (lib/server/shared.ts).
   const shared = sharedForApp(getState());

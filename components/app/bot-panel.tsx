@@ -1,16 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { appsStayLine, botChatId, BRAIN_NAMES, BRAINS_ON, brainOf, brainRuns, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, sharesComputer, workBot, workspaceOf, type AppState, type Bot, type Session } from "@/lib/types";
+import { agentLabel, defaultAgent, isCli, paysLabel } from "@/lib/agents";
+import { appsStayLine, botChatId, brainRuns, live, MAIN_WORKSPACE, MAX_PERSONA_CHARS, settingsOf, sharesComputer, workBot, workspaceOf, type AgentKind, type AppState, type Bot, type BotSettings, type Session } from "@/lib/types";
 import { mainOwnShort, ownComputerShort, ownIsBops } from "@/lib/orgo-plans";
 import { emailShort, numberShort, upgradeLabel, type PlanRoomShort } from "@/lib/plan-includes";
 import type { BopsTier } from "@/cloud/protocol";
 import { BotMemory } from "./bot-memory";
 import { BotSkills } from "./bot-skills";
+import { chartLine, ChartIcon } from "./team-chart";
 import type { AutopilotSection } from "./autopilot";
 import { AppRoutinesButton, BotRoutines, hasTemplates, routineCount, routinesFrom, RoutineSuggest, usePendingSuggest } from "./routines";
 import { BotKeys } from "./keys";
-import { BotBrain, BrainBadge } from "./brains";
+import { AgentChip, AgentMark } from "./agent-marks";
+import { BotAiSection } from "./bot-ai";
 import { ComputerSummary } from "./computer";
 import { Mascot } from "./mascot";
 import { PlanNote, usePlan } from "./plan-note";
@@ -22,6 +25,8 @@ import { WhereToFind } from "./channels";
 import { undash } from "./side-group";
 import { readOnly, you, your, Your, yourMac } from "@/lib/shared";
 import { BOOK_A_CALL } from "@/lib/links";
+import { aiKinds, aiLine, SETTINGS_WORDS, teamLine, type SettingsSection } from "@/lib/bot-settings";
+import { onCount } from "@/lib/sequences";
 
 /** The parts of a bot's profile. Its computer has a tab of its own (see panel-tabs.tsx). */
 export type Section = "details" | "skills" | "routines" | "memory" | "phone";
@@ -43,6 +48,8 @@ export function BotPanel({
   onAsk,
   onUpgrade,
   onClose,
+  onOpenChart,
+  onExpand,
 }: {
   state: AppState;
   bot: Bot;
@@ -67,6 +74,10 @@ export function BotPanel({
   onUpgrade: () => void;
   /** Leave the profile, back to where you were (its X; Esc does it too, see bops-app.tsx). */
   onClose: () => void;
+  /** The team chart (team-chart.tsx), with this bot's sheet open. */
+  onOpenChart?: (botId: string) => void;
+  /** Its full settings page (bot-settings.tsx), at a section or at the top. Not in a workspace shared with the user. */
+  onExpand?: (at?: SettingsSection) => void;
 }) {
   // The Connected App the Routines tab shows only, when it was opened from one (Details, Uses); per bot.
   const [only, setOnly] = useState<{ bot: string; app: string | null }>({ bot: b.id, app: null });
@@ -77,6 +88,9 @@ export function BotPanel({
   };
   // The way out, top right, as on the Vault and the Account sheet.
   const close = <CloseButton onClick={onClose} className="absolute right-4 top-4 bg-white/60" />;
+  // Its full settings page, top left across from the X, at the section of the tab it's on.
+  const expandTo = onExpand && !state.shared ? onExpand : undefined;
+  const expand = expandTo && <ExpandButton onClick={() => expandTo(PANEL_TO_PAGE[tab])} />;
   const tabs = (
     <div className="flex gap-1">
       {SECTIONS.map((t) => (
@@ -107,13 +121,18 @@ export function BotPanel({
         onOpenComputer={onOpenComputer}
         onOpenKeys={onOpenKeys}
         onShowScreen={onShowScreen}
+        onOpenThread={onOpenThread}
         onOpenRoutines={openRoutines}
         onUpgrade={onUpgrade}
+        onOpenChart={onOpenChart}
+        expand={expand}
+        onExpand={expandTo}
       />
     );
 
   return (
     <section className="motion-fade-in relative flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto bg-white px-5 py-4">
+      {expand}
       {close}
       <div className="flex flex-col items-center gap-2">
         <Mascot botId={b.id} color={b.color} size={52} />
@@ -136,10 +155,37 @@ export function BotPanel({
   );
 }
 
-/** By the bot's role: the brain its cloud tasks run on, when it's one the user brought (brains.tsx BotBrain picks it). Nothing for Bops agent (every bot, in a build without brains: brainOf), or where its tasks all run on this Mac (brainRuns). */
-function BotBrainBadge({ state, bot: b, className }: { state: AppState; bot: Bot; className?: string }) {
-  const x = brainRuns(b, state) === "none" ? undefined : brainOf(b, state);
-  return x ? <BrainBadge kind={x.kind} title={`${b.name}'s tasks on its computer run on ${BRAIN_NAMES[x.kind]}`} className={className} /> : null;
+/** Each panel tab's section on the full page: Details opens it at the top. */
+const PANEL_TO_PAGE: Record<Section, SettingsSection | undefined> = { details: undefined, skills: "skills", routines: "routines", memory: "memory", phone: "phone" };
+
+/** The panel's way to its full settings page: the X's size and look, arrows out, with its tip. */
+function ExpandButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={SETTINGS_WORDS.openFull}
+      data-tip={SETTINGS_WORDS.openFull}
+      data-open-full
+      className="absolute left-4 top-4 flex size-8 shrink-0 items-center justify-center rounded-full bg-white/60 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]"
+    >
+      <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden>
+        <path d="M8.5 1.5h4v4M12.5 1.5L8 6M5.5 12.5h-4v-4M1.5 12.5L6 8" fill="none" stroke="#0A0A0A" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
+  );
+}
+
+/**
+ * By the bot's role: the agent its new threads start on (its AI profile's Default, lib/agents.ts), when that's a
+ * CLI the user brought. Nothing for Bops agent (every bot, in a build without brains), or where its tasks all run
+ * on this Mac (brainRuns).
+ */
+export function BotBrainBadge({ state, bot: b, className }: { state: AppState; bot: Bot; className?: string }) {
+  const x = defaultAgent(b, state);
+  if (brainRuns(b, state) === "none" || !isCli(x.kind)) return null;
+  const label = agentLabel(x, { bot: b, state });
+  return <AgentChip agent={x} label={label} title={`${b.name}'s new threads run on ${label}, on ${paysLabel(x, state, workBot(b, state.bots).computerId)}`} className={className} />;
 }
 
 /* ---------------- Details: the bot's contact card ---------------- */
@@ -161,8 +207,12 @@ function Details({
   onOpenComputer,
   onOpenKeys,
   onShowScreen,
+  onOpenThread,
   onOpenRoutines,
   onUpgrade,
+  onOpenChart,
+  expand,
+  onExpand,
 }: {
   state: AppState;
   bot: Bot;
@@ -173,25 +223,21 @@ function Details({
   onOpenComputer: (botId: string) => void;
   onOpenKeys: (botId: string) => void;
   onShowScreen?: (botId: string, display: number) => void;
+  onOpenThread?: (s: Session) => void;
   /** This bot's Routines tab, showing one Connected App's only, or all. */
   onOpenRoutines: (app: string | null) => void;
   onUpgrade: () => void;
+  onOpenChart?: (botId: string) => void;
+  /** Its full settings page's button (BotPanel's), top left. */
+  expand?: React.ReactNode;
+  /** Its full settings page, at a section: the AI, Team and Sequences rows. */
+  onExpand?: (at?: SettingsSection) => void;
 }) {
   const plan = usePhonePlan();
-  // What the Bops plan includes for this bot (lib/plan-includes.ts), when Bops Cloud holds plans to it.
-  const planBot = !!b.isMain && workspaceOf(b) === MAIN_WORKSPACE;
-  const numberRoom = plan.room ? numberShort(plan.room.tier, plan.room.numbers, { isPlanBot: planBot }) : null;
-  const emailRoom = plan.room && !b.email ? emailShort(plan.room.tier, plan.room.emails, { isPlanBot: planBot }) : null;
-  // Max has room for this bot's email, which it gets when the user asks (Get an email).
-  const emailOnAsk = !!plan.room && plan.room.tier === "max_bops" && !planBot && !b.email && !emailRoom;
+  const { line, main, reach, numberRoom, emailRoom, emailOnAsk } = contactOf(state, b, plan);
+  const glass = GLASS;
   const running = state.sessions.filter((s) => s.botId === b.id && live(s)).length;
-  // The workspace's number belongs to its main bot; the other bots are reached through it.
-  const line = state.workspaces?.find((w) => w.id === workspaceOf(b))?.line;
-  const main = state.bots.find((x) => x.isMain && workspaceOf(x) === workspaceOf(b));
-  const reach = line ? (b.isMain ? line.phone : undefined) : b.phone;
   const [copied, setCopied] = useState(false);
-  const glass = "bg-white/60 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]";
-
   const share = async () => {
     await navigator.clipboard.writeText([`${b.name} (${b.role}, Bops)`, b.phone, b.email].filter(Boolean).join("\n"));
     setCopied(true);
@@ -200,6 +246,7 @@ function Details({
 
   return (
     <section className="motion-fade-in relative flex min-h-0 min-w-0 flex-col items-center gap-3.5 overflow-y-auto px-6 pb-5 pt-6" style={{ backgroundImage: `linear-gradient(180deg, transparent 40%, #FFFFFF 100%), ${botWash(b)}`, backgroundSize: "100% 520px", backgroundRepeat: "no-repeat", backgroundColor: "#FFFFFF" }}>
+      {expand}
       {close}
       <div className={`flex size-[104px] items-center justify-center rounded-full ${glass} shadow-[inset_0_0_0_2px_#FFFFFF,0_14px_30px_-12px_#2832002E,0_0_0_1px_#0000000F]`}>
         <Mascot botId={b.id} color={b.color} size={70} />
@@ -210,29 +257,15 @@ function Details({
           {b.isMain ? "Chief of Staff · runs the team" : `${b.role} · Bops team`}
           <BotBrainBadge state={state} bot={b} className="bg-white/60 shadow-[0_0_0_1px_#0000000F]" />
         </div>
+        {/* Its place on the team chart: who it answers to and how many it may ask, opening the chart at its sheet. */}
+        {onOpenChart && chartLine(state, b.id) && (
+          <button type="button" data-chart-line onClick={() => onOpenChart(b.id)} className="mt-1 flex items-center gap-1 text-[12.5px] leading-4 text-[#6B6B6B] hover:text-ink hover:underline">
+            <ChartIcon size={12} />
+            {chartLine(state, b.id)}
+          </button>
+        )}
       </div>
-      <div className="flex gap-3">
-        {/* With a number, it texts the bot from Messages (it answers by text, as it would anyone); without one, its chat here. */}
-        <ActionButton
-          label={reach ? `Text ${prettyPhone(reach)}` : `Message ${b.name}`}
-          onClick={() => (reach ? window.open(`sms:${reach}`) : onOpenChat(botChatId(b.id)))}
-        >
-          <path d="M2 6.5C2 4 4.2 2 7 2s5 2 5 4.5S9.8 11 7 11c-.6 0-1.2-.1-1.7-.2L2.5 12l.7-2.3C2.4 8.8 2 7.7 2 6.5z" fill="#0A0A0A" />
-        </ActionButton>
-        {/* Every number takes calls: the workspace's (the main bot's), or the bot's own. */}
-        <ActionButton label={reach ? `Call ${prettyPhone(reach)}` : "Calling arrives with its phone"} disabled={!reach} onClick={() => reach && window.open(`tel:${reach}`)}>
-          <path d="M3 2.2h2.6l1 2.6-1.6 1a7 7 0 003 3l1-1.6 2.6 1V11a.9.9 0 01-.9.9A9.6 9.6 0 012.1 3.1.9.9 0 013 2.2z" fill="#0A0A0A" />
-        </ActionButton>
-        {/* Video calls with bots aren't here yet; meanwhile it books a video call with the Bops team. */}
-        <ActionButton label="Book a 20-minute video call with the Bops team" onClick={() => window.open(BOOK_A_CALL)}>
-          <rect x="1.2" y="3.5" width="8" height="7" rx="1.5" fill="#0A0A0A" />
-          <path d="M9.6 6.2l3.2-2v5.6L9.6 7.8z" fill="#0A0A0A" />
-        </ActionButton>
-        <ActionButton label={b.email ? `Email ${b.email}` : emailRoom ? emailRoom.text : emailOnAsk ? `${b.name} has no email yet` : plan.planNeeded ? "An email comes with Pro and Max" : "Its inbox is coming"} disabled={!b.email} onClick={() => b.email && window.open(`mailto:${b.email}`)}>
-          <rect x="1.5" y="3" width="11" height="8.5" rx="1.5" fill="none" stroke="#0A0A0A" strokeWidth="1.3" />
-          <path d="M2 4l5 4 5-4" fill="none" stroke="#0A0A0A" strokeWidth="1.3" strokeLinejoin="round" />
-        </ActionButton>
-      </div>
+      <ContactActions state={state} bot={b} plan={plan} onOpenChat={onOpenChat} />
       {tabs}
 
       <div className={`flex w-full flex-col rounded-2xl ${glass}`}>
@@ -253,30 +286,22 @@ function Details({
         {emailOnAsk && <GetEmail bot={b} />}
       </div>
 
+      {/* Its full settings page at AI, Team and Sequences: what each holds, in a line. */}
+      {onExpand && (
+        <>
+          <PageRow title={SETTINGS_WORDS.sections.ai} line={aiLine(state, b)} marks={aiKinds(state, b)} icon={<AiIcon />} onClick={() => onExpand("ai")} />
+          <PageRow title={SETTINGS_WORDS.sections.team} line={teamLine(state, b)} icon={<ChartIcon size={18} />} onClick={() => onExpand("team")} />
+          <PageRow title={SETTINGS_WORDS.sequencesRow} line={seqLine(b, settingsOf(state, b), !!reach)} icon={<SequencesIcon />} onClick={() => onExpand(!b.email && reach ? "phone" : "email")} />
+        </>
+      )}
+
       <ComputerSummary state={state} bot={b} className={`w-full ${glass}`} onOpen={() => onOpenComputer(b.id)} />
       {/* The apps and logins Uses lists are the viewer's own (their vault, their Connected Apps), never the owner's bot's: not in a shared workspace (nor are Keys: BotKeys). */}
       {!state.shared && <Uses state={state} bot={b} onOpenVault={onOpenVault} onOpenRoutines={onOpenRoutines} className={glass} />}
       <BotKeys state={state} bot={b} onAdd={() => onOpenKeys(b.id)} className={glass} />
 
-      {BRAINS_ON && <BotBrain state={state} bot={b} onShowScreen={onShowScreen} className={glass} />}
-
-      <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
-        <div className="flex min-w-0 flex-1 flex-col">
-          <span className="text-[13px] font-semibold leading-4">Thinking</span>
-          <span className="text-[12px] leading-4 text-[#6B6B6B]">{EFFORT_HINT[b.effort ?? "auto"]}</span>
-        </div>
-        <div className="flex shrink-0 gap-0.5 rounded-full bg-black/[0.05] p-[3px]">
-          {(["auto", "low", "medium", "high"] as const).map((e) => (
-            <button
-              key={e}
-              onClick={() => void post("/api/bots", { botId: b.id, effort: e }, "PATCH")}
-              className={`rounded-full px-2.5 py-1 text-[12px] capitalize leading-4 ${(b.effort ?? "auto") === e ? "bg-white text-ink shadow-[0_0_0_1px_#0000000F]" : "text-[#6B6B6B] hover:text-ink"}`}
-            >
-              {e}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* Its AI: the agents its threads run on, how hard it thinks, its threads now (bot-ai.tsx). */}
+      <BotAiSection state={state} bot={b} onShowScreen={onShowScreen} onOpenThread={onOpenThread} onOpenChat={() => onOpenChat(botChatId(b.id))} onAddKey={() => onOpenKeys(b.id)} className={glass} />
 
       <div className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 ${glass}`}>
         <div className="flex min-w-0 flex-1 flex-col">
@@ -366,6 +391,109 @@ function Details({
   );
 }
 
+/** The panel's card look, which its full settings page uses too. */
+export const GLASS = "bg-white/60 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F]";
+
+/**
+ * How a bot is reached, and what the plan says about a number or an email for it: the workspace's line (its main bot's
+ * number; the others are reached through it), its main bot, the number that reaches it, and why the plan has no room.
+ */
+export function contactOf(state: AppState, b: Bot, plan: PhonePlan) {
+  // What the Bops plan includes for this bot (lib/plan-includes.ts), when Bops Cloud holds plans to it.
+  const planBot = !!b.isMain && workspaceOf(b) === MAIN_WORKSPACE;
+  const numberRoom = plan.room ? numberShort(plan.room.tier, plan.room.numbers, { isPlanBot: planBot }) : null;
+  const emailRoom = plan.room && !b.email ? emailShort(plan.room.tier, plan.room.emails, { isPlanBot: planBot }) : null;
+  // Max has room for this bot's email, which it gets when the user asks (Get an email).
+  const emailOnAsk = !!plan.room && plan.room.tier === "max_bops" && !planBot && !b.email && !emailRoom;
+  // The workspace's number belongs to its main bot; the other bots are reached through it.
+  const line = state.workspaces?.find((w) => w.id === workspaceOf(b))?.line;
+  const main = state.bots.find((x) => x.isMain && workspaceOf(x) === workspaceOf(b));
+  const reach = line ? (b.isMain ? line.phone : undefined) : b.phone;
+  return { line, main, reach, numberRoom, emailRoom, emailOnAsk };
+}
+
+/** Text or message it, call its number, book a video call, email it: the panel's four round buttons (`size` 44 on the page). */
+export function ContactActions({ state, bot: b, plan, onOpenChat, size }: { state: AppState; bot: Bot; plan: PhonePlan; onOpenChat: (chatId: string) => void; size?: number }) {
+  const { reach, emailRoom, emailOnAsk } = contactOf(state, b, plan);
+  return (
+      <div className={`flex ${size ? "gap-2.5" : "gap-3"}`} data-contact-actions>
+        {/* With a number, it texts the bot from Messages (it answers by text, as it would anyone); without one, its chat here. */}
+        <ActionButton size={size}
+          label={reach ? `Text ${prettyPhone(reach)}` : `Message ${b.name}`}
+          onClick={() => (reach ? window.open(`sms:${reach}`) : onOpenChat(botChatId(b.id)))}
+        >
+          <path d="M2 6.5C2 4 4.2 2 7 2s5 2 5 4.5S9.8 11 7 11c-.6 0-1.2-.1-1.7-.2L2.5 12l.7-2.3C2.4 8.8 2 7.7 2 6.5z" fill="#0A0A0A" />
+        </ActionButton>
+        {/* Every number takes calls: the workspace's (the main bot's), or the bot's own. */}
+        <ActionButton size={size} label={reach ? `Call ${prettyPhone(reach)}` : "Calling arrives with its phone"} disabled={!reach} onClick={() => reach && window.open(`tel:${reach}`)}>
+          <path d="M3 2.2h2.6l1 2.6-1.6 1a7 7 0 003 3l1-1.6 2.6 1V11a.9.9 0 01-.9.9A9.6 9.6 0 012.1 3.1.9.9 0 013 2.2z" fill="#0A0A0A" />
+        </ActionButton>
+        {/* Video calls with bots aren't here yet; meanwhile it books a video call with the Bops team. */}
+        <ActionButton size={size} label="Book a 20 minute video call with the Bops team" onClick={() => window.open(BOOK_A_CALL)}>
+          <rect x="1.2" y="3.5" width="8" height="7" rx="1.5" fill="#0A0A0A" />
+          <path d="M9.6 6.2l3.2-2v5.6L9.6 7.8z" fill="#0A0A0A" />
+        </ActionButton>
+        <ActionButton size={size} label={b.email ? `Email ${b.email}` : emailRoom ? emailRoom.text : emailOnAsk ? `${b.name} has no email yet` : plan.planNeeded ? "An email comes with Pro and Max" : "Its inbox is coming"} disabled={!b.email} onClick={() => b.email && window.open(`mailto:${b.email}`)}>
+          <rect x="1.5" y="3" width="11" height="8.5" rx="1.5" fill="none" stroke="#0A0A0A" strokeWidth="1.3" />
+          <path d="M2 4l5 4 5-4" fill="none" stroke="#0A0A0A" strokeWidth="1.3" strokeLinejoin="round" />
+        </ActionButton>
+      </div>
+  );
+}
+
+/** The Sequences row's line: how many are on for its email and its phone. */
+export function seqLine(b: Bot, set: BotSettings, phone: boolean) {
+  if (b.email && phone) return SETTINGS_WORDS.seqBoth(onCount(set, "email"), onCount(set, "phone"));
+  if (b.email) return SETTINGS_WORDS.seqNoPhone(onCount(set, "email"));
+  if (phone) return SETTINGS_WORDS.seqNoEmail(onCount(set, "phone"));
+  return SETTINGS_WORDS.seqNone;
+}
+
+/** One of Details' rows to its full settings page: an icon, a title and its line, and a chevron. */
+function PageRow({ title, line, icon, marks, onClick }: { title: string; line: string; icon: React.ReactNode; marks?: AgentKind[]; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} data-page-row={title} className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left hover:bg-white/80 ${GLASS}`}>
+      <span className="flex size-5 shrink-0 items-center justify-center text-ink">{icon}</span>
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="text-[13px] font-semibold leading-4">{title}</span>
+        <span className="text-[12px] leading-4 text-[#6B6B6B]">{line}</span>
+        {marks && marks.length > 1 && (
+          <span className="mt-1 flex items-center gap-1.5" data-agent-marks>
+            {marks.map((k) => (
+              <AgentMark key={k} kind={k} size={14} />
+            ))}
+          </span>
+        )}
+      </span>
+      <svg width="8" height="12" viewBox="0 0 8 12" aria-hidden className="shrink-0 text-[#9A9A98]">
+        <path d="M2 1.5L6.5 6 2 10.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
+  );
+}
+
+/** AI: a small spark. */
+export function AiIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden>
+      <path d="M9 1.8l1.6 4.4 4.6 1.6-4.6 1.6L9 13.8l-1.6-4.4L2.8 7.8l4.6-1.6z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M14 12.2l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6z" fill="currentColor" />
+    </svg>
+  );
+}
+
+/** Sequences: steps joined in a line. */
+export function SequencesIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden>
+      <rect x="1.8" y="2.5" width="6" height="4.2" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="10.2" y="6.9" width="6" height="4.2" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="1.8" y="11.3" width="6" height="4.2" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M7.8 4.6h1.4a1 1 0 011 1V9M7.8 13.4h1.4a1 1 0 001-1V11" fill="none" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
 /**
  * Which computer a bot works on: the main bot's (the default; it uses free screens there) or its own,
  * made on its first task: a copy of the main bot's, or where the Bops plan decides, a Bops computer (on
@@ -375,7 +503,7 @@ function Details({
  * and says why. A main bot shows this only while it works on the free Bops computer another
  * workspace's main bot has: it can move to its own on the plan (with its team), never back.
  */
-function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppState; bot: Bot; className: string; onUpgrade: () => void }) {
+export function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppState; bot: Bot; className: string; onUpgrade: () => void }) {
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -454,7 +582,7 @@ function ComputerChoice({ state, bot: b, className, onUpgrade }: { state: AppSta
 }
 
 /** Deleting a bot takes its computer with it, so it asks once more, saying exactly that (and that the apps it made stay, `apps`). */
-function DeleteBot({ bot: b, apps }: { bot: Bot; apps: string | null }) {
+export function DeleteBot({ bot: b, apps }: { bot: Bot; apps: string | null }) {
   const [sure, setSure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -492,13 +620,14 @@ function DeleteBot({ bot: b, apps }: { bot: Bot; apps: string | null }) {
   );
 }
 
-function ActionButton({ label, onClick, disabled, children }: { label: string; onClick: () => void; disabled?: boolean; children: React.ReactNode }) {
+export function ActionButton({ label, onClick, disabled, children, size }: { label: string; onClick: () => void; disabled?: boolean; children: React.ReactNode; size?: number }) {
   return (
     <button
       title={label}
       aria-label={label}
       onClick={onClick}
       disabled={disabled}
+      style={size ? { width: size, height: size } : undefined}
       className="flex size-[50px] items-center justify-center rounded-full bg-white/60 shadow-[inset_0_0_0_1px_#FFFFFF,0_0_0_1px_#0000000F] hover:bg-white/80 disabled:opacity-40"
     >
       <svg width="20" height="20" viewBox="0 0 14 14">
@@ -520,14 +649,14 @@ type Found = { areaCode: string; options: NumberOption[]; anywhere?: boolean };
 
 /** What the Bops plan holds now (lib/server/plan-room.ts): null where Bops Cloud doesn't hold plans to what they include. */
 type Room = { tier: BopsTier; numbers: number; emails: number } | null;
-type PhonePlan = { on: boolean | null; planNeeded: boolean; room: Room };
+export type PhonePlan = { on: boolean | null; planNeeded: boolean; room: Room };
 
 /**
  * Phones on here (AgentPhone through Bops Cloud), and whether a number or an inbox needs Pro or Max:
  * Bops Cloud holds Free to its plan (BOPS_PLAN_LIMITS). Asked again with the plan read fresh when
  * Bops comes back to the front while it still says Free: the user may have just paid in the browser.
  */
-function usePhonePlan(): PhonePlan {
+export function usePhonePlan(): PhonePlan {
   const [plan, setPlan] = useState<PhonePlan>({ on: null, planNeeded: false, room: null });
   const needed = useRef(false);
   useEffect(() => {
@@ -551,7 +680,7 @@ function usePhonePlan(): PhonePlan {
 }
 
 /** On Free: a number or an email comes with a plan. "Purchase a plan" opens the plans (Account). */
-function PlanNeeded({ what, bot: b, onUpgrade, onCancel }: { what: string; bot: Bot; onUpgrade: () => void; onCancel?: () => void }) {
+export function PlanNeeded({ what, bot: b, onUpgrade, onCancel }: { what: string; bot: Bot; onUpgrade: () => void; onCancel?: () => void }) {
   return (
     <div className="flex flex-col gap-2 px-4 pb-[11px] text-[12px] leading-4">
       <span className="text-[#3A3A38]">
@@ -575,7 +704,7 @@ function PlanNeeded({ what, bot: b, onUpgrade, onCancel }: { what: string; bot: 
  * Why the plan has no room for one more number or email (lib/plan-includes.ts), with the upgrade that
  * has room: "Purchase a plan" from Free, "Upgrade to Max" from Pro. Both open the plans (Account).
  */
-function PlanRoom({ short, onUpgrade, onCancel }: { short: PlanRoomShort; onUpgrade: () => void; onCancel?: () => void }) {
+export function PlanRoom({ short, onUpgrade, onCancel }: { short: PlanRoomShort; onUpgrade: () => void; onCancel?: () => void }) {
   return (
     <div className="flex flex-col gap-2 px-4 pb-[11px] text-[12px] leading-4">
       <span className="text-[#3A3A38]">{short.text}</span>
@@ -598,7 +727,7 @@ function PlanRoom({ short, onUpgrade, onCancel }: { short: PlanRoomShort; onUpgr
 }
 
 /** On Max, an email for a bot besides the main one comes when the user asks: up to 5 in all. */
-function GetEmail({ bot: b }: { bot: Bot }) {
+export function GetEmail({ bot: b }: { bot: Bot }) {
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
   const get = async () => {
@@ -640,7 +769,7 @@ const optionLabel = (o: NumberOption) => (placeOf(o) ? `${o.areaCode} · ${place
  * places that have numbers as pills (nearby ones when that code has none left). The number is bought
  * in the area code picked; then the card shows it, and how to make it yours (LineLink).
  */
-function GetNumber({ bot: b, plan, room, onUpgrade }: { bot: Bot; plan: PhonePlan; room: PlanRoomShort | null; onUpgrade: () => void }) {
+export function GetNumber({ bot: b, plan, room, onUpgrade }: { bot: Bot; plan: PhonePlan; room: PlanRoomShort | null; onUpgrade: () => void }) {
   const { on } = plan;
   // No number on the plan for this bot (lib/plan-includes.ts), or, from a cloud that doesn't say what's held, none on Free.
   const planNeeded = !!room || (!plan.room && plan.planNeeded);
@@ -791,7 +920,7 @@ function GetNumber({ bot: b, plan, room, onUpgrade }: { bot: Bot; plan: PhonePla
   );
 }
 
-function Field({ label, value, empty }: { label: string; value?: string; empty: string }) {
+export function Field({ label, value, empty }: { label: string; value?: string; empty: string }) {
   const [copied, setCopied] = useState(false);
   const copy = () => {
     if (!value) return;
@@ -833,7 +962,7 @@ function Field({ label, value, empty }: { label: string; value?: string; empty: 
  * words. It gets it in its chat, tasks and calls as their preferences, under Bops' own rules. Saving it
  * empty clears it. Esc with unsaved words puts back what's saved.
  */
-function HowIWork({ bot: b, className }: { bot: Bot; className: string }) {
+export function HowIWork({ bot: b, className }: { bot: Bot; className: string }) {
   const [text, setText] = useState(b.persona ?? "");
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -912,7 +1041,7 @@ function HowIWork({ bot: b, className }: { bot: Bot; className: string }) {
  * says how many: that opens its Routines tab at that app. A connect that just finished for this bot
  * opens its routines here by itself.
  */
-function Uses({ state, bot: b, onOpenVault, onOpenRoutines, className }: { state: AppState; bot: Bot; onOpenVault: () => void; onOpenRoutines: (app: string | null) => void; className: string }) {
+export function Uses({ state, bot: b, onOpenVault, onOpenRoutines, className }: { state: AppState; bot: Bot; onOpenVault: () => void; onOpenRoutines: (app: string | null) => void; className: string }) {
   const apps = botApps(state, b);
   const logins = (state.vault ?? []).filter((l) => l.bots === "all" || l.bots.includes(b.id));
   const anchors = useRef(new Map<string, HTMLElement>());

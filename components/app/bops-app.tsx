@@ -1,13 +1,14 @@
 "use client";
 
-import { appsShown } from "@/lib/apps-access";
+import { appsName, appsOwnShown, appsShown } from "@/lib/apps-access";
 import { screenMap } from "@/lib/screens";
 import { chatAsks } from "@/lib/asks";
-import { useEffect, useRef, useState } from "react";
-import { botChatId, BRAINS_ON, isScreenWatch, live, sharesComputer, workBot, type AppState, type Host, type Session, type Watch } from "@/lib/types";
-import { Account } from "./account";
-import { AutopilotPage, type AutopilotSection } from "./autopilot";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { accountIn, botChatId, BRAINS_ON, isScreenWatch, live, sharesComputer, siteLoginIn, workBot, workspaceOf, type AppState, type Host, type Session, type Watch } from "@/lib/types";
+import { initialsOf, PlanAndCredit, UsageSection } from "./account";
+import { AutopilotPage, type AutopilotOpen, type AutopilotSection } from "./autopilot";
 import { Members } from "./members";
+import { TeamChart } from "./team-chart";
 import { BotPanel, type Section } from "./bot-panel";
 import { BotComputers } from "./bot-computers";
 import { BrainSettings } from "./brains";
@@ -18,28 +19,33 @@ import { crmOpen } from "@/lib/crm-access";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { tagsOf } from "@/lib/routine-catalog";
 import { CrmView, OpenCrm } from "./crm";
-import { BoppyLoading, BotMoodsFrom, CallTalking, talkingStore } from "./mascot";
+import { BoppyLoading, BotMoodsFrom, CallTalking, Mascot, talkingStore } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
 import { CHAT_TAB, forgetTab, hostOf, isReading, memoryAgain, NewTab, OpenLink, TabBar, WebTab, type PanelTab } from "./panel-tabs";
 import { MadeAppsHome, MadeAppTab, OpenMadeApp } from "./made-apps";
-import { HostedAppTab, OpenAppTask, OpenHostedApp } from "./hosted-apps";
+import { HostedAppTab, OpenAppTask, OpenHostedApp, OpenSettings } from "./hosted-apps";
+import { OpenBotComputer } from "./app-envs";
+import { WorkspaceDomains } from "./workspace-domains";
+import { BotSettingsPage } from "./bot-settings";
+import type { SettingsSection } from "@/lib/bot-settings";
 
 /** Your Mac's tab, and the chat's bot's profile (it follows the chat, like the computer tab); both open on demand. */
 const MAC_TAB = "tab_mac";
 import { opensMacTab, PROFILE_TAB, tabsShown } from "./tabs-shown";
-import { Sidebar } from "./sidebar";
+import { NameInput, Sidebar } from "./sidebar";
 import { SidebarRail } from "./sidebar-rail";
 import type { BotMenuActions } from "./bot-menu";
+import { NewThread } from "./new-thread";
+import { readyAgents } from "@/lib/agents";
 import { footerPageOf, openFooterPage } from "./sidebar-footer";
 import { CloudUnreachable, SignIn, useAuthStatus } from "./sign-in";
-import { Setup, ThisMacSettings } from "./setup";
+import { ThisMacSettings } from "./setup";
 import { TooltipLayer } from "./tooltip";
-import { VaultTab } from "./vault";
+import { LoginsPage } from "./logins";
 import { MacPreviews } from "./mac-tab";
 import { OPEN_MAC_KEY } from "./mac-pip";
 import { MacComputer } from "./mac-computer";
-import { NoticePopup } from "./notice-popup";
-import { RestartConfirm, RestartIcon, useCanRestart } from "./restart";
+import { RestartButton, RestartIcon, useCanRestart } from "./restart";
 import { RunsOnSettings } from "./runs-on";
 import { chatInWorkspace, currentWorkspace, option, post, radio, SideToggleIcon, teamOf, useAppState, useSelfHosted } from "./ui";
 import { viewOnly } from "./view-only";
@@ -51,7 +57,7 @@ import { trackEvent } from "@/lib/analytics";
 import { OwnerEmail, useOwnerEmailInfo } from "./owner-email";
 import { OwnerPhone, useOwnerPhone, usePhoneInfo, type OwnerNumber, type PendingCode } from "./owner-phone";
 import { LineLink } from "./line-link";
-import { EmailAddresses, MailAddressStep } from "./mail-address";
+import { EmailAddresses } from "./mail-address";
 import { bannerNumber, ReachBanner } from "./reach-banner";
 
 /*
@@ -193,12 +199,36 @@ function Bops({ state }: { state: AppState | null }) {
   const [pinned, setPinned] = useState<Record<string, boolean>>({});
   // The thread whose card you came to a bot's screen from (its Sign in), by bot: taking control of that screen is for it (ComputerView forThread).
   const [cameFor, setCameFor] = useState<Record<string, { display: number; sessionId: string } | undefined>>({});
-  // Settings, or Settings at Keys to add one for a bot (from its profile).
-  const [settings, setSettings] = useState(false);
-  const [account, setAccount] = useState(false);
-  const [setup, setSetup] = useState(false);
-  // The People sheet (members.tsx): who can see the bots' computers.
-  const [members, setMembers] = useState(false);
+  // Settings, a page in the main area (the sidebar stays beside it), at one of its places: Logins from the footer, Team
+  // from your initials, Plan and credit from an upgrade, This Mac from the setup badge, the Org chart at a bot (`chartBot`),
+  // Domains from an app's All domains; `keysFor`: the bot a key is being added for. `atAt` makes each opening go to its
+  // place again, even the one it's at. Only here, in this window: nothing of it is saved.
+  const [settings, setSettings] = useState<false | { at?: SettingsPane; keysFor?: string; chartBot?: string; atAt: number }>(false);
+  const openSettings = (at?: SettingsPane, more: { keysFor?: string; chartBot?: string } = {}) => setSettings({ ...(at ? { at } : {}), ...more, atAt: Date.now() });
+  // A bot's full settings page (bot-settings.tsx), over the whole window, at a section; `atAt` makes each opening a new page.
+  const [botPage, setBotPage] = useState<{ botId: string; at?: SettingsSection; atAt: number } | null>(null);
+  // What had focus as the page opened (the panel's Open full settings, or one of its rows), and whether closing gives it
+  // back: Back, the X, Esc and Collapse leave the app as it was, focus too; a link elsewhere takes focus where it goes.
+  const pageOpener = useRef<HTMLElement | null>(null);
+  const pageRefocus = useRef(false);
+  const openBotPage = (botId: string, at?: SettingsSection) => {
+    pageOpener.current = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+    pageRefocus.current = false;
+    setBotPage({ botId, at, atAt: Date.now() });
+  };
+  const closePage = () => {
+    pageRefocus.current = true;
+    setBotPage(null);
+  };
+  useEffect(() => {
+    if (botPage) return;
+    const el = pageOpener.current;
+    const back = pageRefocus.current;
+    pageOpener.current = null;
+    pageRefocus.current = false;
+    // Once the grid under the page isn't inert any more (this commit): the opener, else the panel's own way back in.
+    if (back) (el?.isConnected ? el : document.querySelector<HTMLElement>("[data-open-full]"))?.focus({ preventScroll: true });
+  }, [botPage]);
   // Heads-ups already brought forward (null until the first state arrives), and the way back.
   const [cutAlerts, setCutAlerts] = useState<Set<string> | null>(null);
   const [cutBack, setCutBack] = useState<{ name: string; back: string } | null>(null);
@@ -254,6 +284,8 @@ function Bops({ state }: { state: AppState | null }) {
   // only the hang-up button does. In the caller's chat it sits in the header slot; elsewhere it waits
   // small in the sidebar's corner.
   const [call, setCall] = useState<string | null>(null);
+  // New thread, for a bot with more than one agent ready (new-thread.tsx): its bot. Over its chat's message box, in place.
+  const [newThreadFor, setNewThreadFor] = useState<string | null>(null);
   // Whether the bot's voice is coming through on that call right now (its mascot talks while it does):
   // a store of its own (CallTalking), so a word starting or ending doesn't redraw the whole app.
   const [callTalking] = useState(talkingStore);
@@ -299,13 +331,20 @@ function Bops({ state }: { state: AppState | null }) {
 
   // What Esc does to the tab on the right, set on every render (see escTab.current below).
   const escTab = useRef<(e: KeyboardEvent) => void>(() => {});
-  // A sheet open over People (Account from its upgrade, Setup from there), set on every render: Esc
-  // closes that alone and goes back to People, as its X does.
-  const overPeople = useRef(false);
+  // Whether the Settings page is open, set on every render: Esc goes back from it (and only from it).
+  const settingsOpen = useRef(false);
+  // Settings while a domain is being bought (Settings' onHold): Esc leaves it open, and everything under it as it is.
+  const settingsHeld = useRef(false);
+  // What Esc does while a bot's settings page is open, set on every render: true when it took the key (pageEsc.current below).
+  const pageEsc = useRef<(e: KeyboardEvent) => boolean>(() => false);
+  const holdSettings = useCallback((held: boolean) => {
+    settingsHeld.current = held;
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
+        setBotPage(null);
         setComposing(true);
       }
       // ⌘\ collapses the sidebar to its rail, or expands it.
@@ -319,18 +358,19 @@ function Bops({ state }: { state: AppState | null }) {
         });
         return;
       }
-      if (e.key === "Escape" && overPeople.current) {
-        setAccount(false);
-        setSetup(false);
+      if (e.key === "Escape" && settingsHeld.current) return;
+      if (e.key === "Escape" && settingsOpen.current) {
+        // The Settings page: Esc goes back to where you were, once nothing in it wanted the key (a menu, a picker, a
+        // confirm in place say so with preventDefault; some listen after this one, so it's read once they all have).
+        setTimeout(() => {
+          if (!e.defaultPrevented && !settingsHeld.current) setSettings(false);
+        }, 0);
         return;
       }
+      if (e.key === "Escape" && pageEsc.current(e)) return;
       if (e.key === "Escape") {
         setThreadId(null);
         setFocus(false);
-        setSettings(false);
-        setAccount(false);
-        setSetup(false);
-        setMembers(false);
         // Last, so going back can bring a full-width computer back.
         escTab.current(e);
       }
@@ -367,12 +407,15 @@ function Bops({ state }: { state: AppState | null }) {
   const crm = crmOpen(state);
   const memory = categoriesOpen(state);
   const apps = appsShown(state);
+  // The apps the bots made stay the owner's, in a workspace shared with Your Apps too.
+  const ownApps = appsOwnShown(state);
   const tabs = tabsShown(openTabs, state, { chatBotId, ws: currentWorkspace(state), crm, memory, apps });
   const tab = active === CHAT_TAB ? undefined : tabs.find((t) => t.id === active);
-  // The footer's pill: People while its sheet is open, else the page in sight on the right.
-  const footer = footerPageOf({ people: members, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory });
+  // The footer's pill: the Settings page's Logins or Your Apps while it's open there, else the page in sight on the right.
+  const inSight = { settings: settings ? (settings.at ?? "profile") : undefined, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory };
+  const footer = footerPageOf(inSight);
   // The rail fills in only a page that's really open (no resting pill to fall back on).
-  const openPage = openFooterPage({ people: members, tab: panelOpen && !focus ? tab?.kind : undefined, knowledge: memory });
+  const openPage = openFooterPage(inSight);
   if (recent.at(-1) !== active) {
     setRecent([...recent.filter((id) => id !== active), active].slice(-20));
     // Gone on to another tab: leaving that one later shouldn't hide the panel this one opened.
@@ -498,8 +541,8 @@ function Bops({ state }: { state: AppState | null }) {
       () => ({ id: id === chatBotId ? PROFILE_TAB : tabId(), kind: "bot", botId: id, section }),
       (t) => ({ ...t, section }) as PanelTab,
     );
-  const openVault = (keysFor?: string) =>
-    openTab((t) => t.kind === "vault", () => ({ id: tabId(), kind: "vault", keysFor }), (t) => ({ ...t, kind: "vault", keysFor }) as PanelTab);
+  // Logins: Settings, at the open workspace's Logins (keysFor: adding a key for that bot).
+  const openVault = (keysFor?: string) => setSettings({ at: "logins", ...(keysFor ? { keysFor } : {}), atAt: Date.now() });
   /** A CRM file, as a tab (one per file). */
   const openCrm = (ws: string, file: string) =>
     openTab(
@@ -541,7 +584,7 @@ function Bops({ state }: { state: AppState | null }) {
   const openMac = () => openTab((t) => t.kind === "mac", () => ({ id: MAC_TAB, kind: "mac" }));
   /** An app a bot made, in its tab (one per app), and every app as tiles (one tab per workspace). */
   const openMadeApp = (appId: string) => {
-    if (apps) openTab((t) => t.kind === "made-app" && t.appId === appId, () => ({ id: tabId(), kind: "made-app", appId }));
+    if (ownApps) openTab((t) => t.kind === "made-app" && t.appId === appId, () => ({ id: tabId(), kind: "made-app", appId }));
   };
   const openApps = () => {
     if (!apps) return;
@@ -558,7 +601,7 @@ function Bops({ state }: { state: AppState | null }) {
   if (shownBuild !== (lastBuild?.id ?? "")) {
     setShownBuild(lastBuild?.id ?? "");
     const building = lastBuild?.madeApp && state.madeApps?.find((a) => a.id === lastBuild.madeApp!.appId)?.building;
-    if (shownBuild !== undefined && lastBuild?.madeApp && building && !focus && apps) {
+    if (shownBuild !== undefined && lastBuild?.madeApp && building && !focus && ownApps) {
       // As openMadeApp does (rendering can't make a new id: the tab is named for the app).
       const appId = lastBuild.madeApp.appId;
       const there = openTabs.find((t) => t.kind === "made-app" && t.appId === appId);
@@ -601,19 +644,54 @@ function Bops({ state }: { state: AppState | null }) {
   /** A page-like tab's own X (and Esc) closes it. */
   const leaveTab = closeTab;
   // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
-  overPeople.current = members && (account || setup);
+  settingsOpen.current = !!settings;
   // Esc leaves a tab that reads as a page (the Vault, a bot's profile) for where you were, once nothing
   // nearer wants it: a sheet, a thread or a dialog (the app picker, an image) closes first, something
   // inside that used it (a form) says so with preventDefault, and Esc while typing elsewhere (the chat,
   // a search) stays there.
   // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
   escTab.current = (e) => {
+    // Under a bot's settings page, the tab on the right stays as it is.
+    if (botPage) return;
     const page = panelOpen && !focus && (tab?.kind === "vault" || tab?.kind === "bot" || tab?.kind === "crm" || tab?.kind === "memory" || tab?.kind === "autopilot") ? tab : undefined;
-    if (!page || e.defaultPrevented || thread || composing || settings || account || setup || members || document.querySelector('[role="dialog"]')) return;
+    if (!page || e.defaultPrevented || thread || composing || settings || document.querySelector('[role="dialog"]')) return;
     const el = e.target instanceof HTMLElement ? e.target : null;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) && !panelRef.current?.contains(el)) return;
     leaveTab(page.id);
   };
+  /**
+   * A bot's settings page open: the Settings page over it (its Plan and credit, its Org chart) goes back first, through
+   * the branch before this one, and the page stays; else Esc goes back to the chat, once nothing nearer wanted it (the
+   * page's own Esc, inside it, does that too). Gone bot, gone page.
+   */
+  // eslint-disable-next-line react-hooks/refs -- kept current for the key listener above
+  pageEsc.current = (e) => {
+    if (!botPage || settings) return false;
+    if (!e.defaultPrevented && !document.querySelector('[role="dialog"]')) closePage();
+    return true;
+  };
+  // Only a bot of the workspace open, and never in one shared with the user (another one opened, or the bot deleted, closes it).
+  const pageBot = botPage && !state.shared ? team.find((b) => b.id === botPage.botId) : undefined;
+  if (botPage && !pageBot) setBotPage(null);
+  /** Leave the page, then go where a link of its goes. */
+  const away =
+    <A extends unknown[]>(fn: (...a: A) => void) =>
+    (...a: A) => {
+      setBotPage(null);
+      fn(...a);
+    };
+  /**
+   * Go somewhere from the sidebar, or from a link on the Settings page: the pages in the main area (Settings, a bot's
+   * settings page) give way to it. Nothing goes while Settings is held (a domain being bought: its answer would be lost).
+   */
+  const leavePages =
+    <A extends unknown[]>(fn: (...a: A) => void) =>
+    (...a: A) => {
+      if (settings && settingsHeld.current) return;
+      setSettings(false);
+      setBotPage(null);
+      fn(...a);
+    };
   const pickTab = (id: string) => {
     setActive(id);
     setFocus(false);
@@ -664,6 +742,7 @@ function Bops({ state }: { state: AppState | null }) {
   const openChat = (id: string) => {
     setChatId(id);
     setPrefill(null);
+    setNewThreadFor(null);
     setThreadId(null);
     setComposing(false);
     setFocus(false);
@@ -732,7 +811,7 @@ function Bops({ state }: { state: AppState | null }) {
         onShowScreen={showScreen}
         onUpgrade={() => {
           trackEvent("bops_upgrade_clicked", { surface: "chat" });
-          setAccount(true);
+          openSettings("plan");
         }}
         peek={!panelOpen && <ComputerPeek state={state} bot={bot} onOpen={() => setPanelOpen(true)} />}
         call={call}
@@ -741,6 +820,12 @@ function Bops({ state }: { state: AppState | null }) {
         prefill={prefill}
         onPrefilled={() => setPrefill(null)}
       />
+      {/* New task from a bot's menu, for a bot with more than one agent: over the message box of its chat, the chat still in view. */}
+      {newThreadFor && !thread && state.bots.some((x) => x.id === newThreadFor) && (
+        <div className="absolute inset-x-0 bottom-0 z-30 px-3 pb-3">
+          <NewThread state={state} bot={state.bots.find((x) => x.id === newThreadFor)!} onClose={() => setNewThreadFor(null)} onStarted={(s) => (setNewThreadFor(null), openThread(s))} onSetUp={() => (setNewThreadFor(null), openProfile(newThreadFor))} />
+        </div>
+      )}
       {thread && (
         <ThreadSheet
           state={state}
@@ -762,6 +847,10 @@ function Bops({ state }: { state: AppState | null }) {
   // rail still clears the window's buttons. The title bar's columns are the same, sliding together.
   // (Whole class names, so Tailwind sees each one.)
   const wide = focus || !panelOpen;
+  // A page in the main area (Settings, a bot's settings page): it covers the columns past the sidebar, as wide as the
+  // sidebar is now (its rail, or itself), sliding with it.
+  const covered = !!settings || !!pageBot;
+  const sidebarWidth = sidebarOpen ? 340 : 72;
   const columns = sidebarOpen
     ? wide
       ? "grid-cols-[340px_minmax(0,1fr)]"
@@ -778,11 +867,26 @@ function Bops({ state }: { state: AppState | null }) {
     },
     onComputer: openComputer,
     onProfile: (id, section) => openProfile(id, section),
-    // Its chat, with the composer focused for the task (once the chat is on screen).
+    // A bot that runs more than one agent: its chat with New thread over the message box, to pick which. Else its chat, with the composer
+    // focused for the task (once the chat is on screen).
     onNewTask: (id) => {
+      const nb = state.bots.find((x) => x.id === id);
+      if (nb && !state.shared && readyAgents(nb, state).length > 1) {
+        setComposing(false);
+        openChat(botChatId(id));
+        return setNewThreadFor(id);
+      }
       openChat(botChatId(id));
       setTimeout(() => document.getElementById("composer")?.focus(), 60);
     },
+  };
+  // The same from the sidebar while a page is open in the main area: the page gives way first.
+  const pageMenuActions: BotMenuActions = {
+    onChat: leavePages(botMenuActions.onChat),
+    onCall: leavePages(botMenuActions.onCall),
+    onComputer: leavePages(botMenuActions.onComputer),
+    onProfile: leavePages(botMenuActions.onProfile),
+    onNewTask: leavePages(botMenuActions.onNewTask),
   };
   const tabBar = (panelOpen || focus) && (
     <TabBar
@@ -806,13 +910,15 @@ function Bops({ state }: { state: AppState | null }) {
     <OpenCrm.Provider value={openCrm}>
     <OpenMadeApp.Provider value={openMadeApp}>
     <OpenHostedApp.Provider value={openHostedApp}>
+    <OpenSettings.Provider value={(at) => openSettings(at)}>
     <OpenAppTask.Provider value={openAppTask}>
+    <OpenBotComputer.Provider value={openComputer}>
       <TooltipLayer />
-      <NoticePopup />
       {/* A shared workspace's chats aren't the user's own: nothing of them is said as what they're looking at. */}
       <ViewReporter chatId={state.shared ? "" : chat.id} threadId={state.shared ? null : (thread?.id ?? null)} />
       <div className="flex h-screen flex-col overflow-clip bg-white font-sans text-ink antialiased">
         <TitleBar
+          bare={!!pageBot || !!settings}
           columns={`${columns} ${SLIDE}`}
           wide={focus || !panelOpen}
           tabs={tabBar}
@@ -824,6 +930,11 @@ function Bops({ state }: { state: AppState | null }) {
             else setPanelOpen(!panelOpen);
           }}
         />
+        {/*
+          The pages in the main area (Settings, a bot's settings page) draw over the grid's columns past the sidebar, which
+          stay as they were underneath (the chat, its draft, a live computer); the sidebar stays beside them, to go anywhere.
+        */}
+        <div className="relative flex min-h-0 flex-1 flex-col">
         <div className={`grid min-h-0 flex-1 ${columns} ${SLIDE}`}>
           {/* The sidebar's column, its color and edge whichever it shows (an inset edge, so the sidebar's 340px fit). */}
           <div className={`flex min-h-0 min-w-0 bg-[#F9F9F8] shadow-[inset_-1px_0_0_#ECECEA] ${sliding ? "overflow-clip" : ""}`}>
@@ -832,20 +943,20 @@ function Bops({ state }: { state: AppState | null }) {
               state={state}
               chatId={chat.id}
               footer={openPage}
-              menuActions={botMenuActions}
+              menuActions={pageMenuActions}
               onExpand={() => toggleSidebar()}
               onSearch={() => toggleSidebar("search")}
               onWorkspaces={() => toggleSidebar("workspaces")}
-              onCompose={() => setComposing(true)}
-              onOpenChat={openChat}
-              onAccount={() => setAccount(true)}
-              onSettings={() => setSettings(true)}
-              onSetup={() => setSetup(true)}
-              onMembers={() => setMembers(true)}
+              onCompose={leavePages(() => setComposing(true))}
+              onOpenChat={leavePages(openChat)}
+              onAccount={() => openSettings("plan")}
+              onSettings={() => openSettings()}
+              onSetup={() => openSettings("mac")}
+              onTeam={() => openSettings("team")}
               onVault={() => openVault()}
-              onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item, null)}
-              onOpenMemory={openMemory}
-              onApps={openApps}
+              onOpenAutopilot={leavePages(({ section, focus: item }: AutopilotOpen) => openAutopilot(section, item, null))}
+              onOpenMemory={leavePages(openMemory)}
+              onApps={leavePages(openApps)}
             />
           ) : (
           <Sidebar
@@ -854,23 +965,26 @@ function Bops({ state }: { state: AppState | null }) {
             search={openWith === "search" ? "" : null}
             workspaces={openWith === "workspaces"}
             onCollapse={() => toggleSidebar()}
-            onOpenChat={openChat}
-            onOpenThread={openThread}
-            onCompose={() => setComposing(true)}
-            onSettings={() => setSettings(true)}
-            onAccount={() => setAccount(true)}
-            onSetup={() => setSetup(true)}
+            onOpenChat={leavePages(openChat)}
+            onOpenThread={leavePages(openThread)}
+            onCompose={leavePages(() => setComposing(true))}
+            onSettings={() => openSettings()}
+            onAccount={() => openSettings("plan")}
+            onSetup={() => openSettings("mac")}
             onVault={() => openVault()}
-            onApps={openApps}
-            onMembers={() => setMembers(true)}
-            onOpenWatch={showWatch}
-            onOpenMemory={openMemory}
-            onOpenAutopilot={({ section, focus: item }) => openAutopilot(section, item, null)}
+            onApps={leavePages(openApps)}
+            onTeam={() => openSettings("team")}
+            onTeamChart={() => openSettings("chart")}
+            onOpenWatch={leavePages(showWatch)}
+            onOpenMemory={leavePages(openMemory)}
+            onOpenAutopilot={leavePages(({ section, focus: item }: AutopilotOpen) => openAutopilot(section, item, null))}
             footer={footer}
-            menuActions={botMenuActions}
+            menuActions={pageMenuActions}
           />
           )}
           </div>
+          {/* Under a page in the main area, what's here keeps going but can't be reached (contents: the grid's columns stay its own). */}
+          <div className="contents" inert={covered}>
           {focus && crmFocus && crm ? (
             <div className="flex min-h-0 min-w-0 flex-col bg-white">
               <CrmView
@@ -957,9 +1071,11 @@ function Bops({ state }: { state: AppState | null }) {
                       onAsk={askBot}
                       onUpgrade={() => {
                         trackEvent("bops_upgrade_clicked", { surface: "bot_panel" });
-                        setAccount(true);
+                        openSettings("plan");
                       }}
                       onClose={() => leaveTab(tab.id)}
+                      onOpenChart={(botId) => openSettings("chart", { chartBot: botId })}
+                      onExpand={(at) => openBotPage(bot.id, at)}
                     />
                   ) : tab?.kind === "new" ? (
                     <NewTab
@@ -970,7 +1086,10 @@ function Bops({ state }: { state: AppState | null }) {
                         openComputer(id);
                       }}
                       onProfile={(id) => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "bot", botId: id, section: "details" } : t)))}
-                      onVault={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "vault" } : t)))}
+                      onVault={() => {
+                        closeTab(tab.id);
+                        openVault();
+                      }}
                       // The workspace's one Apps tab: this new tab gives way to it (or becomes it). None where apps aren't open.
                       onApps={
                         apps
@@ -1000,7 +1119,7 @@ function Bops({ state }: { state: AppState | null }) {
                       onMac={() => setTabs(tabs.map((t) => (t.id === tab.id ? { id: t.id, kind: "mac" } : t)))}
                     />
                   ) : tab?.kind === "vault" ? (
-                    <VaultTab state={state} keysFor={tab.keysFor} onOpenWatch={showWatch} onClose={() => leaveTab(tab.id)} />
+                    <LoginsPage state={state} keysFor={tab.keysFor} onOpenWatch={showWatch} onClose={() => leaveTab(tab.id)} />
                   ) : tab?.kind === "made-app" ? (
                     <MadeAppTab key={tab.id} state={state} appId={tab.appId} />
                   ) : tab?.kind === "made-apps" ? (
@@ -1096,6 +1215,74 @@ function Bops({ state }: { state: AppState | null }) {
               )}
             </>
           )}
+          </div>
+        </div>
+        {pageBot && botPage && (
+          <div className={`absolute inset-y-0 right-0 z-30 bg-white ${PAGE_SLIDE}`} style={{ left: sidebarWidth }} inert={!!settings}>
+            <BotSettingsPage
+              key={`${pageBot.id}:${botPage.atAt}`}
+              state={state}
+              bot={pageBot}
+              at={botPage.at}
+              onBack={closePage}
+              onCollapse={(at) => {
+                closePage();
+                openProfile(pageBot.id, at === "skills" || at === "routines" || at === "memory" ? at : "details");
+              }}
+              links={{
+                onOpenChat: away(openChat),
+                onOpenThread: away(openThread),
+                onOpenVault: away(() => openVault()),
+                onOpenComputer: away(openComputer),
+                onOpenKeys: away((keysFor: string) => openVault(keysFor)),
+                onShowScreen: away(showScreen),
+                onOpenAutopilot: away(openAutopilot),
+                onOpenSkills: away(openSkills),
+                onAsk: away(askBot),
+                onUpgrade: () => {
+                  trackEvent("bops_upgrade_clicked", { surface: "bot_panel" });
+                  openSettings("plan");
+                },
+                onOpenChart: (botId) => openSettings("chart", { chartBot: botId }),
+              }}
+            />
+          </div>
+        )}
+        {settings && (
+          // Over a bot's settings page when it opened from there (its Plan and credit, its Org chart): Back goes back to it.
+          <div className={`absolute inset-y-0 right-0 z-30 flex bg-white ${PAGE_SLIDE}`} style={{ left: sidebarWidth }}>
+            {/* What opens from it goes where it goes, and the page gives way (an app's tab, a page on the web). */}
+            <OpenLink.Provider value={leavePages(openWeb)}>
+            <OpenCrm.Provider value={leavePages(openCrm)}>
+            <OpenMadeApp.Provider value={leavePages(openMadeApp)}>
+            <OpenHostedApp.Provider value={leavePages(openHostedApp)}>
+            <OpenAppTask.Provider value={leavePages(openAppTask)}>
+              <Settings
+                state={state}
+                at={settings.at}
+                atAt={settings.atAt}
+                keysFor={settings.keysFor}
+                chartBot={settings.chartBot}
+                onPane={(at) => setSettings((x) => (x && x.at !== at ? { ...x, at } : x))}
+                onOpenWatch={leavePages(showWatch)}
+                onOpenBot={(botId) => {
+                  setSettings(false);
+                  openBotPage(botId);
+                }}
+                onMakeBot={leavePages(() => setComposing(true))}
+                onOpenApp={leavePages(openHostedApp)}
+                onClose={() => setSettings(false)}
+                onHold={holdSettings}
+                onShowScreen={leavePages(showScreen)}
+                onOpenVault={() => openVault()}
+              />
+            </OpenAppTask.Provider>
+            </OpenHostedApp.Provider>
+            </OpenMadeApp.Provider>
+            </OpenCrm.Provider>
+            </OpenLink.Provider>
+          </div>
+        )}
         </div>
         {callBot && (
           // One call bar for the whole app, never remounted while the call lasts: it only moves.
@@ -1107,48 +1294,12 @@ function Bops({ state }: { state: AppState | null }) {
             <CallBar bot={callBot} owner={state.owner?.name} compact={!(callHere && slotBox)} onOpen={() => openChat(botChatId(callBot.id))} onClose={() => setCall(null)} onSpeaking={callTalking.set} />
           </div>
         )}
-        {/* Before Account, so the plans open on top of it and closing them shows it again. */}
-        {members && (
-          <Members
-            state={state}
-            onClose={() => setMembers(false)}
-            onUpgrade={() => {
-              trackEvent("bops_upgrade_clicked", { surface: "members" });
-              setAccount(true);
-            }}
-          />
-        )}
-        {settings && (
-          <Settings
-            state={state}
-            onClose={() => setSettings(false)}
-            onShowScreen={(id, d) => {
-              setSettings(false);
-              showScreen(id, d);
-            }}
-            onOpenVault={() => {
-              setSettings(false);
-              openVault();
-            }}
-          />
-        )}
-        {account && (
-          <Account
-            state={state}
-            onClose={() => setAccount(false)}
-            onThisMac={() => {
-              setAccount(false);
-              setSetup(true);
-            }}
-          />
-        )}
-        {setup && <Setup state={state} onClose={() => setSetup(false)} />}
-        {/* The first time a workspace gets email: "Pick your Bops address" (or an offer to change one Bops picked). */}
-        {!settings && !account && !setup && !members && <MailAddressStep state={state} />}
         {/* What bots are doing on the user's Mac, live, in the corner (hidden while the Your Mac tab is open). */}
         {!(tab?.kind === "mac" && panelOpen) && !state.shared && <MacPreviews state={state} onOpen={openMac} />}
       </div>
+    </OpenBotComputer.Provider>
     </OpenAppTask.Provider>
+    </OpenSettings.Provider>
     </OpenHostedApp.Provider>
     </OpenMadeApp.Provider>
     </OpenCrm.Provider>
@@ -1164,17 +1315,22 @@ const SIDEBAR_KEY = "bops.sidebar";
 const SIDEBAR_SLIDE_MS = 200;
 /** The grid's columns slide as the sidebar's width changes, the title bar's with them. */
 const SLIDE = "transition-[grid-template-columns] duration-200 ease-out motion-reduce:transition-none";
+/** A page in the main area slides with them: its left edge is the sidebar's. */
+const PAGE_SLIDE = "transition-[left] duration-200 ease-out motion-reduce:transition-none";
 
 /* ---------------- Title bar ---------------- */
 
 /** The window's title bar: traffic lights (in the desktop app), the right side's tabs above it, and the panel toggle. */
 function TitleBar({
+  bare,
   columns,
   wide,
   tabs,
   panelOpen,
   onTogglePanel,
 }: {
+  /** A bot's settings page over the window: the drag region and room for the window's buttons only (tabs would change what's under it). */
+  bare?: boolean;
   columns: string;
   wide: boolean;
   tabs: React.ReactNode;
@@ -1188,6 +1344,8 @@ function TitleBar({
         {/* Room for the window's buttons (the sidebar's toggle is in its header, or at the top of its rail). */}
         {desktop && <div className="w-[56px] shrink-0" />}
       </div>
+      {bare ? null : (
+        <>
       {!wide && <div />}
       <div className="flex min-w-0 items-center gap-2 pl-3 pr-3.5">
         {tabs || <div className="flex-1" />}
@@ -1199,6 +1357,8 @@ function TitleBar({
           <SideToggleIcon side="right" open={panelOpen} />
         </button>
       </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1530,65 +1690,431 @@ function SelfHosting({ state }: { state: AppState }) {
   );
 }
 
-/**
- * Settings, over the app. `onShowScreen`: a brain's sign-in started on a bot's screen, so Settings closes and
- * that screen shows; `onOpenVault`: to add a key there (brains.tsx). Exported for the tests.
- */
-export function Settings({ state, onClose, onShowScreen, onOpenVault }: { state: AppState; onClose: () => void; onShowScreen: (botId: string, display: number) => void; onOpenVault: () => void }) {
+/** Where your bots work: their own cloud computers (the default), or this Mac. One switch for every workspace. */
+function WhereBotsWork({ state }: { state: AppState }) {
   const setHost = (host: Host) => void post("/api/host", { host });
-  const selfHosted = useSelfHosted();
   return (
-    <div className="motion-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-[2px]" onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} className="motion-dialog-in flex max-h-[90vh] w-[760px] flex-col overflow-y-auto rounded-[22px] bg-white shadow-[0_0_0_1px_#0000000F,0_30px_70px_-28px_#00000038]">
-        <div className="flex items-center justify-between border-b border-[#F0F0EE] px-[22px] py-[18px]">
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[18px] font-semibold leading-[22px]">Settings</span>
-            <span className="text-[13px] leading-[17px] text-[#6B6B6B]">
-              {BRAINS_ON ? "You, how your bots reach you, this Mac, where your bots work and their brain" : "You, how your bots reach you, this Mac, and where your bots work"}
+    <div className="flex flex-col gap-2 px-[22px] pt-4">
+      <span className="text-[13px] font-semibold">Where your bots work</span>
+      <div className="flex gap-2.5">
+        {(["orgo", "mac"] as const).map((h) => (
+          <button key={h} onClick={() => setHost(h)} className={`flex flex-1 flex-col gap-1.5 rounded-[14px] p-3.5 text-left ${option(state.host === h)}`}>
+            <span className="flex items-center justify-between">
+              <span className="text-[14px] font-semibold">{h === "orgo" ? "Their own cloud computers" : "This Mac"}</span>
+              {radio(state.host === h)}
             </span>
-          </div>
-          <button onClick={onClose} aria-label="Close" className="flex size-8 items-center justify-center rounded-full shadow-[0_0_0_1px_#E6E6E3]">
-            <svg width="12" height="12" viewBox="0 0 12 12">
-              <path d="M2 2l8 8M10 2l-8 8" fill="none" stroke="#0A0A0A" strokeWidth="1.6" strokeLinecap="round" />
-            </svg>
+            <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">
+              {h === "orgo" ? "Recommended. Your bots work on a computer in the cloud, with 4 screens, and keep working when your Mac is closed. A bot can have one of its own." : "Bots work in background browsers on this Mac, from your own internet connection."}
+            </span>
           </button>
-        </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
+/** Settings' places: Account (yours, in every workspace), then Workspace (the one open now), then Orgo's team's own. */
+export type SettingsPane = "profile" | "plan" | "usage" | "reach" | "ai" | "privacy" | "mac" | "general" | "team" | "chart" | "bots" | "logins" | "email" | "apps" | "domains";
+
+/** A place in Settings' nav: its name, its glyph, and a quiet value on the right. */
+type NavItem = { id: SettingsPane; name: string; icon: React.ReactNode; value?: string | number };
+
+const glyph = (d: string) => (
+  <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden className="shrink-0">
+    <path d={d} fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+const GLYPHS: Record<SettingsPane, string> = {
+  profile: "M8 8a2.6 2.6 0 1 0 0-5.2A2.6 2.6 0 0 0 8 8zM3 13.5c.7-2.4 2.6-3.6 5-3.6s4.3 1.2 5 3.6",
+  plan: "M2 4.5h12v7H2zM2 7h12M4.5 9.5h2",
+  usage: "M3 13V9M6.3 13V6M9.6 13V8M13 13V3.5",
+  reach: "M5 2h6v12H5zM7.3 12h1.4",
+  ai: "M8 2l1.3 3.4L13 6.7l-3.7 1.3L8 11.5 6.7 8 3 6.7l3.7-1.3z",
+  privacy: "M8 2l5 1.9v3.9c0 3.1-2.1 5.6-5 6.6-2.9-1-5-3.5-5-6.6V3.9z",
+  mac: "M2.5 3.5h11v7.5h-11zM1.5 13h13",
+  general: "M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1",
+  team: "M6 7.6a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6zM1.8 13.2c.6-2.3 2.2-3.5 4.2-3.5s3.6 1.2 4.2 3.5M10.4 3.5a2.4 2.4 0 0 1 0 4.4M12 9.9c1.2.4 2 1.5 2.3 3.3",
+  chart: "M6.5 2.5h3v2.5h-3zM2 11h3v2.5H2zM11 11h3v2.5h-3zM8 5v3M3.5 11V8h9v3",
+  bots: "M3.5 6h9v6.5h-9zM8 6V3.5M6 9h.01M10 9h.01M2 8.5v2M14 8.5v2",
+  logins: "M5.5 10.5a3 3 0 1 1 2.1-.9L13.5 3.7M11 6.2l1.5 1.5M9.3 7.9l1.3 1.3",
+  email: "M2 3.5h12v9H2zM2 4l6 4.5L14 4",
+  apps: "M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5H2.5zM9 9h4.5v4.5H9z",
+  domains: "M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM2 8h12M8 2c1.8 1.7 2.6 3.7 2.6 6S9.8 12.3 8 14M8 2C6.2 3.7 5.4 5.7 5.4 8s.8 4.3 2.6 6",
+};
+
+/** A pane's title and what it's for, above what it holds. */
+function PaneHead({ title, sub }: { title: string; sub?: string }) {
+  return (
+    <div className="flex flex-col gap-0.5 px-[22px] pt-6">
+      <span className="text-[22px] font-bold leading-7 tracking-[-0.02em]">{title}</span>
+      {sub && <span className="text-[13px] leading-[19px] text-[#6B6B6B]">{sub}</span>}
+    </div>
+  );
+}
+
+/** Workspace, General: its name, renamed here as in the sidebar's workspace menu (Orgo's workspace too). */
+function WorkspaceGeneral({ state }: { state: AppState }) {
+  const ws = currentWorkspace(state);
+  const w = state.workspaces?.find((x) => x.id === ws);
+  const [naming, setNaming] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const name = state.shared ? state.shared.name : (w?.name ?? "This workspace");
+  const save = async () => {
+    const next = naming?.trim();
+    if (!next || !w) return;
+    const res = await post("/api/workspaces", { id: w.id, name: next }, "PATCH").catch(() => null);
+    const j = ((await res?.json().catch(() => ({}))) ?? {}) as { error?: string };
+    if (res?.ok) {
+      setNaming(null);
+      setError(null);
+    } else setError(j.error ?? "Couldn't reach Bops. Try again.");
+  };
+  return (
+    <div className="flex flex-col gap-2 px-[22px] pt-[18px]">
+      <span className="text-[13px] font-semibold">Name</span>
+      <div className="flex items-center gap-3 rounded-[14px] p-3.5 shadow-[0_0_0_1px_#E6E6E3]">
+        {naming !== null ? (
+          <div className="min-w-0 flex-1">
+            <NameInput value={naming} onChange={setNaming} onSave={() => void save()} onCancel={() => setNaming(null)} />
+          </div>
+        ) : (
+          <>
+            <span className="min-w-0 flex-1 truncate text-[14px] font-medium">{name}</span>
+            {!state.shared && w && (
+              <button onClick={() => setNaming(w.name)} className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
+                Rename
+              </button>
+            )}
+          </>
+        )}
+      </div>
+      {error && (
+        <span role="alert" className="text-[12px] leading-4 text-[#B42318]">
+          {error}
+        </span>
+      )}
+      <span className="text-[12px] leading-4 text-[#9A9A98]">{state.shared ? `Shared with you by ${state.shared.owner || "its owner"}.` : "Make another workspace, or delete this one, from the workspace menu in the sidebar."}</span>
+    </div>
+  );
+}
+
+/** Workspace, Bots: its bots, each opening its own settings page. */
+function WorkspaceBots({ state, onOpenBot }: { state: AppState; onOpenBot?: (botId: string) => void }) {
+  const team = teamOf(state);
+  return (
+    <div className="flex flex-col gap-2 px-[22px] pt-[18px]">
+      <div className="flex flex-col rounded-[14px] shadow-[0_0_0_1px_#E6E6E3]">
+        {team.map((b) => (
+          <div key={b.id} className="flex items-center gap-3 border-b border-[#F0F0EE] px-3.5 py-2.5 last:border-0">
+            <Mascot botId={b.id} color={b.color} size={26} />
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="truncate text-[13.5px] font-medium leading-[18px]">{b.name}</span>
+              <span className="truncate text-[12px] leading-4 text-[#6B6B6B]">{b.role}</span>
+            </span>
+            {onOpenBot && (
+              <button onClick={() => onOpenBot(b.id)} className="shrink-0 rounded-full px-3 py-1.5 text-[12.5px] font-medium leading-4 shadow-[0_0_0_1px_#E6E6E3] hover:bg-[#F7F7F6]">
+                Open settings
+              </button>
+            )}
+          </div>
+        ))}
+        {!team.length && <span className="px-3.5 py-3 text-[12.5px] text-[#6B6B6B]">No bots here yet.</span>}
+      </div>
+    </div>
+  );
+}
+
+/** Workspace, Email and phone: its bots' address (Pick or Change) and the number its main bot is texted and called at. */
+function WorkspaceReach({ state }: { state: AppState }) {
+  const ws = currentWorkspace(state);
+  const w = state.workspaces?.find((x) => x.id === ws);
+  const main = state.bots.find((b) => b.isMain && workspaceOf(b) === ws);
+  const has = !!(w?.mailClaimed || w?.mailPick);
+  return (
+    <>
+      <EmailAddresses state={state} only={ws} />
+      <div className="flex flex-col gap-2 px-[22px] pt-4">
+        <span className="text-[13px] font-semibold">Phone</span>
+        <div className="rounded-[14px] px-3.5 py-3 text-[13px] shadow-[0_0_0_1px_#E6E6E3]">
+          {w?.line?.phone ? (
+            <span>
+              Text or call {main?.name ?? "its main bot"} at <span className="font-mono text-[12.5px]">{w.line.phone}</span>
+            </span>
+          ) : (
+            <span className="text-[#6B6B6B]">No number yet. A workspace gets one to text and call its main bot.</span>
+          )}
+        </div>
+      </div>
+      {!has && <span className="block px-[22px] pt-3 text-[12px] text-[#9A9A98]">Its bots get an address when they first need one.</span>}
+    </>
+  );
+}
+
+/**
+ * Settings, a page in the main area beside the app's own sidebar, with its places on the left: Account (yours, in every
+ * workspace: Profile, Plan and credit, Usage, How bots reach you, AI plans, Privacy, This Mac), then Workspace, the one
+ * open now, picked at the group's heading (General, Team, Org chart, Bots, Logins, Email and phone), then Orgo's team's
+ * own (Your Apps, Domains). Every place is a section of the page, Team, the Org chart and Your Apps too.
+ * `at`: the place it opens at (Logins from the footer, Team from your initials, Domains from an app's All domains), gone
+ * to again on each opening (`atAt`); `onPane` hears each place picked here. `chartBot`: the bot the Org chart opens at.
+ * Back (its heading), Esc and the sidebar leave it (`onClose`; the app's own Esc). `onShowScreen`: a brain's sign in
+ * started on a bot's screen, so Settings gives way and that screen shows; `onOpenVault`: to add a key there (brains.tsx);
+ * `onOpenApp`: an app named there opened in its tab; `onMakeBot`: the Org chart's new bot. `onHold`: whether Settings
+ * must stay now (a domain being bought: its answer would be lost), for the app's own Esc. Exported for the tests.
+ */
+export function Settings({
+  state,
+  onClose,
+  onShowScreen,
+  onOpenVault,
+  at,
+  atAt,
+  keysFor,
+  chartBot,
+  onPane,
+  onOpenApp = () => {},
+  onHold,
+  onOpenBot,
+  onMakeBot,
+  onOpenWatch = () => {},
+}: {
+  state: AppState;
+  onClose: () => void;
+  onShowScreen: (botId: string, display: number) => void;
+  onOpenVault: () => void;
+  at?: SettingsPane;
+  /** When it was asked for at `at`: each asking goes there again. */
+  atAt?: number;
+  /** A bot's profile asked to add a key for it (Logins). */
+  keysFor?: string;
+  /** The bot whose card the Org chart opens at (from its profile). */
+  chartBot?: string;
+  onPane?: (at: SettingsPane) => void;
+  onOpenApp?: (ws: string, name: string) => void;
+  onHold?: (held: boolean) => void;
+  onOpenBot?: (botId: string) => void;
+  onMakeBot?: () => void;
+  onOpenWatch?: (w: Watch) => void;
+}) {
+  const selfHosted = useSelfHosted();
+  // The workspace's domains (bought through Orgo): only where apps are shown (an @orgo.ai account, its own workspace).
+  const domains = appsOwnShown(state);
+  const apps = appsShown(state);
+  const fits = (p?: SettingsPane) => !!p && (p !== "domains" || domains) && (p !== "apps" || apps) && (!state.shared || (p !== "team" && p !== "chart" && p !== "email"));
+  const [pane, setPane] = useState<SettingsPane>(fits(at) ? at! : "profile");
+  const [was, setWas] = useState(`${at}:${atAt}`);
+  if (was !== `${at}:${atAt}`) {
+    setWas(`${at}:${atAt}`);
+    if (fits(at)) setPane(at!);
+  }
+  const go = (p: SettingsPane) => {
+    setPane(p);
+    onPane?.(p);
+  };
+  // A domain being bought: nothing leaves Settings (Back, Esc, the sidebar, an app opened from it) until it's answered.
+  const [buying, setBuying] = useState(false);
+  useEffect(() => {
+    onHold?.(buying);
+    return () => onHold?.(false);
+  }, [buying, onHold]);
+  const close = () => {
+    if (!buying) onClose();
+  };
+  const ws = currentWorkspace(state);
+  const shared = !!state.shared;
+  const team = teamOf(state);
+  const own = state.workspaces ?? [];
+  const wsName = shared ? (state.shared?.name ?? "") : (own.find((w) => w.id === ws)?.name ?? "Main");
+  const people = shared ? 0 : Object.keys(own.find((w) => w.id === ws)?.memberAccess ?? {}).length;
+  const logins = shared ? 0 : (state.accounts ?? []).filter((a) => accountIn(state, a).includes(ws)).length + (state.vault ?? []).filter((l) => siteLoginIn(state, l).includes(ws)).length;
+  const user = state.account?.user;
+  const who = user?.name?.trim() || state.owner?.name.trim() || user?.email?.split("@")[0] || "You";
+  const item = (id: SettingsPane, name: string, more: Partial<NavItem> = {}): NavItem => ({ id, name, icon: glyph(GLYPHS[id]), ...more });
+  const account: NavItem[] = [
+    item("profile", "Profile"),
+    item("plan", "Plan and credit"),
+    item("usage", "Usage"),
+    item("reach", "How bots reach you"),
+    ...(BRAINS_ON ? [item("ai", "AI plans")] : []),
+    ...(!selfHosted ? [item("privacy", "Privacy")] : []),
+    item("mac", "This Mac"),
+  ];
+  const workspace: NavItem[] = [
+    item("general", "General"),
+    ...(!shared ? [item("team", "Team", { value: people || undefined })] : []),
+    ...(!shared ? [item("chart", "Org chart")] : []),
+    item("bots", "Bots", { value: team.length || undefined }),
+    item("logins", "Logins", { value: logins || undefined }),
+    ...(!shared ? [item("email", "Email and phone")] : []),
+  ];
+  const team_: NavItem[] = [...(apps ? [item("apps", appsName(state))] : []), ...(domains ? [item("domains", "Domains")] : [])];
+  const navRow = (x: NavItem) => (
+    <button
+      key={x.id}
+      data-settings-nav={x.id}
+      onClick={() => go(x.id)}
+      aria-current={pane === x.id ? "page" : undefined}
+      className={`flex h-[30px] w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] ${pane === x.id ? "bg-[#EFEFEC] font-semibold text-ink" : "text-[#3A3A38] hover:bg-[#F2F2F0]"}`}
+    >
+      {x.icon}
+      <span className="min-w-0 flex-1 truncate">{x.name}</span>
+      {x.value !== undefined && <span className="shrink-0 text-[11.5px] font-normal tabular-nums text-[#8A8A88]">{x.value}</span>}
+    </button>
+  );
+  const group = (label: string, why: string | null, items: NavItem[], heading?: React.ReactNode) => (
+    <div className="flex flex-col gap-px pt-4">
+      <span className="px-2.5 text-[10.5px] font-semibold uppercase tracking-[0.05em] text-[#8A8A88]">{label}</span>
+      {heading}
+      {why && <span className="px-2.5 pb-1 text-[11px] leading-4 text-[#A3A3A0]">{why}</span>}
+      {items.map(navRow)}
+    </div>
+  );
+  const switcher = (
+    <div className="mx-0.5 my-1.5 flex items-center gap-2 rounded-[10px] bg-white px-2 py-1.5 shadow-[0_0_0_1px_#E8E8E5,0_1px_2px_#00000008]">
+      <span className="flex size-5 shrink-0 items-center justify-center rounded-[6px] bg-[#1F5F4A] text-[11px] font-semibold uppercase text-white">{wsName[0] ?? "W"}</span>
+      {shared || own.length < 2 ? (
+        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">{wsName}</span>
+      ) : (
+        <select
+          aria-label="Workspace"
+          value={ws}
+          onChange={(e) => void post("/api/workspaces", { current: e.target.value }, "PATCH")}
+          className="min-w-0 flex-1 cursor-pointer appearance-none truncate bg-transparent text-[13px] font-semibold outline-none"
+        >
+          {own.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name}
+            </option>
+          ))}
+        </select>
+      )}
+      {!shared && own.length > 1 && (
+        <svg width="10" height="12" viewBox="0 0 10 12" aria-hidden className="shrink-0 text-[#9A9A98]">
+          <path d="M2.5 4.5L5 2l2.5 2.5M2.5 7.5L5 10l2.5-2.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
+    </div>
+  );
+
+  let body: React.ReactNode;
+  if (pane === "profile")
+    body = (
+      <>
+        <PaneHead title="Profile" sub="Who your bots work for, in every workspace." />
         <OwnerSettings owner={state.owner} />
+      </>
+    );
+  else if (pane === "plan")
+    body = (
+      <>
+        <PaneHead title="Plan and credit" sub="Your Bops plan and AI credit, and the inboxes and numbers it pays for." />
+        <PlanAndCredit state={state} />
+      </>
+    );
+  else if (pane === "usage")
+    body = (
+      <>
+        <PaneHead title="Usage" sub="What your bots used, in every workspace." />
+        <UsageSection />
+      </>
+    );
+  else if (pane === "reach")
+    body = (
+      <>
+        <PaneHead title="How bots reach you" sub="Your numbers and emails: how your bots know it's you." />
+        <ReachSettings />
+      </>
+    );
+  else if (pane === "ai" && BRAINS_ON)
+    body = (
+      <>
+        <PaneHead title="AI plans" sub="Your own AI plans and agent sign ins, for your bots' work." />
+        <BrainSettings state={state} onShowScreen={onShowScreen} onOpenVault={onOpenVault} />
+      </>
+    );
+  else if (pane === "privacy")
+    body = (
+      <>
+        <PaneHead title="Privacy" sub="What Bops keeps, for how long, and what it shares." />
         {!selfHosted && <UsageData />}
         {/* Where the user's things are kept and for how long: their own, never a shared workspace's owner's. */}
-        {!selfHosted && !state.shared && <YourData />}
-        <ReachSettings />
-        {!selfHosted && <EmailAddresses state={state} />}
+        {!selfHosted && !shared && <YourData />}
+      </>
+    );
+  else if (pane === "mac")
+    body = (
+      <>
+        <PaneHead title="This Mac" sub="Permissions here, where your bots work, and their computers." />
         <ThisMacSettings state={state} />
-
-        <div className="flex flex-col gap-2 px-[22px] pt-4">
-          <span className="text-[13px] font-semibold">Where your bots work</span>
-          <div className="flex gap-2.5">
-            {(["orgo", "mac"] as const).map((h) => (
-              <button key={h} onClick={() => setHost(h)} className={`flex flex-1 flex-col gap-1.5 rounded-[14px] p-3.5 text-left ${option(state.host === h)}`}>
-                <span className="flex items-center justify-between">
-                  <span className="text-[14px] font-semibold">{h === "orgo" ? "Their own cloud computers" : "This Mac"}</span>
-                  {radio(state.host === h)}
-                </span>
-                <span className="text-[12.5px] leading-[18px] text-[#6B6B6B]">
-                  {h === "orgo" ? "Recommended. Your bots work on a computer in the cloud, with 4 screens, and keep working when your Mac is closed. A bot can have one of its own." : "Bots work in background browsers on this Mac, from your own internet connection."}
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
-
+        <WhereBotsWork state={state} />
         {/* Bots in browsers on this Mac have no computer to run routines on; a self-hosted Bops has no Bops Cloud for a runner to share the state through. */}
         {!selfHosted && state.host !== "mac" && <RunsOnSettings state={state} />}
-
-        {BRAINS_ON && <BrainSettings state={state} onShowScreen={onShowScreen} onOpenVault={onOpenVault} />}
-
         {/* (A shared workspace's computers are its owner's: nothing asks this Mac's Orgo about their keys.) */}
         <BotComputers state={state} padded={!selfHosted} askKeys={!selfHosted && !state.shared} />
-
         {selfHosted && <SelfHosting state={state} />}
-      </div>
+      </>
+    );
+  else if (pane === "general")
+    body = (
+      <>
+        <PaneHead title="General" sub={shared ? `${wsName}, shared with you.` : `${wsName}, shared with the people you add.`} />
+        <WorkspaceGeneral state={state} />
+      </>
+    );
+  else if (pane === "team" && !shared)
+    body = <Members state={state} onUpgrade={() => go("plan")} onTeamChart={() => go("chart")} />;
+  else if (pane === "chart" && !shared)
+    body = <TeamChart key={`${chartBot ?? ""}:${atAt ?? ""}`} state={state} focus={chartBot} onMakeBot={onMakeBot} onOpenPeople={() => go("team")} />;
+  else if (pane === "apps" && apps) body = <MadeAppsHome state={state} ws={ws} />;
+  else if (pane === "bots")
+    body = (
+      <>
+        <PaneHead title="Bots" sub={`${wsName}'s bots. Each has a settings page of its own.`} />
+        <WorkspaceBots state={state} onOpenBot={shared ? undefined : onOpenBot} />
+      </>
+    );
+  else if (pane === "logins") body = <LoginsPage state={state} keysFor={keysFor} onOpenWatch={onOpenWatch} onOpenBot={onOpenBot} />;
+  else if (pane === "email")
+    body = (
+      <>
+        <PaneHead title="Email and phone" sub={`How people reach ${wsName}'s bots.`} />
+        <WorkspaceReach state={state} />
+      </>
+    );
+  else if (pane === "domains" && domains)
+    body = (
+      <>
+        <PaneHead title="Domains" />
+        <WorkspaceDomains state={state} ws={ws} onOpenApp={(w, name) => !buying && onOpenApp(w, name)} onBuying={setBuying} />
+      </>
+    );
+  else body = <PaneHead title="Settings" />;
+
+  // The places with a frame of their own (Logins, the Org chart, Your Apps) scroll inside it; the rest scroll here.
+  const framed = pane === "logins" || pane === "chart" || pane === "apps";
+  return (
+    <div data-settings className="motion-fade-in flex min-h-0 min-w-0 flex-1">
+      <nav aria-label="Settings" className="flex w-[240px] shrink-0 flex-col overflow-y-auto border-r border-[#E8E8E5] bg-[#FBFBFA] px-3 pb-4 pt-4">
+        <button onClick={close} disabled={buying} aria-label="Back" title="Back (Esc)" data-settings-back className="flex items-center gap-2 self-start rounded-lg px-2 py-1 text-[14px] font-semibold hover:bg-[#F2F2F0] disabled:opacity-40">
+          <svg width="8" height="12" viewBox="0 0 8 12" aria-hidden>
+            <path d="M6 1.5L1.5 6 6 10.5" fill="none" stroke="#8A8A88" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          Settings
+        </button>
+        <div className="flex items-center gap-2.5 px-2 pb-1 pt-3">
+          <span className="flex size-[34px] shrink-0 items-center justify-center rounded-full bg-ink text-[12.5px] font-semibold tracking-[0.02em] text-white">{initialsOf(state)}</span>
+          <span className="flex min-w-0 flex-col">
+            <span className="truncate text-[13.5px] font-semibold leading-[18px]">{who}</span>
+            <span className="truncate text-[11.5px] leading-4 text-[#8A8A88]">{user?.email ?? "Not signed in"}</span>
+          </span>
+        </div>
+        {group("Account", "Yours, in every workspace", account)}
+        {group("Workspace", shared ? "Shared with you" : "Shared with its people", workspace, switcher)}
+        {team_.length > 0 && group("Orgo team only", null, team_)}
+      </nav>
+      <main data-settings-pane={pane} className={`flex min-h-0 min-w-0 flex-1 flex-col ${framed ? "" : "overflow-y-auto pb-8"}`}>
+        {body}
+      </main>
     </div>
   );
 }
@@ -1599,7 +2125,6 @@ export function Settings({ state, onClose, onShowScreen, onOpenVault }: { state:
  */
 function FirstLoad() {
   const [slow, setSlow] = useState(false);
-  const [confirm, setConfirm] = useState(false);
   const canRestart = useCanRestart();
   useEffect(() => {
     const t = setTimeout(() => setSlow(true), 20_000);
@@ -1611,12 +2136,13 @@ function FirstLoad() {
         <div className="flex flex-col items-center gap-3">
           <span>This is taking longer than usual.</span>
           {canRestart && (
-            <button onClick={() => setConfirm(true)} className="flex items-center gap-1.5 rounded-full bg-[#F2F2F0] px-3.5 py-1.5 text-[13px] font-medium leading-4 text-ink hover:bg-[#EAEAE7]">
-              <RestartIcon />
-              Restart Bops
-            </button>
+            <div className="flex w-[300px] justify-center">
+              <RestartButton className="flex items-center gap-1.5 rounded-full bg-[#F2F2F0] px-3.5 py-1.5 text-[13px] font-medium leading-4 text-ink hover:bg-[#EAEAE7]">
+                <RestartIcon />
+                Restart Bops
+              </RestartButton>
+            </div>
           )}
-          {confirm && <RestartConfirm onClose={() => setConfirm(false)} />}
         </div>
       )}
     </BoppyLoading>

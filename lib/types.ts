@@ -1,6 +1,7 @@
 /** Shared shapes for the Bops app state, used by both the server and the UI. */
 
-import type { AppHosting, IngotToken } from "./hosted-apps";
+import type { AppHosting, AppsForMembers, IngotToken } from "./hosted-apps";
+import type { Chain } from "./chain";
 import type { MemberAccessMap, MemberWho } from "./member-access";
 import type { Ping } from "./pings";
 import type { SharedOpen } from "./shared";
@@ -118,6 +119,13 @@ export type Bot = {
    */
   brain?: string;
   /**
+   * Its AI profile (lib/agents.ts): the agents its threads may run on, each with how it pays and the account
+   * it uses, and its Default. Unset is Bops agent only, on AI credit, exactly as before: a profile equal to
+   * that is never stored. Only the owner's own Bops changes it (a computer never may: cloud/computer-scope.ts).
+   * `brain` above is kept in step with it for older Bops (the Default's account, when that's Claude Code or Codex).
+   */
+  ai?: BotAi;
+  /**
    * The labels of its workspace's skills it has (lib/skill-labels.ts botHasSkill): unset is every label
    * (as every bot had before), an empty list none. A skill whose own bot list names bots goes by that list
    * instead. Bops' own skills are every bot's whatever this says. Set in Who has what, in Skills, and in
@@ -125,6 +133,45 @@ export type Bot = {
    */
   skillLabels?: string[];
 };
+
+/**
+ * What a bot's settings page set (components/app/bot-settings.tsx), kept on its workspace by bot id
+ * (Workspace.botSettings) rather than on the bot: a Bops from before that changes the bot (an email noted, its voice
+ * kept) before it has the newer state puts back its whole copy of the bot (state-merge.ts merge3), which would take
+ * these with it; a workspace merges field by field, and a Bops from before never writes this one. Unset: as before.
+ */
+export type BotSettings = {
+  /**
+   * The voice it speaks in on calls, picked from CALL_VOICES. Unset: voiceFor's pick for its name, kept in Bot.voice.
+   * Never written into Bot.voice: a Bops from before rewrites that on every call, and Bops Cloud reads it.
+   */
+  callVoice?: CallVoice;
+  /** false: calls to its number hear a short no and are hung up (phone-voice.ts). Unset: it answers, as before. */
+  answersCalls?: false;
+  /**
+   * Built in sequences turned off (lib/sequences.ts): `othersMail`, mail from anyone but the user shows as a card and
+   * the bot stays quiet; `othersCalls`, a stranger's call hears a short no. Unset: all on, as before.
+   */
+  sequencesOff?: { othersMail?: true; othersCalls?: true };
+  /**
+   * Replies to others is Never (lib/permission.ts mailRule): it emails nobody but the user, and doesn't ask. Its
+   * "Send an email" rule says ask meanwhile, which is what a Bops from before does with it.
+   */
+  mailNever?: true;
+};
+
+/** Bot `b`'s settings page settings (Workspace.botSettings), none set: {}. */
+export function settingsOf(state: { workspaces?: { id: string; botSettings?: Record<string, BotSettings> }[] }, b: Pick<Bot, "id" | "workspaceId">): BotSettings {
+  const all = state.workspaces?.find((w) => w.id === workspaceOf(b))?.botSettings;
+  return (all && Object.hasOwn(all, b.id) ? all[b.id] : undefined) ?? {};
+}
+
+/** The nine voices calls speak in (OpenAI realtime), the same lib/server/call.ts picks from by name. */
+export const CALL_VOICES = ["cedar", "ash", "echo", "ballad", "verse", "marin", "coral", "shimmer", "sage"] as const;
+export type CallVoice = (typeof CALL_VOICES)[number];
+export const isCallVoice = (v: unknown): v is CallVoice => typeof v === "string" && (CALL_VOICES as readonly string[]).includes(v);
+/** What a phone line's agent speaks in (Workspace.lineVoices): call voice `for`, as AgentPhone's voice `id` named `name`. */
+export type LineVoice = { for: CallVoice; id: string; name: string; exact?: true };
 
 export const MAX_PERSONA_CHARS = 1500;
 
@@ -222,7 +269,47 @@ export type Workspace = {
    * bot. Bops Cloud reads it from the owner's state to build a member's view; it never goes to them.
    */
   memberAccess?: MemberAccessMap;
+  /**
+   * The team chart (lib/chain.ts): who each bot answers to, who may ask whom, who takes work handed down,
+   * which bots keep their memory to themselves and whom each works for. Unset: every bot answers to the main
+   * bot and may ask every other, as before. Only the owner's own Bops writes it (workspaces.ts setChain); like
+   * memberAccess it never goes to a member (cloud/ws-slice.ts).
+   */
+  chain?: Chain;
+  /**
+   * When this Mac gave everyone already here Your Apps at Read (workspaces.ts giveAppsRead): once, so an entry an older
+   * Bops rewrote later is never given Read again by that.
+   */
+  appsScopeAt?: number;
+  /**
+   * What people with Your Apps at Read or more are shown of its apps on the web (lib/server/apps-for-members.ts), as this
+   * Mac last read Ingot and Orgo. Only there while someone has Read or more. Bops Cloud sends parts of it to them
+   * (cloud/ws-slice.ts appsFor); never variables, tokens, keys, logs or error text.
+   */
+  appsForMembers?: AppsForMembers;
+  /** Its bots' settings page settings, by bot id (BotSettings): none for a bot with nothing set. Never sent to members. */
+  botSettings?: Record<string, BotSettings>;
+  /**
+   * The voice each of its phone lines speaks in on calls to its number, by AgentPhone agent id (lib/server/phone.ts
+   * voiceToAgent): the call voice it was set for and AgentPhone's voice closest to it (`exact`: the same voice by name).
+   * Written only once AgentPhone took it, so the settings page says what calls to the number sound like. Unset: the
+   * line's own voice. A Bops from before never writes it, and merges it as a workspace field.
+   */
+  lineVoices?: Record<string, LineVoice>;
+  /**
+   * Logins of the owner's switched on here besides where they were connected (Used in, on the Logins page), by
+   * loginKey: a Connected App by its account ("app:<id>"), a key of another workspace by its Orgo project and name
+   * ("key:<project>:<NAME>"). Here a Connected App has the same default as where it was connected (Read & act for
+   * every bot, unless only the bots given it have it), and a key may be given to the bots here (Bot.keys). Kept on the
+   * workspace that uses it, never on the login: a Bops from before (v0.0.32) merges a workspace field by field and
+   * never writes this one, and its syncApps rebuilds or drops accounts. Lost, a login is back to its own workspace and
+   * the bots given it: less access, never more. Site logins have none: their bots (VaultLogin.bots) say where.
+   */
+  loginsOn?: Record<string, LoginOn>;
 };
+
+/** A login switched on in a workspace (Workspace.loginsOn): when. */
+export type LoginOn = { at: number };
 
 /** A tag routines sort by: a short name and what it's for. */
 export type WorkspaceTag = { name: string; description: string };
@@ -388,6 +475,28 @@ export function workBot(b: Bot, bots: Bot[]): Bot {
  * own account, never on Bops' AI credit.
  */
 export type BrainKind = "claude" | "codex";
+/** The agents a thread can run on (lib/agents.ts AGENTS). "bops" is Bops' own agent, on OpenAI. */
+export type AgentKind = "bops" | "claude" | "codex" | "opencode" | "agy";
+/** The CLI agents this build drives on a bot's computer (lib/server/cli-agents.ts DRIVERS). */
+export type CliKind = "claude" | "codex" | "opencode";
+/** Who pays for a thread's AI: Bops AI credit, the user's own plan signed in on the computer, or their own key from the Vault. */
+export type AgentPays = "credit" | "plan" | "key";
+/**
+ * One agent in a bot's AI profile: what runs, how it pays, the account it runs on, and the model new threads on
+ * it start with. Never secret: a key stays in the Vault, a plan's login stays in its folder on the computer.
+ */
+export type BotAgent = {
+  /** "bops" for Bops agent; else "ag_" and 10 letters or digits. A thread names its agent by this. */
+  id: string;
+  kind: AgentKind;
+  pays: AgentPays;
+  /** The AI account (Brain.id) for Claude Code and Codex. Never for Bops agent or OpenCode. */
+  account?: string;
+  /** For new threads (lib/agents.ts MODELS). Unset: the kind's default (Bops agent: Auto). */
+  model?: string;
+};
+/** A bot's AI profile. Unset: Bops agent only, as its Default, exactly as before. */
+export type BotAi = { agents: BotAgent[]; default: string };
 /**
  * Whether this build has brains: NEXT_PUBLIC_BOPS_BRAINS=1 where it's built (or where `next dev` starts,
  * .env.local too). Next writes the value into the server and the window alike as it builds them, and a
@@ -398,6 +507,8 @@ export type BrainKind = "claude" | "codex";
  */
 export const BRAINS_ON = process.env.NEXT_PUBLIC_BOPS_BRAINS === "1";
 export const BRAIN_NAMES: Record<BrainKind, string> = { claude: "Claude Code", codex: "Codex" };
+/** The CLI agents' names (lib/agents.ts AGENTS has them all). */
+export const CLI_NAMES: Record<CliKind, string> = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
 /** The Vault key a key brain runs on (lib/server/keys.ts KEY_PROVIDERS): the user's own Anthropic or OpenAI key. */
 export const BRAIN_KEYS: Record<BrainKind, string> = { claude: "ANTHROPIC_API_KEY", codex: "OPENAI_API_KEY" };
 /**
@@ -470,7 +581,7 @@ export function brainReady(x: Brain, b: Bot, state: Pick<AppState, "bots" | "hos
  * Bops agent runs any of it (its agent session or response chain, or the user had it finish there), from when
  * on it stays Bops agent's ("agent"), which knows what it did; nobody yet while nothing has run it.
  */
-export function threadRunner(s: Pick<Session, "brainRun" | "onBopsAgent" | "agentSessionId" | "responseId">): BrainKind | "agent" | undefined {
+export function threadRunner(s: Pick<Session, "brainRun" | "onBopsAgent" | "agentSessionId" | "responseId">): CliKind | "agent" | undefined {
   if (s.onBopsAgent || s.agentSessionId || s.responseId) return "agent";
   return s.brainRun?.started ? s.brainRun.kind : undefined;
 }
@@ -505,6 +616,8 @@ export type TaskRoute = {
   router?: { model: string; effort: TaskEffort; tier: RouteTier; why: string };
   bumps?: number;
   long?: boolean;
+  /** The bot's AI profile picked Bops agent's model (lib/agents.ts): every turn runs on it, a bump included. */
+  pinned?: true;
 };
 
 /** Where bots' screens live: Chrome windows on the user's Mac, or Orgo cloud computers. */
@@ -532,6 +645,11 @@ export type Message = {
   id: string;
   chatId: string;
   role: "user" | "bot" | "system";
+  /**
+   * The agent the owner picked in the message box (BotAgent.id) for the threads this message starts. Checked
+   * against the bot's profile as they start; ignored on a member's message.
+   */
+  agent?: string;
   /** Who wrote it, for bot messages. */
   botId?: BotId;
   /**
@@ -614,7 +732,7 @@ export type Message = {
    */
   asked?: { botId: string; question: string; answer: string; questionId?: string }[];
   /** Set on a "Remembered: …" line: the fact (so it can be undone) and an older one it may replace. */
-  memory?: { ws: string; id: string; fact: string; undone?: boolean; old?: { id: string; text: string; forgotten?: boolean } };
+  memory?: { ws: string; /** Saved to this bot's own bank (it keeps its memory to itself: lib/chain.ts). */ bot?: string; id: string; fact: string; undone?: boolean; old?: { id: string; text: string; forgotten?: boolean } };
   /**
    * Set on the note a bot's save to the CRM leaves (lib/server/crm.ts): the workspace and file, how many
    * rows it added and changed (or that it made the file), the copy from before it (`snapshot`) and the
@@ -801,6 +919,8 @@ export type EmailInfo = {
   bulk?: boolean;
   /** From one of the user's own addresses, and authenticated (DMARC): it's the user talking, and the bot answers by email. */
   fromOwner?: boolean;
+  /** Came past the 12 an hour cap (lib/server/mail.ts receive): shown, and the bot stayed quiet. */
+  held?: true;
 };
 
 /** iMessage's six tapbacks; any other emoji works too. */
@@ -939,15 +1059,24 @@ export type Session = {
    */
   env?: { id: string; remoteUrl: string; workspace?: string; fullAccess?: boolean; sockets?: string; apps?: boolean; data?: boolean; ui?: boolean | "bops"; display?: number; fn?: true };
   /**
-   * Run by its bot's brain (Brain, lib/server/cli-agents.ts) rather than Bops agent: which brain, on which
-   * computer, and the CLI's own session there (`cli`: Claude Code's session id), which a later turn, or a
+   * Run by a CLI agent of its bot's (lib/server/cli-agents.ts) rather than Bops agent: which account (Brain.id;
+   * "-" for OpenCode, which has none) and agent, on which computer, and the CLI's own session there (`cli`:
+   * Claude Code's session id, Codex's thread, OpenCode's "ses_" session), which a later turn, or a
    * restart of the CLI, picks back up. `started`: the CLI has that session (it said so as it began).
    * `waits`: it can't go on until the user does something: sign the brain in on that computer ("sign_in"),
    * or say what's next after the CLI stopped at its plan's usage limit or its sign-in or key was turned
-   * down ("limit": Finish on Bops agent, or Wait). `said` is what Bops told them then (not the bot's own
+   * down ("limit": Finish on Bops agent, or Wait), its model isn't allowed ("model") or its provider is down
+   * ("down"), or the Vault has given all the keys it allows this hour ("vault"). `said` is what Bops told them then (not the bot's own
    * answer). The replies that turn took are marked not delivered again, so they go in when it carries on.
    */
-  brainRun?: { brainId: string; kind: BrainKind; computerId: string; cli: string; started?: true; waits?: "sign_in" | "limit"; said?: string };
+  brainRun?: { brainId: string; agentId?: string; kind: CliKind; computerId: string; cli: string; started?: true; waits?: "sign_in" | "limit" | "model" | "down" | "vault"; said?: string };
+  /**
+   * The agent the thread runs on (BotAgent.id in its bot's profile), its kind and model, given as it began
+   * (lib/agents.ts pickAgent) and fixed from then: follow ups stay on it. Each start checks it against the bot's
+   * profile as it is then (threadAgent), so a thread can't move onto an agent or account its bot doesn't have.
+   * Unset on a thread from before: its brainRun's account, else its bot's Default.
+   */
+  agent?: { id: string; kind: AgentKind; model?: string };
   /** The user had Bops agent finish it after its brain stopped (brainRun.waits "limit"): it runs on Bops agent from then on. */
   onBopsAgent?: true;
   steps: SessionStep[];
@@ -1206,7 +1335,7 @@ export const procedureKey = (s: string) =>
  * for the takeover: handing back carries it on only while it's still so (sessions.ts returnControl). A run that
  * waits for your OK (AppApproval) holds no screen while it waits, so a takeover never finds it.
  */
-export type Takeover = { botId: BotId; sessionId?: string; found?: "left"; since: number; terminal?: { paused?: true } } & ({ display: number; macScreen?: undefined } | { macScreen: number; display?: undefined });
+export type Takeover = { botId: BotId; sessionId?: string; found?: "left"; since: number; terminal?: { paused?: true; shell?: true } } & ({ display: number; macScreen?: undefined } | { macScreen: number; display?: undefined });
 
 /**
  * A screen of a bot's computer the user drives from this Mac (its Takeover, which isn't synced), said to their other
@@ -1725,14 +1854,68 @@ export const openToTeam = (a: Pick<AppAccount, "workspaceId" | "onlyGiven">) => 
 
 /**
  * What a bot may do in one account: what the user set for it (Bot.access), else the default, Read & act,
- * for every bot of the account's workspace (bots made later too). A bot of another workspace, a channel
- * app (CHANNEL_APPS), or an account from before that default (openToTeam) has no default. Null: no access.
+ * for every bot of the account's workspace (bots made later too), and of each workspace it's switched on in
+ * (`usedIn`: Workspace.loginsOn, see usedIn). A bot of any other workspace, a channel app (CHANNEL_APPS), or
+ * an account from before that default (openToTeam) has no default. Null: no access. Without `usedIn`, only
+ * the account's own workspace: less, never more.
  */
-export function levelOf(b: Pick<Bot, "access" | "workspaceId">, a: Pick<AppAccount, "id" | "app" | "workspaceId" | "onlyGiven">): AppLevel | null {
-  const set = b.access?.[a.id];
+export function levelOf(
+  b: Pick<Bot, "access" | "workspaceId">,
+  a: Pick<AppAccount, "id" | "app" | "workspaceId" | "onlyGiven">,
+  usedIn?: readonly string[],
+): AppLevel | null {
+  const set = b.access && Object.hasOwn(b.access, a.id) ? b.access[a.id] : undefined;
   if (set === "read" || set === "act") return set;
-  if (set === "none" || CHANNEL_APPS.has(a.app) || !openToTeam(a) || workspaceOf(a) !== workspaceOf(b)) return null;
-  return "act";
+  if (set === "none" || CHANNEL_APPS.has(a.app) || !openToTeam(a)) return null;
+  const ws = workspaceOf(b);
+  return workspaceOf(a) === ws || !!usedIn?.includes(ws) ? "act" : null;
+}
+
+/* ---------------- Used in: a login switched on in more workspaces ---------------- */
+
+/** A login's key in Workspace.loginsOn: a Connected App by its account id, a key by its Orgo project and name. */
+export const appLoginKey = (accountId: string) => `app:${accountId}`;
+export const keyLoginKey = (project: string, name: string) => `key:${project}:${name}`;
+
+type WithLogins = { workspaces?: Pick<Workspace, "id" | "loginsOn">[] };
+
+/** Whether workspace `w` has login `key` switched on (Workspace.loginsOn): an entry of its own that's a record. */
+export const switchedOn = (w: Pick<Workspace, "loginsOn"> | undefined, key: string) => {
+  const on = w?.loginsOn && typeof w.loginsOn === "object" && Object.hasOwn(w.loginsOn, key) ? w.loginsOn[key] : undefined;
+  return !!on && typeof on === "object";
+};
+
+/** The workspaces login `key` is switched on in besides its own (Workspace.loginsOn). */
+export const usedIn = (state: WithLogins, key: string): string[] => (state.workspaces ?? []).filter((w) => switchedOn(w, key)).map((w) => w.id);
+
+/** levelOf, with the workspaces the account is switched on in. */
+export const levelIn = (state: WithLogins, b: Pick<Bot, "access" | "workspaceId">, a: Pick<AppAccount, "id" | "app" | "workspaceId" | "onlyGiven">) =>
+  levelOf(b, a, usedIn(state, appLoginKey(a.id)));
+
+/**
+ * The workspaces account `a` is in, as Used in shows them: its own, each it's switched on in, and each where a bot was
+ * given it by name (Bot.access read or act, honoured wherever the bot is, as before Used in). Switching one off takes
+ * all of that away there (lib/server/logins.ts).
+ */
+export function accountIn(state: WithLogins & { bots: Pick<Bot, "access" | "workspaceId">[] }, a: Pick<AppAccount, "id" | "workspaceId">): string[] {
+  const out = new Set([workspaceOf(a), ...usedIn(state, appLoginKey(a.id))]);
+  for (const b of state.bots) {
+    const set = b.access && Object.hasOwn(b.access, a.id) ? b.access[a.id] : undefined;
+    if (set === "read" || set === "act") out.add(workspaceOf(b));
+  }
+  return [...out];
+}
+
+/** Whether a bot may use a saved site login (VaultLogin.bots): every bot, or it's one of them. */
+export const mayUseLogin = (l: Pick<VaultLogin, "bots">, botId: string) => l.bots === "all" || (Array.isArray(l.bots) && l.bots.includes(botId));
+
+/**
+ * The workspaces a saved site login is used in: each with a bot that may use it (every one, for "all"). A site login
+ * has no workspace of its own: its bots say where it's used, as before Used in, so nothing new is kept for it.
+ */
+export function siteLoginIn(state: { bots: Pick<Bot, "id" | "workspaceId">[]; workspaces?: Pick<Workspace, "id">[] }, l: Pick<VaultLogin, "bots">): string[] {
+  if (l.bots === "all") return [...new Set([...(state.workspaces ?? []).map((w) => w.id), ...state.bots.map((b) => workspaceOf(b))])];
+  return [...new Set(state.bots.filter((b) => mayUseLogin(l, b.id)).map((b) => workspaceOf(b)))];
 }
 
 /** Whether a bot's access to an account is the default (the user didn't set it for this bot). */
@@ -1753,11 +1936,13 @@ export type AccessUse = {
   viaId?: string;
   outcome: "ok" | "failed" | "refused" | "waiting";
   approvedBy?: "user" | "auto";
+  /** Asked for by a member with Write (a turn or a thread of theirs): their name, so the owner sees who it was for. */
+  for?: string;
   at: number;
 };
 
-/** The last time each account or key was used (GET /api/apps/log), by its target: which bot, and when. */
-export type LastUses = Record<string, { bot: BotId; at: number }>;
+/** The last time each account or key was used (GET /api/apps/log), by its target: which bot, when, and for which member (AccessUse.for). */
+export type LastUses = Record<string, { bot: BotId; at: number; for?: string }>;
 
 /** Where a bot can be added like a teammate. Slack goes through Composio; Telegram and Discord are the bot's own accounts there. */
 export type ChannelKind = "slack" | "telegram" | "discord";
@@ -1846,6 +2031,11 @@ export type AppApproval = {
   reply?: AskAnswer;
   /** In the window only, never synced: the viewer's own answer to it in a shared workspace, on its way or not gone (Message.memberSend). */
   memberSend?: MemberSend;
+  /**
+   * Asked on a member's turn or thread (memberThread): who asked, by name, for the card. Only the owner answers one of
+   * their logins (lib/member-access.ts ownerOnlyAsk), so the card says whose ask it was.
+   */
+  askedFor?: string;
 };
 
 /** How the user answers a request (OpenCode's reply, Codex's ReviewDecision approved / approved_for_session / denied). */
@@ -2127,8 +2317,33 @@ export const live = (s: Session) => s.status === "queued" || s.status === "start
  * API keys, CRM or memory of facts. `find` looks a thread up by id (the store's session).
  */
 export function othersThread(s: Session | undefined, find: (id: string) => Session | undefined): boolean {
-  const theirs = (x: Session | undefined) => !!x && (!!x.fromOutside || !!x.member || (x.replies ?? []).some((r) => r.role === "user" && !!r.member));
+  return outsideThread(s, find) || memberThread(s, find);
+}
+
+/**
+ * Whether a thread is a stranger's: one someone outside Bops started (Session.fromOutside: an email, a text or a call
+ * to a bot), or a part of one. It gets none of the owner's logins, whatever its bot may use: no Connected apps, API keys
+ * or saved site logins, as on their turns in the chat.
+ */
+export function outsideThread(s: Session | undefined, find: (id: string) => Session | undefined): boolean {
+  return !!s?.fromOutside || (!!s?.partOf && !!find(s.partOf)?.fromOutside);
+}
+
+/**
+ * Whether a thread is a member's: one a member with Write started (Session.member) or has told something
+ * (ThreadReply.member), or a part of one. It may use the logins its bot has (a person reaches a login only through the
+ * bots they can tell), but every send, change, delete or payment asks the owner first, with no rule, Just do it or low
+ * risk guess going for them, and a saved site login signs in only when it's set to sign in by itself.
+ */
+export function memberThread(s: Session | undefined, find: (id: string) => Session | undefined): boolean {
+  const theirs = (x: Session | undefined) => !!x && (!!x.member || (x.replies ?? []).some((r) => r.role === "user" && !!r.member));
   return theirs(s) || (!!s?.partOf && theirs(find(s.partOf)));
+}
+
+/** The member a thread is for (memberThread): who started it, else the last of them to tell it something. */
+export function memberOf(s: Session | undefined, find: (id: string) => Session | undefined): MemberWho | undefined {
+  const of = (x: Session | undefined) => x?.member ?? [...(x?.replies ?? [])].reverse().find((r) => r.role === "user" && !!r.member)?.member;
+  return of(s) ?? (s?.partOf ? of(find(s.partOf)) : undefined);
 }
 
 /**

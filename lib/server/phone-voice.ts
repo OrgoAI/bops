@@ -1,10 +1,10 @@
 import "server-only";
 import { speedFor, tierParam, withSpeed } from "./routing";
 import type { CallerVerdict } from "@/cloud/protocol";
-import { botChatId, live, MAX_PERSONA_CHARS, type Bot } from "@/lib/types";
+import { botChatId, live, MAX_PERSONA_CHARS, settingsOf, type Bot, type BotSettings } from "@/lib/types";
 import { callEnded, callStarted } from "./attention";
 import { delegate, voicePrompt } from "./call";
-import { OWNER_WHO, saveToMemory, wsOf } from "./memory";
+import { OWNER_WHO, saveToMemory, scopeOf } from "./memory";
 import { openaiClient } from "./openai-client";
 import { callLog, fromOwner, isOwner, linkClaimed, routeFor, type ApEvent } from "./phone";
 import { addMessage, bot, getState, ownerLine, ownerName, patchSession, stateEpoch } from "./store";
@@ -254,6 +254,16 @@ async function strangerTurn(c: PhoneCall, b: Bot): Promise<VoiceReply> {
  * One turn of a call to a bot's number (AgentPhone's agent.message on channel "voice"): what the bot
  * says next. `verdict`: who's calling, as Bops Cloud decided; without one, the verified numbers here.
  */
+/**
+ * What a call to bot `b`'s number hears when its settings page turned it away, else null: Answers calls off (everyone,
+ * the user too), or Someone else calls off (a caller who isn't the user). The call still ends with its card in the chat.
+ */
+export function callsOff(b: Pick<Bot, "name">, s: BotSettings, owner: boolean): string | null {
+  if (s.answersCalls === false) return owner ? `Sorry, ${b.name} isn't taking calls right now. You can text this number. Bye!` : "Sorry, this number isn't taking calls right now. Bye!";
+  if (!owner && s.sequencesOff?.othersCalls) return "Sorry, this number isn't taking calls right now. Bye!";
+  return null;
+}
+
 export async function voiceTurn(e: ApEvent, verdict?: CallerVerdict): Promise<VoiceReply> {
   const d = e.data ?? {};
   const from = str(d.fromNumber) || str(d.from);
@@ -283,8 +293,14 @@ export async function voiceTurn(e: ApEvent, verdict?: CallerVerdict): Promise<Vo
   const heard = str(d.transcript);
   if (heard) c.turns.push({ who: "caller", text: heard });
   const call = c;
+  // Its settings page turned calls off (Bot.answersCalls), or strangers' calls (Someone else calls, lib/sequences.ts): a short no, no model.
+  const set = settingsOf(getState(), b);
+  const off = callsOff(b, set, call.owner);
+  if (off) callLog({ event: "call turned away", call: id, bot: b.id, why: set.answersCalls === false ? "calls off" : "others' calls off" });
   const tooLong = Date.now() - call.startedAt > (call.owner ? MAX_OWNER_CALL_MS : MAX_STRANGER_CALL_MS) || (!call.owner && call.turns.filter((t) => t.who === "caller").length > MAX_STRANGER_TURNS);
-  const reply: VoiceReply = tooLong
+  const reply: VoiceReply = off
+    ? { text: off, hangup: true }
+    : tooLong
     ? { text: "I have to go now. Bye!", hangup: true }
     : await Promise.race([
         (call.owner ? ownerTurn(call, b) : strangerTurn(call, b)).catch((err: Error) => {
@@ -357,7 +373,7 @@ function finish(c: PhoneCall) {
   const card = { sms: { dir: "in" as const, from: c.from, to: c.to, id: `call:${c.id}` }, call: { seconds, phone: c.from } };
   if (c.owner) {
     callEnded();
-    if (turns.length) saveToMemory(wsOf(b.id), "chat", chatId, turns.slice(-200).map((t) => ({ who: t.who === "caller" ? OWNER_WHO : b.id, text: t.text.slice(0, 2000) })), { chat: "call" });
+    if (turns.length) saveToMemory(scopeOf(b.id), "chat", chatId, turns.slice(-200).map((t) => ({ who: t.who === "caller" ? OWNER_WHO : b.id, text: t.text.slice(0, 2000) })), { chat: "call" });
     addMessage({ chatId, role: "system", text: (lines || "(nothing was said)").slice(0, 8000), ...card });
     return;
   }

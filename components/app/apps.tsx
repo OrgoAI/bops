@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { describeSchedule, runsADay } from "@/cloud/schedule";
-import { APP_LEVELS, appLogo, FEATURED_APPS, levelOf, type AppAccess, type AppAccount, type AppConnecting, type AppLevel, type AppState, type Bot, type LastUses, type Schedule } from "@/lib/types";
+import { APP_LEVELS, appLogo, FEATURED_APPS, levelIn, type AppAccess, type AppAccount, type AppConnecting, type AppLevel, type AppState, type Bot, type LastUses, type Schedule } from "@/lib/types";
 import { CHECK_TIMES, checkerOf, isKeyApp } from "@/lib/routine-catalog";
 import { Mascot, Spinner } from "./mascot";
 import { KeyIcon } from "./screen-cards";
@@ -72,11 +72,14 @@ export function AppLogo({ app, name, size }: { app: string; name: string; size: 
 /** How an account reads in a list: its label and its own name, else the app's name. */
 export const accountTitle = (a: AppAccount) => [a.label, a.name].filter(Boolean).join(" · ") || a.appName;
 
-/** The bot's apps, one logo per app, for its profile and home screen (levelOf: every bot has every app by default). */
+/**
+ * The bot's apps, one logo per app, for its profile and home screen (levelIn: every bot has every app of its workspace
+ * by default, and of each one switched on in it).
+ */
 export function botApps(state: AppState, b: Bot) {
   const seen = new Map<string, { app: string; appName: string; accounts: { account: AppAccount; level: AppLevel }[] }>();
   for (const a of state.accounts ?? []) {
-    const level = levelOf(b, a);
+    const level = levelIn(state, b, a);
     if (!level || a.status !== "active") continue;
     const e = seen.get(a.app) ?? { app: a.app, appName: a.appName, accounts: [] };
     e.accounts.push({ account: a, level });
@@ -158,10 +161,30 @@ export function TrashIcon({ size = 13 }: { size?: number }) {
 }
 
 /**
- * One account in two lines: its name (and the user's label for it) with Rename and Disconnect as icons, then
- * the bots that can use it and when one last did.
+ * One account in two lines: its name (and the user's label for it), who connected it, and Rename and Disconnect as
+ * icons; then the bots that can use it with how much ("read & act", "read only") and when one last did. `onPick`:
+ * its name opens its side panel on the Logins page (logins.tsx), `picked` while it's open there. `by`: who connected
+ * it, as its face and name.
  */
-export function AccountBlock({ state, account: a, many, last, onSignIn }: { state: AppState; account: AppAccount; many: boolean; last?: LastUses[string]; onSignIn: () => void }) {
+export function AccountBlock({
+  state,
+  account: a,
+  many,
+  last,
+  onSignIn,
+  picked,
+  onPick,
+  by,
+}: {
+  state: AppState;
+  account: AppAccount;
+  many: boolean;
+  last?: LastUses[string];
+  onSignIn: () => void;
+  picked?: boolean;
+  onPick?: () => void;
+  by?: React.ReactNode;
+}) {
   const [naming, setNaming] = useState(false);
   const [label, setLabel] = useState(a.label ?? "");
   const [sure, setSure] = useState(false);
@@ -174,7 +197,7 @@ export function AccountBlock({ state, account: a, many, last, onSignIn }: { stat
   const meta = usedLine(last, team) ?? (a.usedAt ? `Used ${usedWhen(a.usedAt)}` : "Not used yet");
   const set = (b: Bot, level: AppAccess) => void post("/api/bots", { botId: b.id, access: { account: a.id, level } }, "PATCH");
   return (
-    <div className={`flex flex-col gap-1.5 ${many ? "rounded-xl bg-[#FAFAF9] p-2" : ""}`}>
+    <div data-account={a.id} className={`flex flex-col gap-1.5 ${picked ? "rounded-xl bg-white p-2 shadow-[0_0_0_1.5px_#0A0A0A]" : many || onPick ? "rounded-xl bg-[#FAFAF9] p-2" : ""}`}>
       <div className="flex min-h-7 items-center gap-2 px-2">
         {naming ? (
           <input
@@ -186,9 +209,14 @@ export function AccountBlock({ state, account: a, many, last, onSignIn }: { stat
             placeholder="Work, Personal…"
             className="h-7 w-[150px] rounded-lg bg-white px-2 text-[12.5px] outline-none shadow-[0_0_0_1.5px_#0A0A0A]"
           />
+        ) : onPick ? (
+          <button type="button" onClick={onPick} aria-pressed={!!picked} className="min-w-0 truncate rounded-md text-left text-[13.5px] font-medium leading-[18px] outline-none hover:underline focus-visible:shadow-[0_0_0_1.5px_#0A0A0A]">
+            {openApp ? "Ready to use" : accountTitle(a)}
+          </button>
         ) : (
           <span className="min-w-0 truncate text-[13.5px] font-medium leading-[18px]">{openApp ? "Ready to use" : accountTitle(a)}</span>
         )}
+        {by}
         {a.status === "expired" && <span className="shrink-0 rounded-full bg-[#FEF0C7] px-1.5 py-px text-[10.5px] font-medium leading-[14px] text-[#93370D]">Signed out</span>}
         <span className="flex-1" />
         {a.status === "expired" && (
@@ -223,8 +251,8 @@ export function AccountBlock({ state, account: a, many, last, onSignIn }: { stat
           <BotChips
             team={team}
             choices={APP_CHOICES}
-            level={(b) => levelOf(b, a) ?? "none"}
-            note={(b) => (levelOf(b, a) === "read" ? "read only" : undefined)}
+            level={(b) => levelIn(state, b, a) ?? "none"}
+            note={(b) => (levelIn(state, b, a) === "read" ? "read only" : "read & act")}
             what={openApp ? a.appName : accountTitle(a)}
             onSet={set}
           />
@@ -471,7 +499,8 @@ function search(apps: CatalogApp[], q: string) {
 
 /**
  * Add an app: search the whole catalog (or pick a popular one), then say who may use the account
- * before signing in, so it's ready the moment the sign-in finishes.
+ * before signing in, so it's ready the moment the sign-in finishes. A card in the Logins page where
+ * Connect asked for it (logins.tsx), as A website login's form is, never a dialog over the app.
  */
 export function AppPicker({ state, start, replaces, onClose }: { state: AppState; start?: string; replaces?: string; onClose: () => void }) {
   const { apps, error } = useCatalog();
@@ -482,26 +511,28 @@ export function AppPicker({ state, start, replaces, onClose }: { state: AppState
   const featured = useMemo(() => (apps ? FEATURED_APPS.map((a) => apps.find((x) => x.app === a)).filter((x): x is CatalogApp => !!x) : []), [apps]);
   const list = q.trim() ? results : featured;
   const connected = new Set((state.accounts ?? []).map((a) => a.app));
-  // Esc closes the picker, and only the picker: the Vault behind it stays (it sees the dialog, and preventDefault).
+  // Esc closes the picker, and only the picker: the Settings page it's on stays (preventDefault says so).
   useEffect(() => {
     const esc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || e.defaultPrevented) return;
       e.preventDefault();
       onClose();
     };
     window.addEventListener("keydown", esc);
     return () => window.removeEventListener("keydown", esc);
   }, [onClose]);
+  // Brought into view as it opens, under the page's heading.
+  const card = useRef<HTMLDivElement>(null);
+  useEffect(() => card.current?.scrollIntoView?.({ block: "nearest" }), []);
   const info = chosen ? (apps?.find((a) => a.app === chosen) ?? { app: chosen, name: (state.accounts ?? []).find((a) => a.app === chosen)?.appName ?? chosen, tags: [], auth: "oauth" as const }) : null;
 
   return (
-    <div onClick={onClose} className="motion-fade-in fixed inset-0 z-50 flex items-start justify-center bg-black/10 p-6 pt-[9vh] backdrop-blur-[2px]">
       <div
-        role="dialog"
-        aria-modal="true"
+        ref={card}
+        role="region"
         aria-label="Add an app"
-        onClick={(e) => e.stopPropagation()}
-        className="motion-dialog-in flex max-h-[76vh] w-full max-w-[600px] flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#0000000F,0_24px_60px_-20px_#00000066]"
+        data-app-picker
+        className="motion-rise-in flex max-h-[min(560px,70vh)] w-full flex-col overflow-hidden rounded-[20px] bg-white shadow-[0_0_0_1px_#E6E6E3,0_12px_32px_-18px_#00000040]"
       >
         {info ? (
           <ConnectStep state={state} app={info} replaces={replaces} onBack={start ? onClose : () => setChosen(undefined)} onDone={onClose} hasOne={connected.has(info.app)} />
@@ -569,7 +600,6 @@ export function AppPicker({ state, start, replaces, onClose }: { state: AppState
           </>
         )}
       </div>
-    </div>
   );
 }
 
