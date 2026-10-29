@@ -258,7 +258,7 @@ await test("The main bot: a two-line chat row like every bot's, pinned first, ma
   const html = render(state);
   const sam = at(html, ">Sam<");
   assert.ok(sam > 0 && sam < at(html, ">Nova<"), "first, though Nova spoke last");
-  assert.match(html, />Sam<\/span><span class="[^"]*">Chief of Staff<\/span>/, "its name with its role chip");
+  assert.match(html, />Sam<\/span><span data-row-line="role"[^>]*>Chief of Staff<\/span>/, "its name with its role chip");
   assert.match(html, />Done with the deck</, "its last message under it");
   assert.match(html, />30m</, "and when");
   assert.ok(html.slice(sam, at(html, ">Nova<")).includes('data-tip="Unread"'), "its unread dot, as on every row");

@@ -27,6 +27,11 @@
 //   listed there, and this build makes a new one where the app is. v0.0.32's own deploy (its makeProject) finds
 //   Prod's project by name, never Staging's, while Prod's is there, and this build makes Prod's before Staging's.
 //
+// - A computer's name and the site a bot works on (Workspace.computerNames, Workspace.botSites; lib/bot-groups.ts): both
+//   on the workspace, which v0.0.32 merges field by field and never writes, so kept in every case, the same bot changed
+//   on both sides too; on the bot they'd be lost there, as the last check shows. Lost or stale, the sidebar says the
+//   bot's role and the group its default name: nothing else reads them yet.
+//
 // Pure functions, and v0.0.32's own modules loaded from the tag (lib/types.ts, lib/server/composio.ts's syncApps,
 // lib/server/keys.ts, lib/server/vault.ts, cloud/computer-scope.ts) with the services they reach faked: nothing reaches
 // Bops Cloud, Composio or Orgo. Without the v0.0.32 tag here (a shallow clone), it says so and stops.
@@ -629,6 +634,107 @@ await checkAsync("v0.0.32's own Deploy on an app with a Staging project beside P
   delete notesOf(st).projectId;
   await H32.deployApp("ws_main", "field-notes", { ours: () => true });
   assert.deepEqual(queued.at(-1), "p_staging", "the one case left, and only after someone deletes Prod's project on Orgo");
+});
+
+/* ---------------- A computer's name, and the site a bot works on ---------------- */
+
+// The sidebar's groups of bots on one computer and the site each bot works on (lib/bot-groups.ts): a computer's name
+// (Workspace.computerNames, by computer id) and each bot's site (Workspace.botSites, by bot id). Both workspace fields,
+// which v0.0.32 merges field by field and never writes: kept in every case, the same bot changed on both sides too. A
+// site kept on the bot (Bot.site) would be lost there, by v0.0.32 and by this build's own merge alike, as each keeps one
+// Mac's whole copy of a bot changed on both sides (shown last): why it's on the workspace, like botSettings. Lost, or
+// pointing at an app or a bot v0.0.32 removed, the sidebar says the bot's role again and nothing else changes.
+const G = await import(`${root}/lib/bot-groups.ts`);
+const NAMES = { c_sam: "Front desk" };
+const SITES = { juno: { app: "shop", site: "blog" } };
+const SHOP = { botId: "sam", computerId: "c_sam", projectId: "p_shop", sites: [{ name: "blog", projectId: "p_blog" }] };
+const shop0 = (() => {
+  const x = clone(base0);
+  x.bots[0].computerId = "c_sam";
+  x.bots.push({ id: "kit", name: "Kit", computer: "shared" });
+  x.workspaces[0].hostedApps = { shop: clone(SHOP) };
+  return x;
+})();
+/** The newer Bops's state: the computer named, and Juno on the blog. */
+const named = (s) => {
+  const x = clone(s);
+  x.workspaces[0].computerNames = clone(NAMES);
+  x.workspaces[0].botSites = clone(SITES);
+  return x;
+};
+const kept = (st) => ({ names: st.workspaces[0].computerNames, sites: st.workspaces[0].botSites });
+const BOTH = { names: NAMES, sites: SITES };
+
+check("v0.0.32 saving something else keeps a computer's name and a bot's site", () => {
+  const base = named(shop0);
+  const mine = clone(base);
+  mine.owner.name = "Ava B";
+  assert.deepEqual(kept(V32.merge3(clone(base), mine, clone(base))), BOTH);
+});
+check("v0.0.32 saving while the newer Bops set them keeps them", () => {
+  const mine = clone(shop0);
+  mine.owner.name = "Ava B";
+  assert.deepEqual(kept(V32.merge3(clone(shop0), mine, named(shop0))), BOTH);
+});
+check("v0.0.32 noting an email for the same bot before it pulled keeps its site (on the workspace, not the bot)", () => {
+  const mine = clone(shop0);
+  mine.bots[1].mail.seenAt = 2;
+  const r = V32.merge3(clone(shop0), mine, named(shop0));
+  assert.deepEqual(kept(r), BOTH);
+  assert.equal(r.bots[1].mail.seenAt, 2, "and its own change stands");
+  assert.equal(G.siteLabel(r, r.bots[1]), "blog", "the sidebar still says it");
+});
+check("v0.0.32 renaming the same workspace, or giving it an app of its own, keeps them (a workspace goes field by field)", () => {
+  const mine = clone(shop0);
+  mine.workspaces[0].name = "Acme";
+  mine.workspaces[0].hostedApps.notes = { botId: "sam", computerId: "c_sam" };
+  const r = V32.merge3(clone(shop0), mine, named(shop0));
+  assert.deepEqual(kept(r), BOTH);
+  assert.equal(r.workspaces[0].name, "Acme");
+  assert.deepEqual(Object.keys(r.workspaces[0].hostedApps).sort(), ["notes", "shop"]);
+  assert.equal(G.botGroups({ ...r, host: "orgo" })[0].name, "Front desk", "the owner's name over the apps'");
+});
+check("a copy v0.0.32 kept, merged in later, keeps them; loaded and written back by v0.0.32, they ride along", () => {
+  const mine = clone(shop0);
+  mine.bots[1].mail.seenAt = 2;
+  assert.deepEqual(kept(V32.merge3(clone(shop0), mine, named(shop0), KEPT)), BOTH);
+  assert.deepEqual(kept(V32.toShared(V32.fromShared(named(shop0), "dev_old_mac"), "dev_old_mac")), BOTH);
+});
+check("v0.0.32 removing the app or the bot: the sidebar says the role again, the group its default, and nothing breaks", () => {
+  const noApp = clone(named(shop0));
+  delete noApp.workspaces[0].hostedApps.shop;
+  const r = V32.merge3(named(shop0), noApp, named(shop0));
+  assert.equal(G.siteLabel(r, r.bots[1]), undefined, "its app gone: the role");
+  assert.deepEqual(G.linkedBots(r), []);
+  const noBot = clone(named(shop0));
+  noBot.bots = noBot.bots.filter((b) => b.id !== "juno");
+  const r2 = V32.merge3(named(shop0), noBot, named(shop0));
+  assert.deepEqual(r2.workspaces[0].botSites, SITES, "v0.0.32 leaves a deleted bot's site behind");
+  assert.deepEqual(G.linkedBots(r2), [], "read only for bots that are there");
+  assert.deepEqual(G.botGroups({ ...r2, host: "orgo" }), [], "Kit alone with Sam: no group");
+});
+check("this build's merge: two Macs naming different computers, or linking different bots, keep both; the same one named on both is the saving Mac's", () => {
+  const base = clone(shop0);
+  const mine = clone(shop0);
+  mine.workspaces[0].computerNames = { c_sam: "Front desk" };
+  mine.workspaces[0].botSites = { kit: { app: "shop", site: "shop" } };
+  const theirs = clone(shop0);
+  theirs.workspaces[0].computerNames = { c_other: "Back office" };
+  theirs.workspaces[0].botSites = SITES;
+  const r = NOW.merge3(base, mine, theirs);
+  assert.deepEqual(r.workspaces[0].computerNames, { c_sam: "Front desk", c_other: "Back office" });
+  assert.deepEqual(r.workspaces[0].botSites, { kit: { app: "shop", site: "shop" }, ...SITES });
+  const t2 = clone(shop0);
+  t2.workspaces[0].computerNames = { c_sam: "Shop floor" };
+  assert.equal(NOW.merge3(clone(shop0), mine, t2).workspaces[0].computerNames.c_sam, "Front desk");
+});
+check("why not on the bot: a site on Juno (Bot.site) set while v0.0.32 notes an email for Juno is lost, by v0.0.32 and by this build alike", () => {
+  const theirs = clone(shop0);
+  theirs.bots[1].site = { app: "shop", site: "blog" };
+  const mine = clone(shop0);
+  mine.bots[1].mail.seenAt = 2;
+  assert.equal(V32.merge3(clone(shop0), mine, theirs).bots[1].site, undefined, "v0.0.32 keeps its whole copy of Juno");
+  assert.equal(NOW.merge3(clone(shop0), mine, theirs).bots[1].site, undefined, "and so does this build's merge");
 });
 
 rmSync(dir, { recursive: true, force: true });

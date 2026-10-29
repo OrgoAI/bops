@@ -4,8 +4,9 @@ import type { AppState } from "./types";
 export { appsOpenTo };
 
 /**
- * Who has apps while they're being finished: Orgo's own team, an account signed in with an @orgo.ai
- * email. Apps are the ones bots make (lib/server/made-apps.ts: the footer's Apps, their tabs, make_app
+ * Which workspaces have apps while they're being finished: those whose owner signs in with an @orgo.ai email
+ * (Orgo's own team). It's the workspace's owner that counts, not who's looking: anyone the owner shared it with
+ * and gave Your Apps sees them there; a workspace anyone else owns has none. Apps are the ones bots make (lib/server/made-apps.ts: the footer's Apps, their tabs, make_app
  * and change_app), apps on the web (lib/hosted-apps.ts: Ingot repos, deploys, the On the web list,
  * work_on_app and deploy_app) and Bops' own skills for them (lib/builtin-skills.ts, "Apps and source
  * control"). Everyone else has no Apps button or New Tab tile, no app tabs (one left open goes), no On
@@ -21,11 +22,13 @@ export { appsOpenTo };
 export const appsOpen = (state: Pick<AppState, "account"> | null | undefined): boolean => appsOpenTo(state?.account?.user.email);
 
 /**
- * Does the window show apps here: open to the account, and in their own workspace, or one someone shared with them
- * whose owner gave them Your Apps (SharedOpen.apps: its apps on the web, read only or to deploy). What stays the
- * owner's whoever the viewer is asks appsOwnShown.
+ * Does the window show apps here: in the user's own workspace when apps are open to them (they own it), in one
+ * someone shared with them when its owner is Orgo's team (SharedOpen.owner, their email) and gave them Your Apps
+ * (SharedOpen.apps: its apps on the web, read only or to deploy). What stays the owner's whoever the viewer is asks
+ * appsOwnShown.
  */
-export const appsShown = (state: Pick<AppState, "account" | "shared"> | null | undefined): boolean => appsOpen(state) && (!state?.shared || !!state.shared.apps);
+export const appsShown = (state: Pick<AppState, "account" | "shared"> | null | undefined): boolean =>
+  state?.shared ? appsOpenTo(state.shared.owner) && !!state.shared.apps : appsOpen(state);
 
 /**
  * What the apps page is called where it shows (appsShown): Your Apps in the user's own workspace; in one shared with

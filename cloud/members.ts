@@ -35,7 +35,7 @@ import {
 } from "./protocol.ts";
 import { chatPage, chatsSeq, loadState, recentMessages, removedAfter, sendZipped, type MessageRow } from "./state.ts";
 import { isConnected, queueForMac } from "./tunnel.ts";
-import { appBotsFor, appsFor, appThreadsFor, botsOf, chatIdsOf, handedByOthers, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, type SliceViewer } from "./ws-slice.ts";
+import { appBotsFor, appsFor, appThreadsFor, botsOf, ownerAppsOpen, chatIdsOf, handedByOthers, list, sharedHash, sharedMessages, sharedSlice, sliceOf, viewerAccess, type SliceViewer } from "./ws-slice.ts";
 
 /**
  * Shared workspaces (protocol.ts "Shared workspaces"): someone the owner added to one of their
@@ -283,7 +283,7 @@ const readState: Route = {
     // The owner's app threads they aren't shown, and the bots whose app lines they are (Orgo's team with Write: ws-slice.ts appThreadsFor).
     const given = bots && viewerAccess(sliceOf(blob, target.ws).workspace, viewer);
     const apps = given && appThreadsFor(blob, given, viewer);
-    const appBots = given && appBotsFor(given, viewer, bots);
+    const appBots = given && appBotsFor(given, viewer, bots, ownerAppsOpen(blob));
     // The owner's state hasn't come up yet, or no longer has this workspace: nothing to show of it.
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     // Which workspace each chat is in, for an owner the cloud has seen nothing of since it started (live.ts).
@@ -411,8 +411,8 @@ function appAct(key: string, x: Record<string, unknown>): { key: string; act: Me
  * such" (never saying whether it exists), Read is MEMBER_APPS_READ_ONLY, a domain the workspace doesn't own or a site
  * the app doesn't have "no such", a deploy that can't be put back NOT_WAITING. The owner's Mac checks it all again.
  */
-function appsTouched(slice: ReturnType<typeof sliceOf>, viewer: SliceViewer, access: MemberAccess, act: MemberAppAct) {
-  const apps = appsFor(slice.workspace, viewer, access, new Set(slice.bots.map((b) => b.id)));
+function appsTouched(slice: ReturnType<typeof sliceOf>, viewer: SliceViewer, access: MemberAccess, act: MemberAppAct, open: boolean) {
+  const apps = appsFor(slice.workspace, viewer, access, new Set(slice.bots.map((b) => b.id)), open);
   const app = apps?.list.find((x) => x.name === act.app);
   if (!apps || !app) throw new HttpError(404, "No such app.");
   if (apps.level !== "write") throw new HttpError(403, "You can see these apps. Ask the owner for Write to change them.", { code: MEMBER_APPS_READ_ONLY });
@@ -568,7 +568,7 @@ const actIn: Route = {
     const slice = sliceOf(blob, target.ws, viewer);
     if (!slice.workspace) throw new HttpError(404, "No such workspace");
     const access = viewerAccess(slice.workspace, viewer);
-    if (isAppAct(body.act)) appsTouched(slice, viewer, access, body.act);
+    if (isAppAct(body.act)) appsTouched(slice, viewer, access, body.act, ownerAppsOpen(blob));
     else {
       const bots = botsTouched(blob, slice, body.act);
       // A chat: every bot in it at Write (a group with one at Read stays watch only). Anything else: its bot.

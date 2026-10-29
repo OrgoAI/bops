@@ -1,6 +1,6 @@
 import "server-only";
-import { appsOpen, appsOpenTo } from "@/lib/apps-access";
-import { accessOf, levelOf, permits, type AccessLevel, type MemberWho } from "@/lib/member-access";
+import { appsOpen } from "@/lib/apps-access";
+import { accessOf, appsLevelOf, levelOf, permits, type AccessLevel, type MemberWho } from "@/lib/member-access";
 import { setting } from "./models";
 import { trackServerEvent } from "./analytics";
 import { fullAccessOn } from "./full-access";
@@ -480,6 +480,12 @@ function memberLevel(member: MemberWho, botId: string): AccessLevel {
   return ws ? levelOf(accessOf(ws.memberAccess, { email: member.email, id: member.userId }), botId) : "none";
 }
 const memberWrites = (member: MemberWho, botId: string) => permits(memberLevel(member, botId), "write");
+/** Whether a member has Your Apps at Write in bot `botId`'s workspace (Workspace.memberAccess): what working on its apps through a bot takes. */
+function memberAppsWrite(member: MemberWho, botId: string): boolean {
+  const b = bot(botId);
+  const ws = b ? getState().workspaces?.find((w) => w.id === workspaceOf(b)) : undefined;
+  return !!ws && appsLevelOf(accessOf(ws.memberAccess, { email: member.email, id: member.userId })) === "write";
+}
 
 /** The owner's app threads (Session.app), and every thread carrying one on (moved from it, a part of it): ws-slice.ts appThreadsOf. */
 function appThreads(): Set<string> {
@@ -710,8 +716,9 @@ function followUpThreads(chatId: string, member?: MemberWho, botId?: string) {
  * are open to them and to the owner (lib/apps-access.ts). member-acts.ts checks a reply in a thread the same way.
  */
 function memberThreadOk(member: MemberWho): (s: Session) => boolean {
-  const apps = appsOpen(getState()) && appsOpenTo(member.email) ? undefined : appThreads();
-  return (s) => memberWrites(member, s.botId) && s.runsOn !== "mac" && !apps?.has(s.id);
+  const open = appsOpen(getState());
+  const apps = appThreads();
+  return (s) => memberWrites(member, s.botId) && s.runsOn !== "mac" && (!apps.has(s.id) || (open && memberAppsWrite(member, s.botId)));
 }
 
 /** Whether a chat message is about a thread: it started it, reports on it, or is its result. */
@@ -1843,10 +1850,10 @@ async function turn(botId: string, chatId: string, opts: TurnOptions = {}): Prom
     // there, and still cost them, so the bot doesn't make one from there.
     const lastAsk = bg ? undefined : [...getState().messages].reverse().find((m) => m.chatId === chatId && m.role === "user");
     const relayed = !!opts.emailBack || !!lastAsk?.via;
-    // Apps (made ones and those on the web, with their tools and notes) are only for an @orgo.ai account for now
-    // (lib/apps-access.ts): on a member's turn, only when they're Orgo's team too.
+    // Apps (made ones and those on the web, with their tools and notes) are only in an @orgo.ai owner's workspaces for
+    // now (lib/apps-access.ts): on a member's turn, only with Your Apps at Write there.
     const member = opts.member;
-    const apps = appsOpen(getState()) && (!member || appsOpenTo(member.email));
+    const apps = appsOpen(getState()) && (!member || memberAppsWrite(member, botId));
     // The user's API keys it may call (keys.ts): only ones set in their Orgo vault. None on a turn someone
     // outside Bops started: a GET runs at once, and would read the user's Stripe or bank on a stranger's say. On a
     // member's, the ones this bot has: they reach the owner's keys only through the bots they may tell, and anything

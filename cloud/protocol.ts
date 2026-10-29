@@ -643,7 +643,17 @@ export type SharedWsSlice = {
    * Cloud before the scope.
    */
   apps?: SharedApps;
+  /**
+   * The computers its bots work on with two or more of the bots shown on one (cloud/ws-slice.ts computersOf): each by a
+   * key of its own (never the computer's id), its bots shown, the name the owner gave it (Workspace.computerNames), and
+   * its bot when that's one shown. None when there's no such computer, and from a Bops Cloud before groups.
+   */
+  groups?: SharedGroup[];
+  /** The site each bot shown works on (lib/types.ts BotSite, Workspace.botSites): only with `apps`, by bot id. */
+  sites?: Record<string, { app: string; site: string }>;
 };
+/** One computer's bots shown (SharedWsSlice.groups; lib/bot-groups.ts SharedGroup, spelled out). */
+export type SharedGroup = { key: string; bots: string[]; name?: string; host?: string };
 
 /** What a member with Your Apps sees of a workspace's apps (SharedWsSlice.apps): `at` when the owner's Mac last read them. */
 export type SharedApps = { level: "read" | "write"; at: number; list: SharedApp[]; /** The workspace's domains bought through Orgo: Write only. */ owned?: { id: string; domain: string }[] };

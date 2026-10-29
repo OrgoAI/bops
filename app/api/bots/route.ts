@@ -8,6 +8,8 @@ import { bot, update } from "@/lib/server/store";
 import { notReady } from "@/lib/server/ready";
 import { routineChanged } from "@/lib/server/routine-sync";
 import { fromBopsWindow } from "@/lib/server/ui-token";
+import { GroupError, linkFrom, setBotSite } from "@/lib/server/bot-groups";
+import { sharedOpen } from "@/lib/server/shared";
 
 /**
  * A bot's settings (what it may do in the user's apps, "Just do it", where it works) and the bot
@@ -34,7 +36,7 @@ export async function POST(request: Request) {
  * Set the bot's access to an account (read, act or none; null puts it back to the default), rename it, set how hard it thinks,
  * where it works, whether it asks first, whether it has business data and how it should work (persona),
  * its call voice, whether it answers calls, its built in sequences and its Replies to others (its settings page),
- * or get it an email.
+ * the site of one of its workspace's apps it works on (its Works on row: Workspace.botSites), or get it an email.
  */
 export async function PATCH(request: Request) {
   const unready = notReady() ?? notFromWindow(request);
@@ -65,6 +67,8 @@ export async function PATCH(request: Request) {
     sequence?: { id?: string; on?: boolean };
     /** Replies to others: its "Send an email" rule (lib/permission.ts withMailRule), and BotSettings.mailNever. */
     othersMail?: MailRule;
+    /** The site it works on (lib/types.ts BotSite: { app, site }, `site` the app's own when left out), or null for none. */
+    site?: unknown;
   };
   const b = body.botId ? bot(body.botId) : undefined;
   if (!b) return Response.json({ error: "no such bot" }, { status: 404 });
@@ -72,6 +76,17 @@ export async function PATCH(request: Request) {
   if (body.sequence !== undefined && (!["othersMail", "othersCalls"].includes(body.sequence?.id ?? "") || typeof body.sequence.on !== "boolean"))
     return Response.json({ error: "No such sequence." }, { status: 400 });
   if (body.othersMail !== undefined && !["never", "ask", "allow"].includes(body.othersMail)) return Response.json({ error: "Pick Never, With your OK or On its own." }, { status: 400 });
+  const site = body.site === undefined ? undefined : linkFrom(body.site);
+  if (body.site !== undefined && site === undefined) return Response.json({ error: "Say which app, and which of its sites." }, { status: 400 });
+  // Which site a bot works on is the owner's to say, with their own workspace open (as its name is).
+  if (site !== undefined && sharedOpen()) return Response.json({ error: "Only the owner can change this." }, { status: 403 });
+  if (site !== undefined) {
+    try {
+      setBotSite(b.id, site);
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: e instanceof GroupError ? e.status : 400 });
+    }
+  }
   if (body.email === true) {
     const r = await requestInbox(b.id).catch((e: Error) => ({ error: e.message, upgrade: null }));
     return Response.json(r, { status: "error" in r ? ("upgrade" in r && r.upgrade ? 402 : 409) : 200 });

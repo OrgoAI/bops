@@ -25,6 +25,8 @@ import { ago, ChatAvatar, chatInWorkspace, chatName, currentWorkspace, NeedsYouD
 import { ChartIcon } from "./team-chart";
 import { ownerWho, roleLabel, saidBy, saidName, sharedBy, type SharedWorkspace } from "@/lib/shared";
 import { appsLine, appsName, appsShown } from "@/lib/apps-access";
+import { botGroups, groupedList, siteLabel } from "@/lib/bot-groups";
+import { BotGroupBlock, renameComputer, useGroupFolds, useSiteDomains } from "./bot-groups";
 
 /** A chat's newest message, if it has one. */
 export const lastMessageOf = (state: AppState, c: Chat) => [...state.messages].reverse().find((m) => m.chatId === c.id);
@@ -34,6 +36,26 @@ export function sidebarChats(state: AppState): Chat[] {
   const activity = (c: Chat) => lastMessageOf(state, c)?.at ?? c.createdAt;
   const pin = (c: Chat) => (c.kind === "bot" && state.bots.find((x) => x.id === c.botIds[0])?.isMain ? 1 : 0);
   return state.chats.filter((c) => chatInWorkspace(state, c)).sort((a, b) => pin(b) - pin(a) || activity(b) - activity(a));
+}
+
+/** The bot a chat is the own chat of (none for a group chat). */
+export const chatBot = (c: Chat) => (c.kind === "bot" ? c.botIds[0] : undefined);
+
+/**
+ * The sidebar's list (and its rail's) in order: sidebarChats with the bots that work on one computer together, each
+ * group right under the main bot when it's on that bot's computer (lib/bot-groups.ts groupedList). `grouped` false:
+ * flat, as a search lists them.
+ */
+export function sidebarList(state: AppState, chats = sidebarChats(state), grouped = true) {
+  const groups = grouped ? botGroups(state) : [];
+  const main = state.bots.find((b) => b.isMain && chats.some((c) => chatBot(c) === b.id))?.id;
+  return groupedList(chats, chatBot, groups, main);
+}
+
+/** Whether a chat has something the viewer hasn't read (as its row marks it). */
+export function unreadChat(state: AppState, c: Chat, selected: boolean) {
+  const last = lastMessageOf(state, c);
+  return !!last && (last.role !== "user" || saidBy(last, state) !== "you") && last.at > (c.readAt ?? 0) && !selected && !state.shared;
 }
 
 /**
@@ -152,8 +174,13 @@ export function Sidebar({
   const attention = attentionOf(state, needs);
   // Needs your attention opens every bot with something waiting (how many times it's been asked, and which bots).
   const [opened, setOpened] = useState<{ at: number; bots: Set<string> } | null>(null);
+  // The groups of bots on one computer (lib/bot-groups.ts), folded as the user left them in this window.
+  const folds = useGroupFolds(user, ws);
+  const domains = useSiteDomains(state);
   const openAttention = () => {
     setOpened({ at: (opened?.at ?? 0) + 1, bots: attention.bots });
+    // A folded group with one of them in it opens too.
+    for (const g of botGroups(state)) if (folds.isFolded(g.key) && g.bots.some((id) => attention.bots.has(id))) folds.fold(g.key, false);
     // The first of them (the main bot, pinned first, when it has some) comes into view.
     const sel = [...attention.bots].map((id) => `[data-bot-threads="${CSS.escape(id)}"]`).join(",");
     requestAnimationFrame(() => sel && document.querySelector<HTMLElement>(sel)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
@@ -187,6 +214,26 @@ export function Sidebar({
         }}
       />
     );
+  };
+
+  /** One chat's row (with what's under it, but while searching). */
+  const chatItem = (c: Chat) => {
+    const b = chatBot(c);
+    const row = (space: ReactNode) => (
+      <ChatRow
+        key={c.id}
+        chat={c}
+        state={state}
+        selected={c.id === chatId}
+        onClick={() => onOpenChat(c.id)}
+        onMenu={openMenu(c)}
+        menuOpen={!!menu && b === menu.botId}
+        last={lastMessage(c)}
+        trail={space}
+        site={b ? siteLabel(state, { id: b, workspaceId: state.bots.find((x) => x.id === b)?.workspaceId }, domains) : undefined}
+      />
+    );
+    return q ? row(null) : withThreads(c, row);
   };
 
   return (
@@ -234,13 +281,27 @@ export function Sidebar({
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {/* What needs you and what you pinned: over everything, and gone while you search. */}
         {!q && <FavoritesSection state={state} attention={attention.count} onAttention={openAttention} onOpenMemory={onOpenMemory} />}
-        {/* The main bot's row first (it runs the team), then the rest by latest activity. */}
+        {/*
+          The main bot's row first (it runs the team), then the rest by latest activity; the bots that work on one
+          computer together under its name (bot-groups.tsx), right under the main bot when it's on that computer.
+        */}
         <div className="flex flex-col gap-0.5">
-          {chats.map((c) => {
-            const row = (space: ReactNode) => (
-              <ChatRow key={c.id} chat={c} state={state} selected={c.id === chatId} onClick={() => onOpenChat(c.id)} onMenu={openMenu(c)} menuOpen={!!menu && c.kind === "bot" && c.botIds[0] === menu.botId} last={lastMessage(c)} trail={space} />
+          {sidebarList(state, chats, !q).map((item) => {
+            if ("chat" in item) return chatItem(item.chat);
+            const g = item.group;
+            const open = item.chats.find((c) => c.id === chatId);
+            return (
+              <BotGroupBlock
+                key={`group:${g.key}`}
+                group={g}
+                folded={folds.isFolded(g.key)}
+                onFold={(f) => folds.fold(g.key, f)}
+                onRename={!state.shared && g.computerId ? (name) => renameComputer(ws, g.computerId!, name) : undefined}
+                waiting={item.chats.some((c) => c.id !== chatId && (attention.bots.has(chatBot(c) ?? "") || unreadChat(state, c, false)))}
+                rows={item.chats.map(chatItem)}
+                selected={open && chatItem(open)}
+              />
             );
-            return q ? row(null) : withThreads(c, row);
           })}
         </div>
 
@@ -646,6 +707,7 @@ function ChatRow({
   menuOpen,
   last,
   trail,
+  site,
 }: {
   chat: Chat;
   state: AppState;
@@ -657,6 +719,8 @@ function ChatRow({
   last?: AppState["messages"][number];
   /** At the end of the preview line: the room its threads' chip takes (sidebar-sections.tsx WithThreads). */
   trail?: ReactNode;
+  /** The site its bot works on, said in place of its role (lib/bot-groups.ts siteLabel). */
+  site?: string;
 }) {
   const members = state.bots.filter((b) => c.botIds.includes(b.id));
   const solo = c.kind === "bot" ? members[0] : undefined;
@@ -699,10 +763,15 @@ function ChatRow({
       )}
       <div className="flex min-w-0 flex-1 flex-col gap-[3px]">
         <div className="flex items-center gap-1.5">
-          <span className="truncate text-[15px] font-semibold leading-[18px]">{c.title ?? (solo ? solo.name : members.map((m) => m.name).join(", "))}</span>
-          {solo && (
-            <span className={`shrink-0 rounded-[5px] px-1.5 py-px text-[11px] leading-[14px] text-[#6B6B6B] ${selected ? "bg-white" : "bg-[#EEEEEC]"}`}>
-              {solo.role}
+          {/* The name first: it keeps its room, and the line beside it (its site, else its role) gives way. */}
+          <span className={`truncate text-[15px] font-semibold leading-[18px] ${solo ? "shrink-0 max-w-[65%]" : ""}`}>{c.title ?? (solo ? solo.name : members.map((m) => m.name).join(", "))}</span>
+          {solo && (site || solo.role) && (
+            <span
+              data-row-line={site ? "site" : "role"}
+              title={site ? (solo.role ? `${solo.role}. Works on ${site}` : `Works on ${site}`) : solo.role}
+              className={`min-w-0 truncate rounded-[5px] px-1.5 py-px text-[11px] leading-[14px] text-[#6B6B6B] ${selected ? "bg-white" : "bg-[#EEEEEC]"}`}
+            >
+              {site ?? solo.role}
             </span>
           )}
           <span className="flex-1" />

@@ -1,6 +1,6 @@
 import "server-only";
 import { isAppAct, MEMBER_ACT_MS, MEMBER_MAX_NOTE, MEMBER_MAX_TEXT, MEMBER_STOP_MAX, type MemberAct, type MemberActPayload, type MemberAppAct } from "@/cloud/protocol";
-import { appsOpen, appsOpenTo } from "@/lib/apps-access";
+import { appsOpen } from "@/lib/apps-access";
 import { accessOf, appsLevelOf, cleanName, currentFor, levelOf, ownerOnlyAsk, permits, writesChat, type MemberAccess, type MemberWho } from "@/lib/member-access";
 import { isAppName, isSiteName, sitesOfHosting, type MemberAppAct as KeptAct } from "@/lib/hosted-apps";
 import { actKept, noteMemberAct, seeApps } from "./apps-for-members";
@@ -95,7 +95,7 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho): string | 
   // Set before they were removed (or left) and came back: not theirs now.
   if (!currentFor(kept, p.joinedAt)) return "access from before they joined";
   const access = kept;
-  const apps = appsOpenTo(who.email) && appsOpen(getState());
+  const apps = appsOpen(getState()) && appsLevelOf(access) === "write";
   const threadOk = (id: string) => {
     const s = session(id);
     return !!s && writes(ws, access, s.botId) && (apps || !ofApp(s.id));
@@ -105,7 +105,7 @@ function refused(p: MemberActPayload, act: MemberAct, who: MemberWho): string | 
   const onMac = (id: string | undefined) => !!id && session(id)?.runsOn === "mac";
   // An app's: Your Apps at Write, while apps are open to them and to the owner, an app and site of the workspace's.
   if (isAppAct(act)) {
-    if (!(appsOpenTo(who.email) && appsOpen(getState()))) return "apps aren't open";
+    if (!appsOpen(getState())) return "apps aren't open";
     if (appsLevelOf(access) !== "write") return "not at Write on Your Apps";
     const h = ws.hostedApps?.[act.app];
     if (!h || !sitesOfHosting(h, act.app).includes(act.site ?? act.app)) return "no such app";

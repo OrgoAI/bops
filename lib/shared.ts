@@ -1,4 +1,4 @@
-import type { MemberAppAct, SharedApps } from "@/cloud/protocol";
+import type { MemberAppAct, SharedApps, SharedGroup } from "@/cloud/protocol";
 /**
  * Workspaces shared with the user (cloud/members.ts, lib/server/shared.ts): someone added them to one of
  * their Bops workspaces' Orgo projects, and they watch it here. With Write on a bot (the owner's choice,
@@ -35,6 +35,8 @@ export type SharedOpen = SharedWorkspace & {
   you?: string;
   /** The workspace's apps, when the owner gave the user Your Apps (cloud/ws-slice.ts appsFor). */
   apps?: SharedApps;
+  /** Its computers with two or more of the bots shown on one, for the sidebar's groups (cloud/ws-slice.ts computersOf). */
+  groups?: SharedGroup[];
   /** What the user did to them that the owner's Bops hasn't kept yet: on its way, waiting, or not gone and why. */
   appActs?: { key: string; act: MemberAppAct; at: number; state: "sending" | "waiting" | "failed"; error?: string }[];
 };

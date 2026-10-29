@@ -166,6 +166,22 @@ export function settingsOf(state: { workspaces?: { id: string; botSettings?: Rec
   return (all && Object.hasOwn(all, b.id) ? all[b.id] : undefined) ?? {};
 }
 
+/**
+ * The site of one of its workspace's apps a bot works on (Workspace.botSites, set on its settings page's Works on row):
+ * the app's name (Workspace.hostedApps) and the site's (the app's own is named as the app). Kept on the workspace by bot
+ * id, as BotSettings is and for the same reason: a bot changed on two Macs at once keeps one Mac's whole copy (by
+ * v0.0.32 and by this build alike: state-merge.ts merge3), which would drop a field on the bot; a workspace merges
+ * field by field, and this map bot by bot.
+ */
+export type BotSite = { app: string; site: string };
+
+/** Bot `b`'s site (Workspace.botSites), or undefined when it works on none. Read it here: never off the bot. */
+export function siteOf(state: { workspaces?: { id: string; botSites?: Record<string, BotSite> }[] }, b: Pick<Bot, "id" | "workspaceId">): BotSite | undefined {
+  const all = state.workspaces?.find((w) => w.id === workspaceOf(b))?.botSites;
+  const x = all && Object.hasOwn(all, b.id) ? all[b.id] : undefined;
+  return x && typeof x.app === "string" && typeof x.site === "string" ? x : undefined;
+}
+
 /** The nine voices calls speak in (OpenAI realtime), the same lib/server/call.ts picks from by name. */
 export const CALL_VOICES = ["cedar", "ash", "echo", "ballad", "verse", "marin", "coral", "shimmer", "sage"] as const;
 export type CallVoice = (typeof CALL_VOICES)[number];
@@ -306,6 +322,14 @@ export type Workspace = {
    * the bots given it: less access, never more. Site logins have none: their bots (VaultLogin.bots) say where.
    */
   loginsOn?: Record<string, LoginOn>;
+  /**
+   * The names the owner gave its computers, by computer id (lib/bot-groups.ts): the sidebar shows the bots that work on
+   * one computer together under it. Unset for one: a name from the apps on it, else its bot's ("Sam's computer"). Only
+   * the owner's own Bops writes it; a Bops from before never writes it and merges it as a workspace field, name by name.
+   */
+  computerNames?: Record<string, string>;
+  /** The site each of its bots works on, by bot id (BotSite, read with siteOf). None for a bot that works on none. */
+  botSites?: Record<string, BotSite>;
 };
 
 /** A login switched on in a workspace (Workspace.loginsOn): when. */

@@ -72,7 +72,7 @@ const TOOLS = {
   repo_tree: ["name", "at", "ref", "path"],
 };
 /** Words with an underscore that aren't tools. */
-const NOT_TOOLS = new Set(["node_modules"]);
+const NOT_TOOLS = new Set(["node_modules", "http_code"]);
 
 /** Everything a bot reads of a skill: its name, description, body and files. */
 const textsOf = (s) => [
@@ -103,8 +103,8 @@ check("The labels: APPS_LABEL among them, each one clean, short, its own and wit
   }
 });
 
-check("The skills: five, each with a slug a skill's folder takes, its own name, a short description, APPS_LABEL and a body", () => {
-  assert.equal(BUILTIN_SKILLS.length, 5);
+check("The skills: seven, each with a slug a skill's folder takes, its own name, a short description, APPS_LABEL and a body", () => {
+  assert.equal(BUILTIN_SKILLS.length, 7);
   const slugs = new Set();
   const names = new Set();
   for (const s of BUILTIN_SKILLS) {
@@ -227,7 +227,7 @@ check("No local Ingot server: no 127.0.0.1:7979 or /etc/ingot, git only by ingot
   // Where an app's folder is (ingot.ts APPS_DIR), and its address (orgo-web's public URLs).
   const all = BUILTIN_SKILLS.map((s) => s.body).join("\n");
   for (const m of all.matchAll(/\/workspace\/[a-z]+\/\S*/g)) assert.match(m[0], /^\/workspace\/apps\/<name>(-git)?`?[.,:]?$/, m[0]);
-  for (const m of all.matchAll(/https?:\/\/\S+/g)) assert.match(m[0], /^(https:\/\/<name>\.orgo\.dev\)?[.,]?|http:\/\/127\.0\.0\.1:3000\/`?[.,]?)$/, m[0]);
+  for (const m of all.matchAll(/https?:\/\/\S+/g)) assert.match(m[0], /^(https:\/\/<name>\.orgo\.dev\)?[.,]?|http:\/\/127\.0\.0\.1:3000\/`?[.,]?|http:\/\/localhost:3000(\/api\/auth\/callback\/google)?\/?`?[.,]?)$/, m[0]);
 });
 
 check("Every repo a command takes is named in full, and no commit is said to be from an author Ingot doesn't keep", () => {

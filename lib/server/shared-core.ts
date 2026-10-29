@@ -440,7 +440,8 @@ const onTheirMac = (text: string) => text.replace(/ · on your Mac\b/g, " · on 
 export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, moods: Record<string, RemoteMood>, acts: PendingAct[] = []): AppState {
   const ws = open.wsId;
   const s = data.state;
-  const workspace: Workspace = { id: ws, name: open.name, createdAt: Number(s.workspace?.createdAt) || 0 };
+  // The site each bot works on, when the owner gave the user Your Apps (cloud/ws-slice.ts sitesOf): read as the owner's are (siteOf).
+  const workspace: Workspace = { id: ws, name: open.name, createdAt: Number(s.workspace?.createdAt) || 0, ...(s.sites ? { botSites: s.sites } : {}) };
   const bots = s.bots.map((b) => ({ computerStatus: "none", role: "", color: "#0A0A0A", isMain: false, ...b, workspaceId: ws }) as unknown as Bot);
   const ids = new Set(bots.map((b) => b.id));
   const chats = s.chats.map((c) => ({ botIds: [], createdAt: 0, ...c, typing: [], workspaceId: ws }) as unknown as Chat);
@@ -587,6 +588,8 @@ export function viewState(own: AppState, open: SharedOpen, data: SharedWsState, 
       ...(data.you ? { you: data.you } : {}),
       // Your Apps, when the owner gave it (cloud/ws-slice.ts appsFor), and what the user did to them that hasn't landed.
       ...(s.apps ? { apps: s.apps } : {}),
+      // Its computers' groups of bots, for the sidebar (cloud/ws-slice.ts computersOf).
+      ...(s.groups ? { groups: s.groups } : {}),
       ...(s.apps && acts.some((x) => isAppAct(x.act)) ? { appActs: acts.filter((x) => isAppAct(x.act)).map((x) => ({ key: x.key, act: x.act as MemberAppAct, at: x.at, state: x.state, ...(x.error ? { error: x.error } : {}) })) } : {}),
     },
     // What of the user's own is worth a chime meanwhile: their own news still reaches them (lib/pings.ts).
